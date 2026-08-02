@@ -1,4 +1,5 @@
 pub mod library;
+pub mod media;
 
 use rusqlite::Connection;
 use std::fmt::Debug;
@@ -73,8 +74,12 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         migrate_v2(conn)?;
     }
 
+    if current_version < 3 {
+        migrate_v3(conn)?;
+    }
+
     conn.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '2')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '3')",
         [],
     )?;
 
@@ -108,5 +113,75 @@ fn migrate_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
         )",
         [],
     )?;
+    Ok(())
+}
+
+fn migrate_v3(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Phase 3 media preparation tables.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS media_jobs (
+            id TEXT PRIMARY KEY,
+            recording_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress REAL NOT NULL DEFAULT 0,
+            stage TEXT NOT NULL,
+            message TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            outputs TEXT NOT NULL DEFAULT '{}'
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_jobs_recording ON media_jobs(recording_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_jobs_status ON media_jobs(status)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS media_metadata (
+            recording_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            width INTEGER,
+            height INTEGER,
+            fps REAL,
+            has_audio INTEGER NOT NULL DEFAULT 0,
+            video_codec TEXT,
+            audio_codec TEXT,
+            bitrate_kbps REAL,
+            streams TEXT NOT NULL DEFAULT '[]',
+            format TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS derivatives (
+            id TEXT PRIMARY KEY,
+            recording_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_derivatives_recording ON derivatives(recording_id)",
+        [],
+    )?;
+
     Ok(())
 }

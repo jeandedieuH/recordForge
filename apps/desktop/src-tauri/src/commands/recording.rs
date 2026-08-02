@@ -21,6 +21,8 @@ use crate::database::library::{
     list_recordings as library_list_recordings, remove_tag, LibraryRecording,
 };
 use crate::errors::{InternalError, Result};
+use crate::jobs::JobManager;
+use crate::media;
 use crate::state::AppState;
 
 /// Initialize the shared application state. Called once in `setup`.
@@ -40,13 +42,28 @@ pub fn init(app: &tauri::App) -> Result<()> {
         .map_err(|e| InternalError::Storage(format!("create sessions dir: {e}")))?;
 
     let ffmpeg_path = Recorder::resolve_ffmpeg()?;
+    let ffprobe_path = media::resolve_executable("ffprobe")?;
     let recorder = Recorder::new(ffmpeg_path.clone(), sessions_dir.clone(), Arc::clone(&db));
+
+    let job_manager = JobManager::new(
+        app.handle().clone(),
+        Arc::clone(&db),
+        ffmpeg_path.clone(),
+        ffprobe_path.clone(),
+    );
+
+    // Resume any pending or interrupted jobs from a previous run.
+    if let Err(err) = job_manager.resume_pending_jobs() {
+        tracing::error!(error = ?err, "failed to resume media jobs");
+    }
 
     app.manage(AppState {
         recorder: Arc::new(Mutex::new(recorder)),
         db,
+        job_manager: Arc::new(Mutex::new(job_manager)),
         sessions_dir,
         ffmpeg_path,
+        ffprobe_path,
         quick_config: Arc::new(Mutex::new(None)),
     });
 

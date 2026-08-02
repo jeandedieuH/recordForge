@@ -2,6 +2,9 @@ pub mod capture;
 pub mod commands;
 pub mod database;
 pub mod errors;
+pub mod events;
+pub mod jobs;
+pub mod media;
 pub mod shortcuts;
 pub mod state;
 pub mod tray;
@@ -72,6 +75,12 @@ pub fn run() {
             commands::recording::trim_recording,
             commands::recording::export_recording,
             commands::recording::open_floating_controls,
+            commands::media::prepare_media,
+            commands::media::cancel_media_job,
+            commands::media::get_media_job,
+            commands::media::list_media_jobs,
+            commands::media::get_media_metadata,
+            commands::media::estimate_prepare_disk_space,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

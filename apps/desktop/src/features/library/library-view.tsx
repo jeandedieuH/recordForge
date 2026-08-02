@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
 import { Button, Input } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
+import { useJobsStore } from "../../stores/jobs-store"
 import { LibraryItemCard } from "./library-item-card"
 import { LibraryItemRow } from "./library-item-row"
+import { MediaJobsPanel } from "./media-jobs-panel"
 import { useLibraryStore, type LibrarySort } from "./use-library"
 
 // Filter, sort, and search helpers for the library list.
@@ -43,6 +45,7 @@ function sortRecordings(recordings: LibraryRecording[], sort: LibrarySort) {
 // layout, and inline trim/export actions.
 export function LibraryView() {
   const store = useLibraryStore()
+  const jobsStore = useJobsStore()
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
   const [trimTarget, setTrimTarget] = useState<LibraryRecording | null>(null)
   const [trimStart, setTrimStart] = useState("")
@@ -116,6 +119,19 @@ export function LibraryView() {
       setTrimError(null)
     } catch (err) {
       setTrimError(String(err))
+    }
+  }
+
+  async function handlePrepare(recording: LibraryRecording) {
+    try {
+      await jobsStore.prepare({
+        recordingId: recording.id,
+        proxyHeight: 540,
+        thumbnailIntervalSec: 5,
+        force: false,
+      })
+    } catch (err) {
+      useLibraryStore.setState({ error: String(err) })
     }
   }
 
@@ -227,6 +243,8 @@ export function LibraryView() {
         </div>
       ) : null}
 
+      <MediaJobsPanel />
+
       {store.isLoading && store.recordings.length === 0 ? (
         <p className="text-sm text-foreground/70">Loading recordings...</p>
       ) : null}
@@ -245,6 +263,7 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
+              onPrepare={handlePrepare}
               onAddTag={store.addTag}
               onRemoveTag={store.removeTag}
             />
@@ -260,6 +279,7 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
+              onPrepare={handlePrepare}
               onAddTag={store.addTag}
               onRemoveTag={store.removeTag}
             />

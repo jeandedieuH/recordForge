@@ -9,6 +9,7 @@ interface LibraryItemRowProps {
   onReveal: (recordingId: string) => void
   onTrim: (recording: LibraryRecording) => void
   onExport: (recording: LibraryRecording) => void
+  onPrepare: (recording: LibraryRecording) => void
   onAddTag: (recordingId: string, tag: string) => void
   onRemoveTag: (recordingId: string, tag: string) => void
 }
@@ -20,6 +21,7 @@ export function LibraryItemRow({
   onReveal,
   onTrim,
   onExport,
+  onPrepare,
   onAddTag,
   onRemoveTag,
 }: LibraryItemRowProps) {
@@ -106,6 +108,9 @@ export function LibraryItemRow({
         </Button>
         <Button variant="secondary" onClick={() => onExport(recording)}>
           Export
+        </Button>
+        <Button variant="secondary" onClick={() => onPrepare(recording)}>
+          Prepare
         </Button>
         <Button variant="ghost" onClick={() => onDelete(recording.id)}>
           Delete
