@@ -10,6 +10,7 @@ interface LibraryItemRowProps {
   onTrim: (recording: LibraryRecording) => void
   onExport: (recording: LibraryRecording) => void
   onPrepare: (recording: LibraryRecording) => void
+  onOpenEditor: (recording: LibraryRecording) => void
   onAddTag: (recordingId: string, tag: string) => void
   onRemoveTag: (recordingId: string, tag: string) => void
 }
@@ -22,6 +23,7 @@ export function LibraryItemRow({
   onTrim,
   onExport,
   onPrepare,
+  onOpenEditor,
   onAddTag,
   onRemoveTag,
 }: LibraryItemRowProps) {
@@ -73,7 +75,7 @@ export function LibraryItemRow({
 
         <div className="mt-2 flex gap-2">
           <Input
-            className="max-w-[12rem]"
+            className="max-w-48"
             placeholder="Add tag"
             value={newTag}
             onChange={(e) => setNewTag(e.target.value)}
@@ -111,6 +113,9 @@ export function LibraryItemRow({
         </Button>
         <Button variant="secondary" onClick={() => onPrepare(recording)}>
           Prepare
+        </Button>
+        <Button variant="secondary" onClick={() => onOpenEditor(recording)}>
+          Editor
         </Button>
         <Button variant="ghost" onClick={() => onDelete(recording.id)}>
           Delete

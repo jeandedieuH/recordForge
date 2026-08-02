@@ -46,41 +46,7 @@ impl Recorder {
 
     /// Discover or verify the FFmpeg binary path.
     pub fn resolve_ffmpeg() -> crate::errors::Result<PathBuf> {
-        // 1. Bundled binary next to the executable.
-        // 2. Binary resolved by the OS PATH.
-        if let Ok(exe) = std::env::current_exe() {
-            let bundled = exe
-                .parent()
-                .map(|p| p.join("..").join("ffmpeg").join("ffmpeg.exe"))
-                .unwrap_or_else(|| PathBuf::from("ffmpeg.exe"));
-            if bundled.exists() {
-                return Ok(bundled);
-            }
-        }
-
-        let in_path = PathBuf::from(if cfg!(windows) {
-            "ffmpeg.exe"
-        } else {
-            "ffmpeg"
-        });
-        if Self::can_run_ffmpeg(&in_path) {
-            return Ok(in_path);
-        }
-
-        Err(
-            crate::errors::InternalError::Media("ffmpeg not found in bundled path or PATH".into())
-                .into(),
-        )
-    }
-
-    fn can_run_ffmpeg(path: &PathBuf) -> bool {
-        std::process::Command::new(path)
-            .arg("-version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        crate::media::resolve_executable("ffmpeg")
     }
 
     #[instrument]

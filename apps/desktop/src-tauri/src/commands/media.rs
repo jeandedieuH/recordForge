@@ -72,6 +72,17 @@ pub fn list_media_jobs(recording_id: String, state: State<'_, AppState>) -> Resu
     manager.list_jobs(&recording_id)
 }
 
+/// Delete derivative files and their database rows for a recording.
+#[tauri::command]
+#[instrument]
+pub fn delete_derivatives(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    crate::database::media::delete_derivatives_for_recording(&db, &recording_id, true)
+}
+
 /// Read cached media metadata for a recording.
 #[tauri::command]
 #[instrument]

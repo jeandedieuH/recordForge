@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
 import { Button, Input } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
+import { useEditorStore } from "../../stores/editor-store"
 import { useJobsStore } from "../../stores/jobs-store"
 import { LibraryItemCard } from "./library-item-card"
 import { LibraryItemRow } from "./library-item-row"
 import { MediaJobsPanel } from "./media-jobs-panel"
+import { MediaPrepareDialog } from "./media-prepare-dialog"
 import { useLibraryStore, type LibrarySort } from "./use-library"
 
 // Filter, sort, and search helpers for the library list.
@@ -46,11 +48,13 @@ function sortRecordings(recordings: LibraryRecording[], sort: LibrarySort) {
 export function LibraryView() {
   const store = useLibraryStore()
   const jobsStore = useJobsStore()
+  const editorStore = useEditorStore()
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
   const [trimTarget, setTrimTarget] = useState<LibraryRecording | null>(null)
   const [trimStart, setTrimStart] = useState("")
   const [trimEnd, setTrimEnd] = useState("")
   const [trimError, setTrimError] = useState<string | null>(null)
+  const [prepareTarget, setPrepareTarget] = useState<LibraryRecording | null>(null)
 
   useEffect(() => {
     // Load the library once on mount. We call getState() directly to avoid
@@ -122,17 +126,31 @@ export function LibraryView() {
     }
   }
 
-  async function handlePrepare(recording: LibraryRecording) {
+  function handleOpenPrepare(recording: LibraryRecording) {
+    setPrepareTarget(recording)
+  }
+
+  async function handlePrepare(
+    recording: LibraryRecording,
+    options: { force: boolean; thumbnailIntervalSec: number },
+  ) {
     try {
-      await jobsStore.prepare({
-        recordingId: recording.id,
-        proxyHeight: 540,
-        thumbnailIntervalSec: 5,
-        force: false,
-      })
+      await jobsStore.prepareWithOptions(recording.id, options)
     } catch (err) {
       useLibraryStore.setState({ error: String(err) })
     }
+  }
+
+  async function handleCleanup(recordingId: string) {
+    try {
+      await jobsStore.cleanup(recordingId)
+    } catch (err) {
+      useLibraryStore.setState({ error: String(err) })
+    }
+  }
+
+  function handleOpenEditor(recording: LibraryRecording) {
+    editorStore.open(recording.id)
   }
 
   return (
@@ -243,6 +261,13 @@ export function LibraryView() {
         </div>
       ) : null}
 
+      <MediaPrepareDialog
+        recording={prepareTarget}
+        onClose={() => setPrepareTarget(null)}
+        onPrepare={handlePrepare}
+        onCleanup={handleCleanup}
+      />
+
       <MediaJobsPanel />
 
       {store.isLoading && store.recordings.length === 0 ? (
@@ -263,7 +288,8 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
-              onPrepare={handlePrepare}
+              onPrepare={handleOpenPrepare}
+              onOpenEditor={handleOpenEditor}
               onAddTag={store.addTag}
               onRemoveTag={store.removeTag}
             />
@@ -279,7 +305,8 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
-              onPrepare={handlePrepare}
+              onPrepare={handleOpenPrepare}
+              onOpenEditor={handleOpenEditor}
               onAddTag={store.addTag}
               onRemoveTag={store.removeTag}
             />

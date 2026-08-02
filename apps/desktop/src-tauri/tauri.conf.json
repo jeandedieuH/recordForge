@@ -27,8 +27,9 @@
       "csp": {
         "default-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",
-        "img-src": "'self' data: blob:",
-        "media-src": "'self' blob:"
+        "img-src": "'self' data: blob: http://asset.localhost:",
+        "media-src": "'self' blob: http://asset.localhost:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://asset.localhost:"
       }
     },
     "withGlobalTauri": false

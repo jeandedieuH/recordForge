@@ -80,6 +80,7 @@ pub fn run() {
             commands::media::get_media_job,
             commands::media::list_media_jobs,
             commands::media::get_media_metadata,
+            commands::media::delete_derivatives,
             commands::media::estimate_prepare_disk_space,
         ])
         .run(tauri::generate_context!())

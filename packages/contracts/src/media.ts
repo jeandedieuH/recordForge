@@ -147,6 +147,30 @@ export const diskSpaceEstimateSchema = z.object({
 
 export type DiskSpaceEstimate = z.infer<typeof diskSpaceEstimateSchema>
 
+// Thumbnail sprite manifest written by the thumbnail generator.
+export const thumbnailManifestSchema = z.object({
+  spritePath: z.string(),
+  columns: z.number().int().min(1),
+  rows: z.number().int().min(1),
+  count: z.number().int().min(0),
+  intervalMs: z.number().int().min(0),
+  thumbWidth: z.number().int().min(1),
+  thumbHeight: z.number().int().min(1),
+})
+
+export type ThumbnailManifest = z.infer<typeof thumbnailManifestSchema>
+
+// Compact waveform peak data.
+export const waveformDataSchema = z.object({
+  sampleRate: z.number().int().min(1),
+  samplesPerPeak: z.number().int().min(1),
+  peaks: z.array(z.number()),
+  durationMs: z.number().int().min(0),
+  imagePath: z.string().optional(),
+})
+
+export type WaveformData = z.infer<typeof waveformDataSchema>
+
 // Summary of prepared media for a recording.
 export const preparedMediaSchema = z.object({
   recordingId: z.string(),

@@ -10,6 +10,7 @@ interface LibraryItemCardProps {
   onTrim: (recording: LibraryRecording) => void
   onExport: (recording: LibraryRecording) => void
   onPrepare: (recording: LibraryRecording) => void
+  onOpenEditor: (recording: LibraryRecording) => void
   onAddTag: (recordingId: string, tag: string) => void
   onRemoveTag: (recordingId: string, tag: string) => void
 }
@@ -22,6 +23,7 @@ export function LibraryItemCard({
   onTrim,
   onExport,
   onPrepare,
+  onOpenEditor,
   onAddTag,
   onRemoveTag,
 }: LibraryItemCardProps) {
@@ -131,6 +133,9 @@ export function LibraryItemCard({
         </Button>
         <Button variant="secondary" onClick={() => onPrepare(recording)}>
           Prepare
+        </Button>
+        <Button variant="secondary" onClick={() => onOpenEditor(recording)}>
+          Editor
         </Button>
         <Button variant="ghost" onClick={() => onDelete(recording.id)}>
           Delete

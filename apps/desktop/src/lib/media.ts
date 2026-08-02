@@ -27,6 +27,10 @@ export async function getMediaMetadata(recordingId: string): Promise<MediaMetada
   return invoke("get_media_metadata", { recordingId })
 }
 
+export async function deleteDerivatives(recordingId: string): Promise<void> {
+  return invoke("delete_derivatives", { recordingId })
+}
+
 export async function estimatePrepareDiskSpace(
   recordingId: string,
   options?: { proxyHeight?: number; thumbnailIntervalSec?: number },

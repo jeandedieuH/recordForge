@@ -2,6 +2,7 @@ import { create } from "zustand"
 import type { MediaJob, PrepareMediaOptions } from "@recordforge/contracts"
 import {
   cancelMediaJob,
+  deleteDerivatives,
   getMediaJob,
   listMediaJobs,
   onMediaJobUpdate,
@@ -21,7 +22,12 @@ interface JobsStore {
   stopListening: () => void
 
   prepare: (options: PrepareMediaOptions) => Promise<MediaJob>
+  prepareWithOptions: (
+    recordingId: string,
+    options: { force: boolean; thumbnailIntervalSec: number },
+  ) => Promise<MediaJob>
   cancel: (jobId: string) => Promise<void>
+  cleanup: (recordingId: string) => Promise<void>
   loadForRecording: (recordingId: string) => Promise<void>
   getJob: (jobId: string) => Promise<MediaJob | undefined>
 }
@@ -71,10 +77,30 @@ export const useJobsStore = create<JobsStore>((set, get) => ({
     return job
   },
 
+  prepareWithOptions: async (recordingId, options) => {
+    const job = await prepareMedia({
+      recordingId,
+      proxyHeight: 540,
+      thumbnailIntervalSec: options.thumbnailIntervalSec,
+      force: options.force,
+    })
+    get().upsertJob(job)
+    return job
+  },
+
   cancel: async (jobId) => {
     await cancelMediaJob(jobId)
     const job = await getMediaJob(jobId)
     get().upsertJob(job)
+  },
+
+  cleanup: async (recordingId) => {
+    await deleteDerivatives(recordingId)
+    const jobs = await listMediaJobs(recordingId)
+    set((state) => {
+      const others = state.jobs.filter((j) => j.recordingId !== recordingId)
+      return { jobs: [...jobs, ...others] }
+    })
   },
 
   loadForRecording: async (recordingId) => {

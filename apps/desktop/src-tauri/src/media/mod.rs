@@ -15,19 +15,18 @@ use tracing::{error, info, instrument};
 
 use crate::errors::{InternalError, Result};
 
-/// Resolve a bundled or PATH-located executable.
+/// Resolve a bundled or PATH-located executable and verify it runs.
 ///
-/// 1. Look next to the executable under `../{tool}/{tool}.exe`.
-/// 2. Fall back to the OS PATH.
+/// Search order:
+/// 1. Next to the current executable (`{name}.exe`).
+/// 2. Inside a `{name}/` directory next to the executable (`{name}/{name}.exe`).
+/// 3. Inside a sibling `bin/` directory (`../bin/{name}.exe`).
+/// 4. The OS `PATH`.
 #[instrument]
 pub fn resolve_executable(name: &str) -> Result<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        let bundled = exe
-            .parent()
-            .map(|p| p.join("..").join(name).join(format!("{name}.exe")))
-            .unwrap_or_else(|| PathBuf::from(format!("{name}.exe")));
-        if bundled.exists() {
-            return Ok(bundled);
+    for candidate in bundled_candidates(name) {
+        if candidate.exists() && can_run(&candidate) {
+            return Ok(candidate);
         }
     }
 
@@ -41,7 +40,28 @@ pub fn resolve_executable(name: &str) -> Result<PathBuf> {
         return Ok(in_path);
     }
 
-    Err(InternalError::Media(format!("{name} not found in bundled path or PATH")).into())
+    Err(InternalError::Media(format!(
+        "{name} not found in bundled path or PATH; make sure {name} is installed"
+    ))
+    .into())
+}
+
+fn bundled_candidates(name: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let file = format!("{name}.exe");
+            candidates.push(dir.join(&file));
+            candidates.push(dir.join(name).join(&file));
+
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("bin").join(&file));
+            }
+        }
+    }
+
+    candidates
 }
 
 fn can_run(path: &Path) -> bool {
