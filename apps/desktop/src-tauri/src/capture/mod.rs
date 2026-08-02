@@ -1,0 +1,20 @@
+pub mod benchmark;
+pub mod config;
+pub mod devices;
+pub mod encoder;
+pub mod ffmpeg;
+pub mod manifest;
+pub mod media;
+pub mod recovery;
+pub mod session;
+pub mod source;
+
+pub use benchmark::{run_benchmark, BenchmarkRecommendation, BenchmarkReport};
+pub use config::{builtin_profiles, RecordingConfig, RecordingProfile};
+pub use devices::{enumerate_audio_devices, enumerate_video_devices, AudioDevice, VideoDevice};
+pub use encoder::{detect_encoders, EncoderInfo};
+pub use manifest::{RecorderState, RecordingManifest};
+pub use media::{concatenate_segments, copy_export, trim_recording};
+pub use recovery::{scan_recovery, RecoveryScanResult};
+pub use session::{Recorder, RecordingStatus};
+pub use source::{enumerate_sources, CaptureSource};

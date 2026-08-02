@@ -56,6 +56,11 @@ cargo clippy
 - Keep feature files small; split by concern.
 - Use Tailwind CSS with the design tokens in `src/styles/index.css`.
 
+## Tauri JS Plugins
+
+- `@tauri-apps/plugin-global-shortcut` and `@tauri-apps/plugin-dialog` are used for global hotkeys and save dialogs.
+- The floating toolbar is rendered when the webview URL contains `?floating=1` (see `src/App.tsx`).
+
 ## Security Notes
 
 - Do not add shell or filesystem permissions without review.

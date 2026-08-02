@@ -44,6 +44,32 @@ impl AppError {
     }
 }
 
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} [{}]: {}",
+            self.category.as_str(),
+            self.code,
+            self.message
+        )
+    }
+}
+
+impl ErrorCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCategory::Capture => "capture",
+            ErrorCategory::Media => "media",
+            ErrorCategory::Storage => "storage",
+            ErrorCategory::Project => "project",
+            ErrorCategory::Editor => "editor",
+            ErrorCategory::Permissions => "permissions",
+            ErrorCategory::Unknown => "unknown",
+        }
+    }
+}
+
 /// Internal error type for Rust operations.
 #[derive(Debug, Error)]
 pub enum InternalError {
@@ -79,6 +105,22 @@ impl From<InternalError> for AppError {
             }
             InternalError::Unknown(msg) => AppError::new(ErrorCategory::Unknown, "unknown", msg),
         }
+    }
+}
+
+impl From<tauri::Error> for AppError {
+    fn from(err: tauri::Error) -> Self {
+        AppError::new(ErrorCategory::Unknown, "tauri_error", err.to_string())
+    }
+}
+
+impl From<tauri_plugin_global_shortcut::Error> for AppError {
+    fn from(err: tauri_plugin_global_shortcut::Error) -> Self {
+        AppError::new(
+            ErrorCategory::Unknown,
+            "global_shortcut_error",
+            err.to_string(),
+        )
     }
 }
 

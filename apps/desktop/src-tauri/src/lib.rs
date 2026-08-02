@@ -1,9 +1,14 @@
+pub mod capture;
+pub mod commands;
 pub mod database;
 pub mod errors;
+pub mod shortcuts;
+pub mod state;
+pub mod tray;
+
+use tracing::{info, instrument};
 
 use errors::Result;
-use tauri::Manager;
-use tracing::{info, instrument};
 
 /// Greeting command used by the initial setup to verify React-to-Rust IPC.
 #[tauri::command]
@@ -28,30 +33,46 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            if let Err(err) = initialize_database(app) {
-                tracing::error!(error = ?err, "failed to initialize database");
+            if let Err(err) = commands::recording::init(app) {
+                tracing::error!(error = ?err, "failed to initialize recorder state");
+            }
+            if let Err(err) = tray::create_tray(app) {
+                tracing::error!(error = ?err, "failed to create tray icon");
+            }
+            if let Err(err) = shortcuts::register_shortcuts(app) {
+                tracing::error!(error = ?err, "failed to register global shortcuts");
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            commands::recording::list_capture_sources,
+            commands::recording::list_audio_devices,
+            commands::recording::list_video_devices,
+            commands::recording::list_builtin_profiles,
+            commands::recording::start_recording,
+            commands::recording::pause_recording,
+            commands::recording::resume_recording,
+            commands::recording::stop_recording,
+            commands::recording::recording_status,
+            commands::recording::insert_marker,
+            commands::recording::detect_hardware_encoders,
+            commands::recording::get_diagnostics_report,
+            commands::recording::scan_recovery_sessions,
+            commands::recording::recover_session,
+            commands::recording::delete_recovery_session,
+            commands::recording::run_encoder_benchmark,
+            commands::recording::list_recordings,
+            commands::recording::delete_recording,
+            commands::recording::reveal_recording,
+            commands::recording::add_recording_tag,
+            commands::recording::remove_recording_tag,
+            commands::recording::trim_recording,
+            commands::recording::export_recording,
+            commands::recording::open_floating_controls,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-fn initialize_database(app: &tauri::App) -> errors::Result<()> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| errors::InternalError::Unknown(format!("app data dir: {e}")))?;
-
-    std::fs::create_dir_all(&app_data_dir)
-        .map_err(|e| errors::InternalError::Unknown(format!("create app data dir: {e}")))?;
-
-    let db_path = app_data_dir.join("app.db");
-    database::initialize(&db_path)
-        .map_err(|e| errors::InternalError::Unknown(format!("open database: {e}")))?;
-
-    info!(db_path = %db_path.display(), "database initialized");
-    Ok(())
 }

@@ -1,3 +1,5 @@
+pub mod library;
+
 use rusqlite::Connection;
 use std::fmt::Debug;
 use std::path::Path;
@@ -30,22 +32,6 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS recordings (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            duration_ms INTEGER,
-            width INTEGER,
-            height INTEGER,
-            fps INTEGER,
-            status TEXT NOT NULL,
-            source_path TEXT NOT NULL
-        )",
-        [],
-    )?;
-
-    conn.execute(
         "CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -73,10 +59,54 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     )?;
 
+    let current_version: i32 = conn
+        .query_row(
+            "SELECT value FROM app_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0);
+
+    if current_version < 2 {
+        migrate_v2(conn)?;
+    }
+
     conn.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '1')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '2')",
         [],
     )?;
 
+    Ok(())
+}
+
+fn migrate_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Pre-release migration: drop the old v1 recordings table and recreate it
+    // to match the LibraryRecording contract.
+    conn.execute("DROP TABLE IF EXISTS recordings", [])?;
+    conn.execute(
+        "CREATE TABLE recordings (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            width INTEGER NOT NULL DEFAULT 0,
+            height INTEGER NOT NULL DEFAULT 0,
+            fps INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            tags TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL,
+            profile_name TEXT NOT NULL,
+            output_path TEXT,
+            work_dir TEXT NOT NULL,
+            thumbnail_path TEXT,
+            markers TEXT NOT NULL DEFAULT '[]'
+        )",
+        [],
+    )?;
     Ok(())
 }

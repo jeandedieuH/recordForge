@@ -1,53 +1,44 @@
 import { useState } from "react"
-import { invoke } from "@tauri-apps/api/core"
+import { LibraryView } from "../features/library"
+import { RecorderPanel } from "../features/recorder"
+import { SettingsView } from "../features/settings"
 
-// Root application shell for recordForge.
-// Provides the main window chrome and a placeholder greeting to verify the Tauri + React + Tailwind setup.
-function AppShell() {
-  const [greetMsg, setGreetMsg] = useState("")
-  const [name, setName] = useState("")
+type Tab = "recorder" | "library" | "settings"
 
-  async function greet() {
-    setGreetMsg(await invoke("greet", { name }))
-  }
+// Root application shell. It provides a tabbed navigation for Recorder, Library,
+// and Settings so each feature stays isolated and the layout remains consistent.
+export function AppShell() {
+  const [activeTab, setActiveTab] = useState<Tab>("recorder")
 
   return (
-    <main className="flex h-screen w-full flex-col items-center justify-center gap-6 p-8">
-      <div className="text-center">
-        <h1 className="text-3xl font-bold tracking-tight">recordForge</h1>
-        <p className="text-muted-foreground mt-2 text-sm">
-          Local-first screen recorder and lightweight editor
-        </p>
-      </div>
+    <main className="mx-auto flex h-screen w-full max-w-5xl flex-col gap-4 overflow-y-auto p-4 sm:p-6">
+      <header className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">recordForge</h1>
+          <p className="text-sm text-foreground/70">Phase 2 capture and library</p>
+        </div>
 
-      <form
-        className="flex w-full max-w-sm items-center gap-2"
-        onSubmit={(e) => {
-          e.preventDefault()
-          greet()
-        }}
-      >
-        <input
-          className="flex-1 rounded-lg border border-border bg-muted px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-          value={name}
-        />
-        <button
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
-          type="submit"
-        >
-          Greet
-        </button>
-      </form>
+        <nav className="flex gap-1 rounded-lg border border-border bg-muted p-1">
+          {(["recorder", "library", "settings"] as Tab[]).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize transition-colors ${
+                activeTab === tab
+                  ? "bg-primary text-primary-foreground"
+                  : "text-foreground hover:bg-background"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </nav>
+      </header>
 
-      {greetMsg ? (
-        <p className="text-sm" data-testid="greet-message">
-          {greetMsg}
-        </p>
-      ) : null}
+      {activeTab === "recorder" ? <RecorderPanel /> : null}
+      {activeTab === "library" ? <LibraryView /> : null}
+      {activeTab === "settings" ? <SettingsView /> : null}
     </main>
   )
 }
-
-export default AppShell
