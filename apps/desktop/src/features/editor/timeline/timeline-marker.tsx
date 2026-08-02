@@ -19,7 +19,7 @@ export function TimelineMarkerView({ marker, onClick }: TimelineMarkerProps) {
       style={{ left: `${left}px`, color: marker.color }}
       title={marker.label}
     >
-      <span className="truncate max-w-[120px] px-1">{marker.label}</span>
+      <span className="truncate max-w-30 px-1">{marker.label}</span>
       <div className="h-2 w-0.5" style={{ backgroundColor: marker.color }} />
     </button>
   )

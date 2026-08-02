@@ -1,7 +1,6 @@
 import { useState } from "react"
 import type { TimelineTrack } from "@recordforge/contracts"
-import { createUpdateTrackCommand } from "@recordforge/editor-core"
-import { trackKindDisplayName } from "@recordforge/editor-core"
+import { createUpdateTrackCommand, trackKindDisplayName } from "@recordforge/editor-core"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { TimelineClipView } from "./timeline-clip"
 import { PipControls } from "./pip-controls"

@@ -43,7 +43,7 @@ export function TimelineToolbar() {
         {view.isPlaying ? "Pause" : "Play"}
       </Button>
 
-      <div className="min-w-[120px] text-sm tabular-nums">
+      <div className="min-w-30 text-sm tabular-nums">
         {formatTime(view.playheadMs)} / {formatTime(view.durationMs)}
       </div>
 
