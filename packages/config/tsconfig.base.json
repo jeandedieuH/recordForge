@@ -20,11 +20,7 @@
     "skipLibCheck": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
-    "baseUrl": ".",
-    "paths": {
-      "@recordforge/*": ["../../packages/*/src"]
-    }
+    "sourceMap": true
   },
   "exclude": ["node_modules", "dist", "build"]
 }
