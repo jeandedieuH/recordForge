@@ -1,0 +1,32 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build outputs
+dist
+build
+*.tsbuildinfo
+
+# Tauri
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen
+apps/desktop/src-tauri/Wix?i
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+*.sw?
+
+# Test
+coverage
+
+# Env
+.env
+.env.local

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [
+    "**/.env.*local",
+    "tsconfig.json",
+    "turbo.json"
+  ],
+  "globalEnv": [
+    "NODE_ENV",
+    "TAURI_ENV_DEBUG",
+    "TAURI_SIGNING_KEY"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "build/**", "src-tauri/target/**"],
+      "inputs": [
+        "src/**",
+        "src-tauri/src/**",
+        "src-tauri/Cargo.toml",
+        "src-tauri/tauri.conf.json",
+        "package.json",
+        "tsconfig.json",
+        "vite.config.ts"
+      ]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {
+      "dependsOn": ["^build"]
+    },
+    "lint:fix": {
+      "cache": false
+    },
+    "format:check": {
+      "cache": false
+    },
+    "format": {
+      "cache": false
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["^build"]
+    },
+    "tauri": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

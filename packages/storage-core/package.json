@@ -1,0 +1,27 @@
+{
+  "name": "@recordforge/storage-core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "format:check": "prettier --check .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@recordforge/contracts": "workspace:*",
+    "@recordforge/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "@recordforge/config": "workspace:*",
+    "eslint": "^9.25.0",
+    "prettier": "^3.5.3",
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.7"
+  }
+}

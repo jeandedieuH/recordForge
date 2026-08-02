@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+/* recordForge desktop base styles */
+@theme {
+  --color-background: #f6f6f6;
+  --color-foreground: #0f0f0f;
+  --color-primary: #396cd8;
+  --color-primary-foreground: #ffffff;
+  --color-muted: #e8e8e8;
+  --color-border: #d1d1d1;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: #1f1f1f;
+    --color-foreground: #f6f6f6;
+    --color-muted: #2f2f2f;
+    --color-border: #3f3f3f;
+  }
+}
+
+body {
+  margin: 0;
+  display: flex;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+}

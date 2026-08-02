@@ -1,0 +1,27 @@
+{
+  "name": "@recordforge/config",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "files": [
+    "tsconfig.base.json",
+    "eslint.config.js",
+    "prettier.config.js",
+    "index.ts"
+  ],
+  "scripts": {
+    "format:check": "prettier --check .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.0.0",
+    "prettier": "^3.5.3",
+    "typescript-eslint": "^8.31.0"
+  }
+}
