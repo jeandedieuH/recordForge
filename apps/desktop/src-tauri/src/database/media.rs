@@ -52,6 +52,7 @@ pub enum MediaJobKind {
     Thumbnail,
     Waveform,
     Prepare,
+    Export,
 }
 
 impl MediaJobKind {
@@ -62,6 +63,7 @@ impl MediaJobKind {
             MediaJobKind::Thumbnail => "thumbnail",
             MediaJobKind::Waveform => "waveform",
             MediaJobKind::Prepare => "prepare",
+            MediaJobKind::Export => "export",
         }
     }
 }
@@ -76,6 +78,7 @@ impl std::str::FromStr for MediaJobKind {
             "thumbnail" => Ok(MediaJobKind::Thumbnail),
             "waveform" => Ok(MediaJobKind::Waveform),
             "prepare" => Ok(MediaJobKind::Prepare),
+            "export" => Ok(MediaJobKind::Export),
             _ => Err(()),
         }
     }
@@ -91,6 +94,7 @@ pub struct MediaJobOutputs {
     pub thumbnail_manifest_path: Option<String>,
     pub waveform_path: Option<String>,
     pub waveform_image_path: Option<String>,
+    pub output_path: Option<String>,
 }
 
 /// Media job record persisted in SQLite.

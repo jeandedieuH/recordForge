@@ -76,7 +76,14 @@ export const mediaJobStatusSchema = z.enum([
 export type MediaJobStatus = z.infer<typeof mediaJobStatusSchema>
 
 // Media job kind.
-export const mediaJobKindSchema = z.enum(["metadata", "proxy", "thumbnail", "waveform", "prepare"])
+export const mediaJobKindSchema = z.enum([
+  "metadata",
+  "proxy",
+  "thumbnail",
+  "waveform",
+  "prepare",
+  "export",
+])
 
 export type MediaJobKind = z.infer<typeof mediaJobKindSchema>
 
@@ -101,6 +108,7 @@ export const mediaJobOutputsSchema = z.object({
   thumbnailManifestPath: z.string().optional(),
   waveformPath: z.string().optional(),
   waveformImagePath: z.string().optional(),
+  outputPath: z.string().optional(),
 })
 
 export type MediaJobOutputs = z.infer<typeof mediaJobOutputsSchema>

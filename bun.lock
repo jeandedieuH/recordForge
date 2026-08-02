@@ -15,6 +15,8 @@
       "version": "0.1.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
+        "@recordforge/editor-core": "workspace:*",
+        "@recordforge/media-core": "workspace:*",
         "@recordforge/ui": "workspace:*",
         "@tauri-apps/api": "^2",
         "@tauri-apps/plugin-dialog": "^2.7.2",

@@ -148,6 +148,10 @@ impl JobManager {
         drop(conn);
 
         for job in jobs {
+            if !matches!(job.kind, crate::database::media::MediaJobKind::Prepare) {
+                continue;
+            }
+
             let options = PrepareOptions {
                 recording_id: job.recording_id.clone(),
                 proxy_height: 540,

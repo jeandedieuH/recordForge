@@ -3,6 +3,7 @@ pub mod commands;
 pub mod database;
 pub mod errors;
 pub mod events;
+pub mod exports;
 pub mod jobs;
 pub mod media;
 pub mod shortcuts;
@@ -82,6 +83,7 @@ pub fn run() {
             commands::media::get_media_metadata,
             commands::media::delete_derivatives,
             commands::media::estimate_prepare_disk_space,
+            commands::exports::export_timeline,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
