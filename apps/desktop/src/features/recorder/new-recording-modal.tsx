@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react"
 import { Crop, Mic, Monitor, MonitorUp, Video, Volume2 } from "lucide-react"
-import { RegionOverlay } from "./region-overlay"
-
 import {
   AudioLevelMeter,
   Button,
@@ -14,7 +12,7 @@ import {
   SelectValue,
   Switch,
 } from "@recordforge/ui"
-import type { Bounds, CaptureSource, RecordingConfig } from "@recordforge/contracts"
+import type { RecordingConfig } from "@recordforge/contracts"
 import { useRecorderStore } from "../../hooks/use-recorder"
 
 interface NewRecordingModalProps {
@@ -57,50 +55,9 @@ export function NewRecordingModal({
     "screen",
   )
   const [audioLevel, setAudioLevel] = useState(0.45)
-  const [showRegionOverlay, setShowRegionOverlay] = useState(false)
-  const [regionBounds, setRegionBounds] = useState<Bounds>({
-    x: 0,
-    y: 0,
-    width: 1920,
-    height: 1080,
-  })
 
-  // Helper to create and set a Region CaptureSource
-  function updateRegionSource(bounds: Bounds) {
-    const regionSource: CaptureSource = {
-      kind: "region",
-      id: `region-${bounds.x}-${bounds.y}-${bounds.width}-${bounds.height}`,
-      name: `Region ${bounds.width}×${bounds.height}`,
-      bounds,
-    }
-    setSelectedSource(regionSource)
-  }
-
-  function handleRegionBoundsChange(field: keyof Bounds, valStr: string) {
-    const num = Number.parseInt(valStr, 10)
-    const newBounds = {
-      ...regionBounds,
-      [field]: Number.isNaN(num)
-        ? 0
-        : Math.max(field === "width" || field === "height" ? 1 : 0, num),
-    }
-    setRegionBounds(newBounds)
-    updateRegionSource(newBounds)
-  }
-
-  function applyRegionPreset(width: number, height: number) {
-    const display = displaySources[0]
-    const displayW = display?.bounds.width ?? 1920
-    const displayH = display?.bounds.height ?? 1080
-    const targetW = Math.min(width, displayW)
-    const targetH = Math.min(height, displayH)
-    const targetX = Math.max(0, Math.round((displayW - targetW) / 2))
-    const targetY = Math.max(0, Math.round((displayH - targetH) / 2))
-
-    const newBounds: Bounds = { x: targetX, y: targetY, width: targetW, height: targetH }
-    setRegionBounds(newBounds)
-    updateRegionSource(newBounds)
-  }
+  
+  
 
   // Load sources, devices, and profiles when the modal opens
   useEffect(() => {
@@ -182,9 +139,7 @@ export function NewRecordingModal({
     } else if (type === "window") {
       const window = windowSources[0] || sources.find((s) => s.kind === "window")
       if (window) setSelectedSource(window)
-    } else if (type === "region") {
-      updateRegionSource(regionBounds)
-    }
+    } 
   }
 
   function handleStartRecording() {
@@ -340,98 +295,6 @@ export function NewRecordingModal({
                       No open windows detected.
                     </p>
                   )
-                ) : null}
-
-                {/* Region Capturing Configuration Options */}
-                {selectedSourceType === "region" ? (
-                  <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-dim p-3 mt-1">
-                    <Button
-                      type="button"
-                      onClick={() => setShowRegionOverlay(true)}
-                      className="flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground shadow transition-all hover:brightness-110 cursor-pointer w-full"
-                    >
-                      <Crop className="size-4" />
-                      <span>Select Area on Screen</span>
-                    </Button>
-
-                    <div className="flex flex-wrap gap-1">
-                      <button
-                        type="button"
-                        onClick={() => applyRegionPreset(1920, 1080)}
-                        className="rounded border border-border/60 bg-surface px-2 py-1 text-[10px] font-medium text-foreground hover:bg-overlay"
-                      >
-                        1080p (16:9)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => applyRegionPreset(1280, 720)}
-                        className="rounded border border-border/60 bg-surface px-2 py-1 text-[10px] font-medium text-foreground hover:bg-overlay"
-                      >
-                        720p (16:9)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => applyRegionPreset(1080, 1080)}
-                        className="rounded border border-border/60 bg-surface px-2 py-1 text-[10px] font-medium text-foreground hover:bg-overlay"
-                      >
-                        Square (1:1)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => applyRegionPreset(1080, 1920)}
-                        className="rounded border border-border/60 bg-surface px-2 py-1 text-[10px] font-medium text-foreground hover:bg-overlay"
-                      >
-                        Vertical (9:16)
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-4 gap-2 pt-1 border-t border-border/40">
-                      <div>
-                        <label className="text-[10px] font-semibold text-subtle-foreground block mb-0.5">
-                          X (px)
-                        </label>
-                        <input
-                          type="number"
-                          value={regionBounds.x}
-                          onChange={(e) => handleRegionBoundsChange("x", e.target.value)}
-                          className="w-full rounded border border-border bg-surface px-1.5 py-1 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] font-semibold text-subtle-foreground block mb-0.5">
-                          Y (px)
-                        </label>
-                        <input
-                          type="number"
-                          value={regionBounds.y}
-                          onChange={(e) => handleRegionBoundsChange("y", e.target.value)}
-                          className="w-full rounded border border-border bg-surface px-1.5 py-1 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] font-semibold text-subtle-foreground block mb-0.5">
-                          Width
-                        </label>
-                        <input
-                          type="number"
-                          value={regionBounds.width}
-                          onChange={(e) => handleRegionBoundsChange("width", e.target.value)}
-                          className="w-full rounded border border-border bg-surface px-1.5 py-1 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] font-semibold text-subtle-foreground block mb-0.5">
-                          Height
-                        </label>
-                        <input
-                          type="number"
-                          value={regionBounds.height}
-                          onChange={(e) => handleRegionBoundsChange("height", e.target.value)}
-                          className="w-full rounded border border-border bg-surface px-1.5 py-1 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                        />
-                      </div>
-                    </div>
-                  </div>
                 ) : null}
               </div>
 
@@ -644,16 +507,7 @@ export function NewRecordingModal({
           </div>
         </DialogContent>
       </Dialog>
-      <RegionOverlay
-        open={showRegionOverlay}
-        initialBounds={regionBounds}
-        onConfirm={(bounds) => {
-          setRegionBounds(bounds)
-          updateRegionSource(bounds)
-          setShowRegionOverlay(false)
-        }}
-        onCancel={() => setShowRegionOverlay(false)}
-      />
+      
     </>
   )
 }

@@ -228,9 +228,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
     }
 
     if (!source) {
-      const message = "Select a capture source before recording"
-      set({ error: message })
-      throw new Error(message)
+      set({ error: "Select a capture source before recording" })
+      return
     }
 
     set({ isLoading: true, pendingAction: "start", error: null, markers: [], saveMessage: null })
@@ -246,29 +245,20 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         webcamDeviceId: state.selectedWebcamId || undefined,
       }
 
+      // Open floating controls and boundary overlay windows as recording initiates
+      void openFloatingControls()
+      void openBoundaryOverlay()
+
       await startRecording(config)
       const status = await getRecordingStatus()
       set({ status, isLoading: false, pendingAction: null })
-
-      // Open auxiliary windows as fire-and-forget AFTER the recording flow
-      // has completed and the UI state is unlocked. These must never block
-      // the recording start — if window creation hangs or fails, recording
-      // still works and the user can stop via tray or keyboard shortcut.
-      openFloatingControls().catch((e) => {
-        console.error("Failed to open floating controls:", toErrorMessage(e))
-      })
-      openBoundaryOverlay().catch((e) => {
-        console.error("Failed to open boundary overlay:", toErrorMessage(e))
-      })
     } catch (error) {
       // If starting the recording fails, close the auxiliary windows so the user
       // isn't left with an orphaned floating toolbar or boundary outline.
       const { hideBoundaryOverlay, hideFloatingControls } = await import("../lib/recorder")
       void hideBoundaryOverlay()
       void hideFloatingControls()
-      const message = toErrorMessage(error)
-      set({ error: message, isLoading: false, pendingAction: null })
-      throw new Error(message)
+      set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
     }
   },
 
