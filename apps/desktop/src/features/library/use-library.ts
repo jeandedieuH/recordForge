@@ -1,4 +1,4 @@
-import { create } from "zustand"
+﻿import { create } from "zustand"
 import type { ExportOptions, LibraryRecording, TrimOptions } from "@recordforge/contracts"
 import {
   addRecordingTag,
@@ -9,6 +9,7 @@ import {
   revealRecording,
   trimRecording,
 } from "../../lib/library"
+import { toErrorMessage } from "../../lib/errors"
 
 export type LibrarySort = "newest" | "oldest" | "duration" | "size"
 
@@ -51,9 +52,11 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
     set({ isLoading: true, error: null })
     try {
       const recordings = await listRecordings()
+      console.log("[library] loaded recordings:", recordings.length, recordings)
       set({ recordings, isLoading: false, error: null })
     } catch (error) {
-      set({ error: String(error), isLoading: false })
+      console.error("[library] failed to load recordings:", error)
+      set({ error: toErrorMessage(error), isLoading: false })
     }
   },
 
@@ -64,7 +67,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
       const recordings = await listRecordings()
       set({ recordings, isLoading: false, error: null })
     } catch (error) {
-      set({ error: String(error), isLoading: false })
+      set({ error: toErrorMessage(error), isLoading: false })
     }
   },
 
@@ -72,7 +75,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
     try {
       await revealRecording(recordingId)
     } catch (error) {
-      set({ error: String(error) })
+      set({ error: toErrorMessage(error) })
     }
   },
 
@@ -83,7 +86,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
       const recordings = await listRecordings()
       set({ recordings, isLoading: false, error: null })
     } catch (error) {
-      set({ error: String(error), isLoading: false })
+      set({ error: toErrorMessage(error), isLoading: false })
     }
   },
 
@@ -93,7 +96,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
       await exportRecording(options)
       set({ isLoading: false, error: null })
     } catch (error) {
-      set({ error: String(error), isLoading: false })
+      set({ error: toErrorMessage(error), isLoading: false })
     }
   },
 
@@ -103,7 +106,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
       const recordings = await listRecordings()
       set({ recordings })
     } catch (error) {
-      set({ error: String(error) })
+      set({ error: toErrorMessage(error) })
     }
   },
 
@@ -113,7 +116,7 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
       const recordings = await listRecordings()
       set({ recordings })
     } catch (error) {
-      set({ error: String(error) })
+      set({ error: toErrorMessage(error) })
     }
   },
 }))

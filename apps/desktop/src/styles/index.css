@@ -1,38 +1,22 @@
 @import "tailwindcss";
+@import "@recordforge/ui/theme.css";
+@import "tw-animate-css";
 
-/* recordForge desktop base styles */
-@theme {
-  --color-background: #f6f6f6;
-  --color-foreground: #0f0f0f;
-  --color-primary: #396cd8;
-  --color-primary-foreground: #ffffff;
-  --color-muted: #e8e8e8;
-  --color-border: #d1d1d1;
-}
+/* recordForge desktop base styles — Forge UI tokens come from @recordforge/ui. */
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-background: #1f1f1f;
-    --color-foreground: #f6f6f6;
-    --color-muted: #2f2f2f;
-    --color-border: #3f3f3f;
-  }
+html {
+  font-size: 14px; /* compact desktop density: rem base 14 */
 }
 
 body {
   margin: 0;
-  display: flex;
   min-width: 320px;
   min-height: 100vh;
   background-color: var(--color-background);
   color: var(--color-foreground);
-  font-family:
-    Inter,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -40,4 +24,16 @@ body {
 #root {
   width: 100%;
   height: 100vh;
+}
+
+/* Mica backdrop: the canvas goes transparent so the window effect shows
+   through. Only set when Rust confirmed the effect is actually active —
+   otherwise the opaque --color-background fallback stays. */
+html[data-mica="true"] body {
+  background-color: transparent;
+}
+
+/* Tabular numerals for timers, timecode, and sizes */
+.tnum {
+  font-feature-settings: "tnum";
 }

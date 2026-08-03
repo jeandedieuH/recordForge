@@ -13,6 +13,10 @@ pub struct Recorder {
     ffmpeg_path: PathBuf,
     sessions_dir: PathBuf,
     db: Arc<Mutex<rusqlite::Connection>>,
+    // Whether this FFmpeg build supports the ddagrab (Desktop Duplication API)
+    // filter. Probed once at construction so display capture can fall back to
+    // gdigrab on builds without D3D11 capture support.
+    ddagrab_available: bool,
     current: Mutex<Option<ActiveSession>>,
 }
 
@@ -36,10 +40,17 @@ impl Recorder {
         sessions_dir: PathBuf,
         db: Arc<Mutex<rusqlite::Connection>>,
     ) -> Self {
+        // Probe ddagrab support once so display capture can transparently fall
+        // back to gdigrab on FFmpeg builds that lack the Desktop Duplication
+        // filter (a common cause of instant capture failures on Windows).
+        let ddagrab_available =
+            super::media::ffmpeg_has_filter(&ffmpeg_path.to_string_lossy(), "ddagrab");
+        info!(ddagrab_available, "recorder initialized");
         Self {
             ffmpeg_path,
             sessions_dir,
             db,
+            ddagrab_available,
             current: Mutex::new(None),
         }
     }
@@ -127,21 +138,59 @@ impl Recorder {
         profile: &RecordingProfile,
         manifest: Arc<Mutex<RecordingManifest>>,
     ) -> crate::errors::Result<(FfmpegCapture, Option<FfmpegCapture>)> {
+        // Probe audio devices before building the capture command. A device
+        // that enumerates but can't be opened (Intel SST mic driver quirk,
+        // device in use, Unicode name round-trip issue) would make FFmpeg
+        // abort the ENTIRE recording — including video. Skipping a bad mic so
+        // the screen recording still proceeds is the right tradeoff for a
+        // recorder-first product.
+        let mut config = config.clone();
+        let ffmpeg = self.ffmpeg_path.to_string_lossy();
+
+        if config.capture_microphone {
+            if let Some(name) = &config.microphone_device_id {
+                let spec = format!("audio=\"{name}\"");
+                if !media::probe_dshow_device(&ffmpeg, &spec) {
+                    tracing::warn!(
+                        device = %name,
+                        "microphone could not be opened; recording video without it"
+                    );
+                    config.capture_microphone = false;
+                    config.microphone_device_id = None;
+                }
+            }
+        }
+
+        if config.capture_system_audio {
+            if let Some(name) = &config.system_audio_device_id {
+                let spec = format!("audio=\"{name}\"");
+                if !media::probe_dshow_device(&ffmpeg, &spec) {
+                    tracing::warn!(
+                        device = %name,
+                        "system audio device could not be opened; recording video without it"
+                    );
+                    config.capture_system_audio = false;
+                    config.system_audio_device_id = None;
+                }
+            }
+        }
+
         let screen_output = work_dir.join(format!("seg_{:03}.mp4", index));
         let screen = FfmpegCapture::start(
-            &self.ffmpeg_path.to_string_lossy(),
-            config,
+            &ffmpeg,
+            &config,
             profile,
             &screen_output.to_string_lossy(),
             index,
             Some(manifest),
+            self.ddagrab_available,
         )?;
 
         let webcam = if config.capture_webcam {
             if let Some(device) = &config.webcam_device_id {
                 let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
                 Some(FfmpegCapture::start_webcam(
-                    &self.ffmpeg_path.to_string_lossy(),
+                    &ffmpeg,
                     device,
                     profile,
                     &webcam_output.to_string_lossy(),

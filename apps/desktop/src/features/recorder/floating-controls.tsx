@@ -17,7 +17,7 @@ export function FloatingControls() {
   const {
     status,
     markers,
-    isLoading,
+    pendingAction,
     error,
     refreshStatus,
     pause,
@@ -51,20 +51,20 @@ export function FloatingControls() {
 
       <div className="ml-auto flex items-center gap-2">
         {isRecording ? (
-          <Button variant="secondary" disabled={isLoading} onClick={pause}>
-            Pause
+          <Button variant="secondary" disabled={pendingAction === "pause"} onClick={pause}>
+            {pendingAction === "pause" ? "Pausing…" : "Pause"}
           </Button>
         ) : isPaused ? (
-          <Button variant="secondary" disabled={isLoading} onClick={resume}>
-            Resume
+          <Button variant="secondary" disabled={pendingAction === "resume"} onClick={resume}>
+            {pendingAction === "resume" ? "Resuming…" : "Resume"}
           </Button>
         ) : null}
 
-        <Button variant="secondary" disabled={!isActive || isLoading} onClick={stop}>
-          Stop
+        <Button variant="secondary" disabled={!isActive || pendingAction === "stop"} onClick={stop}>
+          {pendingAction === "stop" ? "Stopping…" : "Stop"}
         </Button>
 
-        <Button disabled={!isActive || isLoading} onClick={handleMarker}>
+        <Button disabled={!isActive || pendingAction != null} onClick={handleMarker}>
           Marker
         </Button>
       </div>

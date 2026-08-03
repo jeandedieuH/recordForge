@@ -1,5 +1,6 @@
 pub mod library;
 pub mod media;
+pub mod settings;
 
 use rusqlite::Connection;
 use std::fmt::Debug;
@@ -78,8 +79,12 @@ fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         migrate_v3(conn)?;
     }
 
+    if current_version < 4 {
+        migrate_v4(conn)?;
+    }
+
     conn.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '3')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '4')",
         [],
     )?;
 
@@ -110,6 +115,19 @@ fn migrate_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
             work_dir TEXT NOT NULL,
             thumbnail_path TEXT,
             markers TEXT NOT NULL DEFAULT '[]'
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v4(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // R0 settings persistence: theme, window transparency, recorder defaults.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )",
         [],
     )?;

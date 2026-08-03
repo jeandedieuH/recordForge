@@ -19,6 +19,9 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 | Video processing | FFmpeg + FFprobe |
 | State management | Zustand |
 | Validation | Zod |
+| UI kit | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010) |
+| Icons | lucide-react (no emoji in product UI) |
+| Font | Inter Variable, vendored via `@fontsource-variable/inter` |
 
 ## Repository Layout
 
@@ -130,8 +133,20 @@ bun run test
 - Rust: `cargo fmt` and `clippy` must pass.
 - React: minimize `use client`, `useEffect`, and `setState`; prefer server components where applicable.
 - Tailwind: use design tokens, mobile-first.
+- **Design tokens only** — no raw hex/px literals outside `packages/ui/src/styles/theme.css` (spec-010).
+- **No emoji icons** — lucide-react only; icon-only buttons use `IconButton` (aria-label + tooltip built in).
+- **Four-states pattern** — every async surface renders skeleton → content | empty | error(+retry); no raw text loaders.
+- **Feedback** — every background job ends in a toast (or jobs-drawer entry), never silently.
 - Error handling: guard clauses, early returns, user-friendly messages.
 - Add comments on non-obvious implementation decisions only.
+
+## Tooling
+
+Regenerate app icons from the branding master SVG (`branding/forge-mark.svg`):
+
+```bash
+bun run --cwd tooling/scripts icons
+```
 
 ## Completion-Report Format
 

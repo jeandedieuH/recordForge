@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Button, Input } from "@recordforge/ui"
+import { Button, Input, NativeSelect } from "@recordforge/ui"
 import type { Bounds, CaptureSource } from "@recordforge/contracts"
 import { listCaptureSources } from "../../lib/recorder"
 
@@ -220,9 +220,8 @@ export function SourcePicker({ value, onSelect }: SourcePickerProps) {
               <label className="mb-1 block text-xs font-medium" htmlFor="prefill-display">
                 Pre-fill from display
               </label>
-              <select
+              <NativeSelect
                 id="prefill-display"
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
                 value={prefillDisplayId}
                 onChange={(e) => handlePrefillDisplayChange(e.target.value)}
               >
@@ -232,7 +231,7 @@ export function SourcePicker({ value, onSelect }: SourcePickerProps) {
                     {d.name} ({d.bounds.width}x{d.bounds.height})
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
             <Button
               onClick={handleSelectRegion}

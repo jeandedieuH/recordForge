@@ -9,6 +9,7 @@ pub mod media;
 pub mod shortcuts;
 pub mod state;
 pub mod tray;
+pub mod window_effects;
 
 use tracing::{info, instrument};
 
@@ -48,6 +49,9 @@ pub fn run() {
             if let Err(err) = shortcuts::register_shortcuts(app) {
                 tracing::error!(error = ?err, "failed to register global shortcuts");
             }
+            // Frameless chrome: apply the Mica backdrop per the stored setting
+            // (falls back to opaque on failure or when disabled).
+            window_effects::apply_startup_effects(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -84,6 +88,10 @@ pub fn run() {
             commands::media::delete_derivatives,
             commands::media::estimate_prepare_disk_space,
             commands::exports::export_timeline,
+            commands::settings::get_setting,
+            commands::settings::set_setting,
+            commands::settings::set_window_transparency,
+            commands::settings::window_transparency_active,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

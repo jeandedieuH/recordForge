@@ -94,48 +94,106 @@ pub fn list_builtin_profiles() -> Result<Vec<capture::config::RecordingProfile>>
     Ok(capture::config::builtin_profiles())
 }
 
+/// Best-effort broadcast of the current recorder status to all windows.
+///
+/// Used after transport actions so every UI surface (main window, floating
+/// controls) reflects state changes immediately, including those triggered by
+/// global shortcuts or the tray menu. Emission failures are ignored so a
+/// listener-side hiccup can't fail an otherwise-successful recording action.
+pub(crate) fn emit_current_status(app: &tauri::AppHandle, state: &AppState) {
+    let status = {
+        let guard = match state.recorder.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("recorder state mutex poisoned while emitting status");
+                return;
+            }
+        };
+        match guard.status() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = ?e, "failed to read recorder status for event");
+                return;
+            }
+        }
+    };
+    if let Err(e) = crate::events::emit_recorder_status(app, &status) {
+        tracing::warn!(error = ?e, "failed to emit recorder-status event");
+    }
+}
+
 #[tauri::command]
 #[instrument]
-pub fn start_recording(config: RecordingConfig, state: State<'_, AppState>) -> Result<String> {
+pub fn start_recording(
+    config: RecordingConfig,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String> {
     if let Ok(mut guard) = state.quick_config.lock() {
         *guard = Some(config.clone());
     }
 
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.start(config)
+    let session_id = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.start(config)?
+    };
+
+    emit_current_status(&app, &state);
+    Ok(session_id)
 }
 
 #[tauri::command]
 #[instrument]
-pub fn pause_recording(state: State<'_, AppState>) -> Result<RecordingStatus> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.pause()
+pub fn pause_recording(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingStatus> {
+    let status = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.pause()?
+    };
+    let _ = crate::events::emit_recorder_status(&app, &status);
+    Ok(status)
 }
 
 #[tauri::command]
 #[instrument]
-pub fn resume_recording(state: State<'_, AppState>) -> Result<RecordingStatus> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.resume()
+pub fn resume_recording(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingStatus> {
+    let status = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.resume()?
+    };
+    let _ = crate::events::emit_recorder_status(&app, &status);
+    Ok(status)
 }
 
 #[tauri::command]
 #[instrument]
-pub fn stop_recording(state: State<'_, AppState>) -> Result<RecordingStats> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.stop()
+pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
+    let stats = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.stop()?
+    };
+    // Stop finalizes the session; broadcast the now-idle status so the timer
+    // resets and the floating controls update even though stop has no return
+    // status payload of its own.
+    emit_current_status(&app, &state);
+    Ok(stats)
 }
 
 #[tauri::command]
@@ -228,7 +286,9 @@ pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecordin
         .db
         .lock()
         .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    library_list_recordings(&db)
+    let recordings = library_list_recordings(&db)?;
+    tracing::info!(count = recordings.len(), "list_recordings returned");
+    Ok(recordings)
 }
 
 #[tauri::command]

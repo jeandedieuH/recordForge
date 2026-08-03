@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react"
-import { Button, Input } from "@recordforge/ui"
+import { useEffect, useState, type ReactNode } from "react"
+import { Button, Input, NativeSelect } from "@recordforge/ui"
 import type { RecordingConfig } from "@recordforge/contracts"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { openFloatingControls } from "../../lib/recorder"
@@ -14,7 +14,9 @@ interface RecorderControlsProps {
 export function RecorderControls({ onStart }: RecorderControlsProps) {
   const {
     audioDevices,
+    audioDevicesLoaded,
     videoDevices,
+    videoDevicesLoaded,
     profiles,
     selectedSource,
     selectedProfileId,
@@ -22,7 +24,7 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
     selectedSystemAudioId,
     selectedWebcamId,
     status,
-    isLoading,
+    pendingAction,
     error,
     setSelectedSource,
     setSelectedProfileId,
@@ -54,7 +56,7 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
   const isRecording = status?.state === "recording"
   const isPaused = status?.state === "paused"
   const isActive = isRecording || isPaused
-  const canStart = selectedSource && !isActive && !isLoading
+  const canStart = selectedSource && !isActive
 
   function handleAddMarker() {
     if (!markerLabel.trim()) return
@@ -65,72 +67,47 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
     <div className="flex flex-col gap-4">
       <SourcePicker value={selectedSource} onSelect={setSelectedSource} />
 
-      <div className="grid gap-3 rounded-lg border border-border bg-muted p-4">
+      <section className="grid gap-4 rounded-lg border border-border bg-muted p-4">
+        <h2 className="text-sm font-semibold text-foreground">Audio &amp; camera</h2>
+
         <div className="grid gap-3 sm:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-sm font-medium" htmlFor="microphone">
-              Microphone
-            </label>
-            <select
-              id="microphone"
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-              value={selectedMicrophoneId}
-              onChange={(e) => setSelectedMicrophoneId(e.target.value)}
-            >
-              <option value="">No microphone</option>
-              {microphones.map((device) => (
-                <option key={device.id} value={device.id}>
-                  {device.name} {device.isDefault ? "(default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-medium" htmlFor="system-audio">
-              System audio
-            </label>
-            <select
-              id="system-audio"
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-              value={selectedSystemAudioId}
-              onChange={(e) => setSelectedSystemAudioId(e.target.value)}
-            >
-              <option value="">No system audio</option>
-              {systemAudios.map((device) => (
-                <option key={device.id} value={device.id}>
-                  {device.name} {device.isDefault ? "(default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-medium" htmlFor="webcam">
-              Webcam
-            </label>
-            <select
-              id="webcam"
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
-              value={selectedWebcamId}
-              onChange={(e) => setSelectedWebcamId(e.target.value)}
-            >
-              <option value="">No webcam</option>
-              {webcams.map((device) => (
-                <option key={device.id} value={device.id}>
-                  {device.name} {device.isDefault ? "(default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
+          <DeviceField
+            id="microphone"
+            label="Microphone"
+            value={selectedMicrophoneId}
+            emptyOptionLabel="No microphone"
+            onChange={setSelectedMicrophoneId}
+            devices={microphones}
+            loaded={audioDevicesLoaded}
+            emptyHint="No microphone found. Connect or enable one in Windows Sound settings."
+          />
+          <DeviceField
+            id="system-audio"
+            label="System audio"
+            value={selectedSystemAudioId}
+            emptyOptionLabel="No system audio"
+            onChange={setSelectedSystemAudioId}
+            devices={systemAudios}
+            loaded={audioDevicesLoaded}
+            emptyHint="No loopback device found. Enable Stereo Mix (Sound settings → Recording) or install a virtual audio cable such as VB-Audio Virtual Cable."
+          />
+          <DeviceField
+            id="webcam"
+            label="Webcam"
+            value={selectedWebcamId}
+            emptyOptionLabel="No webcam"
+            onChange={setSelectedWebcamId}
+            devices={webcams}
+            loaded={videoDevicesLoaded}
+            emptyHint="No webcam found. Connect or enable one in Windows privacy settings."
+          />
 
           <div>
             <label className="mb-1 block text-sm font-medium" htmlFor="profile">
               Recording profile
             </label>
-            <select
+            <NativeSelect
               id="profile"
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-primary"
               value={selectedProfileId}
               onChange={(e) => setSelectedProfileId(e.target.value as RecordingConfig["profile"])}
             >
@@ -139,7 +116,7 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
                   {profile.label} — {profile.width}x{profile.height}@{profile.fps}fps
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </div>
         </div>
 
@@ -151,34 +128,40 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
           >
             Floating controls
           </Button>
-          <Button className="flex-1" disabled={!canStart} onClick={onStart}>
-            Start recording
+          <Button
+            className="flex-1"
+            disabled={!canStart || pendingAction === "start"}
+            onClick={onStart}
+          >
+            {pendingAction === "start" ? "Starting…" : "Start recording"}
           </Button>
           <Button
             className="flex-1"
-            disabled={!isRecording || isLoading}
+            disabled={!isRecording || pendingAction === "pause"}
             variant="secondary"
             onClick={pause}
           >
-            Pause
+            {pendingAction === "pause" ? "Pausing…" : "Pause"}
           </Button>
           <Button
             className="flex-1"
-            disabled={!isPaused || isLoading}
+            disabled={!isPaused || pendingAction === "resume"}
             variant="secondary"
             onClick={resume}
           >
-            Resume
+            {pendingAction === "resume" ? "Resuming…" : "Resume"}
           </Button>
           <Button
             className="flex-1"
-            disabled={!isActive || isLoading}
+            disabled={!isActive || pendingAction === "stop"}
             variant="secondary"
             onClick={stop}
           >
-            Stop
+            {pendingAction === "stop" ? "Stopping…" : "Stop"}
           </Button>
         </div>
+
+        <p className="text-xs text-foreground/60">{SHORTCUT_HINTS}</p>
 
         <div className="flex gap-2">
           <Input
@@ -192,10 +175,13 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
             Add marker
           </Button>
         </div>
-      </div>
+      </section>
 
       {error ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600 dark:border-red-900 dark:bg-red-950">
+        <div
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600 dark:border-red-900 dark:bg-red-950"
+        >
           {error}
           <button type="button" className="ml-2 underline" onClick={clearError}>
             Dismiss
@@ -205,3 +191,62 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
     </div>
   )
 }
+
+interface DeviceFieldProps {
+  id: string
+  label: string
+  value: string
+  emptyOptionLabel: string
+  onChange: (id: string) => void
+  // Already filtered to the relevant kind (microphone / system / webcam).
+  devices: { id: string; name: string; isDefault: boolean }[]
+  loaded: boolean
+  // Actionable message shown once enumeration has settled but found nothing.
+  emptyHint: string
+}
+
+// Labeled device select with a loading indicator and an actionable empty state.
+// Factored out so the three device pickers stay consistent and their empty
+// states don't drift.
+function DeviceField({
+  id,
+  label,
+  value,
+  emptyOptionLabel,
+  onChange,
+  devices,
+  loaded,
+  emptyHint,
+}: DeviceFieldProps): ReactNode {
+  const showEmptyHint = loaded && devices.length === 0
+
+  return (
+    <div>
+      <label className="mb-1 block text-sm font-medium" htmlFor={id}>
+        {label}
+      </label>
+      <NativeSelect
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={!loaded}
+      >
+        <option value="">{emptyOptionLabel}</option>
+        {devices.map((device) => (
+          <option key={device.id} value={device.id}>
+            {device.name} {device.isDefault ? "(default)" : ""}
+          </option>
+        ))}
+      </NativeSelect>
+
+      {!loaded ? <p className="mt-1 text-xs text-foreground/60">Detecting devices…</p> : null}
+
+      {showEmptyHint ? <p className="mt-1 text-xs text-foreground/60">{emptyHint}</p> : null}
+    </div>
+  )
+}
+
+// Global shortcuts are registered in Rust (src-tauri/src/shortcuts.rs); mirror
+// them here so users can discover them without opening settings.
+const SHORTCUT_HINTS =
+  "Shortcuts: Ctrl+Shift+R start/stop · Ctrl+Shift+P pause/resume · Ctrl+Shift+M marker"

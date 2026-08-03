@@ -57,10 +57,14 @@ export function LibraryView() {
   const [prepareTarget, setPrepareTarget] = useState<LibraryRecording | null>(null)
 
   useEffect(() => {
-    // Load the library once on mount. We call getState() directly to avoid
+    // Load the library on mount. We call getState() directly to avoid
     // re-running this effect when the store reference changes.
     void useLibraryStore.getState().load()
   }, [])
+
+  function handleRefresh() {
+    void store.load()
+  }
 
   const filtered = useMemo(() => {
     const searched = store.recordings.filter(
@@ -209,6 +213,9 @@ export function LibraryView() {
             onClick={() => setViewMode("list")}
           >
             List
+          </Button>
+          <Button variant="secondary" onClick={handleRefresh}>
+            Refresh
           </Button>
         </div>
       </div>

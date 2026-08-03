@@ -63,7 +63,11 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
         }
         _ => {}
     }
+    drop(guard);
 
+    // Reflect the shortcut-driven change in the UI immediately rather than
+    // waiting for the next status poll.
+    crate::commands::recording::emit_current_status(app, &state);
     Ok(())
 }
 
@@ -75,11 +79,16 @@ fn toggle_pause_resume(app: &tauri::AppHandle) -> Result<()> {
         .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
     let status = guard.status()?;
 
-    match status.state {
+    let outcome = match status.state {
         RecorderState::Recording => guard.pause().map(|_| ()),
         RecorderState::Paused => guard.resume().map(|_| ()),
         _ => Ok(()),
-    }
+    };
+    drop(guard);
+
+    // Reflect the shortcut-driven change in the UI immediately.
+    crate::commands::recording::emit_current_status(app, &state);
+    outcome
 }
 
 fn insert_marker(app: &tauri::AppHandle) -> Result<()> {

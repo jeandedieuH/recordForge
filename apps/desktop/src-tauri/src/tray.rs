@@ -59,12 +59,16 @@ fn handle_tray_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "start" => {
             let _ = start_or_focus(&state, app);
+            // Mirror shortcut behavior: push the new status to the UI at once.
+            crate::commands::recording::emit_current_status(app, &state);
         }
         "pause" => {
             let _ = toggle_pause_resume(&state);
+            crate::commands::recording::emit_current_status(app, &state);
         }
         "stop" => {
             let _ = stop_recording(&state);
+            crate::commands::recording::emit_current_status(app, &state);
         }
         "marker" => {
             let _ = insert_marker(&state);

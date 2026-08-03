@@ -1,11 +1,11 @@
 use regex::Regex;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 use super::config::{RecordingConfig, RecordingProfile};
 use super::manifest::{RecordingFragment, RecordingManifest, RecordingStats};
@@ -39,6 +39,11 @@ impl std::fmt::Debug for FfmpegCapture {
 
 impl FfmpegCapture {
     /// Build and start the FFmpeg capture command for the given configuration.
+    ///
+    /// `ddagrab_available` reports whether the FFmpeg build supports the
+    /// `ddagrab` (Desktop Duplication API) filter. When false, display capture
+    /// falls back to `gdigrab` so recording still works on builds without D3D11
+    /// capture support.
     #[instrument(skip(config, profile, manifest))]
     pub fn start(
         ffmpeg_path: &str,
@@ -47,8 +52,9 @@ impl FfmpegCapture {
         output: &str,
         fragment_index: u32,
         manifest: Option<Arc<Mutex<RecordingManifest>>>,
+        ddagrab_available: bool,
     ) -> crate::errors::Result<Self> {
-        let command = build_screen_command(ffmpeg_path, config, profile, output);
+        let command = build_screen_command(ffmpeg_path, config, profile, output, ddagrab_available);
         run(command, output, fragment_index, manifest)
     }
 
@@ -76,9 +82,22 @@ impl FfmpegCapture {
         // Send 'q' followed by a newline to request a clean shutdown.
         if let Some(stdin) = self.stdin.as_mut() {
             if let Err(e) = stdin.write_all(b"q\n") {
-                error!(%e, "failed to send quit to ffmpeg");
+                // A broken/closed pipe (Windows os error 232) here means FFmpeg
+                // already exited on its own — typically a capture failure. That
+                // is expected in that case, so we don't log it as an error; the
+                // wait loop below collects the real exit status and the stderr
+                // reader thread will have logged the underlying cause. Other
+                // write failures are unusual enough to warn about.
+                let already_exited =
+                    matches!(e.kind(), ErrorKind::BrokenPipe) || e.raw_os_error() == Some(232);
+                if already_exited {
+                    tracing::debug!("ffmpeg quit signal not delivered: process already exited");
+                } else {
+                    tracing::warn!(%e, "failed to send quit to ffmpeg");
+                }
+            } else {
+                let _ = stdin.flush();
             }
-            let _ = stdin.flush();
         }
 
         // Close stdin so FFmpeg sees EOF if it did not react to 'q'.
@@ -142,11 +161,41 @@ impl FfmpegCapture {
     }
 }
 
+impl Drop for FfmpegCapture {
+    fn drop(&mut self) {
+        // Best-effort cleanup so a capture dropped without an explicit stop()
+        // (app crash, abandoned session) does not leave FFmpeg running as an
+        // orphan holding the display/audio devices. If stop() already ran, the
+        // child has exited and this is a fast no-op (try_wait returns the
+        // cached exited status immediately).
+        if let Some(stdin) = self.stdin.as_mut() {
+            let _ = stdin.write_all(b"q\n");
+            let _ = stdin.flush();
+        }
+        // Close stdin to signal EOF.
+        self.stdin = None;
+
+        // Give FFmpeg a short window to flush and exit gracefully, then
+        // force-kill if it is still running.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 fn build_screen_command(
     ffmpeg_path: &str,
     config: &RecordingConfig,
     profile: &RecordingProfile,
     output: &str,
+    ddagrab_available: bool,
 ) -> Command {
     let mut command = Command::new(ffmpeg_path);
     command
@@ -155,10 +204,14 @@ fn build_screen_command(
         .stderr(Stdio::piped())
         .arg("-y");
 
-    add_screen_video_input(&mut command, &config.source, profile);
+    // Use ddagrab for display capture only when the filter is present in this
+    // FFmpeg build; otherwise fall back to gdigrab (see add_screen_video_input).
+    let use_ddagrab = config.source.kind == "display" && ddagrab_available;
+
+    add_screen_video_input(&mut command, &config.source, profile, use_ddagrab);
     let audio_indices = add_audio_inputs(&mut command, config);
 
-    let video_filter = build_video_filter(&config.source, profile);
+    let video_filter = build_video_filter(&config.source, profile, use_ddagrab);
     let audio_filter = build_audio_filter(&audio_indices);
 
     let mut filter_complex = video_filter;
@@ -221,18 +274,23 @@ fn add_screen_video_input(
     command: &mut Command,
     source: &CaptureSource,
     profile: &RecordingProfile,
+    use_ddagrab: bool,
 ) {
     let bounds = source.bounds;
 
-    if source.kind == "display" {
-        // Desktop Duplication API via the lavfi ddagrab filter.
+    if source.kind == "display" && use_ddagrab {
+        // Desktop Duplication API via the lavfi ddagrab filter. Produces
+        // hardware (D3D11) frames, so the filter chain must hwdownload them.
         let ddagrab = format!(
             "ddagrab=framerate={}:video_size={}x{}:offset_x={}:offset_y={}",
             profile.fps, bounds.width, bounds.height, bounds.x, bounds.y
         );
         command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
-    } else if source.kind == "window" || source.kind == "region" {
-        // GDI fallback for window or region capture.
+    } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
+        // GDI capture. Used for window/region capture, and as a fallback for
+        // display capture when ddagrab is not available in this FFmpeg build.
+        // gdigrab captures the whole virtual desktop; the filter chain crops
+        // to the target bounds so multi-monitor displays still work.
         command.args([
             "-f",
             "gdigrab",
@@ -254,13 +312,21 @@ fn add_screen_video_input(
     }
 }
 
-fn build_video_filter(source: &CaptureSource, profile: &RecordingProfile) -> String {
-    if source.kind == "display" {
+fn build_video_filter(
+    source: &CaptureSource,
+    profile: &RecordingProfile,
+    use_ddagrab: bool,
+) -> String {
+    if source.kind == "display" && use_ddagrab {
+        // ddagrab emits D3D11 hardware frames; download to system memory as
+        // bgra before scaling.
         format!(
             "[0:v]hwdownload,format=bgra,scale={}:{}[vout]",
             profile.width, profile.height
         )
-    } else if source.kind == "window" || source.kind == "region" {
+    } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
+        // gdigrab captures the full virtual desktop; crop to the source bounds
+        // (handles both multi-monitor displays and windowed/region capture).
         let Bounds {
             x,
             y,
@@ -395,6 +461,16 @@ fn run(
         .ok_or_else(|| crate::errors::InternalError::Capture("ffmpeg stderr unavailable".into()))?;
 
     // Spawn a reader thread to tail the FFmpeg log and extract live stats.
+    // It also surfaces FFmpeg's stderr so capture failures (missing filters,
+    // bad device names, encoder errors) are visible instead of silently
+    // swallowed — progress lines stay at debug; error-looking lines go to warn
+    // so they show up at the default log level alongside the quit/exit logs.
+    //
+    // Lines are also captured into `stderr_buffer` (capped) so that an early
+    // FFmpeg exit can embed the real cause directly in the error returned to
+    // the UI, rather than only in the terminal log.
+    let stderr_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buffer_reader = Arc::clone(&stderr_buffer);
     let manifest_reader = manifest.clone();
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
@@ -402,9 +478,63 @@ fn run(
             Regex::new(r"frame=\s*(\d+)\s+fps=\s*([\d.]+)\s+q=\s*[\d.-]+\s+(?:size=\s*([\d.]+)\w+\s+)?time=([\d:.]+)")
                 .ok();
         for line in reader.lines().map_while(Result::ok) {
+            let is_progress = re_frame
+                .as_ref()
+                .and_then(|re| re.captures(&line))
+                .is_some();
+            if !is_progress && looks_like_ffmpeg_error(&line) {
+                tracing::warn!(target: "recordforge::ffmpeg", line = %line, "ffmpeg stderr");
+            } else {
+                tracing::debug!(target: "recordforge::ffmpeg", line = %line, "ffmpeg stderr");
+            }
             let _ = parse_stats_line(&line, re_frame.as_ref(), &manifest_reader);
+            // Keep the last ~48 lines so a startup failure's cause survives
+            // even after FFmpeg prints its banner/config preamble.
+            if let Ok(mut buf) = stderr_buffer_reader.lock() {
+                if buf.len() >= 48 {
+                    buf.remove(0);
+                }
+                buf.push(line);
+            }
         }
     });
+
+    // Give FFmpeg a short window to fail fast. Missing filters, bad device
+    // names, and unavailable encoders make FFmpeg exit within tens of
+    // milliseconds; surfacing that here turns a silent start failure into a
+    // clear error instead of a confusing "pipe is being closed" later on stop.
+    let probe_start = std::time::Instant::now();
+    let early_status: Option<std::process::ExitStatus> = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(crate::errors::InternalError::Capture(format!(
+                    "wait for ffmpeg startup: {e}"
+                ))
+                .into());
+            }
+        }
+        if probe_start.elapsed() >= std::time::Duration::from_millis(400) {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    if let Some(status) = early_status {
+        // Let the stderr reader drain FFmpeg's error output so the cause is
+        // captured before we build the error message.
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let captured = stderr_buffer
+            .lock()
+            .map(|buf| buf.join("\n"))
+            .unwrap_or_default();
+        return Err(crate::errors::InternalError::Capture(format!(
+            "ffmpeg exited immediately during startup (status: {status}).\n\
+             FFmpeg output:\n{captured}"
+        ))
+        .into());
+    }
 
     // Record the fragment now so recovery can find it.
     if let Some(m) = manifest.as_ref() {
@@ -438,6 +568,27 @@ fn run(
         fragment_index,
         start_time: Instant::now(),
     })
+}
+
+/// Heuristic: does this FFmpeg stderr line look like an error or warning?
+///
+/// FFmpeg prints its banner, configuration, and progress lines to stderr too;
+/// we only want to elevate genuine problems to `warn` so they're visible at the
+/// default log level without drowning the log in routine output. The matched
+/// substrings cover the common FFmpeg failure phrasings ("No such filter",
+/// "Could not open", "Unknown encoder", "Invalid ...", etc.).
+fn looks_like_ffmpeg_error(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("error")
+        || l.contains("no such")
+        || l.contains("not found")
+        || l.contains("cannot")
+        || l.contains("could not")
+        || l.contains("failed")
+        || l.contains("unknown")
+        || l.contains("unrecognized")
+        || l.contains("invalid")
+        || l.contains("abort")
 }
 
 fn parse_stats_line(
