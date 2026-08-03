@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "capture-boundary",
+  "description": "Minimal permissions for the recordForge transparent capture-boundary overlay window",
+  "windows": ["boundary"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close"
+  ]
+}

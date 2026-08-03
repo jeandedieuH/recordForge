@@ -37,6 +37,13 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
             crate::errors::InternalError::Storage(format!("session dir entry: {e}"))
         })?;
 
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        // Only consider UUID-named session directories. Other names are not part
+        // of the recovery surface and may be user-created or malicious.
+        if uuid::Uuid::parse_str(&dir_name).is_err() {
+            continue;
+        }
+
         let manifest_path = entry.path().join("session.json");
         if !manifest_path.exists() {
             continue;
@@ -101,14 +108,15 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
 }
 
 /// Finalize and recover a single session, returning the library record.
+///
+/// `work_dir` must already have been validated as a UUID-named directory
+/// inside the sessions root (see `path_policy::validate_session_dir`).
 #[instrument]
 pub fn recover_session(
-    session_id: &str,
-    sessions_dir: &Path,
+    work_dir: &Path,
     ffmpeg_path: &str,
     conn: &rusqlite::Connection,
 ) -> crate::errors::Result<crate::database::library::LibraryRecording> {
-    let work_dir = sessions_dir.join(session_id);
     let manifest_path = work_dir.join("session.json");
 
     if !manifest_path.exists() {
@@ -125,12 +133,30 @@ pub fn recover_session(
     };
 
     if output_size < 1024 {
-        let segment_files: Vec<PathBuf> = manifest
+        let mut segment_files: Vec<PathBuf> = manifest
             .fragments
             .iter()
-            .filter(|f| f.validated && f.size_bytes.unwrap_or(0) > 0)
+            .filter(|f| (f.validated || f.stopped_at.is_some()) && f.size_bytes.unwrap_or(0) > 0)
             .map(|f| work_dir.join(&f.file_name))
+            .filter(|p| p.exists())
             .collect();
+
+        // Fallback (P0.1 fix): Scan work_dir directly for physical segments
+        if segment_files.is_empty() {
+            if let Ok(entries) = std::fs::read_dir(work_dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if (name.starts_with("seg_") || name.starts_with("segment_")) && name.ends_with(".mp4") {
+                        if let Ok(meta) = entry.metadata() {
+                            if meta.len() > 1024 {
+                                segment_files.push(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+            segment_files.sort();
+        }
 
         if segment_files.is_empty() {
             return Err(crate::errors::InternalError::Media(
@@ -139,7 +165,7 @@ pub fn recover_session(
             .into());
         }
 
-        media::concatenate_segments(ffmpeg_path, &work_dir, &segment_files, &output)?;
+        media::concatenate_segments(ffmpeg_path, work_dir, &segment_files, &output)?;
 
         output_size = std::fs::metadata(&output).map(|m| m.len()).map_err(|e| {
             crate::errors::InternalError::Storage(format!("recovered output metadata: {e}"))
@@ -156,9 +182,33 @@ pub fn recover_session(
 /// Remove a recovery session directory from disk.
 #[instrument]
 pub fn delete_recovery_session(session_id: &str, sessions_dir: &Path) -> crate::errors::Result<()> {
+    // 1. Validate UUID format to prevent path traversal via relative components (P0.7)
+    if uuid::Uuid::parse_str(session_id).is_err() {
+        return Err(crate::errors::InternalError::Permissions(format!(
+            "invalid session ID format for deletion: {session_id}"
+        ))
+        .into());
+    }
+
     let work_dir = sessions_dir.join(session_id);
     if work_dir.exists() {
-        std::fs::remove_dir_all(&work_dir).map_err(|e| {
+        // 2. Canonicalize target and parent to enforce containment
+        let canonical_target = work_dir.canonicalize().map_err(|e| {
+            crate::errors::InternalError::Storage(format!("failed to canonicalize session path: {e}"))
+        })?;
+
+        let canonical_root = sessions_dir.canonicalize().map_err(|e| {
+            crate::errors::InternalError::Storage(format!("failed to canonicalize sessions root: {e}"))
+        })?;
+
+        if !canonical_target.starts_with(&canonical_root) {
+            return Err(crate::errors::InternalError::Permissions(format!(
+                "path traversal blocked: {session_id}"
+            ))
+            .into());
+        }
+
+        std::fs::remove_dir_all(&canonical_target).map_err(|e| {
             crate::errors::InternalError::Storage(format!("delete recovery session: {e}"))
         })?;
     }
@@ -186,6 +236,24 @@ fn validate_fragments(
             }
             Err(e) => {
                 first_error = Some(format!("fragment {} missing: {e}", frag.index));
+            }
+        }
+    }
+
+    // Fallback (P0.1 fix): If manifest fragment records were not finalized due to sudden crash/kill,
+    // scan work_dir directly for any segment video files >= 1KB.
+    if count == 0 {
+        if let Ok(entries) = std::fs::read_dir(work_dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if (name.starts_with("seg_") || name.starts_with("segment_")) && name.ends_with(".mp4") {
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.len() > 1024 {
+                            total += meta.len();
+                            count += 1;
+                        }
+                    }
+                }
             }
         }
     }

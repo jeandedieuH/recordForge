@@ -1,0 +1,30 @@
+{
+  "id": "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22",
+  "sessionId": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+  "name": "Recording a0eebc99",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:01:00Z",
+  "durationMs": 60000,
+  "sizeBytes": 15728640,
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "status": "completed",
+  "tags": ["demo", "v1"],
+  "source": {
+    "kind": "display",
+    "id": "display-0",
+    "name": "Display 1",
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  "profileName": "balanced",
+  "outputPath": "C:/appdata/sessions/a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11/output.mp4",
+  "workDir": "C:/appdata/sessions/a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+  "thumbnailPath": null,
+  "markers": []
+}

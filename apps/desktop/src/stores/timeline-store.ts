@@ -29,6 +29,9 @@ interface TimelineStore {
   isLoading: boolean
   error: string | null
   activeExportJob: MediaJob | null
+  // True while the media-job-update listener is active; prevents duplicate
+  // subscriptions and races between mount and unmount.
+  isListening: boolean
   unlisten: (() => void) | null
 
   load: (recordingId: string) => Promise<void>
@@ -80,6 +83,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   isLoading: false,
   error: null,
   activeExportJob: null,
+  isListening: false,
   unlisten: null,
 
   load: async (recordingId) => {
@@ -119,16 +123,49 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   startListening: async () => {
-    if (get().unlisten) return
+    if (get().isListening) return
+    set({ isListening: true })
+
     const unlisten = await onMediaJobUpdate((job) => {
-      if (job.kind === "export" && job.recordingId === get().recording?.id) {
-        set({ activeExportJob: job })
+      const recording = get().recording
+      if (job.recordingId !== recording?.id) return
+
+      const updates: Partial<TimelineStore> = {}
+
+      // Track export jobs for the editor's export progress UI.
+      if (job.kind === "export") {
+        updates.activeExportJob = job
+      }
+
+      // Track the active proxy/prepare job. We follow a prepare job when it is
+      // already the tracked one (so status/progress updates flow), when there is
+      // no active job yet (so the user sees progress), or when it has produced a
+      // proxy (so the video player can load it).
+      if (job.kind === "prepare") {
+        const currentJob = get().activeJob
+        const isCurrent = currentJob?.id === job.id
+        const hasProxy = Boolean(job.outputs?.proxyPath)
+        if (isCurrent || !currentJob || hasProxy) {
+          updates.activeJob = job
+        }
+      }
+
+      if (Object.keys(updates).length > 0) {
+        set(updates)
       }
     })
-    set({ unlisten })
+
+    // If stopListening() ran while we were awaiting the listener, discard it
+    // instead of leaking an orphaned subscription.
+    if (get().isListening) {
+      set({ unlisten })
+    } else {
+      unlisten()
+    }
   },
 
   stopListening: () => {
+    set({ isListening: false })
     const { unlisten } = get()
     if (unlisten) {
       unlisten()

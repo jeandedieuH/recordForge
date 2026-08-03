@@ -13,7 +13,7 @@ use crate::events::EventPublisher;
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSegment {
-    pub input_path: String,
+    pub asset_id: Option<String>,
     pub source_in_ms: u64,
     pub source_out_ms: u64,
     pub output_start_ms: u64,
@@ -24,7 +24,6 @@ pub struct RenderSegment {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderPlan {
-    pub output_path: String,
     pub duration_ms: u64,
     pub segments: Vec<RenderSegment>,
 }
@@ -33,6 +32,7 @@ pub struct RenderPlan {
 #[instrument(skip(ffmpeg_path, db, plan, app))]
 pub fn run_render_plan(
     recording_id: String,
+    output_path: &Path,
     plan: RenderPlan,
     ffmpeg_path: &std::path::Path,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -68,7 +68,6 @@ pub fn run_render_plan(
         .as_ref()
         .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
     let work_dir = PathBuf::from(&recording.work_dir);
-    let output_path = PathBuf::from(&plan.output_path);
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
@@ -111,7 +110,7 @@ pub fn run_render_plan(
         &ffmpeg_path.to_string_lossy(),
         &work_dir,
         &segment_paths,
-        &output_path,
+        output_path,
     )?;
 
     // Clean up temporary trimmed segments.
@@ -128,7 +127,7 @@ pub fn run_render_plan(
         message: Some("export finished".into()),
         completed_at: Some(chrono::Utc::now().to_rfc3339()),
         outputs: crate::database::media::MediaJobOutputs {
-            output_path: Some(plan.output_path),
+            output_path: Some(output_path.to_string_lossy().to_string()),
             ..Default::default()
         },
         ..job

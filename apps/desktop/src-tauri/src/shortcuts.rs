@@ -43,27 +43,55 @@ pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
 
 fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-    let status = guard.status()?;
 
-    match status.state {
-        RecorderState::Idle | RecorderState::Completed | RecorderState::Failed => {
-            let quick = state.quick_config.lock().map_err(|_| {
-                crate::errors::InternalError::Capture("quick config mutex poisoned".into())
-            })?;
-            if let Some(config) = quick.as_ref() {
-                guard.start(config.clone())?;
-            }
-        }
-        RecorderState::Recording | RecorderState::Paused => {
-            guard.stop().map(|_| ())?;
-        }
-        _ => {}
+    // Track what action was taken so we can open/close auxiliary windows
+    // after releasing the recorder mutex.
+    enum Action {
+        Started,
+        Stopped,
+        None,
     }
-    drop(guard);
+
+    let action = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
+        let status = guard.status()?;
+
+        match status.state {
+            RecorderState::Idle | RecorderState::Completed | RecorderState::Failed => {
+                let quick = state.quick_config.lock().map_err(|_| {
+                    crate::errors::InternalError::Capture("quick config mutex poisoned".into())
+                })?;
+                if let Some(config) = quick.as_ref() {
+                    guard.start(config.clone())?;
+                    Action::Started
+                } else {
+                    Action::None
+                }
+            }
+            RecorderState::Recording | RecorderState::Paused => {
+                guard.stop().map(|_| ())?;
+                Action::Stopped
+            }
+            _ => Action::None,
+        }
+        // guard is dropped here — safe to do window operations below
+    };
+
+    // Open or close auxiliary windows outside the recorder lock
+    match action {
+        Action::Started => {
+            let _ = crate::window::FloatingWindow::open_or_focus(app);
+            let _ = crate::window::BoundaryWindow::open_or_focus(app);
+        }
+        Action::Stopped => {
+            crate::window::FloatingWindow::hide(app);
+            crate::window::BoundaryWindow::hide(app);
+        }
+        Action::None => {}
+    }
 
     // Reflect the shortcut-driven change in the UI immediately rather than
     // waiting for the next status poll.

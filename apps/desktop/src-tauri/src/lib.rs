@@ -6,9 +6,13 @@ pub mod events;
 pub mod exports;
 pub mod jobs;
 pub mod media;
+pub mod path_policy;
 pub mod shortcuts;
 pub mod state;
+pub mod storage;
 pub mod tray;
+pub mod validation;
+pub mod window;
 pub mod window_effects;
 
 use tracing::{info, instrument};

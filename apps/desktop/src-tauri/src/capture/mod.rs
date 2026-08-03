@@ -1,13 +1,17 @@
+pub mod audio;
 pub mod benchmark;
 pub mod config;
 pub mod devices;
 pub mod encoder;
+pub mod engine;
 pub mod ffmpeg;
 pub mod manifest;
 pub mod media;
+pub mod metrics;
 pub mod recovery;
 pub mod session;
 pub mod source;
+pub mod webcam;
 
 pub use benchmark::{run_benchmark, BenchmarkRecommendation, BenchmarkReport};
 pub use config::{builtin_profiles, RecordingConfig, RecordingProfile};

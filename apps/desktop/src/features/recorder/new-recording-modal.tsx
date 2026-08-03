@@ -143,8 +143,10 @@ export function NewRecordingModal({
 
   function handleMicToggle(enabled: boolean) {
     if (enabled) {
-      const defaultMic = selectedMicrophoneId || microphones[0]?.id || "default"
-      setSelectedMicrophoneId(defaultMic)
+      const defaultMic = selectedMicrophoneId || microphones[0]?.id
+      if (defaultMic) {
+        setSelectedMicrophoneId(defaultMic)
+      }
     } else {
       setSelectedMicrophoneId("")
     }
@@ -152,8 +154,10 @@ export function NewRecordingModal({
 
   function handleSystemAudioToggle(enabled: boolean) {
     if (enabled) {
-      const defaultSys = selectedSystemAudioId || systemAudios[0]?.id || "default"
-      setSelectedSystemAudioId(defaultSys)
+      const defaultSys = selectedSystemAudioId || systemAudios[0]?.id
+      if (defaultSys) {
+        setSelectedSystemAudioId(defaultSys)
+      }
     } else {
       setSelectedSystemAudioId("")
     }
@@ -161,8 +165,10 @@ export function NewRecordingModal({
 
   function handleWebcamToggle(enabled: boolean) {
     if (enabled) {
-      const defaultCam = selectedWebcamId || webcams[0]?.id || "default"
-      setSelectedWebcamId(defaultCam)
+      const defaultCam = selectedWebcamId || webcams[0]?.id
+      if (defaultCam) {
+        setSelectedWebcamId(defaultCam)
+      }
     } else {
       setSelectedWebcamId("")
     }

@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for the recordForge main window and floating toolbar",
-  "windows": ["main", "floating"],
+  "description": "Default permissions for the recordForge main window",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
@@ -19,6 +19,7 @@
     "core:window:allow-create",
     "core:window:allow-close",
     "core:window:allow-minimize",
+    "core:window:allow-unminimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",

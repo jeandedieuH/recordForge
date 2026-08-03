@@ -29,10 +29,19 @@ pub fn concatenate_segments(
     let list_path = work_dir.join("concat.txt");
     let mut list = String::new();
     for seg in segment_files {
+        // The concat demuxer resolves relative paths against the list file's
+        // directory, so we require a plain file name here. A missing file name
+        // indicates an unexpected path (e.g. ending in `..`) that we refuse.
         let name = seg
             .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| seg.to_string_lossy().to_string());
+            .ok_or_else(|| {
+                crate::errors::InternalError::Media(format!(
+                    "segment path has no file name: {}",
+                    seg.display()
+                ))
+            })?
+            .to_string_lossy()
+            .to_string();
         list.push_str(&format!("file '{}'\n", name));
     }
     std::fs::write(&list_path, list)

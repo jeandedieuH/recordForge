@@ -20,6 +20,15 @@ pub struct Bounds {
     pub height: i32,
 }
 
+impl Bounds {
+    /// Compute aspect-preserving scale and pad filter string for FFmpeg (fixes P0.5 aspect distortion).
+    pub fn build_aspect_fit_filter(&self, target_width: i32, target_height: i32) -> String {
+        format!(
+            "scale=w={target_width}:h={target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
+    }
+}
+
 /// Enumerate all available capture sources on Windows.
 ///
 /// This is the first step of Phase 1: prove we can discover displays

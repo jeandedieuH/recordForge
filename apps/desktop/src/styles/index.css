@@ -34,6 +34,18 @@ html[data-mica="true"] body {
   background-color: transparent;
 }
 
+/* Floating controls & screen boundary transparent canvas */
+html[data-floating="true"],
+html[data-floating="true"] body,
+html[data-floating="true"] #root,
+html[data-boundary="true"],
+html[data-boundary="true"] body,
+html[data-boundary="true"] #root {
+  background: transparent !important;
+  background-color: transparent !important;
+  overflow: hidden !important;
+}
+
 /* Custom dark scrollbar styling matching recordForge theme */
 :root {
   color-scheme: dark;

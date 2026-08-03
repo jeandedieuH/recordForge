@@ -87,6 +87,15 @@ export const mediaJobKindSchema = z.enum([
 
 export type MediaJobKind = z.infer<typeof mediaJobKindSchema>
 
+export const ffmpegJobSpecSchema = z.object({
+  kind: mediaJobKindSchema,
+  inputPath: z.string(),
+  outputPath: z.string(),
+  args: z.array(z.string()),
+})
+
+export type FFmpegJobSpec = z.infer<typeof ffmpegJobSpecSchema>
+
 // Progress payload emitted for a running or finished job.
 export const mediaJobProgressSchema = z.object({
   jobId: z.string(),

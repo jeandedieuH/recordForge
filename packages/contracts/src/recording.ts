@@ -81,9 +81,9 @@ export const recordingConfigSchema = z.object({
   captureMicrophone: z.boolean(),
   captureSystemAudio: z.boolean(),
   captureWebcam: z.boolean(),
-  webcamDeviceId: z.string().optional(),
-  microphoneDeviceId: z.string().optional(),
-  systemAudioDeviceId: z.string().optional(),
+  webcamDeviceId: z.string().nullish(),
+  microphoneDeviceId: z.string().nullish(),
+  systemAudioDeviceId: z.string().nullish(),
 })
 
 export type RecordingConfig = z.infer<typeof recordingConfigSchema>
@@ -108,11 +108,11 @@ export type RecorderState = z.infer<typeof recorderStateSchema>
 export const recordingStatusSchema = z.object({
   sessionId: z.string(),
   state: recorderStateSchema,
-  startedAt: z.string().datetime().optional(),
-  stoppedAt: z.string().datetime().optional(),
+  startedAt: z.string().datetime().nullish(),
+  stoppedAt: z.string().datetime().nullish(),
   durationMs: z.number().int().min(0).default(0),
   recordedMs: z.number().int().min(0).default(0),
-  error: z.string().optional(),
+  error: z.string().nullish(),
 })
 
 export type RecordingStatus = z.infer<typeof recordingStatusSchema>
@@ -289,9 +289,9 @@ export const libraryRecordingSchema = z.object({
   tags: z.array(z.string()).default([]),
   source: captureSourceSchema,
   profileName: z.string(),
-  outputPath: z.string().optional(),
+  outputPath: z.string().nullish(),
   workDir: z.string(),
-  thumbnailPath: z.string().optional(),
+  thumbnailPath: z.string().nullish(),
   markers: z.array(recordingMarkerSchema).default([]),
 })
 

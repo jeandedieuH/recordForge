@@ -1,4 +1,4 @@
-﻿import { create } from "zustand"
+import { create } from "zustand"
 import type {
   AudioDevice,
   BenchmarkReport,
@@ -22,6 +22,8 @@ import {
   listBuiltinProfiles,
   listCaptureSources,
   listVideoDevices,
+  openBoundaryOverlay,
+  openFloatingControls,
   pauseRecording,
   recoverSession,
   resumeRecording,
@@ -131,7 +133,11 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   loadSources: async () => {
     try {
       const sources = await listCaptureSources()
-      set({ sources, error: null })
+      let selected = get().selectedSource
+      if (!selected || !sources.some((s) => s.id === selected?.id)) {
+        selected = sources.find((s) => s.kind === "display") || sources[0] || null
+      }
+      set({ sources, selectedSource: selected, error: null })
     } catch (error) {
       set({ error: toErrorMessage(error) })
     }
@@ -212,15 +218,25 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
 
   start: async () => {
     const state = get()
-    if (!state.selectedSource) {
-      set({ error: "Select a capture source before recording" })
-      return
+    let source = state.selectedSource
+    if (!source && state.sources.length > 0) {
+      const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
+      if (fallback) {
+        source = fallback
+        set({ selectedSource: fallback })
+      }
+    }
+
+    if (!source) {
+      const message = "Select a capture source before recording"
+      set({ error: message })
+      throw new Error(message)
     }
 
     set({ isLoading: true, pendingAction: "start", error: null, markers: [], saveMessage: null })
     try {
       const config: RecordingConfig = {
-        source: state.selectedSource,
+        source,
         profile: state.selectedProfileId,
         captureMicrophone: !!state.selectedMicrophoneId,
         captureSystemAudio: !!state.selectedSystemAudioId,
@@ -231,12 +247,28 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       }
 
       await startRecording(config)
-      // The Rust command also emits a `recorder-status` event, but the main
-      // window initiated this action so we fetch the authoritative status.
       const status = await getRecordingStatus()
       set({ status, isLoading: false, pendingAction: null })
+
+      // Open auxiliary windows as fire-and-forget AFTER the recording flow
+      // has completed and the UI state is unlocked. These must never block
+      // the recording start — if window creation hangs or fails, recording
+      // still works and the user can stop via tray or keyboard shortcut.
+      openFloatingControls().catch((e) => {
+        console.error("Failed to open floating controls:", toErrorMessage(e))
+      })
+      openBoundaryOverlay().catch((e) => {
+        console.error("Failed to open boundary overlay:", toErrorMessage(e))
+      })
     } catch (error) {
-      set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
+      // If starting the recording fails, close the auxiliary windows so the user
+      // isn't left with an orphaned floating toolbar or boundary outline.
+      const { hideBoundaryOverlay, hideFloatingControls } = await import("../lib/recorder")
+      void hideBoundaryOverlay()
+      void hideFloatingControls()
+      const message = toErrorMessage(error)
+      set({ error: message, isLoading: false, pendingAction: null })
+      throw new Error(message)
     }
   },
 

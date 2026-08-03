@@ -1,7 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tracing::instrument;
+
+use crate::path_policy::PathPolicy;
 
 use crate::capture;
 use crate::capture::benchmark::{run_benchmark, BenchmarkReport};
@@ -41,6 +43,8 @@ pub fn init(app: &tauri::App) -> Result<()> {
     std::fs::create_dir_all(&sessions_dir)
         .map_err(|e| InternalError::Storage(format!("create sessions dir: {e}")))?;
 
+    let path_policy = PathPolicy::new(app_data_dir.clone(), sessions_dir.clone());
+
     let ffmpeg_path = Recorder::resolve_ffmpeg()?;
     let ffprobe_path = media::resolve_executable("ffprobe")?;
     let recorder = Recorder::new(ffmpeg_path.clone(), sessions_dir.clone(), Arc::clone(&db));
@@ -65,6 +69,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         ffmpeg_path,
         ffprobe_path,
         quick_config: Arc::new(Mutex::new(None)),
+        path_policy,
     });
 
     Ok(())
@@ -189,6 +194,8 @@ pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
         guard.stop()?
     };
+    crate::window::FloatingWindow::hide(&app);
+    crate::window::BoundaryWindow::hide(&app);
     // Stop finalizes the session; broadcast the now-idle status so the timer
     // resets and the floating controls update even though stop has no return
     // status payload of its own.
@@ -253,13 +260,16 @@ pub fn scan_recovery_sessions(state: State<'_, AppState>) -> Result<Vec<Recovery
 #[tauri::command]
 #[instrument]
 pub fn recover_session(session_id: String, state: State<'_, AppState>) -> Result<LibraryRecording> {
+    // Validate the session ID as a UUID and ensure its directory stays inside
+    // the sessions root before any recovery work begins.
+    let work_dir = state.path_policy.validate_session_dir(&session_id)?;
+
     let db = state
         .db
         .lock()
         .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
     recovery_recover_session(
-        &session_id,
-        &state.sessions_dir,
+        &work_dir,
         &state.ffmpeg_path.to_string_lossy(),
         &db,
     )
@@ -298,7 +308,7 @@ pub fn delete_recording(recording_id: String, state: State<'_, AppState>) -> Res
         .db
         .lock()
         .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    library_delete_recording(&db, &recording_id)
+    library_delete_recording(&db, &recording_id, state.path_policy.app_data_dir())
 }
 
 #[tauri::command]
@@ -316,8 +326,12 @@ pub fn reveal_recording(recording_id: String, state: State<'_, AppState>) -> Res
 
     #[cfg(windows)]
     {
+        // Reveal only resolves paths that exist and are inside the app data
+        // directory, preventing a compromised database from opening arbitrary files.
+        let validated = state.path_policy.validate_recording_path(Path::new(path))?;
+        let validated_str = validated.to_string_lossy();
         std::process::Command::new("explorer")
-            .args(["/select,", path])
+            .args(["/select,", validated_str.as_ref()])
             .spawn()
             .map_err(|e| InternalError::Media(format!("reveal recording: {e}")))?;
         Ok(())
@@ -357,6 +371,41 @@ pub fn remove_recording_tag(
     remove_tag(&db, &recording_id, &tag)
 }
 
+#[tauri::command]
+#[instrument]
+pub fn trash_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    database::library::trash_recording(&db, &recording_id)
+}
+
+#[tauri::command]
+#[instrument]
+pub fn restore_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    database::library::restore_recording(&db, &recording_id)
+}
+
+#[tauri::command]
+#[instrument]
+pub fn empty_trash(state: State<'_, AppState>) -> Result<()> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    let recordings = database::library::list_recordings(&db)?;
+    let app_data_dir = state.path_policy.app_data_dir();
+    for rec in recordings.into_iter().filter(|r| r.status == database::library::LibraryRecordingStatus::Trashed) {
+        let _ = database::library::delete_recording(&db, &rec.id, app_data_dir);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrimOptions {
@@ -381,7 +430,13 @@ pub fn trim_recording(
         .as_ref()
         .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
 
-    let work_dir = PathBuf::from(&original.work_dir);
+    // Validate that both the source file and the work directory belong to the
+    // app data area before writing a trimmed file next to the original.
+    state.path_policy.validate_recording_path(Path::new(source_path))?;
+    let work_dir = state
+        .path_policy
+        .validate_recording_path(Path::new(&original.work_dir))?;
+
     let suffix = uuid::Uuid::new_v4().to_string();
     let short = &suffix[..suffix.len().min(8)];
     let trimmed_path = work_dir.join(format!("trim_{short}.mp4"));
@@ -426,30 +481,42 @@ pub fn export_recording(options: ExportOptions, state: State<'_, AppState>) -> R
         .as_ref()
         .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
 
-    capture::media::copy_export(Path::new(source_path), Path::new(&options.output_path))
+    // Validate the user-selected destination before copying. This blocks writes
+    // to system directories and path-traversal attempts via the save dialog.
+    let destination = state
+        .path_policy
+        .validate_export_destination(Path::new(&options.output_path))?;
+
+    capture::media::copy_export(Path::new(source_path), &destination)
 }
 
 /// Open a small always-on-top floating window for transport controls.
 #[tauri::command]
 #[instrument]
 pub fn open_floating_controls(app: tauri::AppHandle) -> Result<()> {
-    if app.get_webview_window("floating").is_some() {
-        return Ok(());
-    }
+    crate::window::FloatingWindow::open_or_focus(&app)
+}
 
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        "floating",
-        tauri::WebviewUrl::App("index.html?floating=1".into()),
-    )
-    .title("recordForge Controls")
-    .inner_size(320.0, 80.0)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .build()
-    .map_err(|e| InternalError::Unknown(format!("{e:?}")))?;
+/// Hide the floating transport controls window.
+#[tauri::command]
+#[instrument]
+pub fn hide_floating_controls(app: tauri::AppHandle) -> Result<()> {
+    crate::window::FloatingWindow::hide(&app);
+    Ok(())
+}
 
+/// Open a transparent always-on-top fullscreen window for capture boundary outline.
+#[tauri::command]
+#[instrument]
+pub fn open_boundary_overlay(app: tauri::AppHandle) -> Result<()> {
+    crate::window::BoundaryWindow::open_or_focus(&app)
+}
+
+/// Hide the capture boundary outline window.
+#[tauri::command]
+#[instrument]
+pub fn hide_boundary_overlay(app: tauri::AppHandle) -> Result<()> {
+    crate::window::BoundaryWindow::hide(&app);
     Ok(())
 }
 

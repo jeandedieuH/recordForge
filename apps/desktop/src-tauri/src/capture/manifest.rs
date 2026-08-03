@@ -149,8 +149,9 @@ impl RecordingManifest {
     pub fn read(path: impl AsRef<Path>) -> crate::errors::Result<Self> {
         let data = std::fs::read_to_string(path.as_ref())
             .map_err(|e| crate::errors::InternalError::Storage(format!("read manifest: {e}")))?;
-        serde_json::from_str(&data)
-            .map_err(|e| crate::errors::InternalError::Storage(format!("parse manifest: {e}")))?
+        let manifest: Self = serde_json::from_str(&data)
+            .map_err(|e| crate::errors::InternalError::Storage(format!("parse manifest: {e}")))?;
+        Ok(manifest)
     }
 
     pub fn touch(&mut self) {

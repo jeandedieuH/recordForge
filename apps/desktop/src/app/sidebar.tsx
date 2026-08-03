@@ -39,8 +39,8 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { view: "library", label: "Library", icon: PlaySquare },
   { view: "projects", label: "Projects", icon: FolderOpen },
-  { view: "settings", label: "Settings", icon: Settings },
   { view: "storage", label: "Storage", icon: HardDrive },
+  { view: "settings", label: "Settings", icon: Settings },
 ]
 
 export function Sidebar({

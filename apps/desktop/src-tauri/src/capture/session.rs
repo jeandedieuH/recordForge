@@ -67,11 +67,21 @@ impl Recorder {
             .lock()
             .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
 
-        if guard.is_some() {
-            return Err(crate::errors::InternalError::Capture(
-                "a recording is already active".into(),
-            )
-            .into());
+        if let Some(active) = guard.as_mut() {
+            let screen_running = active
+                .screen_capture
+                .as_mut()
+                .map(|c| c.is_running())
+                .unwrap_or(false);
+            if screen_running {
+                return Err(crate::errors::InternalError::Capture(
+                    "a recording is already active".into(),
+                )
+                .into());
+            } else {
+                info!("clearing orphaned inactive recording session before start");
+                *guard = None;
+            }
         }
 
         let profile = config.resolve_profile().ok_or_else(|| {

@@ -3,7 +3,7 @@ import { ToastViewport, TooltipProvider } from "@recordforge/ui"
 import { EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
-import { NewRecordingModal, RecorderPanel } from "../features/recorder"
+import { NewRecordingModal} from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
 import { useEditorStore } from "../stores/editor-store"
@@ -79,7 +79,7 @@ export function AppShell() {
           />
 
           <main className="min-w-0 flex-1 overflow-y-auto bg-background">
-            {activeView === "record" ? <RecorderPanel /> : null}
+            
             {activeView === "library" ? <LibraryView /> : null}
             {activeView === "projects" ? (
               <div className="p-8 text-center text-subtle-foreground">

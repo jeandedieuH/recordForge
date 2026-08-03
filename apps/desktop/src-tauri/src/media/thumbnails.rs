@@ -31,11 +31,8 @@ pub fn generate_thumbnails(
     std::fs::create_dir_all(output_dir)
         .map_err(|e| InternalError::Storage(format!("create thumbnail dir: {e}")))?;
 
-    if metadata.duration_ms == 0 || metadata.width.is_none() || metadata.height.is_none() {
-        return Err(InternalError::Media(
-            "cannot generate thumbnails without video metadata".into(),
-        )
-        .into());
+    if metadata.duration_ms == 0 {
+        return Err(InternalError::Media("cannot generate thumbnails for zero-duration video".into()).into());
     }
 
     let duration_sec = metadata.duration_ms as f64 / 1000.0;
@@ -78,8 +75,15 @@ pub fn generate_thumbnails(
         return Err(InternalError::Media(format!("thumbnail generation failed: {stderr}")).into());
     }
 
-    // Compute the actual thumbnail dimensions after scaling.
-    let aspect = metadata.width.unwrap() as f64 / metadata.height.unwrap() as f64;
+    // Compute the actual thumbnail dimensions after scaling. Fail explicitly
+    // if the dimensions are missing instead of panicking on an unwrap.
+    let width = metadata.width.ok_or_else(|| {
+        InternalError::Media("cannot generate thumbnails without video width".into())
+    })?;
+    let height = metadata.height.ok_or_else(|| {
+        InternalError::Media("cannot generate thumbnails without video height".into())
+    })?;
+    let aspect = width as f64 / height as f64;
     let thumb_width = 160u32;
     let thumb_height = (160.0 / aspect).round() as u32;
 

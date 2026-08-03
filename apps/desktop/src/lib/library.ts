@@ -28,3 +28,15 @@ export async function trimRecording(options: TrimOptions): Promise<LibraryRecord
 export async function exportRecording(options: ExportOptions): Promise<void> {
   return invoke("export_recording", { options })
 }
+
+export async function trashRecording(recordingId: string): Promise<void> {
+  return invoke("trash_recording", { recordingId })
+}
+
+export async function restoreRecording(recordingId: string): Promise<void> {
+  return invoke("restore_recording", { recordingId })
+}
+
+export async function emptyTrash(): Promise<void> {
+  return invoke("empty_trash")
+}

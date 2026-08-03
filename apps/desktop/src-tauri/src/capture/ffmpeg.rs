@@ -58,6 +58,15 @@ impl FfmpegCapture {
         run(command, output, fragment_index, manifest)
     }
 
+    /// Check if the FFmpeg child process is still actively running.
+    pub fn is_running(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    }
+
     /// Build and start a sidecar FFmpeg capture for a webcam device.
     #[instrument(skip(device, profile, manifest))]
     pub fn start_webcam(
@@ -317,28 +326,21 @@ fn build_video_filter(
     profile: &RecordingProfile,
     use_ddagrab: bool,
 ) -> String {
+    let fit_filter = source
+        .bounds
+        .build_aspect_fit_filter(profile.width, profile.height);
+
     if source.kind == "display" && use_ddagrab {
         // ddagrab emits D3D11 hardware frames; download to system memory as
-        // bgra before scaling.
-        format!(
-            "[0:v]hwdownload,format=bgra,scale={}:{}[vout]",
-            profile.width, profile.height
-        )
+        // bgra before aspect-preserving scale and letterboxing (fixes P0.5).
+        format!("[0:v]hwdownload,format=bgra,{fit_filter}[vout]")
     } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
         // gdigrab captures the full virtual desktop; crop to the source bounds
-        // (handles both multi-monitor displays and windowed/region capture).
-        let Bounds {
-            x,
-            y,
-            width,
-            height,
-        } = source.bounds;
-        format!(
-            "[0:v]crop={}:{}:{}:{},scale={}:{}[vout]",
-            width, height, x, y, profile.width, profile.height
-        )
+        // then apply aspect-preserving scale and letterboxing (fixes P0.5).
+        let Bounds { x, y, width, height } = source.bounds;
+        format!("[0:v]crop={width}:{height}:{x}:{y},{fit_filter}[vout]")
     } else {
-        format!("[0:v]scale={}:{}[vout]", profile.width, profile.height)
+        format!("[0:v]{fit_filter}[vout]")
     }
 }
 

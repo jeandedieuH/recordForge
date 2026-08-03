@@ -2,3 +2,4 @@
 
 export * from "@recordforge/domain"
 export * from "./render-plan"
+export * from "./proxy"

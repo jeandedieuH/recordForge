@@ -141,7 +141,7 @@ export type TimelineViewState = z.infer<typeof timelineViewStateSchema>
 
 // A single continuous segment in the final render plan.
 export const renderSegmentSchema = z.object({
-  inputPath: z.string(),
+  assetId: z.string(),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
@@ -152,7 +152,7 @@ export type RenderSegment = z.infer<typeof renderSegmentSchema>
 
 // Audio mix settings for the final render.
 export const renderPlanAudioSchema = z.object({
-  inputPath: z.string(),
+  assetId: z.string(),
   muted: z.boolean().default(false),
   volume: z.number().min(0).max(2).default(1),
 })
@@ -161,7 +161,7 @@ export type RenderPlanAudio = z.infer<typeof renderPlanAudioSchema>
 
 // Picture-in-picture overlay settings for the final render.
 export const renderPlanOverlaySchema = z.object({
-  inputPath: z.string(),
+  assetId: z.string(),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
@@ -178,7 +178,6 @@ export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
 // Render plan produced by media-core from a timeline.
 export const renderPlanSchema = z.object({
   recordingId: z.string(),
-  outputPath: z.string(),
   canvas: timelineCanvasSchema,
   durationMs: z.number().int().min(0),
   segments: z.array(renderSegmentSchema),

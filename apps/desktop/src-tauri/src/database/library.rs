@@ -257,27 +257,83 @@ pub fn get_recording(conn: &Connection, id: &str) -> Result<LibraryRecording> {
         })?)
 }
 
-/// Delete a library recording. Removes the row and the source file, then the
-/// work directory if it becomes empty.
-pub fn delete_recording(conn: &Connection, id: &str) -> Result<()> {
+/// Move a library recording to trash (soft delete).
+pub fn trash_recording(conn: &Connection, id: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE recordings SET status = 'trashed', updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )
+    .map_err(|e| InternalError::Storage(format!("trash recording: {e}")))?;
+    Ok(())
+}
+
+/// Restore a trashed recording back to completed status.
+pub fn restore_recording(conn: &Connection, id: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE recordings SET status = 'completed', updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )
+    .map_err(|e| InternalError::Storage(format!("restore recording: {e}")))?;
+    Ok(())
+}
+
+/// Permanently delete a library recording (P0.8 atomic fix).
+///
+/// Physical files and derivative entries are removed before deleting the database row.
+/// Paths are checked against `app_data_dir` to prevent a compromised database from
+/// deleting files outside the application's data area.
+pub fn delete_recording(conn: &Connection, id: &str, app_data_dir: &std::path::Path) -> Result<()> {
     let recording = get_recording(conn, id)?;
 
-    conn.execute("DELETE FROM recordings WHERE id = ?1", params![id])
-        .map_err(|e| InternalError::Storage(format!("delete recording: {e}")))?;
+    let app_data_canonical = app_data_dir.canonicalize().map_err(|e| {
+        InternalError::Storage(format!("failed to canonicalize app data dir: {e}"))
+    })?;
 
-    if let Some(output) = recording.output_path {
-        let _ = std::fs::remove_file(output);
+    // 1. Remove physical files first
+    if let Some(output) = &recording.output_path {
+        let output_path = Path::new(output);
+        if output_path.exists() {
+            let canonical = output_path.canonicalize().map_err(|e| {
+                InternalError::Storage(format!("failed to canonicalize output path: {e}"))
+            })?;
+            if !canonical.starts_with(&app_data_canonical) {
+                return Err(InternalError::Permissions(format!(
+                    "refusing to delete recording file outside app data: {}",
+                    canonical.display()
+                ))
+                .into());
+            }
+            std::fs::remove_file(&canonical).map_err(|e| {
+                InternalError::Storage(format!("failed to remove recording file '{output}': {e}"))
+            })?;
+        }
     }
 
     let work_dir = PathBuf::from(&recording.work_dir);
     if work_dir.exists() {
-        let is_empty = std::fs::read_dir(&work_dir)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(false);
-        if is_empty {
-            let _ = std::fs::remove_dir(&work_dir);
+        let canonical = work_dir.canonicalize().map_err(|e| {
+            InternalError::Storage(format!("failed to canonicalize work dir: {e}"))
+        })?;
+        if !canonical.starts_with(&app_data_canonical) {
+            return Err(InternalError::Permissions(format!(
+                "refusing to delete work dir outside app data: {}",
+                canonical.display()
+            ))
+            .into());
         }
+        let _ = std::fs::remove_dir_all(&canonical);
     }
+
+    // 2. Clean associated derivatives and jobs in DB
+    let _ = conn.execute("DELETE FROM derivatives WHERE recording_id = ?1", params![id]);
+    let _ = conn.execute("DELETE FROM media_jobs WHERE recording_id = ?1", params![id]);
+    let _ = conn.execute("DELETE FROM media_metadata WHERE recording_id = ?1", params![id]);
+
+    // 3. Atomically delete database row
+    conn.execute("DELETE FROM recordings WHERE id = ?1", params![id])
+        .map_err(|e| InternalError::Storage(format!("delete recording row: {e}")))?;
 
     Ok(())
 }

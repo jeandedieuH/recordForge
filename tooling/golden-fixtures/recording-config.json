@@ -1,0 +1,20 @@
+{
+  "source": {
+    "kind": "display",
+    "id": "display-0",
+    "name": "Display 1",
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  "profile": "balanced",
+  "captureMicrophone": true,
+  "captureSystemAudio": true,
+  "captureWebcam": false,
+  "webcamDeviceId": null,
+  "microphoneDeviceId": "default",
+  "systemAudioDeviceId": null
+}

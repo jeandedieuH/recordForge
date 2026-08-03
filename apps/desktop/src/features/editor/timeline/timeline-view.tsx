@@ -36,6 +36,15 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
     void store.load(recordingId)
   }, [recordingId, store])
 
+  // Subscribe to media-job-update events so the editor shows proxy/export
+  // progress without requiring the user to close and reopen it.
+  useEffect(() => {
+    void store.startListening()
+    return () => {
+      store.stopListening()
+    }
+  }, [store])
+
   const proxyUrl = useMemo(() => {
     const path = store.activeJob?.outputs?.proxyPath
     return path ? convertFileSrc(path) : null

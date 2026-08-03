@@ -15,9 +15,12 @@ export function useRecorderPolling(intervalMs = 1000) {
   const refreshStatus = useRecorderStore((s) => s.refreshStatus)
 
   useEffect(() => {
+    // Initial fetch on mount
+    refreshStatus().catch(() => {})
+
     const id = setInterval(() => {
       const status = useRecorderStore.getState().status
-      if (status?.state === "recording" || status?.state === "paused") {
+      if (!status || status.state === "recording" || status.state === "paused") {
         refreshStatus().catch(() => {})
       }
     }, intervalMs)

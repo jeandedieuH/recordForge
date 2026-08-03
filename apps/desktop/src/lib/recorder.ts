@@ -82,3 +82,15 @@ export async function runBenchmark(): Promise<BenchmarkReport> {
 export async function openFloatingControls(): Promise<void> {
   return invoke("open_floating_controls")
 }
+
+export async function openBoundaryOverlay(): Promise<void> {
+  return invoke("open_boundary_overlay")
+}
+
+export async function hideBoundaryOverlay(): Promise<void> {
+  return invoke("hide_boundary_overlay")
+}
+
+export async function hideFloatingControls(): Promise<void> {
+  return invoke("hide_floating_controls")
+}
