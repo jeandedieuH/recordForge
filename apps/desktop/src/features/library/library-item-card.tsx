@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { Video } from "lucide-react"
 import { Button, Input } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration, formatFileSize } from "../../lib/format"
@@ -38,8 +39,8 @@ export function LibraryItemCard({
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted p-4">
-      <div className="aspect-video rounded bg-background flex items-center justify-center text-4xl">
-        🎬
+      <div className="aspect-video rounded bg-background flex items-center justify-center">
+        <Video className="size-10 text-foreground/40" aria-hidden />
       </div>
 
       <div>

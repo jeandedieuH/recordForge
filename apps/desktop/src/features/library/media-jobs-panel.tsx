@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useMemo } from "react"
 import { Button, Progress } from "@recordforge/ui"
 import { useJobsStore } from "../../stores/jobs-store"
 
@@ -9,30 +9,42 @@ interface MediaJobsPanelProps {
 
 // Show active media preparation jobs.
 export function MediaJobsPanel({ recordingId }: MediaJobsPanelProps) {
-  const store = useJobsStore()
+  const startListening = useJobsStore((state) => state.startListening)
+  const stopListening = useJobsStore((state) => state.stopListening)
+  const loadForRecording = useJobsStore((state) => state.loadForRecording)
+  const cancel = useJobsStore((state) => state.cancel)
+  const jobs = useJobsStore((state) => state.jobs)
 
+  // Subscribe to the shared job event channel on mount. The store is not in
+  // the dependency array because the whole state object changes on every store
+  // update and would trigger an infinite effect/cleanup loop. Action references
+  // returned by Zustand are stable, so we depend on those instead.
   useEffect(() => {
-    void store.startListening()
+    void startListening()
     if (recordingId) {
-      void store.loadForRecording(recordingId)
+      void loadForRecording(recordingId)
     }
     return () => {
-      store.stopListening()
+      stopListening()
     }
-  }, [recordingId, store])
+  }, [recordingId, startListening, stopListening, loadForRecording])
 
-  const jobs = store.jobs.filter(
-    (j) =>
-      (!recordingId || j.recordingId === recordingId) &&
-      (j.status === "pending" || j.status === "running" || j.status === "failed"),
+  const visibleJobs = useMemo(
+    () =>
+      jobs.filter(
+        (j) =>
+          (!recordingId || j.recordingId === recordingId) &&
+          (j.status === "pending" || j.status === "running" || j.status === "failed"),
+      ),
+    [jobs, recordingId],
   )
 
-  if (jobs.length === 0) return null
+  if (visibleJobs.length === 0) return null
 
   return (
     <div className="space-y-3 rounded-lg border border-border bg-muted p-4">
       <h3 className="text-sm font-medium">Media preparation</h3>
-      {jobs.map((job) => (
+      {visibleJobs.map((job) => (
         <div key={job.id} className="space-y-1.5">
           <div className="flex items-center justify-between text-sm">
             <span className="capitalize text-foreground/80">{job.stage}</span>
@@ -45,7 +57,7 @@ export function MediaJobsPanel({ recordingId }: MediaJobsPanelProps) {
             <Button
               variant="ghost"
               className="h-auto px-2 py-1 text-xs"
-              onClick={() => store.cancel(job.id)}
+              onClick={() => cancel(job.id)}
             >
               Cancel
             </Button>

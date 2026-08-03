@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { Video } from "lucide-react"
 import { Button, Input } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration, formatFileSize } from "../../lib/format"
@@ -38,8 +39,8 @@ export function LibraryItemRow({
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted p-3 sm:flex-row sm:items-start sm:gap-4">
-      <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-background text-2xl">
-        🎬
+      <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-background">
+        <Video className="size-8 text-foreground/40" aria-hidden />
       </div>
 
       <div className="min-w-0 flex-1">

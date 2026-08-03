@@ -64,7 +64,8 @@ export const useJobsStore = create<JobsStore>((set, get) => ({
   },
 
   stopListening: () => {
-    const { unlisten } = get()
+    const { unlisten, isListening } = get()
+    if (!isListening) return
     if (unlisten) {
       unlisten()
     }
