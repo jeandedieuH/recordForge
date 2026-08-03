@@ -1,6 +1,21 @@
 import { useState } from "react"
-import { Video } from "lucide-react"
-import { Button, Input } from "@recordforge/ui"
+import {
+  FolderOpen as FolderIcon,
+  MoreVertical,
+  Music,
+  Plus,
+  Scissors,
+  Trash2,
+  Video,
+} from "lucide-react"
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Input,
+} from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration, formatFileSize } from "../../lib/format"
 
@@ -16,7 +31,6 @@ interface LibraryItemRowProps {
   onRemoveTag: (recordingId: string, tag: string) => void
 }
 
-// Horizontal row layout for a library recording. Suitable for the list view.
 export function LibraryItemRow({
   recording,
   onDelete,
@@ -29,41 +43,62 @@ export function LibraryItemRow({
   onRemoveTag,
 }: LibraryItemRowProps) {
   const [newTag, setNewTag] = useState("")
+  const [showTagInput, setShowTagInput] = useState(false)
+
+  const isAudio =
+    recording.tags.includes("audio") ||
+    recording.name.toLowerCase().includes("voiceover") ||
+    recording.name.toLowerCase().includes("audio")
 
   function handleAddTag() {
     const tag = newTag.trim()
     if (!tag) return
     onAddTag(recording.id, tag)
     setNewTag("")
+    setShowTagInput(false)
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted p-3 sm:flex-row sm:items-start sm:gap-4">
-      <div className="flex h-16 w-24 shrink-0 items-center justify-center rounded bg-background">
-        <Video className="size-8 text-foreground/40" aria-hidden />
-      </div>
+    <div className="group flex flex-col gap-3 rounded-xl border border-border bg-surface p-3.5 transition-all duration-200 hover:border-border-strong hover:shadow-md sm:flex-row sm:items-center sm:justify-between">
+      {/* Thumbnail + Details */}
+      <div className="flex flex-1 items-center gap-3.5 min-w-0">
+        <div className="flex h-14 w-20 shrink-0 items-center justify-center rounded-lg bg-surface-dim border border-border/60 text-muted-foreground overflow-hidden">
+          {isAudio ? (
+            <Music className="size-6 text-subtle-foreground" />
+          ) : (
+            <Video className="size-6 text-subtle-foreground" aria-hidden />
+          )}
+        </div>
 
-      <div className="min-w-0 flex-1">
-        <h3 className="truncate font-semibold" title={recording.name}>
-          {recording.name}
-        </h3>
-        <p className="text-sm text-foreground/70">
-          {formatDate(recording.createdAt)} · {formatDuration(recording.durationMs)} ·{" "}
-          {formatFileSize(recording.sizeBytes)} · {recording.width}x{recording.height} @
-          {recording.fps}fps
-        </p>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h3
+              className="truncate font-sans text-sm font-semibold text-foreground"
+              title={recording.name}
+            >
+              {recording.name}
+            </h3>
+            <span className="shrink-0 rounded bg-overlay px-1.5 py-0.5 font-mono text-[10px] font-medium text-subtle-foreground">
+              {formatDuration(recording.durationMs)}
+            </span>
+          </div>
 
-        {recording.tags.length > 0 ? (
-          <div className="mt-1 flex flex-wrap gap-1">
+          <p className="mt-0.5 text-xs text-subtle-foreground truncate">
+            {formatDate(recording.createdAt)} · {formatFileSize(recording.sizeBytes)} ·{" "}
+            {recording.width}x{recording.height} @{recording.fps}fps
+          </p>
+
+          {/* Tags & Add Tag Action */}
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {recording.tags.map((tag) => (
               <span
                 key={tag}
-                className="inline-flex items-center gap-1 rounded-full bg-background px-2 py-0.5 text-xs"
+                className="inline-flex items-center gap-1 rounded border border-border bg-overlay px-2 py-0.5 text-[10px] font-medium text-foreground"
               >
                 {tag}
                 <button
                   type="button"
-                  className="text-foreground/70 hover:text-red-600"
+                  className="text-subtle-foreground hover:text-red-400"
                   onClick={() => onRemoveTag(recording.id, tag)}
                   aria-label={`Remove ${tag}`}
                 >
@@ -71,56 +106,78 @@ export function LibraryItemRow({
                 </button>
               </span>
             ))}
+
+            {showTagInput ? (
+              <div className="flex items-center gap-1">
+                <Input
+                  className="h-6 w-24 px-1.5 text-[11px]"
+                  placeholder="Tag..."
+                  value={newTag}
+                  autoFocus
+                  onChange={(e) => setNewTag(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddTag()
+                    if (e.key === "Escape") setShowTagInput(false)
+                  }}
+                />
+                <Button size="sm" className="h-6 px-2 text-[10px]" onClick={handleAddTag}>
+                  Add
+                </Button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowTagInput(true)}
+                className="inline-flex items-center gap-0.5 text-[10px] font-medium text-subtle-foreground hover:text-foreground"
+              >
+                <Plus className="size-3" /> Add tag
+              </button>
+            )}
           </div>
-        ) : null}
-
-        <div className="mt-2 flex gap-2">
-          <Input
-            className="max-w-48"
-            placeholder="Add tag"
-            value={newTag}
-            onChange={(e) => setNewTag(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleAddTag()
-            }}
-          />
-          <Button onClick={handleAddTag} disabled={!newTag.trim()}>
-            Add
-          </Button>
         </div>
-
-        {recording.markers.length > 0 ? (
-          <ul className="mt-2 flex flex-wrap gap-2 text-xs">
-            {recording.markers.map((marker) => (
-              <li key={marker.id} className="flex items-center gap-1">
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary" />
-                <span className="font-medium">{marker.label}</span>
-                <span className="text-foreground/70">@ {formatDuration(marker.timestampMs)}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
       </div>
 
-      <div className="flex flex-wrap gap-2 sm:flex-col sm:items-end">
-        <Button variant="ghost" onClick={() => onReveal(recording.id)}>
-          Reveal
+      {/* Action Toolbar */}
+      <div className="flex items-center justify-end gap-2 shrink-0 border-t border-border/40 pt-2 sm:border-t-0 sm:pt-0">
+        <Button
+          onClick={() => onOpenEditor(recording)}
+          className="h-8 px-3.5 text-xs font-semibold bg-primary hover:bg-primary-hover text-white rounded-lg shadow-sm"
+        >
+          <Scissors className="mr-1.5 size-3.5" /> Editor
         </Button>
-        <Button variant="secondary" onClick={() => onTrim(recording)}>
-          Trim
-        </Button>
-        <Button variant="secondary" onClick={() => onExport(recording)}>
+
+        <Button
+          variant="secondary"
+          onClick={() => onExport(recording)}
+          className="h-8 px-3 text-xs rounded-lg border-border"
+        >
           Export
         </Button>
-        <Button variant="secondary" onClick={() => onPrepare(recording)}>
-          Prepare
-        </Button>
-        <Button variant="secondary" onClick={() => onOpenEditor(recording)}>
-          Editor
-        </Button>
-        <Button variant="ghost" onClick={() => onDelete(recording.id)}>
-          Delete
-        </Button>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="flex size-8 items-center justify-center rounded-lg border border-border bg-surface hover:bg-overlay text-muted-foreground hover:text-foreground transition-colors"
+              aria-label="More options"
+            >
+              <MoreVertical className="size-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="border-border-strong bg-surface text-foreground"
+          >
+            <DropdownMenuItem onClick={() => onReveal(recording.id)}>
+              <FolderIcon className="mr-2 size-4" /> Reveal File
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onTrim(recording)}>Trim Video</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onPrepare(recording)}>Prepare Media</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onDelete(recording.id)} className="text-red-400">
+              <Trash2 className="mr-2 size-4 text-red-400" /> Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   )

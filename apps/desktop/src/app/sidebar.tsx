@@ -1,12 +1,13 @@
 import {
-  Circle,
   FolderOpen,
   HardDrive,
   ListTodo,
   PanelLeftClose,
   PanelLeftOpen,
+  PlaySquare,
   Scissors,
   Settings,
+  User,
 } from "lucide-react"
 import {
   Badge,
@@ -18,9 +19,8 @@ import {
 } from "@recordforge/ui"
 import { cn } from "@recordforge/ui"
 import { useJobsStore } from "../stores/jobs-store"
-import { useRecorderStore } from "../stores/recorder-store"
 
-export type View = "record" | "library" | "editor" | "settings"
+export type View = "record" | "library" | "editor" | "settings" | "projects" | "storage" | "export"
 
 interface SidebarProps {
   activeView: View
@@ -33,17 +33,16 @@ interface SidebarProps {
 interface NavItem {
   view: View
   label: string
-  icon: typeof Circle
+  icon: typeof PlaySquare
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { view: "record", label: "Record", icon: Circle },
-  { view: "library", label: "Library", icon: FolderOpen },
+  { view: "library", label: "Library", icon: PlaySquare },
+  { view: "projects", label: "Projects", icon: FolderOpen },
   { view: "settings", label: "Settings", icon: Settings },
+  { view: "storage", label: "Storage", icon: HardDrive },
 ]
 
-// Icon sidebar rail: primary navigation, contextual editor entry, and a footer
-// with the jobs indicator + disk meter (Jobs Drawer wiring lands in R2).
 export function Sidebar({
   activeView,
   onNavigate,
@@ -52,9 +51,7 @@ export function Sidebar({
   onToggleCollapsed,
 }: SidebarProps) {
   const jobs = useJobsStore((state) => state.jobs)
-  const recorderStatus = useRecorderStore((state) => state.status)
   const activeJobCount = jobs.filter((j) => j.status === "pending" || j.status === "running").length
-  const isRecording = recorderStatus?.state === "recording"
 
   function navButton(item: NavItem) {
     const Icon = item.icon
@@ -66,21 +63,21 @@ export function Sidebar({
         onClick={() => onNavigate(item.view)}
         aria-current={active ? "page" : undefined}
         className={cn(
-          "flex cursor-pointer items-center gap-3 rounded-md text-sm transition-colors duration-fast ease-forge",
-          collapsed ? "size-9 justify-center" : "h-9 px-3",
+          "relative flex cursor-pointer items-center gap-3.5 rounded-lg text-sm font-medium transition-all duration-fast ease-forge",
+          collapsed ? "size-10 justify-center" : "h-11 px-3.5",
           active
-            ? "bg-accent-soft text-accent"
-            : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            ? "bg-sidebar-active text-foreground"
+            : "text-sidebar-text hover:bg-sidebar-surface hover:text-foreground",
         )}
       >
         <Icon
-          className={cn(
-            "size-5 shrink-0",
-            item.view === "record" && isRecording && "fill-recording text-recording",
-          )}
+          className={cn("size-5 shrink-0", active ? "text-foreground" : "text-sidebar-text")}
           aria-hidden
         />
         {collapsed ? null : <span>{item.label}</span>}
+        {active && !collapsed ? (
+          <span className="absolute right-0 top-2 bottom-2 w-0.5 rounded-l bg-primary" />
+        ) : null}
       </button>
     )
 
@@ -96,16 +93,32 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        "flex shrink-0 flex-col border-r border-border bg-surface/60 py-3 transition-[width] duration-base ease-forge",
-        collapsed ? "w-14 items-center px-2" : "w-50 px-2",
+        "flex shrink-0 flex-col bg-sidebar text-sidebar-text py-5 px-3 transition-[width] duration-base ease-forge select-none border-r border-sidebar-border",
+        collapsed ? "w-16 items-center" : "w-56",
       )}
     >
-      <nav className={cn("flex flex-col gap-1", collapsed && "items-center")}>
+      {/* Brand Header */}
+      <div className={cn("mb-6 px-2 flex flex-col", collapsed && "items-center px-0")}>
+        {!collapsed ? (
+          <>
+            <h1 className="font-serif text-xl font-bold tracking-tight text-foreground">
+              recordForge
+            </h1>
+            <span className="text-[11px] font-mono text-sidebar-text uppercase tracking-wider">
+              Local-first
+            </span>
+          </>
+        ) : (
+          <span className="font-serif text-lg font-bold text-foreground">rF</span>
+        )}
+      </div>
+
+      <nav className={cn("flex flex-col gap-1.5", collapsed && "items-center")}>
         {NAV_ITEMS.map(navButton)}
 
         {editorOpen ? (
           <>
-            <Separator className="my-2" />
+            <Separator className="my-2 bg-sidebar-border" />
             {(() => {
               const active = activeView === "editor"
               const button = (
@@ -114,14 +127,14 @@ export function Sidebar({
                   onClick={() => onNavigate("editor")}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "flex cursor-pointer items-center gap-3 rounded-md text-sm transition-colors duration-fast ease-forge",
-                    collapsed ? "size-9 justify-center" : "h-9 px-3",
+                    "relative flex cursor-pointer items-center gap-3.5 rounded-lg text-sm font-medium transition-colors duration-fast ease-forge",
+                    collapsed ? "size-10 justify-center" : "h-11 px-3.5",
                     active
-                      ? "bg-accent-soft text-accent"
-                      : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+                      ? "bg-sidebar-active text-foreground"
+                      : "text-sidebar-text hover:bg-sidebar-surface hover:text-foreground",
                   )}
                 >
-                  <Scissors className="size-5 shrink-0" aria-hidden />
+                  <Scissors className="size-5 shrink-0 text-sidebar-text" aria-hidden />
                   {collapsed ? null : (
                     <>
                       <span>Editor</span>
@@ -146,62 +159,66 @@ export function Sidebar({
 
       <div className="flex-1" />
 
-      <div className={cn("flex flex-col gap-1", collapsed && "items-center")}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className={cn(
-                "flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors duration-fast hover:bg-overlay hover:text-foreground",
-                collapsed && "justify-center",
-              )}
-            >
-              <ListTodo className="size-4 shrink-0" aria-hidden />
-              {collapsed ? (
-                activeJobCount > 0 ? (
+      <div className={cn("flex flex-col gap-2", collapsed && "items-center")}>
+        {activeJobCount > 0 ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-sidebar-text hover:bg-sidebar-surface hover:text-foreground",
+                  collapsed && "justify-center",
+                )}
+              >
+                <ListTodo className="size-4 shrink-0" aria-hidden />
+                {collapsed ? (
                   <span className="tnum">{activeJobCount}</span>
-                ) : null
-              ) : (
-                <span className="tnum">
-                  {activeJobCount > 0
-                    ? `${activeJobCount} active ${activeJobCount === 1 ? "job" : "jobs"}`
-                    : "No active jobs"}
-                </span>
-              )}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            Jobs — drawer arrives in the library milestone
-          </TooltipContent>
-        </Tooltip>
+                ) : (
+                  <span className="tnum">
+                    {activeJobCount} active {activeJobCount === 1 ? "job" : "jobs"}
+                  </span>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Active Jobs</TooltipContent>
+          </Tooltip>
+        ) : null}
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div
-              className={cn(
-                "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground",
-                collapsed && "justify-center",
-              )}
-            >
-              <HardDrive className="size-4 shrink-0" aria-hidden />
-              {collapsed ? null : <span className="tnum">Disk: —</span>}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            Free disk space — wired up in the library milestone
-          </TooltipContent>
-        </Tooltip>
-
-        <Separator className="my-1" />
-
-        <IconButton
-          label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={onToggleCollapsed}
-          tooltipSide="right"
-          className={collapsed ? "" : "self-start"}
+        {/* User Profile Avatar */}
+        <div
+          className={cn(
+            "flex items-center gap-2 pt-2",
+            collapsed && "flex-col justify-center gap-3",
+          )}
         >
-          {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-        </IconButton>
+          <button
+            type="button"
+            className="flex size-8 items-center justify-center rounded-full border border-sidebar-border bg-sidebar-surface text-sidebar-text transition-colors hover:border-foreground/30 hover:text-foreground"
+            aria-label="User Account"
+          >
+            <User className="size-4" />
+          </button>
+
+          {!collapsed ? (
+            <IconButton
+              label="Collapse sidebar"
+              onClick={onToggleCollapsed}
+              tooltipSide="right"
+              className="ml-auto text-sidebar-text hover:text-foreground"
+            >
+              <PanelLeftClose className="size-4" />
+            </IconButton>
+          ) : (
+            <IconButton
+              label="Expand sidebar"
+              onClick={onToggleCollapsed}
+              tooltipSide="right"
+              className="text-sidebar-text hover:text-foreground"
+            >
+              <PanelLeftOpen className="size-4" />
+            </IconButton>
+          )}
+        </div>
       </div>
     </aside>
   )

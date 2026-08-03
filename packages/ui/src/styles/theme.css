@@ -5,40 +5,68 @@
  */
 
 @theme {
-  /* Surfaces (dark) */
-  --color-background: #0a0a0b; /* app canvas, near-OLED */
-  --color-surface: #131316; /* cards, panels */
-  --color-elevated: #1a1a1f; /* popovers, drawers */
-  --color-overlay: #222228; /* tooltips, hover fills */
+  /* Professional Trust Color System (DESIGN.md) */
+  --color-background: #070b14; /* Main app canvas background */
+  --color-surface: #0c1220; /* Cards, panels, modals */
+  --color-surface-dim: #090e1a; /* Darker container background */
+  --color-surface-container-low: #090e1a;
+  --color-surface-container: #0c1220;
+  --color-surface-container-high: #121c2e;
+  --color-surface-container-highest: #182438;
+  --color-elevated: #121c2e; /* Floating popovers, dropdowns, dialogs */
+  --color-overlay: #141f33; /* Tooltips, hover fills */
+  --color-accent: #094db2; /* Primary interactive accent */
+  --color-accent-foreground: #ffffff;
+  --color-accent-soft: rgba(9, 77, 178, 0.15);
 
-  /* Borders */
-  --color-border: #ffffff14; /* white/8 */
-  --color-border-strong: #ffffff24; /* white/14 */
+  /* Borders & Outlines */
+  --color-border: #1b263b; /* Subtle container borders */
+  --color-border-strong: #25354f; /* Interactive/focused element borders */
+  --color-outline: #1d2b45;
+  --color-outline-variant: #2a3c5a;
 
-  /* Text */
-  --color-foreground: #fafafa;
-  --color-muted-foreground: #a1a1aa;
-  --color-subtle-foreground: #71717a;
+  /* Typography Colors */
+  --color-foreground: #ffffff;
+  --color-muted-foreground: #8ea1bf;
+  --color-subtle-foreground: #637594;
 
-  /* Brand + semantics — ember is the only brand accent; red is recording/destructive only */
-  --color-accent: #f59e0b; /* forge ember */
-  --color-accent-foreground: #1a1207;
-  --color-accent-soft: #f59e0b1f; /* ember tint fills */
-  --color-recording: #ef4444;
+  /* Brand + Semantics (DESIGN.md) */
+  --color-primary: #094db2; /* Confident blue */
+  --color-primary-hover: #073d8e;
+  --color-primary-container: #3366cc;
+  --color-on-primary-container: #e7ecff;
+  --color-secondary: #4e5d86; /* Slate blue */
+  --color-secondary-hover: #3d4a6e;
+  --color-tertiary: #7d308f; /* Sophisticated purple accent */
+  --color-tertiary-hover: #652575;
+  --color-tertiary-container: #984aaa;
+  --color-recording: #ef4444; /* Recording red dot / actions */
+  --color-recording-hover: #dc2626;
+  --color-[#ef4444]: #ef4444;
   --color-success: #10b981;
-  --color-warning: #eab308;
+  --color-warning: #f59e0b;
   --color-info: #38bdf8;
 
-  /* Timeline track accents */
-  --color-track-screen: #38bdf8; /* sky */
-  --color-track-webcam: #a78bfa; /* violet */
-  --color-track-mic: #34d399; /* emerald */
-  --color-track-system: #f472b6; /* pink */
-  --color-track-captions: #facc15; /* yellow */
+  /* Sidebar Tokens */
+  --color-sidebar: #090d16; /* Deep navy dark sidebar */
+  --color-sidebar-surface: #0e1526;
+  --color-sidebar-active: #161f36;
+  --color-sidebar-border: #151c2e;
+  --color-sidebar-text: #8e9bb0;
+  --color-sidebar-foreground: #ffffff;
 
-  /* Typography — Inter Variable vendored locally via @fontsource-variable/inter */
+  /* Timeline Track Accents */
+  --color-track-screen: #38bdf8; /* Sky blue */
+  --color-track-webcam: #a78bfa; /* Violet */
+  --color-track-mic: #34d399; /* Emerald */
+  --color-track-system: #f472b6; /* Pink */
+  --color-track-captions: #facc15; /* Yellow */
+
+  /* Typography — Professional Trust system (DESIGN.md) */
+  --font-serif: "Noto Serif", Georgia, serif;
   --font-sans:
-    "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    "Inter", "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-label: "Public Sans", "Inter", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
   --text-xs: 0.75rem; /* 12px */
   --text-sm: 0.8125rem; /* 13px */
@@ -85,13 +113,26 @@
 [data-theme="light"] {
   --color-background: #fafafa;
   --color-surface: #ffffff;
+  --color-surface-dim: #f1f5f9;
+  --color-surface-container-low: #f8fafc;
+  --color-surface-container: #ffffff;
+  --color-surface-container-high: #e2e8f0;
+  --color-surface-container-highest: #cbd5e1;
   --color-elevated: #ffffff;
-  --color-overlay: #f4f4f5;
-  --color-border: #18181b14; /* black/8 */
-  --color-border-strong: #18181b24;
-  --color-foreground: #18181b;
-  --color-muted-foreground: #52525b;
-  --color-subtle-foreground: #a1a1aa;
+  --color-overlay: #e2e8f0;
+  --color-border: #e2e8f0;
+  --color-border-strong: #cbd5e1;
+  --color-outline: #cbd5e1;
+  --color-outline-variant: #94a3b8;
+  --color-foreground: #0f172a;
+  --color-muted-foreground: #475569;
+  --color-subtle-foreground: #64748b;
+  --color-sidebar: #ffffff;
+  --color-sidebar-surface: #f1f5f9;
+  --color-sidebar-active: #e2e8f0;
+  --color-sidebar-border: #e2e8f0;
+  --color-sidebar-text: #64748b;
+  --color-sidebar-foreground: #0f172a;
   --color-accent: #d97706; /* darker ember for AA on white */
   --color-accent-foreground: #ffffff;
   --color-accent-soft: #d977061f;

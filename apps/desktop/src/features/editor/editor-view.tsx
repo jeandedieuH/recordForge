@@ -3,10 +3,9 @@ import { TimelineView } from "./timeline"
 interface EditorViewProps {
   recordingId: string
   onClose: () => void
+  onOpenExport?: () => void
 }
 
-// Dedicated editor view for a prepared recording.
-// The timeline view owns the preview, playback, and editing surface.
-export function EditorView({ recordingId, onClose }: EditorViewProps) {
-  return <TimelineView recordingId={recordingId} onClose={onClose} />
+export function EditorView({ recordingId, onClose, onOpenExport }: EditorViewProps) {
+  return <TimelineView recordingId={recordingId} onClose={onClose} onOpenExport={onOpenExport} />
 }

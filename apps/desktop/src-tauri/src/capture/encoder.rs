@@ -76,8 +76,8 @@ struct ProbeResult {
 
 /// Run a one-second test encode to verify the encoder exists and can be initialized.
 ///
-/// The source is a 64x64 synthetic color video so the test is deterministic
-/// and does not require a real display.
+/// The source is a 320x240 synthetic color video so the test is deterministic
+/// and satisfies hardware encoder minimum resolution requirements (e.g. NVENC).
 fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Result<ProbeResult> {
     let output = std::env::temp_dir().join(format!("rf-encoder-probe-{encoder}.mp4"));
 
@@ -88,7 +88,7 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
             "-f",
             "lavfi",
             "-i",
-            "testsrc=size=64x64:rate=30:duration=1",
+            "testsrc=size=320x240:rate=30:duration=1",
             "-c:v",
             encoder,
             "-pix_fmt",

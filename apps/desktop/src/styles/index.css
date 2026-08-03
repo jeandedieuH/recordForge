@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source "../../../../packages/ui/src";
 @import "@recordforge/ui/theme.css";
 @import "tw-animate-css";
 
@@ -31,6 +32,33 @@ body {
    otherwise the opaque --color-background fallback stays. */
 html[data-mica="true"] body {
   background-color: transparent;
+}
+
+/* Custom dark scrollbar styling matching recordForge theme */
+:root {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted-foreground);
 }
 
 /* Tabular numerals for timers, timecode, and sizes */

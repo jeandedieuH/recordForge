@@ -1,6 +1,14 @@
 import type { TimelineTrack } from "@recordforge/contracts"
 import { createUpdateClipTransformCommand } from "@recordforge/editor-core"
-import { Button, Input } from "@recordforge/ui"
+import {
+  Button,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
 interface PipControlsProps {
@@ -103,19 +111,23 @@ export function PipControls({ track, selectedClipId, onClose }: PipControlsProps
 
       <div>
         <label className="mb-1 block text-xs font-medium">Shape</label>
-        <select
+        <Select
           value={transform.shape}
-          onChange={(e) =>
+          onValueChange={(val) =>
             updateTransform({
-              shape: e.target.value as (typeof transform)["shape"],
+              shape: val as (typeof transform)["shape"],
             })
           }
-          className="w-full rounded border border-border bg-background px-2 py-1"
         >
-          <option value="rectangle">Rectangle</option>
-          <option value="rounded">Rounded</option>
-          <option value="circle">Circle</option>
-        </select>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="Select shape" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="rectangle">Rectangle</SelectItem>
+            <SelectItem value="rounded">Rounded</SelectItem>
+            <SelectItem value="circle">Circle</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
     </div>
   )

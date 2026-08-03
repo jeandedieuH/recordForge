@@ -1,5 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { Button, Input, NativeSelect } from "@recordforge/ui"
+import {
+  Button,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@recordforge/ui"
 import type { RecordingConfig } from "@recordforge/contracts"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { openFloatingControls } from "../../lib/recorder"
@@ -106,17 +114,21 @@ export function RecorderControls({ onStart }: RecorderControlsProps) {
             <label className="mb-1 block text-sm font-medium" htmlFor="profile">
               Recording profile
             </label>
-            <NativeSelect
-              id="profile"
+            <Select
               value={selectedProfileId}
-              onChange={(e) => setSelectedProfileId(e.target.value as RecordingConfig["profile"])}
+              onValueChange={(val) => setSelectedProfileId(val as RecordingConfig["profile"])}
             >
-              {profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.label} — {profile.width}x{profile.height}@{profile.fps}fps
-                </option>
-              ))}
-            </NativeSelect>
+              <SelectTrigger id="profile">
+                <SelectValue placeholder="Select recording profile" />
+              </SelectTrigger>
+              <SelectContent>
+                {profiles.map((profile) => (
+                  <SelectItem key={profile.id} value={profile.id}>
+                    {profile.label} — {profile.width}×{profile.height}@{profile.fps}fps
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
@@ -225,19 +237,18 @@ function DeviceField({
       <label className="mb-1 block text-sm font-medium" htmlFor={id}>
         {label}
       </label>
-      <NativeSelect
-        id={id}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={!loaded}
-      >
-        <option value="">{emptyOptionLabel}</option>
-        {devices.map((device) => (
-          <option key={device.id} value={device.id}>
-            {device.name} {device.isDefault ? "(default)" : ""}
-          </option>
-        ))}
-      </NativeSelect>
+      <Select value={value} onValueChange={(val) => onChange(val)} disabled={!loaded}>
+        <SelectTrigger id={id}>
+          <SelectValue placeholder={emptyOptionLabel} />
+        </SelectTrigger>
+        <SelectContent>
+          {devices.map((device) => (
+            <SelectItem key={device.id} value={device.id}>
+              {device.name} {device.isDefault ? "(default)" : ""}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
 
       {!loaded ? <p className="mt-1 text-xs text-foreground/60">Detecting devices…</p> : null}
 

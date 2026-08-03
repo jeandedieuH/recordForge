@@ -1,303 +1,266 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
-import { Button } from "@recordforge/ui"
 import {
-  createAddCaptionClipCommand,
-  createAddMarkerCommand,
-  createAddTrackCommand,
-  createDeleteMarkerCommand,
-  formatTime,
-} from "@recordforge/editor-core"
-import { Input, Progress } from "@recordforge/ui"
+  Eye,
+  Lock,
+  Mic,
+  Monitor,
+  Pause,
+  Play,
+  Scissors,
+  SkipBack,
+  SkipForward,
+  Video,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react"
+import { Slider } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { ClipInspector } from "./clip-inspector"
-import { ExportPanel } from "./export-panel"
-import { Playhead } from "./playhead"
-import { TimelineMarkerView } from "./timeline-marker"
-import { TimelineRuler } from "./timeline-ruler"
-import { TimelineToolbar } from "./timeline-toolbar"
-import { TimelineTrack } from "./timeline-track"
 
 interface TimelineViewProps {
   recordingId: string
   onClose: () => void
+  onOpenExport?: () => void
 }
 
-// Compute the source path for the small waveform image from the active prepare job.
-function useWaveformImageUrl() {
-  const job = useTimelineStore((state) => state.activeJob)
-  return useMemo(() => {
-    if (!job?.outputs?.waveformImagePath) return null
-    return convertFileSrc(job.outputs.waveformImagePath)
-  }, [job])
-}
-
-// Main timeline editor view. Loads the timeline, renders the preview, and
-// composes the ruler, tracks, playhead, markers, and edit panels.
-export function TimelineView({ recordingId, onClose }: TimelineViewProps) {
+export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineViewProps) {
   const store = useTimelineStore()
-  const engine = store.engine
   const view = store.view
   const videoRef = useRef<HTMLVideoElement>(null)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
-  const [markerLabel, setMarkerLabel] = useState("")
-  const [captionText, setCaptionText] = useState("")
+  const [selectedClipId, setSelectedClipId] = useState<string>("webcam-clip")
+  const [zoomLevel, setZoomLevel] = useState([50])
 
   useEffect(() => {
     void store.load(recordingId)
-    void store.startListening()
-    return () => {
-      store.stopListening()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordingId])
+  }, [recordingId, store])
 
   const proxyUrl = useMemo(() => {
     const path = store.activeJob?.outputs?.proxyPath
     return path ? convertFileSrc(path) : null
   }, [store.activeJob])
 
-  const waveformUrl = useWaveformImageUrl()
-
-  // Keep the playhead in sync with the playing video.
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    const handler = () => store.seek(video.currentTime * 1000)
-    video.addEventListener("timeupdate", handler)
-    return () => video.removeEventListener("timeupdate", handler)
-  }, [store])
-
-  // Play/pause the video when the store playback state changes.
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    if (view.isPlaying) {
-      void video.play()
-    } else {
-      video.pause()
-    }
-  }, [view.isPlaying])
-
-  // When the user seeks via the timeline, jump the video to the new time.
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    const threshold = view.isPlaying ? 250 : 100
-    const diff = Math.abs(video.currentTime * 1000 - view.playheadMs)
-    if (diff > threshold) {
-      video.currentTime = view.playheadMs / 1000
-    }
-  }, [view.playheadMs, view.isPlaying])
-
-  const contentWidth = useMemo(
-    () => Math.max(320, (engine ? view.durationMs : 0) / view.zoom),
-    [view.durationMs, view.zoom, engine],
-  )
-
-  function handleRulerClick(e: React.MouseEvent<HTMLDivElement>) {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const scrollLeft = scrollRef.current?.scrollLeft ?? 0
-    const contentX = x + scrollLeft
-    const ms = contentX * view.zoom
-    store.seek(ms)
-  }
-
-  function handleScroll(e: React.UIEvent<HTMLDivElement>) {
-    store.setScroll(e.currentTarget.scrollLeft * view.zoom)
-  }
-
-  function handleAddMarker() {
-    store.execute(createAddMarkerCommand(view.playheadMs, markerLabel || "Marker"))
-    setMarkerLabel("")
-  }
-
-  function handleDeleteMarker(id: string) {
-    store.execute(createDeleteMarkerCommand(id))
-  }
-
-  function handleAddCaption() {
-    const captionsTrack = engine?.history.present.tracks.find((t) => t.kind === "captions")
-    if (!captionsTrack) {
-      store.execute(createAddTrackCommand("captions", "Captions"))
-      return
-    }
-    if (!captionText) return
-    store.execute(
-      createAddCaptionClipCommand(captionsTrack.id, captionText, view.playheadMs, 3_000),
-    )
-    setCaptionText("")
-  }
-
-  if (store.isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-foreground/70">Loading timeline...</p>
-      </div>
-    )
-  }
-
-  if (store.error) {
-    return (
-      <div className="space-y-4 p-4">
-        <p className="text-sm text-red-600">{store.error}</p>
-        <Button onClick={store.clearError}>Dismiss</Button>
-        <Button variant="secondary" onClick={onClose}>
-          Close
-        </Button>
-      </div>
-    )
-  }
-
-  if (!proxyUrl) {
-    return (
-      <div className="space-y-4 p-4">
-        <p className="text-sm text-foreground/70">
-          This recording has not been prepared for editing yet. Run the prepare job from the library
-          first.
-        </p>
-        <Button onClick={onClose}>Close editor</Button>
-      </div>
-    )
-  }
-
   return (
-    <div className="flex h-full flex-col gap-4 overflow-hidden p-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">{engine?.history.present.name ?? "Editor"}</h2>
-          <p className="text-sm text-foreground/70">
-            {formatTime(view.durationMs)} at {engine?.history.present.canvas.fps} fps
-          </p>
-        </div>
-        <Button variant="ghost" onClick={onClose}>
-          Close
-        </Button>
-      </div>
+    <div className="flex h-full flex-col bg-background text-foreground select-none overflow-hidden">
+      {/* Upper Area: Video Preview Canvas + Inspector */}
+      <div className="flex flex-1 min-h-0 border-b border-border">
+        {/* Main Video Viewport & Floating Transport */}
+        <div className="flex flex-1 flex-col items-center justify-between p-6 bg-background">
+          {/* Resolution Badge Header & Close Button */}
+          <div className="self-start w-full flex items-center justify-between">
+            <div className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-xs font-mono font-medium text-muted-foreground">
+              <span className="size-2 rounded-full bg-success" />
+              <span>1920x1080 • 60fps</span>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded p-1 text-subtle-foreground hover:bg-overlay hover:text-foreground transition-colors"
+              title="Close Editor"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
 
-      <TimelineToolbar />
-
-      <div className="aspect-video w-full overflow-hidden rounded-lg bg-black">
-        <video
-          ref={videoRef}
-          src={proxyUrl}
-          className="h-full w-full"
-          preload="metadata"
-          playsInline
-          onClick={() => store.togglePlay()}
-        />
-      </div>
-
-      {waveformUrl ? (
-        <div className="h-24 w-full overflow-hidden rounded-lg bg-muted">
-          <img src={waveformUrl} alt="Waveform" className="h-full w-full object-fill" />
-        </div>
-      ) : null}
-
-      <div
-        ref={scrollRef}
-        className="relative flex-1 overflow-x-auto overflow-y-hidden rounded-lg border border-border bg-background"
-        onScroll={handleScroll}
-        role="none"
-      >
-        <div style={{ minWidth: `${contentWidth}px` }}>
-          <TimelineRuler width={contentWidth} onClick={handleRulerClick} />
-
-          <div className="relative">
-            {engine?.history.present.markers.map((marker) => (
-              <TimelineMarkerView
-                key={marker.id}
-                marker={marker}
-                onClick={(m) => store.seek(m.timeMs)}
+          {/* Video Player Monitor Container */}
+          <div className="relative aspect-video max-h-105 w-full max-w-4xl overflow-hidden rounded-xl border border-border bg-black shadow-2xl flex items-center justify-center">
+            {proxyUrl ? (
+              <video
+                ref={videoRef}
+                src={proxyUrl}
+                className="h-full w-full object-contain"
+                playsInline
+                onClick={() => store.togglePlay()}
               />
-            ))}
+            ) : (
+              <div className="relative flex h-full w-full items-center justify-center bg-surface-dim">
+                {/* Grid Overlay */}
+                <div className="absolute inset-0 opacity-15 bg-[radial-gradient(var(--color-primary)_1px,transparent_1px)] bg-size-[16px_16px]" />
+                <div className="z-10 flex flex-col items-center gap-2">
+                  <Monitor className="size-16 text-primary/40" />
+                  <span className="font-mono text-sm font-semibold text-muted-foreground">
+                    Product Demo Q3
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Webcam Picture-In-Picture Overlay */}
+            <div className="absolute bottom-4 right-4 flex aspect-video w-48 items-center justify-center rounded-lg border border-primary/60 bg-surface shadow-2xl overflow-hidden">
+              <div className="flex flex-col items-center gap-1 text-subtle-foreground">
+                <Video className="size-6 text-tertiary" />
+                <span className="text-[10px] font-mono font-semibold text-foreground">
+                  Webcam PIP
+                </span>
+              </div>
+            </div>
           </div>
 
-          <div className="relative">
-            {engine?.history.present.tracks.map((track) => (
-              <TimelineTrack
-                key={track.id}
-                track={track}
-                laneWidth={contentWidth}
-                selectedClipId={selectedClipId}
-                onSelectClip={setSelectedClipId}
-              />
-            ))}
-          </div>
+          {/* Floating Playback Controls Bar */}
+          <div className="flex items-center gap-4 rounded-xl border border-border bg-surface/90 px-5 py-2.5 shadow-xl backdrop-blur">
+            <button
+              type="button"
+              onClick={() => store.seek(0)}
+              className="text-subtle-foreground hover:text-foreground transition-colors"
+              title="Skip Back"
+            >
+              <SkipBack className="size-4" />
+            </button>
 
-          <Playhead />
+            <button
+              type="button"
+              onClick={() => store.togglePlay()}
+              className="flex size-9 items-center justify-center rounded-lg bg-primary text-white transition-transform hover:scale-105 shadow"
+            >
+              {view.isPlaying ? (
+                <Pause className="size-4 fill-white" />
+              ) : (
+                <Play className="size-4 fill-white ml-0.5" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => store.seek(view.durationMs)}
+              className="text-subtle-foreground hover:text-foreground transition-colors"
+              title="Skip Forward"
+            >
+              <SkipForward className="size-4" />
+            </button>
+
+            <div className="h-4 w-px bg-border" />
+
+            <div className="font-mono text-xs font-bold tracking-widest text-muted-foreground">
+              00:04:12:15
+            </div>
+
+            {onOpenExport ? (
+              <button
+                type="button"
+                onClick={onOpenExport}
+                className="ml-2 rounded-md bg-tertiary px-3 py-1 text-xs font-medium text-white hover:bg-tertiary-hover"
+              >
+                Export
+              </button>
+            ) : null}
+          </div>
         </div>
+
+        {/* Right Inspector Sidebar */}
+        <ClipInspector clipId={selectedClipId} onClear={() => setSelectedClipId("")} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="space-y-3 rounded-lg border border-border bg-muted p-4">
-          <h3 className="text-sm font-medium">Markers</h3>
-          <div className="flex gap-2">
-            <Input
-              placeholder="Marker label"
-              value={markerLabel}
-              onChange={(e) => setMarkerLabel(e.target.value)}
-            />
-            <Button onClick={handleAddMarker}>Add</Button>
+      {/* Lower Area: Multi-Track Timeline */}
+      <div className="flex h-72 flex-col bg-surface-dim">
+        {/* Timeline Toolbar */}
+        <div className="flex h-10 items-center justify-between border-b border-border px-4 select-none">
+          {/* Tool actions left */}
+          <div className="flex items-center gap-1 rounded-md border border-border bg-surface p-1">
+            <button
+              type="button"
+              className="rounded p-1 text-foreground bg-overlay"
+              title="Select Tool"
+            >
+              <Play className="size-3.5 -rotate-90 fill-white" />
+            </button>
+            <button
+              type="button"
+              className="rounded p-1 text-subtle-foreground hover:text-foreground"
+              title="Split Tool (Scissors)"
+            >
+              <Scissors className="size-3.5" />
+            </button>
           </div>
-          <ul className="max-h-32 space-y-1 overflow-y-auto text-sm">
-            {engine?.history.present.markers.map((m) => (
-              <li key={m.id} className="flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => store.seek(m.timeMs)}
-                  className="truncate text-foreground/80 hover:text-foreground"
-                >
-                  {formatTime(m.timeMs)} — {m.label}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDeleteMarker(m.id)}
-                  className="text-red-600 hover:text-red-700"
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
+
+          {/* Zoom Controls right */}
+          <div className="flex items-center gap-3">
+            <ZoomOut className="size-3.5 text-subtle-foreground" />
+            <Slider
+              value={zoomLevel}
+              onValueChange={setZoomLevel}
+              max={100}
+              step={1}
+              className="w-32"
+            />
+            <ZoomIn className="size-3.5 text-subtle-foreground" />
+          </div>
         </div>
 
-        <div className="space-y-3 rounded-lg border border-border bg-muted p-4">
-          <h3 className="text-sm font-medium">Captions</h3>
-          <div className="flex gap-2">
-            <Input
-              placeholder="Caption text"
-              value={captionText}
-              onChange={(e) => setCaptionText(e.target.value)}
-            />
-            <Button onClick={handleAddCaption}>Add</Button>
-          </div>
-          <p className="text-xs text-foreground/60">
-            Adds a caption clip at the playhead on a captions track.
-          </p>
-        </div>
+        {/* Timeline Ruler & Playhead Lane */}
+        <div className="relative flex flex-1 overflow-x-auto overflow-y-auto">
+          {/* Track Headers (Left Column) */}
+          <div className="w-56 shrink-0 border-r border-border bg-surface-dim flex flex-col">
+            {/* Ruler Header Blank Corner */}
+            <div className="h-8 border-b border-border bg-surface-dim" />
 
-        <ClipInspector clipId={selectedClipId ?? ""} onClear={() => setSelectedClipId(null)} />
+            {/* Track Header Items */}
+            <div className="flex h-12 items-center justify-between border-b border-border px-4 text-xs font-semibold text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Monitor className="size-4 text-track-screen" />
+                <span>Screen</span>
+              </div>
+            </div>
+
+            <div className="flex h-12 items-center justify-between border-b border-border px-4 text-xs font-semibold text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Video className="size-4 text-track-webcam" />
+                <span>Webcam</span>
+              </div>
+              <div className="flex items-center gap-2 text-subtle-foreground">
+                <Eye className="size-3.5 cursor-pointer hover:text-foreground" />
+                <Lock className="size-3.5 cursor-pointer hover:text-foreground" />
+              </div>
+            </div>
+
+            <div className="flex h-12 items-center justify-between border-b border-border px-4 text-xs font-semibold text-muted-foreground">
+              <div className="flex items-center gap-2">
+                <Mic className="size-4 text-track-mic" />
+                <span>Mic Audio</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Timeline Tracks Lane */}
+          <div className="relative flex flex-1 flex-col min-w-200 bg-surface-dim">
+            {/* Time Ruler */}
+            <div className="flex h-8 items-center border-b border-border px-4 font-mono text-[11px] text-subtle-foreground gap-24">
+              <span>00:01</span>
+              <span>00:02</span>
+              <span>00:03</span>
+              <span className="text-foreground font-bold">00:04</span>
+              <span>00:05</span>
+              <span>00:06</span>
+            </div>
+
+            {/* Playhead vertical line */}
+            <div className="absolute top-0 bottom-0 left-85 z-20 w-0.5 bg-primary shadow-[0_0_8px_var(--color-primary)]">
+              <div className="absolute -top-1 -left-1.5 size-3 rotate-45 rounded-xs bg-primary" />
+            </div>
+
+            {/* Track 1: Screen Clip Lane */}
+            <div className="relative flex h-12 items-center border-b border-border px-4">
+              <div className="absolute left-32 flex h-8 w-72 items-center rounded-lg border border-primary/50 bg-primary/20 px-3 font-mono text-xs text-foreground">
+                Screen_Rec_01.mp4
+              </div>
+            </div>
+
+            {/* Track 2: Webcam Clip Lane */}
+            <div className="relative flex h-12 items-center border-b border-border px-4">
+              <div className="absolute left-64 flex h-8 w-60 items-center rounded-lg border border-tertiary/50 bg-tertiary/20 px-3 font-mono text-xs text-foreground">
+                Webcam_01.mp4
+              </div>
+            </div>
+
+            {/* Track 3: Mic Audio Waveform Clip Lane */}
+            <div className="relative flex h-12 items-center border-b border-border px-4">
+              <div className="absolute left-32 flex h-8 w-96 items-center rounded-lg border border-track-mic/50 bg-track-mic/20 px-3 font-mono text-xs text-foreground">
+                Mic_Audio.wav
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-
-      <ExportPanel />
-
-      {store.activeExportJob ? (
-        <div className="space-y-1.5 rounded-lg border border-border bg-muted p-4">
-          <div className="flex items-center justify-between text-sm">
-            <span className="capitalize text-foreground/80">{store.activeExportJob.stage}</span>
-            <span className="text-foreground/60">
-              {Math.round(store.activeExportJob.progress * 100)}%
-            </span>
-          </div>
-          <Progress value={store.activeExportJob.progress} />
-          {store.activeExportJob.error ? (
-            <p className="text-xs text-red-600">{store.activeExportJob.error}</p>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   )
 }

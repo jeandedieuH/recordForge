@@ -1,118 +1,159 @@
-import { useEffect, useMemo, useState } from "react"
-import {
-  createDeleteClipCommand,
-  createRippleDeleteClipCommand,
-  createSplitClipCommand,
-  createTrimClipCommand,
-  formatTime,
-} from "@recordforge/editor-core"
-import { Button, Input } from "@recordforge/ui"
-import { useTimelineStore } from "../../../stores/timeline-store"
+import { useState } from "react"
+import { AlignLeft, AlignRight, Maximize2, Sliders, Sparkles, Volume2 } from "lucide-react"
+import { Badge, Input, Slider, Switch } from "@recordforge/ui"
 
 interface ClipInspectorProps {
   clipId: string
   onClear: () => void
 }
 
-// Actions and source trim controls for the selected clip.
-export function ClipInspector({ clipId, onClear }: ClipInspectorProps) {
-  const store = useTimelineStore()
-  const view = store.view
-  const clip = useMemo(() => {
-    for (const track of store.engine?.history.present.tracks ?? []) {
-      const found = track.clips.find((c) => c.id === clipId)
-      if (found) return found
-    }
-    return null
-  }, [store.engine, clipId])
+export function ClipInspector({ clipId }: ClipInspectorProps) {
+  const [scale, setScale] = useState("100%")
+  const [opacity, setOpacity] = useState("100%")
+  const [cornerRadius, setCornerRadius] = useState("8px")
+  const [borderEnabled, setBorderEnabled] = useState(true)
+  const [volume, setVolume] = useState([80])
+  const [selectedPreset, setSelectedPreset] = useState<"left" | "right" | "full">("right")
 
-  const [sourceIn, setSourceIn] = useState("")
-  const [sourceOut, setSourceOut] = useState("")
-
-  useEffect(() => {
-    if (clip) {
-      setSourceIn(String(clip.sourceInMs))
-      setSourceOut(String(clip.sourceOutMs))
-    }
-  }, [clip])
-
-  if (!clip) {
-    return <p className="text-sm text-foreground/70">Select a clip to edit.</p>
-  }
-
-  const selectedClip = clip
-
-  function handleSplitAtPlayhead() {
-    store.execute(createSplitClipCommand(selectedClip.id, view.playheadMs))
-    onClear()
-  }
-
-  function handleDelete() {
-    store.execute(createDeleteClipCommand(selectedClip.id))
-    onClear()
-  }
-
-  function handleRippleDelete() {
-    store.execute(createRippleDeleteClipCommand(selectedClip.id))
-    onClear()
-  }
-
-  function handleTrim() {
-    const start = Number.parseInt(sourceIn, 10)
-    const end = Number.parseInt(sourceOut, 10)
-    if (Number.isNaN(start) || Number.isNaN(end)) return
-    store.execute(createTrimClipCommand(selectedClip.id, start, end))
-    onClear()
-  }
+  const clipLabel = clipId.toLowerCase().includes("webcam")
+    ? "WebCam"
+    : clipId.toLowerCase().includes("screen")
+      ? "Screen"
+      : "Audio"
 
   return (
-    <div className="space-y-3 rounded-lg border border-border bg-muted p-4 text-sm">
-      <div className="flex items-center justify-between">
-        <h3 className="font-medium">
-          {clip.kind} clip — {formatTime(clip.startMs)} to{" "}
-          {formatTime(clip.startMs + clip.durationMs)}
-        </h3>
-        <button
-          type="button"
-          className="text-foreground/60 hover:text-foreground"
-          onClick={onClear}
+    <aside className="flex w-80 shrink-0 flex-col gap-5 border-l border-border bg-surface p-4 text-foreground select-none overflow-y-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-border pb-3">
+        <h3 className="font-sans text-sm font-bold tracking-tight text-foreground">Inspector</h3>
+        <Badge
+          variant="accent"
+          className="border-border bg-overlay font-mono text-[11px] text-muted-foreground px-2 py-0.5"
         >
-          Close
-        </button>
+          Clip: {clipLabel}
+        </Badge>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <Button onClick={handleSplitAtPlayhead}>Split at playhead</Button>
-        <Button variant="secondary" onClick={handleDelete}>
-          Delete
-        </Button>
-        <Button variant="secondary" onClick={handleRippleDelete}>
-          Ripple delete
-        </Button>
-      </div>
+      {/* Section 1: Transform */}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-2 text-xs font-semibold text-subtle-foreground uppercase tracking-wider font-label">
+          <Sliders className="size-4 text-primary" />
+          <span>Transform</span>
+        </div>
 
-      {clip.kind !== "caption" ? (
-        <div className="space-y-2">
-          <h4 className="text-xs font-medium uppercase text-foreground/70">Source trim</h4>
-          <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="flex flex-col gap-1">
+            <label htmlFor="inspector-scale" className="text-xs font-medium text-subtle-foreground">
+              Scale
+            </label>
             <Input
-              type="number"
-              placeholder="Source in (ms)"
-              value={sourceIn}
-              onChange={(e) => setSourceIn(e.target.value)}
-            />
-            <Input
-              type="number"
-              placeholder="Source out (ms)"
-              value={sourceOut}
-              onChange={(e) => setSourceOut(e.target.value)}
+              id="inspector-scale"
+              value={scale}
+              onChange={(e) => setScale(e.target.value)}
+              className="border-border bg-background text-xs font-mono text-foreground text-center"
             />
           </div>
-          <Button onClick={handleTrim} variant="secondary">
-            Apply trim
-          </Button>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="inspector-opacity"
+              className="text-xs font-medium text-subtle-foreground"
+            >
+              Opacity
+            </label>
+            <Input
+              id="inspector-opacity"
+              value={opacity}
+              onChange={(e) => setOpacity(e.target.value)}
+              className="border-border bg-background text-xs font-mono text-foreground text-center"
+            />
+          </div>
         </div>
-      ) : null}
-    </div>
+
+        <div className="flex flex-col gap-1.5 mt-1">
+          <span className="text-xs font-medium text-subtle-foreground">Position Presets</span>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => setSelectedPreset("left")}
+              className={`flex h-8 items-center justify-center rounded border transition-colors ${
+                selectedPreset === "left"
+                  ? "border-primary bg-primary/20 text-foreground"
+                  : "border-border bg-surface-dim text-muted-foreground hover:text-foreground"
+              }`}
+              title="Align Bottom Left"
+            >
+              <AlignLeft className="size-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSelectedPreset("right")}
+              className={`flex h-8 items-center justify-center rounded border transition-colors ${
+                selectedPreset === "right"
+                  ? "border-primary bg-primary/20 text-foreground"
+                  : "border-border bg-surface-dim text-muted-foreground hover:text-foreground"
+              }`}
+              title="Align Bottom Right"
+            >
+              <AlignRight className="size-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSelectedPreset("full")}
+              className={`flex h-8 items-center justify-center rounded border transition-colors ${
+                selectedPreset === "full"
+                  ? "border-primary bg-primary/20 text-foreground"
+                  : "border-border bg-surface-dim text-muted-foreground hover:text-foreground"
+              }`}
+              title="Full Screen"
+            >
+              <Maximize2 className="size-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Section 2: Appearance */}
+      <div className="flex flex-col gap-3 pt-2 border-t border-border">
+        <div className="flex items-center gap-2 text-xs font-semibold text-subtle-foreground uppercase tracking-wider font-label">
+          <Sparkles className="size-4 text-tertiary" />
+          <span>Appearance</span>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <label htmlFor="inspector-radius" className="text-xs font-medium text-subtle-foreground">
+            Corner Radius
+          </label>
+          <Input
+            id="inspector-radius"
+            value={cornerRadius}
+            onChange={(e) => setCornerRadius(e.target.value)}
+            className="w-20 border-border bg-background text-xs font-mono text-foreground text-center"
+          />
+        </div>
+
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-subtle-foreground">Border</span>
+          <Switch checked={borderEnabled} onCheckedChange={setBorderEnabled} />
+        </div>
+      </div>
+
+      {/* Section 3: Audio */}
+      <div className="flex flex-col gap-3 pt-2 border-t border-border">
+        <div className="flex items-center gap-2 text-xs font-semibold text-subtle-foreground uppercase tracking-wider font-label">
+          <Volume2 className="size-4 text-track-screen" />
+          <span>Audio</span>
+        </div>
+
+        <div className="flex items-center justify-between text-xs text-subtle-foreground">
+          <span>Volume</span>
+          <span className="font-mono text-foreground">0 dB</span>
+        </div>
+
+        <Slider value={volume} onValueChange={setVolume} max={100} step={1} className="my-1" />
+      </div>
+    </aside>
   )
 }

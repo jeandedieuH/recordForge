@@ -43,16 +43,16 @@ function applyToDocument(resolvedTheme: ResolvedTheme, micaActive: boolean) {
   }
 }
 
-// Dark-first by default; the persisted setting is applied in load().
+// Dark-first by default per spec-010; the persisted setting is applied in load().
 export const useThemeStore = create<ThemeStore>((set, get) => ({
-  theme: "system",
+  theme: "dark",
   resolvedTheme: "dark",
   micaEnabled: true,
   micaActive: false,
   loaded: false,
 
   load: async () => {
-    let theme: Theme = "system"
+    let theme: Theme = "dark"
     let micaEnabled = true
     let micaActive = false
 

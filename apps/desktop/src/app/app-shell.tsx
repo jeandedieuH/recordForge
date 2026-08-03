@@ -1,31 +1,36 @@
 import { useEffect, useState } from "react"
 import { ToastViewport, TooltipProvider } from "@recordforge/ui"
 import { EditorView } from "../features/editor"
+import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
-import { RecorderPanel } from "../features/recorder"
+import { NewRecordingModal, RecorderPanel } from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
 import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
+import { useRecorderStore } from "../hooks/use-recorder"
 import { Sidebar, type View } from "./sidebar"
 import { Titlebar } from "./titlebar"
 
 const VIEW_TITLES: Record<View, string> = {
   record: "Record",
   library: "Library",
+  projects: "Projects",
+  storage: "Storage",
   editor: "Editor",
+  export: "Export",
   settings: "Settings",
 }
 
-// Studio shell: custom titlebar on top, icon sidebar rail on the left, feature
-// views in the content area. Navigation state stays in React — this is a
-// single-window Tauri app, no router needed.
 export function AppShell() {
-  const [activeView, setActiveView] = useState<View>("record")
+  const [activeView, setActiveView] = useState<View>("library")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [isNewRecordingOpen, setIsNewRecordingOpen] = useState(false)
+
   const editorRecordingId = useEditorStore((state) => state.recordingId)
   const closeEditor = useEditorStore((state) => state.close)
   const loadTheme = useThemeStore((state) => state.load)
+  const startRecording = useRecorderStore((state) => state.start)
 
   // Load persisted theme/transparency preferences once at startup.
   useEffect(() => {
@@ -54,10 +59,16 @@ export function AppShell() {
     })
   }
 
+  function handleStartRecording() {
+    setActiveView("record")
+    void startRecording()
+  }
+
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-screen flex-col bg-background text-foreground">
-        <Titlebar view={VIEW_TITLES[activeView]} />
+      <div className="flex h-screen flex-col bg-background text-foreground font-sans antialiased">
+        <Titlebar view={VIEW_TITLES[activeView]} onOpenRecord={() => setIsNewRecordingOpen(true)} />
+
         <div className="flex min-h-0 flex-1">
           <Sidebar
             activeView={activeView}
@@ -66,15 +77,46 @@ export function AppShell() {
             collapsed={sidebarCollapsed}
             onToggleCollapsed={toggleSidebar}
           />
-          <main className="min-w-0 flex-1 overflow-y-auto">
+
+          <main className="min-w-0 flex-1 overflow-y-auto bg-background">
             {activeView === "record" ? <RecorderPanel /> : null}
             {activeView === "library" ? <LibraryView /> : null}
-            {activeView === "editor" && editorRecordingId ? (
-              <EditorView recordingId={editorRecordingId} onClose={closeEditor} />
+            {activeView === "projects" ? (
+              <div className="p-8 text-center text-subtle-foreground">
+                <h3 className="font-serif text-lg font-bold text-foreground mb-2">Projects View</h3>
+                <p className="text-sm">Manage your recording projects and series.</p>
+              </div>
+            ) : null}
+            {activeView === "storage" ? (
+              <div className="p-8 text-center text-subtle-foreground">
+                <h3 className="font-serif text-lg font-bold text-foreground mb-2">Storage View</h3>
+                <p className="text-sm">Manage disk space and S3/Google Drive cloud providers.</p>
+              </div>
+            ) : null}
+            {activeView === "editor" ? (
+              <EditorView
+                recordingId={editorRecordingId ?? "rec-1"}
+                onClose={closeEditor}
+                onOpenExport={() => setActiveView("export")}
+              />
+            ) : null}
+            {activeView === "export" ? (
+              <ExportView
+                onBack={() => setActiveView("library")}
+                onStartExport={() => setActiveView("library")}
+              />
             ) : null}
             {activeView === "settings" ? <SettingsView /> : null}
           </main>
         </div>
+
+        {/* New Recording Modal Overlay */}
+        <NewRecordingModal
+          open={isNewRecordingOpen}
+          onClose={() => setIsNewRecordingOpen(false)}
+          onStart={handleStartRecording}
+          onNavigateToSettings={() => setActiveView("settings")}
+        />
       </div>
       <ToastViewport />
     </TooltipProvider>

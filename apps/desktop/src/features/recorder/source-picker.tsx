@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react"
-import { Button, Input, NativeSelect } from "@recordforge/ui"
+import { Crop } from "lucide-react"
+import {
+  Button,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@recordforge/ui"
 import type { Bounds, CaptureSource } from "@recordforge/contracts"
 import { listCaptureSources } from "../../lib/recorder"
+import { RegionOverlay } from "./region-overlay"
 
 interface SourcePickerProps {
   value?: CaptureSource | null
@@ -27,6 +37,7 @@ export function SourcePicker({ value, onSelect }: SourcePickerProps) {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<SourceTab>(value?.kind ?? "display")
+  const [showRegionOverlay, setShowRegionOverlay] = useState(false)
 
   const [regionBounds, setRegionBounds] = useState<Bounds>({
     x: 0,
@@ -168,6 +179,15 @@ export function SourcePicker({ value, onSelect }: SourcePickerProps) {
 
       {activeTab === "region" ? (
         <div className="space-y-3">
+          <Button
+            type="button"
+            onClick={() => setShowRegionOverlay(true)}
+            className="flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground shadow transition-all hover:brightness-110 cursor-pointer w-full"
+          >
+            <Crop className="size-4" />
+            <span>Select Area on Screen</span>
+          </Button>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="mb-1 block text-xs font-medium" htmlFor="region-x">
@@ -220,18 +240,21 @@ export function SourcePicker({ value, onSelect }: SourcePickerProps) {
               <label className="mb-1 block text-xs font-medium" htmlFor="prefill-display">
                 Pre-fill from display
               </label>
-              <NativeSelect
-                id="prefill-display"
+              <Select
                 value={prefillDisplayId}
-                onChange={(e) => handlePrefillDisplayChange(e.target.value)}
+                onValueChange={(val) => handlePrefillDisplayChange(val)}
               >
-                <option value="">Select a display</option>
-                {displays.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name} ({d.bounds.width}x{d.bounds.height})
-                  </option>
-                ))}
-              </NativeSelect>
+                <SelectTrigger id="prefill-display">
+                  <SelectValue placeholder="Select a display" />
+                </SelectTrigger>
+                <SelectContent>
+                  {displays.map((d) => (
+                    <SelectItem key={d.id} value={d.id}>
+                      {d.name} ({d.bounds.width}×{d.bounds.height})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <Button
               onClick={handleSelectRegion}
@@ -242,6 +265,23 @@ export function SourcePicker({ value, onSelect }: SourcePickerProps) {
           </div>
         </div>
       ) : null}
+
+      <RegionOverlay
+        open={showRegionOverlay}
+        initialBounds={regionBounds}
+        onConfirm={(bounds) => {
+          setRegionBounds(bounds)
+          setShowRegionOverlay(false)
+          const regionSource: CaptureSource = {
+            kind: "region",
+            id: crypto.randomUUID(),
+            name: `Region ${bounds.width}x${bounds.height}`,
+            bounds,
+          }
+          onSelect(regionSource)
+        }}
+        onCancel={() => setShowRegionOverlay(false)}
+      />
     </div>
   )
 }
