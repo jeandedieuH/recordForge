@@ -60,6 +60,23 @@ describe("recording contracts", () => {
     expect(recordingProfileSchema.parse(profile)).toMatchObject(profile)
   })
 
+  it("accepts nullable optional encoder settings emitted by Rust", () => {
+    const profile = {
+      id: "low-impact",
+      label: "Low Impact",
+      width: 1280,
+      height: 720,
+      fps: 30,
+      videoBitrateKbps: null,
+      crf: null,
+      encoderPriority: ["libx264"],
+      audioCodec: "aac",
+      audioBitrateKbps: 128,
+    }
+
+    expect(recordingProfileSchema.parse(profile)).toEqual(profile)
+  })
+
   it("validates a recording status", () => {
     const status = {
       sessionId: "session-1",
