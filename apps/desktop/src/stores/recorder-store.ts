@@ -126,7 +126,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   diagnostics: null,
   markers: [],
   selectedSource: null,
-  selectedProfileId: "low-impact",
+  selectedProfileId: "low-impact" as const,
   selectedMicrophoneId: "",
   selectedSystemAudioId: "",
   selectedWebcamId: "",

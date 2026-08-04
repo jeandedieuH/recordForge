@@ -27,6 +27,7 @@ const DEFAULT_CHANNELS: u16 = 2;
 const AUDIO_BUFFER_DURATION_HNS: i64 = 100_000;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const WAV_HEADER_SIZE: u64 = 44;
+const SILENCE_CHUNK_FRAMES: usize = 4096;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -451,8 +452,8 @@ fn capture_worker_inner(
         return signal_start_error(&ready_tx, format!("start WASAPI capture stream: {error}"));
     }
 
-    let started_at = Instant::now();
-    if ready_tx.send(Ok(started_at)).is_err() {
+    let capture_started_at = Instant::now();
+    if ready_tx.send(Ok(capture_started_at)).is_err() {
         let _ = audio_client.stop_stream();
         return Err("WASAPI capture startup acknowledgement was dropped".into());
     }
@@ -478,6 +479,14 @@ fn capture_worker_inner(
             Ok(result) => result,
             Err(error) => break Err(format!("read WASAPI audio packet: {error}")),
         };
+        let elapsed_frames = frames_for_duration(capture_started_at.elapsed(), options.sample_rate);
+        let packet_start_frames = buffer_info.index.max(elapsed_frames);
+        if let Err(error) =
+            append_silence_until(&mut file, &mut data_bytes, packet_start_frames, block_align)
+        {
+            break Err(format!("write WASAPI silent gap: {error}"));
+        }
+
         let payload_len = frames_read as usize * block_align;
         if buffer_info.flags.silent {
             packet[..payload_len].fill(0);
@@ -504,7 +513,63 @@ fn capture_worker_inner(
         return Err(error);
     }
 
+    let final_frame_target = frames_for_duration(capture_started_at.elapsed(), options.sample_rate);
+    append_silence_until(&mut file, &mut data_bytes, final_frame_target, block_align)
+        .map_err(|error| format!("write final WASAPI silence: {error}"))?;
+
     finalize_wav(&mut file, data_bytes).map_err(|error| format!("finalize WASAPI WAV: {error}"))
+}
+
+fn frames_for_duration(duration: Duration, sample_rate: u32) -> u64 {
+    let frames = duration.as_nanos().saturating_mul(u128::from(sample_rate)) / 1_000_000_000;
+    u64::try_from(frames).unwrap_or(u64::MAX)
+}
+
+fn append_silence_until(
+    file: &mut std::fs::File,
+    data_bytes: &mut u64,
+    target_frames: u64,
+    block_align: usize,
+) -> std::io::Result<()> {
+    if block_align == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WAV block alignment must be positive",
+        ));
+    }
+
+    let current_frames = *data_bytes / block_align as u64;
+    let mut remaining_frames = target_frames.saturating_sub(current_frames);
+    if remaining_frames == 0 {
+        return Ok(());
+    }
+
+    let silence_buffer_len = SILENCE_CHUNK_FRAMES
+        .checked_mul(block_align)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WAV silence buffer size overflow",
+            )
+        })?;
+    let silence = vec![0u8; silence_buffer_len];
+
+    while remaining_frames > 0 {
+        let frames = remaining_frames.min(SILENCE_CHUNK_FRAMES as u64) as usize;
+        let bytes = frames.checked_mul(block_align).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WAV silence payload size overflow",
+            )
+        })?;
+        file.write_all(&silence[..bytes])?;
+        *data_bytes = data_bytes.checked_add(bytes as u64).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "WAV payload size overflow")
+        })?;
+        remaining_frames -= frames as u64;
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -613,5 +678,49 @@ mod tests {
         assert_eq!(u16::from_le_bytes(header[34..36].try_into().unwrap()), 32);
         assert_eq!(&header[36..40], b"data");
         assert_eq!(u32::from_le_bytes(header[40..44].try_into().unwrap()), 8);
+    }
+
+    #[test]
+    fn pads_loopback_silence_before_and_after_audio_packet() {
+        let sample_rate = 100;
+        let block_align = 4;
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("loopback.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("open temporary WAV");
+        write_wav_header(&mut file, sample_rate, 1).expect("write WAV header");
+
+        let mut data_bytes = 0;
+        let first_packet_frame = frames_for_duration(Duration::from_secs(2), sample_rate);
+        append_silence_until(&mut file, &mut data_bytes, first_packet_frame, block_align)
+            .expect("write leading silence");
+        file.write_all(&[1u8; 4]).expect("write audio packet");
+        data_bytes += block_align as u64;
+
+        let final_frame_target = frames_for_duration(Duration::from_secs(3), sample_rate);
+        append_silence_until(&mut file, &mut data_bytes, final_frame_target, block_align)
+            .expect("write trailing silence");
+        finalize_wav(&mut file, data_bytes).expect("finalize WAV");
+
+        let payload_len = final_frame_target as usize * block_align;
+        file.seek(SeekFrom::Start(WAV_HEADER_SIZE))
+            .expect("seek to data");
+        let mut payload = vec![0u8; payload_len];
+        file.read_exact(&mut payload).expect("read WAV payload");
+
+        let packet_offset = first_packet_frame as usize * block_align;
+        assert!(payload[..packet_offset].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            &payload[packet_offset..packet_offset + block_align],
+            &[1u8; 4]
+        );
+        assert!(payload[packet_offset + block_align..]
+            .iter()
+            .all(|byte| *byte == 0));
     }
 }
