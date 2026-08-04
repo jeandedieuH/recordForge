@@ -117,6 +117,13 @@ export const recordingStatusSchema = z.object({
 
 export type RecordingStatus = z.infer<typeof recordingStatusSchema>
 
+// Broadcast after Rust persists a completed recording so every window can open it.
+export const recordingCompletedSchema = z.object({
+  recordingId: z.string(),
+})
+
+export type RecordingCompleted = z.infer<typeof recordingCompletedSchema>
+
 // A user-defined marker placed during a recording session.
 export const recordingMarkerSchema = z.object({
   id: z.string(),

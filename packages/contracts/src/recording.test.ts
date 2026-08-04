@@ -16,8 +16,69 @@ import {
   trimOptionsSchema,
   videoDeviceSchema,
 } from "./recording"
+import { mediaMetadataSchema } from "./media"
 
 describe("recording contracts", () => {
+  it("accepts null optional media fields emitted by Rust for existing recordings", () => {
+    const metadata = {
+      recordingId: "recording-1",
+      path: "C:/recordforge/recording-1/output.mp4",
+      durationMs: 10_000,
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      hasAudio: true,
+      videoCodec: "h264",
+      audioCodec: null,
+      bitrateKbps: null,
+      streams: [
+        {
+          index: 0,
+          kind: "video" as const,
+          codec: "h264",
+          title: null,
+          startMs: null,
+          durationMs: null,
+          codecLongName: null,
+          width: 1920,
+          height: 1080,
+          fps: 60,
+          bitrateKbps: null,
+          sampleRate: null,
+          channels: null,
+          channelLayout: null,
+          language: null,
+        },
+        {
+          index: 1,
+          kind: "audio" as const,
+          codec: "aac",
+          title: null,
+          startMs: null,
+          durationMs: null,
+          codecLongName: null,
+          width: null,
+          height: null,
+          fps: null,
+          bitrateKbps: null,
+          sampleRate: 48_000,
+          channels: 2,
+          channelLayout: null,
+          language: null,
+        },
+      ],
+      format: {
+        name: "mov,mp4,m4a,3gp,3g2,mj2",
+        durationMs: null,
+        sizeBytes: null,
+        bitrateKbps: null,
+      },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+
+    expect(mediaMetadataSchema.parse(metadata)).toMatchObject(metadata)
+  })
+
   it("validates a display capture source", () => {
     const source = {
       kind: "display" as const,

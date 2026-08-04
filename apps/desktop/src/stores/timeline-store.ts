@@ -17,6 +17,7 @@ import {
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
 import { listRecordings } from "../lib/library"
+import { toErrorMessage } from "../lib/errors"
 import { getMediaJob, getMediaMetadata, listMediaJobs, onMediaJobUpdate } from "../lib/media"
 import { exportTimeline } from "../lib/timeline"
 
@@ -101,8 +102,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       ])
 
       const meta = metadata ?? fallbackMetadata(recording)
-      const completed = jobs.find((j) => j.status === "completed")
-      const latest = completed ?? (jobs.length > 0 ? jobs[0] : null)
+      const prepareJobs = jobs.filter((job) => job.kind === "prepare")
+      const completed = prepareJobs.find((job) => job.status === "completed")
+      const latest = completed ?? (prepareJobs.length > 0 ? prepareJobs[0] : null)
       const activeJob = latest ? await getMediaJob(latest.id) : null
 
       const timeline = createTimelineFromRecording(recording, meta, recording.name)
@@ -114,11 +116,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         recording,
         metadata: meta,
         activeJob,
+        activeExportJob: null,
         view: { zoom: 50, scrollMs: 0, playheadMs: 0, isPlaying: false, durationMs: duration },
         isLoading: false,
+        error: null,
       })
     } catch (err) {
-      set({ error: String(err), isLoading: false })
+      set({ error: toErrorMessage(err), isLoading: false })
     }
   },
 
@@ -202,9 +206,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       set({ error: result.error.message })
       return
     }
+    const duration = getTotalDuration(result.value.history.present)
+    const view = get().view
     set({
       engine: result.value,
-      view: { ...get().view, durationMs: getTotalDuration(result.value.history.present) },
+      view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
   },
@@ -217,9 +223,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       set({ error: result.error.message })
       return
     }
+    const duration = getTotalDuration(result.value.history.present)
+    const view = get().view
     set({
       engine: result.value,
-      view: { ...get().view, durationMs: getTotalDuration(result.value.history.present) },
+      view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
   },
@@ -279,7 +287,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       })
       set({ activeExportJob: job })
     } catch (err) {
-      set({ error: String(err) })
+      set({ error: toErrorMessage(err) })
     }
   },
 

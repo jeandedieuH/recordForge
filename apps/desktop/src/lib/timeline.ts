@@ -1,6 +1,15 @@
-import { invoke } from "@tauri-apps/api/core"
-import type { ExportTimelineOptions, MediaJob } from "@recordforge/contracts"
+import {
+  exportTimelineOptionsSchema,
+  mediaJobSchema,
+  type ExportTimelineOptions,
+  type MediaJob,
+} from "@recordforge/contracts"
+import { invokeValidated } from "./ipc"
 
 export async function exportTimeline(options: ExportTimelineOptions): Promise<MediaJob> {
-  return invoke("export_timeline", { options })
+  return invokeValidated(
+    "export_timeline",
+    { options: exportTimelineOptionsSchema.parse(options) },
+    mediaJobSchema,
+  )
 }

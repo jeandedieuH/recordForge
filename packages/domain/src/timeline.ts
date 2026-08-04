@@ -3,6 +3,7 @@ import type {
   CameraClip,
   LibraryRecording,
   MediaMetadata,
+  MediaStream,
   ScreenClip,
   TimelineClip,
   TimelineMarker,
@@ -85,18 +86,67 @@ export function clipTimeFromSourceTime(clip: TimelineClip, sourceTimeMs: number)
   return (sourceTimeMs - clip.sourceInMs) / clip.speed
 }
 
+function makeTrack(kind: TimelineTrackKind, name: string, clips: TimelineClip[]): TimelineTrack {
+  return {
+    id: crypto.randomUUID(),
+    kind,
+    name,
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips,
+  }
+}
+
+function audioStreamName(stream: MediaStream | undefined, index: number): string {
+  const title = stream?.title?.trim()
+  if (title) return title
+  if (index === 0) return "Microphone"
+  if (index === 1) return "System Audio"
+  return `Audio ${index + 1}`
+}
+
+function createAudioClip(
+  recordingId: string,
+  stream: MediaStream | undefined,
+  duration: number,
+): AudioClip | null {
+  const startMs = Math.min(stream?.startMs ?? 0, duration)
+  const availableDuration = stream?.durationMs ?? Math.max(0, duration - startMs)
+  const clipDuration = Math.min(Math.max(0, availableDuration), Math.max(0, duration - startMs))
+  if (clipDuration <= 0) return null
+
+  return {
+    id: crypto.randomUUID(),
+    kind: "audio",
+    assetId: recordingId,
+    streamIndex: stream?.index,
+    startMs,
+    durationMs: clipDuration,
+    sourceInMs: 0,
+    sourceOutMs: availableDuration,
+    speed: 1,
+    volume: 1,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+  }
+}
+
 export function createTimelineFromRecording(
   recording: LibraryRecording,
   metadata: MediaMetadata,
   name?: string,
 ): TimelineState {
   const now = new Date().toISOString()
-  const duration = metadata.durationMs
-
+  const duration = Math.max(metadata.durationMs, recording.durationMs)
+  const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
+  const primaryVideo = videoStreams[0]
   const screenClip: ScreenClip = {
     id: crypto.randomUUID(),
     kind: "screen",
     assetId: recording.id,
+    streamIndex: primaryVideo?.index,
     startMs: 0,
     durationMs: duration,
     sourceInMs: 0,
@@ -104,78 +154,47 @@ export function createTimelineFromRecording(
     speed: 1,
   }
 
-  const tracks: TimelineTrack[] = [
-    {
-      id: crypto.randomUUID(),
-      kind: "screen",
-      name: "Screen",
-      muted: false,
-      locked: false,
-      solo: false,
-      volume: 1,
-      clips: [screenClip],
-    },
-  ]
+  const tracks: TimelineTrack[] = [makeTrack("screen", "Screen", [screenClip])]
+  const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
+  const audioSources: Array<MediaStream | undefined> = audioStreams.length
+    ? audioStreams
+    : metadata.hasAudio
+      ? [undefined]
+      : []
 
-  if (metadata.hasAudio) {
-    const audioClip: AudioClip = {
-      id: crypto.randomUUID(),
-      kind: "audio",
-      assetId: recording.id,
-      startMs: 0,
-      durationMs: duration,
-      sourceInMs: 0,
-      sourceOutMs: duration,
-      speed: 1,
-      volume: 1,
-      fadeInMs: 0,
-      fadeOutMs: 0,
-    }
-    tracks.push({
-      id: crypto.randomUUID(),
-      kind: "audio",
-      name: "Audio",
-      muted: false,
-      locked: false,
-      solo: false,
-      volume: 1,
-      clips: [audioClip],
-    })
-  }
+  // Each multiplexed capture stream gets its own aligned track and clip.
+  audioSources.forEach((stream, index) => {
+    const clip = createAudioClip(recording.id, stream, duration)
+    if (clip) tracks.push(makeTrack("audio", audioStreamName(stream, index), [clip]))
+  })
 
-  if (
-    recording.source.kind === "display" ||
-    recording.source.kind === "window" ||
-    recording.source.kind === "region"
-  ) {
+  // Keep a camera track only when the source actually contains a second video stream.
+  const secondaryVideo = videoStreams[1]
+  if (secondaryVideo) {
+    const width = metadata.width ?? recording.width
+    const height = metadata.height ?? recording.height
+    const cameraWidth = Math.round(width * 0.25)
+    const cameraHeight = Math.round((cameraWidth * height) / Math.max(1, width))
     const cameraClip: CameraClip = {
       id: crypto.randomUUID(),
       kind: "camera",
       assetId: recording.id,
+      streamIndex: secondaryVideo.index,
       startMs: 0,
       durationMs: duration,
       sourceInMs: 0,
       sourceOutMs: duration,
       speed: 1,
       transform: {
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
+        x: width - cameraWidth - 24,
+        y: height - cameraHeight - 24,
+        width: cameraWidth,
+        height: cameraHeight,
         opacity: 1,
-        shape: "rectangle",
+        shape: "rounded",
       },
     }
-    tracks.push({
-      id: crypto.randomUUID(),
-      kind: "camera",
-      name: "Camera",
-      muted: false,
-      locked: false,
-      solo: false,
-      volume: 1,
-      clips: [cameraClip],
-    })
+    tracks.splice(1, 0, makeTrack("camera", "Camera", [cameraClip]))
   }
 
   const markers: TimelineMarker[] = recording.markers.map((m) => ({

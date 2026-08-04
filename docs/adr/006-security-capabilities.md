@@ -20,6 +20,10 @@ Tauri v2 uses a capability-based security model. recordForge must minimize the a
 
 The countdown is a dynamically-created Tauri webview used while the main window is minimized. Its URL contains only a UUID session ID, a constrained countdown value, and a display label. Rust validates the session ID/state before starting or cancelling capture. The capability is limited to `countdown` and does not broaden the main window or expose raw media data.
 
+## Local Media Asset Protocol Review
+
+The main window uses Tauri's asset protocol to stream finalized recordings and generated derivatives into the HTML video element. The protocol is enabled only for `$APPDATA/sessions/**/*`, which contains the immutable recording originals and their preparation outputs. No arbitrary filesystem or shell permission is granted to the webview, and media outside the application sessions directory is not exposed.
+
 ## Consequences
 
 - Higher friction for features that need filesystem access.

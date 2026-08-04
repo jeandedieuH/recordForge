@@ -31,6 +31,8 @@ export type ClipTransform = z.infer<typeof clipTransformSchema>
 export const timelineClipBaseSchema = z.object({
   id: z.string(),
   assetId: z.string(),
+  // Stream index keeps multiplexed video and audio sources independently editable.
+  streamIndex: z.number().int().min(0).optional(),
   startMs: z.number().int().min(0),
   durationMs: z.number().int().min(0),
   sourceInMs: z.number().int().min(0),
@@ -142,6 +144,8 @@ export type TimelineViewState = z.infer<typeof timelineViewStateSchema>
 // A single continuous segment in the final render plan.
 export const renderSegmentSchema = z.object({
   assetId: z.string(),
+  streamIndex: z.number().int().min(0).optional(),
+  volume: z.number().min(0).max(2).optional(),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
@@ -153,8 +157,10 @@ export type RenderSegment = z.infer<typeof renderSegmentSchema>
 // Audio mix settings for the final render.
 export const renderPlanAudioSchema = z.object({
   assetId: z.string(),
+  streamIndex: z.number().int().min(0).optional(),
   muted: z.boolean().default(false),
   volume: z.number().min(0).max(2).default(1),
+  segments: z.array(renderSegmentSchema).default([]),
 })
 
 export type RenderPlanAudio = z.infer<typeof renderPlanAudioSchema>
@@ -181,7 +187,9 @@ export const renderPlanSchema = z.object({
   canvas: timelineCanvasSchema,
   durationMs: z.number().int().min(0),
   segments: z.array(renderSegmentSchema),
+  // `audio` remains for backwards-compatible consumers; new exports use all tracks.
   audio: renderPlanAudioSchema.optional(),
+  audioTracks: z.array(renderPlanAudioSchema).default([]),
   overlays: z.array(renderPlanOverlaySchema).default([]),
 })
 

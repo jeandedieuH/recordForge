@@ -130,12 +130,12 @@ Everything after that is polish and marketing; the roadmap below stops at the re
 | P1.2 | Audio meter, library, recovery, diagnostics, and storage usage are fake or static. | `features/recorder/*`, `features/library/*`, `features/settings/*` |
 | P1.3 | `timeline-view.tsx` is a hardcoded duplicate timeline; playback state does not control the video. | `features/editor/timeline-view.tsx`, `stores/timeline-store.ts` |
 | P1.4 | Polished export UI is disconnected; functional export panel is not mounted. | `features/export/*` |
-| P1.5 | Media preparation is manual; should run automatically after successful or recovered recordings. | `jobs`, `library`, `media` |
+| P1.5 | Media preparation should be queued after successful or recovered recordings without blocking editor playback. | `apps/desktop/src/stores/recorder-store.ts`, `apps/desktop/src/stores/timeline-store.ts`, `apps/desktop/src-tauri/src/jobs` |
 | P1.6 | Projects and storage surfaces are placeholders; no asset registry or complete domain. | `packages/domain`, `packages/contracts`, `features/storage/*` |
 | P1.7 | TypeScript and Rust `RenderPlan` DTOs have drifted; IPC responses are not validated with Zod at runtime. | `packages/contracts`, `apps/desktop/src/lib/timeline.ts`, Rust DTOs |
 | P1.8 | Editor history is unbounded; projects are regenerated with new IDs on every open. | `editor-core`, `stores/editor-store.ts` |
 | P1.9 | `timeline-view.tsx` depends on the entire Zustand store object, causing repeated reloads. | `features/editor/timeline-view.tsx` |
-| P1.10 | Prepare-job options are not persisted; duplicates allowed; cancellation can race completion. | `jobs` |
+| P1.10 | Prepare-job options are not persisted; forced rebuilds and cancellation/completion races still need hardening. | `apps/desktop/src-tauri/src/jobs`, `apps/desktop/src-tauri/src/database/media.rs` |
 
 ### 3.3 P2 — UX, performance, and engineering debt
 

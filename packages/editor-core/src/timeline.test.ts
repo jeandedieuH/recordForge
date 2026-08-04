@@ -7,6 +7,7 @@ import {
   createRippleDeleteClipCommand,
   createSplitClipCommand,
   createTrimClipCommand,
+  createUpdateClipAudioCommand,
   createUpdateTrackCommand,
   executeCommand,
   redoCommand,
@@ -140,6 +141,56 @@ describe("timeline command engine", () => {
     expect(remaining[0].sourceOutMs).toBe(60_000)
   })
 
+  it("ripple deletes the same time range from aligned audio tracks", () => {
+    const state = makeTestState()
+    state.tracks.push({
+      id: "audio-track",
+      kind: "audio",
+      name: "System Audio",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "audio-clip",
+          kind: "audio",
+          assetId: "rec-1",
+          streamIndex: 2,
+          startMs: 0,
+          durationMs: 60_000,
+          sourceInMs: 0,
+          sourceOutMs: 60_000,
+          speed: 1,
+          volume: 1,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+        },
+      ],
+    })
+
+    const engine = createEngine(state)
+    const split = executeCommand(engine, createSplitClipCommand("clip-1", 20_000))
+    expect(split.ok).toBe(true)
+    if (!split.ok) return
+
+    const ripple = executeCommand(
+      split.value,
+      createRippleDeleteClipCommand(split.value.history.present.tracks[0].clips[0].id),
+    )
+    expect(ripple.ok).toBe(true)
+    if (!ripple.ok) return
+
+    const audioClips = ripple.value.history.present.tracks[1].clips
+    expect(audioClips).toHaveLength(1)
+    expect(audioClips[0]).toMatchObject({
+      startMs: 0,
+      durationMs: 40_000,
+      sourceInMs: 20_000,
+      sourceOutMs: 60_000,
+    })
+  })
+
   it("undoes and redoes commands", () => {
     const engine = createEngine(makeTestState())
     const trimmed = executeCommand(engine, createTrimClipCommand("clip-1", 10_000, 50_000))
@@ -167,5 +218,45 @@ describe("timeline command engine", () => {
     if (!result.ok) return
     expect(result.value.history.present.tracks[0].muted).toBe(true)
     expect(result.value.history.present.tracks[0].volume).toBe(0.5)
+  })
+
+  it("updates an individual audio clip without changing its timing", () => {
+    const state = makeTestState()
+    state.tracks.push({
+      id: "audio-track",
+      kind: "audio",
+      name: "Microphone",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "audio-clip",
+          kind: "audio",
+          assetId: "rec-1",
+          streamIndex: 1,
+          startMs: 0,
+          durationMs: 60_000,
+          sourceInMs: 0,
+          sourceOutMs: 60_000,
+          speed: 1,
+          volume: 1,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+        },
+      ],
+    })
+
+    const engine = createEngine(state)
+    const result = executeCommand(
+      engine,
+      createUpdateClipAudioCommand("audio-clip", { volume: 0.4 }),
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const clip = result.value.history.present.tracks[1].clips[0]
+    expect(clip).toMatchObject({ volume: 0.4, startMs: 0, durationMs: 60_000 })
   })
 })

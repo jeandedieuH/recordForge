@@ -37,13 +37,13 @@ pub fn generate_proxy(
         .arg("-y")
         .arg("-i")
         .arg(input)
-        .args(["-vf", &scale])
+        .args(["-map", "0:v:0", "-vf", &scale])
         .args([
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
         ]);
 
     if has_audio {
-        command.args(["-c:a", "aac", "-b:a", "96k"]);
+        command.args(["-map", "0:a?", "-c:a", "aac", "-b:a", "96k"]);
     } else {
         command.arg("-an");
     }

@@ -431,6 +431,13 @@ pub fn resume_recording(
 #[tauri::command]
 #[instrument]
 pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
+    let session_id = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.status()?.session_id
+    };
     let result = {
         let guard = state
             .recorder
@@ -438,6 +445,21 @@ pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
         guard.stop()
     };
+    if result.is_ok() {
+        if let Ok(db) = state.db.lock() {
+            if let Ok(recordings) = library_list_recordings(&db) {
+                if let Some(recording) = recordings
+                    .iter()
+                    .find(|recording| recording.session_id == session_id)
+                {
+                    if let Err(error) = crate::events::emit_recording_completed(&app, &recording.id)
+                    {
+                        tracing::warn!(error = ?error, "failed to emit recording completion");
+                    }
+                }
+            }
+        }
+    }
     FloatingWindow::hide(&app);
     BoundaryWindow::hide(&app);
     CountdownWindow::hide(&app);

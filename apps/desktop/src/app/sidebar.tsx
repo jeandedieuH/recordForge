@@ -20,7 +20,7 @@ import {
 import { cn } from "@recordforge/ui"
 import { useJobsStore } from "../stores/jobs-store"
 
-export type View = "record" | "library" | "editor" | "settings" | "projects" | "storage" | "export"
+export type View = "library" | "editor" | "settings" | "projects" | "storage" | "export"
 
 interface SidebarProps {
   activeView: View

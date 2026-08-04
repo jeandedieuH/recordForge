@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use tauri::State;
@@ -28,6 +29,9 @@ pub fn export_timeline(
 ) -> Result<MediaJob> {
     let recording_id = options.recording_id.clone();
     let plan = options.plan;
+    let output_path = state
+        .path_policy
+        .validate_export_destination(Path::new(&options.output_path))?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let job = MediaJob {
@@ -54,8 +58,6 @@ pub fn export_timeline(
     let db = Arc::clone(&state.db);
     let app_handle = app.clone();
     let thread_job = job.clone();
-
-    let output_path = std::path::PathBuf::from(options.output_path);
 
     thread::spawn(move || {
         if let Err(err) = run_render_plan(

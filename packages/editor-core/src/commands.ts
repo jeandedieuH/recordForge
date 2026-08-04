@@ -1,5 +1,6 @@
 import type {
   AppError,
+  AudioClip,
   CameraClip,
   ClipTransform,
   TimelineClip,
@@ -326,6 +327,51 @@ export function createDeleteClipCommand(clipId: string): TimelineCommand {
   }
 }
 
+function rippleDeleteFromTrack(
+  track: TimelineTrack,
+  deleteStartMs: number,
+  deleteEndMs: number,
+): TimelineTrack {
+  const deletedDuration = deleteEndMs - deleteStartMs
+  const clips: TimelineClip[] = []
+
+  for (const clip of track.clips) {
+    const clipEndMs = clip.startMs + clip.durationMs
+    if (clipEndMs <= deleteStartMs) {
+      clips.push(clip)
+      continue
+    }
+    if (clip.startMs >= deleteEndMs) {
+      clips.push({ ...clip, startMs: clip.startMs - deletedDuration })
+      continue
+    }
+
+    // Rebuild the portions on either side of the removed range so every
+    // aligned audio/video track loses the same source-time window.
+    if (clip.startMs < deleteStartMs) {
+      const leftDuration = deleteStartMs - clip.startMs
+      clips.push({
+        ...clip,
+        durationMs: leftDuration,
+        sourceOutMs: clip.sourceInMs + leftDuration * clip.speed,
+      })
+    }
+
+    if (clipEndMs > deleteEndMs) {
+      const rightDuration = clipEndMs - deleteEndMs
+      clips.push({
+        ...clip,
+        id: clip.startMs < deleteStartMs ? crypto.randomUUID() : clip.id,
+        startMs: deleteStartMs,
+        durationMs: rightDuration,
+        sourceInMs: clip.sourceInMs + (deleteEndMs - clip.startMs) * clip.speed,
+      })
+    }
+  }
+
+  return { ...track, clips }
+}
+
 export function createRippleDeleteClipCommand(clipId: string): TimelineCommand {
   return {
     name: "Ripple delete clip",
@@ -334,20 +380,12 @@ export function createRippleDeleteClipCommand(clipId: string): TimelineCommand {
       if (!found) {
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
-      const { track, clip, clipIndex } = found
-      const deletedDuration = clip.durationMs
-      const newClips = track.clips
-        .filter((c) => c.id !== clipId)
-        .map((c, index) =>
-          index >= clipIndex ? { ...c, startMs: c.startMs - deletedDuration } : c,
-        )
-      const newTrack: TimelineTrack = { ...track, clips: newClips }
-      const trackResult = sortAndValidateTrack(
-        updateTrackInState(state, track.id, newTrack),
-        track.id,
+      const deleteStartMs = found.clip.startMs
+      const deleteEndMs = found.clip.startMs + found.clip.durationMs
+      const tracks = state.tracks.map((track) =>
+        rippleDeleteFromTrack(track, deleteStartMs, deleteEndMs),
       )
-      if (!trackResult.ok) return trackResult
-      return { ok: true, value: updateTrackInState(state, track.id, trackResult.value) }
+      return { ok: true, value: { ...state, tracks, updatedAt: now() } }
     },
   }
 }
@@ -366,6 +404,38 @@ export function createUpdateTrackCommand(trackId: string, update: TrackUpdate): 
         clips: track.clips,
       }
       return { ok: true, value: updateTrackInState(state, trackId, next) }
+    },
+  }
+}
+
+export function createUpdateClipAudioCommand(
+  clipId: string,
+  update: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs">>,
+): TimelineCommand {
+  return {
+    name: "Update audio clip",
+    execute(state) {
+      const found = findClip(state, clipId)
+      if (!found) {
+        return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+      }
+      if (found.clip.kind !== "audio") {
+        return {
+          ok: false,
+          error: editorError("invalid_clip", "Only audio clips support audio settings"),
+        }
+      }
+      const next: AudioClip = { ...found.clip, ...update }
+      if (next.volume < 0 || next.volume > 2) {
+        return {
+          ok: false,
+          error: editorError("invalid_volume", "Audio volume must be between 0 and 2"),
+        }
+      }
+      if (next.fadeInMs < 0 || next.fadeOutMs < 0) {
+        return { ok: false, error: editorError("invalid_fade", "Audio fades cannot be negative") }
+      }
+      return { ok: true, value: replaceClipInState(state, found.track.id, clipId, next) }
     },
   }
 }

@@ -87,6 +87,52 @@ describe("render-plan", () => {
     expect(plan.value.audio?.muted).toBe(false)
   })
 
+  it("builds independent audio track segments with stream indexes and volume", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "mic-track",
+      kind: "audio",
+      name: "Microphone",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 0.8,
+      clips: [
+        {
+          id: "mic-clip",
+          kind: "audio",
+          assetId: "rec-1",
+          streamIndex: 1,
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          volume: 0.5,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.audioTracks).toHaveLength(1)
+    expect(plan.value.audioTracks[0]).toMatchObject({
+      streamIndex: 1,
+      muted: false,
+      volume: 0.8,
+    })
+    expect(plan.value.audioTracks[0].segments[0]).toMatchObject({
+      streamIndex: 1,
+      volume: 0.4,
+      sourceInMs: 0,
+      sourceOutMs: 20_000,
+    })
+  })
+
   it("builds a plan with continuous output times", () => {
     const plan = buildRenderPlan({
       state: makeTimeline(3),

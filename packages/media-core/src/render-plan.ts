@@ -14,18 +14,24 @@ function editorError(code: string, message: string): AppError {
   return { category: "editor", code, message }
 }
 
-function toSegments(clips: TimelineClip[], assetId: string): RenderSegment[] {
+function toSegments(
+  clips: TimelineClip[],
+  assetId: string,
+  preserveTimelinePosition = false,
+): RenderSegment[] {
   const sorted = sortClips(clips)
   let outputStart = 0
   const segments: RenderSegment[] = []
 
   for (const clip of sorted) {
-    const outputEnd = outputStart + clip.durationMs
+    const start = preserveTimelinePosition ? clip.startMs : outputStart
+    const outputEnd = start + clip.durationMs
     segments.push({
       assetId: clip.assetId || assetId,
+      streamIndex: clip.streamIndex,
       sourceInMs: clip.sourceInMs,
       sourceOutMs: clip.sourceOutMs,
-      outputStartMs: outputStart,
+      outputStartMs: start,
       outputEndMs: outputEnd,
     })
     outputStart = outputEnd
@@ -40,19 +46,24 @@ function toOverlays(_clips: TimelineClip[], _assetId: string): RenderPlanOverlay
   return []
 }
 
-function buildAudio(
-  recording: LibraryRecording,
-  state: TimelineState,
-): RenderPlanAudio | undefined {
-  const audioTrack = state.tracks.find((t) => t.kind === "audio")
-  const muted = audioTrack?.muted ?? false
-  const volume = audioTrack?.volume ?? 1
-
-  return {
-    assetId: recording.id,
-    muted,
-    volume,
-  }
+function buildAudioTracks(recording: LibraryRecording, state: TimelineState): RenderPlanAudio[] {
+  return state.tracks
+    .filter((track) => track.kind === "audio" && track.clips.length > 0)
+    .map((track) => {
+      const clips = sortClips(track.clips)
+      const firstClip = clips[0]
+      const segments = toSegments(clips, recording.id, true).map((segment, index) => ({
+        ...segment,
+        volume: clips[index]?.kind === "audio" ? clips[index].volume * track.volume : track.volume,
+      }))
+      return {
+        assetId: firstClip?.assetId || recording.id,
+        streamIndex: firstClip?.streamIndex,
+        muted: track.muted,
+        volume: track.volume,
+        segments,
+      }
+    })
 }
 
 export interface BuildRenderPlanInput {
@@ -62,8 +73,8 @@ export interface BuildRenderPlanInput {
 }
 
 // Build a render plan from a timeline and a destination path.
-// The MVP only renders the first screen track; camera, audio and captions
-// are included in the plan schema for the next phase.
+// Screen cuts and independent audio tracks are rendered now; camera overlays
+// and captions remain schema-ready for a later render pass.
 export function buildRenderPlan(
   input: BuildRenderPlanInput,
 ): { ok: true; value: RenderPlan } | { ok: false; error: AppError } {
@@ -92,7 +103,7 @@ export function buildRenderPlan(
 
   const segments = toSegments(screenTrack.clips, assetId)
   const overlays = cameraTrack ? toOverlays(cameraTrack.clips, assetId) : []
-  const audio = buildAudio(recording, state)
+  const audioTracks = buildAudioTracks(recording, state)
 
   return {
     ok: true,
@@ -101,7 +112,13 @@ export function buildRenderPlan(
       canvas: state.canvas,
       durationMs: getTotalDuration(state),
       segments,
-      audio,
+      audio: audioTracks[0] ?? {
+        assetId: recording.id,
+        muted: false,
+        volume: 1,
+        segments: [],
+      },
+      audioTracks,
       overlays,
     },
   }

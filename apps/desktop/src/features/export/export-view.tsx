@@ -1,4 +1,5 @@
 import { useState } from "react"
+import type { MediaJob, TimelineCanvas } from "@recordforge/contracts"
 import {
   ArrowLeft,
   ChevronDown,
@@ -22,23 +23,42 @@ import {
 
 interface ExportViewProps {
   projectName?: string
+  canvas?: TimelineCanvas
+  exportJob?: MediaJob | null
+  error?: string | null
+  onDismissError?: () => void
   onBack: () => void
-  onStartExport?: () => void
+  onStartExport?: () => void | Promise<void>
 }
 
 type PresetId = "fast-share" | "balanced" | "smooth-demo" | "archive"
 
 export function ExportView({
-  projectName = "Product Demo Q3.forge",
+  projectName = "Recording",
+  canvas,
+  exportJob = null,
+  error = null,
+  onDismissError,
   onBack,
   onStartExport,
 }: ExportViewProps) {
   const [selectedPreset, setSelectedPreset] = useState<PresetId>("balanced")
+  const [isStarting, setIsStarting] = useState(false)
   const [videoAccordionOpen, setVideoAccordionOpen] = useState(true)
   const [audioAccordionOpen, setAudioAccordionOpen] = useState(false)
   const [useNvenc, setUseNvenc] = useState(true)
   const [codec, setCodec] = useState("hevc")
   const [bitrateControl, setBitrateControl] = useState("vbr-2pass")
+
+  async function handleStartExport() {
+    if (!onStartExport || isStarting || exportJob?.status === "running") return
+    setIsStarting(true)
+    try {
+      await onStartExport()
+    } finally {
+      setIsStarting(false)
+    }
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground select-none">
@@ -50,7 +70,7 @@ export function ExportView({
           className="flex items-center gap-2 font-medium transition-colors hover:text-foreground"
         >
           <ArrowLeft className="size-4" />
-          <span>Projects</span>
+          <span>Editor</span>
           <span>&gt;</span>
           <span className="font-semibold text-foreground">{projectName}</span>
         </button>
@@ -66,6 +86,29 @@ export function ExportView({
           Configure rendering and delivery options for{" "}
           <strong className="text-foreground font-semibold">{projectName}</strong>.
         </p>
+
+        {error ? (
+          <div
+            className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-recording/30 bg-recording/10 px-3 py-2 text-sm text-foreground"
+            role="alert"
+          >
+            <span>Couldn't start the export. Choose another destination and try again.</span>
+            {onDismissError ? (
+              <Button variant="ghost" size="sm" onClick={onDismissError}>
+                Dismiss
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {exportJob?.status === "completed" ? (
+          <div
+            className="mb-6 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm text-foreground"
+            role="status"
+          >
+            Export complete. Your edited MP4 is ready at the selected destination.
+          </div>
+        ) : null}
 
         {/* Section 1: RENDER PRESETS */}
         <div className="flex flex-col gap-3 mb-8">
@@ -318,7 +361,9 @@ export function ExportView({
             Summary
           </span>
           <span className="font-mono text-xs font-semibold text-foreground">
-            1440p • 60fps • HEVC • NVENC • ~120 MB
+            {projectName} •{" "}
+            {canvas ? `${canvas.width}×${canvas.height} • ${canvas.fps}fps` : "Source canvas"} •
+            H.264 • AAC
           </span>
         </div>
 
@@ -331,11 +376,18 @@ export function ExportView({
           </Button>
 
           <Button
-            onClick={onStartExport}
-            className="flex items-center gap-2 rounded-lg bg-tertiary hover:bg-tertiary-hover text-white px-5 py-2 text-xs font-semibold shadow-lg transition-all border-0 cursor-pointer"
+            onClick={() => void handleStartExport()}
+            disabled={isStarting || exportJob?.status === "running"}
+            className="flex items-center gap-2 rounded-lg bg-tertiary px-5 py-2 text-xs font-semibold text-white shadow-lg transition-all hover:bg-tertiary-hover"
           >
             <Play className="size-3.5 fill-white" />
-            <span>Start Export</span>
+            <span>
+              {isStarting
+                ? "Choosing destination…"
+                : exportJob?.status === "running"
+                  ? `Exporting ${Math.round(exportJob.progress * 100)}%`
+                  : "Start Export"}
+            </span>
           </Button>
         </div>
       </div>

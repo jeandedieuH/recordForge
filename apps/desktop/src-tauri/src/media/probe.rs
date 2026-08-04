@@ -22,6 +22,7 @@ struct FfprobeStream {
     channels: Option<i32>,
     channel_layout: Option<String>,
     duration: Option<String>,
+    start_time: Option<String>,
     #[serde(default)]
     tags: serde_json::Map<String, serde_json::Value>,
 }
@@ -126,11 +127,30 @@ pub fn probe_media(ffprobe_path: &str, input: &Path, recording_id: &str) -> Resu
                 .or_else(|| s.tags.get("LANGUAGE"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let title = s
+                .tags
+                .get("title")
+                .or_else(|| s.tags.get("handler_name"))
+                .or_else(|| s.tags.get("HANDLER_NAME"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|value| !value.trim().is_empty());
+            let start_ms = s
+                .start_time
+                .as_ref()
+                .and_then(|value| parse_seconds_to_ms(value));
+            let duration_ms = s
+                .duration
+                .as_ref()
+                .and_then(|value| parse_seconds_to_ms(value));
 
             metadata.streams.push(MediaStream {
                 index: s.index,
                 kind: kind.clone(),
                 codec: s.codec_name.clone().unwrap_or_default(),
+                title,
+                start_ms,
+                duration_ms,
                 codec_long_name: s.codec_long_name.clone(),
                 width: s.width,
                 height: s.height,
@@ -180,5 +200,8 @@ fn parse_rational_fps(s: &str) -> Option<f64> {
 }
 
 fn parse_seconds_to_ms(s: &str) -> Option<u64> {
-    s.parse::<f64>().ok().map(|sec| (sec * 1000.0) as u64)
+    s.parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * 1000.0) as u64)
 }

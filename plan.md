@@ -35,7 +35,7 @@ The approved scope is **V1 Plus**, the approved capture direction is **benchmark
 - The audio meter is random data, the library falls back to fake recordings, recovery is a static banner, diagnostics claim unmeasured readiness, storage usage is fake, and settings expose invalid/mismatched profile descriptions.
 - The real timeline components and command engine exist, but `timeline-view.tsx` renders a separate static timeline with hardcoded resolution, timecode, tracks, and webcam PiP. Playback state does not control the video element.
 - The polished export screen is disconnected; its presets and encoder controls do not reach the backend. The smaller functional export panel is not mounted.
-- Media preparation is manual after recording even though the product flow requires automatic background preparation.
+- Media preparation now queues automatically after successful or recovered recordings; the editor reads existing job state without starting preparation or blocking original-source playback.
 - Projects and storage surfaces are placeholders; the projects table and upload table have no complete domain or command layer.
 
 ### Critical correctness, reliability, performance, and security blockers

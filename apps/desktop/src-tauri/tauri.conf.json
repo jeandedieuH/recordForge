@@ -26,6 +26,10 @@
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/sessions/**/*"]
+      },
       "csp": {
         "default-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",

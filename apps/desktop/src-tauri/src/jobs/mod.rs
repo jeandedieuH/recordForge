@@ -34,6 +34,7 @@ pub struct JobManager {
     ffprobe_path: PathBuf,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
+    start_lock: Arc<Mutex<()>>,
 }
 
 impl JobManager {
@@ -50,19 +51,33 @@ impl JobManager {
             ffprobe_path,
             active_tokens: Arc::new(Mutex::new(HashMap::new())),
             worker_lock: Arc::new(Mutex::new(())),
+            start_lock: Arc::new(Mutex::new(())),
         }
     }
 
     /// Start a prepare job for a recording.
     #[instrument]
     pub fn start_prepare(&self, options: PrepareOptions) -> Result<String> {
+        // Serialize the check-and-insert sequence so simultaneous completion and
+        // editor/manual requests cannot create duplicate non-forced jobs.
+        let _start_lock = self
+            .start_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("job start mutex poisoned".into()))?;
         let conn = self
             .db
             .lock()
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
 
-        // Ensure the recording exists before creating a job.
+        // Ensure the recording exists before creating or reusing a job.
         let _recording = get_recording(&conn, &options.recording_id)?;
+        if !options.force {
+            if let Some(existing) =
+                media_db::find_reusable_prepare_job(&conn, &options.recording_id)?
+            {
+                return Ok(existing.id);
+            }
+        }
         let job = media_db::insert_job(&conn, &options.recording_id, MediaJobKind::Prepare)?;
         drop(conn);
 

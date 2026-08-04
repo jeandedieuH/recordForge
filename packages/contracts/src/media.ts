@@ -9,15 +9,19 @@ export const mediaStreamSchema = z.object({
   index: z.number().int().min(0),
   kind: mediaStreamKindSchema,
   codec: z.string(),
-  codecLongName: z.string().optional(),
-  width: z.number().int().min(0).optional(),
-  height: z.number().int().min(0).optional(),
-  fps: z.number().min(0).optional(),
-  bitrateKbps: z.number().min(0).optional(),
-  sampleRate: z.number().int().min(0).optional(),
-  channels: z.number().int().min(0).optional(),
-  channelLayout: z.string().optional(),
-  language: z.string().optional(),
+  // FFmpeg stream metadata identifies the independently captured source.
+  title: z.string().nullish(),
+  startMs: z.number().int().min(0).nullish(),
+  durationMs: z.number().int().min(0).nullish(),
+  codecLongName: z.string().nullish(),
+  width: z.number().int().min(0).nullish(),
+  height: z.number().int().min(0).nullish(),
+  fps: z.number().min(0).nullish(),
+  bitrateKbps: z.number().min(0).nullish(),
+  sampleRate: z.number().int().min(0).nullish(),
+  channels: z.number().int().min(0).nullish(),
+  channelLayout: z.string().nullish(),
+  language: z.string().nullish(),
 })
 
 export type MediaStream = z.infer<typeof mediaStreamSchema>
@@ -25,9 +29,9 @@ export type MediaStream = z.infer<typeof mediaStreamSchema>
 // Container format metadata from FFprobe.
 export const mediaFormatSchema = z.object({
   name: z.string(),
-  durationMs: z.number().int().min(0).optional(),
-  sizeBytes: z.number().int().min(0).optional(),
-  bitrateKbps: z.number().min(0).optional(),
+  durationMs: z.number().int().min(0).nullish(),
+  sizeBytes: z.number().int().min(0).nullish(),
+  bitrateKbps: z.number().min(0).nullish(),
 })
 
 export type MediaFormat = z.infer<typeof mediaFormatSchema>
@@ -37,15 +41,15 @@ export const mediaMetadataSchema = z.object({
   recordingId: z.string(),
   path: z.string(),
   durationMs: z.number().int().min(0),
-  width: z.number().int().min(1).optional(),
-  height: z.number().int().min(1).optional(),
-  fps: z.number().min(0).optional(),
+  width: z.number().int().min(1).nullish(),
+  height: z.number().int().min(1).nullish(),
+  fps: z.number().min(0).nullish(),
   hasAudio: z.boolean().default(false),
-  videoCodec: z.string().optional(),
-  audioCodec: z.string().optional(),
-  bitrateKbps: z.number().min(0).optional(),
+  videoCodec: z.string().nullish(),
+  audioCodec: z.string().nullish(),
+  bitrateKbps: z.number().min(0).nullish(),
   streams: z.array(mediaStreamSchema).default([]),
-  format: mediaFormatSchema.optional(),
+  format: mediaFormatSchema.nullish(),
   updatedAt: z.string().datetime({ offset: true }),
 })
 
@@ -103,7 +107,7 @@ export const mediaJobProgressSchema = z.object({
   status: mediaJobStatusSchema,
   progress: z.number().min(0).max(1).default(0),
   stage: z.string(),
-  message: z.string().optional(),
+  message: z.string().nullish(),
   updatedAt: z.string().datetime({ offset: true }),
 })
 
@@ -111,13 +115,13 @@ export type MediaJobProgress = z.infer<typeof mediaJobProgressSchema>
 
 // Output files produced by a prepare job.
 export const mediaJobOutputsSchema = z.object({
-  metadataPath: z.string().optional(),
-  proxyPath: z.string().optional(),
-  thumbnailDir: z.string().optional(),
-  thumbnailManifestPath: z.string().optional(),
-  waveformPath: z.string().optional(),
-  waveformImagePath: z.string().optional(),
-  outputPath: z.string().optional(),
+  metadataPath: z.string().nullish(),
+  proxyPath: z.string().nullish(),
+  thumbnailDir: z.string().nullish(),
+  thumbnailManifestPath: z.string().nullish(),
+  waveformPath: z.string().nullish(),
+  waveformImagePath: z.string().nullish(),
+  outputPath: z.string().nullish(),
 })
 
 export type MediaJobOutputs = z.infer<typeof mediaJobOutputsSchema>
@@ -130,12 +134,12 @@ export const mediaJobSchema = z.object({
   status: mediaJobStatusSchema,
   progress: z.number().min(0).max(1).default(0),
   stage: z.string(),
-  message: z.string().optional(),
-  error: z.string().optional(),
+  message: z.string().nullish(),
+  error: z.string().nullish(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
-  startedAt: z.string().datetime({ offset: true }).optional(),
-  completedAt: z.string().datetime({ offset: true }).optional(),
+  startedAt: z.string().datetime({ offset: true }).nullish(),
+  completedAt: z.string().datetime({ offset: true }).nullish(),
   outputs: mediaJobOutputsSchema.default({}),
 })
 
@@ -183,7 +187,7 @@ export const waveformDataSchema = z.object({
   samplesPerPeak: z.number().int().min(1),
   peaks: z.array(z.number()),
   durationMs: z.number().int().min(0),
-  imagePath: z.string().optional(),
+  imagePath: z.string().nullish(),
 })
 
 export type WaveformData = z.infer<typeof waveformDataSchema>

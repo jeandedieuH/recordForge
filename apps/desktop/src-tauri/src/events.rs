@@ -10,6 +10,7 @@ use crate::errors::Result;
 pub mod event_names {
     pub const MEDIA_JOB_UPDATE: &str = "media-job-update";
     pub const RECORDER_STATUS: &str = "recorder-status";
+    pub const RECORDING_COMPLETED: &str = "recording-completed";
 }
 
 /// Publishes Tauri events to the React UI.
@@ -41,5 +42,17 @@ pub fn emit_recorder_status(handle: &tauri::AppHandle, status: &RecordingStatus)
         .emit(event_names::RECORDER_STATUS, status)
         .map_err(|e| {
             crate::errors::InternalError::Unknown(format!("emit recorder status: {e}")).into()
+        })
+}
+
+/// Broadcast the persisted library ID after a recording finishes.
+pub fn emit_recording_completed(handle: &tauri::AppHandle, recording_id: &str) -> Result<()> {
+    handle
+        .emit(
+            event_names::RECORDING_COMPLETED,
+            serde_json::json!({ "recordingId": recording_id }),
+        )
+        .map_err(|e| {
+            crate::errors::InternalError::Unknown(format!("emit recording completed: {e}")).into()
         })
 }

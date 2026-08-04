@@ -3,6 +3,10 @@ use tauri::{LogicalPosition, LogicalSize, Manager, Position, Size};
 use crate::capture::source::Bounds;
 use crate::errors::{InternalError, Result};
 
+const FLOATING_WINDOW_WIDTH: f64 = 520.0;
+const FLOATING_WINDOW_HEIGHT: f64 = 88.0;
+const FLOATING_WINDOW_BOTTOM_MARGIN: f64 = 28.0;
+
 /// Main application window lifecycle helpers used by the recorder.
 pub struct MainWindow;
 
@@ -40,6 +44,9 @@ impl FloatingWindow {
     pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
         if let Some(window) = app.get_webview_window("floating") {
             tracing::info!("floating window already exists, showing and focusing");
+            window.set_content_protected(true).map_err(|error| {
+                InternalError::Unknown(format!("protect floating window from capture: {error}"))
+            })?;
             let _ = window.show();
             let _ = window.set_focus();
             return Ok(());
@@ -54,22 +61,35 @@ impl FloatingWindow {
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'floating';")
         .title("recordForge Transport Controls")
-        .inner_size(440.0, 72.0)
+        .inner_size(FLOATING_WINDOW_WIDTH, FLOATING_WINDOW_HEIGHT)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
+        .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false);
 
-        // Position near top-center of the primary monitor
+        // Position at the bottom-center of the primary monitor so the toolbar
+        // stays close to the pointer without covering the user's main content.
         if let Ok(Some(monitor)) = app.primary_monitor() {
             let size = monitor.size();
+            let position = monitor.position();
             let scale = monitor.scale_factor();
             let screen_w = size.width as f64 / scale;
-            let x = (screen_w - 440.0) / 2.0;
-            let y = 32.0;
-            tracing::info!(screen_w, x, y, scale, "floating window position calculated");
+            let screen_h = size.height as f64 / scale;
+            let monitor_x = position.x as f64 / scale;
+            let monitor_y = position.y as f64 / scale;
+            let x = monitor_x + (screen_w - FLOATING_WINDOW_WIDTH) / 2.0;
+            let y = monitor_y + screen_h - FLOATING_WINDOW_HEIGHT - FLOATING_WINDOW_BOTTOM_MARGIN;
+            tracing::info!(
+                screen_w,
+                screen_h,
+                x,
+                y,
+                scale,
+                "floating window position calculated"
+            );
             builder = builder.position(x, y);
         } else {
             tracing::warn!("no primary monitor detected for floating window positioning");
@@ -114,6 +134,9 @@ impl BoundaryWindow {
             window.set_size(size).map_err(|error| {
                 InternalError::Unknown(format!("size boundary window: {error}"))
             })?;
+            window.set_content_protected(true).map_err(|error| {
+                InternalError::Unknown(format!("protect boundary window from capture: {error}"))
+            })?;
             let _ = window.set_ignore_cursor_events(true);
             let _ = window.show();
             return Ok(());
@@ -139,6 +162,7 @@ impl BoundaryWindow {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
+        .content_protected(true)
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false)
@@ -211,6 +235,7 @@ impl CountdownWindow {
                 .decorations(false)
                 .transparent(true)
                 .always_on_top(true)
+                .content_protected(true)
                 .skip_taskbar(true)
                 .resizable(false)
                 .shadow(false)

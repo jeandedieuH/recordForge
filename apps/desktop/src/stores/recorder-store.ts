@@ -31,12 +31,23 @@ import {
   stopRecording,
 } from "../lib/recorder"
 import { toErrorMessage } from "../lib/errors"
+import { prepareRecordingMedia } from "../lib/media"
 import { getSetting, isTauri } from "../lib/settings"
 
 // Transport action currently in flight. Used for granular per-button pending
 // feedback (e.g. "Stopping..." on Stop while FFmpeg flushes) instead of a single
 // global `isLoading` that blocks every transport button at once.
 export type TransportAction = "start" | "pause" | "resume" | "stop"
+
+async function queueMediaPreparation(recordingId: string): Promise<boolean> {
+  try {
+    await prepareRecordingMedia(recordingId)
+    return true
+  } catch {
+    // A saved original remains usable when the optional derivative job cannot start.
+    return false
+  }
+}
 
 interface RecorderStore {
   sources: CaptureSource[]
@@ -62,9 +73,10 @@ interface RecorderStore {
   // Which transport action is currently in flight, for per-button feedback.
   pendingAction: TransportAction | null
   error: string | null
-  // Brief confirmation shown after a recording is saved to the library, so the
-  // user knows stop succeeded even though the UI just returns to "Ready".
+  // Brief confirmation shown after a recording is saved to the library.
   saveMessage: string | null
+  // The durable library ID created by the latest successful stop.
+  completedRecordingId: string | null
 
   setSelectedSource: (source: CaptureSource | null) => void
   setSelectedProfileId: (profile: RecordingConfig["profile"]) => void
@@ -73,10 +85,13 @@ interface RecorderStore {
   setSelectedWebcamId: (id: string) => void
   clearError: () => void
   clearSaveMessage: () => void
+  clearCompletedRecording: () => void
   // Directly replace the recorder status. Used by the `recorder-status` Tauri
   // event listener so global-shortcut and tray actions update the UI instantly
   // without an extra `recording_status` IPC round-trip.
   setStatus: (status: RecordingStatus) => void
+  setCompletedRecordingId: (recordingId: string) => void
+  queuePreparation: (recordingId: string) => Promise<boolean>
 
   loadSources: () => Promise<void>
   loadAudioDevices: () => Promise<void>
@@ -119,6 +134,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   pendingAction: null,
   error: null,
   saveMessage: null,
+  completedRecordingId: null,
 
   setSelectedSource: (source) => set({ selectedSource: source }),
   setSelectedProfileId: (profile) => set({ selectedProfileId: profile }),
@@ -127,7 +143,16 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   setSelectedWebcamId: (id) => set({ selectedWebcamId: id }),
   clearError: () => set({ error: null }),
   clearSaveMessage: () => set({ saveMessage: null }),
+  clearCompletedRecording: () => set({ completedRecordingId: null }),
   setStatus: (status) => set({ status, error: null }),
+  setCompletedRecordingId: (recordingId) => set({ completedRecordingId: recordingId }),
+  queuePreparation: async (recordingId) => {
+    const started = await queueMediaPreparation(recordingId)
+    if (!started) {
+      set({ saveMessage: "The original source is ready; preview preparation could not be queued." })
+    }
+    return started
+  },
 
   loadSources: async () => {
     try {
@@ -231,7 +256,14 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       return
     }
 
-    set({ isLoading: true, pendingAction: "start", error: null, markers: [], saveMessage: null })
+    set({
+      isLoading: true,
+      pendingAction: "start",
+      error: null,
+      markers: [],
+      saveMessage: null,
+      completedRecordingId: null,
+    })
     try {
       const config: RecordingConfig = {
         source,
@@ -281,21 +313,29 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
     // Stop button itself rather than freezing the whole transport row.
     set({ isLoading: true, pendingAction: "stop", error: null })
     try {
+      const sessionId = get().status?.sessionId
       const stats = await stopRecording()
       const status = await getRecordingStatus()
-      set({ status, isLoading: false, pendingAction: null })
 
-      // Refresh the library so the new recording appears immediately. The
-      // library view only loads on mount, so without this the user would stop
-      // a recording and see "nothing happen" even though it was saved.
+      // Refresh the library before publishing completion so the shell can open
+      // the exact recording created by this session instead of guessing by date.
       const { useLibraryStore } = await import("../features/library/use-library")
       await useLibraryStore.getState().load()
+      const recordings = useLibraryStore.getState().recordings
+      const completedRecordingId = sessionId
+        ? (recordings.find((recording) => recording.sessionId === sessionId)?.id ?? null)
+        : null
 
-      // Show a brief confirmation with duration so the user knows it worked.
       const seconds = Math.round((stats.durationMs ?? 0) / 1000)
       const sizeMb = ((stats.outputSizeBytes ?? 0) / (1024 * 1024)).toFixed(1)
       set({
-        saveMessage: `Recording saved (${seconds}s, ${sizeMb} MB). View it in the Library tab.`,
+        status,
+        isLoading: false,
+        pendingAction: null,
+        completedRecordingId,
+        saveMessage: completedRecordingId
+          ? `Recording saved (${seconds}s, ${sizeMb} MB). Opening the editor…`
+          : `Recording saved (${seconds}s, ${sizeMb} MB). Open it from the Library.`,
       })
     } catch (error) {
       set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
@@ -314,9 +354,15 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   recover: async (sessionId) => {
     set({ isLoading: true, error: null })
     try {
-      await recoverSession(sessionId)
+      const recording = await recoverSession(sessionId)
+      const preparationStarted = await get().queuePreparation(recording.id)
       await get().loadRecovery()
-      set({ isLoading: false })
+      set({
+        isLoading: false,
+        saveMessage: preparationStarted
+          ? "Recording recovered. Preview preparation is running in the background."
+          : "Recording recovered. The original source is ready; preview preparation could not be queued.",
+      })
     } catch (error) {
       set({ error: toErrorMessage(error), isLoading: false })
       throw error

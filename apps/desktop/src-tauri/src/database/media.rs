@@ -1,7 +1,7 @@
 use chrono::Utc;
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::errors::{InternalError, Result};
 
@@ -142,6 +142,9 @@ pub struct MediaStream {
     pub index: i32,
     pub kind: String,
     pub codec: String,
+    pub title: Option<String>,
+    pub start_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub codec_long_name: Option<String>,
     pub width: Option<i32>,
     pub height: Option<i32>,
@@ -221,6 +224,28 @@ pub fn insert_job(conn: &Connection, recording_id: &str, kind: MediaJobKind) -> 
         completed_at: None,
         outputs: MediaJobOutputs::default(),
     })
+}
+
+/// Return an existing prepare job that can satisfy a non-forced request.
+pub fn find_reusable_prepare_job(
+    conn: &Connection,
+    recording_id: &str,
+) -> Result<Option<MediaJob>> {
+    Ok(list_jobs(conn, recording_id)?.into_iter().find(|job| {
+        if job.kind != MediaJobKind::Prepare {
+            return false;
+        }
+
+        match job.status {
+            MediaJobStatus::Pending | MediaJobStatus::Running => true,
+            MediaJobStatus::Completed => job
+                .outputs
+                .proxy_path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).is_file()),
+            MediaJobStatus::Failed | MediaJobStatus::Cancelled => false,
+        }
+    }))
 }
 
 /// Mark a pending job as running.
@@ -546,4 +571,47 @@ fn row_to_derivative(row: &Row<'_>) -> std::result::Result<DerivativeFile, rusql
         size_bytes: row.get::<_, i64>("size_bytes")? as u64,
         created_at: row.get("created_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::migrations::run_migrations;
+
+    #[test]
+    fn finds_only_reusable_prepare_jobs() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+
+        let pending = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
+            .expect("insert pending prepare job");
+        assert_eq!(
+            find_reusable_prepare_job(&conn, "recording-1")
+                .expect("find pending job")
+                .map(|job| job.id),
+            Some(pending.id.clone())
+        );
+
+        fail_job(&conn, &pending.id, "test failure").expect("fail prepare job");
+        assert!(find_reusable_prepare_job(&conn, "recording-1")
+            .expect("find failed job")
+            .is_none());
+
+        let completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
+            .expect("insert completed prepare job");
+        let temp_dir = tempfile::tempdir().expect("create derivative directory");
+        let proxy_path = temp_dir.path().join("proxy.mp4");
+        std::fs::write(&proxy_path, b"proxy").expect("write proxy fixture");
+        let outputs = MediaJobOutputs {
+            proxy_path: Some(proxy_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        complete_job(&conn, &completed.id, &outputs).expect("complete prepare job");
+        assert_eq!(
+            find_reusable_prepare_job(&conn, "recording-1")
+                .expect("find completed job")
+                .map(|job| job.id),
+            Some(completed.id)
+        );
+    }
 }

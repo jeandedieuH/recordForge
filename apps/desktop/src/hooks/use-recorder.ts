@@ -1,6 +1,6 @@
 import { useEffect } from "react"
 import { listen } from "@tauri-apps/api/event"
-import { recordingStatusSchema } from "@recordforge/contracts"
+import { recordingCompletedSchema, recordingStatusSchema } from "@recordforge/contracts"
 import { useRecorderStore } from "../stores/recorder-store"
 
 // Re-export the recorder Zustand store so the rest of the app can subscribe
@@ -36,12 +36,14 @@ export function useRecorderPolling(intervalMs = 1000) {
 // Mount this once near the root of each window that shows recorder state.
 export function useRecorderStatusEvents() {
   const setStatus = useRecorderStore((s) => s.setStatus)
+  const setCompletedRecordingId = useRecorderStore((s) => s.setCompletedRecordingId)
   const refreshStatus = useRecorderStore((s) => s.refreshStatus)
 
   useEffect(() => {
     // `listen` returns an unlisten function; the Tauri event payload is wrapped
     // in an `event.payload` field.
     let unlisten: (() => void) | undefined
+    let unlistenCompleted: (() => void) | undefined
     let active = true
 
     listen<unknown>("recorder-status", (event) => {
@@ -56,9 +58,21 @@ export function useRecorderStatusEvents() {
       }
     })
 
+    listen<unknown>("recording-completed", (event) => {
+      const parsed = recordingCompletedSchema.safeParse(event.payload)
+      if (parsed.success) setCompletedRecordingId(parsed.data.recordingId)
+    }).then((fn) => {
+      if (active) {
+        unlistenCompleted = fn
+      } else {
+        fn()
+      }
+    })
+
     return () => {
       active = false
       unlisten?.()
+      unlistenCompleted?.()
     }
-  }, [refreshStatus, setStatus])
+  }, [refreshStatus, setCompletedRecordingId, setStatus])
 }
