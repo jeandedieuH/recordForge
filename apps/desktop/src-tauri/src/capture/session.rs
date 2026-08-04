@@ -722,3 +722,60 @@ pub struct RecordingStatus {
     pub recorded_ms: u64,
     pub error: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::source::{Bounds, CaptureSource};
+
+    #[test]
+    fn cancel_prepared_session_removes_pending_capture_and_work_dir() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let db = Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().expect("create in-memory database"),
+        ));
+        let recorder = Recorder::new(
+            PathBuf::from("ffmpeg-not-installed"),
+            PathBuf::from("ffprobe-not-installed"),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "display".into(),
+                id: "display-0".into(),
+                name: "Display 1".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "low-impact".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare countdown session");
+        assert_eq!(
+            recorder.status().expect("read pending status").state,
+            RecorderState::Countdown
+        );
+        assert!(temp_dir.path().join(&session_id).exists());
+
+        recorder
+            .cancel_prepared(&session_id)
+            .expect("cancel countdown session");
+
+        assert_eq!(
+            recorder.status().expect("read idle status").state,
+            RecorderState::Idle
+        );
+        assert!(!temp_dir.path().join(session_id).exists());
+    }
+}

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Video, X } from "lucide-react"
-import { Button } from "@recordforge/ui"
+import { Video } from "lucide-react"
 
 interface CountdownOverlayProps {
   seconds?: number
@@ -103,17 +102,10 @@ export function CountdownOverlay({
         </div>
       </div>
 
-      {/* Actions */}
+      {/* The native countdown surface is click-through so it cannot block the desktop. */}
       {onCancel ? (
-        <div className="mt-8 flex flex-col items-center gap-2">
-          <Button
-            variant="secondary"
-            onClick={handleCancel}
-            className="flex items-center gap-2 rounded-full border border-white/20 bg-white/10 text-xs font-semibold text-white hover:bg-white/20 hover:text-white cursor-pointer px-5 py-2"
-          >
-            <X className="size-3.5" />
-            <span>Cancel Recording (Esc)</span>
-          </Button>
+        <div className="mt-8 rounded-full border border-white/20 bg-white/10 px-5 py-2 text-xs font-semibold text-white/90">
+          Press Esc or Ctrl+Shift+R to cancel
         </div>
       ) : null}
     </div>

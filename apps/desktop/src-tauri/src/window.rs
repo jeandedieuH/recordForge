@@ -202,21 +202,32 @@ impl CountdownWindow {
             query_component(source_name),
         );
 
-        tauri::WebviewWindowBuilder::new(app, "countdown", tauri::WebviewUrl::App(url.into()))
-            .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'countdown';")
-            .title("recordForge Starting Recording")
-            .inner_size(logical_size.width, logical_size.height)
-            .position(logical_position.x, logical_position.y)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .shadow(false)
-            .build()
-            .map_err(|error| {
-                InternalError::Unknown(format!("create countdown window: {error:?}"))
-            })?;
+        let window =
+            tauri::WebviewWindowBuilder::new(app, "countdown", tauri::WebviewUrl::App(url.into()))
+                .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'countdown';")
+                .title("recordForge Starting Recording")
+                .inner_size(logical_size.width, logical_size.height)
+                .position(logical_position.x, logical_position.y)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                .shadow(false)
+                .build()
+                .map_err(|error| {
+                    InternalError::Unknown(format!("create countdown window: {error:?}"))
+                })?;
+
+        // A blank or stalled countdown must never become a full-screen input trap.
+        if let Err(error) = window.set_ignore_cursor_events(true) {
+            let _ = window.close();
+            return Err(InternalError::Unknown(format!(
+                "make countdown window click-through: {error:?}"
+            ))
+            .into());
+        }
+        let _ = window.set_focus();
 
         Ok(())
     }
@@ -269,4 +280,17 @@ fn query_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_component;
+
+    #[test]
+    fn query_component_preserves_window_query_boundaries() {
+        assert_eq!(
+            query_component("Display 1 & 100%"),
+            "Display%201%20%26%20100%25"
+        );
+    }
 }

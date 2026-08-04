@@ -135,32 +135,36 @@ pub(crate) fn emit_current_status(app: &tauri::AppHandle, state: &AppState) {
 
 #[tauri::command]
 #[instrument]
-pub fn start_recording(
+pub async fn start_recording(
     config: RecordingConfig,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String> {
-    if let Ok(mut guard) = state.quick_config.lock() {
-        *guard = Some(config.clone());
-    }
-
     let session_id = {
         let guard = state
             .recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.start(config.clone())?
+        guard.prepare(config.clone())?
     };
+    remember_quick_config(&state, config.clone());
 
-    MainWindow::minimize(&app)?;
-    open_recording_windows(&app, config.source.bounds);
+    if let Err(error) = MainWindow::minimize(&app) {
+        abort_prepared_start(&app, &state, &session_id);
+        return Err(error);
+    }
+    if let Err(error) = start_prepared_session(&app, &state, &session_id, config.source.bounds) {
+        abort_prepared_start(&app, &state, &session_id);
+        return Err(error);
+    }
+
     emit_current_status(&app, &state);
     Ok(session_id)
 }
 
 #[tauri::command]
 #[instrument]
-pub fn prepare_recording(
+pub async fn prepare_recording(
     config: RecordingConfig,
     countdown_seconds: u8,
     app: tauri::AppHandle,
@@ -168,9 +172,6 @@ pub fn prepare_recording(
 ) -> Result<String> {
     if !matches!(countdown_seconds, 0 | 3 | 5) {
         return Err(InternalError::Capture("countdown must be 0, 3, or 5 seconds".into()).into());
-    }
-    if let Ok(mut guard) = state.quick_config.lock() {
-        *guard = Some(config.clone());
     }
 
     let session_id = {
@@ -180,16 +181,17 @@ pub fn prepare_recording(
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
         guard.prepare(config.clone())?
     };
+    remember_quick_config(&state, config.clone());
 
     if let Err(error) = MainWindow::minimize(&app) {
-        let _ = cancel_prepared_session(&state, &session_id);
+        abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
 
     if countdown_seconds == 0 {
         if let Err(error) = start_prepared_session(&app, &state, &session_id, config.source.bounds)
         {
-            let _ = MainWindow::restore(&app);
+            abort_prepared_start(&app, &state, &session_id);
             return Err(error);
         }
     } else if let Err(error) = CountdownWindow::open_or_focus(
@@ -199,8 +201,7 @@ pub fn prepare_recording(
         &config.source.name,
         config.source.bounds,
     ) {
-        let _ = cancel_prepared_session(&state, &session_id);
-        let _ = MainWindow::restore(&app);
+        abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
 
@@ -210,16 +211,21 @@ pub fn prepare_recording(
 
 #[tauri::command]
 #[instrument]
-pub fn confirm_recording_start(
+pub async fn confirm_recording_start(
     session_id: String,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<()> {
-    let bounds = quick_config_bounds(&state)?;
+    let bounds = match quick_config_bounds(&state) {
+        Ok(bounds) => bounds,
+        Err(error) => {
+            abort_prepared_start(&app, &state, &session_id);
+            return Err(error);
+        }
+    };
+
     if let Err(error) = start_prepared_session(&app, &state, &session_id, bounds) {
-        CountdownWindow::hide(&app);
-        let _ = MainWindow::restore(&app);
-        emit_current_status(&app, &state);
+        abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
     CountdownWindow::hide(&app);
@@ -229,16 +235,18 @@ pub fn confirm_recording_start(
 
 #[tauri::command]
 #[instrument]
-pub fn cancel_recording_start(
+pub async fn cancel_recording_start(
     session_id: String,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<()> {
-    cancel_prepared_session(&state, &session_id)?;
-    CountdownWindow::hide(&app);
-    MainWindow::restore(&app)?;
-    emit_current_status(&app, &state);
-    Ok(())
+    cancel_prepared_recording(&app, &state, &session_id)
+}
+
+fn remember_quick_config(state: &AppState, config: RecordingConfig) {
+    if let Ok(mut guard) = state.quick_config.lock() {
+        *guard = Some(config);
+    }
 }
 
 fn quick_config_bounds(state: &AppState) -> Result<crate::capture::source::Bounds> {
@@ -252,20 +260,61 @@ fn quick_config_bounds(state: &AppState) -> Result<crate::capture::source::Bound
         .ok_or_else(|| InternalError::Capture("recording source is unavailable".into()).into())
 }
 
+fn abort_prepared_start(app: &tauri::AppHandle, state: &AppState, session_id: &str) {
+    if let Err(error) = cancel_prepared_session(state, session_id) {
+        tracing::debug!(error = ?error, "prepared recording was already past cancellation");
+    }
+    cleanup_recording_windows(app);
+    if let Err(error) = MainWindow::restore(app) {
+        tracing::error!(error = ?error, "failed to restore main window after recording startup failure");
+    }
+    emit_current_status(app, state);
+}
+
+fn cancel_prepared_recording(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    session_id: &str,
+) -> Result<()> {
+    let cancel_result = cancel_prepared_session(state, session_id);
+    cleanup_recording_windows(app);
+    let restore_result = MainWindow::restore(app);
+    emit_current_status(app, state);
+
+    match cancel_result {
+        Ok(()) => restore_result,
+        Err(error) => Err(error),
+    }
+}
+
+fn cleanup_recording_windows(app: &tauri::AppHandle) {
+    FloatingWindow::hide(app);
+    BoundaryWindow::hide(app);
+    CountdownWindow::hide(app);
+}
+
 fn start_prepared_session(
     app: &tauri::AppHandle,
     state: &AppState,
     session_id: &str,
     bounds: crate::capture::source::Bounds,
 ) -> Result<()> {
-    {
+    // Build auxiliary windows before starting capture so a missing control path
+    // aborts startup instead of leaving an active, uncontrollable recording.
+    open_recording_windows(app, bounds)?;
+
+    let result = {
         let guard = state
             .recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.start_prepared(session_id)?;
+        guard.start_prepared(session_id)
+    };
+    if let Err(error) = result {
+        cleanup_recording_windows(app);
+        return Err(error);
     }
-    open_recording_windows(app, bounds);
+
     Ok(())
 }
 
@@ -277,13 +326,72 @@ fn cancel_prepared_session(state: &AppState, session_id: &str) -> Result<()> {
     guard.cancel_prepared(session_id)
 }
 
-fn open_recording_windows(app: &tauri::AppHandle, bounds: crate::capture::source::Bounds) {
-    if let Err(error) = FloatingWindow::open_or_focus(app) {
-        tracing::warn!(error = ?error, "failed to open floating controls");
-    }
+fn open_recording_windows(
+    app: &tauri::AppHandle,
+    bounds: crate::capture::source::Bounds,
+) -> Result<()> {
+    FloatingWindow::open_or_focus(app)?;
     if let Err(error) = BoundaryWindow::open_or_focus(app, bounds) {
-        tracing::warn!(error = ?error, "failed to open capture boundary");
+        FloatingWindow::hide(app);
+        BoundaryWindow::hide(app);
+        return Err(error);
     }
+    Ok(())
+}
+
+pub(crate) fn open_recording_windows_async(
+    app: &tauri::AppHandle,
+    bounds: crate::capture::source::Bounds,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if !recording_is_active(&app) {
+            return;
+        }
+        if let Err(error) = open_recording_windows(&app, bounds) {
+            tracing::error!(error = ?error, "failed to open recording control windows");
+            if recording_is_active(&app) {
+                stop_after_window_failure(&app);
+            }
+            return;
+        }
+        if !recording_is_active(&app) {
+            cleanup_recording_windows(&app);
+        }
+    });
+}
+
+fn recording_is_active(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    state
+        .recorder
+        .lock()
+        .ok()
+        .and_then(|guard| guard.status().ok())
+        .map(|status| {
+            matches!(
+                status.state,
+                capture::manifest::RecorderState::Recording
+                    | capture::manifest::RecorderState::Paused
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn stop_after_window_failure(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if let Ok(guard) = state.recorder.lock() {
+        if let Err(error) = guard.stop() {
+            tracing::warn!(error = ?error, "failed to stop recording after control window failure");
+        }
+    } else {
+        tracing::error!("recorder state mutex poisoned after control window failure");
+    }
+    cleanup_recording_windows(app);
+    if let Err(error) = MainWindow::restore(app) {
+        tracing::error!(error = ?error, "failed to restore main window after control window failure");
+    }
+    emit_current_status(app, &state);
 }
 
 #[tauri::command]
@@ -636,7 +744,7 @@ pub fn export_recording(options: ExportOptions, state: State<'_, AppState>) -> R
 /// Open a small always-on-top floating window for transport controls.
 #[tauri::command]
 #[instrument]
-pub fn open_floating_controls(app: tauri::AppHandle) -> Result<()> {
+pub async fn open_floating_controls(app: tauri::AppHandle) -> Result<()> {
     crate::window::FloatingWindow::open_or_focus(&app)
 }
 
@@ -651,7 +759,10 @@ pub fn hide_floating_controls(app: tauri::AppHandle) -> Result<()> {
 /// Open a transparent always-on-top fullscreen window for capture boundary outline.
 #[tauri::command]
 #[instrument]
-pub fn open_boundary_overlay(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
+pub async fn open_boundary_overlay(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<()> {
     let bounds = quick_config_bounds(&state)?;
     BoundaryWindow::open_or_focus(&app, bounds)
 }

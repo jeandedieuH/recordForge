@@ -105,15 +105,10 @@ fn start_or_focus(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Res
     };
 
     if let Some(bounds) = bounds {
-        if let Err(error) = crate::window::FloatingWindow::open_or_focus(app) {
-            tracing::warn!(error = ?error, "tray start could not open floating controls");
-        }
-        if let Err(error) = crate::window::BoundaryWindow::open_or_focus(app, bounds) {
-            tracing::warn!(error = ?error, "tray start could not open capture boundary");
-        }
         if let Err(error) = crate::window::MainWindow::minimize(app) {
             tracing::warn!(error = ?error, "tray start could not minimize main window");
         }
+        crate::commands::recording::open_recording_windows_async(app, bounds);
     } else if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();

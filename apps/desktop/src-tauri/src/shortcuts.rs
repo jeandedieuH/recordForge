@@ -49,6 +49,7 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     enum Action {
         Started(crate::capture::source::Bounds),
         Stopped,
+        Aborted,
         None,
     }
 
@@ -76,6 +77,10 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
                 guard.stop().map(|_| ())?;
                 Action::Stopped
             }
+            RecorderState::Countdown => {
+                guard.cancel_prepared(&status.session_id)?;
+                Action::Aborted
+            }
             _ => Action::None,
         }
         // guard is dropped here — safe to do window operations below
@@ -84,21 +89,17 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     // Open or close auxiliary windows outside the recorder lock
     match action {
         Action::Started(bounds) => {
-            if let Err(error) = crate::window::FloatingWindow::open_or_focus(app) {
-                tracing::warn!(error = ?error, "shortcut start could not open floating controls");
-            }
-            if let Err(error) = crate::window::BoundaryWindow::open_or_focus(app, bounds) {
-                tracing::warn!(error = ?error, "shortcut start could not open capture boundary");
-            }
             if let Err(error) = crate::window::MainWindow::minimize(app) {
                 tracing::warn!(error = ?error, "shortcut start could not minimize main window");
             }
+            crate::commands::recording::open_recording_windows_async(app, bounds);
         }
-        Action::Stopped => {
+        Action::Stopped | Action::Aborted => {
             crate::window::FloatingWindow::hide(app);
             crate::window::BoundaryWindow::hide(app);
+            crate::window::CountdownWindow::hide(app);
             if let Err(error) = crate::window::MainWindow::restore(app) {
-                tracing::warn!(error = ?error, "shortcut stop could not restore main window");
+                tracing::warn!(error = ?error, "shortcut action could not restore main window");
             }
         }
         Action::None => {}
