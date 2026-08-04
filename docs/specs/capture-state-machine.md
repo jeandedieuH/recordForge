@@ -1,6 +1,6 @@
 # Capture State Machine Specification
 
-> **Status:** Draft — Phase 0  
+> **Status:** Implemented baseline — Windows capture lifecycle
 > **Scope:** Defines the formal recorder state machine for recordForge V1  
 > **Owner:** Rust `capture` module
 
@@ -81,23 +81,24 @@ stateDiagram-v2
 ## 4. Invariants
 
 1. **Single active session**: Only one recording session can be active at a time. Attempting to start while not `idle` returns an error.
-2. **Unified entry points**: All four start paths (UI button, tray menu, global shortcut, floating controls) must go through the same `start → countdown → recording` flow. No entry point may bypass the countdown.
-3. **Countdown is Rust-owned**: The countdown timer runs in Rust, not React, to prevent JS event loop delays from causing timing inconsistency.
-4. **State is authoritative in Rust**: The React UI receives state updates via Tauri events but never directly sets the recorder state. All state transitions are initiated by Rust commands.
-5. **Manifest is always current**: Every state transition writes the updated manifest to disk before returning to the caller.
-6. **Forced exit safety**: If the process is killed during `recording` or `paused`, the manifest on disk reflects the last known state. On next startup, a scan identifies sessions not in `completed` or `idle` state.
+2. **UI start is two-phase**: The main UI uses `prepare_recording` → `confirm_recording_start`; the durable session enters `countdown` before FFmpeg starts and Escape calls `cancel_recording_start`.
+3. **Countdown window is native-owned**: Rust creates and positions the countdown webview while the recorder remains in `countdown`; React renders only the existing visual countdown.
+4. **State is authoritative in Rust**: React receives validated status events and never directly sets recorder state. All capture transitions are initiated by Rust commands.
+5. **Manifest is durable**: State, fragment, marker, and finalization updates use an atomic temporary file, file sync, and Windows replacement semantics.
+6. **Forced exit safety**: Fragmented MP4 output and physical segment scanning preserve interrupted capture candidates, including a first segment that was not cleanly finalized.
+7. **Completion is idempotent**: SQLite insertion is transactional and keyed by `session_id`, so retrying stop/recovery cannot create duplicate library rows.
 
 ---
 
-## 5. Current Implementation Gaps
+## 5. Implemented Baseline and Remaining Work
 
-| Gap | Current Behavior | Required Behavior |
-|-----|------------------|-------------------|
-| Countdown bypass | Titlebar start skips countdown, immediately calls `start_recording` | All paths → countdown → recording |
-| `finalizing` state | `stop()` sets `Completed` immediately after concat | `stop()` → `Finalizing` → validate → insert → `Completed` |
-| Startup reconciliation | No check on startup | Scan sessions dir, mark incomplete sessions as `recovery-required` |
-| State emission | Emitted after start/stop but not during countdown/finalization | Emit on every state transition |
-| Force-quit manifest | Manifest may not reflect `recording` state if write is deferred | Periodic manifest writes during recording (every segment rollover) |
+| Area | Implemented baseline | Remaining follow-up |
+|-----|---------------------|--------------------|
+| UI countdown | `prepare_recording` creates a durable `countdown` session, minimizes the main window, and opens a dedicated countdown webview | Route tray/global-shortcut start through the same settings-backed countdown flow |
+| Finalization | `stop()` writes `finalizing`, flushes FFmpeg, validates media, atomically publishes `output.mp4`, inserts SQLite metadata, then writes `completed` | Add background progress events for long concatenation/probe work |
+| Startup reconciliation | The Library view scans `sessions/` and renders actual recovery candidates | Optional startup event can remove the need for Library view mounting before surfacing the banner |
+| State emission | Prepare, confirm, cancel, pause, resume, and stop emit compact status payloads; the boundary/floating windows validate status events | Add explicit progress percentage during finalization |
+| Force-quit recovery | Fragmented MP4 plus physical `seg_*.mp4` discovery supports recovery of an unclean current segment | Add periodic segment rollover for bounded loss on very long recordings |
 
 ---
 
@@ -120,7 +121,7 @@ Segment N opened → FFmpeg writing frames
         └── [Force-quit] Segment N may be truncated; all prior segments are validated
 ```
 
-### Current gap: Segments are only created on pause/resume. A force-quit during the first continuous recording loses everything because the first segment is never independently finalized.
+The baseline keeps the active segment in fragmented MP4 form and recovery scans the session directory directly, so a force-quit during the first continuous segment remains a recovery candidate when FFmpeg left a readable fragment. Periodic rollover is still planned for bounded-loss guarantees on very long recordings.
 
 ---
 

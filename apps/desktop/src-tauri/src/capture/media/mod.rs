@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tracing::{info, instrument};
 
+use super::disk;
+
 /// Concatenate finalized segment files into a single MP4.
 ///
 /// For a single segment this is a filesystem copy. For multiple segments an
@@ -19,10 +21,17 @@ pub fn concatenate_segments(
         );
     }
 
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::errors::InternalError::Storage(format!("create concat output dir: {e}"))
+        })?;
+    }
+
     if segment_files.len() == 1 {
         std::fs::copy(&segment_files[0], output_path).map_err(|e| {
             crate::errors::InternalError::Media(format!("copy single segment: {e}"))
         })?;
+        disk::sync_file(output_path)?;
         return Ok(());
     }
 
@@ -49,7 +58,8 @@ pub fn concatenate_segments(
 
     let output = Command::new(ffmpeg_path)
         .arg("-y")
-        .args(["-fflags", "+genpts"])
+        .args(["-fflags", "+genpts+igndts"])
+        .args(["-avoid_negative_ts", "make_zero"])
         .args(["-f", "concat", "-safe", "0", "-i"])
         .arg(&list_path)
         .args(["-c", "copy", "-movflags", "+faststart"])
@@ -62,6 +72,7 @@ pub fn concatenate_segments(
         return Err(crate::errors::InternalError::Media(format!("concat failed: {stderr}")).into());
     }
 
+    disk::sync_file(output_path)?;
     Ok(())
 }
 

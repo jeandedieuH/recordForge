@@ -8,6 +8,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "theme",
     "windowTransparency",
     "countdownSeconds",
+    "startMinimized",
     "sidebarCollapsed",
 ];
 

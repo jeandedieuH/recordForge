@@ -1,6 +1,6 @@
 # Recovery and Session Format Specification
 
-> **Status:** Draft — Phase 0  
+> **Status:** Implemented baseline — fragmented MP4 recovery
 > **Scope:** On-disk session format, manifest schema, fragment lifecycle, recovery protocol  
 > **Owner:** Rust `capture::manifest`, `capture::recovery`, `capture::session`
 
@@ -110,12 +110,13 @@ stateDiagram-v2
 ## 4. Manifest Write Protocol
 
 ### Atomic writes
-The manifest is written atomically using a temp-file + rename pattern:
+The manifest is written atomically using a temp-file + durable replacement pattern:
 1. Serialize to JSON pretty-print
 2. Write to `session.json.tmp`
-3. Rename `session.json.tmp` → `session.json`
+3. Flush the temporary file to disk
+4. Replace `session.json` with Windows `ReplaceFileW` when the destination exists, or rename on first write
 
-On Windows, `std::fs::rename` is atomic within the same volume.
+This avoids the Windows overwrite failure mode of a plain `std::fs::rename` and leaves no temporary file after a successful write.
 
 ### Write triggers
 The manifest MUST be written on every state transition:
@@ -127,10 +128,7 @@ The manifest MUST be written on every state transition:
 - Marker added
 - Stats updated
 
-### Current gap
-The manifest is written during state transitions, but there is no periodic write during continuous recording. If FFmpeg is killed during the first segment before any rollover, the manifest reflects `Recording` state but the only fragment has `validated: false`, making recovery impossible.
-
-**Required fix (Phase 2):** Periodic segment rollover (e.g., every 30 seconds) during continuous recording, independent of pause/resume.
+The active fragment is written with fragmented MP4 flags (`empty_moov`, `default_base_moof`, and keyframe fragmentation). Recovery therefore scans physical `seg_*.mp4` files in addition to manifest fragments, allowing an interrupted first segment to be offered for recovery when its container remains readable. Periodic segment rollover remains a follow-up for bounded-loss guarantees.
 
 ---
 
@@ -160,13 +158,13 @@ for each session_dir in sessions/:
 
 ### 5.3 Recovery Execution
 
-1. Collect all fragments where `validated == true && sizeBytes > 0`
-2. Sort by `index`
-3. Create FFmpeg concat demuxer file
-4. Run `ffmpeg -f concat -safe 0 -i list.txt -c copy output.mp4`
-5. Validate output with FFprobe
-6. Update manifest: `state → Completed`, `outputPath → output.mp4`
-7. Insert into library database as `recovered` status
+1. Collect manifest fragments and physical `seg_*.mp4` files that are inside the session directory and larger than 1 KB
+2. Sort by numeric segment index
+3. Validate candidate fragments with FFmpeg before concatenation
+4. Create an `output.partial.mp4` concat result and atomically publish `output.mp4`
+5. Validate the published output with FFmpeg
+6. Write `finalizing` metadata, insert the session idempotently into SQLite as `recovered`, then write `state → Completed`
+7. A retry returns the existing row for the same `session_id` rather than creating a duplicate
 
 ### 5.4 Recovery Deletion
 

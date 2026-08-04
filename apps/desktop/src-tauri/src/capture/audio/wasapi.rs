@@ -17,15 +17,13 @@ pub struct WasapiDeviceInfo {
 
 /// Enumerate WASAPI capture devices (microphones & system loopback render endpoints).
 pub fn enumerate_wasapi_devices() -> Result<Vec<WasapiDeviceInfo>> {
-    let mut devices = Vec::new();
-
     // Built-in default loopback endpoint description
-    devices.push(WasapiDeviceInfo {
+    let devices = vec![WasapiDeviceInfo {
         id: "wasapi-loopback-default".into(),
         name: "System Audio (WASAPI Loopback)".into(),
         is_default: true,
         is_loopback: true,
-    });
+    }];
 
     Ok(devices)
 }

@@ -32,7 +32,10 @@ pub fn generate_thumbnails(
         .map_err(|e| InternalError::Storage(format!("create thumbnail dir: {e}")))?;
 
     if metadata.duration_ms == 0 {
-        return Err(InternalError::Media("cannot generate thumbnails for zero-duration video".into()).into());
+        return Err(InternalError::Media(
+            "cannot generate thumbnails for zero-duration video".into(),
+        )
+        .into());
     }
 
     let duration_sec = metadata.duration_ms as f64 / 1000.0;

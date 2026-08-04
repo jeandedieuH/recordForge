@@ -210,8 +210,13 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
 
         // Create old table with data
-        conn.execute("CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", []).unwrap();
-        conn.execute("INSERT INTO app_meta VALUES ('schema_version', '1')", []).unwrap();
+        conn.execute(
+            "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO app_meta VALUES ('schema_version', '1')", [])
+            .unwrap();
         conn.execute("CREATE TABLE recordings (id TEXT PRIMARY KEY, session_id TEXT, name TEXT, created_at TEXT, updated_at TEXT, duration_ms INTEGER, size_bytes INTEGER, width INTEGER, height INTEGER, fps INTEGER, status TEXT, tags TEXT, source TEXT, profile_name TEXT, output_path TEXT, work_dir TEXT, thumbnail_path TEXT, markers TEXT)", []).unwrap();
         conn.execute("INSERT INTO recordings (id, session_id, name, created_at, updated_at, source, profile_name, work_dir) VALUES ('rec-1', 's-1', 'My Rec', '2026', '2026', '{}', 'balanced', '/tmp')", []).unwrap();
 
@@ -219,10 +224,18 @@ mod tests {
         run_migrations(&mut conn).unwrap();
 
         // Verify data was PRESERVED
-        let count: i64 = conn.query_row("SELECT count(*) FROM recordings", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM recordings", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1, "Migration must preserve existing recordings");
 
-        let version: String = conn.query_row("SELECT value FROM app_meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(version, "4");
     }
 }

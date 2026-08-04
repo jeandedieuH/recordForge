@@ -1,42 +1,56 @@
-import { invoke } from "@tauri-apps/api/core"
-import type { ExportOptions, LibraryRecording, TrimOptions } from "@recordforge/contracts"
+import { z } from "zod"
+import {
+  exportOptionsSchema,
+  libraryRecordingSchema,
+  trimOptionsSchema,
+  type ExportOptions,
+  type LibraryRecording,
+  type TrimOptions,
+} from "@recordforge/contracts"
+import { invokeValidated } from "./ipc"
 
 export async function listRecordings(): Promise<LibraryRecording[]> {
-  return invoke("list_recordings")
+  return invokeValidated("list_recordings", undefined, z.array(libraryRecordingSchema))
 }
 
 export async function deleteRecording(recordingId: string): Promise<void> {
-  return invoke("delete_recording", { recordingId })
+  return invokeValidated<void>("delete_recording", { recordingId })
 }
 
 export async function revealRecording(recordingId: string): Promise<void> {
-  return invoke("reveal_recording", { recordingId })
+  return invokeValidated<void>("reveal_recording", { recordingId })
 }
 
 export async function addRecordingTag(recordingId: string, tag: string): Promise<void> {
-  return invoke("add_recording_tag", { recordingId, tag })
+  return invokeValidated<void>("add_recording_tag", { recordingId, tag })
 }
 
 export async function removeRecordingTag(recordingId: string, tag: string): Promise<void> {
-  return invoke("remove_recording_tag", { recordingId, tag })
+  return invokeValidated<void>("remove_recording_tag", { recordingId, tag })
 }
 
 export async function trimRecording(options: TrimOptions): Promise<LibraryRecording> {
-  return invoke("trim_recording", { options })
+  return invokeValidated(
+    "trim_recording",
+    { options: trimOptionsSchema.parse(options) },
+    libraryRecordingSchema,
+  )
 }
 
 export async function exportRecording(options: ExportOptions): Promise<void> {
-  return invoke("export_recording", { options })
+  return invokeValidated<void>("export_recording", {
+    options: exportOptionsSchema.parse(options),
+  })
 }
 
 export async function trashRecording(recordingId: string): Promise<void> {
-  return invoke("trash_recording", { recordingId })
+  return invokeValidated<void>("trash_recording", { recordingId })
 }
 
 export async function restoreRecording(recordingId: string): Promise<void> {
-  return invoke("restore_recording", { recordingId })
+  return invokeValidated<void>("restore_recording", { recordingId })
 }
 
 export async function emptyTrash(): Promise<void> {
-  return invoke("empty_trash")
+  return invokeValidated<void>("empty_trash")
 }

@@ -108,8 +108,8 @@ export type RecorderState = z.infer<typeof recorderStateSchema>
 export const recordingStatusSchema = z.object({
   sessionId: z.string(),
   state: recorderStateSchema,
-  startedAt: z.string().datetime().nullish(),
-  stoppedAt: z.string().datetime().nullish(),
+  startedAt: z.string().datetime({ offset: true }).nullish(),
+  stoppedAt: z.string().datetime({ offset: true }).nullish(),
   durationMs: z.number().int().min(0).default(0),
   recordedMs: z.number().int().min(0).default(0),
   error: z.string().nullish(),
@@ -122,7 +122,7 @@ export const recordingMarkerSchema = z.object({
   id: z.string(),
   label: z.string(),
   timestampMs: z.number().int().min(0),
-  createdAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
 })
 
 export type RecordingMarker = z.infer<typeof recordingMarkerSchema>
@@ -132,8 +132,8 @@ export type RecordingMarker = z.infer<typeof recordingMarkerSchema>
 export const recordingFragmentSchema = z.object({
   index: z.number().int().min(0),
   fileName: z.string(),
-  startedAt: z.string().datetime(),
-  stoppedAt: z.string().datetime().optional(),
+  startedAt: z.string().datetime({ offset: true }),
+  stoppedAt: z.string().datetime({ offset: true }).optional(),
   durationMs: z.number().int().min(0).optional(),
   // Size in bytes once the fragment has been finalized.
   sizeBytes: z.number().int().min(0).optional(),
@@ -149,8 +149,8 @@ export const recordingManifestSchema = z.object({
   version: z.literal(1),
   sessionId: z.string(),
   state: recorderStateSchema,
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
   // Redacted copy of the source and profile for recovery UI.
   source: captureSourceSchema,
   profileName: z.string(),
@@ -245,7 +245,7 @@ export type RecoveryScanResult = z.infer<typeof recoveryScanResultSchema>
 // Aggregate benchmark report used to choose the default profile/encoder.
 export const benchmarkReportSchema = z.object({
   id: z.string(),
-  createdAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
   platform: z.object({
     os: z.string(),
     ffmpegVersion: z.string(),
@@ -278,8 +278,8 @@ export const libraryRecordingSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
   name: z.string(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
   durationMs: z.number().int().min(0).default(0),
   sizeBytes: z.number().int().min(0).default(0),
   width: z.number().int().min(1),

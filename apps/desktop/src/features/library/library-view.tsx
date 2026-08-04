@@ -1,98 +1,17 @@
 import { useEffect, useMemo, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
-import { AlertTriangle, LayoutGrid, List, RotateCcw } from "lucide-react"
+import { LayoutGrid, List } from "lucide-react"
 import { Button, Input } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
+import { useRecorderStore } from "../../stores/recorder-store"
 import { useEditorStore } from "../../stores/editor-store"
 import { useJobsStore } from "../../stores/jobs-store"
 import { LibraryItemCard } from "./library-item-card"
 import { LibraryItemRow } from "./library-item-row"
 import { MediaJobsPanel } from "./media-jobs-panel"
 import { MediaPrepareDialog } from "./media-prepare-dialog"
+import { RecoveryBanner } from "./recovery-banner"
 import { useLibraryStore, type LibrarySort } from "./use-library"
-
-// Fallback recordings to match reference mockup when local DB is empty
-const dummySource = {
-  kind: "display" as const,
-  id: "disp-1",
-  name: "Display 1",
-  bounds: { x: 0, y: 0, width: 2560, height: 1440 },
-}
-
-const MOCK_RECORDINGS: LibraryRecording[] = [
-  {
-    id: "rec-1",
-    sessionId: "sess-1",
-    name: "API Endpoint Walkthrough...",
-    durationMs: 2712000, // 45:12
-    createdAt: "2024-05-20T10:30:00Z",
-    updatedAt: "2024-05-20T10:30:00Z",
-    status: "completed",
-    width: 2560,
-    height: 1440,
-    fps: 60,
-    sizeBytes: 1540000000,
-    source: dummySource,
-    profileName: "balanced",
-    workDir: "/recordings/rec-1",
-    tags: ["api"],
-    markers: [],
-  },
-  {
-    id: "rec-2",
-    sessionId: "sess-2",
-    name: "Q3 Architecture Review",
-    durationMs: 724000, // 12:04
-    createdAt: "2024-05-18T14:15:00Z",
-    updatedAt: "2024-05-18T14:15:00Z",
-    status: "completed",
-    width: 2560,
-    height: 1440,
-    fps: 60,
-    sizeBytes: 680000000,
-    source: dummySource,
-    profileName: "balanced",
-    workDir: "/recordings/rec-2",
-    tags: ["uploaded"],
-    markers: [],
-  },
-  {
-    id: "rec-3",
-    sessionId: "sess-3",
-    name: "Voiceover - Intro Scene",
-    durationMs: 225000, // 03:45
-    createdAt: "2024-05-15T09:00:00Z",
-    updatedAt: "2024-05-15T09:00:00Z",
-    status: "completed",
-    width: 1920,
-    height: 1080,
-    fps: 30,
-    sizeBytes: 45000000,
-    source: dummySource,
-    profileName: "balanced",
-    workDir: "/recordings/rec-3",
-    tags: ["audio"],
-    markers: [],
-  },
-  {
-    id: "rec-4",
-    sessionId: "sess-4",
-    name: "Client Onboarding Session...",
-    durationMs: 3502000, // 58:22
-    createdAt: "2024-05-12T16:45:00Z",
-    updatedAt: "2024-05-12T16:45:00Z",
-    status: "completed",
-    width: 2560,
-    height: 1440,
-    fps: 60,
-    sizeBytes: 2100000000,
-    source: dummySource,
-    profileName: "balanced",
-    workDir: "/recordings/rec-4",
-    tags: ["uploaded"],
-    markers: [],
-  },
-]
 
 function matchesSearch(recording: LibraryRecording, query: string) {
   if (!query) return true
@@ -130,8 +49,9 @@ export function LibraryView() {
   const store = useLibraryStore()
   const jobsStore = useJobsStore()
   const editorStore = useEditorStore()
+  const recovery = useRecorderStore((state) => state.recovery)
+  const loadRecovery = useRecorderStore((state) => state.loadRecovery)
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
-  const [showRecoveryBanner, setShowRecoveryBanner] = useState(true)
   const [trimTarget, setTrimTarget] = useState<LibraryRecording | null>(null)
   const [trimStart, setTrimStart] = useState("")
   const [trimEnd, setTrimEnd] = useState("")
@@ -140,9 +60,10 @@ export function LibraryView() {
 
   useEffect(() => {
     void useLibraryStore.getState().load()
-  }, [])
+    void loadRecovery()
+  }, [loadRecovery])
 
-  const recordingsToDisplay = store.recordings.length > 0 ? store.recordings : MOCK_RECORDINGS
+  const recordingsToDisplay = store.recordings
 
   const filtered = useMemo(() => {
     const searched = recordingsToDisplay.filter(
@@ -237,47 +158,7 @@ export function LibraryView() {
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto w-full">
-      {/* Incomplete / Recoverable Alert Banner */}
-      {showRecoveryBanner ? (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-warning uppercase tracking-wider font-label">
-            <AlertTriangle className="size-4" />
-            <span>Incomplete / Recoverable</span>
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl border border-border bg-surface p-4 shadow-sm">
-            <div className="flex items-center gap-3.5">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-overlay text-amber-400">
-                <RotateCcw className="size-5" />
-              </div>
-              <div className="flex flex-col">
-                <h3 className="font-mono text-sm font-semibold text-foreground">
-                  Untitled_Recording_2024-05-20.tmp
-                </h3>
-                <p className="text-xs text-subtle-foreground mt-0.5">
-                  Interrupted 2 hours ago • ~14:22 duration
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2.5 self-end sm:self-center">
-              <Button
-                variant="outline"
-                onClick={() => setShowRecoveryBanner(false)}
-                className="text-xs font-medium px-4 py-1.5"
-              >
-                Discard
-              </Button>
-              <Button
-                onClick={() => setShowRecoveryBanner(false)}
-                className="bg-tertiary hover:bg-tertiary-hover text-white text-xs font-medium px-4 py-1.5 rounded-lg border-0 shadow-sm"
-              >
-                Recover
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <RecoveryBanner sessions={recovery} onRecovered={() => void store.load()} />
 
       {/* Recent Recordings Section Header & Controls */}
       <div className="flex items-center justify-between">
@@ -379,7 +260,15 @@ export function LibraryView() {
       <MediaJobsPanel />
 
       {/* Grid or List of Recordings */}
-      {viewMode === "grid" ? (
+      {!store.isLoading && filtered.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border bg-surface p-10 text-center">
+          <h3 className="text-sm font-semibold text-foreground">No recordings yet</h3>
+          <p className="mt-1 text-xs text-subtle-foreground">
+            Start a recording to create your first local MP4.
+          </p>
+        </div>
+      ) : null}
+      {filtered.length > 0 && viewMode === "grid" ? (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
           {filtered.map((recording) => (
             <LibraryItemCard

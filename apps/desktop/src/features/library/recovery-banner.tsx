@@ -1,8 +1,8 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertTriangle, CheckCircle2, Trash2 } from "lucide-react"
 import { Button } from "@recordforge/ui"
 import type { RecoveryScanResult } from "@recordforge/contracts"
-import { deleteRecoverySession, recoverSession } from "../../lib/recorder"
+import { useRecorderStore } from "../../stores/recorder-store"
 
 interface RecoveryBannerProps {
   sessions: RecoveryScanResult[]
@@ -12,13 +12,19 @@ interface RecoveryBannerProps {
 export function RecoveryBanner({ sessions, onRecovered }: RecoveryBannerProps) {
   const [items, setItems] = useState<RecoveryScanResult[]>(sessions)
   const [busySessionId, setBusySessionId] = useState<string | null>(null)
+  const recover = useRecorderStore((state) => state.recover)
+  const deleteRecovery = useRecorderStore((state) => state.deleteRecovery)
+
+  useEffect(() => {
+    setItems(sessions)
+  }, [sessions])
 
   if (items.length === 0) return null
 
   async function handleRecover(sessionId: string) {
     setBusySessionId(sessionId)
     try {
-      await recoverSession(sessionId)
+      await recover(sessionId)
       setItems((prev) => prev.filter((s) => s.sessionId !== sessionId))
       onRecovered?.()
     } catch (err) {
@@ -31,7 +37,7 @@ export function RecoveryBanner({ sessions, onRecovered }: RecoveryBannerProps) {
   async function handleDiscard(sessionId: string) {
     setBusySessionId(sessionId)
     try {
-      await deleteRecoverySession(sessionId)
+      await deleteRecovery(sessionId)
       setItems((prev) => prev.filter((s) => s.sessionId !== sessionId))
     } catch (err) {
       console.error("Failed to discard recovery session:", err)

@@ -1,8 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, instrument};
 
 use super::config::{RecordingConfig, RecordingProfile};
+use super::disk;
 use super::ffmpeg::FfmpegCapture;
 use super::manifest::{RecorderState, RecordingManifest, RecordingMarker, RecordingStats};
 use super::media;
@@ -11,6 +12,7 @@ use super::media;
 #[derive(Debug)]
 pub struct Recorder {
     ffmpeg_path: PathBuf,
+    ffprobe_path: PathBuf,
     sessions_dir: PathBuf,
     db: Arc<Mutex<rusqlite::Connection>>,
     // Whether this FFmpeg build supports the ddagrab (Desktop Duplication API)
@@ -31,12 +33,13 @@ struct ActiveSession {
     webcam_capture: Option<FfmpegCapture>,
     segment_index: u32,
     total_recorded_ms: u64,
-    started_at: chrono::DateTime<chrono::Utc>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Recorder {
     pub fn new(
         ffmpeg_path: PathBuf,
+        ffprobe_path: PathBuf,
         sessions_dir: PathBuf,
         db: Arc<Mutex<rusqlite::Connection>>,
     ) -> Self {
@@ -48,6 +51,7 @@ impl Recorder {
         info!(ddagrab_available, "recorder initialized");
         Self {
             ffmpeg_path,
+            ffprobe_path,
             sessions_dir,
             db,
             ddagrab_available,
@@ -61,33 +65,48 @@ impl Recorder {
     }
 
     #[instrument]
-    pub fn start(&self, config: RecordingConfig) -> crate::errors::Result<String> {
+    pub fn prepare(&self, config: RecordingConfig) -> crate::errors::Result<String> {
+        config.validate()?;
         let mut guard = self
             .current
             .lock()
             .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
 
         if let Some(active) = guard.as_mut() {
+            let state = active
+                .manifest
+                .lock()
+                .map_err(|_| {
+                    crate::errors::InternalError::Capture("manifest mutex poisoned".into())
+                })?
+                .state;
             let screen_running = active
                 .screen_capture
                 .as_mut()
-                .map(|c| c.is_running())
+                .map(|capture| capture.is_running())
                 .unwrap_or(false);
-            if screen_running {
+            if screen_running
+                || matches!(
+                    state,
+                    RecorderState::Countdown
+                        | RecorderState::Recording
+                        | RecorderState::Paused
+                        | RecorderState::Finalizing
+                )
+            {
                 return Err(crate::errors::InternalError::Capture(
                     "a recording is already active".into(),
                 )
                 .into());
-            } else {
-                info!("clearing orphaned inactive recording session before start");
-                *guard = None;
             }
+
+            info!("clearing inactive failed recording session before start");
+            *guard = None;
         }
 
         let profile = config.resolve_profile().ok_or_else(|| {
             crate::errors::InternalError::Capture(format!("unknown profile: {}", config.profile))
         })?;
-
         let session_id = uuid::Uuid::new_v4().to_string();
         let work_dir = self.sessions_dir.join(&session_id);
         std::fs::create_dir_all(&work_dir).map_err(|e| {
@@ -101,27 +120,13 @@ impl Recorder {
             config.source.clone(),
             &profile.id,
         )));
-
-        // Record the intended final output path now so recovery can find it.
         {
             let mut m = manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             m.set_output_path(output.to_string_lossy());
-            let _ = m.write();
-        }
-
-        info!(%session_id, ?work_dir, "starting recording session");
-
-        let (screen, webcam) =
-            self.start_segment(0, &work_dir, &config, &profile, Arc::clone(&manifest))?;
-
-        {
-            let mut m = manifest.lock().map_err(|_| {
-                crate::errors::InternalError::Capture("manifest mutex poisoned".into())
-            })?;
-            m.set_state(RecorderState::Recording);
-            let _ = m.write();
+            m.set_state(RecorderState::Countdown);
+            m.write()?;
         }
 
         *guard = Some(ActiveSession {
@@ -130,13 +135,113 @@ impl Recorder {
             config,
             profile,
             manifest,
-            screen_capture: Some(screen),
-            webcam_capture: webcam,
+            screen_capture: None,
+            webcam_capture: None,
             segment_index: 0,
             total_recorded_ms: 0,
-            started_at: chrono::Utc::now(),
+            started_at: None,
         });
 
+        Ok(session_id)
+    }
+
+    #[instrument]
+    pub fn start_prepared(&self, session_id: &str) -> crate::errors::Result<()> {
+        let mut guard = self
+            .current
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| crate::errors::InternalError::Capture("no prepared recording".into()))?;
+
+        if session.session_id != session_id {
+            return Err(crate::errors::InternalError::Capture(
+                "prepared recording session does not match".into(),
+            )
+            .into());
+        }
+        let state = session
+            .manifest
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("manifest mutex poisoned".into()))?
+            .state;
+        if state != RecorderState::Countdown {
+            return Err(crate::errors::InternalError::Capture(
+                "recording is not waiting to start".into(),
+            )
+            .into());
+        }
+
+        let (screen, webcam) = match self.start_segment(
+            0,
+            &session.work_dir,
+            &session.config,
+            &session.profile,
+            Arc::clone(&session.manifest),
+        ) {
+            Ok(captures) => captures,
+            Err(error) => {
+                if let Ok(mut manifest) = session.manifest.lock() {
+                    manifest.set_state(RecorderState::Failed);
+                    if let Err(write_error) = manifest.write() {
+                        tracing::error!(error = ?write_error, "failed to persist failed recording state");
+                    }
+                }
+                return Err(error);
+            }
+        };
+
+        session.screen_capture = Some(screen);
+        session.webcam_capture = webcam;
+        session.started_at = Some(chrono::Utc::now());
+        {
+            let mut manifest = session.manifest.lock().map_err(|_| {
+                crate::errors::InternalError::Capture("manifest mutex poisoned".into())
+            })?;
+            manifest.set_state(RecorderState::Recording);
+            manifest.write()?;
+        }
+
+        info!(%session_id, "recording capture started");
+        Ok(())
+    }
+
+    #[instrument]
+    pub fn cancel_prepared(&self, session_id: &str) -> crate::errors::Result<()> {
+        let mut guard = self
+            .current
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| crate::errors::InternalError::Capture("no prepared recording".into()))?;
+        let state = session
+            .manifest
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("manifest mutex poisoned".into()))?
+            .state;
+        if session.session_id != session_id || state != RecorderState::Countdown {
+            return Err(crate::errors::InternalError::Capture(
+                "recording cannot be cancelled in its current state".into(),
+            )
+            .into());
+        }
+
+        let session = guard.take().ok_or_else(|| {
+            crate::errors::InternalError::Capture("prepared recording disappeared".into())
+        })?;
+        drop(guard);
+        std::fs::remove_dir_all(&session.work_dir).map_err(|e| {
+            crate::errors::InternalError::Storage(format!("remove cancelled session: {e}"))
+        })?;
+        Ok(())
+    }
+
+    #[instrument]
+    pub fn start(&self, config: RecordingConfig) -> crate::errors::Result<String> {
+        let session_id = self.prepare(config)?;
+        self.start_prepared(&session_id)?;
         Ok(session_id)
     }
 
@@ -198,14 +303,25 @@ impl Recorder {
 
         let webcam = if config.capture_webcam {
             if let Some(device) = &config.webcam_device_id {
-                let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
-                Some(FfmpegCapture::start_webcam(
-                    &ffmpeg,
-                    device,
-                    profile,
-                    &webcam_output.to_string_lossy(),
-                    None,
-                )?)
+                if !super::webcam::validate_webcam_device(&ffmpeg, device)?.available {
+                    tracing::warn!(device = %device, "webcam unavailable; continuing without webcam");
+                    None
+                } else {
+                    let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
+                    match FfmpegCapture::start_webcam(
+                        &ffmpeg,
+                        device,
+                        profile,
+                        &webcam_output.to_string_lossy(),
+                        None,
+                    ) {
+                        Ok(capture) => Some(capture),
+                        Err(error) => {
+                            tracing::warn!(error = ?error, "webcam failed to start; continuing without webcam");
+                            None
+                        }
+                    }
+                }
             } else {
                 info!("capture_webcam enabled but no device specified; skipping webcam");
                 None
@@ -223,42 +339,42 @@ impl Recorder {
             .current
             .lock()
             .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-
         let session = guard
             .as_mut()
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
-
-        if session.screen_capture.is_none() {
-            return Err(crate::errors::InternalError::Capture(
-                "recording is not in progress".into(),
-            )
-            .into());
-        }
-
-        let screen = session.screen_capture.as_mut().ok_or_else(|| {
-            crate::errors::InternalError::Capture("screen capture missing".into())
+        let mut screen = session.screen_capture.take().ok_or_else(|| {
+            crate::errors::InternalError::Capture("recording is not in progress".into())
         })?;
-        let stats = screen.stop()?;
+        let stats = match screen.stop() {
+            Ok(stats) => stats,
+            Err(error) => {
+                if let Ok(mut manifest) = session.manifest.lock() {
+                    manifest.set_state(RecorderState::Failed);
+                    if let Err(write_error) = manifest.write() {
+                        tracing::error!(error = ?write_error, "failed to persist failed recording state");
+                    }
+                }
+                return Err(error);
+            }
+        };
 
-        if let Some(webcam) = session.webcam_capture.as_mut() {
-            if let Err(e) = webcam.stop() {
-                error!(%e, "failed to stop webcam sidecar during pause");
+        if let Some(mut webcam) = session.webcam_capture.take() {
+            if let Err(error) = webcam.stop() {
+                error!(%error, "failed to stop webcam sidecar during pause");
             }
         }
 
         let total = session.total_recorded_ms + stats.duration_ms;
         session.total_recorded_ms = total;
-        session.screen_capture = None;
-        session.webcam_capture = None;
-
+        let _ = self.validated_segments(session)?;
         {
-            let mut m = session.manifest.lock().map_err(|_| {
+            let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            m.set_total_recorded_ms(total);
-            m.set_state(RecorderState::Paused);
-            m.set_stats(stats);
-            let _ = m.write();
+            manifest.set_total_recorded_ms(total);
+            manifest.set_state(RecorderState::Paused);
+            manifest.set_stats(stats);
+            manifest.write()?;
         }
 
         self.status_from_session(session)
@@ -270,7 +386,6 @@ impl Recorder {
             .current
             .lock()
             .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-
         let session = guard
             .as_mut()
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
@@ -282,15 +397,15 @@ impl Recorder {
             .into());
         }
 
-        {
-            let m = session.manifest.lock().map_err(|_| {
-                crate::errors::InternalError::Capture("manifest mutex poisoned".into())
-            })?;
-            if m.state != RecorderState::Paused {
-                return Err(
-                    crate::errors::InternalError::Capture("session is not paused".into()).into(),
-                );
-            }
+        let state = session
+            .manifest
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("manifest mutex poisoned".into()))?
+            .state;
+        if state != RecorderState::Paused {
+            return Err(
+                crate::errors::InternalError::Capture("session is not paused".into()).into(),
+            );
         }
 
         let next_index = session.segment_index + 1;
@@ -305,13 +420,12 @@ impl Recorder {
         session.segment_index = next_index;
         session.screen_capture = Some(screen);
         session.webcam_capture = webcam;
-
         {
-            let mut m = session.manifest.lock().map_err(|_| {
+            let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            m.set_state(RecorderState::Recording);
-            let _ = m.write();
+            manifest.set_state(RecorderState::Recording);
+            manifest.write()?;
         }
 
         self.status_from_session(session)
@@ -323,43 +437,44 @@ impl Recorder {
             .current
             .lock()
             .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-
         let session = guard
-            .take()
+            .as_mut()
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
 
-        let mut final_stats = if let Some(mut screen) = session.screen_capture {
-            screen.stop()?
+        let mut final_stats = if let Some(mut screen) = session.screen_capture.take() {
+            match screen.stop() {
+                Ok(stats) => stats,
+                Err(error) => {
+                    if let Ok(mut manifest) = session.manifest.lock() {
+                        manifest.set_state(RecorderState::Failed);
+                        if let Err(write_error) = manifest.write() {
+                            tracing::error!(error = ?write_error, "failed to persist failed recording state");
+                        }
+                    }
+                    return Err(error);
+                }
+            }
         } else {
             RecordingStats::default()
         };
 
-        if let Some(mut webcam) = session.webcam_capture {
-            if let Err(e) = webcam.stop() {
-                error!(%e, "failed to stop webcam sidecar during stop");
+        if let Some(mut webcam) = session.webcam_capture.take() {
+            if let Err(error) = webcam.stop() {
+                error!(%error, "failed to stop webcam sidecar during stop");
             }
         }
 
         let total = session.total_recorded_ms + final_stats.duration_ms;
         {
-            let mut m = session.manifest.lock().map_err(|_| {
+            let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            m.set_total_recorded_ms(total);
+            manifest.set_total_recorded_ms(total);
+            manifest.set_state(RecorderState::Finalizing);
+            manifest.write()?;
         }
 
-        let output = session.work_dir.join("output.mp4");
-        let segment_files: Vec<PathBuf> = {
-            let m = session.manifest.lock().map_err(|_| {
-                crate::errors::InternalError::Capture("manifest mutex poisoned".into())
-            })?;
-            m.fragments
-                .iter()
-                .filter(|f| f.validated && f.size_bytes.unwrap_or(0) > 0)
-                .map(|f| session.work_dir.join(&f.file_name))
-                .collect()
-        };
-
+        let segment_files = self.validated_segments(session)?;
         if segment_files.is_empty() {
             return Err(crate::errors::InternalError::Capture(
                 "no valid recording segments".into(),
@@ -367,38 +482,127 @@ impl Recorder {
             .into());
         }
 
+        let output = session.work_dir.join("output.mp4");
+        let partial_output = session.work_dir.join("output.partial.mp4");
+        if partial_output.exists() {
+            std::fs::remove_file(&partial_output).map_err(|error| {
+                crate::errors::InternalError::Storage(format!("remove partial output: {error}"))
+            })?;
+        }
         media::concatenate_segments(
             &self.ffmpeg_path.to_string_lossy(),
             &session.work_dir,
             &segment_files,
-            &output,
+            &partial_output,
         )?;
+        disk::atomic_replace(&partial_output, &output)?;
 
         let output_size = std::fs::metadata(&output)
-            .map(|m| m.len())
-            .map_err(|e| crate::errors::InternalError::Storage(format!("output metadata: {e}")))?;
+            .map(|metadata| metadata.len())
+            .map_err(|error| {
+                crate::errors::InternalError::Storage(format!("output metadata: {error}"))
+            })?;
+        if output_size <= 1024 {
+            return Err(crate::errors::InternalError::Media(
+                "final recording output is empty".into(),
+            )
+            .into());
+        }
+        disk::sync_file(&output)?;
 
+        let mut metadata = crate::media::probe::probe_media(
+            &self.ffprobe_path.to_string_lossy(),
+            &output,
+            "pending-recording",
+        )?;
+        if !metadata.streams.iter().any(|stream| stream.kind == "video") {
+            return Err(crate::errors::InternalError::Media(
+                "final recording has no video stream".into(),
+            )
+            .into());
+        }
+
+        final_stats.duration_ms = total.max(metadata.duration_ms);
+        final_stats.output_size_bytes = output_size;
         let manifest_clone = {
-            let mut m = session.manifest.lock().map_err(|_| {
+            let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            m.set_output_path(output.to_string_lossy());
-            m.set_state(RecorderState::Completed);
-            final_stats.duration_ms = total;
-            final_stats.output_size_bytes = output_size;
-            m.set_stats(final_stats.clone());
-            let _ = m.write();
-            (*m).clone()
+            manifest.set_output_path(output.to_string_lossy());
+            manifest.set_total_recorded_ms(final_stats.duration_ms);
+            manifest.set_stats(final_stats.clone());
+            manifest.write()?;
+            (*manifest).clone()
         };
 
-        let db_guard = self
+        let mut db = self
             .db
             .lock()
             .map_err(|_| crate::errors::InternalError::Storage("database mutex poisoned".into()))?;
-        let _ =
-            crate::database::library::insert_recording(&db_guard, &manifest_clone, output_size)?;
+        let recording =
+            crate::database::library::insert_recording(&mut db, &manifest_clone, output_size)?;
+        metadata.recording_id = recording.id;
+        crate::database::media::upsert_metadata(&db, &metadata)?;
+        drop(db);
 
+        {
+            let mut manifest = session.manifest.lock().map_err(|_| {
+                crate::errors::InternalError::Capture("manifest mutex poisoned".into())
+            })?;
+            manifest.set_state(RecorderState::Completed);
+            manifest.write()?;
+        }
+
+        guard.take();
         Ok(final_stats)
+    }
+
+    fn validated_segments(&self, session: &ActiveSession) -> crate::errors::Result<Vec<PathBuf>> {
+        let mut manifest = session
+            .manifest
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("manifest mutex poisoned".into()))?;
+        let session_id = session.session_id.clone();
+        let mut paths = Vec::new();
+
+        for fragment in &mut manifest.fragments {
+            let file_name = Path::new(&fragment.file_name);
+            let is_single_file = file_name.components().count() == 1;
+            let path = session.work_dir.join(file_name);
+            let size = std::fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let valid = is_single_file
+                && fragment.validated
+                && size > 1024
+                && self.validate_media_file(&path, &session_id);
+            fragment.size_bytes = Some(size);
+            fragment.validated = valid;
+            if valid {
+                paths.push(path);
+            }
+        }
+
+        paths.sort_by_key(|path| {
+            path.file_stem()
+                .and_then(|stem| {
+                    stem.to_string_lossy()
+                        .rsplit('_')
+                        .next()
+                        .map(str::to_string)
+                })
+                .and_then(|index| index.parse::<u32>().ok())
+                .unwrap_or(u32::MAX)
+        });
+        manifest.touch();
+        manifest.write()?;
+        Ok(paths)
+    }
+
+    fn validate_media_file(&self, path: &Path, recording_id: &str) -> bool {
+        crate::media::probe::probe_media(&self.ffprobe_path.to_string_lossy(), path, recording_id)
+            .map(|metadata| metadata.streams.iter().any(|stream| stream.kind == "video"))
+            .unwrap_or(false)
     }
 
     /// Insert a marker at the current playback position.
@@ -446,7 +650,7 @@ impl Recorder {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             m.add_marker(marker.clone());
-            let _ = m.write();
+            m.write()?;
         }
 
         Ok(marker)
@@ -483,18 +687,21 @@ impl Recorder {
             .lock()
             .map_err(|_| crate::errors::InternalError::Capture("manifest mutex poisoned".into()))?;
 
-        let wall_ms = (chrono::Utc::now() - session.started_at).num_milliseconds() as u64;
         let current_elapsed = session
             .screen_capture
             .as_ref()
-            .map(|c| c.elapsed_ms())
+            .map(|capture| capture.elapsed_ms())
             .unwrap_or(0);
         let recorded_ms = session.total_recorded_ms + current_elapsed;
+        let wall_ms = session
+            .started_at
+            .map(|started_at| (chrono::Utc::now() - started_at).num_milliseconds().max(0) as u64)
+            .unwrap_or(0);
 
         Ok(RecordingStatus {
             session_id: session.session_id.clone(),
             state: m.state,
-            started_at: Some(session.started_at.to_rfc3339()),
+            started_at: session.started_at.map(|started_at| started_at.to_rfc3339()),
             stopped_at: None,
             duration_ms: wall_ms,
             recorded_ms,

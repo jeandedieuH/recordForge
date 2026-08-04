@@ -33,6 +33,66 @@ pub struct RecordingConfig {
 }
 
 impl RecordingConfig {
+    /// Validate the untrusted IPC payload before it reaches FFmpeg arguments.
+    pub fn validate(&self) -> crate::errors::Result<()> {
+        if !matches!(self.source.kind.as_str(), "display" | "window" | "region") {
+            return Err(crate::errors::InternalError::Capture(
+                "unsupported capture source kind".into(),
+            )
+            .into());
+        }
+
+        if self.source.id.trim().is_empty() || self.source.name.trim().is_empty() {
+            return Err(crate::errors::InternalError::Capture(
+                "capture source identity is required".into(),
+            )
+            .into());
+        }
+
+        let bounds = self.source.bounds;
+        if bounds.width <= 0
+            || bounds.height <= 0
+            || bounds.width > 16_384
+            || bounds.height > 16_384
+            || bounds.x < -32_768
+            || bounds.y < -32_768
+        {
+            return Err(crate::errors::InternalError::Capture(
+                "capture source bounds are outside the supported range".into(),
+            )
+            .into());
+        }
+
+        if self.capture_microphone && self.microphone_device_id.is_none() {
+            return Err(crate::errors::InternalError::Capture(
+                "microphone capture requires a device".into(),
+            )
+            .into());
+        }
+        if self.capture_system_audio && self.system_audio_device_id.is_none() {
+            return Err(crate::errors::InternalError::Capture(
+                "system audio capture requires a device".into(),
+            )
+            .into());
+        }
+        if self.capture_webcam && self.webcam_device_id.is_none() {
+            return Err(crate::errors::InternalError::Capture(
+                "webcam capture requires a device".into(),
+            )
+            .into());
+        }
+
+        if self.resolve_profile().is_none() {
+            return Err(crate::errors::InternalError::Capture(format!(
+                "unknown profile: {}",
+                self.profile
+            ))
+            .into());
+        }
+
+        Ok(())
+    }
+
     /// Resolve the requested profile to a concrete set of encoder/codec parameters.
     pub fn resolve_profile(&self) -> Option<RecordingProfile> {
         builtin_profiles()
@@ -47,7 +107,7 @@ impl RecordingConfig {
     }
 }
 
-/// Built-in profiles tuned for low-end Windows 11 hardware.
+/// Built-in profiles tuned for low-end Windows 10 hardware.
 ///
 /// - `low-impact`: 720p30, ultrafast x264, low CPU cost.
 /// - `balanced`: 1080p30, veryfast x264, reasonable quality.

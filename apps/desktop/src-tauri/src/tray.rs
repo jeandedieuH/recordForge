@@ -67,7 +67,7 @@ fn handle_tray_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             crate::commands::recording::emit_current_status(app, &state);
         }
         "stop" => {
-            let _ = stop_recording(&state);
+            let _ = stop_recording(&state, app);
             crate::commands::recording::emit_current_status(app, &state);
         }
         "marker" => {
@@ -81,35 +81,60 @@ fn handle_tray_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
 }
 
 fn start_or_focus(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Result<()> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
+    let bounds = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
 
-    let status = guard.status()?;
-    if matches!(status.state, RecorderState::Idle) {
-        let quick = state.quick_config.lock().map_err(|_| {
-            crate::errors::InternalError::Capture("quick config mutex poisoned".into())
-        })?;
-        if let Some(config) = quick.as_ref() {
-            guard.start(config.clone())?;
-            return Ok(());
+        let status = guard.status()?;
+        if matches!(status.state, RecorderState::Idle) {
+            let quick = state.quick_config.lock().map_err(|_| {
+                crate::errors::InternalError::Capture("quick config mutex poisoned".into())
+            })?;
+            if let Some(config) = quick.as_ref() {
+                let bounds = config.source.bounds;
+                guard.start(config.clone())?;
+                Some(bounds)
+            } else {
+                None
+            }
+        } else {
+            None
         }
-    }
+    };
 
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(bounds) = bounds {
+        if let Err(error) = crate::window::FloatingWindow::open_or_focus(app) {
+            tracing::warn!(error = ?error, "tray start could not open floating controls");
+        }
+        if let Err(error) = crate::window::BoundaryWindow::open_or_focus(app, bounds) {
+            tracing::warn!(error = ?error, "tray start could not open capture boundary");
+        }
+        if let Err(error) = crate::window::MainWindow::minimize(app) {
+            tracing::warn!(error = ?error, "tray start could not minimize main window");
+        }
+    } else if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
     }
     Ok(())
 }
 
-fn stop_recording(state: &tauri::State<AppState>) -> Result<()> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-    guard.stop().map(|_| ())
+fn stop_recording(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Result<()> {
+    let result = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
+        guard.stop().map(|_| ())
+    };
+    crate::window::FloatingWindow::hide(app);
+    crate::window::BoundaryWindow::hide(app);
+    if let Err(error) = crate::window::MainWindow::restore(app) {
+        tracing::warn!(error = ?error, "tray stop could not restore main window");
+    }
+    result
 }
 
 fn toggle_pause_resume(state: &tauri::State<AppState>) -> Result<()> {

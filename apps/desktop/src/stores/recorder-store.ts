@@ -22,17 +22,16 @@ import {
   listBuiltinProfiles,
   listCaptureSources,
   listVideoDevices,
-  openBoundaryOverlay,
-  openFloatingControls,
   pauseRecording,
   recoverSession,
   resumeRecording,
   runBenchmark,
   scanRecoverySessions,
-  startRecording,
+  prepareRecording,
   stopRecording,
 } from "../lib/recorder"
 import { toErrorMessage } from "../lib/errors"
+import { getSetting, isTauri } from "../lib/settings"
 
 // Transport action currently in flight. Used for granular per-button pending
 // feedback (e.g. "Stopping..." on Stop while FFmpeg flushes) instead of a single
@@ -245,19 +244,14 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         webcamDeviceId: state.selectedWebcamId || undefined,
       }
 
-      // Open floating controls and boundary overlay windows as recording initiates
-      void openFloatingControls()
-      void openBoundaryOverlay()
-
-      await startRecording(config)
+      const configuredCountdown = isTauri()
+        ? await getSetting("countdownSeconds").catch(() => null)
+        : null
+      const countdownSeconds = configuredCountdown === "5" ? 5 : configuredCountdown === "0" ? 0 : 3
+      await prepareRecording(config, countdownSeconds)
       const status = await getRecordingStatus()
       set({ status, isLoading: false, pendingAction: null })
     } catch (error) {
-      // If starting the recording fails, close the auxiliary windows so the user
-      // isn't left with an orphaned floating toolbar or boundary outline.
-      const { hideBoundaryOverlay, hideFloatingControls } = await import("../lib/recorder")
-      void hideBoundaryOverlay()
-      void hideFloatingControls()
       set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
     }
   },
@@ -325,6 +319,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       set({ isLoading: false })
     } catch (error) {
       set({ error: toErrorMessage(error), isLoading: false })
+      throw error
     }
   },
 
@@ -336,6 +331,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       set({ isLoading: false })
     } catch (error) {
       set({ error: toErrorMessage(error), isLoading: false })
+      throw error
     }
   },
 }))

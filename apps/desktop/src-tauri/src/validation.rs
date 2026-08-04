@@ -6,12 +6,11 @@ pub struct Validation;
 impl Validation {
     /// Ensure a string is a valid UUIDv4.
     pub fn uuid(id: &str, field_name: &str) -> Result<String> {
-        uuid::Uuid::parse_str(id)
-            .map_err(|_| {
-                InternalError::Permissions(format!(
-                    "invalid format for '{field_name}': must be a valid UUID"
-                ))
-            })?;
+        uuid::Uuid::parse_str(id).map_err(|_| {
+            InternalError::Permissions(format!(
+                "invalid format for '{field_name}': must be a valid UUID"
+            ))
+        })?;
         Ok(id.to_string())
     }
 

@@ -1,4 +1,19 @@
-import { invoke } from "@tauri-apps/api/core"
+import { z } from "zod"
+import {
+  audioDeviceSchema,
+  benchmarkReportSchema,
+  captureSourceSchema,
+  diagnosticsReportSchema,
+  encoderInfoSchema,
+  libraryRecordingSchema,
+  recordingConfigSchema,
+  recordingMarkerSchema,
+  recordingProfileSchema,
+  recordingStatsSchema,
+  recordingStatusSchema,
+  recoveryScanResultSchema,
+  videoDeviceSchema,
+} from "@recordforge/contracts"
 import type {
   AudioDevice,
   BenchmarkReport,
@@ -14,83 +29,107 @@ import type {
   RecoveryScanResult,
   VideoDevice,
 } from "@recordforge/contracts"
+import { invokeValidated } from "./ipc"
 
 export async function listCaptureSources(): Promise<CaptureSource[]> {
-  return invoke("list_capture_sources")
+  return invokeValidated("list_capture_sources", undefined, z.array(captureSourceSchema))
 }
 
 export async function listAudioDevices(): Promise<AudioDevice[]> {
-  return invoke("list_audio_devices")
+  return invokeValidated("list_audio_devices", undefined, z.array(audioDeviceSchema))
 }
 
 export async function listVideoDevices(): Promise<VideoDevice[]> {
-  return invoke("list_video_devices")
+  return invokeValidated("list_video_devices", undefined, z.array(videoDeviceSchema))
 }
 
 export async function listBuiltinProfiles(): Promise<RecordingProfile[]> {
-  return invoke("list_builtin_profiles")
+  return invokeValidated("list_builtin_profiles", undefined, z.array(recordingProfileSchema))
 }
 
 export async function startRecording(config: RecordingConfig): Promise<string> {
-  return invoke("start_recording", { config })
+  return invokeValidated(
+    "start_recording",
+    { config: recordingConfigSchema.parse(config) },
+    z.string(),
+  )
+}
+
+export async function prepareRecording(
+  config: RecordingConfig,
+  countdownSeconds: number,
+): Promise<string> {
+  return invokeValidated(
+    "prepare_recording",
+    { config: recordingConfigSchema.parse(config), countdownSeconds },
+    z.string(),
+  )
+}
+
+export async function confirmRecordingStart(sessionId: string): Promise<void> {
+  return invokeValidated<void>("confirm_recording_start", { sessionId })
+}
+
+export async function cancelRecordingStart(sessionId: string): Promise<void> {
+  return invokeValidated<void>("cancel_recording_start", { sessionId })
 }
 
 export async function pauseRecording(): Promise<RecordingStatus> {
-  return invoke("pause_recording")
+  return invokeValidated("pause_recording", undefined, recordingStatusSchema)
 }
 
 export async function resumeRecording(): Promise<RecordingStatus> {
-  return invoke("resume_recording")
+  return invokeValidated("resume_recording", undefined, recordingStatusSchema)
 }
 
 export async function stopRecording(): Promise<RecordingStats> {
-  return invoke("stop_recording")
+  return invokeValidated("stop_recording", undefined, recordingStatsSchema)
 }
 
 export async function getRecordingStatus(): Promise<RecordingStatus> {
-  return invoke("recording_status")
+  return invokeValidated("recording_status", undefined, recordingStatusSchema)
 }
 
 export async function insertMarker(label: string): Promise<RecordingMarker> {
-  return invoke("insert_marker", { label })
+  return invokeValidated("insert_marker", { label }, recordingMarkerSchema)
 }
 
 export async function detectHardwareEncoders(): Promise<EncoderInfo[]> {
-  return invoke("detect_hardware_encoders")
+  return invokeValidated("detect_hardware_encoders", undefined, z.array(encoderInfoSchema))
 }
 
 export async function getDiagnosticsReport(): Promise<DiagnosticsReport> {
-  return invoke("get_diagnostics_report")
+  return invokeValidated("get_diagnostics_report", undefined, diagnosticsReportSchema)
 }
 
 export async function scanRecoverySessions(): Promise<RecoveryScanResult[]> {
-  return invoke("scan_recovery_sessions")
+  return invokeValidated("scan_recovery_sessions", undefined, z.array(recoveryScanResultSchema))
 }
 
 export async function recoverSession(sessionId: string): Promise<LibraryRecording> {
-  return invoke("recover_session", { sessionId })
+  return invokeValidated("recover_session", { sessionId }, libraryRecordingSchema)
 }
 
 export async function deleteRecoverySession(sessionId: string): Promise<void> {
-  return invoke("delete_recovery_session", { sessionId })
+  return invokeValidated<void>("delete_recovery_session", { sessionId })
 }
 
 export async function runBenchmark(): Promise<BenchmarkReport> {
-  return invoke("run_encoder_benchmark")
+  return invokeValidated("run_encoder_benchmark", undefined, benchmarkReportSchema)
 }
 
 export async function openFloatingControls(): Promise<void> {
-  return invoke("open_floating_controls")
+  return invokeValidated<void>("open_floating_controls")
 }
 
 export async function openBoundaryOverlay(): Promise<void> {
-  return invoke("open_boundary_overlay")
+  return invokeValidated<void>("open_boundary_overlay")
 }
 
 export async function hideBoundaryOverlay(): Promise<void> {
-  return invoke("hide_boundary_overlay")
+  return invokeValidated<void>("hide_boundary_overlay")
 }
 
 export async function hideFloatingControls(): Promise<void> {
-  return invoke("hide_floating_controls")
+  return invokeValidated<void>("hide_floating_controls")
 }

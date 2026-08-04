@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use super::disk;
 use super::source::CaptureSource;
 
 /// Recorder state mirrored from the shared contracts.
@@ -138,9 +139,8 @@ impl RecordingManifest {
         std::fs::write(&temp, json).map_err(|e| {
             crate::errors::InternalError::Storage(format!("write manifest temp: {e}"))
         })?;
-
-        std::fs::rename(&temp, &path)
-            .map_err(|e| crate::errors::InternalError::Storage(format!("rename manifest: {e}")))?;
+        disk::sync_file(&temp)?;
+        disk::atomic_replace(&temp, &path)?;
 
         Ok(())
     }

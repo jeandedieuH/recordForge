@@ -47,7 +47,7 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     // Track what action was taken so we can open/close auxiliary windows
     // after releasing the recorder mutex.
     enum Action {
-        Started,
+        Started(crate::capture::source::Bounds),
         Stopped,
         None,
     }
@@ -65,8 +65,9 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
                     crate::errors::InternalError::Capture("quick config mutex poisoned".into())
                 })?;
                 if let Some(config) = quick.as_ref() {
+                    let bounds = config.source.bounds;
                     guard.start(config.clone())?;
-                    Action::Started
+                    Action::Started(bounds)
                 } else {
                     Action::None
                 }
@@ -82,13 +83,23 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
 
     // Open or close auxiliary windows outside the recorder lock
     match action {
-        Action::Started => {
-            let _ = crate::window::FloatingWindow::open_or_focus(app);
-            let _ = crate::window::BoundaryWindow::open_or_focus(app);
+        Action::Started(bounds) => {
+            if let Err(error) = crate::window::FloatingWindow::open_or_focus(app) {
+                tracing::warn!(error = ?error, "shortcut start could not open floating controls");
+            }
+            if let Err(error) = crate::window::BoundaryWindow::open_or_focus(app, bounds) {
+                tracing::warn!(error = ?error, "shortcut start could not open capture boundary");
+            }
+            if let Err(error) = crate::window::MainWindow::minimize(app) {
+                tracing::warn!(error = ?error, "shortcut start could not minimize main window");
+            }
         }
         Action::Stopped => {
             crate::window::FloatingWindow::hide(app);
             crate::window::BoundaryWindow::hide(app);
+            if let Err(error) = crate::window::MainWindow::restore(app) {
+                tracing::warn!(error = ?error, "shortcut stop could not restore main window");
+            }
         }
         Action::None => {}
     }

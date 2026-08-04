@@ -3,7 +3,7 @@ import { ToastViewport, TooltipProvider } from "@recordforge/ui"
 import { EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
-import { NewRecordingModal} from "../features/recorder"
+import { NewRecordingModal } from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
 import { useEditorStore } from "../stores/editor-store"
@@ -31,6 +31,8 @@ export function AppShell() {
   const closeEditor = useEditorStore((state) => state.close)
   const loadTheme = useThemeStore((state) => state.load)
   const startRecording = useRecorderStore((state) => state.start)
+  const saveMessage = useRecorderStore((state) => state.saveMessage)
+  const clearSaveMessage = useRecorderStore((state) => state.clearSaveMessage)
 
   // Load persisted theme/transparency preferences once at startup.
   useEffect(() => {
@@ -79,7 +81,21 @@ export function AppShell() {
           />
 
           <main className="min-w-0 flex-1 overflow-y-auto bg-background">
-            
+            {saveMessage ? (
+              <div
+                role="status"
+                className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
+              >
+                <span>{saveMessage}</span>
+                <button
+                  type="button"
+                  className="shrink-0 text-subtle-foreground underline"
+                  onClick={clearSaveMessage}
+                >
+                  Dismiss
+                </button>
+              </div>
+            ) : null}
             {activeView === "library" ? <LibraryView /> : null}
             {activeView === "projects" ? (
               <div className="p-8 text-center text-subtle-foreground">

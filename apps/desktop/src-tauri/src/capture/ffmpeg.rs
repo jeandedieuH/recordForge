@@ -8,8 +8,9 @@ use std::time::Instant;
 use tracing::{info, instrument};
 
 use super::config::{RecordingConfig, RecordingProfile};
+use super::disk;
 use super::manifest::{RecordingFragment, RecordingManifest, RecordingStats};
-use super::source::{Bounds, CaptureSource};
+use super::source::CaptureSource;
 
 /// Manages a running FFmpeg capture process.
 pub struct FfmpegCapture {
@@ -134,36 +135,48 @@ impl FfmpegCapture {
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         stats.duration_ms = duration_ms;
 
-        if let Ok(meta) = std::fs::metadata(&self.output_path) {
-            stats.output_size_bytes = meta.len();
+        let output_size = std::fs::metadata(&self.output_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        stats.output_size_bytes = output_size;
+        if output_size > 0 {
+            disk::sync_file(&self.output_path)?;
+        }
 
-            if let Some(manifest) = self.manifest.as_ref() {
-                let now = chrono::Utc::now().to_rfc3339();
-                let mut m = manifest.lock().map_err(|_| {
-                    crate::errors::InternalError::Capture("manifest mutex poisoned".into())
-                })?;
-
-                if let Some(frag) = m
-                    .fragments
-                    .iter_mut()
-                    .find(|f| f.index == self.fragment_index)
-                {
-                    frag.stopped_at = Some(now);
-                    frag.duration_ms = Some(duration_ms);
-                    frag.size_bytes = Some(meta.len());
-                    frag.validated = meta.len() > 1024;
-                    m.touch();
-                }
-
-                m.set_stats(stats.clone());
-                let _ = m.write();
-            }
-        } else if let Some(manifest) = self.manifest.as_ref() {
+        if let Some(manifest) = self.manifest.as_ref() {
+            let now = chrono::Utc::now().to_rfc3339();
             let mut m = manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
+
+            if let Some(frag) = m
+                .fragments
+                .iter_mut()
+                .find(|f| f.index == self.fragment_index)
+            {
+                frag.stopped_at = Some(now);
+                frag.duration_ms = Some(duration_ms);
+                frag.size_bytes = Some(output_size);
+                frag.validated = status.success() && output_size > 1024;
+                m.touch();
+            }
+
             m.set_stats(stats.clone());
-            let _ = m.write();
+            m.write()?;
+        }
+
+        if !status.success() {
+            return Err(crate::errors::InternalError::Capture(format!(
+                "ffmpeg exited with status {}",
+                status
+            ))
+            .into());
+        }
+        if output_size <= 1024 {
+            return Err(crate::errors::InternalError::Capture(
+                "ffmpeg produced an empty capture file".into(),
+            )
+            .into());
         }
 
         Ok(stats)
@@ -239,7 +252,11 @@ fn build_screen_command(
         add_audio_encoder(&mut command, profile);
     }
 
-    command.args(["-movflags", "+frag_keyframe+faststart", output]);
+    command.args([
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof+faststart",
+        output,
+    ]);
 
     info!(?command, "built screen ffmpeg command");
     command
@@ -273,7 +290,11 @@ fn build_webcam_command(
         .args(["-map", "[vout]"]);
 
     add_video_encoder(&mut command, profile);
-    command.args(["-movflags", "+frag_keyframe+faststart", output]);
+    command.args([
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof+faststart",
+        output,
+    ]);
 
     info!(?command, "built webcam ffmpeg command");
     command
@@ -296,10 +317,8 @@ fn add_screen_video_input(
         );
         command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
     } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
-        // GDI capture. Used for window/region capture, and as a fallback for
-        // display capture when ddagrab is not available in this FFmpeg build.
-        // gdigrab captures the whole virtual desktop; the filter chain crops
-        // to the target bounds so multi-monitor displays still work.
+        // GDI captures the selected rectangle directly, including displays with
+        // negative virtual-desktop coordinates.
         command.args([
             "-f",
             "gdigrab",
@@ -307,6 +326,12 @@ fn add_screen_video_input(
             "512",
             "-framerate",
             &profile.fps.to_string(),
+            "-video_size",
+            &format!("{}x{}", bounds.width, bounds.height),
+            "-offset_x",
+            &bounds.x.to_string(),
+            "-offset_y",
+            &bounds.y.to_string(),
             "-i",
             "desktop",
         ]);
@@ -334,11 +359,6 @@ fn build_video_filter(
         // ddagrab emits D3D11 hardware frames; download to system memory as
         // bgra before aspect-preserving scale and letterboxing (fixes P0.5).
         format!("[0:v]hwdownload,format=bgra,{fit_filter}[vout]")
-    } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
-        // gdigrab captures the full virtual desktop; crop to the source bounds
-        // then apply aspect-preserving scale and letterboxing (fixes P0.5).
-        let Bounds { x, y, width, height } = source.bounds;
-        format!("[0:v]crop={width}:{height}:{x}:{y},{fit_filter}[vout]")
     } else {
         format!("[0:v]{fit_filter}[vout]")
     }
@@ -402,7 +422,7 @@ fn build_audio_filter(audio_indices: &[usize]) -> String {
         .collect();
 
     format!(
-        "{};{}amix=inputs={}:duration=first:dropout_transition=3[aout]",
+        "{};{}amix=inputs={}:duration=longest:dropout_transition=3[aout]",
         resampled.join(";"),
         mix_inputs,
         audio_indices.len()
@@ -452,15 +472,27 @@ fn run(
         crate::errors::InternalError::Capture(format!("failed to start ffmpeg: {e}"))
     })?;
 
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| crate::errors::InternalError::Capture("ffmpeg stdin unavailable".into()))?;
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                crate::errors::InternalError::Capture("ffmpeg stdin unavailable".into()).into(),
+            );
+        }
+    };
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| crate::errors::InternalError::Capture("ffmpeg stderr unavailable".into()))?;
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                crate::errors::InternalError::Capture("ffmpeg stderr unavailable".into()).into(),
+            );
+        }
+    };
 
     // Spawn a reader thread to tail the FFmpeg log and extract live stats.
     // It also surfaces FFmpeg's stderr so capture failures (missing filters,
@@ -559,7 +591,7 @@ fn run(
             size_bytes: None,
             validated: false,
         });
-        let _ = m.write();
+        m.write()?;
     }
 
     Ok(FfmpegCapture {

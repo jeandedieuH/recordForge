@@ -14,6 +14,11 @@ Tauri v2 uses a capability-based security model. recordForge must minimize the a
 - Add filesystem, shell, and other permissions only when required, narrowly scoped.
 - Any capability expansion requires an ADR and a security review.
 - Cloud credentials are stored only in the OS credential vault.
+- The recording countdown window uses a separate `countdown` capability containing only core window/event permissions; it receives no filesystem, shell, or credential permissions.
+
+## Recording Countdown Review
+
+The countdown is a dynamically-created Tauri webview used while the main window is minimized. Its URL contains only a UUID session ID, a constrained countdown value, and a display label. Rust validates the session ID/state before starting or cancelling capture. The capability is limited to `countdown` and does not broaden the main window or expose raw media data.
 
 ## Consequences
 

@@ -52,10 +52,8 @@ export const useLibraryStore = create<LibraryStore>((set) => ({
     set({ isLoading: true, error: null })
     try {
       const recordings = await listRecordings()
-      console.log("[library] loaded recordings:", recordings.length, recordings)
       set({ recordings, isLoading: false, error: null })
     } catch (error) {
-      console.error("[library] failed to load recordings:", error)
       set({ error: toErrorMessage(error), isLoading: false })
     }
   },

@@ -46,7 +46,7 @@ export const mediaMetadataSchema = z.object({
   bitrateKbps: z.number().min(0).optional(),
   streams: z.array(mediaStreamSchema).default([]),
   format: mediaFormatSchema.optional(),
-  updatedAt: z.string().datetime(),
+  updatedAt: z.string().datetime({ offset: true }),
 })
 
 export type MediaMetadata = z.infer<typeof mediaMetadataSchema>
@@ -59,7 +59,7 @@ export const derivativeFileSchema = z.object({
   kind: z.enum(["proxy", "thumbnail", "waveform", "metadata"]),
   path: z.string(),
   sizeBytes: z.number().int().min(0).default(0),
-  createdAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
 })
 
 export type DerivativeFile = z.infer<typeof derivativeFileSchema>
@@ -104,7 +104,7 @@ export const mediaJobProgressSchema = z.object({
   progress: z.number().min(0).max(1).default(0),
   stage: z.string(),
   message: z.string().optional(),
-  updatedAt: z.string().datetime(),
+  updatedAt: z.string().datetime({ offset: true }),
 })
 
 export type MediaJobProgress = z.infer<typeof mediaJobProgressSchema>
@@ -132,10 +132,10 @@ export const mediaJobSchema = z.object({
   stage: z.string(),
   message: z.string().optional(),
   error: z.string().optional(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-  startedAt: z.string().datetime().optional(),
-  completedAt: z.string().datetime().optional(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+  startedAt: z.string().datetime({ offset: true }).optional(),
+  completedAt: z.string().datetime({ offset: true }).optional(),
   outputs: mediaJobOutputsSchema.default({}),
 })
 

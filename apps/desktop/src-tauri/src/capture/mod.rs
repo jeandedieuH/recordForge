@@ -2,6 +2,7 @@ pub mod audio;
 pub mod benchmark;
 pub mod config;
 pub mod devices;
+pub mod disk;
 pub mod encoder;
 pub mod engine;
 pub mod ffmpeg;

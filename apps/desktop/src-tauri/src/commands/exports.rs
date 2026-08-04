@@ -58,7 +58,14 @@ pub fn export_timeline(
     let output_path = std::path::PathBuf::from(options.output_path);
 
     thread::spawn(move || {
-        if let Err(err) = run_render_plan(recording_id, &output_path, plan, &ffmpeg_path, db, &app_handle) {
+        if let Err(err) = run_render_plan(
+            recording_id,
+            &output_path,
+            plan,
+            &ffmpeg_path,
+            db,
+            &app_handle,
+        ) {
             let _ = emit_failed(&app_handle, &thread_job, &err.to_string());
         }
     });

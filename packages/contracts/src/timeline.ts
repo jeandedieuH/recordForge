@@ -122,8 +122,8 @@ export const timelineStateSchema = z.object({
   canvas: timelineCanvasSchema,
   tracks: z.array(timelineTrackSchema),
   markers: z.array(timelineMarkerSchema),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
 })
 
 export type TimelineState = z.infer<typeof timelineStateSchema>

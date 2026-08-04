@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::{info, instrument};
+
+use super::disk;
 
 use super::manifest::{RecorderState, RecordingManifest};
 use super::media;
@@ -91,6 +94,7 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
                 };
                 (None, total_size, err.or(fragment_error))
             };
+        let is_recoverable = fragment_count > 0 || output_path.is_some();
 
         results.push(RecoveryScanResult {
             session_id: manifest.session_id,
@@ -98,7 +102,7 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
             manifest_path: manifest_path.to_string_lossy().to_string(),
             output_path,
             output_size_bytes: output_size,
-            is_recoverable: fragment_count > 0,
+            is_recoverable,
             validation_error,
         });
     }
@@ -115,7 +119,8 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
 pub fn recover_session(
     work_dir: &Path,
     ffmpeg_path: &str,
-    conn: &rusqlite::Connection,
+    ffprobe_path: &str,
+    conn: &mut rusqlite::Connection,
 ) -> crate::errors::Result<crate::database::library::LibraryRecording> {
     let manifest_path = work_dir.join("session.json");
 
@@ -124,39 +129,20 @@ pub fn recover_session(
     }
 
     let mut manifest = RecordingManifest::read(&manifest_path)?;
+    manifest.set_state(RecorderState::Recovering);
+    manifest.write()?;
+
     let output = work_dir.join("output.mp4");
+    let mut output_size = std::fs::metadata(&output)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let output_is_valid = output_size > 1024 && validate_media_file(ffprobe_path, &output);
 
-    let mut output_size = if output.exists() {
-        std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
-
-    if output_size < 1024 {
-        let mut segment_files: Vec<PathBuf> = manifest
-            .fragments
-            .iter()
-            .filter(|f| (f.validated || f.stopped_at.is_some()) && f.size_bytes.unwrap_or(0) > 0)
-            .map(|f| work_dir.join(&f.file_name))
-            .filter(|p| p.exists())
-            .collect();
-
-        // Fallback (P0.1 fix): Scan work_dir directly for physical segments
-        if segment_files.is_empty() {
-            if let Ok(entries) = std::fs::read_dir(work_dir) {
-                for entry in entries.filter_map(Result::ok) {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if (name.starts_with("seg_") || name.starts_with("segment_")) && name.ends_with(".mp4") {
-                        if let Ok(meta) = entry.metadata() {
-                            if meta.len() > 1024 {
-                                segment_files.push(entry.path());
-                            }
-                        }
-                    }
-                }
-            }
-            segment_files.sort();
-        }
+    if !output_is_valid {
+        let segment_files = recovery_segments(work_dir, &manifest)
+            .into_iter()
+            .filter(|path| validate_media_file(ffprobe_path, path))
+            .collect::<Vec<_>>();
 
         if segment_files.is_empty() {
             return Err(crate::errors::InternalError::Media(
@@ -165,18 +151,40 @@ pub fn recover_session(
             .into());
         }
 
-        media::concatenate_segments(ffmpeg_path, work_dir, &segment_files, &output)?;
+        let partial_output = work_dir.join("output.partial.mp4");
+        if partial_output.exists() {
+            std::fs::remove_file(&partial_output).map_err(|error| {
+                crate::errors::InternalError::Storage(format!(
+                    "remove partial recovery output: {error}"
+                ))
+            })?;
+        }
+        media::concatenate_segments(ffmpeg_path, work_dir, &segment_files, &partial_output)?;
+        disk::atomic_replace(&partial_output, &output)?;
+        output_size = std::fs::metadata(&output)
+            .map(|metadata| metadata.len())
+            .map_err(|error| {
+                crate::errors::InternalError::Storage(format!("recovered output metadata: {error}"))
+            })?;
+        disk::sync_file(&output)?;
+    }
 
-        output_size = std::fs::metadata(&output).map(|m| m.len()).map_err(|e| {
-            crate::errors::InternalError::Storage(format!("recovered output metadata: {e}"))
-        })?;
+    if output_size <= 1024 || !validate_media_file(ffprobe_path, &output) {
+        return Err(crate::errors::InternalError::Media(
+            "recovered output failed media validation".into(),
+        )
+        .into());
     }
 
     manifest.set_output_path(output.to_string_lossy());
+    manifest.set_state(RecorderState::Finalizing);
+    manifest.write()?;
+    let recording =
+        crate::database::library::insert_recovered_recording(conn, &manifest, output_size)?;
     manifest.set_state(RecorderState::Completed);
     manifest.write()?;
 
-    crate::database::library::insert_recording(conn, &manifest, output_size)
+    Ok(recording)
 }
 
 /// Remove a recovery session directory from disk.
@@ -194,11 +202,15 @@ pub fn delete_recovery_session(session_id: &str, sessions_dir: &Path) -> crate::
     if work_dir.exists() {
         // 2. Canonicalize target and parent to enforce containment
         let canonical_target = work_dir.canonicalize().map_err(|e| {
-            crate::errors::InternalError::Storage(format!("failed to canonicalize session path: {e}"))
+            crate::errors::InternalError::Storage(format!(
+                "failed to canonicalize session path: {e}"
+            ))
         })?;
 
         let canonical_root = sessions_dir.canonicalize().map_err(|e| {
-            crate::errors::InternalError::Storage(format!("failed to canonicalize sessions root: {e}"))
+            crate::errors::InternalError::Storage(format!(
+                "failed to canonicalize sessions root: {e}"
+            ))
         })?;
 
         if !canonical_target.starts_with(&canonical_root) {
@@ -215,54 +227,97 @@ pub fn delete_recovery_session(session_id: &str, sessions_dir: &Path) -> crate::
     Ok(())
 }
 
+fn recovery_segments(work_dir: &Path, manifest: &RecordingManifest) -> Vec<PathBuf> {
+    let mut paths = manifest
+        .fragments
+        .iter()
+        .filter_map(|fragment| safe_fragment_path(work_dir, &fragment.file_name))
+        .filter(|path| {
+            std::fs::metadata(path)
+                .map(|metadata| metadata.len() > 1024)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    if let Ok(entries) = std::fs::read_dir(work_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if (name.starts_with("seg_") || name.starts_with("segment_"))
+                && name.ends_with(".mp4")
+                && std::fs::metadata(&path)
+                    .map(|metadata| metadata.len() > 1024)
+                    .unwrap_or(false)
+                && !paths.contains(&path)
+            {
+                paths.push(path);
+            }
+        }
+    }
+
+    paths.sort_by_key(|path| segment_index(path).unwrap_or(u32::MAX));
+    paths
+}
+
+fn safe_fragment_path(work_dir: &Path, file_name: &str) -> Option<PathBuf> {
+    let relative = Path::new(file_name);
+    if relative.components().count() != 1 || relative.extension()?.to_str()? != "mp4" {
+        return None;
+    }
+    Some(work_dir.join(relative))
+}
+
+fn segment_index(path: &Path) -> Option<u32> {
+    path.file_stem()?
+        .to_string_lossy()
+        .rsplit('_')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn validate_media_file(ffprobe_path: &str, path: &Path) -> bool {
+    let output = Command::new(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output();
+
+    output
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 fn validate_fragments(
     work_dir: &Path,
     manifest: &RecordingManifest,
 ) -> (u64, usize, Option<String>) {
-    let mut total = 0u64;
-    let mut count = 0usize;
-    let mut first_error = None;
+    let paths = recovery_segments(work_dir, manifest);
+    let total = paths
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum();
+    let count = paths.len();
+    let error = if count == 0 {
+        Some("no valid fragments found".into())
+    } else {
+        None
+    };
 
-    for frag in &manifest.fragments {
-        let path = work_dir.join(&frag.file_name);
-        match std::fs::metadata(&path) {
-            Ok(meta) => {
-                if meta.len() > 1024 {
-                    total += meta.len();
-                    count += 1;
-                } else {
-                    first_error = Some(format!("fragment {} is too small", frag.index));
-                }
-            }
-            Err(e) => {
-                first_error = Some(format!("fragment {} missing: {e}", frag.index));
-            }
-        }
-    }
-
-    // Fallback (P0.1 fix): If manifest fragment records were not finalized due to sudden crash/kill,
-    // scan work_dir directly for any segment video files >= 1KB.
-    if count == 0 {
-        if let Ok(entries) = std::fs::read_dir(work_dir) {
-            for entry in entries.filter_map(Result::ok) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if (name.starts_with("seg_") || name.starts_with("segment_")) && name.ends_with(".mp4") {
-                    if let Ok(meta) = entry.metadata() {
-                        if meta.len() > 1024 {
-                            total += meta.len();
-                            count += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    (total, count, first_error)
+    (total, count, error)
 }
 
 fn output_size_valid(path: &Path) -> bool {
     std::fs::metadata(path)
-        .map(|m| m.len() > 1024)
+        .map(|metadata| metadata.len() > 1024)
         .unwrap_or(false)
 }

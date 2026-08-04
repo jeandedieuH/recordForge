@@ -71,11 +71,62 @@ pub struct LibraryRecording {
 }
 
 /// Insert a completed recording into the library from a finalized manifest.
+///
+/// The session ID is the durable idempotency key. Recovery and normal stop can
+/// safely retry this operation without creating duplicate library rows.
 pub fn insert_recording(
-    conn: &Connection,
+    conn: &mut Connection,
     manifest: &RecordingManifest,
     output_size_bytes: u64,
 ) -> Result<LibraryRecording> {
+    insert_recording_with_status(
+        conn,
+        manifest,
+        output_size_bytes,
+        LibraryRecordingStatus::Completed,
+    )
+}
+
+/// Insert a recovered recording while retaining its recovery provenance.
+pub fn insert_recovered_recording(
+    conn: &mut Connection,
+    manifest: &RecordingManifest,
+    output_size_bytes: u64,
+) -> Result<LibraryRecording> {
+    insert_recording_with_status(
+        conn,
+        manifest,
+        output_size_bytes,
+        LibraryRecordingStatus::Recovered,
+    )
+}
+
+fn insert_recording_with_status(
+    conn: &mut Connection,
+    manifest: &RecordingManifest,
+    output_size_bytes: u64,
+    status: LibraryRecordingStatus,
+) -> Result<LibraryRecording> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| InternalError::Storage(format!("begin recording transaction: {e}")))?;
+
+    match tx.query_row(
+        "SELECT * FROM recordings WHERE session_id = ?1",
+        params![&manifest.session_id],
+        row_to_recording,
+    ) {
+        Ok(existing) => {
+            tx.commit()
+                .map_err(|e| InternalError::Storage(format!("commit recording retry: {e}")))?;
+            return Ok(existing);
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(e) => {
+            return Err(InternalError::Storage(format!("check recording identity: {e}")).into())
+        }
+    }
+
     let (width, height, fps) = resolve_profile_dimensions(&manifest.profile_name);
     let now = Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -86,11 +137,9 @@ pub fn insert_recording(
         .map_err(|e| InternalError::Storage(format!("serialize source: {e}")))?;
     let markers_json = serde_json::to_string(&manifest.markers)
         .map_err(|e| InternalError::Storage(format!("serialize markers: {e}")))?;
-    let tags = "[]";
     let output_path = manifest.output_path.clone().unwrap_or_default();
-    let work_dir = manifest.work_dir.clone();
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO recordings (
             id, session_id, name, created_at, updated_at, duration_ms, size_bytes,
             width, height, fps, status, tags, source, profile_name, output_path,
@@ -109,17 +158,20 @@ pub fn insert_recording(
             width,
             height,
             fps,
-            LibraryRecordingStatus::Completed.as_str(),
-            tags,
+            status.as_str(),
+            "[]",
             source_json,
             manifest.profile_name.clone(),
             output_path,
-            work_dir,
+            manifest.work_dir.clone(),
             None::<String>,
             markers_json,
         ],
     )
     .map_err(|e| InternalError::Storage(format!("insert recording: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| InternalError::Storage(format!("commit recording: {e}")))?;
 
     Ok(LibraryRecording {
         id,
@@ -132,7 +184,7 @@ pub fn insert_recording(
         width,
         height,
         fps,
-        status: LibraryRecordingStatus::Completed,
+        status,
         tags: Vec::new(),
         source: manifest.source.clone(),
         profile_name: manifest.profile_name.clone(),
@@ -287,9 +339,9 @@ pub fn restore_recording(conn: &Connection, id: &str) -> Result<()> {
 pub fn delete_recording(conn: &Connection, id: &str, app_data_dir: &std::path::Path) -> Result<()> {
     let recording = get_recording(conn, id)?;
 
-    let app_data_canonical = app_data_dir.canonicalize().map_err(|e| {
-        InternalError::Storage(format!("failed to canonicalize app data dir: {e}"))
-    })?;
+    let app_data_canonical = app_data_dir
+        .canonicalize()
+        .map_err(|e| InternalError::Storage(format!("failed to canonicalize app data dir: {e}")))?;
 
     // 1. Remove physical files first
     if let Some(output) = &recording.output_path {
@@ -313,9 +365,9 @@ pub fn delete_recording(conn: &Connection, id: &str, app_data_dir: &std::path::P
 
     let work_dir = PathBuf::from(&recording.work_dir);
     if work_dir.exists() {
-        let canonical = work_dir.canonicalize().map_err(|e| {
-            InternalError::Storage(format!("failed to canonicalize work dir: {e}"))
-        })?;
+        let canonical = work_dir
+            .canonicalize()
+            .map_err(|e| InternalError::Storage(format!("failed to canonicalize work dir: {e}")))?;
         if !canonical.starts_with(&app_data_canonical) {
             return Err(InternalError::Permissions(format!(
                 "refusing to delete work dir outside app data: {}",
@@ -327,9 +379,18 @@ pub fn delete_recording(conn: &Connection, id: &str, app_data_dir: &std::path::P
     }
 
     // 2. Clean associated derivatives and jobs in DB
-    let _ = conn.execute("DELETE FROM derivatives WHERE recording_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM media_jobs WHERE recording_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM media_metadata WHERE recording_id = ?1", params![id]);
+    let _ = conn.execute(
+        "DELETE FROM derivatives WHERE recording_id = ?1",
+        params![id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM media_jobs WHERE recording_id = ?1",
+        params![id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM media_metadata WHERE recording_id = ?1",
+        params![id],
+    );
 
     // 3. Atomically delete database row
     conn.execute("DELETE FROM recordings WHERE id = ?1", params![id])

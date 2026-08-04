@@ -72,6 +72,18 @@ describe("recording contracts", () => {
     expect(recordingStatusSchema.parse(status)).toMatchObject(status)
   })
 
+  it("accepts RFC3339 offsets emitted by Rust", () => {
+    const status = {
+      sessionId: "session-1",
+      state: "recording" as const,
+      startedAt: "2026-08-02T12:00:00+00:00",
+      durationMs: 1000,
+      recordedMs: 1000,
+    }
+
+    expect(recordingStatusSchema.parse(status).startedAt).toBe(status.startedAt)
+  })
+
   it("validates a recording manifest with fragments and markers", () => {
     const manifest = {
       version: 1 as const,

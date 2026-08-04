@@ -336,7 +336,7 @@ Register recording shortcuts in Rust so they can work even when the main applica
 
 | Priority | Platform | Capture approach | Status |
 |---|---|---|---|
-| 1 | Windows 11 | Windows Graphics Capture, WASAPI | V1 |
+| 1 | Windows 10 | FFmpeg `ddagrab` with `gdigrab` bounds fallback; DirectShow optional audio/webcam inputs | Implemented baseline |
 | 2 | macOS 14+ | ScreenCaptureKit | Future |
 | 3 | Linux | PipeWire | Experimental future |
 
@@ -346,8 +346,9 @@ Register recording shortcuts in Rust so they can work even when the main applica
 - Capture a selected display.
 - Capture a selected application window.
 - Capture a user-selected region.
-- Capture system audio through WASAPI loopback.
-- Capture microphone audio through WASAPI.
+- Capture system audio through an available DirectShow loopback/virtual device in the current baseline.
+- Capture microphone audio through DirectShow in the current baseline.
+- Native WASAPI loopback and independent audio assets remain a follow-up.
 - Support optional webcam input.
 - Maintain monotonic capture timestamps.
 - Write recoverable local media segments.
@@ -383,6 +384,8 @@ pub trait CaptureEngine: Send + Sync {
 
 ### 6.3 Recording output and recovery
 
+**Implemented Windows baseline:** The UI start path now prepares a UUID session and durable manifest before capture. Rust owns the countdown/start/cancel boundary, minimizes the main window, and creates the floating controls and capture-boundary windows. FFmpeg writes fragmented MP4 segments into the session directory; stop validates and atomically publishes `output.mp4`, inserts an idempotent SQLite library row, and caches FFprobe metadata.
+
 Do not write one giant recording file during capture. Write recoverable segments.
 
 ```text
@@ -403,12 +406,16 @@ recordForge Library/
 #### Recovery rules
 
 1. Persist a session manifest before capture starts.
-2. Mark each finalized segment as complete atomically.
-3. On startup, scan for incomplete sessions.
-4. Validate finished segments.
-5. Rebuild a playable recording from valid segments.
-6. Offer **Recover**, **Export recovered file**, and **Delete**.
-7. Never silently delete recoverable media.
+2. Mark each finalized segment as complete atomically and flush critical files.
+3. On startup, scan the sessions directory from the Library view for incomplete sessions.
+4. Include physical fragmented `seg_*.mp4` files when a force-quit happened before the manifest saw a finalized fragment.
+5. Validate candidate segments and the recovered output before presenting it as a recording.
+6. Rebuild into a temporary output and atomically publish the final MP4.
+7. Insert by `session_id` so recovery retries cannot duplicate library rows.
+8. Offer **Recover**, **Export recovered file**, and **Delete**.
+9. Never silently delete recoverable media.
+
+Periodic segment rollover is still planned for long recordings so a hard kill has a bounded maximum loss window.
 
 Fragmented MP4-style recording is suitable for recovery because media is stored as independently completed fragments; FFmpeg supports creating fragments at keyframes. [stackoverflow](https://stackoverflow.com/questions/8616855/how-to-output-fragmented-mp4-with-ffmpeg)
 

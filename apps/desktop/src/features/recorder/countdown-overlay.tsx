@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Video, X } from "lucide-react"
 import { Button } from "@recordforge/ui"
 
@@ -28,6 +28,12 @@ export function CountdownOverlay({
   // startRecording to be called twice ("recording is already active").
   const firedRef = useRef(false)
 
+  const handleCancel = useCallback(() => {
+    if (firedRef.current) return
+    firedRef.current = true
+    onCancelRef.current?.()
+  }, [])
+
   useEffect(() => {
     firedRef.current = false
     setLeft(seconds)
@@ -49,7 +55,7 @@ export function CountdownOverlay({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && onCancelRef.current) {
         clearTimeout(timer)
-        onCancelRef.current()
+        handleCancel()
       }
     }
 
@@ -59,7 +65,7 @@ export function CountdownOverlay({
       clearTimeout(timer)
       window.removeEventListener("keydown", handleKeyDown)
     }
-  }, [left])
+  }, [handleCancel, left])
 
   const progressPercent = ((seconds - left + 1) / seconds) * 100
 
@@ -102,7 +108,7 @@ export function CountdownOverlay({
         <div className="mt-8 flex flex-col items-center gap-2">
           <Button
             variant="secondary"
-            onClick={onCancel}
+            onClick={handleCancel}
             className="flex items-center gap-2 rounded-full border border-white/20 bg-white/10 text-xs font-semibold text-white hover:bg-white/20 hover:text-white cursor-pointer px-5 py-2"
           >
             <X className="size-3.5" />

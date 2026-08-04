@@ -56,9 +56,6 @@ export function NewRecordingModal({
   )
   const [audioLevel, setAudioLevel] = useState(0.45)
 
-  
-  
-
   // Load sources, devices, and profiles when the modal opens
   useEffect(() => {
     if (open) {
@@ -139,7 +136,7 @@ export function NewRecordingModal({
     } else if (type === "window") {
       const window = windowSources[0] || sources.find((s) => s.kind === "window")
       if (window) setSelectedSource(window)
-    } 
+    }
   }
 
   function handleStartRecording() {
@@ -324,7 +321,7 @@ export function NewRecordingModal({
                         </SelectItem>
                       ))
                     ) : (
-                      <SelectItem value="balanced">Balanced (1080p, 60fps)</SelectItem>
+                      <SelectItem value="balanced">Balanced (1080p, 30fps)</SelectItem>
                     )}
                   </SelectContent>
                 </Select>
@@ -507,7 +504,6 @@ export function NewRecordingModal({
           </div>
         </DialogContent>
       </Dialog>
-      
     </>
   )
 }

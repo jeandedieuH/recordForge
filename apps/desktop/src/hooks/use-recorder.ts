@@ -1,6 +1,6 @@
 import { useEffect } from "react"
 import { listen } from "@tauri-apps/api/event"
-import type { RecordingStatus } from "@recordforge/contracts"
+import { recordingStatusSchema } from "@recordforge/contracts"
 import { useRecorderStore } from "../stores/recorder-store"
 
 // Re-export the recorder Zustand store so the rest of the app can subscribe
@@ -36,6 +36,7 @@ export function useRecorderPolling(intervalMs = 1000) {
 // Mount this once near the root of each window that shows recorder state.
 export function useRecorderStatusEvents() {
   const setStatus = useRecorderStore((s) => s.setStatus)
+  const refreshStatus = useRecorderStore((s) => s.refreshStatus)
 
   useEffect(() => {
     // `listen` returns an unlisten function; the Tauri event payload is wrapped
@@ -43,8 +44,10 @@ export function useRecorderStatusEvents() {
     let unlisten: (() => void) | undefined
     let active = true
 
-    listen<RecordingStatus>("recorder-status", (event) => {
-      setStatus(event.payload)
+    listen<unknown>("recorder-status", (event) => {
+      const parsed = recordingStatusSchema.safeParse(event.payload)
+      if (parsed.success) setStatus(parsed.data)
+      else void refreshStatus()
     }).then((fn) => {
       if (active) {
         unlisten = fn
@@ -57,5 +60,5 @@ export function useRecorderStatusEvents() {
       active = false
       unlisten?.()
     }
-  }, [setStatus])
+  }, [refreshStatus, setStatus])
 }

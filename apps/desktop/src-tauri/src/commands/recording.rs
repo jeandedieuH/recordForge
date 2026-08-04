@@ -26,6 +26,7 @@ use crate::errors::{InternalError, Result};
 use crate::jobs::JobManager;
 use crate::media;
 use crate::state::AppState;
+use crate::window::{BoundaryWindow, CountdownWindow, FloatingWindow, MainWindow};
 
 /// Initialize the shared application state. Called once in `setup`.
 pub fn init(app: &tauri::App) -> Result<()> {
@@ -47,7 +48,12 @@ pub fn init(app: &tauri::App) -> Result<()> {
 
     let ffmpeg_path = Recorder::resolve_ffmpeg()?;
     let ffprobe_path = media::resolve_executable("ffprobe")?;
-    let recorder = Recorder::new(ffmpeg_path.clone(), sessions_dir.clone(), Arc::clone(&db));
+    let recorder = Recorder::new(
+        ffmpeg_path.clone(),
+        ffprobe_path.clone(),
+        sessions_dir.clone(),
+        Arc::clone(&db),
+    );
 
     let job_manager = JobManager::new(
         app.handle().clone(),
@@ -143,11 +149,141 @@ pub fn start_recording(
             .recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.start(config)?
+        guard.start(config.clone())?
     };
+
+    MainWindow::minimize(&app)?;
+    open_recording_windows(&app, config.source.bounds);
+    emit_current_status(&app, &state);
+    Ok(session_id)
+}
+
+#[tauri::command]
+#[instrument]
+pub fn prepare_recording(
+    config: RecordingConfig,
+    countdown_seconds: u8,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String> {
+    if !matches!(countdown_seconds, 0 | 3 | 5) {
+        return Err(InternalError::Capture("countdown must be 0, 3, or 5 seconds".into()).into());
+    }
+    if let Ok(mut guard) = state.quick_config.lock() {
+        *guard = Some(config.clone());
+    }
+
+    let session_id = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.prepare(config.clone())?
+    };
+
+    if let Err(error) = MainWindow::minimize(&app) {
+        let _ = cancel_prepared_session(&state, &session_id);
+        return Err(error);
+    }
+
+    if countdown_seconds == 0 {
+        if let Err(error) = start_prepared_session(&app, &state, &session_id, config.source.bounds)
+        {
+            let _ = MainWindow::restore(&app);
+            return Err(error);
+        }
+    } else if let Err(error) = CountdownWindow::open_or_focus(
+        &app,
+        &session_id,
+        countdown_seconds,
+        &config.source.name,
+        config.source.bounds,
+    ) {
+        let _ = cancel_prepared_session(&state, &session_id);
+        let _ = MainWindow::restore(&app);
+        return Err(error);
+    }
 
     emit_current_status(&app, &state);
     Ok(session_id)
+}
+
+#[tauri::command]
+#[instrument]
+pub fn confirm_recording_start(
+    session_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    let bounds = quick_config_bounds(&state)?;
+    if let Err(error) = start_prepared_session(&app, &state, &session_id, bounds) {
+        CountdownWindow::hide(&app);
+        let _ = MainWindow::restore(&app);
+        emit_current_status(&app, &state);
+        return Err(error);
+    }
+    CountdownWindow::hide(&app);
+    emit_current_status(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+#[instrument]
+pub fn cancel_recording_start(
+    session_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    cancel_prepared_session(&state, &session_id)?;
+    CountdownWindow::hide(&app);
+    MainWindow::restore(&app)?;
+    emit_current_status(&app, &state);
+    Ok(())
+}
+
+fn quick_config_bounds(state: &AppState) -> Result<crate::capture::source::Bounds> {
+    let guard = state
+        .quick_config
+        .lock()
+        .map_err(|_| InternalError::Capture("quick config mutex poisoned".into()))?;
+    guard
+        .as_ref()
+        .map(|config| config.source.bounds)
+        .ok_or_else(|| InternalError::Capture("recording source is unavailable".into()).into())
+}
+
+fn start_prepared_session(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    session_id: &str,
+    bounds: crate::capture::source::Bounds,
+) -> Result<()> {
+    {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.start_prepared(session_id)?;
+    }
+    open_recording_windows(app, bounds);
+    Ok(())
+}
+
+fn cancel_prepared_session(state: &AppState, session_id: &str) -> Result<()> {
+    let guard = state
+        .recorder
+        .lock()
+        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+    guard.cancel_prepared(session_id)
+}
+
+fn open_recording_windows(app: &tauri::AppHandle, bounds: crate::capture::source::Bounds) {
+    if let Err(error) = FloatingWindow::open_or_focus(app) {
+        tracing::warn!(error = ?error, "failed to open floating controls");
+    }
+    if let Err(error) = BoundaryWindow::open_or_focus(app, bounds) {
+        tracing::warn!(error = ?error, "failed to open capture boundary");
+    }
 }
 
 #[tauri::command]
@@ -187,20 +323,21 @@ pub fn resume_recording(
 #[tauri::command]
 #[instrument]
 pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
-    let stats = {
+    let result = {
         let guard = state
             .recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.stop()?
+        guard.stop()
     };
-    crate::window::FloatingWindow::hide(&app);
-    crate::window::BoundaryWindow::hide(&app);
-    // Stop finalizes the session; broadcast the now-idle status so the timer
-    // resets and the floating controls update even though stop has no return
-    // status payload of its own.
+    FloatingWindow::hide(&app);
+    BoundaryWindow::hide(&app);
+    CountdownWindow::hide(&app);
+    if let Err(error) = MainWindow::restore(&app) {
+        tracing::error!(error = ?error, "failed to restore main window after stop");
+    }
     emit_current_status(&app, &state);
-    Ok(stats)
+    result
 }
 
 #[tauri::command]
@@ -264,14 +401,15 @@ pub fn recover_session(session_id: String, state: State<'_, AppState>) -> Result
     // the sessions root before any recovery work begins.
     let work_dir = state.path_policy.validate_session_dir(&session_id)?;
 
-    let db = state
+    let mut db = state
         .db
         .lock()
         .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
     recovery_recover_session(
         &work_dir,
         &state.ffmpeg_path.to_string_lossy(),
-        &db,
+        &state.ffprobe_path.to_string_lossy(),
+        &mut db,
     )
 }
 
@@ -400,7 +538,10 @@ pub fn empty_trash(state: State<'_, AppState>) -> Result<()> {
         .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
     let recordings = database::library::list_recordings(&db)?;
     let app_data_dir = state.path_policy.app_data_dir();
-    for rec in recordings.into_iter().filter(|r| r.status == database::library::LibraryRecordingStatus::Trashed) {
+    for rec in recordings
+        .into_iter()
+        .filter(|r| r.status == database::library::LibraryRecordingStatus::Trashed)
+    {
         let _ = database::library::delete_recording(&db, &rec.id, app_data_dir);
     }
     Ok(())
@@ -432,7 +573,9 @@ pub fn trim_recording(
 
     // Validate that both the source file and the work directory belong to the
     // app data area before writing a trimmed file next to the original.
-    state.path_policy.validate_recording_path(Path::new(source_path))?;
+    state
+        .path_policy
+        .validate_recording_path(Path::new(source_path))?;
     let work_dir = state
         .path_policy
         .validate_recording_path(Path::new(&original.work_dir))?;
@@ -508,8 +651,9 @@ pub fn hide_floating_controls(app: tauri::AppHandle) -> Result<()> {
 /// Open a transparent always-on-top fullscreen window for capture boundary outline.
 #[tauri::command]
 #[instrument]
-pub fn open_boundary_overlay(app: tauri::AppHandle) -> Result<()> {
-    crate::window::BoundaryWindow::open_or_focus(&app)
+pub fn open_boundary_overlay(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
+    let bounds = quick_config_bounds(&state)?;
+    BoundaryWindow::open_or_focus(&app, bounds)
 }
 
 /// Hide the capture boundary outline window.

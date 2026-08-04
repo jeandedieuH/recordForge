@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use crate::errors::{InternalError, Result};
+use std::path::{Path, PathBuf};
 
 /// Path authorization and security policy enforcer for recordForge.
 ///
@@ -70,9 +70,9 @@ impl PathPolicy {
 
     /// Validate a target path for export destination.
     pub fn validate_export_destination(&self, path: &Path) -> Result<PathBuf> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| InternalError::Permissions("export path has no parent directory".into()))?;
+        let parent = path.parent().ok_or_else(|| {
+            InternalError::Permissions("export path has no parent directory".into())
+        })?;
 
         if !parent.exists() {
             return Err(InternalError::Storage(format!(

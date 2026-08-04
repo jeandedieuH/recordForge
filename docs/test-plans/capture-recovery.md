@@ -50,6 +50,7 @@
 | `test_manifest_updated_on_resume` | Resume recording | Manifest state = "recording", new fragment |
 | `test_manifest_updated_on_stop` | Stop recording | Manifest state = "completed", outputPath set |
 | `test_manifest_atomic_write` | Write manifest | `session.json.tmp` does not exist after write |
+| `test_manifest_rewrite_is_atomic_and_durable` | Write, mutate, and rewrite manifest | Existing manifest is replaced and the latest state can be read |
 
 ### 2.2 Fragment lifecycle
 
@@ -59,6 +60,7 @@
 | `test_fragment_validated_on_pause` | Pause recording | Fragment validated, sizeBytes > 0 |
 | `test_new_fragment_on_resume` | Resume after pause | Fragment index incremented |
 | `test_only_validated_fragments_concatenated` | Stop with mixed fragments | Only `validated: true` segments in output |
+| `test_recording_insert_is_idempotent` | Insert the same manifest twice | One SQLite row and the same library ID on retry |
 
 ---
 
@@ -102,7 +104,7 @@
 
 | Scenario | Setup | Kill Method | Verification |
 |----------|-------|-------------|-------------|
-| Kill during first segment (no rollover) | Start 1080p30, record 10s | `taskkill /f` | **P0.1**: Currently NO recovery. Required: periodic rollover enables partial recovery |
+| Kill during first segment (no rollover) | Start 1080p30, record 10s | `taskkill /f` | Fragmented MP4/physical segment is surfaced when the interrupted container remains readable; periodic rollover remains a follow-up |
 | Kill after first rollover | Record > rollover interval | `taskkill /f` | Finalized segments recovered |
 | Kill during pause | Pause recording, then kill | `taskkill /f` | All prior segments recovered |
 | Kill during stop/finalization | Trigger stop, kill during concat | `taskkill /f` | Segments available, output.mp4 may be corrupt |

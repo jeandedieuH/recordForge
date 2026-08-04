@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Cloud,
   Cpu,
@@ -24,6 +24,7 @@ import {
 } from "@recordforge/ui"
 import { useThemeStore } from "../../stores/theme-store"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { getSetting, isTauri, setSetting } from "../../lib/settings"
 import { DiagnosticsPanel } from "./diagnostics-panel"
 
 type SettingsTab = "general" | "quality" | "diagnostics" | "storage"
@@ -36,6 +37,28 @@ export function SettingsView() {
   const [savePath, setSavePath] = useState("C:\\Users\\User\\Videos\\recordForge")
   const [countdownSec, setCountdownSec] = useState("3")
   const [startMinimized, setStartMinimized] = useState(false)
+
+  useEffect(() => {
+    if (!isTauri()) return
+    void Promise.all([getSetting("countdownSeconds"), getSetting("startMinimized")]).then(
+      ([countdown, minimized]) => {
+        if (countdown === "0" || countdown === "3" || countdown === "5") {
+          setCountdownSec(countdown)
+        }
+        setStartMinimized(minimized === "true")
+      },
+    )
+  }, [])
+
+  function handleCountdownChange(value: string) {
+    setCountdownSec(value)
+    if (isTauri()) void setSetting("countdownSeconds", value)
+  }
+
+  function handleStartMinimizedChange(value: boolean) {
+    setStartMinimized(value)
+    if (isTauri()) void setSetting("startMinimized", String(value))
+  }
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-6xl mx-auto w-full">
@@ -213,7 +236,7 @@ export function SettingsView() {
                   Keep recordForge running in the notification area when window is closed.
                 </p>
               </div>
-              <Switch checked={startMinimized} onCheckedChange={setStartMinimized} />
+              <Switch checked={startMinimized} onCheckedChange={handleStartMinimizedChange} />
             </div>
           </div>
         </div>
@@ -236,17 +259,17 @@ export function SettingsView() {
                 {
                   id: "low-impact",
                   name: "Low Impact",
-                  desc: "Best for gaming & low-spec PCs. 1080p @ 30fps",
+                  desc: "Best for gaming & low-spec PCs. 720p @ 30fps",
                 },
                 {
                   id: "balanced",
                   name: "Balanced",
-                  desc: "Optimal balance of quality & filesize. 1080p @ 60fps",
+                  desc: "Optimal balance of quality & filesize. 1080p @ 30fps",
                 },
                 {
-                  id: "pro-res",
+                  id: "high-quality",
                   name: "Maximum Quality",
-                  desc: "Visually lossless capture for editing. 4K @ 60fps",
+                  desc: "Higher quality capture for editing. 1080p @ 30fps",
                 },
               ].map((p) => (
                 <button
@@ -275,7 +298,7 @@ export function SettingsView() {
                 <label className="block text-xs font-medium text-subtle-foreground mb-1.5">
                   Countdown Delay Before Start
                 </label>
-                <Select value={countdownSec} onValueChange={(val) => setCountdownSec(val)}>
+                <Select value={countdownSec} onValueChange={handleCountdownChange}>
                   <SelectTrigger className="w-full rounded-lg border border-border bg-surface-dim px-3 py-2 text-xs text-foreground">
                     <SelectValue placeholder="Select delay" />
                   </SelectTrigger>

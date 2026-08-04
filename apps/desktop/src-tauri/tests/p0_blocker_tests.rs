@@ -2,10 +2,12 @@
 //!
 //! These tests establish baseline reproductions for critical P0 bugs before fixing them.
 
-use recordforge_desktop_lib::capture::manifest::RecordingManifest;
+use recordforge_desktop_lib::capture::manifest::{RecorderState, RecordingManifest};
 use recordforge_desktop_lib::capture::recovery::{delete_recovery_session, scan_recovery};
 use recordforge_desktop_lib::capture::source::{Bounds, CaptureSource};
-use recordforge_desktop_lib::database::library::{delete_recording, insert_recording, list_recordings};
+use recordforge_desktop_lib::database::library::{
+    delete_recording, insert_recording, list_recordings,
+};
 
 #[test]
 fn test_p0_1_first_segment_crash_unrecoverable() {
@@ -18,11 +20,21 @@ fn test_p0_1_first_segment_crash_unrecoverable() {
         kind: "display".into(),
         id: "display-0".into(),
         name: "Display 1".into(),
-        bounds: Bounds { x: 0, y: 0, width: 1920, height: 1080 },
+        bounds: Bounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
     };
 
     // Create a manifest in Recording state (process crashed mid-recording without calling pause/stop)
-    let manifest = RecordingManifest::new(session_id.clone(), work_dir.to_string_lossy(), source, "balanced");
+    let manifest = RecordingManifest::new(
+        session_id.clone(),
+        work_dir.to_string_lossy(),
+        source,
+        "balanced",
+    );
     manifest.write().unwrap();
 
     // Simulate FFmpeg writing 500KB to seg_000.mp4 before the process was killed
@@ -35,7 +47,10 @@ fn test_p0_1_first_segment_crash_unrecoverable() {
     let result = &results[0];
 
     // P0.1 Fix Verification: Direct file scanning recovers unfinalized segments after force-quit/crash
-    assert!(result.is_recoverable, "P0.1 FIX CONFIRMED: Segment file detected and marked recoverable!");
+    assert!(
+        result.is_recoverable,
+        "P0.1 FIX CONFIRMED: Segment file detected and marked recoverable!"
+    );
 
     std::fs::remove_dir_all(&temp_dir).ok();
 }
@@ -55,7 +70,10 @@ fn test_p0_7_path_traversal_in_delete_recovery_session() {
 
     // P0.7 Fix Verification: delete_recovery_session MUST return an error on path traversal
     let res = delete_recovery_session(traversal_id, &sessions_dir);
-    assert!(res.is_err(), "delete_recovery_session correctly rejected path traversal attempt");
+    assert!(
+        res.is_err(),
+        "delete_recovery_session correctly rejected path traversal attempt"
+    );
 
     // Verify secret_dir WAS NOT DELETED
     assert!(
@@ -68,7 +86,7 @@ fn test_p0_7_path_traversal_in_delete_recovery_session() {
 
 #[test]
 fn test_p0_8_delete_recording_non_atomic() {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.pragma_update(None, "foreign_keys", "ON").unwrap();
 
     // Init v2 schema
@@ -94,20 +112,32 @@ fn test_p0_8_delete_recording_non_atomic() {
             markers TEXT NOT NULL DEFAULT '[]'
         )",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     let source = CaptureSource {
         kind: "display".into(),
         id: "display-0".into(),
         name: "Display 1".into(),
-        bounds: Bounds { x: 0, y: 0, width: 1920, height: 1080 },
+        bounds: Bounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
     };
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut manifest = RecordingManifest::new(session_id, "C:/tmp/work", source, "balanced");
     manifest.set_output_path("C:/nonexistent/file/that/cannot/be/deleted.mp4");
 
-    let rec = insert_recording(&conn, &manifest, 100).unwrap();
+    let rec = insert_recording(&mut conn, &manifest, 100).unwrap();
+    let retry = insert_recording(&mut conn, &manifest, 100).unwrap();
+    assert_eq!(
+        retry.id, rec.id,
+        "session retries must not duplicate library rows"
+    );
+    assert_eq!(list_recordings(&conn).unwrap().len(), 1);
 
     // Delete recording row. Pass an existing app data dir for path containment
     // validation; the recording's file paths are nonexistent, so deletion still
@@ -117,7 +147,11 @@ fn test_p0_8_delete_recording_non_atomic() {
 
     // P0.8 Bug Reproduction: The database row is removed even though the file removal was attempted afterward and ignored.
     let remaining = list_recordings(&conn).unwrap();
-    assert_eq!(remaining.len(), 0, "P0.8: DB row deleted regardless of file deletion outcome");
+    assert_eq!(
+        remaining.len(),
+        0,
+        "P0.8: DB row deleted regardless of file deletion outcome"
+    );
 }
 
 #[test]
@@ -128,11 +162,10 @@ fn test_p0_9_migrate_v2_destroys_recordings() {
     conn.execute(
         "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         [],
-    ).unwrap();
-    conn.execute(
-        "INSERT INTO app_meta VALUES ('schema_version', '1')",
-        [],
-    ).unwrap();
+    )
+    .unwrap();
+    conn.execute("INSERT INTO app_meta VALUES ('schema_version', '1')", [])
+        .unwrap();
     conn.execute(
         "CREATE TABLE recordings (id TEXT PRIMARY KEY, session_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', duration_ms INTEGER NOT NULL DEFAULT 0, size_bytes INTEGER NOT NULL DEFAULT 0, width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, fps INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'completed', tags TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT '{}', profile_name TEXT NOT NULL DEFAULT 'balanced', output_path TEXT, work_dir TEXT NOT NULL DEFAULT '', thumbnail_path TEXT, markers TEXT NOT NULL DEFAULT '[]')",
         [],
@@ -140,18 +173,56 @@ fn test_p0_9_migrate_v2_destroys_recordings() {
     conn.execute(
         "INSERT INTO recordings (id, name) VALUES ('rec-1', 'Important Recording')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
 
     // Verify row exists
-    let count_before: i64 = conn.query_row("SELECT count(*) FROM recordings", [], |r| r.get(0)).unwrap();
+    let count_before: i64 = conn
+        .query_row("SELECT count(*) FROM recordings", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(count_before, 1);
 
     // Run new transactional forward-only migrations
     recordforge_desktop_lib::database::migrations::run_migrations(&mut conn).unwrap();
 
     // P0.9 Fix Verification: Non-destructive migrations MUST preserve existing recording data!
-    let count_after: i64 = conn.query_row("SELECT count(*) FROM recordings", [], |r| r.get(0)).unwrap();
-    assert_eq!(count_after, 1, "P0.9 FIX CONFIRMED: Transactional migrations preserved user recording data!");
+    let count_after: i64 = conn
+        .query_row("SELECT count(*) FROM recordings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count_after, 1,
+        "P0.9 FIX CONFIRMED: Transactional migrations preserved user recording data!"
+    );
+}
+
+#[test]
+fn test_manifest_rewrite_is_atomic_and_durable() {
+    let temp_dir = tempfile_dir("manifest_rewrite");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let work_dir = temp_dir.join(&session_id);
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let source = CaptureSource {
+        kind: "display".into(),
+        id: "display-0".into(),
+        name: "Display 1".into(),
+        bounds: Bounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+    };
+
+    let mut manifest =
+        RecordingManifest::new(session_id, work_dir.to_string_lossy(), source, "balanced");
+    manifest.write().unwrap();
+    manifest.set_state(RecorderState::Paused);
+    manifest.write().unwrap();
+
+    let restored = RecordingManifest::read(work_dir.join("session.json")).unwrap();
+    assert_eq!(restored.state, RecorderState::Paused);
+    assert!(!work_dir.join("session.json.tmp").exists());
+    std::fs::remove_dir_all(&temp_dir).unwrap();
 }
 
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
