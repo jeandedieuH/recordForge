@@ -187,14 +187,14 @@ Each session will track multiple asset types:
 | Asset Kind | File Pattern | Track Independence |
 |------------|-------------|-------------------|
 | `screen` | `seg_NNN.mp4` | Primary video track |
-| `microphone` | `mic_NNN.wav` | Separate audio (Phase 2: WASAPI) |
-| `system_audio` | `sys_NNN.wav` | Separate audio (Phase 2: WASAPI loopback) |
+| `microphone` | `mic_NNN.wav` | Separate audio from native WASAPI |
+| `system_audio` | `sys_NNN.wav` | Separate audio from native WASAPI loopback |
 | `webcam` | `webcam_NNN.mp4` | Separate timestamped video |
 | `marker` | In manifest | Metadata only |
 | `cursor_events` | `cursor.json` | Metadata (Phase 6) |
 
-### Current gap (P0.4)
-Microphone and system audio are currently mixed into the screen segment's audio track by FFmpeg's `-f dshow` input. They are not independently controllable in the editor. Phase 2 separates them using WASAPI capture into independent files.
+### Current implementation
+Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg muxes the available assets as separate AAC streams in `seg_NNN.mp4`; the WAV files remain in the session directory for future recovery and editor-track support.
 
 ---
 
@@ -202,8 +202,8 @@ Microphone and system audio are currently mixed into the screen segment's audio 
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | Initial schema; single video segment + mixed audio |
-| 2 (Phase 2) | Add asset registry; separate audio tracks; periodic rollover config |
+| 1 (current) | Initial manifest schema; segment files plus native WASAPI audio muxing |
+| 2 (planned) | Add asset registry; persist separate audio assets and periodic rollover config |
 | 3 (Phase 5) | Add project reference; derivative recipe versions |
 
 Manifests are forward-only. A v2 reader must handle v1 manifests by treating the single segment as a combined screen+audio asset.

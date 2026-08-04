@@ -17,6 +17,7 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 | Monorepo | Turborepo + Bun workspaces |
 | Local database | SQLite |
 | Video processing | FFmpeg + FFprobe |
+| Windows audio capture | Native WASAPI via `wasapi` |
 | State management | Zustand |
 | Validation | Zod |
 | UI kit | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010) |

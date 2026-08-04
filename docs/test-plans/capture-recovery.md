@@ -10,7 +10,7 @@
 ### 1.1 Happy path transitions
 
 | Test | Input | Expected |
-|------|-------|----------|
+| ------ | ------- | ---------- |
 | `test_idle_to_recording` | `start()` with valid config | State → `Recording`, session ID returned |
 | `test_recording_to_paused` | `pause()` while recording | State → `Paused`, segment finalized |
 | `test_paused_to_recording` | `resume()` while paused | State → `Recording`, new segment started |
@@ -20,7 +20,7 @@
 ### 1.2 Guard clause tests
 
 | Test | Input | Expected |
-|------|-------|----------|
+| ------ | ------- | ---------- |
 | `test_start_while_recording` | `start()` while already recording | Error: "a recording is already active" |
 | `test_pause_when_idle` | `pause()` when idle | Error: "no active recording" |
 | `test_resume_when_idle` | `resume()` when idle | Error: "no active recording" |
@@ -32,7 +32,7 @@
 ### 1.3 Marker tests
 
 | Test | Input | Expected |
-|------|-------|----------|
+| ------ | ------- | ---------- |
 | `test_marker_during_recording` | `insert_marker()` while recording | Marker added to manifest |
 | `test_marker_during_pause` | `insert_marker()` while paused | Marker added with accumulated timestamp |
 | `test_marker_when_idle` | `insert_marker()` when idle | Error: "no active recording" |
@@ -44,7 +44,7 @@
 ### 2.1 Manifest persistence
 
 | Test | Action | Verification |
-|------|--------|-------------|
+| ------ | -------- | ------------- |
 | `test_manifest_created_on_start` | Start recording | `session.json` exists in work dir |
 | `test_manifest_updated_on_pause` | Pause recording | Manifest state = "paused" |
 | `test_manifest_updated_on_resume` | Resume recording | Manifest state = "recording", new fragment |
@@ -55,7 +55,7 @@
 ### 2.2 Fragment lifecycle
 
 | Test | Action | Verification |
-|------|--------|-------------|
+| ------ | -------- | ------------- |
 | `test_fragment_created_on_start` | Start recording | Fragment 0 in manifest, `validated: false` |
 | `test_fragment_validated_on_pause` | Pause recording | Fragment validated, sizeBytes > 0 |
 | `test_new_fragment_on_resume` | Resume after pause | Fragment index incremented |
@@ -69,7 +69,7 @@
 ### 3.1 Recovery scan
 
 | Test | Setup | Expected |
-|------|-------|----------|
+| ------ | ------- | ---------- |
 | `test_scan_empty_sessions_dir` | Empty sessions dir | Empty results |
 | `test_scan_completed_session` | Manifest with state=completed | Skipped (not in results) |
 | `test_scan_recording_with_fragments` | Manifest state=recording, 2 validated fragments | `isRecoverable: true` |
@@ -80,7 +80,7 @@
 ### 3.2 Recovery execution
 
 | Test | Setup | Expected |
-|------|-------|----------|
+| ------ | ------- | ---------- |
 | `test_recover_with_fragments` | 2 validated fragments, no output.mp4 | Segments concatenated, library entry created |
 | `test_recover_existing_output` | Valid output.mp4 already exists | Use existing output, create library entry |
 | `test_recover_no_valid_fragments` | 0 validated fragments | Error: "no valid fragments" |
@@ -89,7 +89,7 @@
 ### 3.3 Recovery deletion (P0.7)
 
 | Test | Input | Expected |
-|------|-------|----------|
+| ------ | ------- | ---------- |
 | `test_delete_valid_session` | Valid UUID session ID | Session dir removed |
 | `test_delete_path_traversal` | `session_id = "../../"` | **MUST FAIL** — path traversal blocked |
 | `test_delete_path_traversal_encoded` | `session_id = "..%2F.."` | **MUST FAIL** |
@@ -103,7 +103,7 @@
 ### 4.1 Process kill during recording
 
 | Scenario | Setup | Kill Method | Verification |
-|----------|-------|-------------|-------------|
+| ---------- | ------- | ------------- | ------------- |
 | Kill during first segment (no rollover) | Start 1080p30, record 10s | `taskkill /f` | Fragmented MP4/physical segment is surfaced when the interrupted container remains readable; periodic rollover remains a follow-up |
 | Kill after first rollover | Record > rollover interval | `taskkill /f` | Finalized segments recovered |
 | Kill during pause | Pause recording, then kill | `taskkill /f` | All prior segments recovered |
@@ -113,7 +113,7 @@
 ### 4.2 Recovery after forced exit
 
 | Scenario | Verification |
-|----------|-------------|
+| ---------- | ------------- |
 | App restart after kill | Recovery scan finds incomplete session |
 | User recovers session | output.mp4 created from fragments, library entry added |
 | User discards session | Session directory removed cleanly |
@@ -126,7 +126,7 @@
 ### 5.1 Capture correctness
 
 | Scenario | Steps | Expected |
-|----------|-------|----------|
+| ---------- | ------- | ---------- |
 | Display capture 1080p30 | Select display → Balanced → Start → Record 1 min → Stop | Clean 1080p30 MP4, no artifacts |
 | Window capture (P0.2) | Select a window → Start → Move window → Stop | Currently: desktop crop. Required: tracks window |
 | Window minimized | Start window capture → Minimize target → Stop | Graceful handling |
@@ -137,9 +137,9 @@
 ### 5.2 Audio correctness
 
 | Scenario | Steps | Expected |
-|----------|-------|----------|
+| ---------- | ------- | ---------- |
 | Mic only | Enable mic, disable system audio → Record → Stop | Audio in output from mic |
-| System audio (P0.3) | Enable system audio, disable mic → Record → Stop | Currently: may fail without Stereo Mix |
-| Mic + system (P0.4) | Enable both → Record → Stop → Check tracks | Currently: single mixed track |
+| System audio (P0.3) | Enable system audio, disable mic → Record → Stop | Audio from the selected WASAPI render endpoint without Stereo Mix |
+| Mic + system (P0.4) | Enable both → Record → Stop → Check tracks | Separate microphone and system-audio streams in the MP4 |
 | No audio | Disable all audio → Record → Stop | Valid video-only MP4 |
 | Audio device disconnect | Record with mic → Unplug mic during recording | Warning, continue video |

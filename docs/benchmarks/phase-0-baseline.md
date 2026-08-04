@@ -9,7 +9,7 @@
 ## 1. Application Lifecycle
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Cold startup to main window visible | _[measure]_ ms | |
 | Startup with recovery scan (0 sessions) | _[measure]_ ms | |
 | Startup with recovery scan (5 sessions) | _[measure]_ ms | |
@@ -25,7 +25,7 @@
 ### 2.1 Display capture — 1080p30 Balanced profile
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Capture engine | ddagrab / gdigrab | Which engine was selected |
 | Duration | _[measure]_ min | Target: 5 min initial baseline |
 | Frames processed | _[measure]_ | From FFmpeg stderr |
@@ -45,7 +45,7 @@
 ### 2.2 Display capture — 720p30 Low Impact profile
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Duration | _[measure]_ min | |
 | Frame drops | _[measure]_ % | |
 | CPU usage (average) | _[measure]_ % | |
@@ -54,7 +54,7 @@
 ### 2.3 Window capture
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Works with static window | _[yes/no]_ | |
 | Tracks window movement | _[yes/no]_ | Expected: NO (P0.2) |
 | Handles occlusion correctly | _[yes/no]_ | Expected: NO (P0.2) |
@@ -63,17 +63,17 @@
 ### 2.4 Audio
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Microphone capture works | _[yes/no]_ | |
-| System audio works (without Stereo Mix) | _[yes/no]_ | Expected: NO (P0.3) |
-| Mic and system audio are separate tracks | _[yes/no]_ | Expected: NO (P0.4) |
+| System audio works (without Stereo Mix) | _[yes/no]_ | Native WASAPI loopback; manual validation pending |
+| Mic and system audio are separate tracks | _[yes/no]_ | Separate AAC streams; manual validation pending |
 
 ---
 
 ## 3. Recovery
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Force-quit at 10s (first segment) | _[recovered bytes]_ | Expected: 0 (P0.1) |
 | Force-quit at 2 min (after pause/resume) | _[recovered bytes]_ | |
 | Recovery scan time (5 sessions) | _[measure]_ ms | |
@@ -84,7 +84,7 @@
 ## 4. Library
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Load 10 recordings | _[measure]_ ms | |
 | Load 100 recordings | _[measure]_ ms | |
 | Library shows real data | _[yes/no]_ | Expected: Falls back to mock (P1.2) |
@@ -95,7 +95,7 @@
 ## 5. Media Preparation
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Probe (30s 1080p30) | _[measure]_ ms | |
 | Proxy generation (30s → 540p) | _[measure]_ s | |
 | Thumbnail sprite (30s, 5s interval) | _[measure]_ s | |
@@ -107,7 +107,7 @@
 ## 6. Export
 
 | Metric | Value | Notes |
-|--------|-------|-------|
+| -------- | ------- | ------- |
 | Stream copy 30s 1080p30 | _[measure]_ s | |
 | Export UI connected | _[yes/no]_ | Expected: disconnected (P1.4) |
 | Export shows progress | _[yes/no]_ | |

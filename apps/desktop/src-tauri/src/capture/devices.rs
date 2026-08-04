@@ -31,54 +31,30 @@ pub struct VideoDevice {
     pub is_default: bool,
 }
 
-/// Enumerate DirectShow audio capture devices using FFmpeg.
-///
-/// Device classification: names matching the system-audio heuristic (Stereo Mix,
-/// virtual audio cables, etc.) are treated as system audio; everything else is a
-/// microphone. See [`is_system_audio_name`] for the full match list.
-#[instrument(skip(ffmpeg_path))]
-pub fn enumerate_audio_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<AudioDevice>> {
-    if !cfg!(windows) {
-        tracing::warn!("audio device enumeration is only implemented for Windows");
-        return Ok(Vec::new());
-    }
-
-    let devices = list_dshow_devices(ffmpeg_path)?;
-    let mut audio = Vec::new();
-    let mut first_system = true;
-    let mut first_microphone = true;
-
-    for device in devices {
-        if !matches!(device.media_kind, DshowMediaKind::Audio) {
-            continue;
-        }
-
-        let is_system = is_system_audio_name(&device.name);
-        let kind = if is_system {
-            AudioDeviceKind::System
-        } else {
-            AudioDeviceKind::Microphone
-        };
-
-        let is_default = if is_system {
-            let def = first_system;
-            first_system = false;
-            def
-        } else {
-            let def = first_microphone;
-            first_microphone = false;
-            def
-        };
-
-        audio.push(AudioDevice {
-            id: device.name.clone(),
+/// Enumerate native WASAPI endpoints for microphone capture and render
+/// loopback. DirectShow remains video-only; it is not used for audio devices.
+#[instrument(skip(_ffmpeg_path))]
+pub fn enumerate_audio_devices(_ffmpeg_path: &str) -> crate::errors::Result<Vec<AudioDevice>> {
+    let devices = super::audio::enumerate_wasapi_devices()?;
+    let mut audio = devices
+        .into_iter()
+        .map(|device| AudioDevice {
+            id: device.id,
             name: device.name,
-            kind,
-            is_default,
-        });
-    }
+            kind: if device.is_loopback {
+                AudioDeviceKind::System
+            } else {
+                AudioDeviceKind::Microphone
+            },
+            is_default: device.is_default,
+        })
+        .collect::<Vec<_>>();
+    audio.sort_by_key(|device| !device.is_default);
 
-    info!(count = audio.len(), "enumerated audio devices");
+    info!(
+        count = audio.len(),
+        "enumerated native WASAPI audio devices"
+    );
     Ok(audio)
 }
 
@@ -251,55 +227,6 @@ enum Section {
     Video,
 }
 
-/// Heuristic for naming a dshow audio device as system/loopback audio.
-///
-/// DirectShow cannot capture the Windows system mix on its own; it relies on a
-/// loopback endpoint being exposed as a capture device. In practice that means:
-/// - "Stereo Mix" / "Wave Out Mix" / "What U Hear" (enabled in Sound settings)
-/// - A virtual audio cable: VB-Audio Virtual Cable, VoiceMeeter, OBS Virtual
-///   Audio, etc.
-///
-/// Native WASAPI loopback is not implemented (FFmpeg's `wasapi` indev is absent
-/// from the bundled/full builds), so the UI shows an actionable empty state when
-/// no device matching this heuristic is present.
-fn is_system_audio_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-
-    // Built-in Windows loopback endpoints (usually disabled by default).
-    const BUILTIN: &[&str] = &[
-        "stereo mix",
-        "wave out mix",
-        "what u hear",
-        "wave-out mix",
-        "sum",
-    ];
-
-    // Common virtual audio cables / virtual mixers.
-    const VIRTUAL: &[&str] = &[
-        "virtual-audio-capturer",
-        "virtual audio",
-        "vb-audio",
-        "voicemeeter",
-        "cable output",
-        "cable input",
-        "obs virtual audio",
-        "blackhole",
-        "sound siphon",
-        "audio hijack",
-        "synchronous audio adapter",
-    ];
-
-    if BUILTIN.iter().any(|needle| lower.contains(needle)) {
-        return true;
-    }
-    // "mix" alone is too broad ("Microphone Mix"); only accept it when it is not
-    // part of a microphone device name.
-    if lower.contains("mix") && !lower.contains("microphone") {
-        return true;
-    }
-    VIRTUAL.iter().any(|needle| lower.contains(needle))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,37 +279,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_system_audio_devices() {
-        // No loopback/virtual cable on the fixture -> everything is a microphone.
-        let audio = enumerate_audio_devices_from_text(FFMPEG_8X_OUTPUT);
-        assert!(audio.iter().all(|d| d.kind == AudioDeviceKind::Microphone));
-        assert_eq!(audio.len(), 3);
-        // First microphone is flagged default.
-        assert!(audio[0].is_default);
-        assert!(!audio[1].is_default);
-    }
-
-    #[test]
-    fn detects_virtual_cable_and_stereo_mix_as_system_audio() {
-        let text = "[in#0 @ 0x1] \"Stereo Mix\" (audio)\n[in#0 @ 0x1] \"CABLE Output (VB-Audio Virtual Cable)\" (audio)\n[in#0 @ 0x1] \"Microphone (Realtek)\" (audio)\n";
-        let audio = enumerate_audio_devices_from_text(text);
-        let system: Vec<_> = audio
-            .iter()
-            .filter(|d| d.kind == AudioDeviceKind::System)
-            .collect();
-        assert_eq!(system.len(), 2);
-        // First system device is the default system pick.
-        assert!(system[0].is_default);
-        assert!(!system[1].is_default);
-        // Microphone is still classified as microphone and not "mix"-matched.
-        let mic = audio
-            .iter()
-            .find(|d| d.name == "Microphone (Realtek)")
-            .unwrap();
-        assert_eq!(mic.kind, AudioDeviceKind::Microphone);
-    }
-
-    #[test]
     fn falls_back_to_old_dshow_format_with_section_headers() {
         let text = "[dshow @ 0x1] DirectShow video devices.\n[dshow @ 0x1] \"Integrated Webcam\"\n[dshow @ 0x1] DirectShow audio devices.\n[dshow @ 0x1] \"Microphone (Realtek)\"\n";
         let devices = parse_dshow_devices(text);
@@ -398,41 +294,5 @@ mod tests {
         assert_eq!(video[0].name, "Integrated Webcam");
         assert_eq!(audio.len(), 1);
         assert_eq!(audio[0].name, "Microphone (Realtek)");
-    }
-
-    /// Test helper: run the full audio classification on parsed text without
-    /// spawning FFmpeg. Mirrors `enumerate_audio_devices` but takes raw output.
-    fn enumerate_audio_devices_from_text(text: &str) -> Vec<AudioDevice> {
-        let devices = parse_dshow_devices(text);
-        let mut audio = Vec::new();
-        let mut first_system = true;
-        let mut first_microphone = true;
-        for device in devices {
-            if !matches!(device.media_kind, DshowMediaKind::Audio) {
-                continue;
-            }
-            let is_system = is_system_audio_name(&device.name);
-            let kind = if is_system {
-                AudioDeviceKind::System
-            } else {
-                AudioDeviceKind::Microphone
-            };
-            let is_default = if is_system {
-                let def = first_system;
-                first_system = false;
-                def
-            } else {
-                let def = first_microphone;
-                first_microphone = false;
-                def
-            };
-            audio.push(AudioDevice {
-                id: device.name.clone(),
-                name: device.name,
-                kind,
-                is_default,
-            });
-        }
-        audio
     }
 }

@@ -113,8 +113,8 @@ sessions/{session_id}/
 | Role | Description | Source |
 |------|-------------|--------|
 | `screen` | Primary screen/window/region capture | Recording session |
-| `microphone` | Independent mic audio track | WASAPI capture (Phase 2) |
-| `system_audio` | Independent system audio track | WASAPI loopback (Phase 2) |
+| `microphone` | Independent mic audio track | Native WASAPI capture |
+| `system_audio` | Independent system audio track | Native WASAPI loopback |
 | `webcam` | Webcam sidecar video | Separate FFmpeg process |
 | `cursor_events` | Cursor position/click metadata | Capture metadata (Phase 6) |
 | `image` | User-imported image overlay | Manual import |

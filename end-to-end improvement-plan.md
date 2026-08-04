@@ -78,8 +78,8 @@ Everything after that is polish and marketing; the roadmap below stops at the re
 | Display enumeration | **Working** | Windows display/window enumeration is present. |
 | Display/region capture | **Partial** | FFmpeg `ddagrab` path exists; not benchmarked, not zero-copy, scales to fixed profile and can distort non-16:9 sources. |
 | Window capture | **Misleading** | Crops the desktop rectangle at the window's current coordinates; does not handle occlusion, movement, minimize, mixed-DPI, or app exclusion. |
-| Microphone capture | **Partial** | Captured but mixed with system audio, so tracks are not independent in the editor. |
-| System audio | **Partial** | Relies on Stereo Mix / virtual-cable DirectShow-style devices, not reliable WASAPI loopback. |
+| Microphone capture | **Partial** | Native WASAPI capture now writes an independent WAV and MP4 audio stream; live meters/editor asset registration remain incomplete. |
+| System audio | **Partial** | Native WASAPI loopback now captures render endpoints without Stereo Mix; live meters/editor asset registration remain incomplete. |
 | Webcam | **Partial** | Sidecar capture exists; webcam files are not first-class assets in manifest/project. |
 | Countdown | **Misleading** | Titlebar shortcut bypasses the recorder panel countdown. |
 | Pause/resume/stop | **Partial** | Works for normal stop; recovery depends on validated fragments only. |
@@ -113,8 +113,8 @@ Everything after that is polish and marketing; the roadmap below stops at the re
 | --- | ------ | ------------------ | ---------------------- |
 | P0.1 | Active-segment crash recovery is not dependable: fragments become `validated` only after normal stop; no periodic independently finalized segment rollover. | `src-tauri/src/capture/**`, `recovery` | A force-quit during the first segment recovers nothing. |
 | P0.2 | Window capture is desktop-crop, not true window capture; occlusion, movement, minimizing, mixed-DPI, and app-window exclusion are wrong. | `capture/windows`, `capture/metrics` | Product claims window/region recording but does not deliver it. |
-| P0.3 | System audio uses DirectShow loopback devices, not WASAPI loopback. | `capture/audio` | Fails on many real machines; no reliable system audio. |
-| P0.4 | Microphone and system audio are mixed during capture. | `capture/audio`, `media-core` | Editor cannot independently control required tracks; breaks V1 outcome 9. |
+| P0.3 | System audio used DirectShow loopback devices instead of WASAPI loopback. | `capture/audio` | Resolved in code with native render-endpoint loopback; manual Windows validation pending. |
+| P0.4 | Microphone and system audio were mixed during capture. | `capture/audio`, `media-core` | Resolved in code with independent WAV assets and MP4 audio streams; editor asset registration remains. |
 | P0.5 | Capture scales to a fixed profile size without preserving aspect ratio. | `capture/profiles`, `capture/session` | Distorts non-16:9 windows/regions. |
 | P0.6 | Manifest writes are frequently ignored; state transitions are not authoritative; stop marks manifest complete before durable library insertion. | `src-tauri/src/state.rs`, `database` | Data loss / phantom recordings. |
 | P0.7 | `delete_recovery_session` joins an IPC-supplied string into a directory path without UUID/containment validation. | `src-tauri/src/lib.rs` or equivalent, `path` helpers | Path traversal / destructive operation risk. |

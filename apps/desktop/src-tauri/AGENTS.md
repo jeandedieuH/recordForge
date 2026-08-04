@@ -26,8 +26,9 @@ cargo build --release
 
 - `src/commands/` — Tauri command handlers
 - `src/capture/` — Native screen/audio capture
-  - `src/capture/devices.rs` — DirectShow audio/video device enumeration
-  - `src/capture/media/mod.rs` — FFmpeg concat, trim, copy, and version helpers
+  - `src/capture/audio/wasapi.rs` — Native WASAPI microphone and render-loopback capture
+  - `src/capture/devices.rs` — WASAPI audio and DirectShow video device enumeration
+  - `src/capture/media/mod.rs` — FFmpeg concat, audio mux, trim, copy, and version helpers
 - `src/database/` — SQLite and migrations
   - `src/database/library.rs` — Library recording persistence and tag helpers
 - `src/diagnostics/` — Preflight, metrics, and diagnostics
@@ -46,6 +47,7 @@ cargo build --release
 - `tauri` is configured with the `tray-icon` and `image-png` features.
 - `tauri-plugin-global-shortcut` is used for global hotkeys.
 - `tauri-plugin-dialog` is used for save/export dialogs.
+- `wasapi` provides native Windows microphone and render-loopback capture.
 - These are initialized in `src/lib.rs` and gated by `capabilities/default.json`.
 
 ## Module Rules

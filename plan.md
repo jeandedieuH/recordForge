@@ -43,8 +43,7 @@ The approved scope is **V1 Plus**, the approved capture direction is **benchmark
 - Active-segment crash recovery is not dependable: fragments become `validated` only after normal stop, recovery only concatenates validated fragments, and no periodic independently finalized segment rollover exists. A force-quit during the first segment can recover nothing.
 - Window capture is a crop of the current desktop rectangle, not true window capture; occlusion, movement, minimizing, mixed-DPI coordinates, and app-window exclusion are not correctly handled.
 - Built-in profiles always prioritize `libx264`; detected/recommended hardware encoders are not applied. The `ddagrab` path downloads D3D11 frames to CPU memory before encoding, defeating zero-copy goals.
-- System audio depends on DirectShow loopback-like devices such as Stereo Mix/virtual cables rather than reliable WASAPI loopback.
-- Microphone and system audio are mixed during capture, so the editor cannot independently control the required tracks. Webcam files are not represented as first-class assets in the manifest/library/project model.
+- Native WASAPI now captures microphone and system-audio loopback into separate WAV assets and muxes separate audio streams; live meters and first-class manifest/library/project asset registration remain incomplete. Webcam files are not represented as first-class assets in the manifest/library/project model.
 - Capture scales every source to a fixed profile size without preserving aspect ratio, so non-16:9 windows/regions can be distorted.
 - Manifest writes are frequently ignored; state transitions such as countdown/finalizing/failed are not authoritative; normal stop marks the manifest complete before durable library insertion is guaranteed.
 - `delete_recovery_session` joins an IPC-provided string into a directory path before recursive deletion without UUID/containment validation. Export destinations and other file paths also need a central path policy.

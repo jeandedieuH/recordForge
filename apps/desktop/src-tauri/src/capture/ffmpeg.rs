@@ -86,6 +86,14 @@ impl FfmpegCapture {
         self.start_time.elapsed().as_millis() as u64
     }
 
+    pub fn output_path(&self) -> &Path {
+        &self.output_path
+    }
+
+    pub fn started_at(&self) -> Instant {
+        self.start_time
+    }
+
     /// Send a graceful stop signal ("q\n") to FFmpeg and wait for it to exit.
     #[instrument]
     pub fn stop(&mut self) -> crate::errors::Result<RecordingStats> {
@@ -230,27 +238,17 @@ fn build_screen_command(
     // FFmpeg build; otherwise fall back to gdigrab (see add_screen_video_input).
     let use_ddagrab = config.source.kind == "display" && ddagrab_available;
 
+    // Audio is captured by native WASAPI workers and muxed after the video
+    // fragment is finalized. Keeping this FFmpeg process video-only prevents a
+    // DirectShow audio failure from taking down the screen capture.
     add_screen_video_input(&mut command, &config.source, profile, use_ddagrab);
-    let audio_indices = add_audio_inputs(&mut command, config);
 
     let video_filter = build_video_filter(&config.source, profile, use_ddagrab);
-    let audio_filter = build_audio_filter(&audio_indices);
-
-    let mut filter_complex = video_filter;
-    if !audio_filter.is_empty() {
-        filter_complex.push_str(&format!(";{audio_filter}"));
-    }
-
-    command.args(["-filter_complex", &filter_complex]);
-    command.args(["-map", "[vout]"]);
-    if !audio_indices.is_empty() {
-        command.args(["-map", "[aout]"]);
-    }
+    command
+        .args(["-filter_complex", &video_filter])
+        .args(["-map", "[vout]"]);
 
     add_video_encoder(&mut command, profile);
-    if !audio_indices.is_empty() {
-        add_audio_encoder(&mut command, profile);
-    }
 
     command.args([
         "-movflags",
@@ -364,71 +362,6 @@ fn build_video_filter(
     }
 }
 
-fn add_audio_inputs(command: &mut Command, config: &RecordingConfig) -> Vec<usize> {
-    let mut indices = Vec::new();
-
-    if config.capture_microphone {
-        if let Some(device) = &config.microphone_device_id {
-            command.args([
-                "-f",
-                "dshow",
-                "-thread_queue_size",
-                "512",
-                "-i",
-                &format!("audio=\"{}\"", device),
-            ]);
-            indices.push(1 + indices.len());
-        } else {
-            info!("capture_microphone enabled but no device specified; skipping microphone");
-        }
-    }
-
-    if config.capture_system_audio {
-        if let Some(device) = &config.system_audio_device_id {
-            command.args([
-                "-f",
-                "dshow",
-                "-thread_queue_size",
-                "512",
-                "-i",
-                &format!("audio=\"{}\"", device),
-            ]);
-            indices.push(1 + indices.len());
-        } else {
-            info!("capture_system_audio enabled but no device specified; skipping system audio");
-        }
-    }
-
-    indices
-}
-
-fn build_audio_filter(audio_indices: &[usize]) -> String {
-    if audio_indices.is_empty() {
-        return String::new();
-    }
-
-    if audio_indices.len() == 1 {
-        return format!("[{}:a]anull[aout]", audio_indices[0]);
-    }
-
-    let resampled: Vec<String> = audio_indices
-        .iter()
-        .enumerate()
-        .map(|(i, &idx)| format!("[{idx}:a]aresample=async=1[a{i}]"))
-        .collect();
-
-    let mix_inputs: String = (0..audio_indices.len())
-        .map(|i| format!("[a{i}]"))
-        .collect();
-
-    format!(
-        "{};{}amix=inputs={}:duration=longest:dropout_transition=3[aout]",
-        resampled.join(";"),
-        mix_inputs,
-        audio_indices.len()
-    )
-}
-
 fn add_video_encoder(command: &mut Command, profile: &RecordingProfile) {
     // For the spike we always use the first available/prioritized encoder.
     let encoder = profile
@@ -453,11 +386,6 @@ fn add_video_encoder(command: &mut Command, profile: &RecordingProfile) {
     } else if let Some(kbps) = profile.video_bitrate_kbps {
         command.args(["-b:v", &format!("{}k", kbps)]);
     }
-}
-
-fn add_audio_encoder(command: &mut Command, profile: &RecordingProfile) {
-    command.arg("-c:a").arg(&profile.audio_codec);
-    command.args(["-b:a", &format!("{}k", profile.audio_bitrate_kbps)]);
 }
 
 fn run(

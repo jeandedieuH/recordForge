@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, instrument};
 
+use super::audio::{WasapiCaptureKind, WasapiCaptureOptions, WasapiCaptureSession};
 use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::ffmpeg::FfmpegCapture;
@@ -30,10 +31,24 @@ struct ActiveSession {
     profile: RecordingProfile,
     manifest: Arc<Mutex<RecordingManifest>>,
     screen_capture: Option<FfmpegCapture>,
+    audio_captures: Vec<ActiveAudioCapture>,
     webcam_capture: Option<FfmpegCapture>,
     segment_index: u32,
     total_recorded_ms: u64,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug)]
+struct ActiveAudioCapture {
+    kind: WasapiCaptureKind,
+    session: WasapiCaptureSession,
+}
+
+#[derive(Debug)]
+struct SegmentCaptures {
+    screen: FfmpegCapture,
+    audio: Vec<ActiveAudioCapture>,
+    webcam: Option<FfmpegCapture>,
 }
 
 impl Recorder {
@@ -136,6 +151,7 @@ impl Recorder {
             profile,
             manifest,
             screen_capture: None,
+            audio_captures: Vec::new(),
             webcam_capture: None,
             segment_index: 0,
             total_recorded_ms: 0,
@@ -173,7 +189,7 @@ impl Recorder {
             .into());
         }
 
-        let (screen, webcam) = match self.start_segment(
+        let captures = match self.start_segment(
             0,
             &session.work_dir,
             &session.config,
@@ -192,8 +208,9 @@ impl Recorder {
             }
         };
 
-        session.screen_capture = Some(screen);
-        session.webcam_capture = webcam;
+        session.screen_capture = Some(captures.screen);
+        session.audio_captures = captures.audio;
+        session.webcam_capture = captures.webcam;
         session.started_at = Some(chrono::Utc::now());
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
@@ -252,54 +269,61 @@ impl Recorder {
         config: &RecordingConfig,
         profile: &RecordingProfile,
         manifest: Arc<Mutex<RecordingManifest>>,
-    ) -> crate::errors::Result<(FfmpegCapture, Option<FfmpegCapture>)> {
-        // Probe audio devices before building the capture command. A device
-        // that enumerates but can't be opened (Intel SST mic driver quirk,
-        // device in use, Unicode name round-trip issue) would make FFmpeg
-        // abort the ENTIRE recording — including video. Skipping a bad mic so
-        // the screen recording still proceeds is the right tradeoff for a
-        // recorder-first product.
-        let mut config = config.clone();
+    ) -> crate::errors::Result<SegmentCaptures> {
         let ffmpeg = self.ffmpeg_path.to_string_lossy();
-
-        if config.capture_microphone {
-            if let Some(name) = &config.microphone_device_id {
-                let spec = format!("audio=\"{name}\"");
-                if !media::probe_dshow_device(&ffmpeg, &spec) {
-                    tracing::warn!(
-                        device = %name,
-                        "microphone could not be opened; recording video without it"
-                    );
-                    config.capture_microphone = false;
-                    config.microphone_device_id = None;
-                }
-            }
-        }
-
-        if config.capture_system_audio {
-            if let Some(name) = &config.system_audio_device_id {
-                let spec = format!("audio=\"{name}\"");
-                if !media::probe_dshow_device(&ffmpeg, &spec) {
-                    tracing::warn!(
-                        device = %name,
-                        "system audio device could not be opened; recording video without it"
-                    );
-                    config.capture_system_audio = false;
-                    config.system_audio_device_id = None;
-                }
-            }
-        }
-
         let screen_output = work_dir.join(format!("seg_{:03}.mp4", index));
         let screen = FfmpegCapture::start(
             &ffmpeg,
-            &config,
+            config,
             profile,
             &screen_output.to_string_lossy(),
             index,
             Some(manifest),
             self.ddagrab_available,
         )?;
+
+        // Start each native audio worker after the video process has passed its
+        // startup probe. The per-track start timestamp is retained so the mux
+        // step can preserve the small startup offset instead of silently
+        // shifting audio to time zero.
+        let mut audio = Vec::new();
+        if config.capture_microphone {
+            if let Some(device_id) = config.microphone_device_id.clone() {
+                let output_path = work_dir.join(format!("mic_{:03}.wav", index));
+                match WasapiCaptureSession::start(WasapiCaptureOptions::microphone(
+                    Some(device_id),
+                    output_path,
+                )) {
+                    Ok(session) => audio.push(ActiveAudioCapture {
+                        kind: WasapiCaptureKind::Microphone,
+                        session,
+                    }),
+                    Err(error) => tracing::warn!(
+                        error = ?error,
+                        "microphone WASAPI capture unavailable; continuing with video"
+                    ),
+                }
+            }
+        }
+
+        if config.capture_system_audio {
+            if let Some(device_id) = config.system_audio_device_id.clone() {
+                let output_path = work_dir.join(format!("sys_{:03}.wav", index));
+                match WasapiCaptureSession::start(WasapiCaptureOptions::system_loopback(
+                    Some(device_id),
+                    output_path,
+                )) {
+                    Ok(session) => audio.push(ActiveAudioCapture {
+                        kind: WasapiCaptureKind::SystemLoopback,
+                        session,
+                    }),
+                    Err(error) => tracing::warn!(
+                        error = ?error,
+                        "system audio WASAPI loopback unavailable; continuing with video"
+                    ),
+                }
+            }
+        }
 
         let webcam = if config.capture_webcam {
             if let Some(device) = &config.webcam_device_id {
@@ -330,7 +354,89 @@ impl Recorder {
             None
         };
 
-        Ok((screen, webcam))
+        Ok(SegmentCaptures {
+            screen,
+            audio,
+            webcam,
+        })
+    }
+
+    fn finalize_audio_tracks(
+        &self,
+        screen: &FfmpegCapture,
+        audio_captures: &mut Vec<ActiveAudioCapture>,
+        profile: &RecordingProfile,
+    ) {
+        if audio_captures.is_empty() {
+            return;
+        }
+
+        let screen_started_at = screen.started_at();
+        let screen_path = screen.output_path().to_path_buf();
+        let mut tracks = Vec::new();
+
+        for mut audio_capture in audio_captures.drain(..) {
+            let offset = audio_capture
+                .session
+                .started_at()
+                .saturating_duration_since(screen_started_at);
+            let path = audio_capture.session.output_path().to_path_buf();
+            let bytes_written = match audio_capture.session.stop() {
+                Ok(bytes_written) => bytes_written,
+                Err(error) => {
+                    tracing::warn!(error = ?error, path = %path.display(), "WASAPI track stopped with an error");
+                    continue;
+                }
+            };
+
+            if bytes_written <= 44 {
+                tracing::warn!(path = %path.display(), "WASAPI track contained no audio frames");
+                continue;
+            }
+
+            let title = match audio_capture.kind {
+                WasapiCaptureKind::Microphone => "Microphone",
+                WasapiCaptureKind::SystemLoopback => "System Audio",
+            };
+            tracks.push(media::AudioTrackInput {
+                path,
+                offset,
+                title,
+            });
+        }
+
+        if tracks.is_empty() {
+            return;
+        }
+
+        let stem = screen_path
+            .file_stem()
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_else(|| "segment".into());
+        let muxed_path = screen_path.with_file_name(format!("audio_mux_{stem}.mp4"));
+        if let Err(error) = media::mux_audio_tracks(
+            &self.ffmpeg_path.to_string_lossy(),
+            &screen_path,
+            &tracks,
+            &muxed_path,
+            &profile.audio_codec,
+            profile.audio_bitrate_kbps,
+        ) {
+            tracing::warn!(error = ?error, "failed to mux native WASAPI tracks; keeping video fragment");
+            return;
+        }
+
+        if let Err(error) = disk::atomic_replace(&muxed_path, &screen_path) {
+            tracing::warn!(error = ?error, "failed to publish native WASAPI audio fragment");
+        }
+    }
+
+    fn stop_audio_captures(&self, audio_captures: &mut Vec<ActiveAudioCapture>) {
+        for mut audio_capture in audio_captures.drain(..) {
+            if let Err(error) = audio_capture.session.stop() {
+                tracing::warn!(error = ?error, "failed to stop WASAPI track during cleanup");
+            }
+        }
     }
 
     #[instrument]
@@ -348,6 +454,7 @@ impl Recorder {
         let stats = match screen.stop() {
             Ok(stats) => stats,
             Err(error) => {
+                self.stop_audio_captures(&mut session.audio_captures);
                 if let Ok(mut manifest) = session.manifest.lock() {
                     manifest.set_state(RecorderState::Failed);
                     if let Err(write_error) = manifest.write() {
@@ -357,6 +464,8 @@ impl Recorder {
                 return Err(error);
             }
         };
+
+        self.finalize_audio_tracks(&screen, &mut session.audio_captures, &session.profile);
 
         if let Some(mut webcam) = session.webcam_capture.take() {
             if let Err(error) = webcam.stop() {
@@ -409,7 +518,7 @@ impl Recorder {
         }
 
         let next_index = session.segment_index + 1;
-        let (screen, webcam) = self.start_segment(
+        let captures = self.start_segment(
             next_index,
             &session.work_dir,
             &session.config,
@@ -418,8 +527,9 @@ impl Recorder {
         )?;
 
         session.segment_index = next_index;
-        session.screen_capture = Some(screen);
-        session.webcam_capture = webcam;
+        session.screen_capture = Some(captures.screen);
+        session.audio_captures = captures.audio;
+        session.webcam_capture = captures.webcam;
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
@@ -442,9 +552,10 @@ impl Recorder {
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
 
         let mut final_stats = if let Some(mut screen) = session.screen_capture.take() {
-            match screen.stop() {
+            let stats = match screen.stop() {
                 Ok(stats) => stats,
                 Err(error) => {
+                    self.stop_audio_captures(&mut session.audio_captures);
                     if let Ok(mut manifest) = session.manifest.lock() {
                         manifest.set_state(RecorderState::Failed);
                         if let Err(write_error) = manifest.write() {
@@ -453,8 +564,11 @@ impl Recorder {
                     }
                     return Err(error);
                 }
-            }
+            };
+            self.finalize_audio_tracks(&screen, &mut session.audio_captures, &session.profile);
+            stats
         } else {
+            self.stop_audio_captures(&mut session.audio_captures);
             RecordingStats::default()
         };
 
