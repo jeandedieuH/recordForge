@@ -2,7 +2,7 @@
 name = "recordforge-desktop"
 version = "0.1.0"
 description = "Local-first screen recorder and lightweight editor"
-authors = ["recordForge"]
+authors = ["prestige-tech"]
 edition = "2021"
 rust-version = "1.78"
 
