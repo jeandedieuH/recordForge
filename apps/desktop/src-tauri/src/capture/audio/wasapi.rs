@@ -568,6 +568,8 @@ fn capture_worker_inner(
         let _ = finalize_wav(&mut file, data_bytes);
         return Err(format!("write WASAPI startup silence: {error}"));
     }
+    let mut data_frames = data_bytes / block_align as u64;
+    let is_system_loopback = options.kind == WasapiCaptureKind::SystemLoopback;
 
     let capture_result = 'capture: loop {
         if stop_requested.load(Ordering::Acquire) {
@@ -599,10 +601,32 @@ fn capture_worker_inner(
                 Ok(result) => result,
                 Err(error) => break 'capture Err(format!("read WASAPI audio packet: {error}")),
             };
-            // Copy complete packets in the order WASAPI delivers them. Device
-            // positions and timestamps can jitter on microphone drivers; using
-            // them to trim or insert samples can remove speech and create
-            // audible high-frequency clicks.
+            // Loopback can stop delivering packets while the output endpoint is
+            // silent. Restore that missing interval from a bounded device
+            // position/wall-clock estimate, but never trim packets: microphone
+            // positions can jitter and removing those samples creates artifacts.
+            if is_system_loopback {
+                let elapsed_frames =
+                    frames_for_duration(capture_started_at.elapsed(), options.sample_rate);
+                let packet_start_frames = loopback_packet_start_frames(
+                    stream_offset_frames,
+                    buffer_info.index,
+                    elapsed_frames,
+                    data_frames,
+                    options.sample_rate,
+                );
+                if packet_start_frames > data_frames {
+                    if let Err(error) = append_silence_until(
+                        &mut file,
+                        &mut data_bytes,
+                        packet_start_frames,
+                        block_align,
+                    ) {
+                        break 'capture Err(format!("write WASAPI loopback silence: {error}"));
+                    }
+                }
+            }
+
             let payload_len = match (frames_read as usize).checked_mul(block_align) {
                 Some(payload_len) => payload_len,
                 None => break 'capture Err("WASAPI audio payload size overflow".into()),
@@ -618,6 +642,7 @@ fn capture_worker_inner(
                 Some(data_bytes) => data_bytes,
                 None => break 'capture Err("WASAPI WAV payload size overflow".into()),
             };
+            data_frames = data_bytes / block_align as u64;
             if buffer_info.flags.data_discontinuity {
                 tracing::debug!(
                     path = %options.output_path.display(),
@@ -646,6 +671,31 @@ fn capture_worker_inner(
 fn frames_for_duration(duration: Duration, sample_rate: u32) -> u64 {
     let frames = duration.as_nanos().saturating_mul(u128::from(sample_rate)) / 1_000_000_000;
     u64::try_from(frames).unwrap_or(u64::MAX)
+}
+
+fn loopback_packet_start_frames(
+    stream_offset_frames: u64,
+    packet_index: u64,
+    elapsed_frames: u64,
+    frames_written: u64,
+    sample_rate: u32,
+) -> u64 {
+    let wall_position = stream_offset_frames.saturating_add(elapsed_frames);
+    let device_position = stream_offset_frames.saturating_add(packet_index);
+    let max_plausible_gap = u64::from(sample_rate);
+    let device_gap = device_position.saturating_sub(frames_written);
+    let device_position_is_plausible = device_position >= frames_written
+        && device_gap <= max_plausible_gap
+        && device_position <= wall_position.saturating_add(max_plausible_gap);
+
+    if device_position_is_plausible {
+        wall_position.max(device_position)
+    } else {
+        // Loopback drivers can report a static, zero, or implausibly large
+        // device position. The monotonic capture clock still gives us a safe
+        // position for silence insertion without dropping the actual packet.
+        wall_position
+    }
 }
 
 fn append_silence_until(
@@ -828,6 +878,69 @@ fn finalize_wav(file: &mut std::fs::File, data_bytes: u64) -> std::io::Result<u6
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn uses_a_plausible_loopback_device_position() {
+        assert_eq!(loopback_packet_start_frames(100, 500, 450, 100, 1_000), 600);
+    }
+
+    #[test]
+    fn loopback_packet_position_preserves_idle_leading_silence() {
+        let sample_rate = 100;
+        let block_align = 2;
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("loopback-offset.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open temporary WAV");
+        write_wav_header(&mut file, sample_rate, 1, WasapiSampleFormat::Pcm16)
+            .expect("write WAV header");
+
+        let stream_offset_frames = frames_for_duration(Duration::from_secs(1), sample_rate);
+        // A broken loopback position must not cause an unbounded silence write.
+        let packet_index = u64::MAX;
+        let elapsed_frames = frames_for_duration(Duration::from_secs(2), sample_rate);
+        let packet_start_frames = loopback_packet_start_frames(
+            stream_offset_frames,
+            packet_index,
+            elapsed_frames,
+            stream_offset_frames,
+            sample_rate,
+        );
+        assert_eq!(
+            packet_start_frames,
+            frames_for_duration(Duration::from_secs(3), sample_rate)
+        );
+        let mut data_bytes = 0;
+        append_silence_until(
+            &mut file,
+            &mut data_bytes,
+            stream_offset_frames,
+            block_align,
+        )
+        .expect("write startup silence");
+        append_silence_until(&mut file, &mut data_bytes, packet_start_frames, block_align)
+            .expect("write idle loopback silence");
+        file.write_all(&[1u8; 2]).expect("write audio packet");
+        data_bytes += block_align as u64;
+        finalize_wav(&mut file, data_bytes).expect("finalize WAV");
+
+        file.seek(SeekFrom::Start(WAV_HEADER_SIZE))
+            .expect("seek to data");
+        let mut payload = vec![0u8; (packet_start_frames as usize + 1) * block_align];
+        file.read_exact(&mut payload).expect("read WAV payload");
+
+        let packet_offset = packet_start_frames as usize * block_align;
+        assert!(payload[..packet_offset].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            &payload[packet_offset..packet_offset + block_align],
+            &[1u8; 2]
+        );
+    }
 
     #[test]
     fn aligns_wav_payload_to_video_duration() {
