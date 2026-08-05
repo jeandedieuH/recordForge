@@ -18,15 +18,30 @@ use crate::errors::{InternalError, Result};
 
 /// Resolve a bundled or PATH-located executable and verify it runs.
 ///
-/// Search order:
-/// 1. Next to the current executable (`{name}.exe`).
-/// 2. Inside a `{name}/` directory next to the executable (`{name}/{name}.exe`).
-/// 3. Inside a sibling `bin/` directory (`../bin/{name}.exe`).
-/// 4. The OS `PATH`.
+/// Overload without a resource directory — used when no `AppHandle` is
+/// available (e.g. unit tests). Prefer `resolve_executable_with_resource_dir`
+/// from Tauri setup where the resource dir is known.
 #[instrument]
 pub fn resolve_executable(name: &str) -> Result<PathBuf> {
-    for candidate in bundled_candidates(name) {
+    resolve_executable_with_resource_dir(name, None)
+}
+
+/// Resolve a bundled or PATH-located executable and verify it runs.
+///
+/// Search order:
+/// 1. Tauri resource dir (`externalBin` sidecars land here in production).
+/// 2. Next to the current executable (`{name}.exe`).
+/// 3. Inside a `{name}/` directory next to the executable (`{name}/{name}.exe`).
+/// 4. Inside a sibling `bin/` directory (`../bin/{name}.exe`).
+/// 5. The OS `PATH`.
+#[instrument]
+pub fn resolve_executable_with_resource_dir(
+    name: &str,
+    resource_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    for candidate in bundled_candidates(name, resource_dir) {
         if candidate.exists() && can_run(&candidate) {
+            info!(path = %candidate.display(), "resolved {name} from bundled candidate");
             return Ok(candidate);
         }
     }
@@ -38,21 +53,34 @@ pub fn resolve_executable(name: &str) -> Result<PathBuf> {
     });
 
     if can_run(&in_path) {
+        info!("resolved {name} from PATH");
         return Ok(in_path);
     }
 
     Err(InternalError::Media(format!(
-        "{name} not found in bundled path or PATH; make sure {name} is installed"
+        "{name} not found in bundled path or PATH; make sure {name} is installed \
+         (run `bun run setup:ffmpeg` to download the sidecar binaries)"
     ))
     .into())
 }
 
-fn bundled_candidates(name: &str) -> Vec<PathBuf> {
+/// Build the list of candidate paths in priority order.
+fn bundled_candidates(name: &str, resource_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
 
+    // 1. Tauri resource/externalBin directory (production installs).
+    if let Some(res_dir) = resource_dir {
+        candidates.push(res_dir.join(&file));
+    }
+
+    // 2–4. Relative to the current executable (dev builds).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let file = format!("{name}.exe");
             candidates.push(dir.join(&file));
             candidates.push(dir.join(name).join(&file));
 

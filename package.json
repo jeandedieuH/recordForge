@@ -21,7 +21,8 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check": "turbo run lint format:check typecheck test",
-    "tauri": "turbo run tauri --filter=desktop"
+    "tauri": "turbo run tauri --filter=desktop",
+    "setup:ffmpeg": "node tooling/ffmpeg/setup.mjs"
   },
   "devDependencies": {
     "turbo": "^2.10.8",

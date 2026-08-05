@@ -71,6 +71,12 @@ Install dependencies:
 bun install
 ```
 
+Download FFmpeg/FFprobe sidecar binaries (required after fresh clone):
+
+```bash
+bun run setup:ffmpeg
+```
+
 Run development mode:
 
 ```bash
@@ -142,6 +148,12 @@ bun run test
 - Add comments on non-obvious implementation decisions only.
 
 ## Tooling
+
+Download FFmpeg/FFprobe sidecar binaries (pinned to v9.0):
+
+```bash
+bun run setup:ffmpeg
+```
 
 Regenerate app icons from the branding master SVG (`branding/forge-mark.svg`):
 

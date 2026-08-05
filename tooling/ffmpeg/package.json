@@ -1,0 +1,8 @@
+{
+  "name": "@recordforge/setup-ffmpeg",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node setup.mjs"
+  }
+}

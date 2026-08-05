@@ -76,6 +76,10 @@ impl Recorder {
     }
 
     /// Discover or verify the FFmpeg binary path.
+    ///
+    /// Prefer calling `media::resolve_executable_with_resource_dir` directly
+    /// from Tauri setup where the resource dir is available. This zero-arg
+    /// overload is kept for contexts where no `AppHandle` is at hand.
     pub fn resolve_ffmpeg() -> crate::errors::Result<PathBuf> {
         crate::media::resolve_executable("ffmpeg")
     }
