@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import type {
   ClipTransform,
+  CursorSettings,
   MediaMetadata,
   TimelineClip,
   TimelineTrack,
@@ -9,22 +10,22 @@ import {
   createTrimClipCommand,
   createUpdateClipAudioCommand,
   createUpdateClipTransformCommand,
+  createUpdateCursorSettingsCommand,
   createUpdateTrackCommand,
 } from "@recordforge/editor-core"
 import type { LucideIcon } from "lucide-react"
 import {
   AlignLeft,
   AlignRight,
-  AudioLines,
   Maximize2,
-  Monitor,
+  MousePointer2,
   Sliders,
   Sparkles,
-  Video,
   Volume2,
 } from "lucide-react"
-import { Badge, Button, EmptyState, Input, Slider, Switch, cn } from "@recordforge/ui"
+import { Badge, Button, Input, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { CursorInspector } from "../cursor"
 
 interface ClipInspectorProps {
   clip: TimelineClip | null
@@ -45,42 +46,47 @@ function clipLabel(clip: TimelineClip, track: TimelineTrack): string {
   return track.name
 }
 
+function formatInspectorTime(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  const remainder = Math.floor(ms % 1000)
+  return `${seconds}.${remainder.toString().padStart(3, "0")}s`
+}
+
 export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
+  const timelineState = useTimelineStore((state) => state.engine?.history.present)
+  const cursorSettings = timelineState?.canvas.cursorSettings
+
+  const [activeTab, setActiveTab] = useState<"clip" | "cursor">("cursor")
   const [sourceInText, setSourceInText] = useState(clip ? String(clip.sourceInMs) : "")
   const [sourceOutText, setSourceOutText] = useState(clip ? String(clip.sourceOutMs) : "")
   const stream = clip ? streamDetails(clip, metadata) : null
 
   useEffect(() => {
-    if (!clip) return
+    if (!clip) {
+      setActiveTab("cursor")
+      return
+    }
+    setActiveTab("clip")
     setSourceInText(String(clip.sourceInMs))
     setSourceOutText(String(clip.sourceOutMs))
   }, [clip])
 
+  function handleCursorChange(updated: Partial<CursorSettings>) {
+    execute(createUpdateCursorSettingsCommand(updated))
+  }
+
   if (!clip || !track) {
     return (
-      <aside className="hidden w-80 shrink-0 border-l border-border bg-surface p-4 lg:flex lg:flex-col">
-        <EmptyState
-          icon={Sliders}
-          title="Nothing selected"
-          description="Select a clip in the timeline to edit its source, timing, or audio settings."
-          className="border-0 px-3 py-10"
-        />
+      <aside className="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-border bg-surface p-4 lg:flex">
+        <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
       </aside>
     )
   }
 
   const activeClip = clip
   const isAudio = activeClip.kind === "audio"
-  const isCamera = activeClip.kind === "camera"
   const audioVolume = clip.kind === "audio" ? clip.volume : track.volume
-  const accentClass = track.name.toLowerCase().includes("system")
-    ? "text-track-system"
-    : track.kind === "screen"
-      ? "text-track-screen"
-      : track.kind === "camera"
-        ? "text-track-webcam"
-        : "text-track-mic"
 
   function updateAudioVolume(value: number[]) {
     if (!isAudio) return
@@ -105,181 +111,191 @@ export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorP
   }
 
   return (
-    <aside className="hidden w-80 shrink-0 flex-col gap-5 overflow-y-auto border-l border-border bg-surface p-4 lg:flex">
+    <aside className="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-border bg-surface p-4 lg:flex">
       <div className="flex items-center justify-between border-b border-border pb-3">
-        <div className="flex min-w-0 items-center gap-2">
-          {isAudio ? (
-            <AudioLines className={cn("size-4", accentClass)} />
-          ) : isCamera ? (
-            <Video className={cn("size-4", accentClass)} />
-          ) : (
-            <Monitor className={cn("size-4", accentClass)} />
-          )}
-          <h2 className="truncate text-sm font-semibold text-foreground">Inspector</h2>
+        <div className="flex items-center gap-1 rounded-lg bg-surface-dim p-1">
+          <Button
+            variant={activeTab === "clip" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => setActiveTab("clip")}
+          >
+            Clip Properties
+          </Button>
+          <Button
+            variant={activeTab === "cursor" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 text-xs gap-1.5"
+            onClick={() => setActiveTab("cursor")}
+          >
+            <MousePointer2 className="size-3.5" />
+            Cursor
+          </Button>
         </div>
-        <Button variant="ghost" size="sm" onClick={onClear}>
+        <Button variant="ghost" size="sm" onClick={onClear} className="h-7 text-xs">
           Clear
         </Button>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <Badge
-          variant="accent"
-          className="w-fit border-border bg-overlay px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
-        >
-          {track.name}
-        </Badge>
-        <p className="truncate text-sm font-medium text-foreground">{clipLabel(clip, track)}</p>
-        <p className="font-mono text-[11px] tabular-nums text-subtle-foreground">
-          {formatInspectorTime(clip.startMs)} →{" "}
-          {formatInspectorTime(clip.startMs + clip.durationMs)}
-        </p>
-      </div>
+      {activeTab === "cursor" ? (
+        <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
+      ) : (
+        <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-1">
+            <Badge
+              variant="accent"
+              className="w-fit border-border bg-overlay px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+            >
+              {track.name}
+            </Badge>
+            <p className="truncate text-sm font-medium text-foreground">{clipLabel(clip, track)}</p>
+            <p className="font-mono text-[11px] tabular-nums text-subtle-foreground">
+              {formatInspectorTime(clip.startMs)} →{" "}
+              {formatInspectorTime(clip.startMs + clip.durationMs)}
+            </p>
+          </div>
 
-      <div className="flex flex-col gap-3 border-t border-border pt-4">
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
-          <Sliders className="size-4 text-primary" aria-hidden />
-          <span>Source</span>
-        </div>
-        <div className="grid grid-cols-2 gap-3 text-xs">
-          <InfoField label="Start" value={formatInspectorTime(clip.startMs)} />
-          <InfoField label="Duration" value={formatInspectorTime(clip.durationMs)} />
-          <TrimField label="Source in (ms)" value={sourceInText} onChange={setSourceInText} />
-          <TrimField label="Source out (ms)" value={sourceOutText} onChange={setSourceOutText} />
-          <InfoField
-            label="Stream"
-            value={clip.streamIndex == null ? "Auto" : String(clip.streamIndex)}
-          />
-          <InfoField label="Codec" value={stream?.codec ?? "—"} />
-        </div>
-        <Button variant="secondary" size="sm" onClick={applyTrim}>
-          Apply source trim
-        </Button>
-      </div>
+          <div className="flex flex-col gap-3 border-t border-border pt-4">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+              <Sliders className="size-4 text-primary" aria-hidden />
+              <span>Source</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <InfoField label="Start" value={formatInspectorTime(clip.startMs)} />
+              <InfoField label="Duration" value={formatInspectorTime(clip.durationMs)} />
+              <TrimField label="Source in (ms)" value={sourceInText} onChange={setSourceInText} />
+              <TrimField label="Source out (ms)" value={sourceOutText} onChange={setSourceOutText} />
+              <InfoField
+                label="Stream"
+                value={clip.streamIndex == null ? "Auto" : String(clip.streamIndex)}
+              />
+              <InfoField label="Codec" value={stream?.codec ?? "—"} />
+            </div>
+            <Button variant="secondary" size="sm" onClick={applyTrim}>
+              Apply source trim
+            </Button>
+          </div>
 
-      {isAudio ? (
-        <div className="flex flex-col gap-3 border-t border-border pt-4">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
-            <Volume2 className="size-4 text-track-mic" aria-hidden />
-            <span>Audio</span>
-          </div>
-          <div className="flex items-center justify-between text-xs text-subtle-foreground">
-            <span>Clip volume</span>
-            <span className="font-mono tabular-nums text-foreground">
-              {Math.round(audioVolume * 100)}%
-            </span>
-          </div>
-          <Slider
-            value={[audioVolume]}
-            min={0}
-            max={2}
-            step={0.01}
-            aria-label="Clip volume"
-            onValueChange={updateAudioVolume}
-          />
-          <p className="text-[11px] leading-relaxed text-subtle-foreground">
-            Track mute and volume controls apply independently to {track.name}.
-          </p>
-        </div>
-      ) : null}
+          {isAudio ? (
+            <div className="flex flex-col gap-3 border-t border-border pt-4">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                <Volume2 className="size-4 text-track-mic" aria-hidden />
+                <span>Audio</span>
+              </div>
+              <div className="flex items-center justify-between text-xs text-subtle-foreground">
+                <span>Clip volume</span>
+                <span className="font-mono tabular-nums text-foreground">
+                  {Math.round(audioVolume * 100)}%
+                </span>
+              </div>
+              <Slider
+                value={[audioVolume]}
+                min={0}
+                max={2}
+                step={0.01}
+                aria-label="Clip volume"
+                onValueChange={updateAudioVolume}
+              />
+              <p className="text-[11px] leading-relaxed text-subtle-foreground">
+                Track mute and volume controls apply independently to {track.name}.
+              </p>
+            </div>
+          ) : null}
 
-      {clip.kind === "camera" ? (
-        <div className="flex flex-col gap-3 border-t border-border pt-4">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
-            <Sparkles className="size-4 text-tertiary" aria-hidden />
-            <span>Picture in picture</span>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <NumberField
-              label="X"
-              value={clip.transform.x}
-              onChange={(value) => updateTransform({ x: value })}
-            />
-            <NumberField
-              label="Y"
-              value={clip.transform.y}
-              onChange={(value) => updateTransform({ y: value })}
-            />
-            <NumberField
-              label="Width"
-              value={clip.transform.width}
-              onChange={(value) => updateTransform({ width: value })}
-            />
-            <NumberField
-              label="Height"
-              value={clip.transform.height}
-              onChange={(value) => updateTransform({ height: value })}
-            />
-          </div>
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-subtle-foreground">Opacity</span>
-            <span className="font-mono tabular-nums">
-              {Math.round(clip.transform.opacity * 100)}%
-            </span>
-          </div>
-          <Slider
-            value={[clip.transform.opacity]}
-            min={0}
-            max={1}
-            step={0.05}
-            aria-label="Camera opacity"
-            onValueChange={(value) => updateTransform({ opacity: value[0] ?? 1 })}
-          />
-          <div className="grid grid-cols-3 gap-2">
-            <PresetButton
-              active={clip.transform.x < 100}
-              label="Left"
-              onClick={() => updateTransform({ x: 24, y: 24 })}
-              icon={AlignLeft}
-            />
-            <PresetButton
-              active={clip.transform.x > 100}
-              label="Right"
-              onClick={() =>
-                updateTransform({
-                  x: Math.max(24, (metadata?.width ?? 1920) - clip.transform.width - 24),
-                  y: Math.max(24, (metadata?.height ?? 1080) - clip.transform.height - 24),
-                })
-              }
-              icon={AlignRight}
-            />
-            <PresetButton
-              active={clip.transform.width >= (metadata?.width ?? 1920) * 0.9}
-              label="Full"
-              onClick={() =>
-                updateTransform({
-                  x: 0,
-                  y: 0,
-                  width: metadata?.width ?? 1920,
-                  height: metadata?.height ?? 1080,
-                })
-              }
-              icon={Maximize2}
-            />
-          </div>
-        </div>
-      ) : null}
+          {clip.kind === "camera" ? (
+            <div className="flex flex-col gap-3 border-t border-border pt-4">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                <Sparkles className="size-4 text-tertiary" aria-hidden />
+                <span>Picture in picture</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <NumberField
+                  label="X"
+                  value={clip.transform.x}
+                  onChange={(value) => updateTransform({ x: value })}
+                />
+                <NumberField
+                  label="Y"
+                  value={clip.transform.y}
+                  onChange={(value) => updateTransform({ y: value })}
+                />
+                <NumberField
+                  label="Width"
+                  value={clip.transform.width}
+                  onChange={(value) => updateTransform({ width: value })}
+                />
+                <NumberField
+                  label="Height"
+                  value={clip.transform.height}
+                  onChange={(value) => updateTransform({ height: value })}
+                />
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-subtle-foreground">Opacity</span>
+                <span className="font-mono tabular-nums">
+                  {Math.round(clip.transform.opacity * 100)}%
+                </span>
+              </div>
+              <Slider
+                value={[clip.transform.opacity]}
+                min={0}
+                max={1}
+                step={0.05}
+                aria-label="Camera opacity"
+                onValueChange={(value) => updateTransform({ opacity: value[0] ?? 1 })}
+              />
+              <div className="grid grid-cols-3 gap-2">
+                <PresetButton
+                  active={clip.transform.x < 100}
+                  label="Left"
+                  onClick={() => updateTransform({ x: 24, y: 24 })}
+                  icon={AlignLeft}
+                />
+                <PresetButton
+                  active={clip.transform.x > 100}
+                  label="Right"
+                  onClick={() =>
+                    updateTransform({
+                      x: Math.max(24, (metadata?.width ?? 1920) - clip.transform.width - 24),
+                      y: Math.max(24, (metadata?.height ?? 1080) - clip.transform.height - 24),
+                    })
+                  }
+                  icon={AlignRight}
+                />
+                <PresetButton
+                  active={clip.transform.width >= (metadata?.width ?? 1920) * 0.9}
+                  label="Full"
+                  onClick={() =>
+                    updateTransform({
+                      x: 0,
+                      y: 0,
+                      width: metadata?.width ?? 1920,
+                      height: metadata?.height ?? 1080,
+                    })
+                  }
+                  icon={Maximize2}
+                />
+              </div>
+            </div>
+          ) : null}
 
-      <div className="flex items-center justify-between border-t border-border pt-4 text-xs">
-        <div className="flex items-center gap-2 text-subtle-foreground">
-          <Volume2 className="size-4" aria-hidden />
-          <span>Track muted</span>
+          <div className="flex items-center justify-between border-t border-border pt-4 text-xs">
+            <div className="flex items-center gap-2 text-subtle-foreground">
+              <Volume2 className="size-4" aria-hidden />
+              <span>Track muted</span>
+            </div>
+            <Switch
+              checked={track.muted}
+              onCheckedChange={(muted) => execute(createUpdateTrackCommand(track.id, { muted }))}
+            />
+          </div>
         </div>
-        <Switch
-          checked={track.muted}
-          onCheckedChange={(muted) => execute(createUpdateTrackCommand(track.id, { muted }))}
-        />
-      </div>
+      )}
     </aside>
   )
 }
 
-function formatInspectorTime(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`
-}
+
 
 function TrimField({
   label,

@@ -523,6 +523,32 @@ export function createUpdateCanvasCommand(
   }
 }
 
+export function createUpdateCursorSettingsCommand(
+  cursorSettings: Partial<import("@recordforge/domain").CursorSettings>,
+): TimelineCommand {
+  return {
+    name: "Update cursor settings",
+    execute(state) {
+      const currentCanvas = state.canvas
+      const currentCursor = currentCanvas.cursorSettings ?? {}
+      return {
+        ok: true,
+        value: {
+          ...state,
+          canvas: {
+            ...currentCanvas,
+            cursorSettings: {
+              ...currentCursor,
+              ...cursorSettings,
+            } as import("@recordforge/domain").CursorSettings,
+          },
+          updatedAt: now(),
+        },
+      }
+    },
+  }
+}
+
 export function createTrimTimelineEndsCommand(startMs: number, endMs: number): TimelineCommand {
   return {
     name: "Trim timeline",

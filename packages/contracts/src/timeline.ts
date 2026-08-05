@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { boundsSchema } from "./recording"
+import { cursorSettingsSchema, defaultCursorSettings } from "./cursor"
 
 // Canvas settings shared by the timeline, the preview, and the final render.
 export const timelineCanvasSchema = z.object({
@@ -10,6 +11,7 @@ export const timelineCanvasSchema = z.object({
   padding: z.number().min(0).default(0),
   borderRadius: z.number().min(0).default(0),
   shadow: z.boolean().default(false),
+  cursorSettings: cursorSettingsSchema.default(defaultCursorSettings),
 })
 
 export type TimelineCanvas = z.infer<typeof timelineCanvasSchema>

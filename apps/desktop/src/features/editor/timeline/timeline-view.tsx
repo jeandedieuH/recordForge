@@ -38,6 +38,7 @@ import { isTauri } from "../../../lib/settings"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { AudioTrackPreview } from "./audio-track-preview"
 import { ClipInspector } from "./clip-inspector"
+import { CustomCursorOverlay } from "../cursor"
 
 interface TimelineViewProps {
   recordingId: string
@@ -48,6 +49,13 @@ interface TimelineViewProps {
 interface SelectedClip {
   clip: TimelineClip
   track: TimelineTrack
+}
+
+interface VideoBounds {
+  left: number
+  top: number
+  width: number
+  height: number
 }
 
 function isPreparingJob(job: MediaJob | null): boolean {
@@ -180,11 +188,50 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const monitorRef = useRef<HTMLDivElement>(null)
+  const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
   const [tool, setTool] = useState<TimelineTool>("select")
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [waveformImageError, setWaveformImageError] = useState(false)
+
+  // The monitor can letterbox the video, so cursor coordinates must use the
+  // video's rendered box rather than the full monitor bounds.
+  const updateVideoBounds = useCallback(() => {
+    const monitor = monitorRef.current
+    const video = videoRef.current
+    if (!monitor || !video) {
+      setVideoBounds(null)
+      return
+    }
+
+    const monitorRect = monitor.getBoundingClientRect()
+    const videoRect = video.getBoundingClientRect()
+    if (videoRect.width <= 0 || videoRect.height <= 0) {
+      setVideoBounds(null)
+      return
+    }
+
+    const nextBounds = {
+      left: videoRect.left - monitorRect.left,
+      top: videoRect.top - monitorRect.top,
+      width: videoRect.width,
+      height: videoRect.height,
+    }
+    setVideoBounds((previous) => {
+      if (
+        previous &&
+        previous.left === nextBounds.left &&
+        previous.top === nextBounds.top &&
+        previous.width === nextBounds.width &&
+        previous.height === nextBounds.height
+      ) {
+        return previous
+      }
+      return nextBounds
+    })
+  }, [])
 
   useEffect(() => {
     void load(recordingId)
@@ -220,6 +267,22 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
   const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+
+  useEffect(() => {
+    setVideoBounds(null)
+    if (!mediaUrl) return
+
+    const monitor = monitorRef.current
+    const video = videoRef.current
+    if (!monitor || !video) return
+
+    const observer = new ResizeObserver(updateVideoBounds)
+    observer.observe(monitor)
+    observer.observe(video)
+    updateVideoBounds()
+    return () => observer.disconnect()
+  }, [mediaUrl, updateVideoBounds])
+
   const audioTrackOutputs = activeJob?.outputs?.audioTracks ?? []
   const waveformImagePath = activeJob?.outputs?.waveformImagePath ?? null
   const waveformImageUrl = useMemo(() => toAssetUrl(waveformImagePath), [waveformImagePath])
@@ -442,7 +505,10 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
           ) : null}
 
           {/* Video player monitor */}
-          <div className="relative flex min-h-0 flex-1 items-center justify-center rounded-xl border border-border bg-black p-3 shadow-e2">
+          <div
+            ref={monitorRef}
+            className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-3 shadow-e2"
+          >
             {mediaUrl && !mediaError ? (
               <video
                 ref={videoRef}
@@ -452,6 +518,7 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                 playsInline
                 onClick={togglePlay}
                 onError={() => {
+                  setVideoBounds(null)
                   if (isUsingProxy && originalPath) {
                     setUseOriginalMedia(true)
                     setMediaError(false)
@@ -459,7 +526,11 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                   }
                   setMediaError(true)
                 }}
-                onLoadedData={() => setMediaError(false)}
+                onLoadedMetadata={updateVideoBounds}
+                onLoadedData={() => {
+                  setMediaError(false)
+                  updateVideoBounds()
+                }}
                 onTimeUpdate={(event) => seek(event.currentTarget.currentTime * 1000)}
                 onEnded={() => {
                   pause()
@@ -483,6 +554,24 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                 </div>
               </div>
             )}
+
+            {mediaUrl && !mediaError && videoBounds ? (
+              <CustomCursorOverlay
+                playheadMs={view.playheadMs}
+                cursorSettings={timeline?.canvas.cursorSettings}
+                recordingId={recordingId}
+                telemetryPath={
+                  recording?.workDir ? `${recording.workDir}/cursor_telemetry.json` : null
+                }
+                containerWidth={videoBounds.width}
+                containerHeight={videoBounds.height}
+                offsetX={videoBounds.left}
+                offsetY={videoBounds.top}
+                sourceWidth={recording?.width ?? 1920}
+                sourceHeight={recording?.height ?? 1080}
+              />
+            ) : null}
+
             <AudioTrackPreview
               tracks={timeline.tracks}
               outputs={audioTrackOutputs}

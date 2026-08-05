@@ -307,19 +307,21 @@ fn add_screen_video_input(
     let bounds = source.bounds;
 
     if source.kind == "display" && use_ddagrab {
-        // Desktop Duplication API via the lavfi ddagrab filter. Produces
-        // hardware (D3D11) frames, so the filter chain must hwdownload them.
+        // Desktop Duplication API via the lavfi ddagrab filter.
+        // draw_mouse=0 keeps raw capture clean so custom overlay cursor renders cleanly.
         let ddagrab = format!(
-            "ddagrab=framerate={}:video_size={}x{}:offset_x={}:offset_y={}",
+            "ddagrab=draw_mouse=0:framerate={}:video_size={}x{}:offset_x={}:offset_y={}",
             profile.fps, bounds.width, bounds.height, bounds.x, bounds.y
         );
         command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
     } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
-        // GDI captures the selected rectangle directly, including displays with
-        // negative virtual-desktop coordinates.
+        // GDI captures the selected rectangle directly.
+        // -draw_mouse 0 hides the native mouse cursor so software custom cursor overlay can be customized post-recording.
         command.args([
             "-f",
             "gdigrab",
+            "-draw_mouse",
+            "0",
             "-thread_queue_size",
             "512",
             "-framerate",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import type { TimelineState } from "@recordforge/domain"
+import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
 import {
   createDeleteClipCommand,
   createEngine,
@@ -28,6 +28,7 @@ function makeTestState(): TimelineState {
       padding: 0,
       borderRadius: 0,
       shadow: false,
+      cursorSettings: defaultCursorSettings,
     },
     tracks: [
       {

@@ -30,7 +30,7 @@ regex = "1.11"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"
-windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [dev-dependencies]
 tempfile = "3"

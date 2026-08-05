@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, instrument};
@@ -9,6 +10,8 @@ use crate::database::library::get_recording;
 use crate::database::media::MediaJob;
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
+
+mod cursor;
 
 /// A single trimmed segment in the final export.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -29,6 +32,8 @@ pub struct RenderSegment {
 pub struct RenderPlan {
     pub duration_ms: u64,
     pub segments: Vec<RenderSegment>,
+    #[serde(default)]
+    pub canvas: Option<cursor::RenderCanvas>,
     #[serde(default)]
     pub audio: Option<RenderPlanAudio>,
     // `Some(empty)` means the current editor intentionally has no audio tracks.
@@ -156,6 +161,14 @@ pub fn run_render_plan(
             }
         }
     }
+
+    apply_cursor_overlay(
+        &ffmpeg_path.to_string_lossy(),
+        output_path,
+        &work_dir,
+        &plan,
+        &recording_id,
+    )?;
 
     let completed = MediaJob {
         status: crate::database::media::MediaJobStatus::Completed,
@@ -327,6 +340,156 @@ fn render_timeline_with_audio(
 
     crate::capture::disk::atomic_replace(&partial_path, output_path)?;
     Ok(())
+}
+
+fn apply_cursor_overlay(
+    ffmpeg_path: &str,
+    output_path: &Path,
+    work_dir: &Path,
+    plan: &RenderPlan,
+    recording_id: &str,
+) -> Result<()> {
+    let canvas = match plan.canvas.as_ref() {
+        Some(canvas) => canvas,
+        None => return Ok(()),
+    };
+    // Capture removes the OS cursor before recording, so every export with
+    // telemetry must render the configured replacement cursor.
+    if canvas.width == 0
+        || canvas.height == 0
+        || canvas.fps == 0
+        || canvas.width > 7_680
+        || canvas.height > 4_320
+        || canvas.fps > 240
+    {
+        return Err(
+            InternalError::Media("cursor render canvas dimensions are unsupported".into()).into(),
+        );
+    }
+
+    let telemetry_path = work_dir.join("cursor_telemetry.json");
+    if !telemetry_path.exists() {
+        tracing::warn!(%recording_id, "cursor telemetry is unavailable; exporting without a cursor overlay");
+        return Ok(());
+    }
+    let telemetry_text = std::fs::read_to_string(&telemetry_path)
+        .map_err(|error| InternalError::Storage(format!("read cursor telemetry: {error}")))?;
+    let telemetry: crate::capture::cursor::CursorTelemetryFile =
+        serde_json::from_str(&telemetry_text)
+            .map_err(|error| InternalError::Storage(format!("parse cursor telemetry: {error}")))?;
+    if telemetry.events.is_empty() {
+        tracing::warn!(%recording_id, "cursor telemetry has no events; exporting without a cursor overlay");
+        return Ok(());
+    }
+
+    let renderer = cursor::CursorRenderer::new(
+        canvas.cursor_settings.clone(),
+        telemetry,
+        &plan.segments,
+        canvas.width,
+        canvas.height,
+    )
+    .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
+    let frame_size = (canvas.width as usize)
+        .checked_mul(canvas.height as usize)
+        .and_then(|size| size.checked_mul(4))
+        .ok_or_else(|| InternalError::Media("cursor overlay frame is too large".into()))?;
+    let frame_count = plan
+        .duration_ms
+        .saturating_mul(canvas.fps as u64)
+        .saturating_add(999)
+        .checked_div(1000)
+        .unwrap_or(1)
+        .max(1);
+    let partial_path = cursor_partial_output_path(output_path);
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .arg("-y")
+        .args(["-hide_banner", "-loglevel", "error"])
+        .arg("-i")
+        .arg(output_path)
+        .args([
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &format!("{}x{}", canvas.width, canvas.height),
+            "-r",
+            &canvas.fps.to_string(),
+            "-i",
+            "-",
+        ])
+        .args([
+            "-filter_complex",
+            "[0:v][1:v]overlay=shortest=1:format=auto[vout]",
+            "-map",
+            "[vout]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&partial_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| InternalError::Media(format!("start cursor overlay render: {error}")))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| InternalError::Media("cursor overlay stdin unavailable".into()))?;
+    let mut frame = vec![0; frame_size];
+    for frame_index in 0..frame_count {
+        let output_ms = frame_index.saturating_mul(1000) / canvas.fps as u64;
+        renderer.render_frame(output_ms, &mut frame);
+        if let Err(error) = stdin.write_all(&frame) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(
+                InternalError::Media(format!("write cursor overlay frame: {error}")).into(),
+            );
+        }
+    }
+    drop(stdin);
+
+    let output = child.wait_with_output().map_err(|error| {
+        InternalError::Media(format!("wait for cursor overlay render: {error}"))
+    })?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&partial_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InternalError::Media(format!("cursor overlay render failed: {stderr}")).into());
+    }
+
+    crate::capture::disk::atomic_replace(&partial_path, output_path)?;
+    Ok(())
+}
+
+fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "export".into());
+    output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.cursor.partial.mp4"))
 }
 
 fn validate_asset(asset_id: Option<&String>, recording_id: &str) -> Result<()> {

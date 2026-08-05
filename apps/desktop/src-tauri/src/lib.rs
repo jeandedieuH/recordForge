@@ -78,6 +78,7 @@ pub fn run() {
             commands::recording::scan_recovery_sessions,
             commands::recording::recover_session,
             commands::recording::delete_recovery_session,
+            commands::recording::get_cursor_telemetry,
             commands::recording::run_encoder_benchmark,
             commands::recording::list_recordings,
             commands::recording::delete_recording,

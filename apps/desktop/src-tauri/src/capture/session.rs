@@ -34,6 +34,7 @@ struct ActiveSession {
     screen_capture: Option<FfmpegCapture>,
     audio_captures: Vec<ActiveAudioCapture>,
     webcam_capture: Option<FfmpegCapture>,
+    cursor_tracker: Option<super::cursor::CursorTracker>,
     segment_index: u32,
     total_recorded_ms: u64,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -158,6 +159,7 @@ impl Recorder {
             screen_capture: None,
             audio_captures: Vec::new(),
             webcam_capture: None,
+            cursor_tracker: None,
             segment_index: 0,
             total_recorded_ms: 0,
             started_at: None,
@@ -216,6 +218,16 @@ impl Recorder {
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
         session.webcam_capture = captures.webcam;
+        let bounds = session.config.source.bounds;
+        session.cursor_tracker = Some(super::cursor::CursorTracker::start(
+            session.session_id.clone(),
+            session.work_dir.clone(),
+            bounds.x,
+            bounds.y,
+            bounds.width as u32,
+            bounds.height as u32,
+            0,
+        ));
         session.started_at = Some(chrono::Utc::now());
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
@@ -506,6 +518,10 @@ impl Recorder {
             }
         }
 
+        if let Some(mut tracker) = session.cursor_tracker.take() {
+            tracker.stop();
+        }
+
         let total = session.total_recorded_ms + stats.duration_ms;
         session.total_recorded_ms = total;
         let _ = self.validated_segments(session)?;
@@ -563,6 +579,16 @@ impl Recorder {
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
         session.webcam_capture = captures.webcam;
+        let bounds = session.config.source.bounds;
+        session.cursor_tracker = Some(super::cursor::CursorTracker::start(
+            session.session_id.clone(),
+            session.work_dir.clone(),
+            bounds.x,
+            bounds.y,
+            bounds.width as u32,
+            bounds.height as u32,
+            session.total_recorded_ms,
+        ));
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
@@ -614,6 +640,10 @@ impl Recorder {
             if let Err(error) = webcam.stop() {
                 error!(%error, "failed to stop webcam sidecar during stop");
             }
+        }
+
+        if let Some(mut tracker) = session.cursor_tracker.take() {
+            tracker.stop();
         }
 
         let total = session.total_recorded_ms + final_stats.duration_ms;

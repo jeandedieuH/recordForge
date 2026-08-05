@@ -4,5 +4,6 @@
 export * from "./recording"
 export * from "./project"
 export * from "./timeline"
+export * from "./cursor"
 export * from "./media"
 export * from "./errors"

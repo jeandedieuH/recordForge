@@ -1,3 +1,4 @@
+import { defaultCursorSettings } from "@recordforge/contracts"
 import type {
   AudioClip,
   CameraClip,
@@ -217,6 +218,7 @@ export function createTimelineFromRecording(
       padding: 0,
       borderRadius: 0,
       shadow: false,
+      cursorSettings: defaultCursorSettings,
     },
     tracks,
     markers,

@@ -842,3 +842,29 @@ fn diagnostic_os() -> String {
         "unknown".into()
     }
 }
+
+/// Load recorded mouse cursor telemetry data for a recording session.
+#[tauri::command]
+#[instrument(skip(state))]
+pub fn get_cursor_telemetry(
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> Result<Option<crate::capture::cursor::CursorTelemetryFile>> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    let recording = match get_recording(&conn, &recording_id) {
+        Ok(rec) => rec,
+        Err(_) => return Ok(None),
+    };
+    let path = std::path::PathBuf::from(&recording.work_dir).join("cursor_telemetry.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| InternalError::Storage(format!("read cursor telemetry file: {e}")))?;
+    let telemetry: crate::capture::cursor::CursorTelemetryFile = serde_json::from_str(&text)
+        .map_err(|e| InternalError::Storage(format!("parse cursor telemetry json: {e}")))?;
+    Ok(Some(telemetry))
+}

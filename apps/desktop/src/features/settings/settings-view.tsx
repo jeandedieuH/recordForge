@@ -6,12 +6,14 @@ import {
   HardDrive,
   Moon,
   Monitor,
+  MousePointer2,
   Sliders,
   Sparkles,
   Sun,
   Volume2,
 } from "lucide-react"
 import type { RecordingConfig } from "@recordforge/contracts"
+import { defaultCursorSettings } from "@recordforge/contracts"
 import {
   Button,
   Input,
@@ -26,8 +28,9 @@ import { useThemeStore } from "../../stores/theme-store"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, isTauri, setSetting } from "../../lib/settings"
 import { DiagnosticsPanel } from "./diagnostics-panel"
+import { CursorInspector } from "../editor/cursor"
 
-type SettingsTab = "general" | "quality" | "diagnostics" | "storage"
+type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "storage"
 
 export function SettingsView() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general")
@@ -98,6 +101,19 @@ export function SettingsView() {
         >
           <Sliders className="size-4" />
           <span>Recording Defaults</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("cursor")}
+          className={`flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-semibold transition-all ${
+            activeTab === "cursor"
+              ? "bg-primary text-white shadow-sm"
+              : "text-subtle-foreground hover:bg-surface hover:text-foreground"
+          }`}
+        >
+          <MousePointer2 className="size-4" />
+          <span>Custom Cursor</span>
         </button>
 
         <button
@@ -321,6 +337,16 @@ export function SettingsView() {
               </div>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {/* Tab: Custom Cursor */}
+      {activeTab === "cursor" ? (
+        <div className="max-w-xl rounded-2xl border border-border bg-surface p-5 shadow-e1">
+          <CursorInspector
+            settings={defaultCursorSettings}
+            onChange={() => {}}
+          />
         </div>
       ) : null}
 
