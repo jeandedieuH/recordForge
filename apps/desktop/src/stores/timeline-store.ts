@@ -18,7 +18,13 @@ import {
 import { buildRenderPlan } from "@recordforge/media-core"
 import { listRecordings } from "../lib/library"
 import { toErrorMessage } from "../lib/errors"
-import { getMediaJob, getMediaMetadata, listMediaJobs, onMediaJobUpdate } from "../lib/media"
+import {
+  getMediaJob,
+  getMediaMetadata,
+  listMediaJobs,
+  onMediaJobUpdate,
+  prepareRecordingMedia,
+} from "../lib/media"
 import { exportTimeline } from "../lib/timeline"
 
 interface TimelineStore {
@@ -103,9 +109,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
       const meta = metadata ?? fallbackMetadata(recording)
       const prepareJobs = jobs.filter((job) => job.kind === "prepare")
-      const completed = prepareJobs.find((job) => job.status === "completed")
-      const latest = completed ?? (prepareJobs.length > 0 ? prepareJobs[0] : null)
-      const activeJob = latest ? await getMediaJob(latest.id) : null
+      const latest = prepareJobs[0] ?? null
+      let activeJob = latest ? await getMediaJob(latest.id) : null
+      if (
+        meta.hasAudio &&
+        (!activeJob ||
+          (activeJob.status === "completed" &&
+            (activeJob.outputs.prepareVersion < 2 || activeJob.outputs.audioTracks.length === 0)))
+      ) {
+        // Older prepare jobs only generated one combined waveform and did not
+        // expose independent audio assets to the editor.
+        activeJob = await prepareRecordingMedia(recordingId)
+      }
 
       const timeline = createTimelineFromRecording(recording, meta, recording.name)
       const engine = createEngine(timeline)

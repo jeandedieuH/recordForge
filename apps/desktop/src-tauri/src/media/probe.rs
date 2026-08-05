@@ -127,14 +127,7 @@ pub fn probe_media(ffprobe_path: &str, input: &Path, recording_id: &str) -> Resu
                 .or_else(|| s.tags.get("LANGUAGE"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let title = s
-                .tags
-                .get("title")
-                .or_else(|| s.tags.get("handler_name"))
-                .or_else(|| s.tags.get("HANDLER_NAME"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|value| !value.trim().is_empty());
+            let title = stream_title(&s.tags);
             let start_ms = s
                 .start_time
                 .as_ref()
@@ -185,6 +178,17 @@ pub fn probe_media(ffprobe_path: &str, input: &Path, recording_id: &str) -> Resu
     Ok(metadata)
 }
 
+fn stream_title(tags: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    ["title", "name", "NAME", "handler_name", "HANDLER_NAME"]
+        .iter()
+        .find_map(|key| {
+            tags.get(*key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty() && *value != "SoundHandler")
+        })
+        .map(str::to_string)
+}
+
 fn parse_rational_fps(s: &str) -> Option<f64> {
     let s = s.trim();
     if let Some(idx) = s.find('/') {
@@ -204,4 +208,32 @@ fn parse_seconds_to_ms(s: &str) -> Option<u64> {
         .ok()
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
         .map(|seconds| (seconds * 1000.0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_ffmpeg_name_over_generic_sound_handler() {
+        let tags = serde_json::json!({
+            "handler_name": "SoundHandler",
+            "name": "System Audio",
+        })
+        .as_object()
+        .cloned()
+        .expect("object tags");
+
+        assert_eq!(stream_title(&tags).as_deref(), Some("System Audio"));
+    }
+
+    #[test]
+    fn ignores_generic_handler_when_no_specific_title_exists() {
+        let tags = serde_json::json!({ "handler_name": "SoundHandler" })
+            .as_object()
+            .cloned()
+            .expect("object tags");
+
+        assert_eq!(stream_title(&tags), None);
+    }
 }

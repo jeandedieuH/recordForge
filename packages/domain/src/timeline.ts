@@ -101,7 +101,7 @@ function makeTrack(kind: TimelineTrackKind, name: string, clips: TimelineClip[])
 
 function audioStreamName(stream: MediaStream | undefined, index: number): string {
   const title = stream?.title?.trim()
-  if (title) return title
+  if (title && title !== "SoundHandler") return title
   if (index === 0) return "Microphone"
   if (index === 1) return "System Audio"
   return `Audio ${index + 1}`

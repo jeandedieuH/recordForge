@@ -84,16 +84,31 @@ impl std::str::FromStr for MediaJobKind {
     }
 }
 
+/// One independently playable audio stream and its waveform assets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAudioTrackOutput {
+    pub stream_index: i32,
+    pub title: String,
+    pub audio_path: String,
+    pub waveform_path: String,
+    pub waveform_image_path: String,
+}
+
 /// Output files produced by a media job.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaJobOutputs {
+    #[serde(default)]
+    pub prepare_version: u32,
     pub metadata_path: Option<String>,
     pub proxy_path: Option<String>,
     pub thumbnail_dir: Option<String>,
     pub thumbnail_manifest_path: Option<String>,
     pub waveform_path: Option<String>,
     pub waveform_image_path: Option<String>,
+    #[serde(default)]
+    pub audio_tracks: Vec<MediaAudioTrackOutput>,
     pub output_path: Option<String>,
 }
 
@@ -238,11 +253,19 @@ pub fn find_reusable_prepare_job(
 
         match job.status {
             MediaJobStatus::Pending | MediaJobStatus::Running => true,
-            MediaJobStatus::Completed => job
-                .outputs
-                .proxy_path
-                .as_deref()
-                .is_some_and(|path| Path::new(path).is_file()),
+            MediaJobStatus::Completed => {
+                job.outputs.prepare_version >= 2
+                    && job
+                        .outputs
+                        .proxy_path
+                        .as_deref()
+                        .is_some_and(|path| Path::new(path).is_file())
+                    && job.outputs.audio_tracks.iter().all(|track| {
+                        Path::new(&track.audio_path).is_file()
+                            && Path::new(&track.waveform_path).is_file()
+                            && Path::new(&track.waveform_image_path).is_file()
+                    })
+            }
             MediaJobStatus::Failed | MediaJobStatus::Cancelled => false,
         }
     }))
@@ -597,19 +620,33 @@ mod tests {
             .expect("find failed job")
             .is_none());
 
-        let completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
-            .expect("insert completed prepare job");
+        let stale_completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
+            .expect("insert stale completed prepare job");
         let temp_dir = tempfile::tempdir().expect("create derivative directory");
         let proxy_path = temp_dir.path().join("proxy.mp4");
         std::fs::write(&proxy_path, b"proxy").expect("write proxy fixture");
-        let outputs = MediaJobOutputs {
+        let stale_outputs = MediaJobOutputs {
+            prepare_version: 1,
             proxy_path: Some(proxy_path.to_string_lossy().to_string()),
             ..Default::default()
         };
-        complete_job(&conn, &completed.id, &outputs).expect("complete prepare job");
+        complete_job(&conn, &stale_completed.id, &stale_outputs)
+            .expect("complete stale prepare job");
+        assert!(find_reusable_prepare_job(&conn, "recording-1")
+            .expect("ignore stale completed job")
+            .is_none());
+
+        let completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
+            .expect("insert current completed prepare job");
+        let outputs = MediaJobOutputs {
+            prepare_version: 2,
+            proxy_path: Some(proxy_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        complete_job(&conn, &completed.id, &outputs).expect("complete current prepare job");
         assert_eq!(
             find_reusable_prepare_job(&conn, "recording-1")
-                .expect("find completed job")
+                .expect("find current completed job")
                 .map(|job| job.id),
             Some(completed.id)
         );

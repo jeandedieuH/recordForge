@@ -2,8 +2,8 @@
 //!
 //! System audio is captured from a render endpoint with the WASAPI loopback
 //! stream flag. Microphones use the normal WASAPI capture direction. Both
-//! paths write independent float32 WAV assets so FFmpeg never needs a
-//! DirectShow audio device or a virtual Stereo Mix device.
+//! paths write independent WAV assets using the requested sample format so
+//! FFmpeg never needs a DirectShow audio device or a virtual Stereo Mix device.
 
 use crate::errors::Result;
 use std::fs::OpenOptions;
@@ -25,6 +25,7 @@ use wasapi::{
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_CHANNELS: u16 = 2;
 const AUDIO_BUFFER_DURATION_HNS: i64 = 100_000;
+const AUDIO_EVENT_TIMEOUT_MS: u32 = 100;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const WAV_HEADER_SIZE: u64 = 44;
 const SILENCE_CHUNK_FRAMES: usize = 4096;
@@ -172,13 +173,49 @@ pub enum WasapiCaptureKind {
     SystemLoopback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasapiSampleFormat {
+    Pcm16,
+    Float32,
+}
+
+impl WasapiSampleFormat {
+    fn bits_per_sample(self) -> u16 {
+        match self {
+            Self::Pcm16 => 16,
+            Self::Float32 => 32,
+        }
+    }
+
+    fn bytes_per_sample(self) -> u16 {
+        self.bits_per_sample() / 8
+    }
+
+    fn wav_format_tag(self) -> u16 {
+        match self {
+            Self::Pcm16 => 1,
+            Self::Float32 => 3,
+        }
+    }
+
+    #[cfg(windows)]
+    fn wasapi_sample_type(self) -> SampleType {
+        match self {
+            Self::Pcm16 => SampleType::Int,
+            Self::Float32 => SampleType::Float,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WasapiCaptureOptions {
     pub device_id: Option<String>,
     pub kind: WasapiCaptureKind,
     pub sample_rate: u32,
     pub channels: u16,
+    pub sample_format: WasapiSampleFormat,
     pub output_path: PathBuf,
+    pub timeline_origin: Instant,
 }
 
 impl WasapiCaptureOptions {
@@ -188,7 +225,12 @@ impl WasapiCaptureOptions {
             kind: WasapiCaptureKind::Microphone,
             sample_rate: DEFAULT_SAMPLE_RATE,
             channels: DEFAULT_CHANNELS,
+            // Request integer PCM for the microphone. This keeps the capture
+            // path in the format used by the Windows recording endpoint and
+            // avoids a driver-specific float conversion before encoding.
+            sample_format: WasapiSampleFormat::Pcm16,
             output_path,
+            timeline_origin: Instant::now(),
         }
     }
 
@@ -198,8 +240,16 @@ impl WasapiCaptureOptions {
             kind: WasapiCaptureKind::SystemLoopback,
             sample_rate: DEFAULT_SAMPLE_RATE,
             channels: DEFAULT_CHANNELS,
+            sample_format: WasapiSampleFormat::Pcm16,
             output_path,
+            timeline_origin: Instant::now(),
         }
+    }
+
+    /// Set the common video-origin clock used to timestamp this audio track.
+    pub fn with_timeline_origin(mut self, timeline_origin: Instant) -> Self {
+        self.timeline_origin = timeline_origin;
+        self
     }
 }
 
@@ -208,6 +258,9 @@ impl WasapiCaptureOptions {
 pub struct WasapiCaptureSession {
     output_path: PathBuf,
     started_at: Instant,
+    sample_rate: u32,
+    channels: u16,
+    sample_format: WasapiSampleFormat,
     #[cfg(windows)]
     stop_requested: Arc<AtomicBool>,
     #[cfg(windows)]
@@ -234,6 +287,9 @@ impl WasapiCaptureSession {
         #[cfg(windows)]
         {
             let output_path = options.output_path.clone();
+            let sample_rate = options.sample_rate;
+            let channels = options.channels;
+            let sample_format = options.sample_format;
             let stop_requested = Arc::new(AtomicBool::new(false));
             let worker_stop = Arc::clone(&stop_requested);
             let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -279,6 +335,9 @@ impl WasapiCaptureSession {
             Ok(Self {
                 output_path,
                 started_at,
+                sample_rate,
+                channels,
+                sample_format,
                 stop_requested,
                 worker: Some(worker),
             })
@@ -322,6 +381,22 @@ impl WasapiCaptureSession {
         {
             Ok(0)
         }
+    }
+
+    /// Make the finalized track exactly as long as the segment's video clock.
+    /// This removes tail samples captured while FFmpeg flushes and adds silence
+    /// when a driver stopped returning packets before the video ended.
+    pub fn align_to_duration(&self, duration: Duration) -> Result<u64> {
+        align_wav_to_duration(
+            &self.output_path,
+            self.sample_rate,
+            self.channels,
+            self.sample_format,
+            duration,
+        )
+        .map_err(|error| {
+            crate::errors::InternalError::Capture(format!("align WASAPI track: {error}")).into()
+        })
     }
 }
 
@@ -386,6 +461,15 @@ fn capture_worker_inner(
             )
         }
     };
+    if device.get_direction() != endpoint_direction {
+        return signal_start_error(
+            &ready_tx,
+            format!(
+                "selected WASAPI endpoint direction does not match {} capture",
+                endpoint_direction
+            ),
+        );
+    }
 
     let mut audio_client = match device.get_iaudioclient() {
         Ok(client) => client,
@@ -394,9 +478,9 @@ fn capture_worker_inner(
         }
     };
     let format = WaveFormat::new(
-        32,
-        32,
-        &SampleType::Float,
+        usize::from(options.sample_format.bits_per_sample()),
+        usize::from(options.sample_format.bits_per_sample()),
+        &options.sample_format.wasapi_sample_type(),
         options.sample_rate as usize,
         options.channels as usize,
         None,
@@ -409,7 +493,7 @@ fn capture_worker_inner(
         );
     }
 
-    let mode = StreamMode::PollingShared {
+    let mode = StreamMode::EventsShared {
         autoconvert: true,
         buffer_duration_hns: AUDIO_BUFFER_DURATION_HNS,
     };
@@ -419,6 +503,12 @@ fn capture_worker_inner(
             format!("initialize WASAPI capture stream: {error}"),
         );
     }
+    let capture_event = match audio_client.set_get_eventhandle() {
+        Ok(handle) => handle,
+        Err(error) => {
+            return signal_start_error(&ready_tx, format!("create WASAPI capture event: {error}"))
+        }
+    };
     let capture_client = match audio_client.get_audiocaptureclient() {
         Ok(client) => client,
         Err(error) => {
@@ -444,7 +534,12 @@ fn capture_worker_inner(
             )
         }
     };
-    if let Err(error) = write_wav_header(&mut file, options.sample_rate, options.channels) {
+    if let Err(error) = write_wav_header(
+        &mut file,
+        options.sample_rate,
+        options.channels,
+        options.sample_format,
+    ) {
         return signal_start_error(&ready_tx, format!("write WASAPI WAV header: {error}"));
     }
 
@@ -453,51 +548,83 @@ fn capture_worker_inner(
     }
 
     let capture_started_at = Instant::now();
+    let stream_offset_frames = frames_for_duration(
+        capture_started_at.saturating_duration_since(options.timeline_origin),
+        options.sample_rate,
+    );
     if ready_tx.send(Ok(capture_started_at)).is_err() {
         let _ = audio_client.stop_stream();
         return Err("WASAPI capture startup acknowledgement was dropped".into());
     }
 
     let mut data_bytes = 0u64;
-    let capture_result = loop {
+    if let Err(error) = append_silence_until(
+        &mut file,
+        &mut data_bytes,
+        stream_offset_frames,
+        block_align,
+    ) {
+        let _ = audio_client.stop_stream();
+        let _ = finalize_wav(&mut file, data_bytes);
+        return Err(format!("write WASAPI startup silence: {error}"));
+    }
+
+    let capture_result = 'capture: loop {
         if stop_requested.load(Ordering::Acquire) {
             break Ok(());
         }
 
-        let packet_frames = match capture_client.get_next_packet_size() {
-            Ok(Some(frames)) if frames > 0 => frames,
-            Ok(_) => {
-                thread::sleep(Duration::from_millis(3));
-                continue;
+        match capture_event.wait_for_event(AUDIO_EVENT_TIMEOUT_MS) {
+            Ok(()) | Err(wasapi::WasapiError::EventTimeout) => {}
+            Err(error) => break Err(format!("wait for WASAPI capture event: {error}")),
+        }
+
+        loop {
+            if stop_requested.load(Ordering::Acquire) {
+                break 'capture Ok(());
             }
-            Err(error) => break Err(format!("read WASAPI packet size: {error}")),
-        };
 
-        let capacity = packet_frames as usize * block_align;
-        let mut packet = vec![0u8; capacity];
-        let (frames_read, buffer_info) = match capture_client.read_from_device(&mut packet) {
-            Ok(result) => result,
-            Err(error) => break Err(format!("read WASAPI audio packet: {error}")),
-        };
-        let elapsed_frames = frames_for_duration(capture_started_at.elapsed(), options.sample_rate);
-        let packet_start_frames = buffer_info.index.max(elapsed_frames);
-        if let Err(error) =
-            append_silence_until(&mut file, &mut data_bytes, packet_start_frames, block_align)
-        {
-            break Err(format!("write WASAPI silent gap: {error}"));
-        }
+            let packet_frames = match capture_client.get_next_packet_size() {
+                Ok(Some(frames)) if frames > 0 => frames,
+                Ok(_) => break,
+                Err(error) => break 'capture Err(format!("read WASAPI packet size: {error}")),
+            };
 
-        let payload_len = frames_read as usize * block_align;
-        if buffer_info.flags.silent {
-            packet[..payload_len].fill(0);
-        }
-        if let Err(error) = file.write_all(&packet[..payload_len]) {
-            break Err(format!("write WASAPI audio packet: {error}"));
-        }
-        data_bytes = data_bytes.saturating_add(payload_len as u64);
-
-        if buffer_info.flags.data_discontinuity {
-            tracing::debug!(path = %options.output_path.display(), "WASAPI reported an audio data discontinuity");
+            let capacity = match (packet_frames as usize).checked_mul(block_align) {
+                Some(capacity) => capacity,
+                None => break 'capture Err("WASAPI packet buffer size overflow".into()),
+            };
+            let mut packet = vec![0u8; capacity];
+            let (frames_read, buffer_info) = match capture_client.read_from_device(&mut packet) {
+                Ok(result) => result,
+                Err(error) => break 'capture Err(format!("read WASAPI audio packet: {error}")),
+            };
+            // Copy complete packets in the order WASAPI delivers them. Device
+            // positions and timestamps can jitter on microphone drivers; using
+            // them to trim or insert samples can remove speech and create
+            // audible high-frequency clicks.
+            let payload_len = match (frames_read as usize).checked_mul(block_align) {
+                Some(payload_len) => payload_len,
+                None => break 'capture Err("WASAPI audio payload size overflow".into()),
+            };
+            if buffer_info.flags.silent {
+                packet[..payload_len].fill(0);
+            }
+            if let Err(error) = file.write_all(&packet[..payload_len]) {
+                break 'capture Err(format!("write WASAPI audio packet: {error}"));
+            }
+            let written_bytes = payload_len as u64;
+            data_bytes = match data_bytes.checked_add(written_bytes) {
+                Some(data_bytes) => data_bytes,
+                None => break 'capture Err("WASAPI WAV payload size overflow".into()),
+            };
+            if buffer_info.flags.data_discontinuity {
+                tracing::debug!(
+                    path = %options.output_path.display(),
+                    packet_index = buffer_info.index,
+                    "WASAPI reported an audio data discontinuity"
+                );
+            }
         }
     };
 
@@ -512,10 +639,6 @@ fn capture_worker_inner(
         let _ = finalize_wav(&mut file, data_bytes);
         return Err(error);
     }
-
-    let final_frame_target = frames_for_duration(capture_started_at.elapsed(), options.sample_rate);
-    append_silence_until(&mut file, &mut data_bytes, final_frame_target, block_align)
-        .map_err(|error| format!("write final WASAPI silence: {error}"))?;
 
     finalize_wav(&mut file, data_bytes).map_err(|error| format!("finalize WASAPI WAV: {error}"))
 }
@@ -572,6 +695,69 @@ fn append_silence_until(
     Ok(())
 }
 
+fn align_wav_to_duration(
+    path: &Path,
+    sample_rate: u32,
+    channels: u16,
+    sample_format: WasapiSampleFormat,
+    duration: Duration,
+) -> std::io::Result<u64> {
+    if sample_rate == 0 || channels == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WAV sample rate and channel count must be positive",
+        ));
+    }
+
+    let block_align = usize::from(channels)
+        .checked_mul(usize::from(sample_format.bytes_per_sample()))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WAV block alignment overflow",
+            )
+        })?;
+    let target_frames = frames_for_duration(duration, sample_rate);
+    let target_bytes = target_frames
+        .checked_mul(block_align as u64)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "WAV target size overflow")
+        })?;
+    u32::try_from(target_bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAV target exceeds the 4 GB RIFF limit",
+        )
+    })?;
+
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < WAV_HEADER_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAV file is missing its header",
+        ));
+    }
+
+    let current_bytes = file_len - WAV_HEADER_SIZE;
+    if !current_bytes.is_multiple_of(block_align as u64) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAV payload is not aligned to a complete audio frame",
+        ));
+    }
+
+    if target_bytes < current_bytes {
+        file.set_len(WAV_HEADER_SIZE + target_bytes)?;
+    } else if target_bytes > current_bytes {
+        file.seek(SeekFrom::End(0))?;
+        let mut data_bytes = current_bytes;
+        append_silence_until(&mut file, &mut data_bytes, target_frames, block_align)?;
+    }
+
+    finalize_wav(&mut file, target_bytes)
+}
+
 #[cfg(windows)]
 fn signal_start_error(
     ready_tx: &SyncSender<std::result::Result<Instant, String>>,
@@ -585,13 +771,16 @@ fn write_wav_header(
     file: &mut std::fs::File,
     sample_rate: u32,
     channels: u16,
+    sample_format: WasapiSampleFormat,
 ) -> std::io::Result<()> {
-    let block_align = channels.checked_mul(4).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "WAV block alignment overflow",
-        )
-    })?;
+    let block_align = channels
+        .checked_mul(sample_format.bytes_per_sample())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WAV block alignment overflow",
+            )
+        })?;
     let byte_rate = sample_rate
         .checked_mul(u32::from(block_align))
         .ok_or_else(|| {
@@ -604,12 +793,12 @@ fn write_wav_header(
     file.write_all(b"WAVE")?;
     file.write_all(b"fmt ")?;
     file.write_all(&16u32.to_le_bytes())?;
-    file.write_all(&3u16.to_le_bytes())?;
+    file.write_all(&sample_format.wav_format_tag().to_le_bytes())?;
     file.write_all(&channels.to_le_bytes())?;
     file.write_all(&sample_rate.to_le_bytes())?;
     file.write_all(&byte_rate.to_le_bytes())?;
     file.write_all(&block_align.to_le_bytes())?;
-    file.write_all(&32u16.to_le_bytes())?;
+    file.write_all(&sample_format.bits_per_sample().to_le_bytes())?;
     file.write_all(b"data")?;
     file.write_all(&0u32.to_le_bytes())?;
     Ok(())
@@ -641,7 +830,93 @@ mod tests {
     use std::io::Read;
 
     #[test]
-    fn writes_a_float32_stereo_wav_header() {
+    fn aligns_wav_payload_to_video_duration() {
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("aligned.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open temporary WAV");
+        write_wav_header(&mut file, 100, 1, WasapiSampleFormat::Pcm16).expect("write WAV header");
+        file.write_all(&[1u8; 2 * 300]).expect("write audio frames");
+        finalize_wav(&mut file, 2 * 300).expect("finalize WAV");
+        drop(file);
+
+        align_wav_to_duration(
+            &path,
+            100,
+            1,
+            WasapiSampleFormat::Pcm16,
+            Duration::from_secs(1),
+        )
+        .expect("align WAV to video duration");
+
+        let metadata = std::fs::metadata(&path).expect("read aligned WAV metadata");
+        assert_eq!(metadata.len(), WAV_HEADER_SIZE + 100 * 2);
+    }
+
+    #[test]
+    fn pads_idle_capture_to_video_duration() {
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("idle.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open temporary WAV");
+        write_wav_header(&mut file, 100, 1, WasapiSampleFormat::Pcm16).expect("write WAV header");
+        file.write_all(&[1u8; 2]).expect("write one audio frame");
+        finalize_wav(&mut file, 2).expect("finalize WAV");
+        drop(file);
+
+        align_wav_to_duration(
+            &path,
+            100,
+            1,
+            WasapiSampleFormat::Pcm16,
+            Duration::from_secs(1),
+        )
+        .expect("pad idle capture to video duration");
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("reopen padded WAV");
+        file.seek(SeekFrom::Start(WAV_HEADER_SIZE + 2))
+            .expect("seek past audio frame");
+        let mut tail = vec![0u8; 99 * 2];
+        file.read_exact(&mut tail).expect("read padded silence");
+        assert!(tail.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn uses_pcm16_microphone_and_loopback_defaults() {
+        let microphone = WasapiCaptureOptions::microphone(None, PathBuf::from("mic.wav"));
+        let system = WasapiCaptureOptions::system_loopback(None, PathBuf::from("system.wav"));
+
+        assert_eq!(microphone.channels, DEFAULT_CHANNELS);
+        assert_eq!(system.channels, DEFAULT_CHANNELS);
+        assert_eq!(microphone.sample_format, WasapiSampleFormat::Pcm16);
+        assert_eq!(system.sample_format, WasapiSampleFormat::Pcm16);
+        assert_eq!(microphone.sample_rate, DEFAULT_SAMPLE_RATE);
+        assert_eq!(system.sample_rate, DEFAULT_SAMPLE_RATE);
+    }
+
+    #[test]
+    fn microphone_capture_does_not_default_to_float_samples() {
+        let microphone = WasapiCaptureOptions::microphone(None, PathBuf::from("mic.wav"));
+        let debug = format!("{microphone:?}");
+
+        assert!(debug.contains("sample_format: Pcm16"));
+    }
+
+    #[test]
+    fn writes_a_pcm16_stereo_wav_header() {
         let directory = tempfile::tempdir().expect("create temporary directory");
         let path = directory.path().join("audio.wav");
         let mut file = OpenOptions::new()
@@ -652,19 +927,24 @@ mod tests {
             .open(path)
             .expect("open temporary WAV");
 
-        write_wav_header(&mut file, DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS)
-            .expect("write WAV header");
-        file.write_all(&[0u8; 8]).expect("write one audio frame");
-        finalize_wav(&mut file, 8).expect("finalize WAV");
+        write_wav_header(
+            &mut file,
+            DEFAULT_SAMPLE_RATE,
+            DEFAULT_CHANNELS,
+            WasapiSampleFormat::Pcm16,
+        )
+        .expect("write WAV header");
+        file.write_all(&[0u8; 4]).expect("write one audio frame");
+        finalize_wav(&mut file, 4).expect("finalize WAV");
 
         file.seek(SeekFrom::Start(0)).expect("rewind WAV");
         let mut header = [0u8; 44];
         file.read_exact(&mut header).expect("read WAV header");
 
         assert_eq!(&header[0..4], b"RIFF");
-        assert_eq!(u32::from_le_bytes(header[4..8].try_into().unwrap()), 44);
+        assert_eq!(u32::from_le_bytes(header[4..8].try_into().unwrap()), 40);
         assert_eq!(&header[8..12], b"WAVE");
-        assert_eq!(u16::from_le_bytes(header[20..22].try_into().unwrap()), 3);
+        assert_eq!(u16::from_le_bytes(header[20..22].try_into().unwrap()), 1);
         assert_eq!(u16::from_le_bytes(header[22..24].try_into().unwrap()), 2);
         assert_eq!(
             u32::from_le_bytes(header[24..28].try_into().unwrap()),
@@ -672,18 +952,50 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(header[28..32].try_into().unwrap()),
-            384_000
+            192_000
         );
+        assert_eq!(u16::from_le_bytes(header[32..34].try_into().unwrap()), 4);
+        assert_eq!(u16::from_le_bytes(header[34..36].try_into().unwrap()), 16);
+        assert_eq!(&header[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(header[40..44].try_into().unwrap()), 4);
+    }
+
+    #[test]
+    fn writes_a_float32_wav_header() {
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("mic.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .expect("open temporary WAV");
+
+        write_wav_header(
+            &mut file,
+            DEFAULT_SAMPLE_RATE,
+            DEFAULT_CHANNELS,
+            WasapiSampleFormat::Float32,
+        )
+        .expect("write WAV header");
+        file.write_all(&[0u8; 8]).expect("write one audio frame");
+        finalize_wav(&mut file, 8).expect("finalize WAV");
+
+        file.seek(SeekFrom::Start(0)).expect("rewind WAV");
+        let mut header = [0u8; 44];
+        file.read_exact(&mut header).expect("read WAV header");
+
+        assert_eq!(u16::from_le_bytes(header[20..22].try_into().unwrap()), 3);
+        assert_eq!(u16::from_le_bytes(header[22..24].try_into().unwrap()), 2);
         assert_eq!(u16::from_le_bytes(header[32..34].try_into().unwrap()), 8);
         assert_eq!(u16::from_le_bytes(header[34..36].try_into().unwrap()), 32);
-        assert_eq!(&header[36..40], b"data");
-        assert_eq!(u32::from_le_bytes(header[40..44].try_into().unwrap()), 8);
     }
 
     #[test]
     fn pads_loopback_silence_before_and_after_audio_packet() {
         let sample_rate = 100;
-        let block_align = 4;
+        let block_align = 2;
         let directory = tempfile::tempdir().expect("create temporary directory");
         let path = directory.path().join("loopback.wav");
         let mut file = OpenOptions::new()
@@ -693,13 +1005,14 @@ mod tests {
             .write(true)
             .open(path)
             .expect("open temporary WAV");
-        write_wav_header(&mut file, sample_rate, 1).expect("write WAV header");
+        write_wav_header(&mut file, sample_rate, 1, WasapiSampleFormat::Pcm16)
+            .expect("write WAV header");
 
         let mut data_bytes = 0;
         let first_packet_frame = frames_for_duration(Duration::from_secs(2), sample_rate);
         append_silence_until(&mut file, &mut data_bytes, first_packet_frame, block_align)
             .expect("write leading silence");
-        file.write_all(&[1u8; 4]).expect("write audio packet");
+        file.write_all(&[1u8; 2]).expect("write audio packet");
         data_bytes += block_align as u64;
 
         let final_frame_target = frames_for_duration(Duration::from_secs(3), sample_rate);
@@ -717,7 +1030,7 @@ mod tests {
         assert!(payload[..packet_offset].iter().all(|byte| *byte == 0));
         assert_eq!(
             &payload[packet_offset..packet_offset + block_align],
-            &[1u8; 4]
+            &[1u8; 2]
         );
         assert!(payload[packet_offset + block_align..]
             .iter()

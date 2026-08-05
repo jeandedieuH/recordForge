@@ -35,6 +35,33 @@ describe("domain", () => {
     expect(true).toBe(true)
   })
 
+  it("maps generic SoundHandler metadata to stable capture track names", () => {
+    const metadata: MediaMetadata = {
+      recordingId: "recording-1",
+      path: "C:/recordforge/session-1/output.mp4",
+      durationMs: 60_000,
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      hasAudio: true,
+      streams: [
+        { index: 0, kind: "video", codec: "h264" },
+        { index: 1, kind: "audio", codec: "aac", title: "SoundHandler", durationMs: 60_000 },
+        { index: 2, kind: "audio", codec: "aac", title: "SoundHandler", durationMs: 60_000 },
+      ],
+      format: { name: "mov,mp4,m4a,3gp,3g2,mj2" },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+
+    const timeline = createTimelineFromRecording(makeRecording(), metadata)
+
+    expect(timeline.tracks.map((track) => track.name)).toEqual([
+      "Screen",
+      "Microphone",
+      "System Audio",
+    ])
+  })
+
   it("creates aligned screen, microphone, and system audio tracks from recorded streams", () => {
     const metadata: MediaMetadata = {
       recordingId: "recording-1",

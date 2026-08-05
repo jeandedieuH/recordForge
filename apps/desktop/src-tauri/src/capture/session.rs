@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::{error, info, instrument};
 
 use super::audio::{WasapiCaptureKind, WasapiCaptureOptions, WasapiCaptureSession};
@@ -282,47 +283,43 @@ impl Recorder {
             self.ddagrab_available,
         )?;
 
-        // Start each native audio worker after the video process has passed its
-        // startup probe. The per-track start timestamp is retained so the mux
-        // step can preserve the small startup offset instead of silently
-        // shifting audio to time zero.
+        // Every audio worker writes against the screen capture's monotonic
+        // origin, so startup latency is represented as leading silence rather
+        // than a second independent FFmpeg offset.
+        let timeline_origin = screen.started_at();
         let mut audio = Vec::new();
         if config.capture_microphone {
-            if let Some(device_id) = config.microphone_device_id.clone() {
-                let output_path = work_dir.join(format!("mic_{:03}.wav", index));
-                match WasapiCaptureSession::start(WasapiCaptureOptions::microphone(
-                    Some(device_id),
-                    output_path,
-                )) {
-                    Ok(session) => audio.push(ActiveAudioCapture {
-                        kind: WasapiCaptureKind::Microphone,
-                        session,
-                    }),
-                    Err(error) => tracing::warn!(
-                        error = ?error,
-                        "microphone WASAPI capture unavailable; continuing with video"
-                    ),
-                }
-            }
+            let device_id = config.microphone_device_id.clone().ok_or_else(|| {
+                crate::errors::InternalError::Capture("microphone device is missing".into())
+            })?;
+            let output_path = work_dir.join(format!("mic_{:03}.wav", index));
+            let options = WasapiCaptureOptions::microphone(Some(device_id), output_path)
+                .with_timeline_origin(timeline_origin);
+            let session = WasapiCaptureSession::start(options).map_err(|error| {
+                crate::errors::InternalError::Capture(format!("start microphone capture: {error}"))
+            })?;
+            audio.push(ActiveAudioCapture {
+                kind: WasapiCaptureKind::Microphone,
+                session,
+            });
         }
 
         if config.capture_system_audio {
-            if let Some(device_id) = config.system_audio_device_id.clone() {
-                let output_path = work_dir.join(format!("sys_{:03}.wav", index));
-                match WasapiCaptureSession::start(WasapiCaptureOptions::system_loopback(
-                    Some(device_id),
-                    output_path,
-                )) {
-                    Ok(session) => audio.push(ActiveAudioCapture {
-                        kind: WasapiCaptureKind::SystemLoopback,
-                        session,
-                    }),
-                    Err(error) => tracing::warn!(
-                        error = ?error,
-                        "system audio WASAPI loopback unavailable; continuing with video"
-                    ),
-                }
-            }
+            let device_id = config.system_audio_device_id.clone().ok_or_else(|| {
+                crate::errors::InternalError::Capture("system audio device is missing".into())
+            })?;
+            let output_path = work_dir.join(format!("sys_{:03}.wav", index));
+            let options = WasapiCaptureOptions::system_loopback(Some(device_id), output_path)
+                .with_timeline_origin(timeline_origin);
+            let session = WasapiCaptureSession::start(options).map_err(|error| {
+                crate::errors::InternalError::Capture(format!(
+                    "start system audio capture: {error}"
+                ))
+            })?;
+            audio.push(ActiveAudioCapture {
+                kind: WasapiCaptureKind::SystemLoopback,
+                session,
+            });
         }
 
         let webcam = if config.capture_webcam {
@@ -366,29 +363,37 @@ impl Recorder {
         screen: &FfmpegCapture,
         audio_captures: &mut Vec<ActiveAudioCapture>,
         profile: &RecordingProfile,
+        duration: Duration,
     ) {
         if audio_captures.is_empty() {
             return;
         }
 
-        let screen_started_at = screen.started_at();
         let screen_path = screen.output_path().to_path_buf();
         let mut tracks = Vec::new();
 
         for mut audio_capture in audio_captures.drain(..) {
-            let offset = audio_capture
-                .session
-                .started_at()
-                .saturating_duration_since(screen_started_at);
             let path = audio_capture.session.output_path().to_path_buf();
-            let bytes_written = match audio_capture.session.stop() {
+            if let Err(error) = audio_capture.session.stop() {
+                tracing::warn!(
+                    error = ?error,
+                    path = %path.display(),
+                    "WASAPI track stopped with an error"
+                );
+                continue;
+            }
+
+            let bytes_written = match audio_capture.session.align_to_duration(duration) {
                 Ok(bytes_written) => bytes_written,
                 Err(error) => {
-                    tracing::warn!(error = ?error, path = %path.display(), "WASAPI track stopped with an error");
+                    tracing::warn!(
+                        error = ?error,
+                        path = %path.display(),
+                        "failed to align WASAPI track to video"
+                    );
                     continue;
                 }
             };
-
             if bytes_written <= 44 {
                 tracing::warn!(path = %path.display(), "WASAPI track contained no audio frames");
                 continue;
@@ -400,8 +405,11 @@ impl Recorder {
             };
             tracks.push(media::AudioTrackInput {
                 path,
-                offset,
                 title,
+                kind: match audio_capture.kind {
+                    WasapiCaptureKind::Microphone => media::AudioTrackKind::Microphone,
+                    WasapiCaptureKind::SystemLoopback => media::AudioTrackKind::System,
+                },
             });
         }
 
@@ -421,13 +429,29 @@ impl Recorder {
             &muxed_path,
             &profile.audio_codec,
             profile.audio_bitrate_kbps,
+            duration,
         ) {
             tracing::warn!(error = ?error, "failed to mux native WASAPI tracks; keeping video fragment");
             return;
         }
 
-        if let Err(error) = disk::atomic_replace(&muxed_path, &screen_path) {
-            tracing::warn!(error = ?error, "failed to publish native WASAPI audio fragment");
+        match disk::atomic_replace(&muxed_path, &screen_path) {
+            Ok(()) => {
+                // The AAC mux is the durable recording asset. Keep raw WAV files
+                // only when muxing fails so an interrupted session remains recoverable.
+                for track in &tracks {
+                    if let Err(error) = std::fs::remove_file(&track.path) {
+                        tracing::warn!(
+                            error = ?error,
+                            path = %track.path.display(),
+                            "failed to remove temporary WASAPI WAV"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = ?error, "failed to publish native WASAPI audio fragment");
+            }
         }
     }
 
@@ -465,7 +489,12 @@ impl Recorder {
             }
         };
 
-        self.finalize_audio_tracks(&screen, &mut session.audio_captures, &session.profile);
+        self.finalize_audio_tracks(
+            &screen,
+            &mut session.audio_captures,
+            &session.profile,
+            Duration::from_millis(stats.duration_ms),
+        );
 
         if let Some(mut webcam) = session.webcam_capture.take() {
             if let Err(error) = webcam.stop() {
@@ -565,7 +594,12 @@ impl Recorder {
                     return Err(error);
                 }
             };
-            self.finalize_audio_tracks(&screen, &mut session.audio_captures, &session.profile);
+            self.finalize_audio_tracks(
+                &screen,
+                &mut session.audio_captures,
+                &session.profile,
+                Duration::from_millis(stats.duration_ms),
+            );
             stats
         } else {
             self.stop_audio_captures(&mut session.audio_captures);

@@ -60,7 +60,7 @@ export const derivativeFileSchema = z.object({
   id: z.string(),
   recordingId: z.string(),
   jobId: z.string(),
-  kind: z.enum(["proxy", "thumbnail", "waveform", "metadata"]),
+  kind: z.enum(["proxy", "thumbnail", "waveform", "metadata", "audio"]),
   path: z.string(),
   sizeBytes: z.number().int().min(0).default(0),
   createdAt: z.string().datetime({ offset: true }),
@@ -113,14 +113,27 @@ export const mediaJobProgressSchema = z.object({
 
 export type MediaJobProgress = z.infer<typeof mediaJobProgressSchema>
 
+// One independently playable audio stream and its waveform assets.
+export const mediaAudioTrackOutputSchema = z.object({
+  streamIndex: z.number().int().min(0),
+  title: z.string(),
+  audioPath: z.string(),
+  waveformPath: z.string(),
+  waveformImagePath: z.string(),
+})
+
+export type MediaAudioTrackOutput = z.infer<typeof mediaAudioTrackOutputSchema>
+
 // Output files produced by a prepare job.
 export const mediaJobOutputsSchema = z.object({
+  prepareVersion: z.number().int().min(0).default(0),
   metadataPath: z.string().nullish(),
   proxyPath: z.string().nullish(),
   thumbnailDir: z.string().nullish(),
   thumbnailManifestPath: z.string().nullish(),
   waveformPath: z.string().nullish(),
   waveformImagePath: z.string().nullish(),
+  audioTracks: z.array(mediaAudioTrackOutputSchema).default([]),
   outputPath: z.string().nullish(),
 })
 

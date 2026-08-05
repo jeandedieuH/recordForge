@@ -5,12 +5,19 @@ use tracing::{info, instrument};
 
 use super::disk;
 
+/// Audio source kind used to label independent track inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioTrackKind {
+    Microphone,
+    System,
+}
+
 /// An independently captured audio asset to mux into a screen fragment.
 #[derive(Debug, Clone)]
 pub struct AudioTrackInput {
     pub path: PathBuf,
-    pub offset: Duration,
     pub title: &'static str,
+    pub kind: AudioTrackKind,
 }
 
 /// Concatenate finalized segment files into a single MP4.
@@ -96,6 +103,7 @@ pub fn mux_audio_tracks(
     output_path: &Path,
     audio_codec: &str,
     audio_bitrate_kbps: i32,
+    duration: Duration,
 ) -> crate::errors::Result<()> {
     if tracks.is_empty() {
         return Err(crate::errors::InternalError::Media(
@@ -119,6 +127,12 @@ pub fn mux_audio_tracks(
         return Err(
             crate::errors::InternalError::Media("audio bitrate must be positive".into()).into(),
         );
+    }
+    if duration.is_zero() {
+        return Err(crate::errors::InternalError::Media(
+            "audio mux duration must be positive".into(),
+        )
+        .into());
     }
     for track in tracks {
         if !track.path.exists() {
@@ -144,9 +158,6 @@ pub fn mux_audio_tracks(
         .arg(video_path);
 
     for track in tracks {
-        if !track.offset.is_zero() {
-            command.args(["-itsoffset", &format!("{:.3}", track.offset.as_secs_f64())]);
-        }
         command.arg("-i").arg(&track.path);
     }
 
@@ -163,6 +174,8 @@ pub fn mux_audio_tracks(
         audio_codec,
         "-b:a",
         &format!("{audio_bitrate_kbps}k"),
+        "-t",
+        &format!("{:.6}", duration.as_secs_f64()),
         "-avoid_negative_ts",
         "make_zero",
         "-movflags",

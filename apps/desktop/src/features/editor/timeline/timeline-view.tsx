@@ -36,6 +36,7 @@ import {
 import { Button, EmptyState, IconButton, Progress, Skeleton, Slider, cn } from "@recordforge/ui"
 import { isTauri } from "../../../lib/settings"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { AudioTrackPreview } from "./audio-track-preview"
 import { ClipInspector } from "./clip-inspector"
 
 interface TimelineViewProps {
@@ -219,14 +220,26 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
   const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+  const audioTrackOutputs = activeJob?.outputs?.audioTracks ?? []
   const waveformImagePath = activeJob?.outputs?.waveformImagePath ?? null
   const waveformImageUrl = useMemo(() => toAssetUrl(waveformImagePath), [waveformImagePath])
   const waveformUrl = waveformImageUrl && !waveformImageError ? waveformImageUrl : null
+  const waveformUrlsByStream = useMemo(
+    () =>
+      new Map(
+        audioTrackOutputs.map((output) => [
+          output.streamIndex,
+          toAssetUrl(output.waveformImagePath),
+        ]),
+      ),
+    [audioTrackOutputs],
+  )
   const waveformDurationMs = Math.max(
     metadata?.durationMs ?? recording?.durationMs ?? view.durationMs,
     1,
   )
-  const isPreviewMuted = timeline ? isTimelineAudioMuted(timeline) : false
+  const hasStandaloneAudio = audioTrackOutputs.length > 0
+  const isPreviewMuted = hasStandaloneAudio || (timeline ? isTimelineAudioMuted(timeline) : false)
 
   useEffect(() => {
     setWaveformImageError(false)
@@ -470,6 +483,12 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                 </div>
               </div>
             )}
+            <AudioTrackPreview
+              tracks={timeline.tracks}
+              outputs={audioTrackOutputs}
+              playheadMs={view.playheadMs}
+              isPlaying={view.isPlaying}
+            />
 
             <div className="pointer-events-none absolute left-5 top-5 flex items-center gap-1.5 rounded-full border border-border bg-background/80 px-2.5 py-1 text-[10px] text-muted-foreground backdrop-blur">
               <span className="size-1.5 rounded-full bg-success" />
@@ -694,85 +713,94 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                 <div className="absolute -left-1.5 top-0 size-3 rotate-45 rounded-xs bg-primary" />
               </div>
 
-              {timeline.tracks.map((track) => (
-                <div key={track.id} className={cn("relative flex items-center", TRACK_ROW_CLASS)}>
-                  {track.clips.map((clip) => (
-                    <button
-                      key={clip.id}
-                      type="button"
-                      className={cn(
-                        "absolute flex h-9 min-w-10 items-center overflow-hidden rounded-md border px-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                        getClipClass(track),
-                        selectedClipId === clip.id &&
-                          "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
-                        track.muted && "opacity-45",
-                        track.locked && "cursor-not-allowed opacity-60",
-                      )}
-                      style={{
-                        left: `${clip.startMs * pixelsPerMs}px`,
-                        width: `${Math.max(clip.durationMs * pixelsPerMs, 40)}px`,
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        setSelectedClipId(clip.id)
-                        if (tool === "split" && !track.locked) {
-                          const bounds = event.currentTarget.getBoundingClientRect()
-                          const offsetMs = Math.round(
-                            Math.max(
-                              1,
-                              Math.min(
-                                clip.durationMs - 1,
-                                (event.clientX - bounds.left) / pixelsPerMs,
-                              ),
-                            ),
-                          )
-                          const splitTimeMs = clip.startMs + offsetMs
-                          seek(splitTimeMs)
-                          execute(createSplitClipCommand(clip.id, splitTimeMs))
-                        } else {
-                          seek(clip.startMs)
-                        }
-                      }}
-                      title={`${getClipLabel(clip, track)} · ${formatTime(clip.durationMs)}`}
-                    >
-                      {clip.kind === "audio" && waveformUrl ? (
-                        <img
-                          key={`${activeJob?.id ?? "waveform"}-${clip.id}`}
-                          src={waveformUrl}
-                          alt=""
-                          aria-hidden
-                          draggable={false}
-                          loading="eager"
-                          className="pointer-events-none absolute top-0 max-w-none mix-blend-screen opacity-80"
+              {timeline.tracks.map((track) => {
+                return (
+                  <div key={track.id} className={cn("relative flex items-center", TRACK_ROW_CLASS)}>
+                    {track.clips.map((clip) => {
+                      const clipWaveformUrl =
+                        clip.kind === "audio"
+                          ? (waveformUrlsByStream.get(clip.streamIndex ?? -1) ?? waveformUrl)
+                          : null
+
+                      return (
+                        <button
+                          key={clip.id}
+                          type="button"
+                          className={cn(
+                            "absolute flex h-9 min-w-10 items-center overflow-hidden rounded-md border px-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                            getClipClass(track),
+                            selectedClipId === clip.id &&
+                              "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
+                            track.muted && "opacity-45",
+                            track.locked && "cursor-not-allowed opacity-60",
+                          )}
                           style={{
-                            left: `${-(clip.sourceInMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
-                            width: `${(waveformDurationMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
-                            height: "100%",
+                            left: `${clip.startMs * pixelsPerMs}px`,
+                            width: `${Math.max(clip.durationMs * pixelsPerMs, 40)}px`,
                           }}
-                          onError={() => setWaveformImageError(true)}
-                        />
-                      ) : null}
-                      <span className="relative z-10 truncate font-medium text-foreground">
-                        {getClipLabel(clip, track)}
-                      </span>
-                      {clip.kind === "audio" && !waveformUrl ? (
-                        <span
-                          className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70"
-                          aria-hidden
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setSelectedClipId(clip.id)
+                            if (tool === "split" && !track.locked) {
+                              const bounds = event.currentTarget.getBoundingClientRect()
+                              const offsetMs = Math.round(
+                                Math.max(
+                                  1,
+                                  Math.min(
+                                    clip.durationMs - 1,
+                                    (event.clientX - bounds.left) / pixelsPerMs,
+                                  ),
+                                ),
+                              )
+                              const splitTimeMs = clip.startMs + offsetMs
+                              seek(splitTimeMs)
+                              execute(createSplitClipCommand(clip.id, splitTimeMs))
+                            } else {
+                              seek(clip.startMs)
+                            }
+                          }}
+                          title={`${getClipLabel(clip, track)} · ${formatTime(clip.durationMs)}`}
                         >
-                          {Array.from({ length: 8 }, (_, index) => (
-                            <span
-                              key={index}
-                              className="w-px bg-current"
-                              style={{ height: `${6 + ((index * 7) % 10)}px` }}
+                          {clip.kind === "audio" && clipWaveformUrl ? (
+                            <img
+                              key={`${activeJob?.id ?? "waveform"}-${clip.id}`}
+                              src={clipWaveformUrl}
+                              alt=""
+                              aria-hidden
+                              draggable={false}
+                              loading="eager"
+                              className="pointer-events-none absolute top-0 max-w-none mix-blend-screen opacity-80"
+                              style={{
+                                left: `${-(clip.sourceInMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
+                                width: `${(waveformDurationMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
+                                height: "100%",
+                              }}
+                              onError={() => setWaveformImageError(true)}
                             />
-                          ))}
-                        </span>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-              ))}
+                          ) : null}
+                          <span className="relative z-10 truncate font-medium text-foreground">
+                            {getClipLabel(clip, track)}
+                          </span>
+                          {clip.kind === "audio" && !clipWaveformUrl ? (
+                            <span
+                              className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70"
+                              aria-hidden
+                            >
+                              {Array.from({ length: 8 }, (_, index) => (
+                                <span
+                                  key={index}
+                                  className="w-px bg-current"
+                                  style={{ height: `${6 + ((index * 7) % 10)}px` }}
+                                />
+                              ))}
+                            </span>
+                          ) : null}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )
+              })}
             </div>
           </div>
         </div>

@@ -194,7 +194,7 @@ Each session will track multiple asset types:
 | `cursor_events` | `cursor.json` | Metadata (Phase 6) |
 
 ### Current implementation
-Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg muxes the available assets as separate AAC streams in `seg_NNN.mp4`; the WAV files remain in the session directory for future recovery and editor-track support.
+Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg applies the microphone cleanup filter and muxes the available assets as separate AAC streams in `seg_NNN.mp4`. The temporary WAV files are removed after a successful mux and retained when muxing fails so an interrupted session remains recoverable.
 
 ---
 

@@ -15,12 +15,12 @@ export async function prepareMedia(options: PrepareMediaOptions): Promise<MediaJ
 }
 
 // Queue the standard background derivatives without making callers duplicate the editor defaults.
-export function prepareRecordingMedia(recordingId: string): Promise<MediaJob> {
+export function prepareRecordingMedia(recordingId: string, force = false): Promise<MediaJob> {
   return prepareMedia({
     recordingId,
     proxyHeight: 540,
     thumbnailIntervalSec: 5,
-    force: false,
+    force,
   })
 }
 

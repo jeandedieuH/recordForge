@@ -6,6 +6,19 @@ use tracing::{info, instrument};
 use crate::database::media::MediaMetadata;
 use crate::errors::{InternalError, Result};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_filter_pads_unused_grid_cells_with_black() {
+        let filter = build_thumbnail_filter(5, 10, 5, 41);
+
+        assert!(filter.contains("tpad=stop_mode=add:stop=9:color=black"));
+        assert!(filter.contains("tile=10x5:nb_frames=50:color=black"));
+    }
+}
+
 /// Manifest describing the thumbnail sprite for a recording.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,8 +32,22 @@ pub struct ThumbnailManifest {
     pub thumb_height: u32,
 }
 
+fn build_thumbnail_filter(interval_sec: u64, columns: u32, rows: u32, count: u32) -> String {
+    let capacity = u64::from(columns) * u64::from(rows);
+    let padding_frames = capacity.saturating_sub(u64::from(count));
+    let padding = if padding_frames > 0 {
+        format!(",tpad=stop_mode=add:stop={padding_frames}:color=black")
+    } else {
+        String::new()
+    };
+
+    format!(
+        "fps=1/{interval_sec},scale=160:-2:force_original_aspect_ratio=decrease,format=yuv420p{padding},tile={columns}x{rows}:nb_frames={capacity}:color=black"
+    )
+}
+
 /// Generate a thumbnail sprite and manifest.
-#[instrument(skip(ffmpeg_path, metadata))]
+#[instrument(skip(ffmpeg_path, input, output_dir, metadata))]
 pub fn generate_thumbnails(
     ffmpeg_path: &str,
     input: &Path,
@@ -37,6 +64,9 @@ pub fn generate_thumbnails(
         )
         .into());
     }
+    if thumbnail_interval_sec == 0 {
+        return Err(InternalError::Media("thumbnail interval must be positive".into()).into());
+    }
 
     let duration_sec = metadata.duration_ms as f64 / 1000.0;
     let count = (duration_sec / thumbnail_interval_sec as f64).ceil() as u32;
@@ -51,9 +81,7 @@ pub fn generate_thumbnails(
     let sprite_path = output_dir.join("sprite.jpg");
     let manifest_path = output_dir.join("thumbnails.json");
 
-    let filter = format!(
-        "fps=1/{thumbnail_interval_sec},scale=160:-2:force_original_aspect_ratio=decrease,format=yuv420p,tile={columns}x{rows}:nb_frames={count}"
-    );
+    let filter = build_thumbnail_filter(thumbnail_interval_sec, columns, rows, count);
 
     let mut command = Command::new(ffmpeg_path);
     command
@@ -68,7 +96,7 @@ pub fn generate_thumbnails(
         .arg("2")
         .arg(&sprite_path);
 
-    info!(?command, "generating thumbnail sprite");
+    info!("generating thumbnail sprite");
 
     let output = command
         .output()
@@ -76,6 +104,9 @@ pub fn generate_thumbnails(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(InternalError::Media(format!("thumbnail generation failed: {stderr}")).into());
+    }
+    if !sprite_path.is_file() {
+        return Err(InternalError::Media("thumbnail generation produced no sprite".into()).into());
     }
 
     // Compute the actual thumbnail dimensions after scaling. Fail explicitly

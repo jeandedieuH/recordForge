@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,13 +24,44 @@ pub struct WaveformData {
     pub image_path: Option<String>,
 }
 
-/// Generate a waveform PNG and JSON peak file.
-#[instrument(skip(ffmpeg_path, metadata, cancel))]
+/// Generate a waveform PNG and JSON peak file for the first audio stream.
+#[instrument(skip(ffmpeg_path, input, output_dir, metadata, cancel))]
 pub fn generate_waveform(
     ffmpeg_path: &str,
     input: &Path,
     output_dir: &Path,
     metadata: &MediaMetadata,
+    cancel: Arc<AtomicBool>,
+) -> Result<(PathBuf, PathBuf)> {
+    generate_waveform_internal(ffmpeg_path, input, output_dir, metadata, None, cancel)
+}
+
+/// Generate a waveform for one specific FFmpeg stream.
+#[instrument(skip(ffmpeg_path, input, output_dir, metadata, cancel))]
+pub fn generate_waveform_for_stream(
+    ffmpeg_path: &str,
+    input: &Path,
+    output_dir: &Path,
+    metadata: &MediaMetadata,
+    stream_index: i32,
+    cancel: Arc<AtomicBool>,
+) -> Result<(PathBuf, PathBuf)> {
+    generate_waveform_internal(
+        ffmpeg_path,
+        input,
+        output_dir,
+        metadata,
+        Some(stream_index),
+        cancel,
+    )
+}
+
+fn generate_waveform_internal(
+    ffmpeg_path: &str,
+    input: &Path,
+    output_dir: &Path,
+    metadata: &MediaMetadata,
+    stream_index: Option<i32>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(output_dir)
@@ -42,9 +74,9 @@ pub fn generate_waveform(
     let png_path = output_dir.join("waveform.png");
     let json_path = output_dir.join("waveform.json");
 
-    generate_waveform_png(ffmpeg_path, input, &png_path, cancel.clone())?;
+    generate_waveform_png(ffmpeg_path, input, &png_path, stream_index, cancel.clone())?;
 
-    let peaks = extract_peaks(ffmpeg_path, input, cancel)?;
+    let peaks = extract_peaks(ffmpeg_path, input, stream_index, cancel)?;
     let data = WaveformData {
         sample_rate: SAMPLE_RATE,
         samples_per_peak: SAMPLES_PER_PEAK,
@@ -61,25 +93,47 @@ pub fn generate_waveform(
     Ok((json_path, png_path))
 }
 
+fn build_waveform_png_args(
+    input: &Path,
+    output: &Path,
+    stream_index: Option<i32>,
+) -> Vec<OsString> {
+    let input_label =
+        stream_index.map_or_else(|| "0:a:0".to_string(), |index| format!("0:{index}"));
+    let filter = format!(
+        "[{input_label}]aformat=channel_layouts=mono,showwavespic=s=1600x120:colors=#3b82f6[waveform]"
+    );
+
+    vec![
+        OsString::from("-y"),
+        OsString::from("-i"),
+        input.as_os_str().to_owned(),
+        OsString::from("-filter_complex"),
+        OsString::from(filter),
+        OsString::from("-map"),
+        OsString::from("[waveform]"),
+        OsString::from("-an"),
+        OsString::from("-frames:v"),
+        OsString::from("1"),
+        OsString::from("-c:v"),
+        OsString::from("png"),
+        OsString::from("-f"),
+        OsString::from("image2"),
+        output.as_os_str().to_owned(),
+    ]
+}
+
 fn generate_waveform_png(
     ffmpeg_path: &str,
     input: &Path,
     output: &Path,
+    stream_index: Option<i32>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut command = Command::new(ffmpeg_path);
-    command
-        .arg("-y")
-        .arg("-i")
-        .arg(input)
-        .args([
-            "-filter_complex",
-            "aformat=channel_layouts=mono,showwavespic=s=1600x120:colors=#3b82f6",
-        ])
-        .args(["-frames:v", "1"])
-        .arg(output);
+    command.args(build_waveform_png_args(input, output, stream_index));
 
-    info!(?command, "generating waveform png");
+    info!("generating waveform png");
 
     let result = command
         .output()
@@ -97,25 +151,33 @@ fn generate_waveform_png(
     Ok(())
 }
 
-fn extract_peaks(ffmpeg_path: &str, input: &Path, cancel: Arc<AtomicBool>) -> Result<Vec<f32>> {
+fn extract_peaks(
+    ffmpeg_path: &str,
+    input: &Path,
+    stream_index: Option<i32>,
+    cancel: Arc<AtomicBool>,
+) -> Result<Vec<f32>> {
     let mut command = Command::new(ffmpeg_path);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .arg("-i")
-        .arg(input)
-        .args([
-            "-ac",
-            "1",
-            "-ar",
-            &SAMPLE_RATE.to_string(),
-            "-sample_fmt",
-            "s16",
-            "-f",
-            "s16le",
-            "pipe:1",
-        ]);
+        .arg(input);
+    if let Some(stream_index) = stream_index {
+        command.args(["-map", &format!("0:{stream_index}")]);
+    }
+    command.args([
+        "-ac",
+        "1",
+        "-ar",
+        &SAMPLE_RATE.to_string(),
+        "-sample_fmt",
+        "s16",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]);
 
     let mut child = command
         .spawn()
@@ -177,4 +239,40 @@ fn extract_peaks(ffmpeg_path: &str, input: &Path, cancel: Arc<AtomicBool>) -> Re
     }
 
     Ok(peaks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waveform_png_command_maps_only_the_filter_video_output() {
+        let args =
+            build_waveform_png_args(Path::new("input.mp4"), Path::new("waveform.png"), Some(1));
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "-y",
+                "-i",
+                "input.mp4",
+                "-filter_complex",
+                "[0:1]aformat=channel_layouts=mono,showwavespic=s=1600x120:colors=#3b82f6[waveform]",
+                "-map",
+                "[waveform]",
+                "-an",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                "-f",
+                "image2",
+                "waveform.png",
+            ]
+        );
+    }
 }

@@ -30,10 +30,17 @@ pub fn estimate_derivative_size(
     // ~8 KB per 160px wide JPEG on average.
     let thumbnails_bytes = thumb_count * 8 * 1024;
 
-    // Waveform image plus JSON peaks.
-    let waveform_bytes = 200 * 1024 + (duration_sec as u64) * 400;
+    let audio_track_count = metadata
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == "audio")
+        .count() as f64;
+    // Each audio stream gets a compact M4A derivative plus its own waveform.
+    let audio_bytes = audio_track_count * (192.0 * duration_sec / 8.0 * 1024.0);
+    let waveform_bytes =
+        audio_track_count * (200.0 * 1024.0 + (duration_sec as u64) as f64 * 400.0);
 
-    (proxy_bytes + thumbnails_bytes as f64 + waveform_bytes as f64) as u64
+    (proxy_bytes + thumbnails_bytes as f64 + audio_bytes + waveform_bytes) as u64
 }
 
 /// Return the number of free bytes available to the caller for a path.
