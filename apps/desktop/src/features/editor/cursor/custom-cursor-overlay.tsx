@@ -8,6 +8,11 @@ import {
   type CursorTelemetryFile,
 } from "@recordforge/contracts"
 import { isTauri } from "../../../lib/settings"
+import { cn } from "@recordforge/ui"
+
+export function isCenterHotspotPreset(preset: string): boolean {
+  return preset === "highlighter-circle" || preset === "cyberpunk" || preset === "minimal-dot"
+}
 
 interface ActiveCursorEvent {
   event: CursorTelemetryEvent
@@ -246,8 +251,10 @@ export function CustomCursorOverlay({
           style={{
             left: posX,
             top: posY,
-            transform: `scale(${scale})`,
-            transformOrigin: "top left",
+            transform: isCenterHotspotPreset(cursorSettings.preset)
+              ? `translate(-50%, -50%) scale(${scale})`
+              : `scale(${scale})`,
+            transformOrigin: isCenterHotspotPreset(cursorSettings.preset) ? "center" : "top left",
             filter: cursorSettings.shadowEnabled
               ? `drop-shadow(${cursorSettings.shadowOffsetX}px ${cursorSettings.shadowOffsetY}px ${cursorSettings.shadowBlur}px ${cursorSettings.shadowColor})`
               : "none",
@@ -269,20 +276,24 @@ export function CustomCursorOverlay({
 
 interface RenderCursorPresetProps {
   preset: string
-  fillColor: string
-  fillOpacity: number
-  strokeColor: string
-  strokeWidth: number
-  strokeOpacity: number
+  fillColor?: string
+  fillOpacity?: number
+  strokeColor?: string
+  strokeWidth?: number
+  strokeOpacity?: number
+  className?: string
+  isPreview?: boolean
 }
 
 export function RenderCursorPreset({
   preset,
-  fillColor,
-  fillOpacity,
-  strokeColor,
-  strokeWidth,
-  strokeOpacity,
+  fillColor = "#3b82f6",
+  fillOpacity = 1,
+  strokeColor = "#ffffff",
+  strokeWidth = 2,
+  strokeOpacity = 1,
+  className,
+  isPreview = false,
 }: RenderCursorPresetProps) {
   const commonProps = {
     fill: fillColor,
@@ -295,19 +306,21 @@ export function RenderCursorPreset({
   switch (preset) {
     case "modern-neon":
       return (
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className="drop-shadow">
-          <path
-            d="M3 3L10.5 20.5L13.8 13.8L20.5 10.5L3 3Z"
-            {...commonProps}
-            strokeLinejoin="round"
-          />
-          <circle cx="4" cy="4" r="2" fill={strokeColor} opacity={strokeOpacity} />
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className={cn("drop-shadow", className)}>
+          <g transform={isPreview ? "translate(0.25, 0.25)" : undefined}>
+            <path
+              d="M3 3L10.5 20.5L13.8 13.8L20.5 10.5L3 3Z"
+              {...commonProps}
+              strokeLinejoin="round"
+            />
+            <circle cx="4" cy="4" r="2" fill={strokeColor} opacity={strokeOpacity} />
+          </g>
         </svg>
       )
 
     case "sleek-dark":
       return (
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className={className}>
           <path
             d="M3 3L10 21L13.5 13.5L21 10L3 3Z"
             fill="#121212"
@@ -322,51 +335,41 @@ export function RenderCursorPreset({
 
     case "highlighter-circle":
       return (
-        <svg
-          width="36"
-          height="36"
-          viewBox="0 0 36 36"
-          fill="none"
-          className="transform -translate-x-1/2 -translate-y-1/2"
-        >
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none" className={className}>
           <circle
-            cx="18"
-            cy="18"
-            r="15"
+            cx="16"
+            cy="16"
+            r="13"
             fill={fillColor}
             fillOpacity={0.35}
             stroke={strokeColor}
             strokeWidth={strokeWidth}
             strokeOpacity={strokeOpacity}
           />
-          <circle cx="18" cy="18" r="3" fill={strokeColor} opacity={strokeOpacity} />
+          <circle cx="16" cy="16" r="3" fill={strokeColor} opacity={strokeOpacity} />
         </svg>
       )
 
     case "mac-pro":
       return (
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
-          <path
-            d="M3 3L11 20L14 13.5L20.5 10.5L3 3Z"
-            fill="#FFFFFF"
-            fillOpacity={fillOpacity}
-            stroke="#1E1E1E"
-            strokeWidth={strokeWidth || 1.5}
-            strokeOpacity={strokeOpacity}
-            strokeLinejoin="round"
-          />
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className={className}>
+          <g transform={isPreview ? "translate(0.25, 0.25)" : undefined}>
+            <path
+              d="M3 3L11 20L14 13.5L20.5 10.5L3 3Z"
+              fill="#FFFFFF"
+              fillOpacity={fillOpacity}
+              stroke="#1E1E1E"
+              strokeWidth={strokeWidth || 1.5}
+              strokeOpacity={strokeOpacity}
+              strokeLinejoin="round"
+            />
+          </g>
         </svg>
       )
 
     case "cyberpunk":
       return (
-        <svg
-          width="32"
-          height="32"
-          viewBox="0 0 32 32"
-          fill="none"
-          className="transform -translate-x-1/2 -translate-y-1/2"
-        >
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none" className={className}>
           <circle
             cx="16"
             cy="16"
@@ -385,13 +388,7 @@ export function RenderCursorPreset({
 
     case "minimal-dot":
       return (
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 20 20"
-          fill="none"
-          className="transform -translate-x-1/2 -translate-y-1/2"
-        >
+        <svg width="28" height="28" viewBox="0 0 20 20" fill="none" className={className}>
           <circle
             cx="10"
             cy="10"
@@ -407,24 +404,28 @@ export function RenderCursorPreset({
 
     case "hand-pointer":
       return (
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-          <path
-            d="M10 11V4.5C10 3.67 9.33 3 8.5 3C7.67 3 7 3.67 7 4.5V12.79L5.44 11.23C4.85 10.64 3.9 10.64 3.31 11.23C2.72 11.82 2.72 12.77 3.31 13.36L8.5 18.55C9.88 19.93 11.75 20.7 13.7 20.7H16.5C19.26 20.7 21.5 18.46 21.5 15.7V11.5C21.5 10.67 20.83 10 20 10C19.17 10 18.5 10.67 18.5 11.5V10C18.5 9.17 17.83 8.5 17 8.5C16.17 8.5 15.5 9.17 15.5 10V9.5C15.5 8.67 14.83 8 14 8C13.17 8 12.5 8.67 12.5 9.5V11"
-            {...commonProps}
-            strokeLinejoin="round"
-          />
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className={className}>
+          <g transform={isPreview ? "translate(-0.11, 0.15)" : undefined}>
+            <path
+              d="M10 11V4.5C10 3.67 9.33 3 8.5 3C7.67 3 7 3.67 7 4.5V12.79L5.44 11.23C4.85 10.64 3.9 10.64 3.31 11.23C2.72 11.82 2.72 12.77 3.31 13.36L8.5 18.55C9.88 19.93 11.75 20.7 13.7 20.7H16.5C19.26 20.7 21.5 18.46 21.5 15.7V11.5C21.5 10.67 20.83 10 20 10C19.17 10 18.5 10.67 18.5 11.5V10C18.5 9.17 17.83 8.5 17 8.5C16.17 8.5 15.5 9.17 15.5 10V9.5C15.5 8.67 14.83 8 14 8C13.17 8 12.5 8.67 12.5 9.5V11"
+              {...commonProps}
+              strokeLinejoin="round"
+            />
+          </g>
         </svg>
       )
 
     case "default":
     default:
       return (
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path
-            d="M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z"
-            {...commonProps}
-            strokeLinejoin="round"
-          />
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className={className}>
+          <g transform={isPreview ? "translate(0.5, 0.5)" : undefined}>
+            <path
+              d="M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z"
+              {...commonProps}
+              strokeLinejoin="round"
+            />
+          </g>
         </svg>
       )
   }

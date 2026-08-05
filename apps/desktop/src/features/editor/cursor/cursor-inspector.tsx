@@ -62,15 +62,16 @@ export function CursorInspector({
                 type="button"
                 onClick={() => onChange({ preset: item.id })}
                 className={cn(
-                  "flex flex-col items-center gap-2 rounded-xl border p-2.5 text-center transition-all hover:bg-surface-elevated",
+                  "flex flex-col items-center justify-center gap-2 rounded-xl border p-2.5 text-center transition-all hover:bg-surface-elevated",
                   isSelected
                     ? "border-primary bg-primary/10 ring-1 ring-primary"
                     : "border-border bg-surface"
                 )}
               >
-                <div className="flex size-9 items-center justify-center rounded-lg bg-surface-dim shadow-inner">
+                <div className="flex size-10 items-center justify-center rounded-lg bg-surface-dim shadow-inner">
                   <RenderCursorPreset
                     preset={item.id}
+                    isPreview
                     fillColor={settings.fillColor ?? "#3b82f6"}
                     fillOpacity={settings.fillOpacity ?? 1}
                     strokeColor={settings.strokeColor ?? "#ffffff"}
@@ -78,8 +79,8 @@ export function CursorInspector({
                     strokeOpacity={settings.strokeOpacity ?? 1}
                   />
                 </div>
-                <div className="min-w-0">
-                  <p className="truncate font-semibold text-foreground text-[11px]">{item.label}</p>
+                <div className="min-w-0 w-full">
+                  <p className="truncate font-semibold text-foreground text-[11px] leading-tight">{item.label}</p>
                 </div>
               </button>
             )
