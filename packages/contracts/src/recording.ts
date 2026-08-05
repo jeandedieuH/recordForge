@@ -188,11 +188,11 @@ export const encoderInfoSchema = z.object({
   name: z.string(),
   codec: z.string(),
   // Hardware-backed encoders report their vendor (nvidia, intel, amd, microsoft).
-  vendor: z.string().optional(),
+  vendor: z.string().nullish(),
   // Whether the encoder is currently usable on this machine.
   available: z.boolean(),
   // Human-readable reason if the encoder is unavailable.
-  reason: z.string().optional(),
+  reason: z.string().nullish(),
   // Bitrate/cqp/crf support flags.
   supportsCbr: z.boolean().default(false),
   supportsCrf: z.boolean().default(false),
@@ -213,13 +213,13 @@ export const encoderBenchmarkResultSchema = z.object({
   avgFps: z.number(),
   speed: z.number(),
   // Estimated based on output file size / duration.
-  bitrateKbps: z.number().optional(),
+  bitrateKbps: z.number().nullish(),
   // CPU utilization percentage observed during the run.
-  cpuPercent: z.number().optional(),
+  cpuPercent: z.number().nullish(),
   // Memory working set in MB.
-  memoryMb: z.number().optional(),
+  memoryMb: z.number().nullish(),
   // Error message if the benchmark failed.
-  error: z.string().optional(),
+  error: z.string().nullish(),
 })
 
 export type EncoderBenchmarkResult = z.infer<typeof encoderBenchmarkResultSchema>
@@ -256,8 +256,8 @@ export const benchmarkReportSchema = z.object({
   platform: z.object({
     os: z.string(),
     ffmpegVersion: z.string(),
-    cpu: z.string().optional(),
-    memoryMb: z.number().int().optional(),
+    cpu: z.string().nullish(),
+    memoryMb: z.number().int().nullish(),
   }),
   results: z.array(encoderBenchmarkResultSchema),
   recommendation: z.object({
@@ -326,8 +326,8 @@ export const diagnosticsReportSchema = z.object({
   platform: z.object({
     os: z.string(),
     ffmpegVersion: z.string(),
-    cpu: z.string().optional(),
-    memoryMb: z.number().int().optional(),
+    cpu: z.string().nullish(),
+    memoryMb: z.number().int().nullish(),
   }),
   encoders: z.array(encoderInfoSchema),
   audioDevices: z.array(audioDeviceSchema),

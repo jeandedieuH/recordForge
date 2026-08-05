@@ -3,6 +3,7 @@ import {
   audioDeviceSchema,
   benchmarkReportSchema,
   captureSourceSchema,
+  diagnosticsReportSchema,
   encoderInfoSchema,
   exportOptionsSchema,
   libraryRecordingSchema,
@@ -217,7 +218,9 @@ describe("recording contracts", () => {
       id: "libx264",
       name: "x264",
       codec: "h264",
+      vendor: null,
       available: true,
+      reason: null,
       supportsCrf: true,
     }
 
@@ -258,6 +261,8 @@ describe("recording contracts", () => {
       platform: {
         os: "windows",
         ffmpegVersion: "6.0",
+        cpu: null,
+        memoryMb: null,
       },
       results: [
         {
@@ -270,6 +275,10 @@ describe("recording contracts", () => {
           framesProcessed: 300,
           avgFps: 30,
           speed: 1.0,
+          bitrateKbps: null,
+          cpuPercent: null,
+          memoryMb: null,
+          error: null,
         },
       ],
       recommendation: {
@@ -280,6 +289,31 @@ describe("recording contracts", () => {
     }
 
     expect(benchmarkReportSchema.parse(report)).toMatchObject(report)
+  })
+
+  it("accepts nullable diagnostics fields emitted by Rust", () => {
+    const report = {
+      platform: {
+        os: "windows",
+        ffmpegVersion: "6.0",
+        cpu: null,
+        memoryMb: null,
+      },
+      encoders: [
+        {
+          id: "libx264",
+          name: "x264",
+          codec: "h264",
+          vendor: null,
+          available: true,
+          reason: null,
+        },
+      ],
+      audioDevices: [],
+      videoDevices: [],
+    }
+
+    expect(diagnosticsReportSchema.parse(report)).toMatchObject(report)
   })
 
   it("validates audio and video devices", () => {
