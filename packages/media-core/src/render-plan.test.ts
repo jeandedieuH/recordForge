@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { LibraryRecording, TimelineState } from "@recordforge/domain"
-import { buildRenderPlan } from "./render-plan"
+import { buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
 
 function makeTimeline(clipCount = 1): TimelineState {
   return {
@@ -130,6 +130,49 @@ describe("render-plan", () => {
       volume: 0.4,
       sourceInMs: 0,
       sourceOutMs: 20_000,
+    })
+  })
+
+  it("preserves muted audio tracks in the render plan", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "muted-audio-track",
+      kind: "audio",
+      name: "Microphone",
+      muted: true,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "muted-audio-clip",
+          kind: "audio",
+          assetId: "rec-1",
+          streamIndex: 1,
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          volume: 1,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+        },
+      ],
+    })
+
+    expect(isTimelineAudioMuted(state)).toBe(true)
+    state.tracks[1].muted = false
+    expect(isTimelineAudioMuted(state)).toBe(false)
+    state.tracks[1].muted = true
+
+    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.audioTracks[0]).toMatchObject({
+      streamIndex: 1,
+      muted: true,
     })
   })
 

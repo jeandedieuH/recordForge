@@ -46,6 +46,11 @@ function toOverlays(_clips: TimelineClip[], _assetId: string): RenderPlanOverlay
   return []
 }
 
+export function isTimelineAudioMuted(state: TimelineState): boolean {
+  const audioTracks = state.tracks.filter((track) => track.kind === "audio")
+  return audioTracks.length > 0 && audioTracks.every((track) => track.muted)
+}
+
 function buildAudioTracks(recording: LibraryRecording, state: TimelineState): RenderPlanAudio[] {
   return state.tracks
     .filter((track) => track.kind === "audio" && track.clips.length > 0)

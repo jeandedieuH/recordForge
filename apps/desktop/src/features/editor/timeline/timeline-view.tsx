@@ -10,13 +10,14 @@ import {
   getRedoLabel,
   getUndoLabel,
 } from "@recordforge/editor-core"
+import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
   AudioLines,
-  Eye,
   Lock,
   LockOpen,
   Monitor,
+  MousePointer2,
   Pause,
   Play,
   Redo2,
@@ -60,6 +61,14 @@ type TimelineTool = "select" | "split"
 
 const TRACK_ROW_CLASS = "h-14 border-b border-border"
 const TICK_INTERVALS = [1_000, 5_000, 10_000, 30_000, 60_000]
+const TIMELINE_ZOOM_MIN = 10
+const TIMELINE_ZOOM_MAX = 200
+const TIMELINE_ZOOM_STEP = 10
+
+function toAssetUrl(path: string | null): string | null {
+  if (!path) return null
+  return isTauri() ? convertFileSrc(path) : path
+}
 
 function getTickInterval(pixelsPerMs: number): number {
   const minimumSpacing = 72
@@ -174,6 +183,7 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const [tool, setTool] = useState<TimelineTool>("select")
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
+  const [waveformImageError, setWaveformImageError] = useState(false)
 
   useEffect(() => {
     void load(recordingId)
@@ -208,10 +218,19 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const isPreparing = isPreparingJob(activeJob)
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
-  const mediaUrl = useMemo(() => {
-    if (!mediaPath) return null
-    return isTauri() ? convertFileSrc(mediaPath) : mediaPath
-  }, [mediaPath])
+  const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+  const waveformImagePath = activeJob?.outputs?.waveformImagePath ?? null
+  const waveformImageUrl = useMemo(() => toAssetUrl(waveformImagePath), [waveformImagePath])
+  const waveformUrl = waveformImageUrl && !waveformImageError ? waveformImageUrl : null
+  const waveformDurationMs = Math.max(
+    metadata?.durationMs ?? recording?.durationMs ?? view.durationMs,
+    1,
+  )
+  const isPreviewMuted = timeline ? isTimelineAudioMuted(timeline) : false
+
+  useEffect(() => {
+    setWaveformImageError(false)
+  }, [activeJob?.id, waveformImagePath])
 
   useEffect(() => {
     const element = videoRef.current
@@ -296,6 +315,10 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
 
   function toggleTrackLocked(track: TimelineTrack) {
     execute(createUpdateTrackCommand(track.id, { locked: !track.locked }))
+  }
+
+  function adjustZoom(delta: number) {
+    setZoom(Math.max(TIMELINE_ZOOM_MIN, Math.min(TIMELINE_ZOOM_MAX, view.zoom + delta)))
   }
 
   if (isLoading) return <TimelineLoadingState />
@@ -412,6 +435,7 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                 ref={videoRef}
                 src={mediaUrl}
                 className="max-h-full max-w-full rounded-lg object-contain"
+                muted={isPreviewMuted}
                 playsInline
                 onClick={togglePlay}
                 onError={() => {
@@ -498,20 +522,30 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
         {/* Timeline Toolbar */}
         <div className="flex h-11 items-center justify-between border-b border-border px-4">
           <div className="flex items-center gap-1">
-            <div className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1">
+            <div
+              className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1"
+              role="toolbar"
+              aria-label="Timeline tools"
+            >
               <IconButton
                 label="Selection tool"
                 tooltipSide="top"
-                className={cn(tool === "select" && "bg-overlay text-foreground")}
+                aria-pressed={tool === "select"}
+                className={cn(
+                  tool === "select" && "bg-overlay text-foreground ring-1 ring-primary/30",
+                )}
                 onClick={() => setTool("select")}
               >
-                <Eye />
+                <MousePointer2 />
               </IconButton>
               <IconButton
                 label="Split tool"
                 shortcut="S"
                 tooltipSide="top"
-                className={cn(tool === "split" && "bg-primary/20 text-primary")}
+                aria-pressed={tool === "split"}
+                className={cn(
+                  tool === "split" && "bg-primary/20 text-primary ring-1 ring-primary/30",
+                )}
                 onClick={() => setTool("split")}
               >
                 <Scissors />
@@ -546,18 +580,35 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
             </IconButton>
           </div>
 
-          <div className="flex items-center gap-3">
-            <ZoomOut className="size-3.5 text-subtle-foreground" aria-hidden />
+          <div className="flex items-center gap-2">
+            <IconButton
+              label="Zoom out timeline"
+              tooltipSide="top"
+              disabled={view.zoom <= TIMELINE_ZOOM_MIN}
+              onClick={() => adjustZoom(-TIMELINE_ZOOM_STEP)}
+            >
+              <ZoomOut />
+            </IconButton>
             <Slider
-              value={[view.zoom]}
-              min={10}
-              max={200}
+              value={[Math.min(TIMELINE_ZOOM_MAX, Math.max(TIMELINE_ZOOM_MIN, view.zoom))]}
+              min={TIMELINE_ZOOM_MIN}
+              max={TIMELINE_ZOOM_MAX}
               step={1}
               aria-label="Timeline zoom"
               onValueChange={(value) => setZoom(value[0] ?? view.zoom)}
               className="w-32"
             />
-            <ZoomIn className="size-3.5 text-subtle-foreground" aria-hidden />
+            <IconButton
+              label="Zoom in timeline"
+              tooltipSide="top"
+              disabled={view.zoom >= TIMELINE_ZOOM_MAX}
+              onClick={() => adjustZoom(TIMELINE_ZOOM_STEP)}
+            >
+              <ZoomIn />
+            </IconButton>
+            <span className="min-w-9 text-right font-mono text-[10px] tabular-nums text-subtle-foreground">
+              {Math.round(view.zoom)}%
+            </span>
           </div>
         </div>
 
@@ -684,12 +735,29 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                       }}
                       title={`${getClipLabel(clip, track)} · ${formatTime(clip.durationMs)}`}
                     >
-                      <span className="truncate font-medium text-foreground">
+                      {clip.kind === "audio" && waveformUrl ? (
+                        <img
+                          key={`${activeJob?.id ?? "waveform"}-${clip.id}`}
+                          src={waveformUrl}
+                          alt=""
+                          aria-hidden
+                          draggable={false}
+                          loading="eager"
+                          className="pointer-events-none absolute top-0 max-w-none mix-blend-screen opacity-80"
+                          style={{
+                            left: `${-(clip.sourceInMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
+                            width: `${(waveformDurationMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
+                            height: "100%",
+                          }}
+                          onError={() => setWaveformImageError(true)}
+                        />
+                      ) : null}
+                      <span className="relative z-10 truncate font-medium text-foreground">
                         {getClipLabel(clip, track)}
                       </span>
-                      {clip.kind === "audio" ? (
+                      {clip.kind === "audio" && !waveformUrl ? (
                         <span
-                          className="ml-2 flex shrink-0 items-end gap-px opacity-70"
+                          className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70"
                           aria-hidden
                         >
                           {Array.from({ length: 8 }, (_, index) => (
