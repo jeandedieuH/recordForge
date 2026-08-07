@@ -5,9 +5,9 @@
     "": {
       "name": "recordforge",
       "devDependencies": {
-        "@types/node": "latest",
-        "turbo": "latest",
-        "typescript": "latest",
+        "@types/node": "^26.1.2",
+        "turbo": "^2.10.8",
+        "typescript": "^7.0.2",
       },
     },
     "apps/desktop": {
@@ -170,6 +170,16 @@
       "peerDependencies": {
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
+      },
+    },
+    "tooling/ffmpeg": {
+      "name": "@recordforge/setup-ffmpeg",
+    },
+    "tooling/golden-fixtures": {
+      "name": "@recordforge/golden-fixtures",
+      "version": "0.1.0",
+      "dependencies": {
+        "@recordforge/contracts": "workspace:*",
       },
     },
     "tooling/scripts": {
@@ -445,7 +455,11 @@
 
     "@recordforge/editor-core": ["@recordforge/editor-core@workspace:packages/editor-core"],
 
+    "@recordforge/golden-fixtures": ["@recordforge/golden-fixtures@workspace:tooling/golden-fixtures"],
+
     "@recordforge/media-core": ["@recordforge/media-core@workspace:packages/media-core"],
+
+    "@recordforge/setup-ffmpeg": ["@recordforge/setup-ffmpeg@workspace:tooling/ffmpeg"],
 
     "@recordforge/storage-core": ["@recordforge/storage-core@workspace:packages/storage-core"],
 

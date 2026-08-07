@@ -1,0 +1,70 @@
+{
+  "format": "recordforge.project",
+  "version": 1,
+  "id": "fixture-project-long",
+  "name": "Editor Five Minute Fixture",
+  "recordingId": "fixture-recording-long",
+  "canvas": {
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "background": "#101828",
+    "padding": 0,
+    "borderRadius": 0,
+    "shadow": false
+  },
+  "assets": [
+    {
+      "id": "asset-screen-long",
+      "role": "screen",
+      "path": "720p30_5m.mp4",
+      "durationMs": 300000,
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "hasAudio": true
+    }
+  ],
+  "tracks": [
+    {
+      "id": "track-screen-long",
+      "kind": "screen",
+      "name": "Screen",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "screen-clip-long",
+          "kind": "screen",
+          "assetId": "asset-screen-long",
+          "startMs": 0,
+          "durationMs": 300000,
+          "sourceInMs": 0,
+          "sourceOutMs": 300000,
+          "speed": 1
+        }
+      ]
+    }
+  ],
+  "markers": [
+    {
+      "id": "marker-long-1",
+      "timeMs": 60000,
+      "label": "One minute",
+      "color": "#f59e0b"
+    },
+    {
+      "id": "marker-long-2",
+      "timeMs": 180000,
+      "label": "Three minutes",
+      "color": "#f59e0b"
+    }
+  ],
+  "exportSettings": {
+    "preset": "default-mp4",
+    "codec": "h264",
+    "container": "mp4"
+  },
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:00:00.000Z"
+}

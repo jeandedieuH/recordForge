@@ -1,39 +1,39 @@
-# Baseline Machine — Windows 10
+# Baseline Machine - Windows 11
 
-> **Status:** To be filled with actual hardware measurements  
+> **Status:** Development machine recorded; low-end classification and performance measurements pending
 > **Scope:** Documents the specific test machine used for baseline benchmarks
 
 ---
 
 ## Hardware
 
-| Component | Value |
-|-----------|-------|
-| **CPU** | _[fill: model, cores, threads, base/boost clock]_ |
-| **GPU** | _[fill: model, VRAM, driver version]_ |
-| **RAM** | _[fill: capacity, type, speed]_ |
-| **Storage** | _[fill: model, type (SATA SSD/NVMe/HDD), capacity, seq read/write]_ |
-| **Display** | _[fill: resolution, refresh rate, scaling percentage]_ |
-| **Microphone** | _[fill: device name, type (USB/built-in/analog)]_ |
-| **Webcam** | _[fill: device name, max resolution, USB version]_ |
+| Component      | Value                                                                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CPU**        | 11th Gen Intel Core i5-11400H, 6 cores / 12 threads, 2.69 GHz reported max clock                                                             |
+| **GPU**        | NVIDIA GeForce RTX 3050 Laptop GPU, 4 GB reported adapter memory, driver 32.0.16.1088; Intel UHD Graphics also present, driver 32.0.101.7077 |
+| **RAM**        | 24 GB physical memory                                                                                                                        |
+| **Storage**    | OM3PDP3-AD NVMe KDI 256 GB SSD; Intel SSDPEKNW512G8 512 GB SSD                                                                               |
+| **Display**    | _[fill: resolution, refresh rate, scaling percentage]_                                                                                       |
+| **Microphone** | _[fill: device name, type (USB/built-in/analog)]_                                                                                            |
+| **Webcam**     | _[fill: device name, max resolution, USB version]_                                                                                           |
 
 ## Software
 
-| Component | Value |
-|-----------|-------|
-| **OS** | Windows 10 _[fill: build number]_ |
-| **FFmpeg** | _[fill: version, build source]_ |
-| **Power Plan** | Balanced |
+| Component      | Value                                             |
+| -------------- | ------------------------------------------------- |
+| **OS**         | Windows 11 Home, build 26200, 64-bit              |
+| **FFmpeg**     | 9.0 full build from `gyan.dev`, available on PATH |
+| **Power Plan** | Balanced                                          |
 
 ## Thermal Notes
 
-_[fill: Is this a laptop? Does it thermal throttle under sustained load? What ambient temperature was testing done at?]_
+Laptop: Dell G15 5511. Thermal throttling and ambient temperature are not measured yet.
 
 ---
 
 ## How to Populate
 
-Run the following commands and fill in the table above:
+Run the following commands to refresh or complete the table above:
 
 ```powershell
 # System info

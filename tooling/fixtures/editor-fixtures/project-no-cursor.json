@@ -1,0 +1,59 @@
+{
+  "format": "recordforge.project",
+  "version": 1,
+  "id": "fixture-project-no-cursor",
+  "name": "Imported MP4 Without Cursor Metadata",
+  "recordingId": "fixture-imported-recording",
+  "sourceKind": "imported",
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "background": "#000000",
+    "padding": 0,
+    "borderRadius": 0,
+    "shadow": false
+  },
+  "assets": [
+    {
+      "id": "asset-imported-screen",
+      "role": "screen",
+      "path": "1080p30_video_only_5s.mp4",
+      "durationMs": 5000,
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "hasAudio": false,
+      "cursorMetadata": "unavailable"
+    }
+  ],
+  "tracks": [
+    {
+      "id": "track-imported-screen",
+      "kind": "screen",
+      "name": "Screen",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "imported-screen-clip",
+          "kind": "screen",
+          "assetId": "asset-imported-screen",
+          "startMs": 0,
+          "durationMs": 5000,
+          "sourceInMs": 0,
+          "sourceOutMs": 5000,
+          "speed": 1
+        }
+      ]
+    }
+  ],
+  "markers": [],
+  "exportSettings": {
+    "preset": "default-mp4",
+    "codec": "h264",
+    "container": "mp4"
+  },
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:00:00.000Z"
+}

@@ -34,6 +34,7 @@ sessions/{session_id}/
 
 ```jsonc
 {
+  "format": "recordforge.project",
   "version": 1,
   "id": "project-uuid",
   "name": "Recording abc12345",
@@ -45,18 +46,18 @@ sessions/{session_id}/
     "background": "#000000",
     "padding": 0,
     "borderRadius": 0,
-    "shadow": false
+    "shadow": false,
   },
   "assets": [
     {
       "id": "asset-uuid-screen",
       "role": "screen",
-      "path": "output.mp4",       // Relative to project dir
+      "path": "output.mp4", // Relative to project dir
       "durationMs": 180000,
       "width": 1920,
       "height": 1080,
       "fps": 30,
-      "hasAudio": true
+      "hasAudio": true,
     },
     {
       "id": "asset-uuid-webcam",
@@ -66,8 +67,8 @@ sessions/{session_id}/
       "width": 1280,
       "height": 720,
       "fps": 30,
-      "hasAudio": false
-    }
+      "hasAudio": false,
+    },
   ],
   "tracks": [
     {
@@ -87,20 +88,20 @@ sessions/{session_id}/
           "durationMs": 180000,
           "sourceInMs": 0,
           "sourceOutMs": 180000,
-          "speed": 1.0
-        }
-      ]
-    }
+          "speed": 1.0,
+        },
+      ],
+    },
   ],
   "markers": [],
   "exportSettings": {
     "preset": "default-mp4",
     "codec": "h264",
-    "container": "mp4"
+    "container": "mp4",
   },
   "createdAt": "2026-01-01T00:00:00Z",
   "updatedAt": "2026-01-01T00:05:00Z",
-  "checksum": "sha256:abc..."
+  "checksum": "sha256:abc...",
 }
 ```
 
@@ -110,15 +111,15 @@ sessions/{session_id}/
 
 ### 3.1 Asset Roles
 
-| Role | Description | Source |
-|------|-------------|--------|
-| `screen` | Primary screen/window/region capture | Recording session |
-| `microphone` | Independent mic audio track | Native WASAPI capture |
-| `system_audio` | Independent system audio track | Native WASAPI loopback |
-| `webcam` | Webcam sidecar video | Separate FFmpeg process |
-| `cursor_events` | Cursor position/click metadata | Capture metadata (Phase 6) |
-| `image` | User-imported image overlay | Manual import |
-| `caption` | Text/subtitle data | User-created |
+| Role            | Description                          | Source                                    |
+| --------------- | ------------------------------------ | ----------------------------------------- |
+| `screen`        | Primary screen/window/region capture | Recording session                         |
+| `microphone`    | Independent mic audio track          | Native WASAPI capture                     |
+| `system_audio`  | Independent system audio track       | Native WASAPI loopback                    |
+| `webcam`        | Webcam sidecar video                 | Separate FFmpeg process                   |
+| `cursor_events` | Cursor position/click metadata       | Editor Phase 5 capture/editor integration |
+| `image`         | User-imported image overlay          | Manual import                             |
+| `caption`       | Text/subtitle data                   | User-created                              |
 
 ### 3.2 Asset Resolution
 
@@ -134,6 +135,7 @@ let absolute = project_dir.join(&asset.path);
 ### 3.3 Missing Asset Handling
 
 If an asset file is missing on project load:
+
 1. Mark the asset as `missing` in the UI
 2. Offer a "Relink" action for the user to locate the file
 3. Do not allow export with missing assets
@@ -143,16 +145,19 @@ If an asset file is missing on project load:
 
 ## 4. Versioning and Migration
 
-### 4.1 Version field
+### 4.1 Format and version fields
 
-Every project file has a `version` integer. Parsers must check the version before loading.
+Every project file has a `format` discriminator and a `version` integer. Parsers must check both before loading.
+
+The current runtime `TimelineState.version = 1` is not a persisted project format because the editor does not currently save it. Durable project version 1 is reserved for the shape defined by this document and must not be inferred from the runtime state.
 
 ### 4.2 Forward-only migration
 
-| From | To | Changes |
-|------|----|---------|
-| 1 | 2 | Add `assets` array (v1 inferred assets from `recordingId`) |
-| 2 | 3 | Add `exportSettings`, `checksum` |
+There are no approved durable migrations yet. The first future migration must be added to this table before a new project version is released:
+
+| From | To  | Changes                                      |
+| ---- | --- | -------------------------------------------- |
+| 1    | 2   | To be defined by the Phase 1 contract review |
 
 ### 4.3 Migration rules
 
@@ -168,6 +173,7 @@ Every project file has a `version` integer. Parsers must check the version befor
 ### 5.1 Atomic writes
 
 Projects are written atomically using the same temp-file + rename pattern as manifests:
+
 1. Serialize to JSON
 2. Write to `project.json.tmp`
 3. Rename → `project.json`
@@ -207,13 +213,13 @@ CREATE INDEX idx_projects_recording ON projects(recording_id);
 
 ## 7. Current Implementation Gaps
 
-| Gap | Current State | Required |
-|-----|---------------|----------|
-| No project persistence | Projects regenerated with new IDs on every editor open | Load/save `project.json` |
-| No asset registry | `recordingId` assumed to be single-file | Asset array with roles |
-| No autosave | — | Debounced atomic writes |
-| No dirty state tracking | — | Dirty/saving/saved/error indicators |
-| No backup snapshots | — | Pre-destructive snapshots |
-| No migration | — | Version-gated forward-only migration |
-| History unbounded | Editor command history grows without limit | Cap at N commands, coalesce adjacent |
-| No checksum | — | SHA-256 of project content for corruption detection |
+| Gap                     | Current State                                          | Required                                            |
+| ----------------------- | ------------------------------------------------------ | --------------------------------------------------- |
+| No project persistence  | Projects regenerated with new IDs on every editor open | Load/save `project.json`                            |
+| No asset registry       | `recordingId` assumed to be single-file                | Asset array with roles                              |
+| No autosave             | —                                                      | Debounced atomic writes                             |
+| No dirty state tracking | —                                                      | Dirty/saving/saved/error indicators                 |
+| No backup snapshots     | —                                                      | Pre-destructive snapshots                           |
+| No migration            | —                                                      | Version-gated forward-only migration                |
+| History unbounded       | Editor command history grows without limit             | Cap at N commands, coalesce adjacent                |
+| No checksum             | —                                                      | SHA-256 of project content for corruption detection |

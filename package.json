@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Local-first screen recorder and lightweight editor",
   "license": "MIT",
-  "author": "recordForge",
+  "author": "Prestige Tech",
   "type": "module",
   "workspaces": [
     "apps/*",
@@ -22,7 +22,8 @@
     "test": "turbo run test",
     "check": "turbo run lint format:check typecheck test",
     "tauri": "turbo run tauri --filter=desktop",
-    "setup:ffmpeg": "node tooling/ffmpeg/setup.mjs"
+    "setup:ffmpeg": "node tooling/ffmpeg/setup.mjs",
+    "fixtures:generate": "bun run tooling/fixtures/generate.ts"
   },
   "devDependencies": {
     "turbo": "^2.10.8",

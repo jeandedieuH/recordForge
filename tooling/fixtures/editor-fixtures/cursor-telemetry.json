@@ -1,0 +1,64 @@
+{
+  "recordingId": "fixture-recording",
+  "sourceWidth": 1024,
+  "sourceHeight": 768,
+  "sampleRateHz": 60,
+  "events": [
+    {
+      "tMs": 0,
+      "x": 80,
+      "y": 96,
+      "clicked": false,
+      "button": "none",
+      "visible": true
+    },
+    {
+      "tMs": 500,
+      "x": 160,
+      "y": 128,
+      "clicked": true,
+      "button": "left",
+      "visible": true
+    },
+    {
+      "tMs": 1000,
+      "x": 320,
+      "y": 220,
+      "clicked": false,
+      "button": "none",
+      "visible": true
+    },
+    {
+      "tMs": 2500,
+      "x": 640,
+      "y": 420,
+      "clicked": true,
+      "button": "right",
+      "visible": true
+    },
+    {
+      "tMs": 4000,
+      "x": 900,
+      "y": 680,
+      "clicked": false,
+      "button": "none",
+      "visible": true
+    },
+    {
+      "tMs": 6500,
+      "x": 960,
+      "y": 720,
+      "clicked": false,
+      "button": "none",
+      "visible": false
+    },
+    {
+      "tMs": 9000,
+      "x": 512,
+      "y": 384,
+      "clicked": false,
+      "button": "none",
+      "visible": true
+    }
+  ]
+}

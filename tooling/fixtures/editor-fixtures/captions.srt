@@ -1,0 +1,11 @@
+1
+00:00:00,500 --> 00:00:02,000
+Open the project fixture.
+
+2
+00:00:02,500 --> 00:00:04,500
+Focus follows the recorded interaction.
+
+3
+00:00:06,000 --> 00:00:08,500
+The second clip contains a deliberate speed change.
