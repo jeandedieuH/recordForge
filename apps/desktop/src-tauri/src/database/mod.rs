@@ -1,6 +1,7 @@
 pub mod library;
 pub mod media;
 pub mod migrations;
+pub mod projects;
 pub mod settings;
 
 use rusqlite::Connection;

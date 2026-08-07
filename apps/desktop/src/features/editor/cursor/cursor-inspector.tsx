@@ -1,11 +1,6 @@
 import type { CursorIconPreset, CursorSettings } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
-import {
-  MousePointer2,
-  Sliders,
-  Sparkles,
-  Zap,
-} from "lucide-react"
+import { MousePointer2, Sliders, Sparkles, Zap } from "lucide-react"
 import { Button, Label, Slider, Switch, cn } from "@recordforge/ui"
 import { RenderCursorPreset } from "./custom-cursor-overlay"
 
@@ -52,7 +47,9 @@ export function CursorInspector({
 
       {/* 1. Preset Selector Grid */}
       <div className="space-y-2">
-        <Label className="text-[11px] font-semibold text-muted-foreground">Cursor Style Preset</Label>
+        <Label className="text-[11px] font-semibold text-muted-foreground">
+          Cursor Style Preset
+        </Label>
         <div className="grid grid-cols-2 gap-2">
           {PRESETS.map((item) => {
             const isSelected = activePreset === item.id
@@ -65,7 +62,7 @@ export function CursorInspector({
                   "flex flex-col items-center justify-center gap-2 rounded-xl border p-2.5 text-center transition-all hover:bg-surface-elevated",
                   isSelected
                     ? "border-primary bg-primary/10 ring-1 ring-primary"
-                    : "border-border bg-surface"
+                    : "border-border bg-surface",
                 )}
               >
                 <div className="flex size-10 items-center justify-center rounded-lg bg-surface-dim shadow-inner">
@@ -80,7 +77,9 @@ export function CursorInspector({
                   />
                 </div>
                 <div className="min-w-0 w-full">
-                  <p className="truncate font-semibold text-foreground text-[11px] leading-tight">{item.label}</p>
+                  <p className="truncate font-semibold text-foreground text-[11px] leading-tight">
+                    {item.label}
+                  </p>
                 </div>
               </button>
             )
@@ -105,7 +104,7 @@ export function CursorInspector({
       {/* 3. Colors & Outline */}
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
         <Label className="font-semibold text-[11px]">Fill & Outline</Label>
-        
+
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
             <span className="text-[10px] text-muted-foreground">Fill Color</span>
@@ -237,7 +236,9 @@ export function CursorInspector({
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <p className="font-medium text-[11px]">Motion Smoothing</p>
-              <p className="text-[10px] text-muted-foreground">Removes mouse jitter during playback</p>
+              <p className="text-[10px] text-muted-foreground">
+                Removes mouse jitter during playback
+              </p>
             </div>
             <Switch
               checked={settings.smoothMovement ?? true}

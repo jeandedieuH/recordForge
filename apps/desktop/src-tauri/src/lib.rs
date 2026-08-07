@@ -7,6 +7,7 @@ pub mod exports;
 pub mod jobs;
 pub mod media;
 pub mod path_policy;
+pub mod projects;
 pub mod shortcuts;
 pub mod state;
 pub mod storage;
@@ -95,6 +96,16 @@ pub fn run() {
             commands::media::get_media_metadata,
             commands::media::delete_derivatives,
             commands::media::estimate_prepare_disk_space,
+            commands::projects::load_project_for_recording,
+            commands::projects::save_project,
+            commands::projects::create_project,
+            commands::projects::create_bootstrap_project,
+            commands::projects::rename_project,
+            commands::projects::duplicate_project,
+            commands::projects::delete_project,
+            commands::projects::relink_project_asset,
+            commands::projects::snapshot_project,
+            commands::projects::get_project_asset_paths,
             commands::exports::export_timeline,
             commands::settings::get_setting,
             commands::settings::set_setting,

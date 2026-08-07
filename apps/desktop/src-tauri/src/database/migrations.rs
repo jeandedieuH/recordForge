@@ -39,9 +39,12 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if current_version < 4 {
         migrate_v4(&tx)?;
     }
+    if current_version < 5 {
+        migrate_v5(&tx)?;
+    }
 
     tx.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '4')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '5')",
         [],
     )?;
 
@@ -201,6 +204,55 @@ fn migrate_v4(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v5: durable project index with recording reference and full project json.
+fn migrate_v5(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    // The v1 projects table did not include a recording_id column or FK.
+    // Rebuild it non-destructively so existing rows keep their project_json.
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS projects_new (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            recording_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            project_json TEXT NOT NULL,
+            FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    // Attempt to backfill recording_id from the JSON payload when available.
+    // If json_extract is unavailable, existing rows get an empty recording_id
+    // and will be repaired the next time they are saved through the project API.
+    let fill_sql = "INSERT OR REPLACE INTO projects_new
+        SELECT
+            id,
+            name,
+            COALESCE(json_extract(project_json, '$.recordingId'), '') AS recording_id,
+            created_at,
+            updated_at,
+            project_json
+        FROM projects";
+
+    if tx.execute(fill_sql, []).is_err() {
+        // Fallback: copy without recording_id backfill. Existing rows with an
+        // empty recording_id will be overwritten on their next save.
+        tx.execute(
+            "INSERT OR REPLACE INTO projects_new
+                SELECT id, name, '', created_at, updated_at, project_json FROM projects",
+            [],
+        )?;
+    }
+
+    tx.execute("DROP TABLE IF EXISTS projects", [])?;
+    tx.execute("ALTER TABLE projects_new RENAME TO projects", [])?;
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS idx_projects_recording ON projects(recording_id)",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +288,6 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
     }
 }

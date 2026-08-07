@@ -27,6 +27,8 @@ thiserror = "1"
 chrono = { version = "0.4.40", features = ["serde"] }
 uuid = { version = "1.15", features = ["v4", "serde"] }
 regex = "1.11"
+sha2 = "0.10.9"
+hex = "0.4.3"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"

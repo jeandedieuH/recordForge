@@ -3,19 +3,29 @@ import type {
   LibraryRecording,
   MediaJob,
   MediaMetadata,
+  recordForgeProject,
   TimelineViewState,
 } from "@recordforge/contracts"
 import {
   createEngine,
-  createTimelineFromRecording,
+  createProjectFromRecording,
   executeCommand,
   getTotalDuration,
+  projectToTimeline,
   redoCommand,
+  timelineToProject,
   type CommandEngine,
   type TimelineCommand,
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
+import {
+  createProject,
+  loadProject,
+  relinkProjectAsset,
+  saveProject,
+  snapshotProject,
+} from "../lib/project"
 import { listRecordings } from "../lib/library"
 import { toErrorMessage } from "../lib/errors"
 import {
@@ -26,20 +36,25 @@ import {
   prepareRecordingMedia,
 } from "../lib/media"
 import { exportTimeline } from "../lib/timeline"
+import { useEditorStore } from "./editor-store"
 
 interface TimelineStore {
   engine: CommandEngine | null
   view: TimelineViewState
   recording: LibraryRecording | null
   metadata: MediaMetadata | null
+  project: recordForgeProject | null
   activeJob: MediaJob | null
   isLoading: boolean
   error: string | null
   activeExportJob: MediaJob | null
+  missingAssets: string[]
   // True while the media-job-update listener is active; prevents duplicate
   // subscriptions and races between mount and unmount.
   isListening: boolean
   unlisten: (() => void) | null
+  // Pending autosave timer; cleared when a save runs or the editor closes.
+  autosaveTimeout: number | null
 
   load: (recordingId: string) => Promise<void>
   startListening: () => Promise<void>
@@ -57,9 +72,16 @@ interface TimelineStore {
   setScroll: (ms: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
 
+  save: () => Promise<void>
+  scheduleAutosave: () => void
+  relinkAsset: (assetId: string, newPath: string) => Promise<void>
+
   export: (outputPath: string) => Promise<void>
   clearError: () => void
 }
+
+const AUTOSAVE_DELAY_MS = 2000
+const SNAPSHOT_COMMANDS = new Set(["Delete clip", "Ripple delete", "Delete track", "Trim clip"])
 
 function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
   return {
@@ -75,6 +97,10 @@ function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
   }
 }
 
+function isDestructiveCommand(command: TimelineCommand): boolean {
+  return SNAPSHOT_COMMANDS.has(command.name)
+}
+
 export const useTimelineStore = create<TimelineStore>((set, get) => ({
   engine: null,
   view: {
@@ -86,12 +112,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
   recording: null,
   metadata: null,
+  project: null,
   activeJob: null,
   isLoading: false,
   error: null,
   activeExportJob: null,
+  missingAssets: [],
   isListening: false,
   unlisten: null,
+  autosaveTimeout: null,
 
   load: async (recordingId) => {
     set({ isLoading: true, error: null })
@@ -122,16 +151,36 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         activeJob = await prepareRecordingMedia(recordingId)
       }
 
-      const timeline = createTimelineFromRecording(recording, meta, recording.name)
+      // Phase 1: load an existing durable project or create one from the recording.
+      const loaded = await loadProject(recordingId)
+
+      let project: recordForgeProject
+      let missingAssets: string[] = []
+
+      if (loaded) {
+        project = loaded.project
+        missingAssets = loaded.missingAssets
+      } else {
+        project = createProjectFromRecording(recording, meta, recording.name)
+        project = await createProject(project)
+      }
+
+      const timeline = projectToTimeline(project)
       const engine = createEngine(timeline)
       const duration = getTotalDuration(timeline)
+
+      // Keep the editor store in sync for UI surfaces (save status, missing assets).
+      useEditorStore.getState().open(recordingId, project)
+      useEditorStore.getState().setMissingAssets(missingAssets)
 
       set({
         engine,
         recording,
         metadata: meta,
+        project,
         activeJob,
         activeExportJob: null,
+        missingAssets,
         view: { zoom: 50, scrollMs: 0, playheadMs: 0, isPlaying: false, durationMs: duration },
         isLoading: false,
         error: null,
@@ -193,17 +242,29 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   execute: (command) => {
-    const { engine } = get()
-    if (!engine) return
+    const { engine, project } = get()
+    if (!engine || !project) return
+
+    if (isDestructiveCommand(command)) {
+      const recording = get().recording
+      if (recording) {
+        // Fire-and-forget snapshot; failures are not surfaced to the user.
+        void snapshotProject(recording.id).catch(() => {})
+      }
+    }
+
     const result = executeCommand(engine, command)
     if (!result.ok) {
       set({ error: result.error.message })
       return
     }
-    const duration = getTotalDuration(result.value.history.present)
+    const nextTimeline = result.value.history.present
+    const nextProject = timelineToProject(nextTimeline, project)
+    const duration = getTotalDuration(nextTimeline)
     const view = get().view
     set({
       engine: result.value,
+      project: nextProject,
       error: null,
       view: {
         ...view,
@@ -211,40 +272,102 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         playheadMs: Math.min(view.playheadMs, duration),
       },
     })
+    get().scheduleAutosave()
   },
 
   undo: () => {
-    const { engine } = get()
-    if (!engine) return
+    const { engine, project } = get()
+    if (!engine || !project) return
     const result = undoCommand(engine)
     if (!result.ok) {
       set({ error: result.error.message })
       return
     }
-    const duration = getTotalDuration(result.value.history.present)
+    const nextTimeline = result.value.history.present
+    const nextProject = timelineToProject(nextTimeline, project)
+    const duration = getTotalDuration(nextTimeline)
     const view = get().view
     set({
       engine: result.value,
+      project: nextProject,
       view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
+    get().scheduleAutosave()
   },
 
   redo: () => {
-    const { engine } = get()
-    if (!engine) return
+    const { engine, project } = get()
+    if (!engine || !project) return
     const result = redoCommand(engine)
     if (!result.ok) {
       set({ error: result.error.message })
       return
     }
-    const duration = getTotalDuration(result.value.history.present)
+    const nextTimeline = result.value.history.present
+    const nextProject = timelineToProject(nextTimeline, project)
+    const duration = getTotalDuration(nextTimeline)
     const view = get().view
     set({
       engine: result.value,
+      project: nextProject,
       view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
+    get().scheduleAutosave()
+  },
+
+  scheduleAutosave: () => {
+    const { autosaveTimeout } = get()
+    if (autosaveTimeout) {
+      window.clearTimeout(autosaveTimeout)
+    }
+
+    useEditorStore.getState().setSaveStatus("idle")
+
+    const timeout = window.setTimeout(() => {
+      void get().save()
+    }, AUTOSAVE_DELAY_MS)
+
+    set({ autosaveTimeout: timeout })
+  },
+
+  save: async () => {
+    const { project, autosaveTimeout } = get()
+    if (!project) return
+
+    if (autosaveTimeout) {
+      window.clearTimeout(autosaveTimeout)
+      set({ autosaveTimeout: null })
+    }
+
+    useEditorStore.getState().setSaveStatus("saving")
+    try {
+      const saved = await saveProject(project)
+      set({ project: saved })
+      useEditorStore.getState().setProject(saved)
+      useEditorStore.getState().setSaveStatus("saved")
+    } catch (err) {
+      useEditorStore.getState().setSaveStatus("error", toErrorMessage(err))
+      set({ error: toErrorMessage(err) })
+    }
+  },
+
+  relinkAsset: async (assetId, newPath) => {
+    const { recording, project } = get()
+    if (!recording || !project) return
+    try {
+      const updated = await relinkProjectAsset(recording.id, assetId, newPath)
+      const missing = updated.assets.filter((a) => a.status === "missing").map((a) => a.id)
+      set({ project: updated, missingAssets: missing })
+      useEditorStore.getState().setProject(updated)
+      useEditorStore.getState().setMissingAssets(missing)
+      // Persist the relinked project immediately so a missing-asset state is
+      // never lost on close.
+      void get().save()
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+    }
   },
 
   play: () => {
@@ -283,8 +406,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   export: async (outputPath) => {
-    const { engine, recording } = get()
-    if (!engine || !recording) return
+    const { engine, recording, project } = get()
+    if (!engine || !recording || !project) return
+
+    if (get().missingAssets.length > 0) {
+      set({
+        error:
+          "Cannot export while assets are missing. Relink or restore the missing assets first.",
+      })
+      return
+    }
+
     const plan = buildRenderPlan({
       state: engine.history.present,
       recording,

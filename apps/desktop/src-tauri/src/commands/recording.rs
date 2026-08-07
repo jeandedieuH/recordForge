@@ -38,10 +38,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
     // Tauri's resource dir is where externalBin sidecars land in production
     // installs. In dev mode this may differ, but resolve_executable falls
     // through to other candidates transparently.
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .ok();
+    let resource_dir = app.path().resource_dir().ok();
 
     let db_path = app_data_dir.join("app.db");
     let conn = database::initialize(&db_path)
@@ -54,14 +51,10 @@ pub fn init(app: &tauri::App) -> Result<()> {
 
     let path_policy = PathPolicy::new(app_data_dir.clone(), sessions_dir.clone());
 
-    let ffmpeg_path = media::resolve_executable_with_resource_dir(
-        "ffmpeg",
-        resource_dir.as_deref(),
-    )?;
-    let ffprobe_path = media::resolve_executable_with_resource_dir(
-        "ffprobe",
-        resource_dir.as_deref(),
-    )?;
+    let ffmpeg_path =
+        media::resolve_executable_with_resource_dir("ffmpeg", resource_dir.as_deref())?;
+    let ffprobe_path =
+        media::resolve_executable_with_resource_dir("ffprobe", resource_dir.as_deref())?;
     let recorder = Recorder::new(
         ffmpeg_path.clone(),
         ffprobe_path.clone(),

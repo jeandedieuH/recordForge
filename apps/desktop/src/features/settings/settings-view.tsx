@@ -343,10 +343,7 @@ export function SettingsView() {
       {/* Tab: Custom Cursor */}
       {activeTab === "cursor" ? (
         <div className="max-w-xl rounded-2xl border border-border bg-surface p-5 shadow-e1">
-          <CursorInspector
-            settings={defaultCursorSettings}
-            onChange={() => {}}
-          />
+          <CursorInspector settings={defaultCursorSettings} onChange={() => {}} />
         </div>
       ) : null}
 

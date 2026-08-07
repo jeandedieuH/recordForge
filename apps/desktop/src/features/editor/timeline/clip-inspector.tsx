@@ -164,7 +164,11 @@ export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorP
               <InfoField label="Start" value={formatInspectorTime(clip.startMs)} />
               <InfoField label="Duration" value={formatInspectorTime(clip.durationMs)} />
               <TrimField label="Source in (ms)" value={sourceInText} onChange={setSourceInText} />
-              <TrimField label="Source out (ms)" value={sourceOutText} onChange={setSourceOutText} />
+              <TrimField
+                label="Source out (ms)"
+                value={sourceOutText}
+                onChange={setSourceOutText}
+              />
               <InfoField
                 label="Stream"
                 value={clip.streamIndex == null ? "Auto" : String(clip.streamIndex)}
@@ -294,8 +298,6 @@ export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorP
     </aside>
   )
 }
-
-
 
 function TrimField({
   label,

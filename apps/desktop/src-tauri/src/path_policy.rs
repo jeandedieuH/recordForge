@@ -146,6 +146,48 @@ impl PathPolicy {
 
         Ok(canonical)
     }
+
+    /// Check whether `candidate` is contained within `base` using path components.
+    pub fn is_contained(&self, base: &Path, candidate: &Path) -> bool {
+        candidate.starts_with(base)
+    }
+
+    /// Validate a new asset path for a project. The path may be absolute or
+    /// relative to the project directory, but it must resolve to a file inside
+    /// the project directory and it must exist.
+    pub fn validate_project_asset_path(&self, project_dir: &Path, path: &Path) -> Result<PathBuf> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            project_dir.join(path)
+        };
+
+        if !absolute.exists() {
+            return Err(InternalError::Storage(format!(
+                "asset path does not exist: {}",
+                absolute.display()
+            ))
+            .into());
+        }
+
+        let canonical = absolute
+            .canonicalize()
+            .map_err(|e| InternalError::Storage(format!("canonicalize asset path: {e}")))?;
+
+        let project_canonical = project_dir
+            .canonicalize()
+            .map_err(|e| InternalError::Storage(format!("canonicalize project dir: {e}")))?;
+
+        if !canonical.starts_with(&project_canonical) {
+            return Err(InternalError::Permissions(format!(
+                "asset path outside project directory: {}",
+                canonical.display()
+            ))
+            .into());
+        }
+
+        Ok(canonical)
+    }
 }
 
 #[cfg(test)]

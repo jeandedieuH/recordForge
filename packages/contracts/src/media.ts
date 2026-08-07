@@ -4,6 +4,19 @@ import { z } from "zod"
 export const mediaStreamKindSchema = z.enum(["video", "audio", "subtitle", "data", "attachment"])
 export type MediaStreamKind = z.infer<typeof mediaStreamKindSchema>
 
+// Asset roles for the durable project asset registry.
+// Each role maps a source file to a specific timeline purpose.
+export const projectAssetRoleSchema = z.enum([
+  "screen",
+  "microphone",
+  "system_audio",
+  "webcam",
+  "cursor_events",
+  "caption",
+  "image",
+])
+export type ProjectAssetRole = z.infer<typeof projectAssetRoleSchema>
+
 // Individual media stream from FFprobe.
 export const mediaStreamSchema = z.object({
   index: z.number().int().min(0),

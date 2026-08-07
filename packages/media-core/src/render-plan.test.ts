@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type LibraryRecording, type TimelineState } from "@recordforge/domain"
+import {
+  defaultCursorSettings,
+  type LibraryRecording,
+  type TimelineState,
+} from "@recordforge/domain"
 import { buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
 
 function makeTimeline(clipCount = 1): TimelineState {

@@ -1,10 +1,13 @@
-import { defaultCursorSettings } from "@recordforge/contracts"
+import { defaultCursorSettings, defaultProjectExportSettings } from "@recordforge/contracts"
 import type {
   AudioClip,
   CameraClip,
   LibraryRecording,
   MediaMetadata,
   MediaStream,
+  Project,
+  ProjectAsset,
+  ProjectExportSettings,
   ScreenClip,
   TimelineClip,
   TimelineMarker,
@@ -138,6 +141,7 @@ export function createTimelineFromRecording(
   recording: LibraryRecording,
   metadata: MediaMetadata,
   name?: string,
+  projectId?: string,
 ): TimelineState {
   const now = new Date().toISOString()
   const duration = Math.max(metadata.durationMs, recording.durationMs)
@@ -207,7 +211,7 @@ export function createTimelineFromRecording(
 
   return {
     version: 1,
-    id: crypto.randomUUID(),
+    id: projectId ?? crypto.randomUUID(),
     name: name ?? recording.name,
     recordingId: recording.id,
     canvas: {
@@ -244,4 +248,92 @@ export function formatTime(ms: number): string {
   const seconds = totalSeconds % 60
   const millis = Math.floor((ms % 1000) / 10)
   return `${minutes}:${seconds.toString().padStart(2, "0")}.${millis.toString().padStart(2, "0")}`
+}
+
+// Derive the primary source filename to store as a project-relative asset path.
+// The recorder writes the final output as `output.mp4` inside the session work dir.
+function sourceFileName(recording: LibraryRecording): string {
+  return recording.outputPath?.split(/[\\/]/).pop() ?? "output.mp4"
+}
+
+// Build the durable screen asset for a newly created project.
+function createScreenAsset(recording: LibraryRecording, metadata: MediaMetadata): ProjectAsset {
+  return {
+    id: recording.id,
+    role: "screen",
+    path: sourceFileName(recording),
+    status: "available",
+    durationMs: metadata.durationMs,
+    width: metadata.width ?? recording.width,
+    height: metadata.height ?? recording.height,
+    fps: metadata.fps ?? recording.fps,
+    hasAudio: metadata.hasAudio,
+  }
+}
+
+// Build a durable project from a recording and its media metadata.
+// This is the single entry point for creating a project the first time a recording is opened.
+export function createProjectFromRecording(
+  recording: LibraryRecording,
+  metadata: MediaMetadata,
+  name?: string,
+  exportSettings?: ProjectExportSettings,
+): Project {
+  const projectId = crypto.randomUUID()
+  const timeline = createTimelineFromRecording(recording, metadata, name, projectId)
+
+  // In the bootstrap project every clip references the single screen asset.
+  // This preserves the existing render-plan contract while the asset registry is in place.
+  const screenAsset = createScreenAsset(recording, metadata)
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips) {
+      clip.assetId = screenAsset.id
+    }
+  }
+
+  return {
+    format: "recordforge.project",
+    version: 1,
+    id: projectId,
+    name: timeline.name,
+    recordingId: recording.id,
+    canvas: timeline.canvas,
+    assets: [screenAsset],
+    tracks: timeline.tracks,
+    markers: timeline.markers,
+    exportSettings: exportSettings ?? defaultProjectExportSettings,
+    createdAt: timeline.createdAt,
+    updatedAt: timeline.updatedAt,
+    checksum: "",
+  }
+}
+
+// Convert a durable project into the in-memory timeline state used by the command engine.
+export function projectToTimeline(project: Project): TimelineState {
+  return {
+    version: 1,
+    id: project.id,
+    name: project.name,
+    recordingId: project.recordingId,
+    canvas: project.canvas,
+    tracks: project.tracks,
+    markers: project.markers,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+  }
+}
+
+// Merge an updated timeline back into an existing project without losing assets,
+// export settings, or the project identity. The checksum is intentionally left
+// unchanged so the save layer can recompute it during persistence.
+export function timelineToProject(timeline: TimelineState, base: Project): Project {
+  return {
+    ...base,
+    name: timeline.name,
+    canvas: timeline.canvas,
+    tracks: timeline.tracks,
+    markers: timeline.markers,
+    exportSettings: base.exportSettings ?? defaultProjectExportSettings,
+    updatedAt: new Date().toISOString(),
+  }
 }

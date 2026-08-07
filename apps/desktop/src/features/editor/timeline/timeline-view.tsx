@@ -35,6 +35,7 @@ import {
 } from "lucide-react"
 import { Button, EmptyState, IconButton, Progress, Skeleton, Slider, cn } from "@recordforge/ui"
 import { isTauri } from "../../../lib/settings"
+import { useEditorStore, type SaveStatus } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { AudioTrackPreview } from "./audio-track-preview"
 import { ClipInspector } from "./clip-inspector"
@@ -119,6 +120,20 @@ function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
   return track.name
 }
 
+function saveStatusText(status: SaveStatus): string {
+  switch (status) {
+    case "saving":
+      return "Saving..."
+    case "saved":
+      return "Saved"
+    case "error":
+      return "Save failed"
+    case "idle":
+    default:
+      return "Unsaved changes"
+  }
+}
+
 function TimelineLoadingState() {
   return (
     <div className="flex h-full min-h-160 flex-col gap-4 bg-background p-6">
@@ -186,6 +201,9 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const setZoom = useTimelineStore((state) => state.setZoom)
   const clearError = useTimelineStore((state) => state.clearError)
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
+  const saveStatus = useEditorStore((state) => state.saveStatus)
+  const saveError = useEditorStore((state) => state.saveError)
+  const missingAssets = useEditorStore((state) => state.missingAssets)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const monitorRef = useRef<HTMLDivElement>(null)
@@ -435,6 +453,28 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
               <span className="rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success">
                 {isUsingProxy ? "Proxy ready" : proxyPath ? "Original fallback" : "Original source"}
               </span>
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-0.5 text-[10px] font-medium",
+                  saveStatus === "error"
+                    ? "border-destructive/30 bg-destructive/10 text-destructive"
+                    : saveStatus === "saved"
+                      ? "border-success/30 bg-success/10 text-success"
+                      : "border-warning/30 bg-warning/10 text-warning",
+                )}
+                title={saveError ?? saveStatusText(saveStatus)}
+              >
+                {saveStatusText(saveStatus)}
+              </span>
+              {missingAssets.length > 0 ? (
+                <span
+                  className="flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive"
+                  title={`Missing assets: ${missingAssets.join(", ")}`}
+                >
+                  <AlertCircle className="size-3" />
+                  {missingAssets.length} missing
+                </span>
+              ) : null}
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
@@ -609,7 +649,17 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
               {formatTime(view.playheadMs)} / {formatTime(view.durationMs)}
             </div>
             {onOpenExport ? (
-              <Button variant="secondary" className="ml-3" onClick={onOpenExport}>
+              <Button
+                variant="secondary"
+                className="ml-3"
+                disabled={missingAssets.length > 0}
+                title={
+                  missingAssets.length > 0
+                    ? "Export is disabled while assets are missing"
+                    : "Open export settings"
+                }
+                onClick={onOpenExport}
+              >
                 Export
               </Button>
             ) : null}

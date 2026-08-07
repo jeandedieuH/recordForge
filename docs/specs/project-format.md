@@ -1,6 +1,6 @@
 # Project Format Specification
 
-> **Status:** Draft — Phase 0  
+> **Status:** Draft — Phase 1  
 > **Scope:** Defines the on-disk project file format, asset registry, versioning, and persistence rules  
 > **Owner:** `packages/domain`, `packages/contracts`, Rust `projects` module
 
@@ -53,21 +53,25 @@ sessions/{session_id}/
       "id": "asset-uuid-screen",
       "role": "screen",
       "path": "output.mp4", // Relative to project dir
+      "status": "available",
       "durationMs": 180000,
       "width": 1920,
       "height": 1080,
       "fps": 30,
       "hasAudio": true,
+      "streamIndex": null,
     },
     {
       "id": "asset-uuid-webcam",
       "role": "webcam",
       "path": "webcam_000.mp4",
+      "status": "available",
       "durationMs": 180000,
       "width": 1280,
       "height": 720,
       "fps": 30,
       "hasAudio": false,
+      "streamIndex": null,
     },
   ],
   "tracks": [
@@ -105,7 +109,26 @@ sessions/{session_id}/
 }
 ```
 
+### 2.3 Checksum
+
+The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 digest of the canonical JSON of the project object with the `checksum` field removed. Rust recomputes it on every atomic save and validates it on every load, falling back to `project.json.bak` when the primary file is corrupt.
+
 ---
+
+### 2.4 Asset fields
+
+| Field         | Type      | Required | Description                                               |
+| ------------- | --------- | -------- | --------------------------------------------------------- |
+| `id`          | string    | yes      | UUID that clips use as `assetId`                          |
+| `role`        | string    | yes      | One of the roles in §3.1                                  |
+| `path`        | string    | yes      | Path relative to the project directory                    |
+| `status`      | string    | no       | `available` (default), `missing`, or `relinked`          |
+| `durationMs`  | integer   | no       | Cached source duration in milliseconds                    |
+| `width`       | integer   | no       | Cached video width                                        |
+| `height`      | integer   | no       | Cached video height                                       |
+| `fps`         | float     | no       | Cached frame rate                                         |
+| `hasAudio`    | boolean   | no       | Whether the source has at least one audio stream          |
+| `streamIndex` | integer   | no       | Optional FFmpeg stream index used for multi-stream files  |
 
 ## 3. Asset Registry
 
@@ -136,10 +159,11 @@ let absolute = project_dir.join(&asset.path);
 
 If an asset file is missing on project load:
 
-1. Mark the asset as `missing` in the UI
-2. Offer a "Relink" action for the user to locate the file
-3. Do not allow export with missing assets
-4. Do not silently skip missing assets
+1. Set its `status` to `missing` in the project file
+2. Mark the asset as missing in the UI
+3. Offer a "Relink" action for the user to locate the file
+4. Do not allow export with missing assets
+5. Do not silently skip missing assets
 
 ---
 
@@ -153,11 +177,11 @@ The current runtime `TimelineState.version = 1` is not a persisted project forma
 
 ### 4.2 Forward-only migration
 
-There are no approved durable migrations yet. The first future migration must be added to this table before a new project version is released:
+The initial durable project format is version 1. Future migrations must be added to this table before a new project version is released:
 
-| From | To  | Changes                                      |
-| ---- | --- | -------------------------------------------- |
-| 1    | 2   | To be defined by the Phase 1 contract review |
+| From | To  | Changes |
+| ---- | --- | ------- |
+| 1    | 2   | TBD     |
 
 ### 4.3 Migration rules
 

@@ -306,7 +306,13 @@ export function RenderCursorPreset({
   switch (preset) {
     case "modern-neon":
       return (
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className={cn("drop-shadow", className)}>
+        <svg
+          width="28"
+          height="28"
+          viewBox="0 0 24 24"
+          fill="none"
+          className={cn("drop-shadow", className)}
+        >
           <g transform={isPreview ? "translate(0.25, 0.25)" : undefined}>
             <path
               d="M3 3L10.5 20.5L13.8 13.8L20.5 10.5L3 3Z"
