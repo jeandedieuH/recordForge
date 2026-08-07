@@ -1,5 +1,7 @@
 import type { TimelineState } from "@recordforge/domain"
-import type { TimelineCommand } from "./commands"
+import type { CommandRecord } from "./command-records"
+import { applyCommand, canApplyCommand } from "./commands"
+import type { CommandResult } from "./history"
 import {
   apply,
   canRedo,
@@ -8,7 +10,6 @@ import {
   getRedoName,
   getUndoName,
   redo,
-  type CommandResult,
   type History,
   undo,
 } from "./history"
@@ -17,17 +18,54 @@ export interface CommandEngine {
   history: History<TimelineState>
 }
 
+export interface ExecuteOptions {
+  /** Override the command's coalesce flag for high-frequency gestures. */
+  coalesce?: boolean
+  /** Override the default coalescing window in milliseconds. */
+  coalesceWindowMs?: number
+  /** Override the history cap for this command. */
+  cap?: number
+  /** Explicit timestamp for deterministic tests and replay. */
+  timestamp?: number
+}
+
 export function createEngine(state: TimelineState): CommandEngine {
   return { history: createHistory(state) }
 }
 
+export function canExecute(engine: CommandEngine, command: CommandRecord): CommandResult<void> {
+  return canApplyCommand(engine.history.present, command)
+}
+
 export function executeCommand(
   engine: CommandEngine,
-  command: TimelineCommand,
+  command: CommandRecord,
+  options?: ExecuteOptions,
 ): CommandResult<CommandEngine> {
-  const result = command.execute(engine.history.present)
+  const can = canApplyCommand(engine.history.present, command)
+  if (!can.ok) return can
+
+  const result = applyCommand(engine.history.present, command)
   if (!result.ok) return result
-  return { ok: true, value: { history: apply(engine.history, result.value, command.name) } }
+
+  const coalesce = options?.coalesce ?? command.coalesce
+  const coalesceKey = coalesce && command.coalesceKey ? command.coalesceKey : undefined
+  const commandToApply: CommandRecord = {
+    ...command,
+    coalesce,
+    coalesceKey,
+  }
+
+  return {
+    ok: true,
+    value: {
+      history: apply(engine.history, result.value, commandToApply, {
+        timestamp: options?.timestamp,
+        coalesceWindowMs: options?.coalesceWindowMs,
+        cap: options?.cap,
+      }),
+    },
+  }
 }
 
 export function undoCommand(engine: CommandEngine): CommandResult<CommandEngine> {

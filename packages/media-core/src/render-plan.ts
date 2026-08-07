@@ -14,30 +14,17 @@ function editorError(code: string, message: string): AppError {
   return { category: "editor", code, message }
 }
 
-function toSegments(
-  clips: TimelineClip[],
-  assetId: string,
-  preserveTimelinePosition = false,
-): RenderSegment[] {
+function toSegments(clips: TimelineClip[], assetId: string): RenderSegment[] {
   const sorted = sortClips(clips)
-  let outputStart = 0
-  const segments: RenderSegment[] = []
-
-  for (const clip of sorted) {
-    const start = preserveTimelinePosition ? clip.startMs : outputStart
-    const outputEnd = start + clip.durationMs
-    segments.push({
-      assetId: clip.assetId || assetId,
-      streamIndex: clip.streamIndex,
-      sourceInMs: clip.sourceInMs,
-      sourceOutMs: clip.sourceOutMs,
-      outputStartMs: start,
-      outputEndMs: outputEnd,
-    })
-    outputStart = outputEnd
-  }
-
-  return segments
+  return sorted.map((clip) => ({
+    assetId: clip.assetId || assetId,
+    streamIndex: clip.streamIndex,
+    sourceInMs: clip.sourceInMs,
+    sourceOutMs: clip.sourceOutMs,
+    speed: clip.speed,
+    outputStartMs: clip.startMs,
+    outputEndMs: clip.startMs + clip.durationMs,
+  }))
 }
 
 function toOverlays(_clips: TimelineClip[], _assetId: string): RenderPlanOverlay[] {
@@ -57,7 +44,7 @@ function buildAudioTracks(recording: LibraryRecording, state: TimelineState): Re
     .map((track) => {
       const clips = sortClips(track.clips)
       const firstClip = clips[0]
-      const segments = toSegments(clips, recording.id, true).map((segment, index) => ({
+      const segments = toSegments(clips, recording.id).map((segment, index) => ({
         ...segment,
         volume: clips[index]?.kind === "audio" ? clips[index].volume * track.volume : track.volume,
       }))

@@ -247,3 +247,45 @@ CREATE INDEX idx_projects_recording ON projects(recording_id);
 | No migration            | —                                                      | Version-gated forward-only migration                |
 | History unbounded       | Editor command history grows without limit             | Cap at N commands, coalesce adjacent                |
 | No checksum             | —                                                      | SHA-256 of project content for corruption detection |
+
+---
+
+## 8. Time Semantics
+
+A recordForge project uses three coordinate systems for time:
+
+| Coordinate | Description | Source of truth |
+| ---------- | ----------- | --------------- |
+| Source     | A position in an immutable source asset (ms) | Asset file and `clip.sourceInMs` / `clip.sourceOutMs` |
+| Timeline   | A position in the editable project (ms) | `clip.startMs` and `clip.durationMs` on tracks |
+| Output     | A position in the final rendered/previewed file (ms) | Render plan `outputStartMs` / `outputEndMs` or preview playhead |
+
+### 8.1 Clip time model
+
+Each clip stores five time fields:
+
+- `startMs` — position on the timeline where the clip begins.
+- `durationMs` — how long the clip occupies on the timeline.
+- `sourceInMs` — source time corresponding to `startMs`.
+- `sourceOutMs` — source time corresponding to `startMs + durationMs`.
+- `speed` — playback rate. `durationMs = (sourceOutMs - sourceInMs) / speed`.
+
+### 8.2 Default output mapping
+
+By default, the output timeline preserves the timeline position of every clip. This means an intentional gap (a span with no clip on the relevant track) becomes silence or black filler. The total output duration is the maximum `startMs + durationMs` across all clips and markers.
+
+### 8.3 Squeeze/gapless mapping
+
+A caller may request a compressed output (`squeezeGaps: true`). In that mode the output removes the duration of all gaps and plays only clip content. Audio, video, and overlay segments must use the same squeezed output coordinate system so they remain synchronized.
+
+### 8.4 Marker behavior
+
+Markers are timeline-level references. Under edit commands they behave as follows:
+
+- **Trim/split** — markers keep their timeline time unless the clip they were anchored to is removed or the marker falls in a trimmed-away range.
+- **Ripple delete** — markers inside the deleted time range are removed; markers after the deleted range shift left by the deleted duration.
+- **Trim timeline ends** — markers outside the trimmed range are removed; markers inside shift to the new start.
+
+### 8.5 Track locks and timing
+
+A locked track cannot be modified by direct clip commands or ripple delete. Ripple delete still removes the same output time window from unlocked tracks; locked tracks keep their clips unchanged. This preserves the editor's intent while protecting finished tracks from accidental edits.

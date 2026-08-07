@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { boundsSchema } from "./recording"
 import { cursorSettingsSchema, defaultCursorSettings } from "./cursor"
+import { timelineSelectionSchema } from "./selection"
 
 // Canvas settings shared by the timeline, the preview, and the final render.
 export const timelineCanvasSchema = z.object({
@@ -139,6 +140,7 @@ export const timelineViewStateSchema = z.object({
   playheadMs: z.number().default(0),
   isPlaying: z.boolean().default(false),
   durationMs: z.number().default(0),
+  selection: timelineSelectionSchema.nullable().default(null),
 })
 
 export type TimelineViewState = z.infer<typeof timelineViewStateSchema>
@@ -148,6 +150,7 @@ export const renderSegmentSchema = z.object({
   assetId: z.string(),
   streamIndex: z.number().int().min(0).optional(),
   volume: z.number().min(0).max(2).optional(),
+  speed: z.number().min(0).default(1),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),

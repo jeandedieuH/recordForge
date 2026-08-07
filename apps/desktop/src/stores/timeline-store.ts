@@ -16,6 +16,7 @@ import {
   timelineToProject,
   type CommandEngine,
   type TimelineCommand,
+  type TimelineSelection,
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
@@ -71,6 +72,7 @@ interface TimelineStore {
   setZoom: (zoom: number) => void
   setScroll: (ms: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
+  setSelection: (selection: TimelineSelection | null) => void
 
   save: () => Promise<void>
   scheduleAutosave: () => void
@@ -81,7 +83,12 @@ interface TimelineStore {
 }
 
 const AUTOSAVE_DELAY_MS = 2000
-const SNAPSHOT_COMMANDS = new Set(["Delete clip", "Ripple delete", "Delete track", "Trim clip"])
+const SNAPSHOT_COMMANDS = new Set([
+  "delete-clip",
+  "ripple-delete-clip",
+  "delete-track",
+  "trim-clip",
+])
 
 function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
   return {
@@ -98,7 +105,7 @@ function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
 }
 
 function isDestructiveCommand(command: TimelineCommand): boolean {
-  return SNAPSHOT_COMMANDS.has(command.name)
+  return SNAPSHOT_COMMANDS.has(command.kind)
 }
 
 export const useTimelineStore = create<TimelineStore>((set, get) => ({
@@ -109,6 +116,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     playheadMs: 0,
     isPlaying: false,
     durationMs: 0,
+    selection: null,
   },
   recording: null,
   metadata: null,
@@ -181,7 +189,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         activeJob,
         activeExportJob: null,
         missingAssets,
-        view: { zoom: 50, scrollMs: 0, playheadMs: 0, isPlaying: false, durationMs: duration },
+        view: { zoom: 50, scrollMs: 0, playheadMs: 0, isPlaying: false, durationMs: duration, selection: null },
         isLoading: false,
         error: null,
       })
@@ -403,6 +411,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   setActiveExportJob: (job) => {
     set({ activeExportJob: job })
+  },
+
+  setSelection: (selection) => {
+    const { view } = get()
+    set({ view: { ...view, selection } })
   },
 
   export: async (outputPath) => {

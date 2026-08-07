@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "@recordforge/contracts": "workspace:*",
-    "@recordforge/domain": "workspace:*"
+    "@recordforge/domain": "workspace:*",
+    "zod": "^3.25.11"
   },
   "devDependencies": {
     "@recordforge/config": "workspace:*",

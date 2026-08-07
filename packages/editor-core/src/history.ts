@@ -1,4 +1,5 @@
 import type { AppError } from "@recordforge/domain"
+import type { CommandRecord } from "./command-records"
 
 export interface Result<T> {
   ok: true
@@ -15,6 +16,8 @@ export type CommandResult<T, E = AppError> = Result<T> | Failure<E>
 export interface Transaction<T> {
   name: string
   state: T
+  command: CommandRecord
+  timestamp: number
 }
 
 export interface History<T> {
@@ -23,16 +26,72 @@ export interface History<T> {
   future: Transaction<T>[]
 }
 
+export interface ApplyOptions {
+  timestamp?: number
+  coalesceWindowMs?: number
+  cap?: number
+}
+
+const DEFAULT_COALESCE_WINDOW_MS = 250
+const DEFAULT_HISTORY_CAP = 250
+
 export function createHistory<T>(initial: T): History<T> {
   return { past: [], present: initial, future: [] }
 }
 
-export function apply<T>(history: History<T>, next: T, name: string): History<T> {
-  return {
-    past: [...history.past, { name, state: history.present }],
-    present: next,
-    future: [],
+function canCoalesce(
+  last: Transaction<unknown> | undefined,
+  command: CommandRecord,
+  timestamp: number,
+  windowMs: number,
+): boolean {
+  if (!last) return false
+  if (!command.coalesce || !last.command.coalesce) return false
+  if (!command.coalesceKey || !last.command.coalesceKey) return false
+  if (command.coalesceKey !== last.command.coalesceKey) return false
+  return timestamp - last.timestamp <= windowMs
+}
+
+export function apply<T>(
+  history: History<T>,
+  next: T,
+  command: CommandRecord,
+  options?: ApplyOptions,
+): History<T> {
+  const timestamp = options?.timestamp ?? Date.now()
+  const windowMs = options?.coalesceWindowMs ?? DEFAULT_COALESCE_WINDOW_MS
+  const cap = options?.cap ?? DEFAULT_HISTORY_CAP
+  const lastPast = history.past[history.past.length - 1]
+
+  let past: Transaction<T>[]
+  let previousState: T
+
+  if (canCoalesce(lastPast, command, timestamp, windowMs)) {
+    // Replace the last history entry so the whole high-frequency gesture
+    // undoes as one unit. The transaction state is the state before the
+    // gesture started; the final applied state becomes the new present.
+    previousState = lastPast.state
+    past = history.past.slice(0, -1)
+  } else {
+    previousState = history.present
+    past = history.past
   }
+
+  const transaction: Transaction<T> = {
+    name: command.name,
+    state: previousState,
+    command,
+    timestamp,
+  }
+
+  const withNewPast = { ...history, past: [...past, transaction], present: next, future: [] }
+
+  if (withNewPast.past.length > cap) {
+    const dropCount = withNewPast.past.length - cap
+    return { ...withNewPast, past: withNewPast.past.slice(dropCount) }
+  }
+
+  return withNewPast
 }
 
 export function undo<T>(history: History<T>): History<T> {
@@ -41,7 +100,15 @@ export function undo<T>(history: History<T>): History<T> {
   return {
     past: history.past.slice(0, -1),
     present: previous.state,
-    future: [{ name: previous.name, state: history.present }, ...history.future],
+    future: [
+      {
+        name: previous.name,
+        state: history.present,
+        command: previous.command,
+        timestamp: previous.timestamp,
+      },
+      ...history.future,
+    ],
   }
 }
 
@@ -49,7 +116,10 @@ export function redo<T>(history: History<T>): History<T> {
   if (history.future.length === 0) return history
   const next = history.future[0]
   return {
-    past: [...history.past, { name: next.name, state: history.present }],
+    past: [
+      ...history.past,
+      { name: next.name, state: history.present, command: next.command, timestamp: next.timestamp },
+    ],
     present: next.state,
     future: history.future.slice(1),
   }
