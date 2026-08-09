@@ -29,6 +29,7 @@ pub enum ProjectAssetRole {
     Screen,
     Microphone,
     SystemAudio,
+    Music,
     Webcam,
     CursorEvents,
     Caption,
@@ -41,6 +42,7 @@ impl ProjectAssetRole {
             ProjectAssetRole::Screen => "screen",
             ProjectAssetRole::Microphone => "microphone",
             ProjectAssetRole::SystemAudio => "system_audio",
+            ProjectAssetRole::Music => "music",
             ProjectAssetRole::Webcam => "webcam",
             ProjectAssetRole::CursorEvents => "cursor_events",
             ProjectAssetRole::Caption => "caption",
@@ -131,10 +133,16 @@ pub struct ProjectFile {
     pub assets: Vec<ProjectAsset>,
     pub tracks: Value,
     pub markers: Value,
+    #[serde(default = "empty_json_array")]
+    pub zoom_segments: Value,
     pub export_settings: ProjectExportSettings,
     pub created_at: String,
     pub updated_at: String,
     pub checksum: String,
+}
+
+fn empty_json_array() -> Value {
+    Value::Array(Vec::new())
 }
 
 /// Result of loading a project, with any missing asset ids.
@@ -742,6 +750,7 @@ pub fn create_project(
         assets: vec![screen_asset],
         tracks,
         markers: Value::Array(vec![]),
+        zoom_segments: Value::Array(vec![]),
         export_settings: ProjectExportSettings::default(),
         created_at: now.clone(),
         updated_at: now,
@@ -938,6 +947,7 @@ mod tests {
             assets: vec![],
             tracks: Value::Null,
             markers: Value::Null,
+            zoom_segments: Value::Null,
             export_settings: ProjectExportSettings::default(),
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),

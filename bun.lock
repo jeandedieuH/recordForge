@@ -126,6 +126,7 @@
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
         "@recordforge/domain": "workspace:*",
+        "@recordforge/editor-core": "workspace:*",
       },
       "devDependencies": {
         "@recordforge/config": "workspace:*",

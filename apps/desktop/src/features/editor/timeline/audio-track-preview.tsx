@@ -23,6 +23,19 @@ function toAssetUrl(path: string): string {
   return isTauri() ? convertFileSrc(path) : path
 }
 
+function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
+  const clipTimeMs = (playheadMs - clip.startMs) * clip.speed
+  const fadeIn = Math.min(clip.fadeInMs, clip.durationMs)
+  const fadeOut = Math.min(clip.fadeOutMs, clip.durationMs)
+  const fadeInGain = fadeIn > 0 ? Math.min(1, Math.max(0, clipTimeMs / fadeIn)) : 1
+  const fadeOutStart = Math.max(0, clip.durationMs - fadeOut)
+  const fadeOutGain =
+    fadeOut > 0 && clipTimeMs > fadeOutStart
+      ? Math.min(1, Math.max(0, (clip.durationMs - clipTimeMs) / fadeOut))
+      : 1
+  return Math.min(fadeInGain, fadeOutGain)
+}
+
 function buildPreviewTracks(
   tracks: TimelineTrack[],
   outputs: MediaAudioTrackOutput[],
@@ -66,11 +79,14 @@ export function AudioTrackPreview({
     for (const previewTrack of previewTracks) {
       const element = audioRefs.current[previewTrack.id]
       if (!element) continue
-      element.volume = previewTrack.volume
+      element.volume = Math.min(
+        1,
+        previewTrack.volume * fadeMultiplier(previewTrack.clip, playheadMs),
+      )
       element.playbackRate = Math.max(0.25, Math.min(4, previewTrack.clip.speed * playbackRate))
       element.muted = previewTrack.muted || previewTrack.volume === 0
     }
-  }, [playbackRate, previewTracks])
+  }, [playbackRate, playheadMs, previewTracks])
 
   useEffect(() => {
     for (const previewTrack of previewTracks) {

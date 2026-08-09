@@ -1,6 +1,6 @@
 use crate::capture::cursor::{CursorTelemetryEvent, CursorTelemetryFile};
 
-use super::RenderSegment;
+use super::{RenderPlanZoomSegment, RenderSegment};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -74,7 +74,27 @@ pub struct RenderCanvas {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    #[serde(default = "default_canvas_background")]
+    pub background: String,
+    #[serde(default)]
+    pub padding: u32,
+    #[serde(default)]
+    pub border_radius: u32,
+    #[serde(default)]
+    pub shadow: bool,
+    #[serde(default)]
+    pub shadow_color: Option<String>,
+    #[serde(default)]
+    pub shadow_blur: Option<f64>,
+    #[serde(default)]
+    pub shadow_offset_x: Option<f64>,
+    #[serde(default)]
+    pub shadow_offset_y: Option<f64>,
     pub cursor_settings: CursorSettings,
+}
+
+fn default_canvas_background() -> String {
+    "#000000".into()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,6 +119,7 @@ pub struct CursorRenderer {
     settings: CursorSettings,
     telemetry: CursorTelemetryFile,
     segments: Vec<RenderSegment>,
+    zoom_segments: Vec<RenderPlanZoomSegment>,
     canvas_width: u32,
     canvas_height: u32,
     fit_scale: f64,
@@ -107,10 +128,29 @@ pub struct CursorRenderer {
 }
 
 impl CursorRenderer {
+    #[cfg(test)]
     pub fn new(
         settings: CursorSettings,
         telemetry: CursorTelemetryFile,
         segments: &[RenderSegment],
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> Result<Self, String> {
+        Self::new_with_zoom(
+            settings,
+            telemetry,
+            segments,
+            &[],
+            canvas_width,
+            canvas_height,
+        )
+    }
+
+    pub fn new_with_zoom(
+        settings: CursorSettings,
+        telemetry: CursorTelemetryFile,
+        segments: &[RenderSegment],
+        zoom_segments: &[RenderPlanZoomSegment],
         canvas_width: u32,
         canvas_height: u32,
     ) -> Result<Self, String> {
@@ -134,6 +174,7 @@ impl CursorRenderer {
             settings,
             telemetry,
             segments: segments.to_vec(),
+            zoom_segments: zoom_segments.to_vec(),
             canvas_width,
             canvas_height,
             fit_scale,
@@ -174,6 +215,7 @@ impl CursorRenderer {
             None => return,
         };
         let (x, y) = self.position_for_event(event_index);
+        let (x, y) = self.apply_zoom(output_ms, x, y);
 
         if self.settings.spotlight_mode {
             self.render_spotlight(frame, x, y);
@@ -206,6 +248,49 @@ impl CursorRenderer {
         let stroke = parse_color(&self.settings.stroke_color, Rgba::opaque(255, 255, 255))
             .with_alpha(self.settings.stroke_opacity);
         self.draw_cursor(frame, x, y, fill, stroke, self.settings.stroke_width);
+    }
+
+    fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {
+        let Some(segment) = self.zoom_segments.iter().find(|segment| {
+            segment.enabled && output_ms >= segment.start_ms && output_ms < segment.end_ms
+        }) else {
+            return (x, y);
+        };
+        let duration = (segment.end_ms - segment.start_ms).max(1) as f64;
+        let progress =
+            ((output_ms.saturating_sub(segment.start_ms) as f64) / duration).clamp(0.0, 1.0);
+        let eased = match segment.easing.as_str() {
+            "linear" => progress,
+            "ease-in" => progress * progress,
+            "ease-out" => 1.0 - (1.0 - progress).powi(2),
+            _ => {
+                if progress < 0.5 {
+                    2.0 * progress * progress
+                } else {
+                    1.0 - (-2.0 * progress + 2.0).powi(2) / 2.0
+                }
+            }
+        };
+        let target_width =
+            (segment.target.width / segment.scale.max(1.0)).clamp(1.0, self.canvas_width as f64);
+        let target_height =
+            (segment.target.height / segment.scale.max(1.0)).clamp(1.0, self.canvas_height as f64);
+        let target_x = (segment.target.x + (segment.target.width - target_width) / 2.0)
+            .clamp(0.0, self.canvas_width as f64 - target_width);
+        let target_y = (segment.target.y + (segment.target.height - target_height) / 2.0)
+            .clamp(0.0, self.canvas_height as f64 - target_height);
+        let crop_x = target_x * eased;
+        let crop_y = target_y * eased;
+        let crop_width =
+            self.canvas_width as f64 + (target_width - self.canvas_width as f64) * eased;
+        let crop_height =
+            self.canvas_height as f64 + (target_height - self.canvas_height as f64) * eased;
+        (
+            ((x - crop_x) * self.canvas_width as f64 / crop_width)
+                .clamp(0.0, self.canvas_width as f64),
+            ((y - crop_y) * self.canvas_height as f64 / crop_height)
+                .clamp(0.0, self.canvas_height as f64),
+        )
     }
 
     fn position_for_event(&self, event_index: usize) -> (f64, f64) {
@@ -924,6 +1009,8 @@ mod tests {
             asset_id: Some("recording".into()),
             stream_index: None,
             volume: None,
+            fade_in_ms: None,
+            fade_out_ms: None,
             source_in_ms: 0,
             source_out_ms: 1_000,
             output_start_ms: 0,

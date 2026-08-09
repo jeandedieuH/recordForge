@@ -9,6 +9,22 @@ import {
 } from "./cursor"
 import { timelineSelectionSchema } from "./selection"
 
+// Output framing presets are intentionally explicit so preview and export can
+// reject unsupported aspect ratios instead of silently cropping the recording.
+export const canvasAspectRatioSchema = z.enum(["16:9", "1:1", "9:16", "custom"])
+export type CanvasAspectRatio = z.infer<typeof canvasAspectRatioSchema>
+
+export const zoomEasingSchema = z.enum(["linear", "ease-in", "ease-out", "ease-in-out"])
+export type ZoomEasing = z.infer<typeof zoomEasingSchema>
+
+export const zoomTargetSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+})
+export type ZoomTarget = z.infer<typeof zoomTargetSchema>
+
 // Canvas settings shared by the timeline, the preview, and the final render.
 export const timelineCanvasSchema = z.object({
   width: z.number().int().min(1),
@@ -18,12 +34,20 @@ export const timelineCanvasSchema = z.object({
   padding: z.number().min(0).default(0),
   borderRadius: z.number().min(0).default(0),
   shadow: z.boolean().default(false),
+  // These fields are optional for backwards-compatible v1 project files. New
+  // canvas edits persist them, and render helpers apply safe defaults when absent.
+  aspectRatio: canvasAspectRatioSchema.optional(),
+  shadowColor: z.string().optional(),
+  shadowBlur: z.number().min(0).optional(),
+  shadowOffsetX: z.number().optional(),
+  shadowOffsetY: z.number().optional(),
   cursorSettings: cursorSettingsSchema.default(defaultCursorSettings),
 })
 
 export type TimelineCanvas = z.infer<typeof timelineCanvasSchema>
 
-// Visual transform for a picture-in-picture camera clip.
+// Visual transform for a picture-in-picture camera clip. Crop coordinates are
+// expressed in source pixels, while x/y/width/height are canvas pixels.
 export const clipTransformSchema = z.object({
   x: z.number().default(0),
   y: z.number().default(0),
@@ -32,9 +56,33 @@ export const clipTransformSchema = z.object({
   crop: boundsSchema.optional(),
   opacity: z.number().min(0).max(1).default(1),
   shape: z.enum(["rectangle", "rounded", "circle"]).default("rectangle"),
+  visible: z.boolean().optional(),
+  borderWidth: z.number().min(0).optional(),
+  borderColor: z.string().optional(),
+  borderOpacity: z.number().min(0).max(1).optional(),
+  shadowEnabled: z.boolean().optional(),
+  shadowColor: z.string().optional(),
+  shadowBlur: z.number().min(0).optional(),
+  shadowOffsetX: z.number().optional(),
+  shadowOffsetY: z.number().optional(),
 })
 
 export type ClipTransform = z.infer<typeof clipTransformSchema>
+
+// Manual zoom ranges are timeline effects rather than media clips. The target
+// is clamped to the canvas before it reaches either the preview or the exporter.
+export const manualZoomSegmentSchema = z.object({
+  id: z.string(),
+  startMs: z.number().int().min(0),
+  durationMs: z.number().int().min(1),
+  target: zoomTargetSchema,
+  scale: z.number().min(1).max(8).default(1),
+  easing: zoomEasingSchema.default("ease-in-out"),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+})
+
+export type ManualZoomSegment = z.infer<typeof manualZoomSegmentSchema>
 
 // Core clip fields. Clips are non-destructive references into source media.
 export const timelineClipBaseSchema = z.object({
@@ -66,9 +114,13 @@ export const cameraClipSchema = timelineClipBaseSchema.extend({
 
 export type CameraClip = z.infer<typeof cameraClipSchema>
 
+export const audioRoleSchema = z.enum(["microphone", "system_audio", "music", "other"])
+export type AudioRole = z.infer<typeof audioRoleSchema>
+
 // Audio clip: an audio source slice with volume and fade controls.
 export const audioClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("audio"),
+  role: audioRoleSchema.optional(),
   volume: z.number().min(0).max(2).default(1),
   fadeInMs: z.number().min(0).default(0),
   fadeOutMs: z.number().min(0).default(0),
@@ -163,6 +215,9 @@ export const timelineStateSchema = z.object({
   canvas: timelineCanvasSchema,
   tracks: z.array(timelineTrackSchema),
   markers: z.array(timelineMarkerSchema),
+  // Optional keeps projects created before Phase 6 valid while still making
+  // manual zoom ranges durable as soon as the user creates one.
+  zoomSegments: z.array(manualZoomSegmentSchema).optional(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 })
@@ -191,6 +246,8 @@ export const renderSegmentSchema = z.object({
   assetId: z.string(),
   streamIndex: z.number().int().min(0).optional(),
   volume: z.number().min(0).max(2).optional(),
+  fadeInMs: z.number().min(0).optional(),
+  fadeOutMs: z.number().min(0).optional(),
   speed: z.number().min(0).default(1),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
@@ -204,6 +261,7 @@ export type RenderSegment = z.infer<typeof renderSegmentSchema>
 export const renderPlanAudioSchema = z.object({
   assetId: z.string(),
   streamIndex: z.number().int().min(0).optional(),
+  role: audioRoleSchema.optional(),
   muted: z.boolean().default(false),
   volume: z.number().min(0).max(2).default(1),
   segments: z.array(renderSegmentSchema).default([]),
@@ -214,6 +272,7 @@ export type RenderPlanAudio = z.infer<typeof renderPlanAudioSchema>
 // Picture-in-picture overlay settings for the final render.
 export const renderPlanOverlaySchema = z.object({
   assetId: z.string(),
+  streamIndex: z.number().int().min(0).optional(),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
@@ -222,10 +281,33 @@ export const renderPlanOverlaySchema = z.object({
   y: z.number(),
   width: z.number(),
   height: z.number(),
+  crop: boundsSchema.optional(),
   opacity: z.number().min(0).max(1).default(1),
+  visible: z.boolean().default(true),
+  shape: z.enum(["rectangle", "rounded", "circle"]).default("rectangle"),
+  borderWidth: z.number().min(0).optional(),
+  borderColor: z.string().optional(),
+  borderOpacity: z.number().min(0).max(1).optional(),
+  shadowEnabled: z.boolean().optional(),
+  shadowColor: z.string().optional(),
+  shadowBlur: z.number().min(0).optional(),
+  shadowOffsetX: z.number().optional(),
+  shadowOffsetY: z.number().optional(),
 })
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
+
+export const renderPlanZoomSegmentSchema = z.object({
+  id: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  target: zoomTargetSchema,
+  scale: z.number().min(1).max(8).default(1),
+  easing: zoomEasingSchema.default("ease-in-out"),
+  enabled: z.boolean().default(true),
+})
+
+export type RenderPlanZoomSegment = z.infer<typeof renderPlanZoomSegmentSchema>
 
 // Cursor effects are sent as IDs and validated settings. Rust resolves the
 // telemetry path from the registered project asset instead of accepting a path.
@@ -253,6 +335,7 @@ export const renderPlanSchema = z.object({
   audio: renderPlanAudioSchema.optional(),
   audioTracks: z.array(renderPlanAudioSchema).default([]),
   overlays: z.array(renderPlanOverlaySchema).default([]),
+  zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
   cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
 })
 

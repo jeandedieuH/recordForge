@@ -66,6 +66,7 @@ interface TimelineLanesProps {
     coalesceKey: string,
   ) => void
   onSelectMarker: (marker: TimelineMarker) => void
+  onSelectZoom: (segmentId: string) => void
   onDeleteSelection: (ripple: boolean) => void
   onToggleTrackMuted: (track: TimelineTrack) => void
   onToggleTrackSolo: (track: TimelineTrack) => void
@@ -145,6 +146,7 @@ export function TimelineLanes({
   onMoveClip,
   onTrimClip,
   onSelectMarker,
+  onSelectZoom,
   onDeleteSelection,
   onToggleTrackMuted,
   onToggleTrackSolo,
@@ -160,6 +162,7 @@ export function TimelineLanes({
   const [viewportHeight, setViewportHeight] = useState(0)
   const selectedClipIds = new Set(view.selection?.kind === "clip" ? view.selection.clipIds : [])
   const selectedMarkerId = view.selection?.kind === "marker" ? view.selection.markerId : null
+  const selectedZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
   const scrollMargin = RULER_HEIGHT + MARKER_LANE_HEIGHT
   const [draftRange, setDraftRange] = useState<{ startMs: number; endMs: number } | null>(null)
   const rangePointerRef = useRef<{
@@ -255,7 +258,7 @@ export function TimelineLanes({
   function isTimelineInteractiveTarget(target: EventTarget | null): boolean {
     return (
       target instanceof Element &&
-      Boolean(target.closest("[data-timeline-clip], [data-timeline-marker]"))
+      Boolean(target.closest("[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom]"))
     )
   }
 
@@ -417,6 +420,33 @@ export function TimelineLanes({
                   />
                   <span className="truncate">{marker.label}</span>
                 </button>
+              ))}
+            {timeline.zoomSegments
+              ?.filter(
+                (segment) =>
+                  segment.startMs <= visibleEndMs &&
+                  segment.startMs + segment.durationMs >= visibleStartMs,
+              )
+              .map((segment) => (
+                <button
+                  key={segment.id}
+                  type="button"
+                  data-timeline-zoom
+                  aria-label={`Zoom segment from ${formatTimelineTime(segment.startMs)} to ${formatTimelineTime(segment.startMs + segment.durationMs)}`}
+                  className={cn(
+                    "absolute bottom-0 h-1.5 -translate-x-0 rounded-full bg-primary/70 outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                    selectedZoomId === segment.id && "bg-primary ring-1 ring-primary",
+                    segment.locked && "bg-muted-foreground/60",
+                  )}
+                  style={{
+                    left: `${segment.startMs * pixelsPerMs}px`,
+                    width: `${Math.max(4, segment.durationMs * pixelsPerMs)}px`,
+                  }}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onSelectZoom(segment.id)
+                  }}
+                />
               ))}
           </div>
 

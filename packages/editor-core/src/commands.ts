@@ -4,38 +4,46 @@ import type {
   CameraClip,
   ClipTransform,
   CursorEffectClip,
+  ManualZoomSegment,
   TimelineClip,
+  TimelineCanvas,
   TimelineState,
   TimelineTrack,
   TrackUpdate,
 } from "@recordforge/domain"
 import { findClip, findTrack, getTotalDuration, validateNoOverlap } from "@recordforge/domain"
+import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
   AddCaptionClipCommand,
   AddCursorRangeCommand,
+  AddZoomSegmentCommand,
   AddMarkerCommand,
   AddTrackCommand,
   CommandRecord,
   DeleteClipCommand,
   DeleteClipsCommand,
   DeleteCursorRangeCommand,
+  DeleteZoomSegmentCommand,
   DeleteMarkerCommand,
   DeleteRangeCommand,
   DeleteTrackCommand,
   MoveClipCommand,
   MoveClipsCommand,
   ResizeCursorRangeCommand,
+  ResizeZoomSegmentCommand,
   RippleDeleteClipCommand,
   RippleDeleteClipsCommand,
   RippleDeleteRangeCommand,
   SplitClipCommand,
   SplitCursorRangeCommand,
+  SplitZoomSegmentCommand,
   TrimClipCommand,
   TrimTimelineEndsCommand,
   UpdateCanvasCommand,
   UpdateClipAudioCommand,
   UpdateCursorRangeCommand,
+  UpdateZoomSegmentCommand,
   UpdateClipTransformCommand,
   UpdateCursorSettingsCommand,
   UpdateMarkerCommand,
@@ -142,6 +150,41 @@ function findCursorRange(
     if (range) return { track, range }
   }
   return null
+}
+
+function findZoomSegment(state: TimelineState, segmentId: string): ManualZoomSegment | null {
+  return getManualZoomSegments(state).find((segment) => segment.id === segmentId) ?? null
+}
+
+function validateZoomSegments(segments: ManualZoomSegment[]): CommandResult<ManualZoomSegment[]> {
+  const sorted = [...segments].sort(
+    (left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id),
+  )
+  for (let index = 0; index < sorted.length; index++) {
+    const segment = sorted[index]
+    if (segment.durationMs <= 0) {
+      return {
+        ok: false,
+        error: editorError("invalid_zoom_segment", "Zoom segment must have a duration"),
+      }
+    }
+    if (index > 0) {
+      const previous = sorted[index - 1]
+      if (previous.startMs + previous.durationMs > segment.startMs) {
+        return {
+          ok: false,
+          error: editorError("zoom_segment_overlap", "Zoom segments cannot overlap"),
+        }
+      }
+    }
+    if (segment.target.width <= 0 || segment.target.height <= 0) {
+      return {
+        ok: false,
+        error: editorError("invalid_zoom_target", "Zoom target must have positive dimensions"),
+      }
+    }
+  }
+  return { ok: true, value: sorted }
 }
 
 function validateCursorRanges(track: TimelineTrack): CommandResult<TimelineTrack> {
@@ -358,6 +401,61 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "add-zoom-segment": {
+      if (command.startMs >= command.endMs) {
+        return {
+          ok: false,
+          error: editorError("invalid_zoom_segment", "Zoom segment end must be greater than start"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "split-zoom-segment":
+    case "resize-zoom-segment":
+    case "update-zoom-segment":
+    case "delete-zoom-segment": {
+      const segment = findZoomSegment(state, command.segmentId)
+      if (!segment) {
+        return { ok: false, error: editorError("zoom_segment_not_found", "Zoom segment not found") }
+      }
+      if (segment.locked) {
+        const onlyUnlock =
+          command.kind === "update-zoom-segment" &&
+          command.locked === false &&
+          command.startMs === undefined &&
+          command.endMs === undefined &&
+          command.target === undefined &&
+          command.scale === undefined &&
+          command.easing === undefined &&
+          command.enabled === undefined
+        if (!onlyUnlock) {
+          return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
+        }
+      }
+      if (command.kind === "split-zoom-segment") {
+        const end = segment.startMs + segment.durationMs
+        if (command.splitTimeMs <= segment.startMs || command.splitTimeMs >= end) {
+          return {
+            ok: false,
+            error: editorError("invalid_zoom_split", "Split point is outside zoom segment"),
+          }
+        }
+      }
+      if (command.kind === "resize-zoom-segment" || command.kind === "update-zoom-segment") {
+        const nextStart = command.startMs ?? segment.startMs
+        const nextEnd = command.endMs ?? segment.startMs + segment.durationMs
+        if (nextStart >= nextEnd) {
+          return {
+            ok: false,
+            error: editorError(
+              "invalid_zoom_segment",
+              "Zoom segment end must be greater than start",
+            ),
+          }
+        }
+      }
+      return { ok: true, value: undefined }
+    }
     case "update-canvas":
       return { ok: true, value: undefined }
     case "update-cursor-settings":
@@ -436,6 +534,16 @@ export function applyCommand(
       return applyUpdateCursorRange(state, command)
     case "delete-cursor-range":
       return applyDeleteCursorRange(state, command)
+    case "add-zoom-segment":
+      return applyAddZoomSegment(state, command)
+    case "update-zoom-segment":
+      return applyUpdateZoomSegment(state, command)
+    case "split-zoom-segment":
+      return applySplitZoomSegment(state, command)
+    case "resize-zoom-segment":
+      return applyResizeZoomSegment(state, command)
+    case "delete-zoom-segment":
+      return applyDeleteZoomSegment(state, command)
     case "trim-timeline-ends":
       return applyTrimTimelineEnds(state, command)
     default:
@@ -827,6 +935,43 @@ function deleteRangeFromTrack(
   }
 }
 
+function zoomSegmentsAfterRange(
+  segments: ManualZoomSegment[],
+  deleteStartMs: number,
+  deleteEndMs: number,
+  ripple: boolean,
+): ManualZoomSegment[] {
+  return segments.flatMap((segment) => {
+    if (segment.locked) return [segment]
+    const segmentEndMs = segment.startMs + segment.durationMs
+    if (segmentEndMs <= deleteStartMs) return [segment]
+    if (segment.startMs >= deleteEndMs) {
+      return ripple
+        ? [{ ...segment, startMs: segment.startMs - (deleteEndMs - deleteStartMs) }]
+        : [segment]
+    }
+
+    const leftEndMs = Math.min(deleteStartMs, segmentEndMs)
+    const rightStartMs = Math.max(deleteEndMs, segment.startMs)
+    const next: ManualZoomSegment[] = []
+    if (segment.startMs < deleteStartMs && leftEndMs > segment.startMs) {
+      next.push({ ...segment, durationMs: leftEndMs - segment.startMs })
+    }
+    if (segmentEndMs > deleteEndMs && segmentEndMs > rightStartMs) {
+      next.push({
+        ...segment,
+        id:
+          next.length > 0
+            ? `${segment.id}:range:${deleteStartMs}:${deleteEndMs}:right`
+            : segment.id,
+        startMs: ripple ? deleteStartMs : rightStartMs,
+        durationMs: segmentEndMs - rightStartMs,
+      })
+    }
+    return next
+  })
+}
+
 function deleteMarkersInRange(
   markers: TimelineState["markers"],
   deleteStartMs: number,
@@ -862,7 +1007,13 @@ function applyDeleteRangeInternal(
   const markers = ripple
     ? shiftMarkersAfterRipple(state.markers, deleteStartMs, deleteEndMs)
     : deleteMarkersInRange(state.markers, deleteStartMs, deleteEndMs)
-  return { ...state, tracks, markers, updatedAt: now() }
+  const zoomSegments = zoomSegmentsAfterRange(
+    getManualZoomSegments(state),
+    deleteStartMs,
+    deleteEndMs,
+    ripple,
+  )
+  return { ...state, tracks, markers, zoomSegments, updatedAt: now() }
 }
 
 function applyDeleteClips(
@@ -989,7 +1140,42 @@ function applyUpdateClipAudio(
   if (next.fadeInMs < 0 || next.fadeOutMs < 0) {
     return { ok: false, error: editorError("invalid_fade", "Audio fades cannot be negative") }
   }
+  if (next.fadeInMs + next.fadeOutMs > next.durationMs) {
+    return {
+      ok: false,
+      error: editorError("invalid_fade", "Audio fades cannot exceed the clip duration"),
+    }
+  }
   return { ok: true, value: replaceClipInState(state, track.id, command.clipId, next) }
+}
+
+function normalizeClipTransform(
+  transform: ClipTransform,
+  canvas: TimelineState["canvas"],
+): ClipTransform {
+  const width = Math.min(Math.max(0, transform.width), canvas.width)
+  const height = Math.min(Math.max(0, transform.height), canvas.height)
+  return {
+    ...transform,
+    x: Math.min(Math.max(0, transform.x), Math.max(0, canvas.width - width)),
+    y: Math.min(Math.max(0, transform.y), Math.max(0, canvas.height - height)),
+    width,
+    height,
+    opacity: Math.min(1, Math.max(0, transform.opacity)),
+    visible: transform.visible ?? true,
+    borderWidth: Math.max(0, transform.borderWidth ?? 0),
+    borderOpacity: Math.min(1, Math.max(0, transform.borderOpacity ?? 1)),
+    shadowBlur: Math.max(0, transform.shadowBlur ?? 0),
+    crop: transform.crop
+      ? {
+          ...transform.crop,
+          x: Math.max(0, transform.crop.x),
+          y: Math.max(0, transform.crop.y),
+          width: Math.max(1, transform.crop.width),
+          height: Math.max(1, transform.crop.height),
+        }
+      : undefined,
+  }
 }
 
 function applyUpdateClipTransform(
@@ -1010,7 +1196,10 @@ function applyUpdateClipTransform(
       error: editorError("invalid_clip", "Only camera clips support transforms"),
     }
   }
-  const next: CameraClip = { ...clip, transform: command.transform as ClipTransform }
+  const next: CameraClip = {
+    ...clip,
+    transform: normalizeClipTransform(command.transform, state.canvas),
+  }
   return { ok: true, value: replaceClipInState(state, track.id, command.clipId, next) }
 }
 
@@ -1056,9 +1245,27 @@ function applyUpdateCanvas(
   state: TimelineState,
   command: UpdateCanvasCommand,
 ): CommandResult<TimelineState> {
+  const nextCanvas = { ...state.canvas, ...command.canvas }
+  if (nextCanvas.width <= 0 || nextCanvas.height <= 0 || nextCanvas.fps <= 0) {
+    return {
+      ok: false,
+      error: editorError("invalid_canvas", "Canvas dimensions and frame rate must be positive"),
+    }
+  }
+  if (nextCanvas.aspectRatio && nextCanvas.aspectRatio !== "custom") {
+    const size = canvasSizeForAspectRatio(nextCanvas.aspectRatio, nextCanvas)
+    nextCanvas.width = size.width
+    nextCanvas.height = size.height
+  }
+  if (nextCanvas.padding * 2 >= Math.min(nextCanvas.width, nextCanvas.height)) {
+    return {
+      ok: false,
+      error: editorError("invalid_canvas", "Canvas padding leaves no content area"),
+    }
+  }
   return {
     ok: true,
-    value: { ...state, canvas: { ...state.canvas, ...command.canvas }, updatedAt: now() },
+    value: { ...state, canvas: nextCanvas, updatedAt: now() },
   }
 }
 
@@ -1209,6 +1416,122 @@ function applyDeleteCursorRange(
   return { ok: true, value: updateTrackInState(state, found.track.id, nextTrack) }
 }
 
+function applyAddZoomSegment(
+  state: TimelineState,
+  command: AddZoomSegmentCommand,
+): CommandResult<TimelineState> {
+  const segment: ManualZoomSegment = {
+    id: command.segmentId ?? `zoom:${command.startMs}:${command.endMs}`,
+    startMs: command.startMs,
+    durationMs: command.endMs - command.startMs,
+    target: clampZoomTarget(command.target, state.canvas),
+    scale: command.scale ?? 1,
+    easing: command.easing ?? "ease-in-out",
+    enabled: true,
+    locked: false,
+  }
+  const segments = [...getManualZoomSegments(state), segment]
+  const valid = validateZoomSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, zoomSegments: valid.value, updatedAt: now() } }
+}
+
+function applyUpdateZoomSegment(
+  state: TimelineState,
+  command: UpdateZoomSegmentCommand,
+): CommandResult<TimelineState> {
+  const current = findZoomSegment(state, command.segmentId)
+  if (!current) {
+    return { ok: false, error: editorError("zoom_segment_not_found", "Zoom segment not found") }
+  }
+  const startMs = command.startMs ?? current.startMs
+  const endMs = command.endMs ?? current.startMs + current.durationMs
+  const next: ManualZoomSegment = {
+    ...current,
+    startMs,
+    durationMs: endMs - startMs,
+    target: command.target
+      ? clampZoomTarget({ ...current.target, ...command.target }, state.canvas)
+      : current.target,
+    scale: command.scale ?? current.scale,
+    easing: command.easing ?? current.easing,
+    enabled: command.enabled ?? current.enabled,
+    locked: command.locked ?? current.locked,
+  }
+  const segments = getManualZoomSegments(state).map((segment) =>
+    segment.id === command.segmentId ? next : segment,
+  )
+  const valid = validateZoomSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, zoomSegments: valid.value, updatedAt: now() } }
+}
+
+function applySplitZoomSegment(
+  state: TimelineState,
+  command: SplitZoomSegmentCommand,
+): CommandResult<TimelineState> {
+  const current = findZoomSegment(state, command.segmentId)
+  if (!current) {
+    return { ok: false, error: editorError("zoom_segment_not_found", "Zoom segment not found") }
+  }
+  const leftDuration = command.splitTimeMs - current.startMs
+  const left: ManualZoomSegment = {
+    ...current,
+    id: command.leftSegmentId ?? `${current.id}:left:${command.splitTimeMs}`,
+    durationMs: leftDuration,
+  }
+  const right: ManualZoomSegment = {
+    ...current,
+    id: command.rightSegmentId ?? `${current.id}:right:${command.splitTimeMs}`,
+    startMs: command.splitTimeMs,
+    durationMs: current.durationMs - leftDuration,
+  }
+  const segments = getManualZoomSegments(state)
+    .filter((segment) => segment.id !== command.segmentId)
+    .concat(left, right)
+  const valid = validateZoomSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, zoomSegments: valid.value, updatedAt: now() } }
+}
+
+function applyResizeZoomSegment(
+  state: TimelineState,
+  command: ResizeZoomSegmentCommand,
+): CommandResult<TimelineState> {
+  const current = findZoomSegment(state, command.segmentId)
+  if (!current) {
+    return { ok: false, error: editorError("zoom_segment_not_found", "Zoom segment not found") }
+  }
+  const startMs = command.startMs ?? current.startMs
+  const endMs = command.endMs ?? current.startMs + current.durationMs
+  const next = { ...current, startMs, durationMs: endMs - startMs }
+  const segments = getManualZoomSegments(state).map((segment) =>
+    segment.id === command.segmentId ? next : segment,
+  )
+  const valid = validateZoomSegments(segments)
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, zoomSegments: valid.value, updatedAt: now() } }
+}
+
+function applyDeleteZoomSegment(
+  state: TimelineState,
+  command: DeleteZoomSegmentCommand,
+): CommandResult<TimelineState> {
+  if (!findZoomSegment(state, command.segmentId)) {
+    return { ok: false, error: editorError("zoom_segment_not_found", "Zoom segment not found") }
+  }
+  return {
+    ok: true,
+    value: {
+      ...state,
+      zoomSegments: getManualZoomSegments(state).filter(
+        (segment) => segment.id !== command.segmentId,
+      ),
+      updatedAt: now(),
+    },
+  }
+}
+
 function applyTrimTimelineEnds(
   state: TimelineState,
   command: TrimTimelineEndsCommand,
@@ -1245,10 +1568,24 @@ function applyTrimTimelineEnds(
   const markers = state.markers
     .filter((m) => m.timeMs >= command.startMs && m.timeMs <= command.endMs)
     .map((m) => ({ ...m, timeMs: m.timeMs - command.startMs }))
+  const zoomSegments = getManualZoomSegments(state)
+    .map((segment) => {
+      if (segment.locked) return segment
+      const segmentEnd = segment.startMs + segment.durationMs
+      if (segmentEnd <= command.startMs || segment.startMs >= command.endMs) return null
+      const nextStart = Math.max(segment.startMs, command.startMs)
+      const nextEnd = Math.min(segmentEnd, command.endMs)
+      return {
+        ...segment,
+        startMs: nextStart - command.startMs,
+        durationMs: nextEnd - nextStart,
+      }
+    })
+    .filter((segment): segment is ManualZoomSegment => segment !== null)
 
   return {
     ok: true,
-    value: { ...state, tracks, markers, updatedAt: now() },
+    value: { ...state, tracks, markers, zoomSegments, updatedAt: now() },
   }
 }
 
@@ -1507,6 +1844,87 @@ export function createDeleteCursorRangeCommand(rangeId: string): CommandRecord {
   }
 }
 
+export function createAddZoomSegmentCommand(
+  startMs: number,
+  endMs: number,
+  target: ManualZoomSegment["target"],
+  options: {
+    segmentId?: string
+    scale?: number
+    easing?: ManualZoomSegment["easing"]
+  } = {},
+): CommandRecord {
+  return {
+    kind: "add-zoom-segment",
+    name: "Add zoom segment",
+    segmentId: options.segmentId ?? crypto.randomUUID(),
+    startMs,
+    endMs,
+    target,
+    scale: options.scale,
+    easing: options.easing,
+  }
+}
+
+export function createUpdateZoomSegmentCommand(
+  segmentId: string,
+  update: {
+    startMs?: number
+    endMs?: number
+    target?: Partial<ManualZoomSegment["target"]>
+    scale?: number
+    easing?: ManualZoomSegment["easing"]
+    enabled?: boolean
+    locked?: boolean
+  },
+): CommandRecord {
+  return {
+    kind: "update-zoom-segment",
+    name: "Update zoom segment",
+    segmentId,
+    ...update,
+    coalesce: true,
+    coalesceKey: `zoom:${segmentId}`,
+  }
+}
+
+export function createSplitZoomSegmentCommand(
+  segmentId: string,
+  splitTimeMs: number,
+): CommandRecord {
+  return {
+    kind: "split-zoom-segment",
+    name: "Split zoom segment",
+    segmentId,
+    splitTimeMs,
+    leftSegmentId: crypto.randomUUID(),
+    rightSegmentId: crypto.randomUUID(),
+  }
+}
+
+export function createResizeZoomSegmentCommand(
+  segmentId: string,
+  update: { startMs?: number; endMs?: number },
+  options: { coalesceKey?: string } = {},
+): CommandRecord {
+  return {
+    kind: "resize-zoom-segment",
+    name: "Resize zoom segment",
+    segmentId,
+    ...update,
+    coalesce: true,
+    coalesceKey: options.coalesceKey ?? `zoom-resize:${segmentId}`,
+  }
+}
+
+export function createDeleteZoomSegmentCommand(segmentId: string): CommandRecord {
+  return {
+    kind: "delete-zoom-segment",
+    name: "Delete zoom segment",
+    segmentId,
+  }
+}
+
 export function createUpdateTrackCommand(trackId: string, update: TrackUpdate): CommandRecord {
   const coalesce =
     update.volume !== undefined &&
@@ -1572,17 +1990,7 @@ export function createAddCaptionClipCommand(
   }
 }
 
-export function createUpdateCanvasCommand(
-  canvas: Partial<{
-    width: number
-    height: number
-    fps: number
-    background: string
-    padding: number
-    borderRadius: number
-    shadow: boolean
-  }>,
-): CommandRecord {
+export function createUpdateCanvasCommand(canvas: Partial<TimelineCanvas>): CommandRecord {
   return {
     kind: "update-canvas",
     name: "Update canvas",

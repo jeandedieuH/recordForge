@@ -6,7 +6,7 @@ import { z } from "zod"
 // project file, but it is serialized to the Zustand view store so the UI can
 // render the inspector and timeline highlights consistently.
 
-export const timelineSelectionKindSchema = z.enum(["clip", "range", "marker"])
+export const timelineSelectionKindSchema = z.enum(["clip", "range", "marker", "zoom"])
 export type TimelineSelectionKind = z.infer<typeof timelineSelectionKindSchema>
 
 export const timelineSelectionSchema = z.discriminatedUnion("kind", [
@@ -27,6 +27,10 @@ export const timelineSelectionSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("marker"),
     markerId: z.string(),
+  }),
+  z.object({
+    kind: z.literal("zoom"),
+    segmentId: z.string(),
   }),
 ])
 

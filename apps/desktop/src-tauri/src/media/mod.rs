@@ -3,6 +3,7 @@ pub mod disk;
 pub mod probe;
 pub mod proxy;
 pub mod thumbnails;
+pub mod video;
 pub mod waveform;
 
 use regex::Regex;

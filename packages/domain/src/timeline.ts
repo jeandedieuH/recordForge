@@ -1,6 +1,7 @@
 import { defaultCursorSettings, defaultProjectExportSettings } from "@recordforge/contracts"
 import type {
   AudioClip,
+  AudioRole,
   CameraClip,
   CursorEffectClip,
   LibraryRecording,
@@ -138,6 +139,17 @@ export function ensureCursorEffectTrack(
   return { ...state, tracks: [...state.tracks, cursorTrack] }
 }
 
+function audioStreamRole(stream: MediaStream | undefined, index: number): AudioRole {
+  const title = stream?.title?.toLowerCase() ?? ""
+  if (title.includes("microphone") || title.includes("mic")) return "microphone"
+  if (title.includes("system") || title.includes("desktop") || title.includes("loopback")) {
+    return "system_audio"
+  }
+  if (index === 0) return "microphone"
+  if (index === 1) return "system_audio"
+  return "other"
+}
+
 function audioStreamName(stream: MediaStream | undefined, index: number): string {
   const title = stream?.title?.trim()
   if (title && title !== "SoundHandler") return title
@@ -150,6 +162,7 @@ function createAudioClip(
   recordingId: string,
   stream: MediaStream | undefined,
   duration: number,
+  streamIndex: number,
 ): AudioClip | null {
   const startMs = Math.min(stream?.startMs ?? 0, duration)
   const availableDuration = stream?.durationMs ?? Math.max(0, duration - startMs)
@@ -161,6 +174,7 @@ function createAudioClip(
     kind: "audio",
     assetId: recordingId,
     streamIndex: stream?.index,
+    role: audioStreamRole(stream, streamIndex),
     startMs,
     durationMs: clipDuration,
     sourceInMs: 0,
@@ -204,7 +218,7 @@ export function createTimelineFromRecording(
 
   // Each multiplexed capture stream gets its own aligned track and clip.
   audioSources.forEach((stream, index) => {
-    const clip = createAudioClip(recording.id, stream, duration)
+    const clip = createAudioClip(recording.id, stream, duration, index)
     if (clip) tracks.push(makeTrack("audio", audioStreamName(stream, index), [clip]))
   })
 
@@ -307,6 +321,25 @@ function createScreenAsset(recording: LibraryRecording, metadata: MediaMetadata)
   }
 }
 
+function createStreamAsset(
+  recording: LibraryRecording,
+  stream: MediaStream,
+  role: ProjectAsset["role"],
+): ProjectAsset {
+  return {
+    id: `${recording.id}:${role}:${stream.index}`,
+    role,
+    path: sourceFileName(recording),
+    status: "available",
+    durationMs: stream.durationMs ?? 0,
+    width: stream.width,
+    height: stream.height,
+    fps: stream.fps,
+    hasAudio: stream.kind === "audio",
+    streamIndex: stream.index,
+  }
+}
+
 // Build a durable project from a recording and its media metadata.
 // This is the single entry point for creating a project the first time a recording is opened.
 export function createProjectFromRecording(
@@ -319,15 +352,36 @@ export function createProjectFromRecording(
   const projectId = crypto.randomUUID()
   const baseTimeline = createTimelineFromRecording(recording, metadata, name, projectId)
 
-  // In the bootstrap project every clip references the single screen asset.
-  // This preserves the existing render-plan contract while the asset registry is in place.
+  // Bootstrap projects register semantic stream assets while keeping every
+  // asset path relative to the recording session for safe export resolution.
   const screenAsset = createScreenAsset(recording, metadata)
   const timeline = cursorTelemetryAsset
     ? ensureCursorEffectTrack(baseTimeline, cursorTelemetryAsset.id)
     : baseTimeline
+  const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
+  const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
+  const streamAssets = [
+    ...audioStreams.map((stream, index) => {
+      const audioRole = audioStreamRole(stream, index)
+      const assetRole: ProjectAsset["role"] =
+        audioRole === "microphone"
+          ? "microphone"
+          : audioRole === "system_audio"
+            ? "system_audio"
+            : "music"
+      return createStreamAsset(recording, stream, assetRole)
+    }),
+    ...(videoStreams[1] ? [createStreamAsset(recording, videoStreams[1], "webcam")] : []),
+  ]
+  const streamAssetByIndex = new Map(streamAssets.map((asset) => [asset.streamIndex, asset]))
   for (const track of timeline.tracks) {
     for (const clip of track.clips) {
-      clip.assetId = screenAsset.id
+      if (clip.kind === "cursor-effect") continue
+      const streamAsset =
+        "streamIndex" in clip && clip.streamIndex !== undefined
+          ? streamAssetByIndex.get(clip.streamIndex)
+          : undefined
+      clip.assetId = streamAsset?.id ?? screenAsset.id
     }
   }
 
@@ -338,9 +392,10 @@ export function createProjectFromRecording(
     name: timeline.name,
     recordingId: recording.id,
     canvas: timeline.canvas,
-    assets: [screenAsset, ...(cursorTelemetryAsset ? [cursorTelemetryAsset] : [])],
+    assets: [screenAsset, ...streamAssets, ...(cursorTelemetryAsset ? [cursorTelemetryAsset] : [])],
     tracks: timeline.tracks,
     markers: timeline.markers,
+    zoomSegments: timeline.zoomSegments ?? [],
     exportSettings: exportSettings ?? defaultProjectExportSettings,
     createdAt: timeline.createdAt,
     updatedAt: timeline.updatedAt,
@@ -358,6 +413,7 @@ export function projectToTimeline(project: Project): TimelineState {
     canvas: project.canvas,
     tracks: project.tracks,
     markers: project.markers,
+    zoomSegments: project.zoomSegments ?? [],
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   }
@@ -375,6 +431,7 @@ export function timelineToProject(timeline: TimelineState, base: Project): Proje
     canvas: timeline.canvas,
     tracks: timeline.tracks,
     markers: timeline.markers,
+    zoomSegments: timeline.zoomSegments ?? [],
     exportSettings: base.exportSettings ?? defaultProjectExportSettings,
     updatedAt: new Date().toISOString(),
   }

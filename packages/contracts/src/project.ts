@@ -2,7 +2,12 @@ import { z } from "zod"
 import { cursorDpiScaleSchema, cursorTelemetryTimebaseSchema } from "./cursor"
 import { boundsSchema } from "./recording"
 import { projectAssetRoleSchema } from "./media"
-import { timelineCanvasSchema, timelineMarkerSchema, timelineTrackSchema } from "./timeline"
+import {
+  manualZoomSegmentSchema,
+  timelineCanvasSchema,
+  timelineMarkerSchema,
+  timelineTrackSchema,
+} from "./timeline"
 
 // Canvas settings are stored in the on-disk project file under the same schema.
 export const canvasSettingsSchema = timelineCanvasSchema
@@ -68,6 +73,9 @@ export const projectSchema = z.object({
   assets: z.array(projectAssetSchema),
   tracks: z.array(timelineTrackSchema),
   markers: z.array(timelineMarkerSchema),
+  // Optional for projects created before Phase 6. New edits persist the
+  // collection so zoom behavior survives reopen.
+  zoomSegments: z.array(manualZoomSegmentSchema).optional(),
   exportSettings: projectExportSettingsSchema,
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),

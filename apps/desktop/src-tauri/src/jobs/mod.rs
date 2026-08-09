@@ -9,6 +9,7 @@ use crate::database::library::get_recording;
 use crate::database::media as media_db;
 use crate::database::media::{
     DerivativeFile, MediaAudioTrackOutput, MediaJob, MediaJobKind, MediaJobOutputs,
+    MediaVideoTrackOutput,
 };
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
@@ -17,9 +18,10 @@ use crate::media::disk::{available_space, derivative_dir, estimate_derivative_si
 use crate::media::probe::probe_media;
 use crate::media::proxy::generate_proxy;
 use crate::media::thumbnails::generate_thumbnails;
+use crate::media::video::extract_video_track;
 use crate::media::waveform::generate_waveform_for_stream;
 
-const PREPARE_OUTPUT_VERSION: u32 = 2;
+const PREPARE_OUTPUT_VERSION: u32 = 3;
 
 /// Options for a prepare job.
 #[derive(Debug, Clone)]
@@ -350,6 +352,48 @@ impl Worker {
 
         if cancel.load(Ordering::Relaxed) {
             return self.finish_cancelled();
+        }
+
+        // Stage: extract secondary video streams so the browser preview can
+        // render camera clips without pretending the primary screen stream is a webcam.
+        let secondary_video_streams = metadata
+            .streams
+            .iter()
+            .filter(|stream| stream.kind == "video")
+            .skip(1)
+            .collect::<Vec<_>>();
+        if !secondary_video_streams.is_empty() {
+            self.set_progress(0.46, "camera tracks")?;
+            let video_dir = derivative_dir(&work_dir, "video");
+            for stream in secondary_video_streams {
+                if cancel.load(Ordering::Relaxed) {
+                    return self.finish_cancelled();
+                }
+                let title = stream
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("Camera {}", stream.index));
+                let video_path = video_dir.join(format!("stream_{:03}.mp4", stream.index));
+                if self.options.force || !video_path.is_file() {
+                    if let Err(error) = extract_video_track(
+                        &self.ffmpeg_path.to_string_lossy(),
+                        &input_path,
+                        stream.index,
+                        &video_path,
+                        cancel.clone(),
+                    ) {
+                        return self.fail(&format!("video track {}: {error}", stream.index));
+                    }
+                }
+                self.record_derivative(&video_path.to_string_lossy(), "video")?;
+                outputs.video_tracks.push(MediaVideoTrackOutput {
+                    stream_index: stream.index,
+                    title,
+                    video_path: video_path.to_string_lossy().to_string(),
+                    width: stream.width,
+                    height: stream.height,
+                });
+            }
         }
 
         // Stage: thumbnail sprite.

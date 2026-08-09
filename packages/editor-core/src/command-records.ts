@@ -8,6 +8,8 @@ import {
   timelineCanvasSchema,
   timelineTrackKindSchema,
   trackUpdateSchema,
+  zoomEasingSchema,
+  zoomTargetSchema,
 } from "@recordforge/contracts"
 
 // Serializable, discriminated command records for the timeline command engine.
@@ -262,6 +264,58 @@ export const deleteCursorRangeCommandSchema = commandMetaSchema.extend({
 
 export type DeleteCursorRangeCommand = z.infer<typeof deleteCursorRangeCommandSchema>
 
+export const addZoomSegmentCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-zoom-segment"),
+  segmentId: z.string().optional(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  target: zoomTargetSchema,
+  scale: z.number().min(1).max(8).optional(),
+  easing: zoomEasingSchema.optional(),
+})
+
+export type AddZoomSegmentCommand = z.infer<typeof addZoomSegmentCommandSchema>
+
+export const updateZoomSegmentCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-zoom-segment"),
+  segmentId: z.string(),
+  startMs: z.number().int().min(0).optional(),
+  endMs: z.number().int().positive().optional(),
+  target: zoomTargetSchema.partial().optional(),
+  scale: z.number().min(1).max(8).optional(),
+  easing: zoomEasingSchema.optional(),
+  enabled: z.boolean().optional(),
+  locked: z.boolean().optional(),
+})
+
+export type UpdateZoomSegmentCommand = z.infer<typeof updateZoomSegmentCommandSchema>
+
+export const splitZoomSegmentCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("split-zoom-segment"),
+  segmentId: z.string(),
+  splitTimeMs: z.number().int().min(0),
+  leftSegmentId: z.string().optional(),
+  rightSegmentId: z.string().optional(),
+})
+
+export type SplitZoomSegmentCommand = z.infer<typeof splitZoomSegmentCommandSchema>
+
+export const resizeZoomSegmentCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("resize-zoom-segment"),
+  segmentId: z.string(),
+  startMs: z.number().int().min(0).optional(),
+  endMs: z.number().int().positive().optional(),
+})
+
+export type ResizeZoomSegmentCommand = z.infer<typeof resizeZoomSegmentCommandSchema>
+
+export const deleteZoomSegmentCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-zoom-segment"),
+  segmentId: z.string(),
+})
+
+export type DeleteZoomSegmentCommand = z.infer<typeof deleteZoomSegmentCommandSchema>
+
 export const trimTimelineEndsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("trim-timeline-ends"),
   startMs: z.number().int().min(0),
@@ -297,6 +351,11 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   resizeCursorRangeCommandSchema,
   updateCursorRangeCommandSchema,
   deleteCursorRangeCommandSchema,
+  addZoomSegmentCommandSchema,
+  updateZoomSegmentCommandSchema,
+  splitZoomSegmentCommandSchema,
+  resizeZoomSegmentCommandSchema,
+  deleteZoomSegmentCommandSchema,
   trimTimelineEndsCommandSchema,
 ])
 

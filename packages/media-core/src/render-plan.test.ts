@@ -245,6 +245,113 @@ describe("render-plan", () => {
     ])
   })
 
+  it("plans camera transforms, crop, visibility ranges, and manual zoom segments", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "camera-clip",
+          kind: "camera",
+          assetId: "rec-1",
+          streamIndex: 2,
+          startMs: 2_000,
+          durationMs: 5_000,
+          sourceInMs: 2_000,
+          sourceOutMs: 7_000,
+          speed: 1,
+          transform: {
+            x: 1_800,
+            y: 1_000,
+            width: 480,
+            height: 320,
+            crop: { x: 10, y: 20, width: 640, height: 480 },
+            opacity: 0.8,
+            shape: "circle",
+            visible: false,
+            borderWidth: 4,
+            shadowEnabled: true,
+          },
+        },
+      ],
+    })
+    state.zoomSegments = [
+      {
+        id: "zoom-1",
+        startMs: 1_000,
+        durationMs: 3_000,
+        target: { x: -100, y: 100, width: 1_000, height: 700 },
+        scale: 1.5,
+        easing: "ease-out",
+        enabled: true,
+        locked: false,
+      },
+    ]
+
+    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.overlays[0]).toMatchObject({
+      streamIndex: 2,
+      outputStartMs: 2_000,
+      visible: false,
+      crop: { width: 640, height: 480 },
+      shape: "circle",
+    })
+    expect(plan.value.zoomSegments[0]).toMatchObject({
+      id: "zoom-1",
+      startMs: 1_000,
+      endMs: 4_000,
+      target: { x: 0, y: 100 },
+    })
+  })
+
+  it("carries audio fades and solo exclusion into the render plan", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "system-track",
+      kind: "audio",
+      name: "System Audio",
+      muted: false,
+      locked: false,
+      solo: true,
+      volume: 0.75,
+      clips: [
+        {
+          id: "system-clip",
+          kind: "audio",
+          assetId: "rec-1",
+          streamIndex: 2,
+          role: "system_audio",
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          volume: 0.5,
+          fadeInMs: 500,
+          fadeOutMs: 800,
+        },
+      ],
+    })
+    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.audioTracks).toHaveLength(1)
+    expect(plan.value.audioTracks[0]).toMatchObject({ role: "system_audio", muted: false })
+    expect(plan.value.audioTracks[0].segments[0]).toMatchObject({
+      volume: 0.375,
+      fadeInMs: 500,
+      fadeOutMs: 800,
+    })
+  })
+
   it("fails when the recording has no output path", () => {
     const badRecording = { ...recording, outputPath: undefined }
     const plan = buildRenderPlan({

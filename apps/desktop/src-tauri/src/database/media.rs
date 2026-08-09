@@ -95,6 +95,19 @@ pub struct MediaAudioTrackOutput {
     pub waveform_image_path: String,
 }
 
+/// One independently playable secondary video stream for camera preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaVideoTrackOutput {
+    pub stream_index: i32,
+    pub title: String,
+    pub video_path: String,
+    #[serde(default)]
+    pub width: Option<i32>,
+    #[serde(default)]
+    pub height: Option<i32>,
+}
+
 /// Output files produced by a media job.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +122,8 @@ pub struct MediaJobOutputs {
     pub waveform_image_path: Option<String>,
     #[serde(default)]
     pub audio_tracks: Vec<MediaAudioTrackOutput>,
+    #[serde(default)]
+    pub video_tracks: Vec<MediaVideoTrackOutput>,
     pub output_path: Option<String>,
 }
 
@@ -265,6 +280,11 @@ pub fn find_reusable_prepare_job(
                             && Path::new(&track.waveform_path).is_file()
                             && Path::new(&track.waveform_image_path).is_file()
                     })
+                    && job
+                        .outputs
+                        .video_tracks
+                        .iter()
+                        .all(|track| Path::new(&track.video_path).is_file())
             }
             MediaJobStatus::Failed | MediaJobStatus::Cancelled => false,
         }

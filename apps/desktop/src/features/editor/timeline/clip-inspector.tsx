@@ -4,19 +4,25 @@ import type {
   ClipTransform,
   CursorSettings,
   MediaMetadata,
+  ManualZoomSegment,
   TimelineClip,
   TimelineMarker,
   TimelineTrack,
 } from "@recordforge/contracts"
 import {
   createAddCursorRangeCommand,
+  createAddZoomSegmentCommand,
+  createSplitZoomSegmentCommand,
   createDeleteCursorRangeCommand,
+  createDeleteZoomSegmentCommand,
   createDeleteMarkerCommand,
   createUpdateCursorRangeCommand,
+  createUpdateZoomSegmentCommand,
   createUpdateMarkerCommand,
   createTrimClipCommand,
   createUpdateClipAudioCommand,
   createUpdateClipTransformCommand,
+  createUpdateCanvasCommand,
   createUpdateCursorSettingsCommand,
   createUpdateTrackCommand,
   getTotalDuration,
@@ -81,6 +87,9 @@ export function ClipInspector({
   const selectedRange = view.selection?.kind === "range" ? view.selection : null
   const cursorRange = clip?.kind === "cursor-effect" ? clip : null
   const cursorRangeSettings = cursorSettingsForEffect(cursorSettings, cursorRange)
+  const selectedZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
+  const selectedZoom =
+    timelineState?.zoomSegments?.find((segment) => segment.id === selectedZoomId) ?? null
 
   const [activeTab, setActiveTab] = useState<"clip" | "cursor">("cursor")
   const [sourceInText, setSourceInText] = useState(clip ? String(clip.sourceInMs) : "")
@@ -210,7 +219,96 @@ export function ClipInspector({
               Select a project to inspect its canvas.
             </p>
           )}
+          {timelineState ? (
+            <div className="mt-3 flex flex-col gap-3 border-t border-border pt-3">
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                  label="Width"
+                  value={timelineState.canvas.width}
+                  onChange={(value) => execute(createUpdateCanvasCommand({ width: value }))}
+                />
+                <NumberField
+                  label="Height"
+                  value={timelineState.canvas.height}
+                  onChange={(value) => execute(createUpdateCanvasCommand({ height: value }))}
+                />
+                <NumberField
+                  label="Padding"
+                  value={timelineState.canvas.padding}
+                  onChange={(value) => execute(createUpdateCanvasCommand({ padding: value }))}
+                />
+                <NumberField
+                  label="Corner radius"
+                  value={timelineState.canvas.borderRadius}
+                  onChange={(value) => execute(createUpdateCanvasCommand({ borderRadius: value }))}
+                />
+              </div>
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Aspect ratio</span>
+                <select
+                  aria-label="Canvas aspect ratio"
+                  value={timelineState.canvas.aspectRatio ?? "custom"}
+                  onChange={(event) =>
+                    execute(
+                      createUpdateCanvasCommand({
+                        aspectRatio: event.target.value as "16:9" | "1:1" | "9:16" | "custom",
+                      }),
+                    )
+                  }
+                  className="h-8 rounded-md border border-border bg-surface px-2 text-xs text-foreground"
+                >
+                  <option value="16:9">16:9</option>
+                  <option value="1:1">1:1</option>
+                  <option value="9:16">9:16</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Background</span>
+                <Input
+                  aria-label="Canvas background"
+                  type="color"
+                  value={timelineState.canvas.background}
+                  onChange={(event) =>
+                    execute(createUpdateCanvasCommand({ background: event.target.value }))
+                  }
+                  className="h-8 w-12 p-1"
+                />
+              </label>
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Canvas shadow</span>
+                <Switch
+                  checked={timelineState.canvas.shadow}
+                  onCheckedChange={(shadow) => execute(createUpdateCanvasCommand({ shadow }))}
+                />
+              </label>
+            </div>
+          ) : null}
         </div>
+        <ZoomInspector
+          segments={timelineState?.zoomSegments ?? []}
+          selectedSegment={selectedZoom}
+          timelineDuration={timelineState ? getTotalDuration(timelineState) : 0}
+          playheadMs={view.playheadMs}
+          onSelect={(segmentId) =>
+            useTimelineStore.getState().setSelection({ kind: "zoom", segmentId })
+          }
+          onAdd={(startMs, endMs, target) => {
+            const segmentId = crypto.randomUUID()
+            execute(createAddZoomSegmentCommand(startMs, endMs, target, { segmentId }))
+            useTimelineStore.getState().setSelection({ kind: "zoom", segmentId })
+          }}
+          onUpdate={(segmentId, update) =>
+            execute(createUpdateZoomSegmentCommand(segmentId, update))
+          }
+          onSplit={(segmentId, splitTimeMs) =>
+            execute(createSplitZoomSegmentCommand(segmentId, splitTimeMs))
+          }
+          onDelete={(segmentId) => {
+            execute(createDeleteZoomSegmentCommand(segmentId))
+            onClear()
+          }}
+        />
         <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
         {cursorAssetId ? (
           <Button variant="secondary" size="sm" onClick={addCursorRange}>
@@ -375,6 +473,24 @@ export function ClipInspector({
                 aria-label="Clip volume"
                 onValueChange={updateAudioVolume}
               />
+              {activeClip.kind === "audio" ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <NumberField
+                    label="Fade in (ms)"
+                    value={activeClip.fadeInMs}
+                    onChange={(value) =>
+                      execute(createUpdateClipAudioCommand(activeClip.id, { fadeInMs: value }))
+                    }
+                  />
+                  <NumberField
+                    label="Fade out (ms)"
+                    value={activeClip.fadeOutMs}
+                    onChange={(value) =>
+                      execute(createUpdateClipAudioCommand(activeClip.id, { fadeOutMs: value }))
+                    }
+                  />
+                </div>
+              ) : null}
               <p className="text-[11px] leading-relaxed text-subtle-foreground">
                 Track mute and volume controls apply independently to {track.name}.
               </p>
@@ -423,6 +539,94 @@ export function ClipInspector({
                 aria-label="Camera opacity"
                 onValueChange={(value) => updateTransform({ opacity: value[0] ?? 1 })}
               />
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Show camera</span>
+                <Switch
+                  checked={clip.transform.visible !== false}
+                  onCheckedChange={(visible) => updateTransform({ visible })}
+                />
+              </label>
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Shape</span>
+                <select
+                  aria-label="Camera shape"
+                  value={clip.transform.shape}
+                  onChange={(event) =>
+                    updateTransform({
+                      shape: event.target.value as ClipTransform["shape"],
+                    })
+                  }
+                  className="h-8 rounded-md border border-border bg-surface px-2 text-xs text-foreground"
+                >
+                  <option value="rectangle">Rectangle</option>
+                  <option value="rounded">Rounded</option>
+                  <option value="circle">Circle</option>
+                </select>
+              </label>
+              <div className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">
+                  Crop (source pixels)
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  {(["x", "y", "width", "height"] as const).map((field) => (
+                    <NumberField
+                      key={field}
+                      label={field}
+                      value={clip.transform.crop?.[field] ?? 0}
+                      onChange={(value) =>
+                        updateTransform({
+                          crop: {
+                            x: clip.transform.crop?.x ?? 0,
+                            y: clip.transform.crop?.y ?? 0,
+                            width: clip.transform.crop?.width ?? metadata?.width ?? 1,
+                            height: clip.transform.crop?.height ?? metadata?.height ?? 1,
+                            [field]: value,
+                          },
+                        })
+                      }
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                  label="Border width"
+                  value={clip.transform.borderWidth ?? 0}
+                  onChange={(value) => updateTransform({ borderWidth: value })}
+                />
+                <NumberField
+                  label="Border opacity"
+                  value={clip.transform.borderOpacity ?? 1}
+                  onChange={(value) => updateTransform({ borderOpacity: value })}
+                />
+                <NumberField
+                  label="Shadow blur"
+                  value={clip.transform.shadowBlur ?? 0}
+                  onChange={(value) =>
+                    updateTransform({ shadowBlur: value, shadowEnabled: value > 0 })
+                  }
+                />
+                <NumberField
+                  label="Shadow X"
+                  value={clip.transform.shadowOffsetX ?? 0}
+                  onChange={(value) => updateTransform({ shadowOffsetX: value })}
+                />
+                <NumberField
+                  label="Shadow Y"
+                  value={clip.transform.shadowOffsetY ?? 0}
+                  onChange={(value) => updateTransform({ shadowOffsetY: value })}
+                />
+              </div>
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Border color</span>
+                <Input
+                  aria-label="Camera border color"
+                  type="color"
+                  value={clip.transform.borderColor ?? "#ffffff"}
+                  onChange={(event) => updateTransform({ borderColor: event.target.value })}
+                  className="h-8 w-12 p-1"
+                />
+              </label>
               <div className="grid grid-cols-3 gap-2">
                 <PresetButton
                   active={clip.transform.x < 100}
@@ -471,6 +675,179 @@ export function ClipInspector({
         </div>
       )}
     </aside>
+  )
+}
+
+// Manual zoom ranges share the same command engine as media edits, so every
+// inspector change is undoable and the persisted project stays authoritative.
+function ZoomInspector({
+  segments,
+  selectedSegment,
+  timelineDuration,
+  playheadMs,
+  onSelect,
+  onAdd,
+  onUpdate,
+  onSplit,
+  onDelete,
+}: {
+  segments: ManualZoomSegment[]
+  selectedSegment: ManualZoomSegment | null
+  timelineDuration: number
+  playheadMs: number
+  onSelect: (segmentId: string) => void
+  onAdd: (startMs: number, endMs: number, target: ManualZoomSegment["target"]) => void
+  onUpdate: (
+    segmentId: string,
+    update: Parameters<typeof createUpdateZoomSegmentCommand>[1],
+  ) => void
+  onSplit: (segmentId: string, splitTimeMs: number) => void
+  onDelete: (segmentId: string) => void
+}) {
+  const defaultEnd = Math.min(timelineDuration || playheadMs + 1_000, playheadMs + 1_000)
+  return (
+    <div className="flex flex-col gap-2 border-b border-border pb-4">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+          Manual zoom
+        </span>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="h-7 text-[10px]"
+          disabled={defaultEnd <= playheadMs}
+          onClick={() =>
+            onAdd(playheadMs, defaultEnd, {
+              x: 0,
+              y: 0,
+              width: 640,
+              height: 360,
+            })
+          }
+        >
+          Add at playhead
+        </Button>
+      </div>
+      {segments.length === 0 ? (
+        <p className="text-[11px] leading-relaxed text-subtle-foreground">
+          Add a range to focus on a screen area. Targets are clamped to the canvas before preview
+          and export.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-1">
+          {segments.map((segment) => (
+            <button
+              key={segment.id}
+              type="button"
+              className={`flex items-center justify-between rounded-md border px-2 py-1.5 text-left text-[11px] ${
+                selectedSegment?.id === segment.id
+                  ? "border-primary/60 bg-primary/10"
+                  : "border-border bg-surface-dim"
+              }`}
+              onClick={() => onSelect(segment.id)}
+            >
+              <span className="truncate">
+                {formatInspectorTime(segment.startMs)} →{" "}
+                {formatInspectorTime(segment.startMs + segment.durationMs)}
+              </span>
+              <span className="font-mono text-subtle-foreground">{segment.scale.toFixed(1)}×</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {selectedSegment ? (
+        <div className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2">
+          <div className="grid grid-cols-2 gap-2">
+            <NumberField
+              label="Target X"
+              value={selectedSegment.target.x}
+              onChange={(value) => onUpdate(selectedSegment.id, { target: { x: value } })}
+            />
+            <NumberField
+              label="Target Y"
+              value={selectedSegment.target.y}
+              onChange={(value) => onUpdate(selectedSegment.id, { target: { y: value } })}
+            />
+            <NumberField
+              label="Target width"
+              value={selectedSegment.target.width}
+              onChange={(value) => onUpdate(selectedSegment.id, { target: { width: value } })}
+            />
+            <NumberField
+              label="Target height"
+              value={selectedSegment.target.height}
+              onChange={(value) => onUpdate(selectedSegment.id, { target: { height: value } })}
+            />
+            <NumberField
+              label="Start (ms)"
+              value={selectedSegment.startMs}
+              onChange={(value) => onUpdate(selectedSegment.id, { startMs: value })}
+            />
+            <NumberField
+              label="End (ms)"
+              value={selectedSegment.startMs + selectedSegment.durationMs}
+              onChange={(value) => onUpdate(selectedSegment.id, { endMs: value })}
+            />
+            <NumberField
+              label="Scale"
+              value={selectedSegment.scale}
+              onChange={(value) => onUpdate(selectedSegment.id, { scale: value })}
+            />
+          </div>
+          <label className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
+            <span>Easing</span>
+            <select
+              aria-label="Zoom easing"
+              value={selectedSegment.easing}
+              onChange={(event) =>
+                onUpdate(selectedSegment.id, {
+                  easing: event.target.value as ManualZoomSegment["easing"],
+                })
+              }
+              className="h-7 rounded border border-border bg-surface px-1 text-[11px] text-foreground"
+            >
+              <option value="linear">Linear</option>
+              <option value="ease-in">Ease in</option>
+              <option value="ease-out">Ease out</option>
+              <option value="ease-in-out">Ease in/out</option>
+            </select>
+          </label>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-[10px]"
+              disabled={selectedSegment.locked}
+              onClick={() =>
+                onSplit(
+                  selectedSegment.id,
+                  selectedSegment.startMs + Math.floor(selectedSegment.durationMs / 2),
+                )
+              }
+            >
+              Split
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-[10px]"
+              onClick={() => onUpdate(selectedSegment.id, { locked: !selectedSegment.locked })}
+            >
+              {selectedSegment.locked ? "Unlock" : "Lock"}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7 text-[10px]"
+              disabled={selectedSegment.locked}
+              onClick={() => onDelete(selectedSegment.id)}
+            >
+              Delete
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
   )
 }
 

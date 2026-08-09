@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import {
   type MediaJob,
+  type MediaVideoTrackOutput,
   type TimelineClip,
   type TimelineMarker,
   type TimelineTrack,
@@ -13,6 +14,7 @@ import {
   createDeleteMarkerCommand,
   createDeleteRangeCommand,
   createDeleteCursorRangeCommand,
+  createDeleteZoomSegmentCommand,
   createMoveClipCommand,
   createMoveClipsCommand,
   createRippleDeleteClipCommand,
@@ -23,8 +25,12 @@ import {
   createSplitCursorRangeCommand,
   createTrimClipCommand,
   createUpdateTrackCommand,
+  createUpdateClipTransformCommand,
   findClip,
+  findManualZoomAtTime,
   findNextTimelineClip,
+  resolveZoomTransform,
+  canvasShadowStyle,
   formatTime,
   sourceToTimelineForTrack,
   timelineToSourceForTrack,
@@ -70,6 +76,7 @@ import type {
   ThumbnailManifest,
 } from "../media/derivative-resources"
 import { AudioTrackPreview } from "./audio-track-preview"
+import { CameraPreview } from "./camera-preview"
 import { ClipInspector } from "./clip-inspector"
 import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
 import { CustomCursorOverlay } from "../cursor"
@@ -262,6 +269,17 @@ export function TimelineView({
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
   const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+  const activeZoomSegment = useMemo(
+    () => (timeline ? findManualZoomAtTime(timeline, view.playheadMs) : null),
+    [timeline, view.playheadMs],
+  )
+  const zoomTransform = useMemo(
+    () =>
+      activeZoomSegment && timeline
+        ? resolveZoomTransform(activeZoomSegment, view.playheadMs, timeline.canvas)
+        : null,
+    [activeZoomSegment, timeline, view.playheadMs],
+  )
   const activeCursorEffect = useMemo(
     () => (timeline ? findCursorEffectAtTime(timeline, view.playheadMs) : null),
     [timeline, view.playheadMs],
@@ -285,6 +303,18 @@ export function TimelineView({
     })
   }, [cursorClickSourceTimesMs, timeline])
   const audioTrackOutputs = activeJob?.outputs?.audioTracks ?? []
+  const cameraVideoOutputs: MediaVideoTrackOutput[] = activeJob?.outputs?.videoTracks ?? []
+  const cameraClips = useMemo(
+    () =>
+      timeline?.tracks
+        .filter((track) => track.kind === "camera" && !track.muted)
+        .flatMap((track) =>
+          track.clips.filter(
+            (clip): clip is Extract<TimelineClip, { kind: "camera" }> => clip.kind === "camera",
+          ),
+        ) ?? [],
+    [timeline],
+  )
   const isPreviewMuted =
     audioTrackOutputs.length > 0 || (timeline ? isTimelineAudioMuted(timeline) : false)
   const retryThumbnail = useCallback(() => {
@@ -594,6 +624,12 @@ export function TimelineView({
       setSelection(null)
       return
     }
+    if (selection.kind === "zoom") {
+      execute(createDeleteZoomSegmentCommand(selection.segmentId))
+      setSelection(null)
+      return
+    }
+    if (selection.kind !== "clip") return
     if (selection.clipIds.length > 1) {
       execute(
         ripple
@@ -916,84 +952,122 @@ export function TimelineView({
             ref={monitorRef}
             className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-3 shadow-e2"
           >
-            {mediaUrl && !mediaError ? (
-              <video
-                key={mediaUrl}
-                ref={videoRef}
-                src={mediaUrl}
-                className="max-h-full max-w-full rounded-lg object-contain"
-                muted={isPreviewMuted}
-                playsInline
-                onClick={togglePlay}
-                onError={() => {
-                  setVideoBounds(null)
-                  if (isUsingProxy && originalPath) {
-                    setUseOriginalMedia(true)
-                    setMediaError(false)
-                    return
+            <div
+              className="relative flex min-h-0 w-full max-w-full max-h-full items-center justify-center overflow-hidden"
+              style={{
+                aspectRatio: `${timeline.canvas.width} / ${timeline.canvas.height}`,
+                backgroundColor: timeline.canvas.background,
+                padding: timeline.canvas.padding,
+                borderRadius: timeline.canvas.borderRadius,
+                boxShadow: canvasShadowStyle(timeline.canvas),
+              }}
+            >
+              {mediaUrl && !mediaError ? (
+                <video
+                  key={mediaUrl}
+                  ref={videoRef}
+                  src={mediaUrl}
+                  className="size-full rounded-lg object-contain"
+                  style={
+                    zoomTransform
+                      ? {
+                          transform: `translate(${(zoomTransform.translateX / timeline.canvas.width) * 100}%, ${(zoomTransform.translateY / timeline.canvas.height) * 100}%) scale(${zoomTransform.scale})`,
+                          transformOrigin: "center",
+                        }
+                      : undefined
                   }
-                  setMediaError(true)
-                }}
-                onLoadedMetadata={() => {
-                  updateVideoBounds()
-                  syncVideoToTimeline(view.playheadMs)
-                  if (view.isPlaying) void startPlayback(view.playheadMs)
-                }}
-                onLoadedData={() => {
-                  setMediaError(false)
-                  updateVideoBounds()
-                }}
-                onTimeUpdate={(event) =>
-                  handleVideoTimeUpdate(event.currentTarget.currentTime * 1000)
-                }
-                onEnded={() => {
-                  if (timeline && playbackClipIdRef.current) {
-                    const clip = playbackClipIdRef.current
-                      ? findClip(timeline, playbackClipIdRef.current)?.clip
-                      : null
-                    const next = clip
-                      ? findNextTimelineClip(timeline, "screen", clip.startMs + clip.durationMs + 1)
-                      : null
-                    if (next) {
-                      seek(next.startMs)
-                      void startPlayback(next.startMs)
+                  muted={isPreviewMuted}
+                  playsInline
+                  onClick={togglePlay}
+                  onError={() => {
+                    setVideoBounds(null)
+                    if (isUsingProxy && originalPath) {
+                      setUseOriginalMedia(true)
+                      setMediaError(false)
                       return
                     }
+                    setMediaError(true)
+                  }}
+                  onLoadedMetadata={() => {
+                    updateVideoBounds()
+                    syncVideoToTimeline(view.playheadMs)
+                    if (view.isPlaying) void startPlayback(view.playheadMs)
+                  }}
+                  onLoadedData={() => {
+                    setMediaError(false)
+                    updateVideoBounds()
+                  }}
+                  onTimeUpdate={(event) =>
+                    handleVideoTimeUpdate(event.currentTarget.currentTime * 1000)
                   }
-                  pause()
-                  seek(view.durationMs)
-                }}
-              />
-            ) : (
-              <div className="flex flex-col items-center gap-3 text-center">
-                <div className="flex size-16 items-center justify-center rounded-2xl bg-surface-dim text-primary/50">
-                  <Monitor className="size-8" aria-hidden />
+                  onEnded={() => {
+                    if (timeline && playbackClipIdRef.current) {
+                      const clip = playbackClipIdRef.current
+                        ? findClip(timeline, playbackClipIdRef.current)?.clip
+                        : null
+                      const next = clip
+                        ? findNextTimelineClip(
+                            timeline,
+                            "screen",
+                            clip.startMs + clip.durationMs + 1,
+                          )
+                        : null
+                      if (next) {
+                        seek(next.startMs)
+                        void startPlayback(next.startMs)
+                        return
+                      }
+                    }
+                    pause()
+                    seek(view.durationMs)
+                  }}
+                />
+              ) : (
+                <div className="flex flex-col items-center gap-3 text-center">
+                  <div className="flex size-16 items-center justify-center rounded-2xl bg-surface-dim text-primary/50">
+                    <Monitor className="size-8" aria-hidden />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">
+                      {mediaError ? "Preview unavailable" : "No preview source"}
+                    </p>
+                    <p className="mt-1 text-xs text-subtle-foreground">
+                      {mediaError
+                        ? "The recording source could not be loaded. Timeline edits remain available."
+                        : "This recording does not have a playable media source yet."}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-sm font-semibold text-foreground">
-                    {mediaError ? "Preview unavailable" : "No preview source"}
-                  </p>
-                  <p className="mt-1 text-xs text-subtle-foreground">
-                    {mediaError
-                      ? "The recording source could not be loaded. Timeline edits remain available."
-                      : "This recording does not have a playable media source yet."}
-                  </p>
-                </div>
-              </div>
-            )}
+              )}
 
-            {mediaUrl && !mediaError && videoBounds ? (
-              <CustomCursorOverlay
-                playheadMs={view.playheadMs}
-                sourceTimeMs={cursorSourceTimeMs}
-                cursorSettings={cursorSettings}
-                recordingId={recordingId}
-                containerWidth={videoBounds.width}
-                containerHeight={videoBounds.height}
-                offsetX={videoBounds.left}
-                offsetY={videoBounds.top}
-              />
-            ) : null}
+              {mediaUrl && !mediaError && videoBounds ? (
+                <CustomCursorOverlay
+                  playheadMs={view.playheadMs}
+                  sourceTimeMs={cursorSourceTimeMs}
+                  cursorSettings={cursorSettings}
+                  recordingId={recordingId}
+                  containerWidth={videoBounds.width}
+                  containerHeight={videoBounds.height}
+                  offsetX={videoBounds.left}
+                  offsetY={videoBounds.top}
+                />
+              ) : null}
+
+              {mediaUrl && cameraClips.length > 0 ? (
+                <CameraPreview
+                  clips={cameraClips}
+                  outputs={cameraVideoOutputs}
+                  playheadMs={view.playheadMs}
+                  isPlaying={view.isPlaying}
+                  playbackRate={view.playbackRate}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  onUpdateTransform={(clipId, transform) =>
+                    execute(createUpdateClipTransformCommand(clipId, transform))
+                  }
+                />
+              ) : null}
+            </div>
 
             <AudioTrackPreview
               tracks={timeline.tracks}
@@ -1180,6 +1254,7 @@ export function TimelineView({
           onMoveClip={moveClip}
           onTrimClip={trimClip}
           onSelectMarker={selectMarker}
+          onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
           onDeleteSelection={deleteSelected}
           onToggleTrackMuted={(track) =>
             execute(createUpdateTrackCommand(track.id, { muted: !track.muted }))

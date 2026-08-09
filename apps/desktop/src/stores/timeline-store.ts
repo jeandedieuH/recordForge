@@ -99,6 +99,7 @@ const SNAPSHOT_COMMANDS = new Set([
   "ripple-delete-range",
   "delete-track",
   "delete-cursor-range",
+  "delete-zoom-segment",
   "trim-clip",
 ])
 
@@ -122,7 +123,7 @@ function isDestructiveCommand(command: TimelineCommand): boolean {
 
 function isReusablePrepareJob(job: MediaJob): boolean {
   if (job.kind !== "prepare" || job.status !== "completed") return false
-  if (!job.outputs.proxyPath) return false
+  if (job.outputs.prepareVersion < 3 || !job.outputs.proxyPath) return false
   return job.outputs.audioTracks.every((track) =>
     Boolean(track.audioPath && track.waveformPath && track.waveformImagePath),
   )
@@ -200,13 +201,29 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           activeJob.outputs.prepareVersion >= 2 &&
           activeJob.outputs.audioTracks.length > 0,
         )
+      const secondaryVideoStreams = meta.streams
+        .filter((stream) => stream.kind === "video")
+        .slice(1)
+      const hasUsableVideoDerivatives =
+        secondaryVideoStreams.length === 0 ||
+        Boolean(
+          activeJob &&
+          activeJob.outputs.prepareVersion >= 3 &&
+          secondaryVideoStreams.every(
+            (stream) =>
+              activeJob?.outputs.videoTracks.some(
+                (output) => output.streamIndex === stream.index,
+              ) ?? false,
+          ),
+        )
       if (
         !activeJob ||
-        (activeJob.status === "completed" && (!hasUsableProxy || !hasUsableAudioDerivatives))
+        (activeJob.status === "completed" &&
+          (!hasUsableProxy || !hasUsableAudioDerivatives || !hasUsableVideoDerivatives))
       ) {
         // Older prepare jobs only generated one combined waveform and did not
         // expose independent audio assets to the editor.
-        activeJob = await prepareRecordingMedia(recordingId)
+        activeJob = await prepareRecordingMedia(recordingId, true)
       }
 
       // Phase 1: load an existing durable project or create one from the recording.

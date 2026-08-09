@@ -10,6 +10,7 @@ export const projectAssetRoleSchema = z.enum([
   "screen",
   "microphone",
   "system_audio",
+  "music",
   "webcam",
   "cursor_events",
   "caption",
@@ -73,7 +74,7 @@ export const derivativeFileSchema = z.object({
   id: z.string(),
   recordingId: z.string(),
   jobId: z.string(),
-  kind: z.enum(["proxy", "thumbnail", "waveform", "metadata", "audio"]),
+  kind: z.enum(["proxy", "thumbnail", "waveform", "metadata", "audio", "video"]),
   path: z.string(),
   sizeBytes: z.number().int().min(0).default(0),
   createdAt: z.string().datetime({ offset: true }),
@@ -137,6 +138,17 @@ export const mediaAudioTrackOutputSchema = z.object({
 
 export type MediaAudioTrackOutput = z.infer<typeof mediaAudioTrackOutputSchema>
 
+// One independently playable secondary video stream for camera preview.
+export const mediaVideoTrackOutputSchema = z.object({
+  streamIndex: z.number().int().min(0),
+  title: z.string(),
+  videoPath: z.string(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+})
+
+export type MediaVideoTrackOutput = z.infer<typeof mediaVideoTrackOutputSchema>
+
 // Output files produced by a prepare job.
 export const mediaJobOutputsSchema = z.object({
   prepareVersion: z.number().int().min(0).default(0),
@@ -147,6 +159,7 @@ export const mediaJobOutputsSchema = z.object({
   waveformPath: z.string().nullish(),
   waveformImagePath: z.string().nullish(),
   audioTracks: z.array(mediaAudioTrackOutputSchema).default([]),
+  videoTracks: z.array(mediaVideoTrackOutputSchema).default([]),
   outputPath: z.string().nullish(),
 })
 
