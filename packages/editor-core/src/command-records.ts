@@ -1,7 +1,10 @@
 import { z } from "zod"
 import {
   clipTransformSchema,
+  cursorEffectSettingsSchema,
+  cursorIconPresetSchema,
   cursorSettingsSchema,
+  cursorSmoothingSchema,
   timelineCanvasSchema,
   timelineTrackKindSchema,
   trackUpdateSchema,
@@ -205,6 +208,60 @@ export const updateCursorSettingsCommandSchema = commandMetaSchema.extend({
 
 export type UpdateCursorSettingsCommand = z.infer<typeof updateCursorSettingsCommandSchema>
 
+export const addCursorRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-cursor-range"),
+  trackId: z.string().optional(),
+  rangeId: z.string().optional(),
+  assetId: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  presetId: cursorIconPresetSchema.optional(),
+  scale: z.number().min(0.2).max(5).optional(),
+  smoothing: cursorSmoothingSchema.optional(),
+  settings: cursorEffectSettingsSchema.optional(),
+})
+
+export type AddCursorRangeCommand = z.infer<typeof addCursorRangeCommandSchema>
+
+export const splitCursorRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("split-cursor-range"),
+  rangeId: z.string(),
+  splitTimeMs: z.number().int().min(0),
+  leftRangeId: z.string().optional(),
+  rightRangeId: z.string().optional(),
+})
+
+export type SplitCursorRangeCommand = z.infer<typeof splitCursorRangeCommandSchema>
+
+export const resizeCursorRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("resize-cursor-range"),
+  rangeId: z.string(),
+  startMs: z.number().int().min(0).optional(),
+  endMs: z.number().int().positive().optional(),
+})
+
+export type ResizeCursorRangeCommand = z.infer<typeof resizeCursorRangeCommandSchema>
+
+export const updateCursorRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-cursor-range"),
+  rangeId: z.string(),
+  enabled: z.boolean().optional(),
+  locked: z.boolean().optional(),
+  presetId: cursorIconPresetSchema.optional(),
+  scale: z.number().min(0.2).max(5).optional(),
+  smoothing: cursorSmoothingSchema.optional(),
+  settings: cursorEffectSettingsSchema.optional(),
+})
+
+export type UpdateCursorRangeCommand = z.infer<typeof updateCursorRangeCommandSchema>
+
+export const deleteCursorRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-cursor-range"),
+  rangeId: z.string(),
+})
+
+export type DeleteCursorRangeCommand = z.infer<typeof deleteCursorRangeCommandSchema>
+
 export const trimTimelineEndsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("trim-timeline-ends"),
   startMs: z.number().int().min(0),
@@ -235,6 +292,11 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   addCaptionClipCommandSchema,
   updateCanvasCommandSchema,
   updateCursorSettingsCommandSchema,
+  addCursorRangeCommandSchema,
+  splitCursorRangeCommandSchema,
+  resizeCursorRangeCommandSchema,
+  updateCursorRangeCommandSchema,
+  deleteCursorRangeCommandSchema,
   trimTimelineEndsCommandSchema,
 ])
 

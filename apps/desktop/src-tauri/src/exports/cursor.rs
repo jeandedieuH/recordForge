@@ -2,9 +2,10 @@ use crate::capture::cursor::{CursorTelemetryEvent, CursorTelemetryFile};
 
 use super::RenderSegment;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CursorSettings {
+    pub enabled: bool,
     pub preset: String,
     pub scale: f64,
     pub fill_color: String,
@@ -21,17 +22,22 @@ pub struct CursorSettings {
     pub click_feedback: String,
     pub click_color: String,
     pub click_size: f64,
+    pub left_click_enabled: bool,
+    pub right_click_enabled: bool,
     pub spotlight_mode: bool,
     pub spotlight_radius: f64,
     pub spotlight_dim_opacity: f64,
     pub hide_native_cursor: bool,
     pub smooth_movement: bool,
     pub smooth_factor: f64,
+    pub auto_hide_idle: bool,
+    pub idle_timeout_ms: u64,
 }
 
 impl Default for CursorSettings {
     fn default() -> Self {
         Self {
+            enabled: true,
             preset: "modern-neon".into(),
             scale: 1.0,
             fill_color: "#3b82f6".into(),
@@ -48,12 +54,16 @@ impl Default for CursorSettings {
             click_feedback: "ripple".into(),
             click_color: "#60a5fa".into(),
             click_size: 36.0,
+            left_click_enabled: true,
+            right_click_enabled: true,
             spotlight_mode: false,
             spotlight_radius: 120.0,
             spotlight_dim_opacity: 0.5,
             hide_native_cursor: true,
             smooth_movement: true,
             smooth_factor: 0.25,
+            auto_hide_idle: false,
+            idle_timeout_ms: 2_000,
         }
     }
 }
@@ -104,6 +114,7 @@ impl CursorRenderer {
         canvas_width: u32,
         canvas_height: u32,
     ) -> Result<Self, String> {
+        let telemetry = telemetry.normalize();
         if canvas_width == 0 || canvas_height == 0 {
             return Err("cursor canvas dimensions must be positive".into());
         }
@@ -142,9 +153,20 @@ impl CursorRenderer {
             Some(time) => time,
             None => return,
         };
+        if !self.settings.enabled {
+            return;
+        }
         let event_index = match closest_event(&self.telemetry.events, source_time_ms) {
             Some((index, event)) => {
-                if !event.visible {
+                if !event.visible
+                    || (self.settings.auto_hide_idle
+                        && is_cursor_idle(
+                            &self.telemetry.events,
+                            index,
+                            source_time_ms,
+                            self.settings.idle_timeout_ms,
+                        ))
+                {
                     return;
                 }
                 index
@@ -157,8 +179,12 @@ impl CursorRenderer {
             self.render_spotlight(frame, x, y);
         }
 
-        if is_recent_click(&self.telemetry.events, source_time_ms)
-            && self.settings.click_feedback != "none"
+        if is_recent_click(
+            &self.telemetry.events,
+            source_time_ms,
+            self.settings.left_click_enabled,
+            self.settings.right_click_enabled,
+        ) && self.settings.click_feedback != "none"
         {
             self.render_click_feedback(frame, x, y, source_time_ms);
         }
@@ -184,7 +210,26 @@ impl CursorRenderer {
 
     fn position_for_event(&self, event_index: usize) -> (f64, f64) {
         let event = &self.telemetry.events[event_index];
-        let (mut source_x, mut source_y) = (event.x, event.y);
+        let (capture_width, capture_height) = self
+            .telemetry
+            .capture_bounds
+            .as_ref()
+            .map(|bounds| (bounds.width, bounds.height))
+            .unwrap_or((self.telemetry.source_width, self.telemetry.source_height));
+        let dpi_scale = self
+            .telemetry
+            .dpi_scale
+            .as_ref()
+            .map(|scale| (scale.x, scale.y))
+            .unwrap_or((1.0, 1.0));
+        let coordinate_scale_x =
+            self.telemetry.source_width as f64 / capture_width.max(1) as f64 * dpi_scale.0;
+        let coordinate_scale_y =
+            self.telemetry.source_height as f64 / capture_height.max(1) as f64 * dpi_scale.1;
+        let (mut source_x, mut source_y) =
+            (event.x * coordinate_scale_x, event.y * coordinate_scale_y);
+        source_x = source_x.clamp(0.0, self.telemetry.source_width as f64);
+        source_y = source_y.clamp(0.0, self.telemetry.source_height as f64);
         if self.settings.smooth_movement {
             let factor = self.settings.smooth_factor.clamp(0.05, 1.0);
             let window_size = 5;
@@ -231,7 +276,12 @@ impl CursorRenderer {
     }
 
     fn render_click_feedback(&self, frame: &mut [u8], x: f64, y: f64, time_ms: u64) {
-        let click = closest_click(&self.telemetry.events, time_ms);
+        let click = closest_click(
+            &self.telemetry.events,
+            time_ms,
+            self.settings.left_click_enabled,
+            self.settings.right_click_enabled,
+        );
         let elapsed = click
             .map(|event| time_ms.saturating_sub(event.t_ms) as f64)
             .unwrap_or(0.0);
@@ -487,7 +537,12 @@ fn closest_event(
     Some((index, &events[index]))
 }
 
-fn closest_click(events: &[CursorTelemetryEvent], time_ms: u64) -> Option<&CursorTelemetryEvent> {
+fn closest_click(
+    events: &[CursorTelemetryEvent],
+    time_ms: u64,
+    left_enabled: bool,
+    right_enabled: bool,
+) -> Option<&CursorTelemetryEvent> {
     let mut low = 0;
     let mut high = events.len();
     while low < high {
@@ -505,15 +560,49 @@ fn closest_click(events: &[CursorTelemetryEvent], time_ms: u64) -> Option<&Curso
         if elapsed >= 350 {
             break;
         }
-        if event.clicked {
+        let is_edge =
+            event.button_event == "down" || (event.button_event == "none" && event.clicked);
+        let is_enabled = match event.button.as_str() {
+            "left" => left_enabled,
+            "right" => right_enabled,
+            _ => true,
+        };
+        if is_edge && is_enabled {
             return Some(event);
         }
     }
     None
 }
 
-fn is_recent_click(events: &[CursorTelemetryEvent], time_ms: u64) -> bool {
-    closest_click(events, time_ms).is_some()
+fn is_recent_click(
+    events: &[CursorTelemetryEvent],
+    time_ms: u64,
+    left_enabled: bool,
+    right_enabled: bool,
+) -> bool {
+    closest_click(events, time_ms, left_enabled, right_enabled).is_some()
+}
+
+fn is_cursor_idle(
+    events: &[CursorTelemetryEvent],
+    event_index: usize,
+    time_ms: u64,
+    timeout_ms: u64,
+) -> bool {
+    if event_index == 0 || timeout_ms == 0 {
+        return false;
+    }
+    let current = &events[event_index];
+    for previous in events[..event_index].iter().rev() {
+        if previous.x != current.x
+            || previous.y != current.y
+            || previous.button_event == "down"
+            || (previous.button_event == "none" && previous.clicked)
+        {
+            return time_ms.saturating_sub(previous.t_ms) >= timeout_ms;
+        }
+    }
+    time_ms.saturating_sub(current.t_ms) >= timeout_ms
 }
 
 fn parse_color(value: &str, fallback: Rgba) -> Rgba {
@@ -797,18 +886,24 @@ mod tests {
     use super::*;
 
     fn telemetry() -> CursorTelemetryFile {
-        CursorTelemetryFile {
-            recording_id: "recording".into(),
-            source_width: 100,
-            source_height: 100,
-            sample_rate_hz: 60,
-            events: vec![
+        CursorTelemetryFile::new(
+            "recording".into(),
+            100,
+            100,
+            crate::capture::cursor::CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            vec![
                 CursorTelemetryEvent {
                     t_ms: 0,
                     x: 10.0,
                     y: 20.0,
                     clicked: false,
                     button: "none".into(),
+                    button_event: "none".into(),
                     visible: true,
                 },
                 CursorTelemetryEvent {
@@ -817,10 +912,11 @@ mod tests {
                     y: 50.0,
                     clicked: true,
                     button: "left".into(),
+                    button_event: "down".into(),
                     visible: true,
                 },
             ],
-        }
+        )
     }
 
     fn segments() -> Vec<RenderSegment> {
@@ -853,6 +949,30 @@ mod tests {
         let mut frame = vec![0; 100 * 100 * 4];
         renderer.render_frame(100, &mut frame);
         assert!(frame.chunks_exact(4).any(|pixel| pixel[3] > 0));
+    }
+
+    #[test]
+    fn matches_shared_cursor_fixture_metadata_and_aspect_fit() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tooling/fixtures/editor-fixtures/cursor-telemetry.json"
+        ));
+        let telemetry = serde_json::from_str::<CursorTelemetryFile>(fixture)
+            .expect("shared cursor fixture should parse")
+            .normalize();
+        assert_eq!(telemetry.schema_version, 1);
+        assert_eq!(telemetry.asset_id, "asset-cursor-events");
+        let renderer = CursorRenderer::new(
+            CursorSettings::default(),
+            telemetry,
+            &segments(),
+            1_920,
+            1_080,
+        )
+        .expect("valid cursor renderer");
+        let (x, y) = renderer.position_for_event(0);
+        assert!((x - 352.5).abs() < 0.01);
+        assert!((y - 135.0).abs() < 0.01);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import type {
   AudioClip,
   CameraClip,
   ClipTransform,
+  CursorEffectClip,
   TimelineClip,
   TimelineState,
   TimelineTrack,
@@ -12,24 +13,29 @@ import { findClip, findTrack, getTotalDuration, validateNoOverlap } from "@recor
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
   AddCaptionClipCommand,
+  AddCursorRangeCommand,
   AddMarkerCommand,
   AddTrackCommand,
   CommandRecord,
   DeleteClipCommand,
   DeleteClipsCommand,
+  DeleteCursorRangeCommand,
   DeleteMarkerCommand,
   DeleteRangeCommand,
   DeleteTrackCommand,
   MoveClipCommand,
   MoveClipsCommand,
+  ResizeCursorRangeCommand,
   RippleDeleteClipCommand,
   RippleDeleteClipsCommand,
   RippleDeleteRangeCommand,
   SplitClipCommand,
+  SplitCursorRangeCommand,
   TrimClipCommand,
   TrimTimelineEndsCommand,
   UpdateCanvasCommand,
   UpdateClipAudioCommand,
+  UpdateCursorRangeCommand,
   UpdateClipTransformCommand,
   UpdateCursorSettingsCommand,
   UpdateMarkerCommand,
@@ -121,6 +127,48 @@ function checkTrackLocked(track: TimelineTrack, update?: TrackUpdate): CommandRe
   return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
 }
 
+function findCursorRange(
+  state: TimelineState,
+  rangeId: string,
+): {
+  track: TimelineTrack
+  range: CursorEffectClip
+} | null {
+  for (const track of state.tracks) {
+    if (track.kind !== "cursor") continue
+    const range = track.clips.find(
+      (clip): clip is CursorEffectClip => clip.kind === "cursor-effect" && clip.id === rangeId,
+    )
+    if (range) return { track, range }
+  }
+  return null
+}
+
+function validateCursorRanges(track: TimelineTrack): CommandResult<TimelineTrack> {
+  const ranges = track.clips
+    .filter((clip): clip is CursorEffectClip => clip.kind === "cursor-effect")
+    .sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id))
+  for (let index = 0; index < ranges.length; index++) {
+    const range = ranges[index]
+    if (range.durationMs <= 0) {
+      return {
+        ok: false,
+        error: editorError("invalid_cursor_range", "Cursor range must have a duration"),
+      }
+    }
+    if (index > 0) {
+      const previous = ranges[index - 1]
+      if (previous.startMs + previous.durationMs > range.startMs) {
+        return {
+          ok: false,
+          error: editorError("cursor_range_overlap", "Cursor ranges cannot overlap"),
+        }
+      }
+    }
+  }
+  return { ok: true, value: { ...track, clips: ranges } }
+}
+
 // --- Command application ---
 
 export function canApplyCommand(state: TimelineState, command: CommandRecord): CommandResult<void> {
@@ -158,6 +206,9 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       const trackResult = checkTrackLocked(found.track)
       if (!trackResult.ok) return trackResult
+      if (found.clip.kind === "cursor-effect" && found.clip.locked) {
+        return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
+      }
       if (command.kind === "move-clip" && command.newTrackId) {
         const target = findTrack(state, command.newTrackId)
         if (!target)
@@ -172,7 +223,10 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       if (foundClips.some((found) => !found)) {
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
-      const lockedClip = foundClips.find((found) => found?.track.locked)
+      const lockedClip = foundClips.find(
+        (found) =>
+          found?.track.locked || (found?.clip.kind === "cursor-effect" && found.clip.locked),
+      )
       if (lockedClip) {
         return {
           ok: false,
@@ -190,7 +244,10 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       if (foundClips.some((found) => !found)) {
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
-      const lockedClip = foundClips.find((found) => found?.track.locked)
+      const lockedClip = foundClips.find(
+        (found) =>
+          found?.track.locked || (found?.clip.kind === "cursor-effect" && found.clip.locked),
+      )
       if (lockedClip) {
         return {
           ok: false,
@@ -226,6 +283,77 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
         return {
           ok: false,
           error: editorError("invalid_track", "Captions can only be added to a captions track"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "add-cursor-range": {
+      const track = command.trackId
+        ? findTrack(state, command.trackId)
+        : state.tracks.find((t) => t.kind === "cursor")
+      if (track) {
+        if (track.kind !== "cursor") {
+          return {
+            ok: false,
+            error: editorError("invalid_track", "Cursor ranges require a cursor track"),
+          }
+        }
+        if (track.locked) {
+          return {
+            ok: false,
+            error: editorError("track_locked", `Track "${track.name}" is locked`),
+          }
+        }
+      }
+      if (command.startMs >= command.endMs) {
+        return {
+          ok: false,
+          error: editorError("invalid_cursor_range", "Cursor range end must be greater than start"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "split-cursor-range":
+    case "resize-cursor-range":
+    case "update-cursor-range":
+    case "delete-cursor-range": {
+      const found = findCursorRange(state, command.rangeId)
+      if (!found)
+        return { ok: false, error: editorError("cursor_range_not_found", "Cursor range not found") }
+      if (found.track.locked || (found.range.locked && command.kind !== "update-cursor-range")) {
+        return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
+      }
+      if (command.kind === "update-cursor-range" && found.range.locked) {
+        const onlyUnlock =
+          command.locked === false &&
+          command.enabled === undefined &&
+          command.presetId === undefined &&
+          command.scale === undefined &&
+          command.smoothing === undefined &&
+          command.settings === undefined
+        if (!onlyUnlock)
+          return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
+      }
+      if (command.kind === "resize-cursor-range") {
+        const nextStart = command.startMs ?? found.range.startMs
+        const nextEnd = command.endMs ?? found.range.startMs + found.range.durationMs
+        if (nextStart >= nextEnd) {
+          return {
+            ok: false,
+            error: editorError(
+              "invalid_cursor_range",
+              "Cursor range end must be greater than start",
+            ),
+          }
+        }
+      }
+      if (command.kind === "split-cursor-range") {
+        const end = found.range.startMs + found.range.durationMs
+        if (command.splitTimeMs <= found.range.startMs || command.splitTimeMs >= end) {
+          return {
+            ok: false,
+            error: editorError("invalid_cursor_split", "Split point is outside cursor range"),
+          }
         }
       }
       return { ok: true, value: undefined }
@@ -298,6 +426,16 @@ export function applyCommand(
       return applyUpdateCanvas(state, command)
     case "update-cursor-settings":
       return applyUpdateCursorSettings(state, command)
+    case "add-cursor-range":
+      return applyAddCursorRange(state, command)
+    case "split-cursor-range":
+      return applySplitCursorRange(state, command)
+    case "resize-cursor-range":
+      return applyResizeCursorRange(state, command)
+    case "update-cursor-range":
+      return applyUpdateCursorRange(state, command)
+    case "delete-cursor-range":
+      return applyDeleteCursorRange(state, command)
     case "trim-timeline-ends":
       return applyTrimTimelineEnds(state, command)
     default:
@@ -417,6 +555,21 @@ function applyTrimClip(
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
+  if (clip.kind === "cursor-effect") {
+    const nextStart = command.startMs ?? clip.startMs
+    const nextEnd =
+      command.sourceOutMs > command.sourceInMs
+        ? nextStart +
+          Math.round((command.sourceOutMs - command.sourceInMs) / Math.max(clip.speed, 0.001))
+        : nextStart + clip.durationMs
+    return applyResizeCursorRange(state, {
+      kind: "resize-cursor-range",
+      name: "Resize cursor range",
+      rangeId: clip.id,
+      startMs: nextStart,
+      endMs: nextEnd,
+    })
+  }
 
   const nextClip: TimelineClip = {
     ...clip,
@@ -448,6 +601,16 @@ function applySplitClip(
   const { track, clip } = found
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  if (clip.kind === "cursor-effect") {
+    return applySplitCursorRange(state, {
+      kind: "split-cursor-range",
+      name: "Split cursor range",
+      rangeId: clip.id,
+      splitTimeMs: command.splitTimeMs,
+      leftRangeId: command.leftClipId,
+      rightRangeId: command.rightClipId,
+    })
   }
 
   const clipEndMs = clip.startMs + clip.durationMs
@@ -527,7 +690,9 @@ function applyMoveClip(
     }
   }
   const targetAcceptsClip =
-    (targetTrack.kind === "captions" && clip.kind === "caption") || targetTrack.kind === clip.kind
+    (targetTrack.kind === "captions" && clip.kind === "caption") ||
+    (targetTrack.kind === "cursor" && clip.kind === "cursor-effect") ||
+    targetTrack.kind === clip.kind
   if (!targetAcceptsClip) {
     return {
       ok: false,
@@ -609,6 +774,7 @@ function clipSegmentsAfterRange(
   deleteEndMs: number,
   ripple: boolean,
 ): TimelineClip[] {
+  if (clip.kind === "cursor-effect" && clip.locked) return [clip]
   const clipEndMs = clip.startMs + clip.durationMs
   if (clipEndMs <= deleteStartMs) return [clip]
   if (clip.startMs >= deleteEndMs) {
@@ -915,6 +1081,134 @@ function applyUpdateCursorSettings(
   }
 }
 
+function applyAddCursorRange(
+  state: TimelineState,
+  command: AddCursorRangeCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((track) => track.kind === "cursor")
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? "track:cursor",
+    kind: "cursor",
+    name: "Cursor",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  const settings = command.settings ?? {}
+  const range: CursorEffectClip = {
+    id: command.rangeId ?? `cursor-effect:${command.startMs}:${command.endMs}`,
+    kind: "cursor-effect",
+    assetId: command.assetId,
+    startMs: command.startMs,
+    durationMs: command.endMs - command.startMs,
+    sourceInMs: 0,
+    sourceOutMs: 0,
+    speed: 1,
+    presetId: command.presetId ?? settings.preset ?? "modern-neon",
+    scale: command.scale ?? settings.scale ?? 1,
+    smoothing: command.smoothing ?? (settings.smoothMovement === false ? "off" : "smooth"),
+    settings,
+    enabled: settings.enabled ?? true,
+    locked: false,
+  }
+  const nextTrack = { ...track, clips: [...track.clips, range] }
+  const valid = validateCursorRanges(nextTrack)
+  if (!valid.ok) return valid
+  const tracks = existingTrack
+    ? state.tracks.map((candidate) => (candidate.id === track.id ? valid.value : candidate))
+    : [...state.tracks, valid.value]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applySplitCursorRange(
+  state: TimelineState,
+  command: SplitCursorRangeCommand,
+): CommandResult<TimelineState> {
+  const found = findCursorRange(state, command.rangeId)
+  if (!found)
+    return { ok: false, error: editorError("cursor_range_not_found", "Cursor range not found") }
+  const splitOffset = command.splitTimeMs - found.range.startMs
+  const left: CursorEffectClip = {
+    ...found.range,
+    id: command.leftRangeId ?? `${found.range.id}:left:${command.splitTimeMs}`,
+    durationMs: splitOffset,
+  }
+  const right: CursorEffectClip = {
+    ...found.range,
+    id: command.rightRangeId ?? `${found.range.id}:right:${command.splitTimeMs}`,
+    startMs: command.splitTimeMs,
+    durationMs: found.range.durationMs - splitOffset,
+  }
+  const nextTrack = {
+    ...found.track,
+    clips: found.track.clips.filter((clip) => clip.id !== command.rangeId).concat(left, right),
+  }
+  const valid = validateCursorRanges(nextTrack)
+  if (!valid.ok) return valid
+  return { ok: true, value: updateTrackInState(state, found.track.id, valid.value) }
+}
+
+function applyResizeCursorRange(
+  state: TimelineState,
+  command: ResizeCursorRangeCommand,
+): CommandResult<TimelineState> {
+  const found = findCursorRange(state, command.rangeId)
+  if (!found)
+    return { ok: false, error: editorError("cursor_range_not_found", "Cursor range not found") }
+  const startMs = command.startMs ?? found.range.startMs
+  const endMs = command.endMs ?? found.range.startMs + found.range.durationMs
+  const range = { ...found.range, startMs, durationMs: endMs - startMs }
+  const nextTrack = {
+    ...found.track,
+    clips: found.track.clips.map((clip) => (clip.id === range.id ? range : clip)),
+  }
+  const valid = validateCursorRanges(nextTrack)
+  if (!valid.ok) return valid
+  return { ok: true, value: updateTrackInState(state, found.track.id, valid.value) }
+}
+
+function applyUpdateCursorRange(
+  state: TimelineState,
+  command: UpdateCursorRangeCommand,
+): CommandResult<TimelineState> {
+  const found = findCursorRange(state, command.rangeId)
+  if (!found)
+    return { ok: false, error: editorError("cursor_range_not_found", "Cursor range not found") }
+  const nextSettings = { ...found.range.settings, ...(command.settings ?? {}) }
+  const range: CursorEffectClip = {
+    ...found.range,
+    ...(command.enabled === undefined ? {} : { enabled: command.enabled }),
+    ...(command.locked === undefined ? {} : { locked: command.locked }),
+    ...(command.presetId === undefined ? {} : { presetId: command.presetId }),
+    ...(command.scale === undefined ? {} : { scale: command.scale }),
+    ...(command.smoothing === undefined ? {} : { smoothing: command.smoothing }),
+    settings: nextSettings,
+  }
+  const nextTrack = {
+    ...found.track,
+    clips: found.track.clips.map((clip) => (clip.id === range.id ? range : clip)),
+  }
+  return { ok: true, value: updateTrackInState(state, found.track.id, nextTrack) }
+}
+
+function applyDeleteCursorRange(
+  state: TimelineState,
+  command: DeleteCursorRangeCommand,
+): CommandResult<TimelineState> {
+  const found = findCursorRange(state, command.rangeId)
+  if (!found)
+    return { ok: false, error: editorError("cursor_range_not_found", "Cursor range not found") }
+  const nextTrack = {
+    ...found.track,
+    clips: found.track.clips.filter((clip) => clip.id !== command.rangeId),
+  }
+  return { ok: true, value: updateTrackInState(state, found.track.id, nextTrack) }
+}
+
 function applyTrimTimelineEnds(
   state: TimelineState,
   command: TrimTimelineEndsCommand,
@@ -927,6 +1221,7 @@ function applyTrimTimelineEnds(
     if (track.locked) return track
     const clips = track.clips
       .map((clip) => {
+        if (clip.kind === "cursor-effect" && clip.locked) return clip
         const clipEnd = clip.startMs + clip.durationMs
         if (clipEnd <= command.startMs || clip.startMs >= command.endMs) {
           return null
@@ -1125,6 +1420,90 @@ export function createRippleDeleteClipsCommand(clipIds: string[]): CommandRecord
     kind: "ripple-delete-clips",
     name: "Ripple delete clips",
     clipIds: [...new Set(clipIds)],
+  }
+}
+
+export function createAddCursorRangeCommand(
+  assetId: string,
+  startMs: number,
+  endMs: number,
+  options: {
+    trackId?: string
+    rangeId?: string
+    presetId?: import("@recordforge/contracts").CursorIconPreset
+    scale?: number
+    smoothing?: import("@recordforge/contracts").CursorSmoothing
+    settings?: import("@recordforge/contracts").CursorEffectSettings
+  } = {},
+): CommandRecord {
+  return {
+    kind: "add-cursor-range",
+    name: "Add cursor range",
+    assetId,
+    startMs,
+    endMs,
+    trackId: options.trackId,
+    rangeId: options.rangeId ?? crypto.randomUUID(),
+    presetId: options.presetId,
+    scale: options.scale,
+    smoothing: options.smoothing,
+    settings: options.settings,
+  }
+}
+
+export function createSplitCursorRangeCommand(rangeId: string, splitTimeMs: number): CommandRecord {
+  return {
+    kind: "split-cursor-range",
+    name: "Split cursor range",
+    rangeId,
+    splitTimeMs,
+    leftRangeId: crypto.randomUUID(),
+    rightRangeId: crypto.randomUUID(),
+  }
+}
+
+export function createResizeCursorRangeCommand(
+  rangeId: string,
+  update: { startMs?: number; endMs?: number },
+  options: { coalesceKey?: string } = {},
+): CommandRecord {
+  return {
+    kind: "resize-cursor-range",
+    name: "Resize cursor range",
+    rangeId,
+    startMs: update.startMs,
+    endMs: update.endMs,
+    coalesce: true,
+    coalesceKey: options.coalesceKey ?? `cursor-resize:${rangeId}`,
+  }
+}
+
+export function createUpdateCursorRangeCommand(
+  rangeId: string,
+  update: {
+    enabled?: boolean
+    locked?: boolean
+    presetId?: import("@recordforge/contracts").CursorIconPreset
+    scale?: number
+    smoothing?: import("@recordforge/contracts").CursorSmoothing
+    settings?: import("@recordforge/contracts").CursorEffectSettings
+  },
+): CommandRecord {
+  return {
+    kind: "update-cursor-range",
+    name: "Update cursor range",
+    rangeId,
+    ...update,
+    coalesce: true,
+    coalesceKey: `cursor-settings:${rangeId}`,
+  }
+}
+
+export function createDeleteCursorRangeCommand(rangeId: string): CommandRecord {
+  return {
+    kind: "delete-cursor-range",
+    name: "Delete cursor range",
+    rangeId,
   }
 }
 

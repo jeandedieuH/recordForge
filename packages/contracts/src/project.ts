@@ -1,4 +1,6 @@
 import { z } from "zod"
+import { cursorDpiScaleSchema, cursorTelemetryTimebaseSchema } from "./cursor"
+import { boundsSchema } from "./recording"
 import { projectAssetRoleSchema } from "./media"
 import { timelineCanvasSchema, timelineMarkerSchema, timelineTrackSchema } from "./timeline"
 
@@ -27,7 +29,17 @@ export const projectAssetSchema = z.object({
   height: z.number().int().min(0).nullish(),
   fps: z.number().min(0).nullish(),
   hasAudio: z.boolean().default(false),
-  streamIndex: z.number().int().min(0).optional(),
+  streamIndex: z.number().int().min(0).nullish(),
+  // Cursor telemetry assets retain their capture contract in the registry so
+  // preview/export never need to infer metadata from a recording path.
+  sourceWidth: z.number().int().positive().nullish(),
+  sourceHeight: z.number().int().positive().nullish(),
+  sampleRateHz: z.number().positive().nullish(),
+  schemaVersion: z.number().int().positive().nullish(),
+  captureBounds: boundsSchema.nullish(),
+  dpiScale: cursorDpiScaleSchema.nullish(),
+  timebase: cursorTelemetryTimebaseSchema.nullish(),
+  cursorMetadata: z.enum(["available", "unavailable"]).nullish(),
 })
 
 export type ProjectAsset = z.infer<typeof projectAssetSchema>

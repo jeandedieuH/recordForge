@@ -28,6 +28,7 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 
 - `apps/desktop/` — Tauri desktop app (React frontend + Rust backend)
 - `packages/contracts/` — Zod schemas and DTOs
+- `packages/cursor-core/` — Pure cursor telemetry normalization, mapping, and parity algorithms
 - `packages/domain/` — Domain models
 - `packages/editor-core/` — Pure timeline command engine
 - `packages/media-core/` — FFmpeg job specifications

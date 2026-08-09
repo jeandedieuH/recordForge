@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { cursorSettingsForEffect } from "@recordforge/cursor-core"
 import type {
   ClipTransform,
   CursorSettings,
@@ -8,13 +9,17 @@ import type {
   TimelineTrack,
 } from "@recordforge/contracts"
 import {
+  createAddCursorRangeCommand,
+  createDeleteCursorRangeCommand,
   createDeleteMarkerCommand,
+  createUpdateCursorRangeCommand,
   createUpdateMarkerCommand,
   createTrimClipCommand,
   createUpdateClipAudioCommand,
   createUpdateClipTransformCommand,
   createUpdateCursorSettingsCommand,
   createUpdateTrackCommand,
+  getTotalDuration,
 } from "@recordforge/editor-core"
 import type { LucideIcon } from "lucide-react"
 import {
@@ -42,7 +47,7 @@ interface ClipInspectorProps {
 }
 
 function streamDetails(clip: TimelineClip, metadata: MediaMetadata | null) {
-  if (clip.streamIndex == null) return null
+  if (!("streamIndex" in clip) || clip.streamIndex == null) return null
   return metadata?.streams.find((stream) => stream.index === clip.streamIndex) ?? null
 }
 
@@ -68,8 +73,14 @@ export function ClipInspector({
   onClear,
 }: ClipInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
+  const project = useTimelineStore((state) => state.project)
+  const view = useTimelineStore((state) => state.view)
   const timelineState = useTimelineStore((state) => state.engine?.history.present)
   const cursorSettings = timelineState?.canvas.cursorSettings
+  const cursorAssetId = project?.assets.find((asset) => asset.role === "cursor_events")?.id
+  const selectedRange = view.selection?.kind === "range" ? view.selection : null
+  const cursorRange = clip?.kind === "cursor-effect" ? clip : null
+  const cursorRangeSettings = cursorSettingsForEffect(cursorSettings, cursorRange)
 
   const [activeTab, setActiveTab] = useState<"clip" | "cursor">("cursor")
   const [sourceInText, setSourceInText] = useState(clip ? String(clip.sourceInMs) : "")
@@ -83,7 +94,7 @@ export function ClipInspector({
       setActiveTab("cursor")
       return
     }
-    setActiveTab("clip")
+    setActiveTab(clip.kind === "cursor-effect" ? "cursor" : "clip")
     setSourceInText(String(clip.sourceInMs))
     setSourceOutText(String(clip.sourceOutMs))
   }, [clip])
@@ -94,7 +105,37 @@ export function ClipInspector({
   }, [marker])
 
   function handleCursorChange(updated: Partial<CursorSettings>) {
+    if (cursorRange) {
+      execute(
+        createUpdateCursorRangeCommand(cursorRange.id, {
+          enabled: updated.enabled,
+          presetId: updated.preset,
+          scale: updated.scale,
+          smoothing:
+            updated.smoothMovement === undefined
+              ? undefined
+              : updated.smoothMovement
+                ? "smooth"
+                : "off",
+          settings: updated,
+        }),
+      )
+      return
+    }
     execute(createUpdateCursorSettingsCommand(updated))
+  }
+
+  function addCursorRange() {
+    if (!cursorAssetId || !timelineState) return
+    const startMs = selectedRange?.startMs ?? 0
+    const endMs = selectedRange?.endMs ?? Math.max(1, getTotalDuration(timelineState))
+    execute(
+      createAddCursorRangeCommand(cursorAssetId, startMs, endMs, {
+        presetId: cursorSettings?.preset,
+        scale: cursorSettings?.scale,
+        settings: cursorSettings,
+      }),
+    )
   }
 
   if (marker) {
@@ -171,12 +212,18 @@ export function ClipInspector({
           )}
         </div>
         <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
+        {cursorAssetId ? (
+          <Button variant="secondary" size="sm" onClick={addCursorRange}>
+            {selectedRange ? "Add selected cursor range" : "Add full-duration cursor range"}
+          </Button>
+        ) : null}
       </aside>
     )
   }
 
   const activeClip = clip
   const isAudio = activeClip.kind === "audio"
+  const streamIndex = "streamIndex" in activeClip ? activeClip.streamIndex : undefined
   const audioVolume = clip.kind === "audio" ? clip.volume : track.volume
 
   function updateAudioVolume(value: number[]) {
@@ -229,7 +276,37 @@ export function ClipInspector({
       </div>
 
       {activeTab === "cursor" ? (
-        <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
+        <div className="flex flex-col gap-3">
+          <CursorInspector settings={cursorRangeSettings} onChange={handleCursorChange} />
+          {cursorRange ? (
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  execute(
+                    createUpdateCursorRangeCommand(cursorRange.id, {
+                      locked: !cursorRange.locked,
+                    }),
+                  )
+                }
+              >
+                {cursorRange.locked ? "Unlock range" : "Lock range"}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={cursorRange.locked}
+                onClick={() => {
+                  execute(createDeleteCursorRangeCommand(cursorRange.id))
+                  onClear()
+                }}
+              >
+                Delete range
+              </Button>
+            </div>
+          ) : null}
+        </div>
       ) : (
         <div className="flex flex-col gap-5">
           <div className="flex flex-col gap-1">
@@ -251,30 +328,32 @@ export function ClipInspector({
             </p>
           </div>
 
-          <div className="flex flex-col gap-3 border-t border-border pt-4">
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
-              <Sliders className="size-4 text-primary" aria-hidden />
-              <span>Source</span>
+          {activeClip.kind !== "cursor-effect" ? (
+            <div className="flex flex-col gap-3 border-t border-border pt-4">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                <Sliders className="size-4 text-primary" aria-hidden />
+                <span>Source</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <InfoField label="Start" value={formatInspectorTime(clip.startMs)} />
+                <InfoField label="Duration" value={formatInspectorTime(clip.durationMs)} />
+                <TrimField label="Source in (ms)" value={sourceInText} onChange={setSourceInText} />
+                <TrimField
+                  label="Source out (ms)"
+                  value={sourceOutText}
+                  onChange={setSourceOutText}
+                />
+                <InfoField
+                  label="Stream"
+                  value={streamIndex == null ? "Auto" : String(streamIndex)}
+                />
+                <InfoField label="Codec" value={stream?.codec ?? "—"} />
+              </div>
+              <Button variant="secondary" size="sm" onClick={applyTrim}>
+                Apply source trim
+              </Button>
             </div>
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <InfoField label="Start" value={formatInspectorTime(clip.startMs)} />
-              <InfoField label="Duration" value={formatInspectorTime(clip.durationMs)} />
-              <TrimField label="Source in (ms)" value={sourceInText} onChange={setSourceInText} />
-              <TrimField
-                label="Source out (ms)"
-                value={sourceOutText}
-                onChange={setSourceOutText}
-              />
-              <InfoField
-                label="Stream"
-                value={clip.streamIndex == null ? "Auto" : String(clip.streamIndex)}
-              />
-              <InfoField label="Codec" value={stream?.codec ?? "—"} />
-            </div>
-            <Button variant="secondary" size="sm" onClick={applyTrim}>
-              Apply source trim
-            </Button>
-          </div>
+          ) : null}
 
           {isAudio ? (
             <div className="flex flex-col gap-3 border-t border-border pt-4">

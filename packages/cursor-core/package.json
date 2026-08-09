@@ -1,5 +1,5 @@
 {
-  "name": "@recordforge/media-core",
+  "name": "@recordforge/cursor-core",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -14,9 +14,7 @@
     "format": "prettier --write ."
   },
   "dependencies": {
-    "@recordforge/contracts": "workspace:*",
-    "@recordforge/cursor-core": "workspace:*",
-    "@recordforge/domain": "workspace:*"
+    "@recordforge/contracts": "workspace:*"
   },
   "devDependencies": {
     "@recordforge/config": "workspace:*",

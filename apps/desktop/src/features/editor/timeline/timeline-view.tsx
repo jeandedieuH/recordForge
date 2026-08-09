@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import {
-  cursorTelemetryFileSchema,
   type MediaJob,
   type TimelineClip,
   type TimelineMarker,
@@ -13,12 +12,15 @@ import {
   createDeleteClipsCommand,
   createDeleteMarkerCommand,
   createDeleteRangeCommand,
+  createDeleteCursorRangeCommand,
   createMoveClipCommand,
   createMoveClipsCommand,
   createRippleDeleteClipCommand,
   createRippleDeleteClipsCommand,
   createRippleDeleteRangeCommand,
+  createResizeCursorRangeCommand,
   createSplitClipCommand,
+  createSplitCursorRangeCommand,
   createTrimClipCommand,
   createUpdateTrackCommand,
   findClip,
@@ -27,6 +29,13 @@ import {
   sourceToTimelineForTrack,
   timelineToSourceForTrack,
 } from "@recordforge/editor-core"
+import {
+  cursorSettingsForEffect,
+  findCursorEffectAtTime,
+  isCursorClickEdge,
+  normalizeCursorTelemetry,
+  timelineToCursorSourceTime,
+} from "@recordforge/cursor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
@@ -179,7 +188,7 @@ export function TimelineView({
   const suppressPlayheadSyncRef = useRef(false)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
   const [tool, setTool] = useState<"select" | "split">("select")
-  const [cursorClickTimesMs, setCursorClickTimesMs] = useState<number[]>([])
+  const [cursorClickSourceTimesMs, setCursorClickSourceTimesMs] = useState<number[]>([])
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
@@ -219,20 +228,20 @@ export function TimelineView({
 
   useEffect(() => {
     let cancelled = false
-    setCursorClickTimesMs([])
+    setCursorClickSourceTimesMs([])
 
     async function loadCursorClickTimes() {
       try {
         const raw = isTauri()
           ? await invoke<unknown>("get_cursor_telemetry", { recordingId })
           : null
-        const parsed = cursorTelemetryFileSchema.safeParse(raw)
-        if (cancelled || !parsed.success) return
-        setCursorClickTimesMs(
-          parsed.data.events.filter((event) => event.clicked).map((event) => event.tMs),
+        if (cancelled || !raw) return
+        const telemetry = normalizeCursorTelemetry(raw)
+        setCursorClickSourceTimesMs(
+          telemetry.events.filter(isCursorClickEdge).map((event) => event.tMs),
         )
       } catch {
-        if (!cancelled) setCursorClickTimesMs([])
+        if (!cancelled) setCursorClickSourceTimesMs([])
       }
     }
 
@@ -253,6 +262,28 @@ export function TimelineView({
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
   const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+  const activeCursorEffect = useMemo(
+    () => (timeline ? findCursorEffectAtTime(timeline, view.playheadMs) : null),
+    [timeline, view.playheadMs],
+  )
+  const cursorSettings = useMemo(() => {
+    const base = cursorSettingsForEffect(timeline?.canvas.cursorSettings, activeCursorEffect)
+    if (!activeCursorEffect && timeline?.tracks.some((track) => track.kind === "cursor")) {
+      return { ...base, enabled: false }
+    }
+    return base
+  }, [activeCursorEffect, timeline])
+  const cursorSourceTimeMs = timeline ? timelineToCursorSourceTime(timeline, view.playheadMs) : null
+  const cursorClickTimesMs = useMemo(() => {
+    if (!timeline) return []
+    const screenAssetId = timeline.tracks.find((track) => track.kind === "screen")?.clips[0]
+      ?.assetId
+    if (!screenAssetId) return []
+    return cursorClickSourceTimesMs.flatMap((sourceTimeMs) => {
+      const mapped = sourceToTimelineForTrack(timeline, "screen", screenAssetId, sourceTimeMs)
+      return mapped ? [mapped.timelineMs] : []
+    })
+  }, [cursorClickSourceTimesMs, timeline])
   const audioTrackOutputs = activeJob?.outputs?.audioTracks ?? []
   const isPreviewMuted =
     audioTrackOutputs.length > 0 || (timeline ? isTimelineAudioMuted(timeline) : false)
@@ -539,6 +570,10 @@ export function TimelineView({
 
   function splitSelected() {
     if (!selectedClip || selectedClip.track.locked) return
+    if (selectedClip.clip.kind === "cursor-effect") {
+      execute(createSplitCursorRangeCommand(selectedClip.clip.id, view.playheadMs))
+      return
+    }
     execute(createSplitClipCommand(selectedClip.clip.id, view.playheadMs))
   }
 
@@ -568,7 +603,17 @@ export function TimelineView({
       setSelection(null)
       return
     }
-    if (!selectedClip || selectedClip.track.locked) return
+    if (
+      !selectedClip ||
+      selectedClip.track.locked ||
+      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
+    )
+      return
+    if (selectedClip.clip.kind === "cursor-effect" && !ripple) {
+      execute(createDeleteCursorRangeCommand(selectedClip.clip.id))
+      setSelection(null)
+      return
+    }
     execute(
       ripple
         ? createRippleDeleteClipCommand(selectedClip.clip.id)
@@ -578,7 +623,12 @@ export function TimelineView({
   }
 
   function nudgeSelected(deltaMs: number) {
-    if (!selectedClip || selectedClip.track.locked) return
+    if (
+      !selectedClip ||
+      selectedClip.track.locked ||
+      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
+    )
+      return
     const selection = view.selection
     if (selection?.kind === "clip" && selection.clipIds.length > 1) {
       execute(
@@ -597,9 +647,23 @@ export function TimelineView({
   }
 
   function trimSelected(edge: "start" | "end", deltaMs: number) {
-    if (!selectedClip || selectedClip.track.locked) return
+    if (
+      !selectedClip ||
+      selectedClip.track.locked ||
+      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
+    )
+      return
     const { clip } = selectedClip
     const clipEndMs = clip.startMs + clip.durationMs
+    if (clip.kind === "cursor-effect") {
+      const nextStartMs =
+        edge === "start"
+          ? Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
+          : clip.startMs
+      const nextEndMs = edge === "end" ? Math.max(clip.startMs + 1, clipEndMs + deltaMs) : clipEndMs
+      execute(createResizeCursorRangeCommand(clip.id, { startMs: nextStartMs, endMs: nextEndMs }))
+      return
+    }
     if (edge === "start") {
       const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
       const sourceInMs = Math.max(
@@ -623,9 +687,13 @@ export function TimelineView({
   }
 
   function selectClip(clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) {
-    if (tool === "split" && !track.locked) {
+    if (tool === "split" && !track.locked && !(clip.kind === "cursor-effect" && clip.locked)) {
       if (view.playheadMs > clip.startMs && view.playheadMs < clip.startMs + clip.durationMs) {
-        execute(createSplitClipCommand(clip.id, view.playheadMs))
+        execute(
+          clip.kind === "cursor-effect"
+            ? createSplitCursorRangeCommand(clip.id, view.playheadMs)
+            : createSplitClipCommand(clip.id, view.playheadMs),
+        )
       }
       return
     }
@@ -680,7 +748,7 @@ export function TimelineView({
     newStartMs: number,
     coalesceKey: string,
   ) {
-    if (track.locked) return
+    if (track.locked || (clip.kind === "cursor-effect" && clip.locked)) return
     const selection = view.selection
     if (
       selection?.kind === "clip" &&
@@ -710,9 +778,22 @@ export function TimelineView({
     edgeTimeMs: number,
     coalesceKey: string,
   ) {
-    if (track.locked) return
+    if (track.locked || (clip.kind === "cursor-effect" && clip.locked)) return
     const clipEndMs = clip.startMs + clip.durationMs
     const nextEdgeMs = Math.round(edgeTimeMs)
+    if (clip.kind === "cursor-effect") {
+      execute(
+        createResizeCursorRangeCommand(
+          clip.id,
+          edge === "start"
+            ? { startMs: Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs)) }
+            : { endMs: Math.max(clip.startMs + 1, nextEdgeMs) },
+          { coalesceKey },
+        ),
+        { coalesceWindowMs: 60_000 },
+      )
+      return
+    }
     if (edge === "start") {
       const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs))
       const sourceInMs = Math.max(
@@ -904,17 +985,13 @@ export function TimelineView({
             {mediaUrl && !mediaError && videoBounds ? (
               <CustomCursorOverlay
                 playheadMs={view.playheadMs}
-                cursorSettings={timeline.canvas.cursorSettings}
+                sourceTimeMs={cursorSourceTimeMs}
+                cursorSettings={cursorSettings}
                 recordingId={recordingId}
-                telemetryPath={
-                  recording.workDir ? `${recording.workDir}/cursor_telemetry.json` : null
-                }
                 containerWidth={videoBounds.width}
                 containerHeight={videoBounds.height}
                 offsetX={videoBounds.left}
                 offsetY={videoBounds.top}
-                sourceWidth={recording.width ?? 1920}
-                sourceHeight={recording.height ?? 1080}
               />
             ) : null}
 

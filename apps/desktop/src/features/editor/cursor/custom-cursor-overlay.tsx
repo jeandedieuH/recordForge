@@ -1,12 +1,20 @@
 import { useEffect, useId, useMemo, useState } from "react"
 import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import {
-  cursorTelemetryFileSchema,
   defaultCursorSettings,
   type CursorSettings,
   type CursorTelemetryEvent,
   type CursorTelemetryFile,
 } from "@recordforge/contracts"
+import {
+  findCursorEventAtTime,
+  fitCursorPoint,
+  isCursorButtonEnabled,
+  isCursorClickEdge,
+  isCursorIdle,
+  normalizeCursorTelemetry,
+  smoothCursorPosition,
+} from "@recordforge/cursor-core"
 import { isTauri } from "../../../lib/settings"
 import { cn } from "@recordforge/ui"
 
@@ -21,15 +29,16 @@ interface ActiveCursorEvent {
 
 interface CustomCursorOverlayProps {
   playheadMs: number
+  sourceTimeMs?: number | null
   cursorSettings?: CursorSettings
   recordingId?: string | null
+  // Browser previews may provide a fixture URL. Tauri always resolves the
+  // cursor_events asset through the Rust project registry command.
   telemetryPath?: string | null
   containerWidth: number
   containerHeight: number
   offsetX?: number
   offsetY?: number
-  sourceWidth?: number
-  sourceHeight?: number
 }
 
 function toAssetUrl(path: string | null): string | null {
@@ -39,6 +48,7 @@ function toAssetUrl(path: string | null): string | null {
 
 export function CustomCursorOverlay({
   playheadMs,
+  sourceTimeMs = playheadMs,
   cursorSettings = defaultCursorSettings,
   recordingId,
   telemetryPath,
@@ -46,22 +56,29 @@ export function CustomCursorOverlay({
   containerHeight,
   offsetX = 0,
   offsetY = 0,
-  sourceWidth = 1920,
-  sourceHeight = 1080,
 }: CustomCursorOverlayProps) {
   const [telemetry, setTelemetry] = useState<CursorTelemetryFile | null>(null)
+  const [telemetryStatus, setTelemetryStatus] = useState<"loading" | "available" | "unavailable">(
+    "loading",
+  )
   const instanceId = useId()
   const spotlightMaskId = `spotlight-mask-${instanceId.replace(/:/g, "")}`
 
   useEffect(() => {
     let isMounted = true
     setTelemetry(null)
+    setTelemetryStatus("loading")
 
     function setValidatedTelemetry(data: unknown): boolean {
-      const parsed = cursorTelemetryFileSchema.safeParse(data)
-      if (!parsed.success || !isMounted) return false
-      setTelemetry(parsed.data)
-      return true
+      try {
+        const normalized = normalizeCursorTelemetry(data)
+        if (!isMounted) return false
+        setTelemetry(normalized)
+        setTelemetryStatus("available")
+        return true
+      } catch {
+        return false
+      }
     }
 
     async function loadTelemetry() {
@@ -72,7 +89,7 @@ export function CustomCursorOverlay({
           })
           if (res && setValidatedTelemetry(res)) return
         } catch {
-          // Fall back to the asset URL for browser previews and older sessions.
+          // An unavailable asset is a valid project state, not a cursor position.
         }
       }
 
@@ -83,12 +100,12 @@ export function CustomCursorOverlay({
             const res = await fetch(url)
             if (res.ok && setValidatedTelemetry(await res.json())) return
           } catch {
-            // The overlay can still render its deterministic fallback position.
+            // Browser fixture loading is best effort; no synthetic cursor follows.
           }
         }
       }
 
-      if (isMounted) setTelemetry(null)
+      if (isMounted) setTelemetryStatus("unavailable")
     }
 
     void loadTelemetry()
@@ -99,103 +116,61 @@ export function CustomCursorOverlay({
   }, [recordingId, telemetryPath])
 
   const activeEvent = useMemo<ActiveCursorEvent | null>(() => {
-    if (!telemetry || telemetry.events.length === 0) return null
-    const events = telemetry.events
+    if (!telemetry || sourceTimeMs === null || sourceTimeMs === undefined) return null
+    const lookup = findCursorEventAtTime(telemetry, sourceTimeMs)
+    return lookup ? { event: lookup.event, index: lookup.index } : null
+  }, [sourceTimeMs, telemetry])
 
-    let low = 0
-    let high = events.length
-    while (low < high) {
-      const middle = low + Math.floor((high - low) / 2)
-      if (events[middle].tMs < playheadMs) low = middle + 1
-      else high = middle
-    }
+  const fittedPosition = useMemo(() => {
+    if (!activeEvent || !telemetry) return null
+    const sourcePosition = smoothCursorPosition(telemetry, activeEvent.index, cursorSettings)
+    return fitCursorPoint(sourcePosition, telemetry, containerWidth, containerHeight, {
+      clampToSource: true,
+    })
+  }, [activeEvent, containerHeight, containerWidth, cursorSettings, telemetry])
 
-    const right = Math.min(low, events.length - 1)
-    const left = Math.max(0, right - 1)
-    const index =
-      Math.abs(events[left].tMs - playheadMs) <= Math.abs(events[right].tMs - playheadMs)
-        ? left
-        : right
-    return { event: events[index], index }
-  }, [telemetry, playheadMs])
-
-  const smoothedPosition = useMemo(() => {
-    if (!activeEvent) {
-      return { x: containerWidth / 2, y: containerHeight / 2, clicked: false }
-    }
-
-    const event = activeEvent.event
-    const srcW = telemetry?.sourceWidth || sourceWidth || 1920
-    const srcH = telemetry?.sourceHeight || sourceHeight || 1080
-
-    const scaleX = containerWidth / srcW
-    const scaleY = containerHeight / srcH
-
-    const targetX = event.x * scaleX
-    const targetY = event.y * scaleY
-
-    if (!cursorSettings.smoothMovement || !telemetry) {
-      return { x: targetX, y: targetY, clicked: event.clicked }
-    }
-
-    const events = telemetry.events
-    const idx = activeEvent.index
-    if (idx <= 0) return { x: targetX, y: targetY, clicked: event.clicked }
-
-    const windowSize = 5
-    let sumX = 0
-    let sumY = 0
-    let totalWeight = 0
-    const factor = cursorSettings.smoothFactor ?? 0.25
-
-    for (let i = Math.max(0, idx - windowSize); i <= idx; i++) {
-      const weight = Math.pow(1 - factor, idx - i)
-      sumX += events[i].x * scaleX * weight
-      sumY += events[i].y * scaleY * weight
-      totalWeight += weight
-    }
-
-    return {
-      x: sumX / totalWeight,
-      y: sumY / totalWeight,
-      clicked: event.clicked,
-    }
-  }, [
-    activeEvent,
-    telemetry,
-    containerWidth,
-    containerHeight,
-    sourceWidth,
-    sourceHeight,
-    cursorSettings.smoothMovement,
-    cursorSettings.smoothFactor,
-  ])
-
-  const isCursorVisible = activeEvent?.event.visible ?? true
+  const isIdle = Boolean(
+    activeEvent &&
+    telemetry &&
+    cursorSettings.autoHideIdle &&
+    isCursorIdle(telemetry, activeEvent.index, sourceTimeMs ?? 0, cursorSettings.idleTimeoutMs),
+  )
+  const isCursorVisible = Boolean(
+    cursorSettings.enabled &&
+    telemetryStatus === "available" &&
+    activeEvent?.event.visible &&
+    fittedPosition?.visible &&
+    !isIdle,
+  )
 
   const isClicking = useMemo(() => {
-    if (!telemetry || cursorSettings.clickFeedback === "none") return false
-    if (smoothedPosition.clicked) return true
-    if (!activeEvent) return false
+    if (!telemetry || sourceTimeMs === null || sourceTimeMs === undefined) return false
+    if (cursorSettings.clickFeedback === "none" || !activeEvent) return false
     const events = telemetry.events
-    const idx = activeEvent.index
-    for (let i = Math.max(0, idx - 8); i <= idx; i++) {
-      if (events[i].clicked && Math.abs(events[i].tMs - playheadMs) < 350) {
+    for (let index = Math.max(0, activeEvent.index - 8); index <= activeEvent.index; index++) {
+      const event = events[index]
+      if (
+        isCursorClickEdge(event) &&
+        isCursorButtonEnabled(event, cursorSettings) &&
+        sourceTimeMs - event.tMs >= 0 &&
+        sourceTimeMs - event.tMs < 350
+      ) {
         return true
       }
     }
     return false
-  }, [telemetry, activeEvent, playheadMs, cursorSettings.clickFeedback, smoothedPosition.clicked])
+  }, [activeEvent, cursorSettings, sourceTimeMs, telemetry])
 
   if (!containerWidth || !containerHeight) return null
 
-  const posX = smoothedPosition.x
-  const posY = smoothedPosition.y
+  const posX = fittedPosition?.x ?? 0
+  const posY = fittedPosition?.y ?? 0
   const scale = cursorSettings.scale ?? 1.0
+  const isUnavailable = telemetryStatus === "unavailable"
 
   return (
     <div
-      aria-hidden
+      aria-hidden={!isUnavailable}
       className="pointer-events-none absolute z-20 overflow-hidden rounded-lg"
       style={{
         left: offsetX,
@@ -204,13 +179,28 @@ export function CustomCursorOverlay({
         height: containerHeight,
       }}
     >
+      {isUnavailable ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="absolute left-2 top-2 rounded-md border border-border bg-background/85 px-2 py-1 text-[10px] text-subtle-foreground backdrop-blur"
+        >
+          Cursor unavailable
+        </div>
+      ) : null}
+
       {/* Spotlight mode background mask */}
       {isCursorVisible && cursorSettings.spotlightMode ? (
         <svg className="pointer-events-none absolute inset-0 size-full">
           <defs>
             <mask id={spotlightMaskId}>
               <rect width="100%" height="100%" fill="white" />
-              <circle cx={posX} cy={posY} r={cursorSettings.spotlightRadius * scale} fill="black" />
+              <circle
+                cx={posX}
+                cy={posY}
+                r={cursorSettings.spotlightRadius * (fittedPosition?.scale ?? 1) * scale}
+                fill="black"
+              />
             </mask>
           </defs>
           <rect
@@ -230,8 +220,8 @@ export function CustomCursorOverlay({
           style={{
             left: posX,
             top: posY,
-            width: cursorSettings.clickSize * scale,
-            height: cursorSettings.clickSize * scale,
+            width: cursorSettings.clickSize * (fittedPosition?.scale ?? 1) * scale,
+            height: cursorSettings.clickSize * (fittedPosition?.scale ?? 1) * scale,
             backgroundColor:
               cursorSettings.clickFeedback === "spotlight"
                 ? cursorSettings.clickColor

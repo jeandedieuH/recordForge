@@ -15,6 +15,7 @@ import {
   Lock,
   LockOpen,
   Monitor,
+  MousePointer2,
   Rows3,
   Video,
   Volume2,
@@ -77,12 +78,14 @@ interface TimelineLanesProps {
 function getTrackIcon(track: TimelineTrack): LucideIcon {
   if (track.kind === "screen") return Monitor
   if (track.kind === "camera") return Video
+  if (track.kind === "cursor") return MousePointer2
   return AudioLines
 }
 
 function getTrackAccent(track: TimelineTrack): string {
   if (track.kind === "screen") return "screen"
   if (track.kind === "camera") return "camera"
+  if (track.kind === "cursor") return "cursor"
   if (track.name.toLowerCase().includes("system")) return "system"
   return "mic"
 }
@@ -95,6 +98,7 @@ function getClipClass(track: TimelineTrack): string {
       camera: "border-track-webcam/70 bg-track-webcam/20 hover:bg-track-webcam/30",
       mic: "border-track-mic/70 bg-track-mic/20 hover:bg-track-mic/30",
       system: "border-track-system/70 bg-track-system/20 hover:bg-track-system/30",
+      cursor: "border-primary/70 bg-primary/15 hover:bg-primary/25",
     }[accent] ?? "border-border bg-surface"
   )
 }
@@ -102,6 +106,7 @@ function getClipClass(track: TimelineTrack): string {
 function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
   if (clip.kind === "screen") return "Screen capture"
   if (clip.kind === "camera") return "Camera capture"
+  if (clip.kind === "cursor-effect") return `${clip.presetId} cursor effect`
   if (clip.kind === "caption") return clip.text
   return track.name
 }
@@ -516,6 +521,7 @@ function TrackHeader({
               track.kind === "audio" && !track.name.toLowerCase().includes("system"),
             "text-track-system":
               track.kind === "audio" && track.name.toLowerCase().includes("system"),
+            "text-primary": track.kind === "cursor",
           })}
           aria-hidden
         />
@@ -737,7 +743,7 @@ function TimelineClipItem({
     event: React.PointerEvent<HTMLDivElement | HTMLButtonElement>,
     mode: ClipGesture["mode"],
   ) {
-    if (event.button !== 0 || track.locked) return
+    if (event.button !== 0 || track.locked || (clip.kind === "cursor-effect" && clip.locked)) return
     event.stopPropagation()
     event.preventDefault()
     const target = event.currentTarget.closest("[data-timeline-clip]")

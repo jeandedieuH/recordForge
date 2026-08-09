@@ -199,6 +199,52 @@ describe("render-plan", () => {
     expect(plan.value.segments[2].outputEndMs).toBe(60_000)
   })
 
+  it("carries cursor range settings by asset and effect ids", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "cursor-track",
+      kind: "cursor",
+      name: "Cursor",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "cursor-range",
+          kind: "cursor-effect",
+          assetId: "cursor-events:rec-1",
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 0,
+          speed: 1,
+          presetId: "cyberpunk",
+          scale: 1.5,
+          smoothing: "strong",
+          settings: { rightClickEnabled: false },
+          enabled: true,
+          locked: false,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.cursorEffects).toEqual([
+      expect.objectContaining({
+        id: "cursor-range",
+        assetId: "cursor-events:rec-1",
+        startMs: 0,
+        endMs: 20_000,
+        presetId: "cyberpunk",
+        smoothing: "strong",
+        settings: { rightClickEnabled: false },
+      }),
+    ])
+  })
+
   it("fails when the recording has no output path", () => {
     const badRecording = { ...recording, outputPath: undefined }
     const plan = buildRenderPlan({

@@ -17,6 +17,7 @@ pub struct RecoveryScanResult {
     pub output_path: Option<String>,
     pub output_size_bytes: u64,
     pub is_recoverable: bool,
+    pub cursor_telemetry_available: bool,
     pub validation_error: Option<String>,
 }
 
@@ -63,6 +64,7 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
                     output_path: None,
                     output_size_bytes: 0,
                     is_recoverable: false,
+                    cursor_telemetry_available: false,
                     validation_error: Some(format!("manifest unreadable: {e}")),
                 });
                 continue;
@@ -95,6 +97,13 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
                 (None, total_size, err.or(fragment_error))
             };
         let is_recoverable = fragment_count > 0 || output_path.is_some();
+        let cursor_telemetry_available = work_dir.join("cursor_telemetry.json").is_file()
+            && std::fs::read_to_string(work_dir.join("cursor_telemetry.json"))
+                .ok()
+                .and_then(|text| {
+                    serde_json::from_str::<super::cursor::CursorTelemetryFile>(&text).ok()
+                })
+                .is_some();
 
         results.push(RecoveryScanResult {
             session_id: manifest.session_id,
@@ -103,6 +112,7 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
             output_path,
             output_size_bytes: output_size,
             is_recoverable,
+            cursor_telemetry_available,
             validation_error,
         });
     }

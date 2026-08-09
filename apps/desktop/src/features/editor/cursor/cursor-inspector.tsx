@@ -45,6 +45,20 @@ export function CursorInspector({
         </Button>
       </div>
 
+      {/* Availability is explicit so disabled ranges never look like missing media. */}
+      <div className="flex items-center justify-between rounded-xl border border-border bg-surface p-3">
+        <div className="space-y-0.5">
+          <p className="font-semibold">Show custom cursor</p>
+          <p className="text-[10px] text-muted-foreground">
+            Use recorded cursor telemetry in preview and export
+          </p>
+        </div>
+        <Switch
+          checked={settings.enabled ?? true}
+          onCheckedChange={(value) => onChange({ enabled: value })}
+        />
+      </div>
+
       {/* 1. Preset Selector Grid */}
       <div className="space-y-2">
         <Label className="text-[11px] font-semibold text-muted-foreground">
@@ -98,6 +112,18 @@ export function CursorInspector({
           max={3.0}
           step={0.1}
           onValueChange={([val]) => onChange({ scale: val })}
+        />
+        <div className="flex justify-between text-[10px]">
+          <span>Cursor opacity</span>
+          <span className="font-mono">{Math.round((settings.fillOpacity ?? 1) * 100)}%</span>
+        </div>
+        <Slider
+          value={[settings.fillOpacity ?? 1]}
+          min={0}
+          max={1}
+          step={0.05}
+          aria-label="Cursor opacity"
+          onValueChange={([val]) => onChange({ fillOpacity: val })}
         />
       </div>
 
@@ -210,6 +236,23 @@ export function CursorInspector({
           ))}
         </div>
 
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
+            <span className="text-[10px]">Left click</span>
+            <Switch
+              checked={settings.leftClickEnabled ?? true}
+              onCheckedChange={(value) => onChange({ leftClickEnabled: value })}
+            />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
+            <span className="text-[10px]">Right click</span>
+            <Switch
+              checked={settings.rightClickEnabled ?? true}
+              onCheckedChange={(value) => onChange({ rightClickEnabled: value })}
+            />
+          </div>
+        </div>
+
         {settings.clickFeedback !== "none" ? (
           <div className="space-y-2 pt-1">
             <div className="flex items-center justify-between">
@@ -245,6 +288,54 @@ export function CursorInspector({
               onCheckedChange={(val) => onChange({ smoothMovement: val })}
             />
           </div>
+
+          {settings.smoothMovement ? (
+            <div className="space-y-1 pt-1">
+              <div className="flex justify-between text-[10px]">
+                <span>Smoothing strength</span>
+                <span className="font-mono">
+                  {Math.round((1 - (settings.smoothFactor ?? 0.25)) * 100)}%
+                </span>
+              </div>
+              <Slider
+                value={[settings.smoothFactor ?? 0.25]}
+                min={0.05}
+                max={1}
+                step={0.05}
+                aria-label="Cursor smoothing strength"
+                onValueChange={([value]) => onChange({ smoothFactor: value })}
+              />
+            </div>
+          ) : null}
+
+          <div className="flex items-center justify-between pt-1">
+            <div className="space-y-0.5">
+              <p className="font-medium text-[11px]">Hide when idle</p>
+              <p className="text-[10px] text-muted-foreground">
+                Hide after a quiet stretch of telemetry
+              </p>
+            </div>
+            <Switch
+              checked={settings.autoHideIdle ?? false}
+              onCheckedChange={(value) => onChange({ autoHideIdle: value })}
+            />
+          </div>
+
+          {settings.autoHideIdle ? (
+            <div className="space-y-1 pl-2 border-l-2 border-success/40 pt-1">
+              <div className="flex justify-between text-[10px]">
+                <span>Idle timeout</span>
+                <span className="font-mono">{settings.idleTimeoutMs ?? 2000}ms</span>
+              </div>
+              <Slider
+                value={[settings.idleTimeoutMs ?? 2000]}
+                min={500}
+                max={10000}
+                step={100}
+                onValueChange={([value]) => onChange({ idleTimeoutMs: value })}
+              />
+            </div>
+          ) : null}
 
           <div className="flex items-center justify-between pt-1">
             <div className="space-y-0.5">

@@ -26,7 +26,11 @@ pub fn load_project_for_recording(
 ) -> Result<Option<LoadedProject>> {
     let recording = get_db_recording(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
-    load_project(&project_dir, &state.path_policy)
+    let loaded = load_project(&project_dir, &state.path_policy)?;
+    if let Some(project) = loaded.as_ref() {
+        index_project(&state, &project.project)?;
+    }
+    Ok(loaded)
 }
 
 /// Save a project. If the project file already exists, it is backed up before

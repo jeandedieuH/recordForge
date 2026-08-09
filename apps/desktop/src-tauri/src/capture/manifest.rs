@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use super::cursor::{CursorCaptureBounds, CursorDpiScale, CursorTelemetryTimebase};
 use super::disk;
 use super::source::CaptureSource;
 
@@ -76,6 +77,21 @@ pub struct RecordingFragment {
     pub validated: bool,
 }
 
+/// Checkpoint metadata for the immutable cursor telemetry asset. Event data
+/// remains in the asset file; the manifest only carries recovery identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorTelemetryAsset {
+    pub asset_id: String,
+    pub path: String,
+    pub schema_version: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub capture_bounds: CursorCaptureBounds,
+    pub dpi_scale: CursorDpiScale,
+    pub timebase: CursorTelemetryTimebase,
+}
+
 /// On-disk manifest for a recording session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +110,8 @@ pub struct RecordingManifest {
     pub markers: Vec<RecordingMarker>,
     #[serde(default)]
     pub total_recorded_ms: u64,
+    #[serde(default)]
+    pub cursor_telemetry: Option<CursorTelemetryAsset>,
     pub stats: Option<RecordingStats>,
 }
 
@@ -118,6 +136,7 @@ impl RecordingManifest {
             fragments: Vec::new(),
             markers: Vec::new(),
             total_recorded_ms: 0,
+            cursor_telemetry: None,
             stats: None,
         }
     }
@@ -180,6 +199,11 @@ impl RecordingManifest {
 
     pub fn set_total_recorded_ms(&mut self, ms: u64) {
         self.total_recorded_ms = ms;
+        self.touch();
+    }
+
+    pub fn set_cursor_telemetry(&mut self, metadata: CursorTelemetryAsset) {
+        self.cursor_telemetry = Some(metadata);
         self.touch();
     }
 

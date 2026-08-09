@@ -169,6 +169,20 @@ export const recordingManifestSchema = z.object({
   markers: z.array(recordingMarkerSchema).default([]),
   // Total accumulated recorded time in milliseconds (used for pause/resume).
   totalRecordedMs: z.number().int().min(0).default(0),
+  // Checkpoint identity for the cursor_events project asset. Event samples stay
+  // in the telemetry asset rather than being copied into the manifest.
+  cursorTelemetry: z
+    .object({
+      assetId: z.string(),
+      path: z.string(),
+      schemaVersion: z.number().int().positive(),
+      sourceWidth: z.number().int().positive(),
+      sourceHeight: z.number().int().positive(),
+      captureBounds: boundsSchema,
+      dpiScale: z.object({ x: z.number().positive(), y: z.number().positive() }),
+      timebase: z.object({ unit: z.literal("ms"), ticksPerSecond: z.number().int().positive() }),
+    })
+    .optional(),
   // Optional FFmpeg process statistics captured at stop time.
   stats: z
     .object({
@@ -244,6 +258,7 @@ export const recoveryScanResultSchema = z.object({
   outputPath: z.string().optional(),
   outputSizeBytes: z.number().int().min(0).default(0),
   isRecoverable: z.boolean(),
+  cursorTelemetryAvailable: z.boolean().default(false),
   validationError: z.string().optional(),
 })
 

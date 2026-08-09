@@ -836,7 +836,8 @@ fn diagnostic_os() -> String {
     }
 }
 
-/// Load recorded mouse cursor telemetry data for a recording session.
+/// Load cursor telemetry through the project asset registry. React only sends
+/// the recording id; Rust resolves and validates the registered asset path.
 #[tauri::command]
 #[instrument(skip(state))]
 pub fn get_cursor_telemetry(
@@ -851,13 +852,39 @@ pub fn get_cursor_telemetry(
         Ok(rec) => rec,
         Err(_) => return Ok(None),
     };
-    let path = std::path::PathBuf::from(&recording.work_dir).join("cursor_telemetry.json");
-    if !path.exists() {
+    drop(conn);
+
+    let project_dir = crate::projects::project_dir_for_recording(&recording);
+    let loaded = crate::projects::load_project(&project_dir, &state.path_policy)?;
+    let Some(loaded) = loaded else {
+        return Ok(None);
+    };
+    let Some(asset) = loaded
+        .project
+        .assets
+        .iter()
+        .find(|asset| asset.role == crate::projects::ProjectAssetRole::CursorEvents)
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        asset.status,
+        crate::projects::ProjectAssetStatus::Available
+            | crate::projects::ProjectAssetStatus::Relinked
+    ) {
         return Ok(None);
     }
+
+    let path = project_dir.join(&asset.path);
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| InternalError::Storage(format!("read cursor telemetry file: {e}")))?;
+        .map_err(|e| InternalError::Storage(format!("read cursor telemetry asset: {e}")))?;
     let telemetry: crate::capture::cursor::CursorTelemetryFile = serde_json::from_str(&text)
         .map_err(|e| InternalError::Storage(format!("parse cursor telemetry json: {e}")))?;
+    let telemetry = telemetry.normalize();
+    if telemetry.asset_id != asset.id {
+        return Err(
+            InternalError::Project("cursor telemetry asset identity mismatch".into()).into(),
+        );
+    }
     Ok(Some(telemetry))
 }

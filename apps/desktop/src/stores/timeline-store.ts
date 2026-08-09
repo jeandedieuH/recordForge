@@ -98,6 +98,7 @@ const SNAPSHOT_COMMANDS = new Set([
   "ripple-delete-clips",
   "ripple-delete-range",
   "delete-track",
+  "delete-cursor-range",
   "trim-clip",
 ])
 
@@ -213,6 +214,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
       let project: recordForgeProject
       let missingAssets: string[] = []
+      let didMigrateCursorTrack = false
 
       if (loaded) {
         project = loaded.project
@@ -223,6 +225,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       }
 
       const timeline = projectToTimeline(project)
+      // Persist the cursor track migration in the next autosave instead of
+      // keeping it only as a runtime fallback for legacy project files.
+      if (timeline.tracks.length !== project.tracks.length) {
+        project = timelineToProject(timeline, project)
+        didMigrateCursorTrack = true
+      }
       const engine = createEngine(timeline)
       const duration = getTotalDuration(timeline)
 
@@ -254,6 +262,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         isLoading: false,
         error: null,
       })
+      if (didMigrateCursorTrack) {
+        useEditorStore.getState().setDirty(true)
+        get().scheduleAutosave()
+      }
     } catch (err) {
       set({ error: toErrorMessage(err), isLoading: false })
     }

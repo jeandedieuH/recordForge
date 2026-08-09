@@ -7,7 +7,9 @@ use super::audio::{WasapiCaptureKind, WasapiCaptureOptions, WasapiCaptureSession
 use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::ffmpeg::FfmpegCapture;
-use super::manifest::{RecorderState, RecordingManifest, RecordingMarker, RecordingStats};
+use super::manifest::{
+    CursorTelemetryAsset, RecorderState, RecordingManifest, RecordingMarker, RecordingStats,
+};
 use super::media;
 
 /// Shared recorder state. Only one recording session can be active at a time.
@@ -51,6 +53,27 @@ struct SegmentCaptures {
     screen: FfmpegCapture,
     audio: Vec<ActiveAudioCapture>,
     webcam: Option<FfmpegCapture>,
+}
+
+fn cursor_asset_metadata(session_id: &str, bounds: super::source::Bounds) -> CursorTelemetryAsset {
+    CursorTelemetryAsset {
+        asset_id: format!("cursor-events:{session_id}"),
+        path: "cursor_telemetry.json".into(),
+        schema_version: 1,
+        source_width: bounds.width.max(1) as u32,
+        source_height: bounds.height.max(1) as u32,
+        capture_bounds: super::cursor::CursorCaptureBounds {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width.max(1) as u32,
+            height: bounds.height.max(1) as u32,
+        },
+        dpi_scale: super::cursor::CursorDpiScale { x: 1.0, y: 1.0 },
+        timebase: super::cursor::CursorTelemetryTimebase {
+            unit: "ms".into(),
+            ticks_per_second: 1_000,
+        },
+    }
 }
 
 impl Recorder {
@@ -233,6 +256,7 @@ impl Recorder {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
+            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds));
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }
@@ -495,6 +519,9 @@ impl Recorder {
             Ok(stats) => stats,
             Err(error) => {
                 self.stop_audio_captures(&mut session.audio_captures);
+                if let Some(mut tracker) = session.cursor_tracker.take() {
+                    tracker.stop();
+                }
                 if let Ok(mut manifest) = session.manifest.lock() {
                     manifest.set_state(RecorderState::Failed);
                     if let Err(write_error) = manifest.write() {
@@ -593,6 +620,7 @@ impl Recorder {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
+            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds));
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }

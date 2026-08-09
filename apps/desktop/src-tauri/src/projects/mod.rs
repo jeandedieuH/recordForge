@@ -8,6 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 
+use crate::capture::cursor::CursorTelemetryFile;
 use crate::capture::disk::atomic_replace;
 use crate::database::library::LibraryRecording;
 use crate::database::media::MediaMetadata;
@@ -75,6 +76,22 @@ pub struct ProjectAsset {
     #[serde(default)]
     pub has_audio: bool,
     pub stream_index: Option<i32>,
+    #[serde(default)]
+    pub source_width: Option<u32>,
+    #[serde(default)]
+    pub source_height: Option<u32>,
+    #[serde(default)]
+    pub sample_rate_hz: Option<f64>,
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    #[serde(default)]
+    pub capture_bounds: Option<crate::capture::cursor::CursorCaptureBounds>,
+    #[serde(default)]
+    pub dpi_scale: Option<crate::capture::cursor::CursorDpiScale>,
+    #[serde(default)]
+    pub timebase: Option<crate::capture::cursor::CursorTelemetryTimebase>,
+    #[serde(default)]
+    pub cursor_metadata: Option<String>,
 }
 
 /// Export settings persisted with the project.
@@ -261,6 +278,182 @@ fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPoli
     Ok(())
 }
 
+fn telemetry_asset_from_file(
+    project_dir: &Path,
+    _recording_id: &str,
+) -> Result<Option<(ProjectAsset, CursorTelemetryFile)>> {
+    let path = project_dir.join("cursor_telemetry.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let text = fs::read_to_string(&path)
+        .map_err(|e| InternalError::Storage(format!("read cursor telemetry asset: {e}")))?;
+    let telemetry = match serde_json::from_str::<CursorTelemetryFile>(&text) {
+        Ok(telemetry) => telemetry.normalize(),
+        Err(error) => {
+            warn!(error = %error, "cursor telemetry asset is unavailable");
+            return Ok(None);
+        }
+    };
+    let asset = ProjectAsset {
+        id: telemetry.asset_id.clone(),
+        role: ProjectAssetRole::CursorEvents,
+        path: "cursor_telemetry.json".into(),
+        status: ProjectAssetStatus::Available,
+        duration_ms: telemetry.events.last().map(|event| event.t_ms).unwrap_or(0),
+        width: Some(telemetry.source_width as i32),
+        height: Some(telemetry.source_height as i32),
+        fps: Some(telemetry.sample_rate_hz as f64),
+        has_audio: false,
+        stream_index: None,
+        source_width: Some(telemetry.source_width),
+        source_height: Some(telemetry.source_height),
+        sample_rate_hz: Some(telemetry.sample_rate_hz as f64),
+        schema_version: Some(telemetry.schema_version),
+        capture_bounds: telemetry.capture_bounds.clone(),
+        dpi_scale: telemetry.dpi_scale.clone(),
+        timebase: telemetry.timebase.clone(),
+        cursor_metadata: Some("available".into()),
+    };
+    Ok(Some((asset, telemetry)))
+}
+
+fn timeline_duration(value: &Value) -> u64 {
+    value
+        .as_array()
+        .into_iter()
+        .flat_map(|tracks| tracks.iter())
+        .flat_map(|track| {
+            track
+                .get("clips")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|clip| Some(clip.get("startMs")?.as_u64()? + clip.get("durationMs")?.as_u64()?))
+        .max()
+        .unwrap_or(1)
+}
+
+/// Register cursor telemetry in the project asset registry and migrate the
+/// legacy global cursor settings into a full-duration cursor range.
+pub fn ensure_cursor_asset(project: &mut ProjectFile, project_dir: &Path) -> Result<bool> {
+    let Some((asset, telemetry)) = telemetry_asset_from_file(project_dir, &project.recording_id)?
+    else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    if let Some(existing) = project
+        .assets
+        .iter_mut()
+        .find(|candidate| candidate.role == ProjectAssetRole::CursorEvents)
+    {
+        if existing.id != asset.id
+            || existing.path != asset.path
+            || existing.status != ProjectAssetStatus::Available
+            || existing.source_width != asset.source_width
+            || existing.source_height != asset.source_height
+        {
+            *existing = asset.clone();
+            changed = true;
+        }
+    } else {
+        project.assets.push(asset.clone());
+        changed = true;
+    }
+
+    let duration_ms = timeline_duration(&project.tracks)
+        .max(telemetry.events.last().map(|event| event.t_ms).unwrap_or(1));
+    let canvas = project.canvas.clone();
+    let tracks = project
+        .tracks
+        .as_array_mut()
+        .ok_or_else(|| InternalError::Project("project tracks must be an array".into()))?;
+    let cursor_track = tracks
+        .iter_mut()
+        .find(|track| track.get("kind").and_then(Value::as_str) == Some("cursor"));
+    if let Some(track) = cursor_track {
+        let clips = track
+            .get_mut("clips")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| InternalError::Project("cursor track clips must be an array".into()))?;
+        if clips.is_empty() {
+            clips.push(cursor_effect_value(&asset, duration_ms, &canvas));
+            changed = true;
+        } else {
+            for clip in clips {
+                if clip.get("kind").and_then(Value::as_str) != Some("cursor-effect") {
+                    continue;
+                }
+                if clip.get("assetId").and_then(Value::as_str) != Some(asset.id.as_str()) {
+                    if let Some(object) = clip.as_object_mut() {
+                        object.insert("assetId".into(), Value::String(asset.id.clone()));
+                        changed = true;
+                    }
+                }
+            }
+        }
+    } else {
+        tracks.push(serde_json::json!({
+            "id": format!("track:cursor:{}", project.recording_id),
+            "kind": "cursor",
+            "name": "Cursor",
+            "muted": false,
+            "locked": false,
+            "solo": false,
+            "volume": 1,
+            "clips": [cursor_effect_value(&asset, duration_ms, &canvas)],
+        }));
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn cursor_effect_value(asset: &ProjectAsset, duration_ms: u64, canvas: &Value) -> Value {
+    let canvas_settings = canvas
+        .get("cursorSettings")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let preset = canvas_settings
+        .get("preset")
+        .cloned()
+        .unwrap_or_else(|| Value::String("modern-neon".into()));
+    let scale = canvas_settings
+        .get("scale")
+        .cloned()
+        .unwrap_or_else(|| Value::from(1.0));
+    let smoothing = if canvas_settings
+        .get("smoothMovement")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        "smooth"
+    } else {
+        "off"
+    };
+    let enabled = canvas_settings
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    serde_json::json!({
+        "id": format!("cursor-effect:{}", asset.id),
+        "kind": "cursor-effect",
+        "assetId": asset.id,
+        "startMs": 0,
+        "durationMs": duration_ms,
+        "sourceInMs": 0,
+        "sourceOutMs": 0,
+        "speed": 1,
+        "presetId": preset,
+        "scale": scale,
+        "smoothing": smoothing,
+        "settings": canvas_settings,
+        "enabled": enabled,
+        "locked": false,
+    })
+}
+
 /// Load a project from the recording's work directory.
 /// If the project file does not exist, returns `Ok(None)` so the caller can bootstrap.
 #[instrument]
@@ -313,6 +506,16 @@ pub fn load_project(project_dir: &Path, policy: &PathPolicy) -> Result<Option<Lo
         if matches!(asset.status, ProjectAssetStatus::Missing) {
             missing_assets.push(asset.id.clone());
         }
+    }
+
+    if ensure_cursor_asset(&mut project, project_dir)? {
+        project = save_project(&project, project_dir)?;
+        missing_assets = project
+            .assets
+            .iter()
+            .filter(|asset| matches!(asset.status, ProjectAssetStatus::Missing))
+            .map(|asset| asset.id.clone())
+            .collect();
     }
 
     Ok(Some(LoadedProject {
@@ -438,6 +641,14 @@ fn create_screen_asset(recording: &LibraryRecording, metadata: &MediaMetadata) -
         fps: metadata.fps,
         has_audio: metadata.has_audio,
         stream_index: None,
+        source_width: None,
+        source_height: None,
+        sample_rate_hz: None,
+        schema_version: None,
+        capture_bounds: None,
+        dpi_scale: None,
+        timebase: None,
+        cursor_metadata: None,
     }
 }
 
@@ -537,13 +748,12 @@ pub fn create_project(
         checksum: String::new(),
     };
 
-    save_project(&project, project_dir).map(|mut saved| {
-        // The command layer will replace the bootstrap tracks via the domain
-        // timeline builder; leaving a valid project file on disk satisfies the
-        // "opening creates a stable project identity" acceptance criterion.
-        saved.tracks = serde_json::json!([]);
-        saved
-    })
+    let mut project = project;
+    // The command layer will replace the bootstrap tracks via the domain
+    // timeline builder; leaving a valid project file on disk satisfies the
+    // "opening creates a stable project identity" acceptance criterion.
+    ensure_cursor_asset(&mut project, project_dir)?;
+    save_project(&project, project_dir)
 }
 
 /// Rename an existing project.
@@ -647,6 +857,15 @@ pub fn asset_path_map(project: &ProjectFile, project_dir: &Path) -> HashMap<Stri
     map
 }
 
+/// Resolve all exportable assets through the same containment checks used by
+/// project loading. Export callers receive IDs mapped to trusted paths only.
+pub fn load_asset_path_map(project_dir: &Path) -> Result<HashMap<String, PathBuf>> {
+    let policy = PathPolicy::new(project_dir.to_path_buf(), project_dir.to_path_buf());
+    let loaded = load_project(project_dir, &policy)?
+        .ok_or_else(|| InternalError::Project("project file is required for export".into()))?;
+    Ok(asset_path_map(&loaded.project, project_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,6 +967,44 @@ mod tests {
         let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
         assert_eq!(loaded.project.id, project.id);
         assert!(loaded.missing_assets.is_empty());
+    }
+
+    #[test]
+    fn test_cursor_asset_is_registered_and_migrated_to_a_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let (recording, metadata) = make_test_recording(&project_dir);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
+        let telemetry = CursorTelemetryFile::new(
+            recording.id.clone(),
+            1920,
+            1080,
+            crate::capture::cursor::CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            vec![],
+        );
+        fs::write(
+            project_dir.join("cursor_telemetry.json"),
+            serde_json::to_string(&telemetry).unwrap(),
+        )
+        .unwrap();
+
+        let project = create_project(&recording, &metadata, None, &project_dir).unwrap();
+        let cursor_asset = project
+            .assets
+            .iter()
+            .find(|asset| asset.role == ProjectAssetRole::CursorEvents)
+            .expect("cursor asset");
+        assert_eq!(cursor_asset.id, "cursor-events:rec-1");
+        let tracks = project.tracks.as_array().expect("tracks");
+        assert!(tracks
+            .iter()
+            .any(|track| { track.get("kind").and_then(Value::as_str) == Some("cursor") }));
     }
 
     #[test]

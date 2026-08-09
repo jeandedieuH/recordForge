@@ -79,7 +79,7 @@ export function buildTimelineSegments(state: TimelineState, assetId: string): Ti
       segments.push({
         clipId: clip.id,
         assetId: clip.assetId,
-        streamIndex: clip.streamIndex,
+        streamIndex: "streamIndex" in clip ? clip.streamIndex : undefined,
         startMs: clip.startMs,
         endMs: clip.startMs + clip.durationMs,
         sourceInMs: clip.sourceInMs,

@@ -2,6 +2,7 @@ import { defaultCursorSettings, defaultProjectExportSettings } from "@recordforg
 import type {
   AudioClip,
   CameraClip,
+  CursorEffectClip,
   LibraryRecording,
   MediaMetadata,
   MediaStream,
@@ -101,6 +102,40 @@ function makeTrack(kind: TimelineTrackKind, name: string, clips: TimelineClip[])
     volume: 1,
     clips,
   }
+}
+
+export function createCursorEffectTrack(
+  assetId: string,
+  durationMs: number,
+  settings = defaultCursorSettings,
+): TimelineTrack {
+  const cursorClip: CursorEffectClip = {
+    id: `cursor-effect:${assetId}`,
+    kind: "cursor-effect",
+    assetId,
+    startMs: 0,
+    durationMs: Math.max(1, Math.round(durationMs)),
+    sourceInMs: 0,
+    sourceOutMs: 0,
+    speed: 1,
+    presetId: settings.preset,
+    scale: settings.scale,
+    smoothing: settings.smoothMovement ? "smooth" : "off",
+    settings,
+    enabled: settings.enabled,
+    locked: false,
+  }
+  return makeTrack("cursor", "Cursor", [cursorClip])
+}
+
+export function ensureCursorEffectTrack(
+  state: TimelineState,
+  assetId: string,
+  durationMs = getTotalDuration(state),
+): TimelineState {
+  if (state.tracks.some((track) => track.kind === "cursor")) return state
+  const cursorTrack = createCursorEffectTrack(assetId, durationMs, state.canvas.cursorSettings)
+  return { ...state, tracks: [...state.tracks, cursorTrack] }
 }
 
 function audioStreamName(stream: MediaStream | undefined, index: number): string {
@@ -237,6 +272,7 @@ export function trackKindDisplayName(kind: TimelineTrackKind): string {
     camera: "Camera",
     audio: "Audio",
     captions: "Captions",
+    cursor: "Cursor",
     effects: "Effects",
   }
   return names[kind]
@@ -278,13 +314,17 @@ export function createProjectFromRecording(
   metadata: MediaMetadata,
   name?: string,
   exportSettings?: ProjectExportSettings,
+  cursorTelemetryAsset?: ProjectAsset,
 ): Project {
   const projectId = crypto.randomUUID()
-  const timeline = createTimelineFromRecording(recording, metadata, name, projectId)
+  const baseTimeline = createTimelineFromRecording(recording, metadata, name, projectId)
 
   // In the bootstrap project every clip references the single screen asset.
   // This preserves the existing render-plan contract while the asset registry is in place.
   const screenAsset = createScreenAsset(recording, metadata)
+  const timeline = cursorTelemetryAsset
+    ? ensureCursorEffectTrack(baseTimeline, cursorTelemetryAsset.id)
+    : baseTimeline
   for (const track of timeline.tracks) {
     for (const clip of track.clips) {
       clip.assetId = screenAsset.id
@@ -298,7 +338,7 @@ export function createProjectFromRecording(
     name: timeline.name,
     recordingId: recording.id,
     canvas: timeline.canvas,
-    assets: [screenAsset],
+    assets: [screenAsset, ...(cursorTelemetryAsset ? [cursorTelemetryAsset] : [])],
     tracks: timeline.tracks,
     markers: timeline.markers,
     exportSettings: exportSettings ?? defaultProjectExportSettings,
@@ -310,7 +350,7 @@ export function createProjectFromRecording(
 
 // Convert a durable project into the in-memory timeline state used by the command engine.
 export function projectToTimeline(project: Project): TimelineState {
-  return {
+  const timeline: TimelineState = {
     version: 1,
     id: project.id,
     name: project.name,
@@ -321,6 +361,8 @@ export function projectToTimeline(project: Project): TimelineState {
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   }
+  const cursorAsset = project.assets.find((asset) => asset.role === "cursor_events")
+  return cursorAsset ? ensureCursorEffectTrack(timeline, cursorAsset.id) : timeline
 }
 
 // Merge an updated timeline back into an existing project without losing assets,

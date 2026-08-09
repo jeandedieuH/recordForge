@@ -1,6 +1,12 @@
 import { z } from "zod"
 import { boundsSchema } from "./recording"
-import { cursorSettingsSchema, defaultCursorSettings } from "./cursor"
+import {
+  cursorEffectSettingsSchema,
+  cursorIconPresetSchema,
+  cursorSettingsSchema,
+  cursorSmoothingSchema,
+  defaultCursorSettings,
+} from "./cursor"
 import { timelineSelectionSchema } from "./selection"
 
 // Canvas settings shared by the timeline, the preview, and the final render.
@@ -79,18 +85,48 @@ export const captionClipSchema = timelineClipBaseSchema.extend({
 
 export type CaptionClip = z.infer<typeof captionClipSchema>
 
+// Cursor effects are timeline ranges rather than source-media clips. The
+// source fields stay optional-compatible with the existing clip engine so
+// generic selection, movement, and persistence code can handle the range.
+export const cursorEffectClipSchema = z.object({
+  id: z.string(),
+  kind: z.literal("cursor-effect"),
+  assetId: z.string(),
+  startMs: z.number().int().min(0),
+  durationMs: z.number().int().min(1),
+  sourceInMs: z.number().int().min(0).default(0),
+  sourceOutMs: z.number().int().min(0).default(0),
+  speed: z.number().positive().default(1),
+  presetId: cursorIconPresetSchema.default("modern-neon"),
+  scale: z.number().min(0.2).max(5).default(1),
+  smoothing: cursorSmoothingSchema.default("smooth"),
+  settings: cursorEffectSettingsSchema.default({}),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+})
+
+export type CursorEffectClip = z.infer<typeof cursorEffectClipSchema>
+
 // Discriminated union of all clip kinds.
 export const timelineClipSchema = z.discriminatedUnion("kind", [
   screenClipSchema,
   cameraClipSchema,
   audioClipSchema,
   captionClipSchema,
+  cursorEffectClipSchema,
 ])
 
 export type TimelineClip = z.infer<typeof timelineClipSchema>
 
 // Track kind determines how the track is rendered and exported.
-export const timelineTrackKindSchema = z.enum(["screen", "camera", "audio", "captions", "effects"])
+export const timelineTrackKindSchema = z.enum([
+  "screen",
+  "camera",
+  "audio",
+  "captions",
+  "cursor",
+  "effects",
+])
 
 export type TimelineTrackKind = z.infer<typeof timelineTrackKindSchema>
 
@@ -191,6 +227,22 @@ export const renderPlanOverlaySchema = z.object({
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
 
+// Cursor effects are sent as IDs and validated settings. Rust resolves the
+// telemetry path from the registered project asset instead of accepting a path.
+export const renderPlanCursorEffectSchema = z.object({
+  id: z.string(),
+  assetId: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  enabled: z.boolean().default(true),
+  presetId: cursorIconPresetSchema.default("modern-neon"),
+  scale: z.number().min(0.2).max(5).default(1),
+  smoothing: cursorSmoothingSchema.default("smooth"),
+  settings: cursorEffectSettingsSchema.default({}),
+})
+
+export type RenderPlanCursorEffect = z.infer<typeof renderPlanCursorEffectSchema>
+
 // Render plan produced by media-core from a timeline.
 export const renderPlanSchema = z.object({
   recordingId: z.string(),
@@ -201,6 +253,7 @@ export const renderPlanSchema = z.object({
   audio: renderPlanAudioSchema.optional(),
   audioTracks: z.array(renderPlanAudioSchema).default([]),
   overlays: z.array(renderPlanOverlaySchema).default([]),
+  cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
 })
 
 export type RenderPlan = z.infer<typeof renderPlanSchema>

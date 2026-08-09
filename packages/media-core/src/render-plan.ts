@@ -3,6 +3,7 @@ import type {
   LibraryRecording,
   RenderPlan,
   RenderPlanAudio,
+  RenderPlanCursorEffect,
   RenderPlanOverlay,
   RenderSegment,
   TimelineClip,
@@ -18,7 +19,7 @@ function toSegments(clips: TimelineClip[], assetId: string): RenderSegment[] {
   const sorted = sortClips(clips)
   return sorted.map((clip) => ({
     assetId: clip.assetId || assetId,
-    streamIndex: clip.streamIndex,
+    streamIndex: "streamIndex" in clip ? clip.streamIndex : undefined,
     sourceInMs: clip.sourceInMs,
     sourceOutMs: clip.sourceOutMs,
     speed: clip.speed,
@@ -31,6 +32,25 @@ function toOverlays(_clips: TimelineClip[], _assetId: string): RenderPlanOverlay
   // Camera overlays are planned for a later phase. Return an empty array for the
   // MVP so the schema is ready when Rust overlay rendering lands.
   return []
+}
+
+function toCursorEffects(state: TimelineState): RenderPlanCursorEffect[] {
+  const track = state.tracks.find((candidate) => candidate.kind === "cursor")
+  if (!track) return []
+  return track.clips
+    .filter((clip) => clip.kind === "cursor-effect")
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+    .map((clip) => ({
+      id: clip.id,
+      assetId: clip.assetId,
+      startMs: clip.startMs,
+      endMs: clip.startMs + clip.durationMs,
+      enabled: clip.enabled,
+      presetId: clip.presetId,
+      scale: clip.scale,
+      smoothing: clip.smoothing,
+      settings: clip.settings,
+    }))
 }
 
 export function isTimelineAudioMuted(state: TimelineState): boolean {
@@ -50,7 +70,7 @@ function buildAudioTracks(recording: LibraryRecording, state: TimelineState): Re
       }))
       return {
         assetId: firstClip?.assetId || recording.id,
-        streamIndex: firstClip?.streamIndex,
+        streamIndex: firstClip && "streamIndex" in firstClip ? firstClip.streamIndex : undefined,
         muted: track.muted,
         volume: track.volume,
         segments,
@@ -96,6 +116,7 @@ export function buildRenderPlan(
   const segments = toSegments(screenTrack.clips, assetId)
   const overlays = cameraTrack ? toOverlays(cameraTrack.clips, assetId) : []
   const audioTracks = buildAudioTracks(recording, state)
+  const cursorEffects = toCursorEffects(state)
 
   return {
     ok: true,
@@ -112,6 +133,7 @@ export function buildRenderPlan(
       },
       audioTracks,
       overlays,
+      cursorEffects,
     },
   }
 }

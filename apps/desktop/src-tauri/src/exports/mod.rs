@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -33,6 +34,8 @@ pub struct RenderPlan {
     pub duration_ms: u64,
     pub segments: Vec<RenderSegment>,
     #[serde(default)]
+    pub cursor_effects: Vec<RenderPlanCursorEffect>,
+    #[serde(default)]
     pub canvas: Option<cursor::RenderCanvas>,
     #[serde(default)]
     pub audio: Option<RenderPlanAudio>,
@@ -56,6 +59,20 @@ pub struct RenderPlanAudio {
 
 fn default_audio_volume() -> f64 {
     1.0
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RenderPlanCursorEffect {
+    pub id: String,
+    pub asset_id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub enabled: bool,
+    pub preset_id: String,
+    pub scale: f64,
+    pub smoothing: String,
+    pub settings: serde_json::Value,
 }
 
 /// Run a render plan in a background thread, trimming and concatenating segments.
@@ -98,6 +115,7 @@ pub fn run_render_plan(
         .as_ref()
         .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
     let work_dir = PathBuf::from(&recording.work_dir);
+    let asset_paths = crate::projects::load_asset_path_map(&work_dir)?;
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
@@ -165,9 +183,9 @@ pub fn run_render_plan(
     apply_cursor_overlay(
         &ffmpeg_path.to_string_lossy(),
         output_path,
-        &work_dir,
         &plan,
         &recording_id,
+        &asset_paths,
     )?;
 
     let completed = MediaJob {
@@ -345,9 +363,9 @@ fn render_timeline_with_audio(
 fn apply_cursor_overlay(
     ffmpeg_path: &str,
     output_path: &Path,
-    work_dir: &Path,
     plan: &RenderPlan,
     recording_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
 ) -> Result<()> {
     let canvas = match plan.canvas.as_ref() {
         Some(canvas) => canvas,
@@ -367,29 +385,66 @@ fn apply_cursor_overlay(
         );
     }
 
-    let telemetry_path = work_dir.join("cursor_telemetry.json");
-    if !telemetry_path.exists() {
+    let effects = if plan.cursor_effects.is_empty() {
+        vec![RenderPlanCursorEffect {
+            id: format!("cursor-effect:{recording_id}"),
+            asset_id: format!("cursor-events:{recording_id}"),
+            start_ms: 0,
+            end_ms: plan.duration_ms,
+            enabled: true,
+            preset_id: canvas.cursor_settings.preset.clone(),
+            scale: canvas.cursor_settings.scale,
+            smoothing: if canvas.cursor_settings.smooth_movement {
+                "smooth".into()
+            } else {
+                "off".into()
+            },
+            settings: serde_json::Value::Object(serde_json::Map::new()),
+        }]
+    } else {
+        plan.cursor_effects.clone()
+    };
+
+    let mut renderers = Vec::new();
+    for effect in effects {
+        if !effect.enabled || effect.end_ms <= effect.start_ms {
+            continue;
+        }
+        let Some(telemetry_path) = asset_paths.get(&effect.asset_id) else {
+            tracing::warn!(
+                %recording_id,
+                asset_id = %effect.asset_id,
+                "cursor telemetry asset is unavailable; skipping cursor range"
+            );
+            continue;
+        };
+        let telemetry_text = std::fs::read_to_string(telemetry_path).map_err(|error| {
+            InternalError::Storage(format!("read cursor telemetry asset: {error}"))
+        })?;
+        let telemetry =
+            serde_json::from_str::<crate::capture::cursor::CursorTelemetryFile>(&telemetry_text)
+                .map_err(|error| {
+                    InternalError::Storage(format!("parse cursor telemetry: {error}"))
+                })?
+                .normalize();
+        if telemetry.events.is_empty() {
+            continue;
+        }
+        let settings = cursor_settings_for_effect(&canvas.cursor_settings, &effect);
+        let renderer = cursor::CursorRenderer::new(
+            settings,
+            telemetry,
+            &plan.segments,
+            canvas.width,
+            canvas.height,
+        )
+        .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
+        renderers.push((effect.start_ms, effect.end_ms, renderer));
+    }
+    if renderers.is_empty() {
         tracing::warn!(%recording_id, "cursor telemetry is unavailable; exporting without a cursor overlay");
         return Ok(());
     }
-    let telemetry_text = std::fs::read_to_string(&telemetry_path)
-        .map_err(|error| InternalError::Storage(format!("read cursor telemetry: {error}")))?;
-    let telemetry: crate::capture::cursor::CursorTelemetryFile =
-        serde_json::from_str(&telemetry_text)
-            .map_err(|error| InternalError::Storage(format!("parse cursor telemetry: {error}")))?;
-    if telemetry.events.is_empty() {
-        tracing::warn!(%recording_id, "cursor telemetry has no events; exporting without a cursor overlay");
-        return Ok(());
-    }
-
-    let renderer = cursor::CursorRenderer::new(
-        canvas.cursor_settings.clone(),
-        telemetry,
-        &plan.segments,
-        canvas.width,
-        canvas.height,
-    )
-    .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
     let frame_size = (canvas.width as usize)
         .checked_mul(canvas.height as usize)
         .and_then(|size| size.checked_mul(4))
@@ -456,7 +511,13 @@ fn apply_cursor_overlay(
     let mut frame = vec![0; frame_size];
     for frame_index in 0..frame_count {
         let output_ms = frame_index.saturating_mul(1000) / canvas.fps as u64;
-        renderer.render_frame(output_ms, &mut frame);
+        frame.fill(0);
+        if let Some((_, _, renderer)) = renderers
+            .iter()
+            .find(|(start_ms, end_ms, _)| output_ms >= *start_ms && output_ms < *end_ms)
+        {
+            renderer.render_frame(output_ms, &mut frame);
+        }
         if let Err(error) = stdin.write_all(&frame) {
             let _ = child.kill();
             let _ = child.wait();
@@ -479,6 +540,37 @@ fn apply_cursor_overlay(
 
     crate::capture::disk::atomic_replace(&partial_path, output_path)?;
     Ok(())
+}
+
+fn cursor_settings_for_effect(
+    base: &cursor::CursorSettings,
+    effect: &RenderPlanCursorEffect,
+) -> cursor::CursorSettings {
+    let mut value = serde_json::to_value(base).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(base_object), Some(effect_object)) =
+        (value.as_object_mut(), effect.settings.as_object())
+    {
+        for (key, setting) in effect_object {
+            base_object.insert(key.clone(), setting.clone());
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("enabled".into(), serde_json::Value::Bool(effect.enabled));
+        object.insert(
+            "preset".into(),
+            serde_json::Value::String(effect.preset_id.clone()),
+        );
+        object.insert("scale".into(), serde_json::Value::from(effect.scale));
+        if effect.smoothing == "off" {
+            object.insert("smoothMovement".into(), serde_json::Value::Bool(false));
+        } else {
+            object.insert("smoothMovement".into(), serde_json::Value::Bool(true));
+            if effect.smoothing == "strong" {
+                object.insert("smoothFactor".into(), serde_json::Value::from(0.12));
+            }
+        }
+    }
+    serde_json::from_value(value).unwrap_or_else(|_| base.clone())
 }
 
 fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
