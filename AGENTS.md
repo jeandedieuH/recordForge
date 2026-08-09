@@ -170,3 +170,8 @@ When finishing a task, report:
 3. Validation evidence (commands run, test results).
 4. Known limitations.
 5. Follow-up work.
+
+## Verification Notes
+
+- `bun run lint` currently stops before linting because the installed `typescript-eslint` release does not support the repository's TypeScript 7.0 toolchain; use typecheck, format checks, and tests until the toolchain compatibility is resolved.
+- On Windows, run Rust tests with `cargo test -j 1` when parallel linking intermittently reports `LNK1104` for test executables.

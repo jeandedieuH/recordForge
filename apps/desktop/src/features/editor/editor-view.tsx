@@ -1,4 +1,4 @@
-import { TimelineView } from "./timeline"
+import { EditorShell } from "./editor-shell"
 
 interface EditorViewProps {
   recordingId: string
@@ -7,5 +7,5 @@ interface EditorViewProps {
 }
 
 export function EditorView({ recordingId, onClose, onOpenExport }: EditorViewProps) {
-  return <TimelineView recordingId={recordingId} onClose={onClose} onOpenExport={onOpenExport} />
+  return <EditorShell recordingId={recordingId} onClose={onClose} onOpenExport={onOpenExport} />
 }

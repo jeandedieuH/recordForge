@@ -16,6 +16,7 @@ interface AudioTrackPreviewProps {
   outputs: MediaAudioTrackOutput[]
   playheadMs: number
   isPlaying: boolean
+  playbackRate: number
 }
 
 function toAssetUrl(path: string): string {
@@ -56,6 +57,7 @@ export function AudioTrackPreview({
   outputs,
   playheadMs,
   isPlaying,
+  playbackRate,
 }: AudioTrackPreviewProps) {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
   const previewTracks = useMemo(() => buildPreviewTracks(tracks, outputs), [outputs, tracks])
@@ -65,10 +67,10 @@ export function AudioTrackPreview({
       const element = audioRefs.current[previewTrack.id]
       if (!element) continue
       element.volume = previewTrack.volume
-      element.playbackRate = Math.max(0.25, Math.min(4, previewTrack.clip.speed))
+      element.playbackRate = Math.max(0.25, Math.min(4, previewTrack.clip.speed * playbackRate))
       element.muted = previewTrack.muted || previewTrack.volume === 0
     }
-  }, [previewTracks])
+  }, [playbackRate, previewTracks])
 
   useEffect(() => {
     for (const previewTrack of previewTracks) {

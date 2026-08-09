@@ -206,6 +206,20 @@ fn migrate_v4(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
 
 /// v5: durable project index with recording reference and full project json.
 fn migrate_v5(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    // A partially initialized v1 database may not have created the project
+    // index yet. Create the legacy shape before rebuilding it so migration is
+    // safe for both complete and interrupted first-run databases.
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            project_json TEXT NOT NULL
+        )",
+        [],
+    )?;
+
     // The v1 projects table did not include a recording_id column or FK.
     // Rebuild it non-destructively so existing rows keep their project_json.
     tx.execute(

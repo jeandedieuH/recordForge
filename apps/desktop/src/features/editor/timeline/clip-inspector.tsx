@@ -4,9 +4,12 @@ import type {
   CursorSettings,
   MediaMetadata,
   TimelineClip,
+  TimelineMarker,
   TimelineTrack,
 } from "@recordforge/contracts"
 import {
+  createDeleteMarkerCommand,
+  createUpdateMarkerCommand,
   createTrimClipCommand,
   createUpdateClipAudioCommand,
   createUpdateClipTransformCommand,
@@ -17,7 +20,9 @@ import type { LucideIcon } from "lucide-react"
 import {
   AlignLeft,
   AlignRight,
+  Flag as FlagIcon,
   Maximize2,
+  Monitor,
   MousePointer2,
   Sliders,
   Sparkles,
@@ -30,7 +35,9 @@ import { CursorInspector } from "../cursor"
 interface ClipInspectorProps {
   clip: TimelineClip | null
   track: TimelineTrack | null
+  marker: TimelineMarker | null
   metadata: MediaMetadata | null
+  selectedClipCount?: number
   onClear: () => void
 }
 
@@ -52,7 +59,14 @@ function formatInspectorTime(ms: number): string {
   return `${seconds}.${remainder.toString().padStart(3, "0")}s`
 }
 
-export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorProps) {
+export function ClipInspector({
+  clip,
+  track,
+  marker,
+  metadata,
+  selectedClipCount = 1,
+  onClear,
+}: ClipInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
   const timelineState = useTimelineStore((state) => state.engine?.history.present)
   const cursorSettings = timelineState?.canvas.cursorSettings
@@ -60,6 +74,8 @@ export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorP
   const [activeTab, setActiveTab] = useState<"clip" | "cursor">("cursor")
   const [sourceInText, setSourceInText] = useState(clip ? String(clip.sourceInMs) : "")
   const [sourceOutText, setSourceOutText] = useState(clip ? String(clip.sourceOutMs) : "")
+  const [markerLabel, setMarkerLabel] = useState(marker?.label ?? "")
+  const [markerTimeText, setMarkerTimeText] = useState(marker ? String(marker.timeMs) : "")
   const stream = clip ? streamDetails(clip, metadata) : null
 
   useEffect(() => {
@@ -72,13 +88,88 @@ export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorP
     setSourceOutText(String(clip.sourceOutMs))
   }, [clip])
 
+  useEffect(() => {
+    setMarkerLabel(marker?.label ?? "")
+    setMarkerTimeText(marker ? String(marker.timeMs) : "")
+  }, [marker])
+
   function handleCursorChange(updated: Partial<CursorSettings>) {
     execute(createUpdateCursorSettingsCommand(updated))
+  }
+
+  if (marker) {
+    return (
+      <aside className="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-border bg-surface p-4 lg:flex">
+        <div className="flex items-center justify-between border-b border-border pb-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <FlagIcon className="size-4 text-primary" aria-hidden />
+            <span>Marker</span>
+          </div>
+          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onClear}>
+            Clear
+          </Button>
+        </div>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface-dim p-3">
+            <Input
+              aria-label="Marker label"
+              value={markerLabel}
+              onChange={(event) => setMarkerLabel(event.target.value)}
+              onBlur={() => execute(createUpdateMarkerCommand(marker.id, { label: markerLabel }))}
+            />
+            <Input
+              aria-label="Marker time in milliseconds"
+              type="number"
+              min={0}
+              value={markerTimeText}
+              onChange={(event) => setMarkerTimeText(event.target.value)}
+              onBlur={() => {
+                const timeMs = Number.parseInt(markerTimeText, 10)
+                if (Number.isFinite(timeMs) && timeMs >= 0) {
+                  execute(createUpdateMarkerCommand(marker.id, { timeMs }))
+                }
+              }}
+            />
+            <p className="font-mono text-xs tabular-nums text-subtle-foreground">
+              {formatInspectorTime(marker.timeMs)}
+            </p>
+          </div>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => {
+              execute(createDeleteMarkerCommand(marker.id))
+              onClear()
+            }}
+          >
+            Delete marker
+          </Button>
+        </div>
+      </aside>
+    )
   }
 
   if (!clip || !track) {
     return (
       <aside className="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-border bg-surface p-4 lg:flex">
+        <div className="flex flex-col gap-3 border-b border-border pb-4">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <Monitor className="size-4 text-primary" aria-hidden />
+            <span>Canvas</span>
+          </div>
+          {timelineState ? (
+            <div className="grid grid-cols-2 gap-2">
+              <InfoField label="Width" value={`${timelineState.canvas.width}px`} />
+              <InfoField label="Height" value={`${timelineState.canvas.height}px`} />
+              <InfoField label="Frame rate" value={`${timelineState.canvas.fps} fps`} />
+              <InfoField label="Background" value={timelineState.canvas.background} />
+            </div>
+          ) : (
+            <p className="text-xs text-subtle-foreground">
+              Select a project to inspect its canvas.
+            </p>
+          )}
+        </div>
         <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
       </aside>
     )
@@ -142,12 +233,17 @@ export function ClipInspector({ clip, track, metadata, onClear }: ClipInspectorP
       ) : (
         <div className="flex flex-col gap-5">
           <div className="flex flex-col gap-1">
-            <Badge
-              variant="accent"
-              className="w-fit border-border bg-overlay px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
-            >
-              {track.name}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge
+                variant="accent"
+                className="w-fit border-border bg-overlay px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+              >
+                {track.name}
+              </Badge>
+              {selectedClipCount > 1 ? (
+                <Badge variant="outline">{selectedClipCount} selected</Badge>
+              ) : null}
+            </div>
             <p className="truncate text-sm font-medium text-foreground">{clipLabel(clip, track)}</p>
             <p className="font-mono text-[11px] tabular-nums text-subtle-foreground">
               {formatInspectorTime(clip.startMs)} →{" "}

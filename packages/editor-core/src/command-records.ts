@@ -31,12 +31,23 @@ export type CommandMeta = z.infer<typeof commandMetaSchema>
 
 export const addMarkerCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-marker"),
+  markerId: z.string().optional(),
   timeMs: z.number().int().min(0),
   label: z.string(),
   color: z.string().default("#f59e0b"),
 })
 
 export type AddMarkerCommand = z.infer<typeof addMarkerCommandSchema>
+
+export const updateMarkerCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-marker"),
+  markerId: z.string(),
+  timeMs: z.number().int().min(0).optional(),
+  label: z.string().optional(),
+  color: z.string().optional(),
+})
+
+export type UpdateMarkerCommand = z.infer<typeof updateMarkerCommandSchema>
 
 export const deleteMarkerCommandSchema = commandMetaSchema.extend({
   kind: z.literal("delete-marker"),
@@ -47,6 +58,7 @@ export type DeleteMarkerCommand = z.infer<typeof deleteMarkerCommandSchema>
 
 export const addTrackCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-track"),
+  trackId: z.string().optional(),
   trackKind: timelineTrackKindSchema,
   trackName: z.string().optional(),
 })
@@ -63,6 +75,8 @@ export type DeleteTrackCommand = z.infer<typeof deleteTrackCommandSchema>
 export const trimClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("trim-clip"),
   clipId: z.string(),
+  /** Optional timeline start used by direct left-edge trims. */
+  startMs: z.number().int().min(0).optional(),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
 })
@@ -73,6 +87,8 @@ export const splitClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("split-clip"),
   clipId: z.string(),
   splitTimeMs: z.number().int().min(0),
+  leftClipId: z.string().optional(),
+  rightClipId: z.string().optional(),
 })
 
 export type SplitClipCommand = z.infer<typeof splitClipCommandSchema>
@@ -93,12 +109,50 @@ export const deleteClipCommandSchema = commandMetaSchema.extend({
 
 export type DeleteClipCommand = z.infer<typeof deleteClipCommandSchema>
 
+export const moveClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("move-clips"),
+  clipIds: z.array(z.string()).min(1),
+  deltaMs: z.number().int(),
+})
+
+export type MoveClipsCommand = z.infer<typeof moveClipsCommandSchema>
+
+export const deleteClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-clips"),
+  clipIds: z.array(z.string()).min(1),
+})
+
+export type DeleteClipsCommand = z.infer<typeof deleteClipsCommandSchema>
+
 export const rippleDeleteClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("ripple-delete-clip"),
   clipId: z.string(),
 })
 
 export type RippleDeleteClipCommand = z.infer<typeof rippleDeleteClipCommandSchema>
+
+export const deleteRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-range"),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().min(0),
+})
+
+export type DeleteRangeCommand = z.infer<typeof deleteRangeCommandSchema>
+
+export const rippleDeleteRangeCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("ripple-delete-range"),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().min(0),
+})
+
+export type RippleDeleteRangeCommand = z.infer<typeof rippleDeleteRangeCommandSchema>
+
+export const rippleDeleteClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("ripple-delete-clips"),
+  clipIds: z.array(z.string()).min(1),
+})
+
+export type RippleDeleteClipsCommand = z.infer<typeof rippleDeleteClipsCommandSchema>
 
 export const updateTrackCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-track"),
@@ -129,6 +183,7 @@ export type UpdateClipTransformCommand = z.infer<typeof updateClipTransformComma
 export const addCaptionClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-caption-clip"),
   trackId: z.string(),
+  clipId: z.string().optional(),
   text: z.string(),
   startMs: z.number().int().min(0),
   durationMs: z.number().int().min(0),
@@ -160,6 +215,7 @@ export type TrimTimelineEndsCommand = z.infer<typeof trimTimelineEndsCommandSche
 
 export const commandRecordSchema = z.discriminatedUnion("kind", [
   addMarkerCommandSchema,
+  updateMarkerCommandSchema,
   deleteMarkerCommandSchema,
   addTrackCommandSchema,
   deleteTrackCommandSchema,
@@ -167,7 +223,12 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   splitClipCommandSchema,
   moveClipCommandSchema,
   deleteClipCommandSchema,
+  moveClipsCommandSchema,
+  deleteClipsCommandSchema,
   rippleDeleteClipCommandSchema,
+  deleteRangeCommandSchema,
+  rippleDeleteRangeCommandSchema,
+  rippleDeleteClipsCommandSchema,
   updateTrackCommandSchema,
   updateClipAudioCommandSchema,
   updateClipTransformCommandSchema,

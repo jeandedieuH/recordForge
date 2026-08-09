@@ -1,4 +1,4 @@
-import type { TimelineClip, TimelineState } from "@recordforge/domain"
+import type { TimelineClip, TimelineState, TimelineTrackKind } from "@recordforge/domain"
 
 // Time mapping between the three domains used by the editor:
 //
@@ -101,6 +101,94 @@ function findClipsForAsset(state: TimelineState, assetId: string): TimelineClip[
     }
   }
   return clips.sort((a, b) => a.startMs - b.startMs)
+}
+
+/** A source position paired with the exact timeline clip that owns it. */
+export interface TimelinePlaybackPosition {
+  clip: TimelineClip
+  clipId: string
+  sourceMs: number
+}
+
+function findTrackClips(
+  state: TimelineState,
+  trackKind: TimelineTrackKind,
+  trackId?: string,
+): TimelineClip[] {
+  const track = state.tracks.find((candidate) => {
+    if (candidate.kind !== trackKind) return false
+    return trackId ? candidate.id === trackId : true
+  })
+  return track ? [...track.clips].sort((a, b) => a.startMs - b.startMs) : []
+}
+
+/** Find a clip at timeline time on one authoritative playback track. */
+export function findTimelineClipAt(
+  state: TimelineState,
+  trackKind: TimelineTrackKind,
+  timelineMs: number,
+  trackId?: string,
+): TimelineClip | null {
+  return (
+    findTrackClips(state, trackKind, trackId).find(
+      (clip) => timelineMs >= clip.startMs && timelineMs < clip.startMs + clip.durationMs,
+    ) ?? null
+  )
+}
+
+/** Find the next clip on a track, including a clip that starts at `timelineMs`. */
+export function findNextTimelineClip(
+  state: TimelineState,
+  trackKind: TimelineTrackKind,
+  timelineMs: number,
+  trackId?: string,
+): TimelineClip | null {
+  return (
+    findTrackClips(state, trackKind, trackId).find((clip) => clip.startMs >= timelineMs) ?? null
+  )
+}
+
+/**
+ * Convert a timeline position into source time for one track kind.
+ *
+ * Playback uses a single track (normally the screen track) so camera or audio
+ * clips sharing the same source asset cannot make the mapping ambiguous.
+ */
+export function timelineToSourceForTrack(
+  state: TimelineState,
+  trackKind: TimelineTrackKind,
+  timelineMs: number,
+  trackId?: string,
+): TimelinePlaybackPosition | null {
+  const clip = findTimelineClipAt(state, trackKind, timelineMs, trackId)
+  if (!clip) return null
+  const sourceMs = timelineToSource(clip, timelineMs)
+  if (sourceMs === null) return null
+  return { clip, clipId: clip.id, sourceMs }
+}
+
+/** Convert source time back to timeline time on one authoritative track. */
+export function sourceToTimelineForTrack(
+  state: TimelineState,
+  trackKind: TimelineTrackKind,
+  assetId: string,
+  sourceMs: number,
+  options?: { preferClipId?: string; trackId?: string },
+): SourceToTimelineResult | null {
+  const candidates = findTrackClips(state, trackKind, options?.trackId).filter((clip) => {
+    if (clip.assetId !== assetId) return false
+    if (options?.preferClipId && clip.id !== options.preferClipId) return false
+    return sourceMs >= clip.sourceInMs && sourceMs <= clip.sourceOutMs
+  })
+  const first = candidates[0]
+  if (!first) return null
+  const timelineMs = sourceToClipTime(first, sourceMs)
+  if (timelineMs === null) return null
+  return {
+    clipId: first.id,
+    timelineMs,
+    unambiguous: candidates.length === 1,
+  }
 }
 
 /**

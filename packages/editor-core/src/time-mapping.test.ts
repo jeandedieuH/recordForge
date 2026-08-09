@@ -3,6 +3,8 @@ import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
 import {
   buildTimelineSegments,
   clipDurationFromSourceRange,
+  findNextTimelineClip,
+  findTimelineClipAt,
   isInsideClip,
   outputToTimeline,
   sourceToClipTime,
@@ -10,6 +12,7 @@ import {
   timelineToOutput,
   timelineToSource,
   timelineToSourceForState,
+  timelineToSourceForTrack,
 } from "./time-mapping"
 
 function makeTestState(): TimelineState {
@@ -156,6 +159,43 @@ describe("time mapping", () => {
       sourceMs: 25_000,
     })
     expect(timelineToSourceForState(state, 30_000)).toBe(null)
+  })
+
+  it("maps edited playback to the screen track and skips gaps", () => {
+    const state = makeGappedState()
+    expect(findTimelineClipAt(state, "screen", 5_000)?.id).toBe("clip-1")
+    expect(findTimelineClipAt(state, "screen", 30_000)).toBe(null)
+    expect(findNextTimelineClip(state, "screen", 30_000)?.id).toBe("clip-2")
+  })
+
+  it("uses the edited clip range after a trim and split", () => {
+    const state = makeTestState()
+    state.tracks[0].clips = [
+      {
+        ...state.tracks[0].clips[0],
+        id: "trimmed",
+        sourceInMs: 10_000,
+        sourceOutMs: 30_000,
+        durationMs: 20_000,
+      },
+      {
+        ...state.tracks[0].clips[0],
+        id: "split",
+        startMs: 20_000,
+        sourceInMs: 30_000,
+        sourceOutMs: 50_000,
+        durationMs: 20_000,
+      },
+    ]
+
+    expect(timelineToSourceForTrack(state, "screen", 5_000)).toMatchObject({
+      clipId: "trimmed",
+      sourceMs: 15_000,
+    })
+    expect(timelineToSourceForTrack(state, "screen", 25_000)).toMatchObject({
+      clipId: "split",
+      sourceMs: 35_000,
+    })
   })
 
   it("preserves gaps in the default output mapping", () => {

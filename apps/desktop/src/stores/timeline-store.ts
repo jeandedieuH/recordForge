@@ -15,6 +15,7 @@ import {
   redoCommand,
   timelineToProject,
   type CommandEngine,
+  type ExecuteOptions,
   type TimelineCommand,
   type TimelineSelection,
   undoCommand,
@@ -61,7 +62,7 @@ interface TimelineStore {
   startListening: () => Promise<void>
   stopListening: () => void
 
-  execute: (command: TimelineCommand) => void
+  execute: (command: TimelineCommand, options?: ExecuteOptions) => void
   undo: () => void
   redo: () => void
 
@@ -69,8 +70,13 @@ interface TimelineStore {
   pause: () => void
   togglePlay: () => void
   seek: (ms: number) => void
+  setPlaybackRate: (rate: number) => void
   setZoom: (zoom: number) => void
   setScroll: (ms: number) => void
+  setSnapEnabled: (enabled: boolean) => void
+  setSnapThreshold: (thresholdMs: number) => void
+  toggleTrackCollapsed: (trackId: string) => void
+  setTrackHeight: (trackId: string, height: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
   setSelection: (selection: TimelineSelection | null) => void
 
@@ -85,7 +91,12 @@ interface TimelineStore {
 const AUTOSAVE_DELAY_MS = 2000
 const SNAPSHOT_COMMANDS = new Set([
   "delete-clip",
+  "delete-clips",
+  "delete-marker",
+  "delete-range",
   "ripple-delete-clip",
+  "ripple-delete-clips",
+  "ripple-delete-range",
   "delete-track",
   "trim-clip",
 ])
@@ -108,6 +119,24 @@ function isDestructiveCommand(command: TimelineCommand): boolean {
   return SNAPSHOT_COMMANDS.has(command.kind)
 }
 
+function isReusablePrepareJob(job: MediaJob): boolean {
+  if (job.kind !== "prepare" || job.status !== "completed") return false
+  if (!job.outputs.proxyPath) return false
+  return job.outputs.audioTracks.every((track) =>
+    Boolean(track.audioPath && track.waveformPath && track.waveformImagePath),
+  )
+}
+
+function selectPreparationJob(jobs: MediaJob[]): MediaJob | null {
+  const prepareJobs = jobs.filter((job) => job.kind === "prepare")
+  return (
+    prepareJobs.find((job) => job.status === "pending" || job.status === "running") ??
+    prepareJobs.find(isReusablePrepareJob) ??
+    prepareJobs[0] ??
+    null
+  )
+}
+
 export const useTimelineStore = create<TimelineStore>((set, get) => ({
   engine: null,
   view: {
@@ -115,8 +144,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     scrollMs: 0,
     playheadMs: 0,
     isPlaying: false,
+    playbackRate: 1,
     durationMs: 0,
     selection: null,
+    snapEnabled: true,
+    snapThresholdMs: 120,
+    collapsedTrackIds: [],
+    trackHeights: {},
   },
   recording: null,
   metadata: null,
@@ -131,7 +165,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   autosaveTimeout: null,
 
   load: async (recordingId) => {
-    set({ isLoading: true, error: null })
+    set({
+      isLoading: true,
+      error: null,
+      engine: null,
+      recording: null,
+      metadata: null,
+      project: null,
+      activeJob: null,
+      activeExportJob: null,
+      missingAssets: [],
+    })
     try {
       const recordings = await listRecordings()
       const recording = recordings.find((r) => r.id === recordingId)
@@ -145,14 +189,19 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       ])
 
       const meta = metadata ?? fallbackMetadata(recording)
-      const prepareJobs = jobs.filter((job) => job.kind === "prepare")
-      const latest = prepareJobs[0] ?? null
-      let activeJob = latest ? await getMediaJob(latest.id) : null
+      const selectedPreparationJob = selectPreparationJob(jobs)
+      let activeJob = selectedPreparationJob ? await getMediaJob(selectedPreparationJob.id) : null
+      const hasUsableProxy = Boolean(activeJob?.outputs.proxyPath)
+      const hasUsableAudioDerivatives =
+        !meta.hasAudio ||
+        Boolean(
+          activeJob &&
+          activeJob.outputs.prepareVersion >= 2 &&
+          activeJob.outputs.audioTracks.length > 0,
+        )
       if (
-        meta.hasAudio &&
-        (!activeJob ||
-          (activeJob.status === "completed" &&
-            (activeJob.outputs.prepareVersion < 2 || activeJob.outputs.audioTracks.length === 0)))
+        !activeJob ||
+        (activeJob.status === "completed" && (!hasUsableProxy || !hasUsableAudioDerivatives))
       ) {
         // Older prepare jobs only generated one combined waveform and did not
         // expose independent audio assets to the editor.
@@ -189,7 +238,19 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         activeJob,
         activeExportJob: null,
         missingAssets,
-        view: { zoom: 50, scrollMs: 0, playheadMs: 0, isPlaying: false, durationMs: duration, selection: null },
+        view: {
+          zoom: 50,
+          scrollMs: 0,
+          playheadMs: 0,
+          isPlaying: false,
+          playbackRate: 1,
+          durationMs: duration,
+          selection: null,
+          snapEnabled: true,
+          snapThresholdMs: 120,
+          collapsedTrackIds: [],
+          trackHeights: {},
+        },
         isLoading: false,
         error: null,
       })
@@ -249,7 +310,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     set({ unlisten: null })
   },
 
-  execute: (command) => {
+  execute: (command, options) => {
     const { engine, project } = get()
     if (!engine || !project) return
 
@@ -261,7 +322,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       }
     }
 
-    const result = executeCommand(engine, command)
+    const result = executeCommand(engine, command, options)
     if (!result.ok) {
       set({ error: result.error.message })
       return
@@ -280,6 +341,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         playheadMs: Math.min(view.playheadMs, duration),
       },
     })
+    useEditorStore.getState().setDirty(true)
     get().scheduleAutosave()
   },
 
@@ -301,6 +363,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
+    useEditorStore.getState().setDirty(true)
     get().scheduleAutosave()
   },
 
@@ -322,6 +385,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
+    useEditorStore.getState().setDirty(true)
     get().scheduleAutosave()
   },
 
@@ -354,6 +418,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       const saved = await saveProject(project)
       set({ project: saved })
       useEditorStore.getState().setProject(saved)
+      useEditorStore.getState().setDirty(false)
       useEditorStore.getState().setSaveStatus("saved")
     } catch (err) {
       useEditorStore.getState().setSaveStatus("error", toErrorMessage(err))
@@ -398,6 +463,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     set({ view: { ...view, playheadMs: clamped } })
   },
 
+  setPlaybackRate: (rate) => {
+    const { view } = get()
+    const clamped = Math.max(0.25, Math.min(rate, 4))
+    set({ view: { ...view, playbackRate: clamped } })
+  },
+
   setZoom: (zoom) => {
     const { view } = get()
     const clamped = Math.max(1, Math.min(zoom, 500))
@@ -407,6 +478,42 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   setScroll: (ms) => {
     const { view } = get()
     set({ view: { ...view, scrollMs: Math.max(0, ms) } })
+  },
+
+  setSnapEnabled: (enabled) => {
+    const { view } = get()
+    set({ view: { ...view, snapEnabled: enabled } })
+  },
+
+  setSnapThreshold: (thresholdMs) => {
+    const { view } = get()
+    set({
+      view: {
+        ...view,
+        snapThresholdMs: Math.max(1, Math.min(Math.round(thresholdMs), 5_000)),
+      },
+    })
+  },
+
+  toggleTrackCollapsed: (trackId) => {
+    const { view } = get()
+    const collapsed = new Set(view.collapsedTrackIds)
+    if (collapsed.has(trackId)) collapsed.delete(trackId)
+    else collapsed.add(trackId)
+    set({ view: { ...view, collapsedTrackIds: [...collapsed] } })
+  },
+
+  setTrackHeight: (trackId, height) => {
+    const { view } = get()
+    set({
+      view: {
+        ...view,
+        trackHeights: {
+          ...view.trackHeights,
+          [trackId]: Math.max(28, Math.min(Math.round(height), 240)),
+        },
+      },
+    })
   },
 
   setActiveExportJob: (job) => {

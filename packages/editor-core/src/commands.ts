@@ -16,10 +16,15 @@ import type {
   AddTrackCommand,
   CommandRecord,
   DeleteClipCommand,
+  DeleteClipsCommand,
   DeleteMarkerCommand,
+  DeleteRangeCommand,
   DeleteTrackCommand,
   MoveClipCommand,
+  MoveClipsCommand,
   RippleDeleteClipCommand,
+  RippleDeleteClipsCommand,
+  RippleDeleteRangeCommand,
   SplitClipCommand,
   TrimClipCommand,
   TrimTimelineEndsCommand,
@@ -27,6 +32,7 @@ import type {
   UpdateClipAudioCommand,
   UpdateClipTransformCommand,
   UpdateCursorSettingsCommand,
+  UpdateMarkerCommand,
   UpdateTrackCommand,
 } from "./command-records"
 import type { CommandResult } from "./history"
@@ -96,10 +102,10 @@ function sortAndValidateTrack(
     return { ok: false, error: editorError("track_not_found", "Track not found") }
   }
   const sorted = [...track.clips].sort((a, b) => a.startMs - b.startMs)
-  if (track.kind === "screen" || track.kind === "camera") {
-    if (!validateNoOverlap(sorted, ignoreClipId)) {
-      return { ok: false, error: editorError("clip_overlap", "Clips overlap on this track") }
-    }
+  // A track is a single ordered lane. Rejecting overlap for every lane keeps
+  // drag and keyboard moves safe instead of silently covering existing content.
+  if (!validateNoOverlap(sorted, ignoreClipId)) {
+    return { ok: false, error: editorError("clip_overlap", "Clips overlap on this track") }
   }
   return { ok: true, value: { ...track, clips: sorted } }
 }
@@ -121,6 +127,11 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
   switch (command.kind) {
     case "add-marker":
       return { ok: true, value: undefined }
+    case "update-marker": {
+      const marker = state.markers.find((candidate) => candidate.id === command.markerId)
+      if (!marker) return { ok: false, error: editorError("marker_not_found", "Marker not found") }
+      return { ok: true, value: undefined }
+    }
     case "delete-marker": {
       const marker = state.markers.find((m) => m.id === command.markerId)
       if (!marker) return { ok: false, error: editorError("marker_not_found", "Marker not found") }
@@ -153,6 +164,48 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
           return { ok: false, error: editorError("track_not_found", "Target track not found") }
         const targetResult = checkTrackLocked(target)
         if (!targetResult.ok) return targetResult
+      }
+      return { ok: true, value: undefined }
+    }
+    case "move-clips": {
+      const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
+      if (foundClips.some((found) => !found)) {
+        return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+      }
+      const lockedClip = foundClips.find((found) => found?.track.locked)
+      if (lockedClip) {
+        return {
+          ok: false,
+          error: editorError("track_locked", `Track "${lockedClip.track.name}" is locked`),
+        }
+      }
+      if (foundClips.some((found) => (found?.clip.startMs ?? 0) + command.deltaMs < 0)) {
+        return { ok: false, error: editorError("invalid_move", "Clip cannot start before zero") }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "delete-clips":
+    case "ripple-delete-clips": {
+      const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
+      if (foundClips.some((found) => !found)) {
+        return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+      }
+      const lockedClip = foundClips.find((found) => found?.track.locked)
+      if (lockedClip) {
+        return {
+          ok: false,
+          error: editorError("track_locked", `Track "${lockedClip.track.name}" is locked`),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "delete-range":
+    case "ripple-delete-range": {
+      if (command.startMs >= command.endMs) {
+        return {
+          ok: false,
+          error: editorError("invalid_range", "Range end must be greater than range start"),
+        }
       }
       return { ok: true, value: undefined }
     }
@@ -205,6 +258,8 @@ export function applyCommand(
   switch (command.kind) {
     case "add-marker":
       return applyAddMarker(state, command)
+    case "update-marker":
+      return applyUpdateMarker(state, command)
     case "delete-marker":
       return applyDeleteMarker(state, command)
     case "add-track":
@@ -217,10 +272,20 @@ export function applyCommand(
       return applySplitClip(state, command)
     case "move-clip":
       return applyMoveClip(state, command)
+    case "move-clips":
+      return applyMoveClips(state, command)
     case "delete-clip":
       return applyDeleteClip(state, command)
+    case "delete-clips":
+      return applyDeleteClips(state, command)
     case "ripple-delete-clip":
       return applyRippleDeleteClip(state, command)
+    case "delete-range":
+      return applyDeleteRange(state, command)
+    case "ripple-delete-range":
+      return applyRippleDeleteRange(state, command)
+    case "ripple-delete-clips":
+      return applyRippleDeleteClips(state, command)
     case "update-track":
       return applyUpdateTrack(state, command)
     case "update-clip-audio":
@@ -245,14 +310,46 @@ function applyAddMarker(
   command: AddMarkerCommand,
 ): CommandResult<TimelineState> {
   const marker = {
-    id: crypto.randomUUID(),
+    id: command.markerId ?? `marker:${command.timeMs}:${command.label}`,
     timeMs: command.timeMs,
     label: command.label,
     color: command.color,
   }
   return {
     ok: true,
-    value: { ...state, markers: [...state.markers, marker], updatedAt: now() },
+    value: {
+      ...state,
+      markers: [...state.markers, marker].sort(
+        (a, b) => a.timeMs - b.timeMs || a.id.localeCompare(b.id),
+      ),
+      updatedAt: now(),
+    },
+  }
+}
+
+function applyUpdateMarker(
+  state: TimelineState,
+  command: UpdateMarkerCommand,
+): CommandResult<TimelineState> {
+  const marker = state.markers.find((candidate) => candidate.id === command.markerId)
+  if (!marker) {
+    return { ok: false, error: editorError("marker_not_found", "Marker not found") }
+  }
+  const nextMarker = {
+    ...marker,
+    ...(command.timeMs === undefined ? {} : { timeMs: command.timeMs }),
+    ...(command.label === undefined ? {} : { label: command.label }),
+    ...(command.color === undefined ? {} : { color: command.color }),
+  }
+  return {
+    ok: true,
+    value: {
+      ...state,
+      markers: state.markers
+        .map((candidate) => (candidate.id === command.markerId ? nextMarker : candidate))
+        .sort((a, b) => a.timeMs - b.timeMs || a.id.localeCompare(b.id)),
+      updatedAt: now(),
+    },
   }
 }
 
@@ -275,7 +372,7 @@ function applyAddTrack(
   command: AddTrackCommand,
 ): CommandResult<TimelineState> {
   const track: TimelineTrack = {
-    id: crypto.randomUUID(),
+    id: command.trackId ?? `track:${command.trackKind}:${command.trackName ?? "track"}`,
     kind: command.trackKind,
     name: command.trackName ?? `${command.trackKind} track`,
     muted: false,
@@ -323,9 +420,12 @@ function applyTrimClip(
 
   const nextClip: TimelineClip = {
     ...clip,
+    ...(command.startMs === undefined ? {} : { startMs: command.startMs }),
     sourceInMs: command.sourceInMs,
     sourceOutMs: command.sourceOutMs,
-    durationMs: clipDurationFromSourceRange(command.sourceInMs, command.sourceOutMs, clip.speed),
+    durationMs: Math.round(
+      clipDurationFromSourceRange(command.sourceInMs, command.sourceOutMs, clip.speed),
+    ),
   }
   const valid = validateClipBoundaries(nextClip)
   if (!valid.ok) return valid
@@ -355,13 +455,14 @@ function applySplitClip(
     return { ok: false, error: editorError("invalid_split", "Split time is outside the clip") }
   }
 
-  const splitSource = timelineToSource(clip, command.splitTimeMs)
-  if (splitSource === null) {
+  const mappedSplitSource = timelineToSource(clip, command.splitTimeMs)
+  if (mappedSplitSource === null) {
     return {
       ok: false,
       error: editorError("invalid_split", "Split point is outside the source range"),
     }
   }
+  const splitSource = Math.round(mappedSplitSource)
   if (splitSource <= clip.sourceInMs || splitSource >= clip.sourceOutMs) {
     return {
       ok: false,
@@ -369,19 +470,21 @@ function applySplitClip(
     }
   }
 
-  const leftDuration = (splitSource - clip.sourceInMs) / clip.speed
-  const rightDuration = (clip.sourceOutMs - splitSource) / clip.speed
+  const leftDuration = Math.round((splitSource - clip.sourceInMs) / clip.speed)
+  const rightDuration = Math.round((clip.sourceOutMs - splitSource) / clip.speed)
+  const leftClipId = command.leftClipId ?? `${clip.id}:split:${command.splitTimeMs}:left`
+  const rightClipId = command.rightClipId ?? `${clip.id}:split:${command.splitTimeMs}:right`
 
   const left: TimelineClip = {
     ...clip,
-    id: crypto.randomUUID(),
+    id: leftClipId,
     durationMs: leftDuration,
     sourceOutMs: splitSource,
   }
 
   const right: TimelineClip = {
     ...clip,
-    id: crypto.randomUUID(),
+    id: rightClipId,
     startMs: command.splitTimeMs,
     durationMs: rightDuration,
     sourceInMs: splitSource,
@@ -423,7 +526,9 @@ function applyMoveClip(
       error: editorError("track_locked", `Track "${targetTrack.name}" is locked`),
     }
   }
-  if (targetTrack.kind !== clip.kind) {
+  const targetAcceptsClip =
+    (targetTrack.kind === "captions" && clip.kind === "caption") || targetTrack.kind === clip.kind
+  if (!targetAcceptsClip) {
     return {
       ok: false,
       error: editorError("invalid_move", "Clip kind does not match target track"),
@@ -459,6 +564,26 @@ function applyMoveClip(
   return { ok: true, value: updateTrackInState(withSource, targetTrack.id, targetResult.value) }
 }
 
+function applyMoveClips(
+  state: TimelineState,
+  command: MoveClipsCommand,
+): CommandResult<TimelineState> {
+  const clipIds = new Set(command.clipIds)
+  let next = state
+  for (const track of state.tracks) {
+    const clips = track.clips.map((clip) =>
+      clipIds.has(clip.id) ? { ...clip, startMs: clip.startMs + command.deltaMs } : clip,
+    )
+    const trackResult = sortAndValidateTrack(
+      updateTrackInState(next, track.id, { ...track, clips }),
+      track.id,
+    )
+    if (!trackResult.ok) return trackResult
+    next = updateTrackInState(next, track.id, trackResult.value)
+  }
+  return { ok: true, value: { ...next, updatedAt: now() } }
+}
+
 function applyDeleteClip(
   state: TimelineState,
   command: DeleteClipCommand,
@@ -478,51 +603,70 @@ function applyDeleteClip(
   return { ok: true, value: updateTrackInState(state, track.id, newTrack) }
 }
 
-function rippleDeleteFromTrack(
+function clipSegmentsAfterRange(
+  clip: TimelineClip,
+  deleteStartMs: number,
+  deleteEndMs: number,
+  ripple: boolean,
+): TimelineClip[] {
+  const clipEndMs = clip.startMs + clip.durationMs
+  if (clipEndMs <= deleteStartMs) return [clip]
+  if (clip.startMs >= deleteEndMs) {
+    return ripple ? [{ ...clip, startMs: clip.startMs - (deleteEndMs - deleteStartMs) }] : [clip]
+  }
+
+  const segments: TimelineClip[] = []
+  const hasLeft = clip.startMs < deleteStartMs
+  const hasRight = clipEndMs > deleteEndMs
+  const leftEndMs = Math.min(deleteStartMs, clipEndMs)
+  const rightStartMs = Math.max(deleteEndMs, clip.startMs)
+
+  if (hasLeft && leftEndMs > clip.startMs) {
+    const leftDurationMs = leftEndMs - clip.startMs
+    segments.push({
+      ...clip,
+      durationMs: Math.round(leftDurationMs),
+      sourceOutMs: clip.sourceInMs + Math.round(leftDurationMs * clip.speed),
+    })
+  }
+
+  if (hasRight && clipEndMs > rightStartMs) {
+    const rightDurationMs = clipEndMs - rightStartMs
+    const nextStartMs = ripple ? deleteStartMs : rightStartMs
+    segments.push({
+      ...clip,
+      id: hasLeft ? `${clip.id}:range:${deleteStartMs}:${deleteEndMs}:right` : clip.id,
+      startMs: nextStartMs,
+      durationMs: Math.round(rightDurationMs),
+      sourceInMs: clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed),
+    })
+  }
+
+  return segments
+}
+
+function deleteRangeFromTrack(
   track: TimelineTrack,
   deleteStartMs: number,
   deleteEndMs: number,
+  ripple: boolean,
 ): TimelineTrack {
   if (track.locked) return track
-
-  const deletedDuration = deleteEndMs - deleteStartMs
-  const clips: TimelineClip[] = []
-
-  for (const clip of track.clips) {
-    const clipEndMs = clip.startMs + clip.durationMs
-    if (clipEndMs <= deleteStartMs) {
-      clips.push(clip)
-      continue
-    }
-    if (clip.startMs >= deleteEndMs) {
-      clips.push({ ...clip, startMs: clip.startMs - deletedDuration })
-      continue
-    }
-
-    // Rebuild the portions on either side of the removed range so every
-    // aligned audio/video track loses the same source-time window.
-    if (clip.startMs < deleteStartMs) {
-      const leftDuration = deleteStartMs - clip.startMs
-      clips.push({
-        ...clip,
-        durationMs: leftDuration,
-        sourceOutMs: clip.sourceInMs + leftDuration * clip.speed,
-      })
-    }
-
-    if (clipEndMs > deleteEndMs) {
-      const rightDuration = clipEndMs - deleteEndMs
-      clips.push({
-        ...clip,
-        id: clip.startMs < deleteStartMs ? crypto.randomUUID() : clip.id,
-        startMs: deleteStartMs,
-        durationMs: rightDuration,
-        sourceInMs: clip.sourceInMs + (deleteEndMs - clip.startMs) * clip.speed,
-      })
-    }
+  const clips = track.clips.flatMap((clip) =>
+    clipSegmentsAfterRange(clip, deleteStartMs, deleteEndMs, ripple),
+  )
+  return {
+    ...track,
+    clips: clips.sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id)),
   }
+}
 
-  return { ...track, clips }
+function deleteMarkersInRange(
+  markers: TimelineState["markers"],
+  deleteStartMs: number,
+  deleteEndMs: number,
+): TimelineState["markers"] {
+  return markers.filter((marker) => marker.timeMs < deleteStartMs || marker.timeMs >= deleteEndMs)
 }
 
 function shiftMarkersAfterRipple(
@@ -532,8 +676,79 @@ function shiftMarkersAfterRipple(
 ): TimelineState["markers"] {
   const deletedDuration = deleteEndMs - deleteStartMs
   return markers
-    .filter((m) => m.timeMs < deleteStartMs || m.timeMs > deleteEndMs)
-    .map((m) => (m.timeMs > deleteEndMs ? { ...m, timeMs: m.timeMs - deletedDuration } : m))
+    .filter((marker) => marker.timeMs < deleteStartMs || marker.timeMs >= deleteEndMs)
+    .map((marker) =>
+      marker.timeMs >= deleteEndMs
+        ? { ...marker, timeMs: marker.timeMs - deletedDuration }
+        : marker,
+    )
+}
+
+function applyDeleteRangeInternal(
+  state: TimelineState,
+  deleteStartMs: number,
+  deleteEndMs: number,
+  ripple: boolean,
+): TimelineState {
+  const tracks = state.tracks.map((track) =>
+    deleteRangeFromTrack(track, deleteStartMs, deleteEndMs, ripple),
+  )
+  const markers = ripple
+    ? shiftMarkersAfterRipple(state.markers, deleteStartMs, deleteEndMs)
+    : deleteMarkersInRange(state.markers, deleteStartMs, deleteEndMs)
+  return { ...state, tracks, markers, updatedAt: now() }
+}
+
+function applyDeleteClips(
+  state: TimelineState,
+  command: DeleteClipsCommand,
+): CommandResult<TimelineState> {
+  const clipIds = new Set(command.clipIds)
+  const tracks = state.tracks.map((track) => ({
+    ...track,
+    clips: track.clips.filter((clip) => !clipIds.has(clip.id)),
+  }))
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyDeleteRange(
+  state: TimelineState,
+  command: DeleteRangeCommand,
+): CommandResult<TimelineState> {
+  return {
+    ok: true,
+    value: applyDeleteRangeInternal(state, command.startMs, command.endMs, false),
+  }
+}
+
+function applyRippleDeleteRange(
+  state: TimelineState,
+  command: RippleDeleteRangeCommand,
+): CommandResult<TimelineState> {
+  return {
+    ok: true,
+    value: applyDeleteRangeInternal(state, command.startMs, command.endMs, true),
+  }
+}
+
+function applyRippleDeleteClips(
+  state: TimelineState,
+  command: RippleDeleteClipsCommand,
+): CommandResult<TimelineState> {
+  const ranges = command.clipIds
+    .map((clipId) => findClip(state, clipId)?.clip)
+    .filter((clip): clip is TimelineClip => clip !== undefined)
+    .map((clip) => ({ startMs: clip.startMs, endMs: clip.startMs + clip.durationMs }))
+    .sort((a, b) => b.startMs - a.startMs || b.endMs - a.endMs)
+
+  let next = state
+  let previousRange: { startMs: number; endMs: number } | undefined
+  for (const range of ranges) {
+    if (previousRange?.startMs === range.startMs && previousRange.endMs === range.endMs) continue
+    next = applyDeleteRangeInternal(next, range.startMs, range.endMs, true)
+    previousRange = range
+  }
+  return { ok: true, value: next }
 }
 
 function applyRippleDeleteClip(
@@ -549,12 +764,10 @@ function applyRippleDeleteClip(
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
 
-  const deleteStartMs = clip.startMs
-  const deleteEndMs = clip.startMs + clip.durationMs
-  const tracks = state.tracks.map((t) => rippleDeleteFromTrack(t, deleteStartMs, deleteEndMs))
-  const markers = shiftMarkersAfterRipple(state.markers, deleteStartMs, deleteEndMs)
-
-  return { ok: true, value: { ...state, tracks, markers, updatedAt: now() } }
+  return {
+    ok: true,
+    value: applyDeleteRangeInternal(state, clip.startMs, clip.startMs + clip.durationMs, true),
+  }
 }
 
 function applyUpdateTrack(
@@ -653,7 +866,7 @@ function applyAddCaptionClip(
     }
   }
   const newClip: TimelineClip = {
-    id: crypto.randomUUID(),
+    id: command.clipId ?? `caption:${command.trackId}:${command.startMs}:${command.text}`,
     kind: "caption",
     assetId: track.id,
     startMs: command.startMs,
@@ -665,7 +878,12 @@ function applyAddCaptionClip(
     style: "default",
   }
   const newTrack: TimelineTrack = { ...track, clips: [...track.clips, newClip] }
-  return { ok: true, value: updateTrackInState(state, command.trackId, newTrack) }
+  const trackResult = sortAndValidateTrack(
+    updateTrackInState(state, command.trackId, newTrack),
+    command.trackId,
+  )
+  if (!trackResult.ok) return trackResult
+  return { ok: true, value: updateTrackInState(state, command.trackId, trackResult.value) }
 }
 
 function applyUpdateCanvas(
@@ -749,9 +967,24 @@ export function createAddMarkerCommand(
   return {
     kind: "add-marker",
     name: "Add marker",
+    markerId: crypto.randomUUID(),
     timeMs,
     label,
     color,
+  }
+}
+
+export function createUpdateMarkerCommand(
+  markerId: string,
+  update: Pick<UpdateMarkerCommand, "timeMs" | "label" | "color">,
+): CommandRecord {
+  return {
+    kind: "update-marker",
+    name: "Update marker",
+    markerId,
+    ...update,
+    coalesce: update.timeMs !== undefined,
+    coalesceKey: update.timeMs !== undefined ? `marker:${markerId}` : undefined,
   }
 }
 
@@ -770,6 +1003,7 @@ export function createAddTrackCommand(
   return {
     kind: "add-track",
     name: "Add track",
+    trackId: crypto.randomUUID(),
     trackKind: kind,
     trackName: trackName ?? `${kind} track`,
   }
@@ -787,15 +1021,17 @@ export function createTrimClipCommand(
   clipId: string,
   sourceInMs: number,
   sourceOutMs: number,
+  options: { startMs?: number; coalesceKey?: string } = {},
 ): CommandRecord {
   return {
     kind: "trim-clip",
     name: "Trim clip",
     clipId,
+    ...(options.startMs === undefined ? {} : { startMs: options.startMs }),
     sourceInMs,
     sourceOutMs,
     coalesce: true,
-    coalesceKey: `trim:${clipId}`,
+    coalesceKey: options.coalesceKey ?? `trim:${clipId}`,
   }
 }
 
@@ -805,6 +1041,8 @@ export function createSplitClipCommand(clipId: string, splitTimeMs: number): Com
     name: "Split clip",
     clipId,
     splitTimeMs,
+    leftClipId: crypto.randomUUID(),
+    rightClipId: crypto.randomUUID(),
   }
 }
 
@@ -812,6 +1050,7 @@ export function createMoveClipCommand(
   clipId: string,
   newStartMs: number,
   newTrackId?: string,
+  options: { coalesceKey?: string } = {},
 ): CommandRecord {
   return {
     kind: "move-clip",
@@ -820,7 +1059,22 @@ export function createMoveClipCommand(
     newStartMs,
     newTrackId,
     coalesce: true,
-    coalesceKey: `move:${clipId}`,
+    coalesceKey: options.coalesceKey ?? `move:${clipId}`,
+  }
+}
+
+export function createMoveClipsCommand(
+  clipIds: string[],
+  deltaMs: number,
+  options: { coalesceKey?: string } = {},
+): CommandRecord {
+  return {
+    kind: "move-clips",
+    name: "Move clips",
+    clipIds: [...new Set(clipIds)],
+    deltaMs,
+    coalesce: true,
+    coalesceKey: options.coalesceKey ?? `move-clips:${[...new Set(clipIds)].sort().join(",")}`,
   }
 }
 
@@ -832,11 +1086,45 @@ export function createDeleteClipCommand(clipId: string): CommandRecord {
   }
 }
 
+export function createDeleteClipsCommand(clipIds: string[]): CommandRecord {
+  return {
+    kind: "delete-clips",
+    name: "Delete clips",
+    clipIds: [...new Set(clipIds)],
+  }
+}
+
 export function createRippleDeleteClipCommand(clipId: string): CommandRecord {
   return {
     kind: "ripple-delete-clip",
     name: "Ripple delete",
     clipId,
+  }
+}
+
+export function createDeleteRangeCommand(startMs: number, endMs: number): CommandRecord {
+  return {
+    kind: "delete-range",
+    name: "Delete range",
+    startMs,
+    endMs,
+  }
+}
+
+export function createRippleDeleteRangeCommand(startMs: number, endMs: number): CommandRecord {
+  return {
+    kind: "ripple-delete-range",
+    name: "Ripple delete range",
+    startMs,
+    endMs,
+  }
+}
+
+export function createRippleDeleteClipsCommand(clipIds: string[]): CommandRecord {
+  return {
+    kind: "ripple-delete-clips",
+    name: "Ripple delete clips",
+    clipIds: [...new Set(clipIds)],
   }
 }
 
@@ -898,6 +1186,7 @@ export function createAddCaptionClipCommand(
     kind: "add-caption-clip",
     name: "Add caption",
     trackId,
+    clipId: crypto.randomUUID(),
     text,
     startMs,
     durationMs,

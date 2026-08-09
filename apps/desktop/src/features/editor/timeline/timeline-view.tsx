@@ -1,50 +1,74 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { convertFileSrc } from "@tauri-apps/api/core"
-import type { MediaJob, TimelineClip, TimelineTrack } from "@recordforge/contracts"
+import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import {
+  cursorTelemetryFileSchema,
+  type MediaJob,
+  type TimelineClip,
+  type TimelineMarker,
+  type TimelineTrack,
+} from "@recordforge/contracts"
+import {
+  createAddMarkerCommand,
   createDeleteClipCommand,
+  createDeleteClipsCommand,
+  createDeleteMarkerCommand,
+  createDeleteRangeCommand,
+  createMoveClipCommand,
+  createMoveClipsCommand,
   createRippleDeleteClipCommand,
+  createRippleDeleteClipsCommand,
+  createRippleDeleteRangeCommand,
   createSplitClipCommand,
+  createTrimClipCommand,
   createUpdateTrackCommand,
+  findClip,
+  findNextTimelineClip,
   formatTime,
-  getRedoLabel,
-  getUndoLabel,
+  sourceToTimelineForTrack,
+  timelineToSourceForTrack,
 } from "@recordforge/editor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
-  AudioLines,
-  Lock,
-  LockOpen,
+  CheckCircle2,
+  Flag,
   Monitor,
   MousePointer2,
   Pause,
   Play,
-  Redo2,
   Scissors,
   SkipBack,
   SkipForward,
-  Trash2,
-  Undo2,
-  Video,
-  Volume2,
-  VolumeX,
-  X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react"
-import { Button, EmptyState, IconButton, Progress, Skeleton, Slider, cn } from "@recordforge/ui"
+import {
+  Button,
+  EmptyState,
+  IconButton,
+  NativeSelect,
+  Progress,
+  Skeleton,
+  Slider,
+  cn,
+} from "@recordforge/ui"
 import { isTauri } from "../../../lib/settings"
-import { useEditorStore, type SaveStatus } from "../../../stores/editor-store"
+import { useEditorStore } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import type {
+  DerivativeResource,
+  WaveformResources,
+  ThumbnailManifest,
+} from "../media/derivative-resources"
 import { AudioTrackPreview } from "./audio-track-preview"
 import { ClipInspector } from "./clip-inspector"
+import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
 import { CustomCursorOverlay } from "../cursor"
 
 interface TimelineViewProps {
   recordingId: string
-  onClose: () => void
-  onOpenExport?: () => void
+  thumbnailResource: DerivativeResource<ThumbnailManifest> & { retry: () => void }
+  waveformResources: WaveformResources
 }
 
 interface SelectedClip {
@@ -67,80 +91,14 @@ function isFailedPreparationJob(job: MediaJob | null): boolean {
   return job?.kind === "prepare" && job.status === "failed"
 }
 
-type TimelineTool = "select" | "split"
-
-const TRACK_ROW_CLASS = "h-14 border-b border-border"
-const TICK_INTERVALS = [1_000, 5_000, 10_000, 30_000, 60_000]
-const TIMELINE_ZOOM_MIN = 10
-const TIMELINE_ZOOM_MAX = 200
-const TIMELINE_ZOOM_STEP = 10
-
 function toAssetUrl(path: string | null): string | null {
   if (!path) return null
   return isTauri() ? convertFileSrc(path) : path
 }
 
-function getTickInterval(pixelsPerMs: number): number {
-  const minimumSpacing = 72
-  return (
-    TICK_INTERVALS.find((interval) => interval * pixelsPerMs >= minimumSpacing) ??
-    TICK_INTERVALS[TICK_INTERVALS.length - 1]
-  )
-}
-
-function getTrackIcon(track: TimelineTrack) {
-  if (track.kind === "screen") return Monitor
-  if (track.kind === "camera") return Video
-  return AudioLines
-}
-
-function getTrackAccent(track: TimelineTrack): string {
-  if (track.kind === "screen") return "screen"
-  if (track.kind === "camera") return "camera"
-  if (track.name.toLowerCase().includes("system")) return "system"
-  return "mic"
-}
-
-function getClipClass(track: TimelineTrack): string {
-  const accent = getTrackAccent(track)
-  return (
-    {
-      screen: "border-track-screen/70 bg-track-screen/20 hover:bg-track-screen/30",
-      camera: "border-track-webcam/70 bg-track-webcam/20 hover:bg-track-webcam/30",
-      mic: "border-track-mic/70 bg-track-mic/20 hover:bg-track-mic/30",
-      system: "border-track-system/70 bg-track-system/20 hover:bg-track-system/30",
-    }[accent] ?? "border-border bg-surface"
-  )
-}
-
-function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
-  if (clip.kind === "screen") return "Screen capture"
-  if (clip.kind === "camera") return "Camera capture"
-  if (clip.kind === "caption") return clip.text
-  return track.name
-}
-
-function saveStatusText(status: SaveStatus): string {
-  switch (status) {
-    case "saving":
-      return "Saving..."
-    case "saved":
-      return "Saved"
-    case "error":
-      return "Save failed"
-    case "idle":
-    default:
-      return "Unsaved changes"
-  }
-}
-
 function TimelineLoadingState() {
   return (
     <div className="flex h-full min-h-160 flex-col gap-4 bg-background p-6">
-      <div className="flex items-center justify-between">
-        <Skeleton className="h-6 w-52" />
-        <Skeleton className="size-9" />
-      </div>
       <div className="flex min-h-0 flex-1 gap-4">
         <div className="flex min-w-0 flex-1 flex-col items-center justify-center rounded-xl border border-border bg-surface-dim p-6">
           <Skeleton className="aspect-video w-full max-w-4xl rounded-xl" />
@@ -182,7 +140,11 @@ function EditorErrorState({
   )
 }
 
-export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineViewProps) {
+export function TimelineView({
+  recordingId,
+  thumbnailResource,
+  waveformResources,
+}: TimelineViewProps) {
   const engine = useTimelineStore((state) => state.engine)
   const timeline = engine?.history.present ?? null
   const view = useTimelineStore((state) => state.view)
@@ -195,27 +157,109 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
   const execute = useTimelineStore((state) => state.execute)
   const undo = useTimelineStore((state) => state.undo)
   const redo = useTimelineStore((state) => state.redo)
+  const save = useTimelineStore((state) => state.save)
+  const play = useTimelineStore((state) => state.play)
   const pause = useTimelineStore((state) => state.pause)
   const togglePlay = useTimelineStore((state) => state.togglePlay)
   const seek = useTimelineStore((state) => state.seek)
+  const setPlaybackRate = useTimelineStore((state) => state.setPlaybackRate)
   const setZoom = useTimelineStore((state) => state.setZoom)
+  const setScroll = useTimelineStore((state) => state.setScroll)
+  const setSnapEnabled = useTimelineStore((state) => state.setSnapEnabled)
+  const setSnapThreshold = useTimelineStore((state) => state.setSnapThreshold)
+  const toggleTrackCollapsed = useTimelineStore((state) => state.toggleTrackCollapsed)
+  const setTrackHeight = useTimelineStore((state) => state.setTrackHeight)
+  const setSelection = useTimelineStore((state) => state.setSelection)
   const clearError = useTimelineStore((state) => state.clearError)
-  const activeExportJob = useTimelineStore((state) => state.activeExportJob)
-  const saveStatus = useEditorStore((state) => state.saveStatus)
-  const saveError = useEditorStore((state) => state.saveError)
   const missingAssets = useEditorStore((state) => state.missingAssets)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const monitorRef = useRef<HTMLDivElement>(null)
+  const playbackClipIdRef = useRef<string | null>(null)
+  const suppressPlayheadSyncRef = useRef(false)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
-  const [tool, setTool] = useState<TimelineTool>("select")
+  const [tool, setTool] = useState<"select" | "split">("select")
+  const [cursorClickTimesMs, setCursorClickTimesMs] = useState<number[]>([])
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
-  const [waveformImageError, setWaveformImageError] = useState(false)
+  const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
 
-  // The monitor can letterbox the video, so cursor coordinates must use the
-  // video's rendered box rather than the full monitor bounds.
+  useEffect(() => {
+    void load(recordingId)
+  }, [load, recordingId])
+
+  const selectedClip = useMemo<SelectedClip | null>(() => {
+    const selection = view.selection
+    if (!timeline || !selection || selection.kind !== "clip") return null
+    for (const track of timeline.tracks) {
+      const clip = track.clips.find((candidate) => candidate.id === selection.primaryClipId)
+      if (clip) return { clip, track }
+    }
+    return null
+  }, [timeline, view.selection])
+
+  const selectedMarker = useMemo<TimelineMarker | null>(() => {
+    const selection = view.selection
+    if (!timeline || !selection || selection.kind !== "marker") return null
+    return timeline.markers.find((marker) => marker.id === selection.markerId) ?? null
+  }, [timeline, view.selection])
+  const selectedClipCount = view.selection?.kind === "clip" ? view.selection.clipIds.length : 0
+
+  useEffect(() => {
+    if (view.selection?.kind === "clip" && !selectedClip) setSelection(null)
+    if (view.selection?.kind === "marker" && !selectedMarker) setSelection(null)
+  }, [selectedClip, selectedMarker, setSelection, view.selection])
+
+  useEffect(() => {
+    setUseOriginalMedia(false)
+    setMediaError(false)
+    setThumbnailSpriteError(false)
+    playbackClipIdRef.current = null
+  }, [recordingId])
+
+  useEffect(() => {
+    let cancelled = false
+    setCursorClickTimesMs([])
+
+    async function loadCursorClickTimes() {
+      try {
+        const raw = isTauri()
+          ? await invoke<unknown>("get_cursor_telemetry", { recordingId })
+          : null
+        const parsed = cursorTelemetryFileSchema.safeParse(raw)
+        if (cancelled || !parsed.success) return
+        setCursorClickTimesMs(
+          parsed.data.events.filter((event) => event.clicked).map((event) => event.tMs),
+        )
+      } catch {
+        if (!cancelled) setCursorClickTimesMs([])
+      }
+    }
+
+    void loadCursorClickTimes()
+    return () => {
+      cancelled = true
+    }
+  }, [recording?.id, recordingId])
+
+  useEffect(() => {
+    setThumbnailSpriteError(false)
+  }, [activeJob?.id, activeJob?.outputs?.thumbnailManifestPath])
+
+  const proxyPath = activeJob?.outputs?.proxyPath ?? null
+  const originalPath = recording?.outputPath ?? null
+  const isUsingProxy = Boolean(proxyPath && !useOriginalMedia)
+  const isPreparing = isPreparingJob(activeJob)
+  const isPreparationFailed = isFailedPreparationJob(activeJob)
+  const mediaPath = isUsingProxy ? proxyPath : originalPath
+  const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+  const audioTrackOutputs = activeJob?.outputs?.audioTracks ?? []
+  const isPreviewMuted =
+    audioTrackOutputs.length > 0 || (timeline ? isTimelineAudioMuted(timeline) : false)
+  const retryThumbnail = useCallback(() => {
+    setThumbnailSpriteError(false)
+    thumbnailResource.retry()
+  }, [thumbnailResource.retry])
   const updateVideoBounds = useCallback(() => {
     const monitor = monitorRef.current
     const video = videoRef.current
@@ -251,49 +295,96 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
     })
   }, [])
 
-  useEffect(() => {
-    void load(recordingId)
-  }, [load, recordingId])
+  // The playhead is always timeline time. The media element is only a source
+  // clock, so every seek and timeupdate crosses this shared mapping seam.
+  const getPlaybackPosition = useCallback(
+    (timelineMs: number) =>
+      timeline ? timelineToSourceForTrack(timeline, "screen", timelineMs) : null,
+    [timeline],
+  )
 
-  const selectedClip = useMemo<SelectedClip | null>(() => {
-    if (!timeline || !selectedClipId) return null
-    for (const track of timeline.tracks) {
-      const clip = track.clips.find((candidate) => candidate.id === selectedClipId)
-      if (clip) return { clip, track }
+  const syncVideoToTimeline = useCallback(
+    (timelineMs: number): boolean => {
+      const element = videoRef.current
+      const position = getPlaybackPosition(timelineMs)
+      if (!element || !position) {
+        if (element) element.pause()
+        playbackClipIdRef.current = null
+        return false
+      }
+
+      playbackClipIdRef.current = position.clipId
+      element.playbackRate = Math.max(0.25, Math.min(4, view.playbackRate * position.clip.speed))
+      const sourceSeconds = position.sourceMs / 1000
+      if (Math.abs(element.currentTime - sourceSeconds) > 0.08) {
+        element.currentTime = sourceSeconds
+      }
+      return true
+    },
+    [getPlaybackPosition, view.playbackRate],
+  )
+
+  const startPlayback = useCallback(
+    async (timelineMs: number) => {
+      const element = videoRef.current
+      if (!element) return
+
+      let startMs = timelineMs
+      if (!getPlaybackPosition(startMs)) {
+        const next = timeline ? findNextTimelineClip(timeline, "screen", startMs) : null
+        if (!next) {
+          pause()
+          return
+        }
+        startMs = next.startMs
+        seek(startMs)
+      }
+
+      if (!syncVideoToTimeline(startMs)) {
+        pause()
+        return
+      }
+      try {
+        await element.play()
+      } catch {
+        pause()
+      }
+    },
+    [getPlaybackPosition, pause, seek, syncVideoToTimeline, timeline],
+  )
+
+  useEffect(() => {
+    const element = videoRef.current
+    if (!element) return
+    if (view.isPlaying) {
+      void startPlayback(view.playheadMs)
+      return
     }
-    return null
-  }, [selectedClipId, timeline])
-
-  const firstClipId = timeline?.tracks.flatMap((track) => track.clips)[0]?.id ?? null
-  useEffect(() => {
-    if (!selectedClip || !selectedClipId) setSelectedClipId(firstClipId)
-  }, [firstClipId, selectedClip, selectedClipId])
+    element.pause()
+  }, [startPlayback, view.isPlaying])
 
   useEffect(() => {
-    setUseOriginalMedia(false)
-    setMediaError(false)
-  }, [recordingId])
+    if (suppressPlayheadSyncRef.current) {
+      suppressPlayheadSyncRef.current = false
+      return
+    }
+    syncVideoToTimeline(view.playheadMs)
+  }, [syncVideoToTimeline, view.playheadMs])
 
-  const proxyPath = activeJob?.outputs?.proxyPath ?? null
   useEffect(() => {
-    if (proxyPath) setUseOriginalMedia(false)
-    setMediaError(false)
-  }, [proxyPath])
-  const originalPath = recording?.outputPath ?? null
-  const isUsingProxy = Boolean(proxyPath && !useOriginalMedia)
-  const isPreparing = isPreparingJob(activeJob)
-  const isPreparationFailed = isFailedPreparationJob(activeJob)
-  const mediaPath = isUsingProxy ? proxyPath : originalPath
-  const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+    if (!view.isPlaying || getPlaybackPosition(view.playheadMs)) return
+    void startPlayback(view.playheadMs)
+  }, [getPlaybackPosition, startPlayback, view.isPlaying, view.playheadMs])
 
   useEffect(() => {
     setVideoBounds(null)
-    if (!mediaUrl) return
+    playbackClipIdRef.current = null
+  }, [mediaUrl])
 
+  useEffect(() => {
     const monitor = monitorRef.current
     const video = videoRef.current
-    if (!monitor || !video) return
-
+    if (!monitor || !video || !mediaUrl) return
     const observer = new ResizeObserver(updateVideoBounds)
     observer.observe(monitor)
     observer.observe(video)
@@ -301,118 +392,369 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
     return () => observer.disconnect()
   }, [mediaUrl, updateVideoBounds])
 
-  const audioTrackOutputs = activeJob?.outputs?.audioTracks ?? []
-  const waveformImagePath = activeJob?.outputs?.waveformImagePath ?? null
-  const waveformImageUrl = useMemo(() => toAssetUrl(waveformImagePath), [waveformImagePath])
-  const waveformUrl = waveformImageUrl && !waveformImageError ? waveformImageUrl : null
-  const waveformUrlsByStream = useMemo(
-    () =>
-      new Map(
-        audioTrackOutputs.map((output) => [
-          output.streamIndex,
-          toAssetUrl(output.waveformImagePath),
-        ]),
-      ),
-    [audioTrackOutputs],
-  )
-  const waveformDurationMs = Math.max(
-    metadata?.durationMs ?? recording?.durationMs ?? view.durationMs,
-    1,
-  )
-  const hasStandaloneAudio = audioTrackOutputs.length > 0
-  const isPreviewMuted = hasStandaloneAudio || (timeline ? isTimelineAudioMuted(timeline) : false)
+  const handleVideoTimeUpdate = useCallback(
+    (sourceMs: number) => {
+      if (!timeline) return
+      const currentClip = playbackClipIdRef.current
+        ? (findClip(timeline, playbackClipIdRef.current)?.clip ?? null)
+        : null
+      const screenAssetId =
+        currentClip?.assetId ??
+        timeline.tracks.find((track) => track.kind === "screen")?.clips[0]?.assetId ??
+        recordingId
+      if (currentClip && sourceMs >= currentClip.sourceOutMs - 40) {
+        const next = findNextTimelineClip(
+          timeline,
+          "screen",
+          currentClip.startMs + currentClip.durationMs + 1,
+        )
+        if (next) {
+          playbackClipIdRef.current = next.id
+          suppressPlayheadSyncRef.current = true
+          seek(next.startMs)
+          window.requestAnimationFrame(() => {
+            syncVideoToTimeline(next.startMs)
+            void startPlayback(next.startMs)
+          })
+        } else {
+          pause()
+          suppressPlayheadSyncRef.current = true
+          seek(view.durationMs)
+        }
+        return
+      }
 
-  useEffect(() => {
-    setWaveformImageError(false)
-  }, [activeJob?.id, waveformImagePath])
-
-  useEffect(() => {
-    const element = videoRef.current
-    if (!element) return
-    if (view.isPlaying) {
-      void element.play().catch(() => pause())
-      return
-    }
-    element.pause()
-  }, [pause, view.isPlaying])
-
-  useEffect(() => {
-    const element = videoRef.current
-    if (!element || !Number.isFinite(view.playheadMs)) return
-    const nextTime = view.playheadMs / 1000
-    if (Math.abs(element.currentTime - nextTime) > 0.08) element.currentTime = nextTime
-  }, [view.playheadMs])
-
-  const pixelsPerMs = Math.max(0.0004 * view.zoom, 0.01)
-  const timelineWidth = Math.max(720, Math.ceil(view.durationMs * pixelsPerMs))
-  const tickInterval = getTickInterval(pixelsPerMs)
-  const tickCount = Math.min(600, Math.ceil(view.durationMs / tickInterval) + 1)
-  const undoLabel = engine ? getUndoLabel(engine) : null
-  const redoLabel = engine ? getRedoLabel(engine) : null
-
-  const splitSelected = useCallback(() => {
-    if (!selectedClip || selectedClip.track.locked) return
-    execute(createSplitClipCommand(selectedClip.clip.id, view.playheadMs))
-  }, [execute, selectedClip, view.playheadMs])
-
-  const deleteSelected = useCallback(
-    (ripple: boolean) => {
-      if (!selectedClip || selectedClip.track.locked) return
-      execute(
-        ripple
-          ? createRippleDeleteClipCommand(selectedClip.clip.id)
-          : createDeleteClipCommand(selectedClip.clip.id),
-      )
-      setSelectedClipId(null)
+      const preferred = playbackClipIdRef.current
+      const mapped =
+        sourceToTimelineForTrack(timeline, "screen", screenAssetId, sourceMs, {
+          preferClipId: preferred ?? undefined,
+        }) ?? sourceToTimelineForTrack(timeline, "screen", screenAssetId, sourceMs)
+      if (!mapped) {
+        pause()
+        return
+      }
+      suppressPlayheadSyncRef.current = true
+      seek(mapped.timelineMs)
     },
-    [execute, selectedClip],
+    [
+      pause,
+      recordingId,
+      seek,
+      startPlayback,
+      syncVideoToTimeline,
+      timeline,
+      view.durationMs,
+      view.playheadMs,
+    ],
   )
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
+  const handleTimelineKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement | null
       if (target?.closest("input, textarea, select, button")) return
+      const key = event.key.toLowerCase()
+      const frameMs = Math.max(1, Math.round(1000 / Math.max(1, timeline?.canvas.fps ?? 30)))
+      const hasModifier = event.ctrlKey || event.metaKey
 
       if (event.code === "Space") {
         event.preventDefault()
         togglePlay()
-      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+      } else if (hasModifier && key === "z") {
         event.preventDefault()
         if (event.shiftKey) redo()
         else undo()
-      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+      } else if (hasModifier && key === "y") {
         event.preventDefault()
         redo()
-      } else if (event.key.toLowerCase() === "s") {
+      } else if (hasModifier && key === "s") {
+        event.preventDefault()
+        void save()
+      } else if (key === "s") {
         event.preventDefault()
         splitSelected()
+      } else if (key === "m") {
+        event.preventDefault()
+        addMarker()
+      } else if (key === "j") {
+        event.preventDefault()
+        setPlaybackRate(0.5)
+        play()
+      } else if (key === "k") {
+        event.preventDefault()
+        pause()
+      } else if (key === "l") {
+        event.preventDefault()
+        setPlaybackRate(1)
+        play()
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault()
-        deleteSelected(selectedClip?.track.kind === "screen")
+        deleteSelected(event.shiftKey)
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault()
+        const direction = event.key === "ArrowLeft" ? -1 : 1
+        if (event.altKey && selectedClip) {
+          trimSelected(
+            event.shiftKey
+              ? direction === -1
+                ? "end"
+                : "start"
+              : direction === -1
+                ? "start"
+                : "end",
+            direction * frameMs,
+          )
+        } else if (hasModifier && selectedClip) {
+          nudgeSelected(direction * (event.shiftKey ? 1_000 : frameMs))
+        } else {
+          seek(view.playheadMs + direction * (event.shiftKey ? 1_000 : frameMs))
+        }
+      } else if (event.key === "Home") {
+        event.preventDefault()
+        seek(0)
+      } else if (event.key === "End") {
+        event.preventDefault()
+        seek(view.durationMs)
+      }
+    },
+    [
+      addMarker,
+      deleteSelected,
+      nudgeSelected,
+      pause,
+      play,
+      redo,
+      save,
+      seek,
+      selectedClip,
+      setPlaybackRate,
+      splitSelected,
+      timeline?.canvas.fps,
+      togglePlay,
+      trimSelected,
+      undo,
+      view.durationMs,
+      view.playheadMs,
+    ],
+  )
+
+  function splitSelected() {
+    if (!selectedClip || selectedClip.track.locked) return
+    execute(createSplitClipCommand(selectedClip.clip.id, view.playheadMs))
+  }
+
+  function deleteSelected(ripple: boolean) {
+    const selection = view.selection
+    if (!selection) return
+    if (selection.kind === "range") {
+      execute(
+        ripple
+          ? createRippleDeleteRangeCommand(selection.startMs, selection.endMs)
+          : createDeleteRangeCommand(selection.startMs, selection.endMs),
+      )
+      setSelection(null)
+      return
+    }
+    if (selection.kind === "marker") {
+      execute(createDeleteMarkerCommand(selection.markerId))
+      setSelection(null)
+      return
+    }
+    if (selection.clipIds.length > 1) {
+      execute(
+        ripple
+          ? createRippleDeleteClipsCommand(selection.clipIds)
+          : createDeleteClipsCommand(selection.clipIds),
+      )
+      setSelection(null)
+      return
+    }
+    if (!selectedClip || selectedClip.track.locked) return
+    execute(
+      ripple
+        ? createRippleDeleteClipCommand(selectedClip.clip.id)
+        : createDeleteClipCommand(selectedClip.clip.id),
+    )
+    setSelection(null)
+  }
+
+  function nudgeSelected(deltaMs: number) {
+    if (!selectedClip || selectedClip.track.locked) return
+    const selection = view.selection
+    if (selection?.kind === "clip" && selection.clipIds.length > 1) {
+      execute(
+        createMoveClipsCommand(selection.clipIds, Math.round(deltaMs), {
+          coalesceKey: `keyboard-move:${selection.clipIds.slice().sort().join(",")}`,
+        }),
+      )
+      return
+    }
+    const nextStartMs = Math.max(0, Math.round(selectedClip.clip.startMs + deltaMs))
+    execute(
+      createMoveClipCommand(selectedClip.clip.id, nextStartMs, undefined, {
+        coalesceKey: `keyboard-move:${selectedClip.clip.id}`,
+      }),
+    )
+  }
+
+  function trimSelected(edge: "start" | "end", deltaMs: number) {
+    if (!selectedClip || selectedClip.track.locked) return
+    const { clip } = selectedClip
+    const clipEndMs = clip.startMs + clip.durationMs
+    if (edge === "start") {
+      const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
+      const sourceInMs = Math.max(
+        0,
+        clip.sourceInMs + Math.round((nextStartMs - clip.startMs) * clip.speed),
+      )
+      if (sourceInMs >= clip.sourceOutMs) return
+      execute(
+        createTrimClipCommand(clip.id, sourceInMs, clip.sourceOutMs, { startMs: nextStartMs }),
+      )
+      return
+    }
+    const nextEndMs = Math.max(clip.startMs + 1, clipEndMs + deltaMs)
+    const sourceDurationMs = Math.max(metadata?.durationMs ?? 0, clip.sourceOutMs)
+    const sourceOutMs = Math.min(
+      sourceDurationMs,
+      clip.sourceInMs + Math.round((nextEndMs - clip.startMs) * clip.speed),
+    )
+    if (sourceOutMs <= clip.sourceInMs) return
+    execute(createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs))
+  }
+
+  function selectClip(clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) {
+    if (tool === "split" && !track.locked) {
+      if (view.playheadMs > clip.startMs && view.playheadMs < clip.startMs + clip.durationMs) {
+        execute(createSplitClipCommand(clip.id, view.playheadMs))
+      }
+      return
+    }
+    if (event.shiftKey && view.selection?.kind === "clip") {
+      const current = findClip(timeline!, view.selection.primaryClipId)?.clip
+      if (current) {
+        setSelection({
+          kind: "range",
+          startMs: Math.min(current.startMs, clip.startMs),
+          endMs: Math.max(current.startMs + current.durationMs, clip.startMs + clip.durationMs),
+        })
+        return
       }
     }
-
-    window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [deleteSelected, redo, selectedClip, splitSelected, togglePlay, undo])
-
-  function seekFromPointer(event: React.MouseEvent<HTMLElement>) {
-    const bounds = event.currentTarget.getBoundingClientRect()
-    const scrollLeft = "scrollLeft" in event.currentTarget ? event.currentTarget.scrollLeft : 0
-    const position = Math.max(0, event.clientX - bounds.left + scrollLeft)
-    seek(position / pixelsPerMs)
+    if (event.ctrlKey || event.metaKey) {
+      const current =
+        view.selection?.kind === "clip"
+          ? view.selection
+          : { kind: "clip" as const, primaryClipId: clip.id, clipIds: [], trackId: track.id }
+      const clipIds = current.clipIds.includes(clip.id)
+        ? current.clipIds.filter((id) => id !== clip.id)
+        : [...current.clipIds, clip.id]
+      if (clipIds.length === 0) {
+        setSelection(null)
+        return
+      }
+      setSelection({
+        kind: "clip",
+        primaryClipId: clip.id,
+        clipIds,
+        trackId: track.id,
+      })
+      return
+    }
+    setSelection({ kind: "clip", primaryClipId: clip.id, clipIds: [clip.id], trackId: track.id })
+    seek(clip.startMs)
   }
 
-  function toggleTrackMuted(track: TimelineTrack) {
-    execute(createUpdateTrackCommand(track.id, { muted: !track.muted }))
+  function selectRange(startMs: number, endMs: number) {
+    if (endMs <= startMs) return
+    setSelection({ kind: "range", startMs: Math.round(startMs), endMs: Math.round(endMs) })
   }
 
-  function toggleTrackLocked(track: TimelineTrack) {
-    execute(createUpdateTrackCommand(track.id, { locked: !track.locked }))
+  function selectMarker(marker: TimelineMarker) {
+    setSelection({ kind: "marker", markerId: marker.id })
+    seek(marker.timeMs)
+  }
+
+  function moveClip(
+    clip: TimelineClip,
+    track: TimelineTrack,
+    newStartMs: number,
+    coalesceKey: string,
+  ) {
+    if (track.locked) return
+    const selection = view.selection
+    if (
+      selection?.kind === "clip" &&
+      selection.clipIds.length > 1 &&
+      selection.clipIds.includes(clip.id)
+    ) {
+      execute(
+        createMoveClipsCommand(selection.clipIds, Math.round(newStartMs - clip.startMs), {
+          coalesceKey,
+        }),
+        { coalesceWindowMs: 60_000 },
+      )
+      return
+    }
+    execute(
+      createMoveClipCommand(clip.id, Math.max(0, Math.round(newStartMs)), undefined, {
+        coalesceKey,
+      }),
+      { coalesceWindowMs: 60_000 },
+    )
+  }
+
+  function trimClip(
+    clip: TimelineClip,
+    track: TimelineTrack,
+    edge: "start" | "end",
+    edgeTimeMs: number,
+    coalesceKey: string,
+  ) {
+    if (track.locked) return
+    const clipEndMs = clip.startMs + clip.durationMs
+    const nextEdgeMs = Math.round(edgeTimeMs)
+    if (edge === "start") {
+      const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs))
+      const sourceInMs = Math.max(
+        0,
+        clip.sourceInMs + Math.round((nextStartMs - clip.startMs) * clip.speed),
+      )
+      if (sourceInMs >= clip.sourceOutMs) return
+      execute(
+        createTrimClipCommand(clip.id, sourceInMs, clip.sourceOutMs, {
+          startMs: nextStartMs,
+          coalesceKey,
+        }),
+        { coalesceWindowMs: 60_000 },
+      )
+      return
+    }
+    const nextEndMs = Math.max(clip.startMs + 1, nextEdgeMs)
+    const sourceDurationMs = Math.max(metadata?.durationMs ?? 0, clip.sourceOutMs)
+    const sourceOutMs = Math.min(
+      sourceDurationMs,
+      clip.sourceInMs + Math.round((nextEndMs - clip.startMs) * clip.speed),
+    )
+    if (sourceOutMs <= clip.sourceInMs) return
+    execute(createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs, { coalesceKey }), {
+      coalesceWindowMs: 60_000,
+    })
+  }
+
+  function cycleTrackHeight(track: TimelineTrack) {
+    const currentHeight = view.trackHeights[track.id] ?? 56
+    const nextHeight = currentHeight >= 88 ? 56 : currentHeight + 16
+    setTrackHeight(track.id, nextHeight)
+  }
+
+  function addMarker() {
+    execute(
+      createAddMarkerCommand(view.playheadMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`),
+    )
   }
 
   function adjustZoom(delta: number) {
-    setZoom(Math.max(TIMELINE_ZOOM_MIN, Math.min(TIMELINE_ZOOM_MAX, view.zoom + delta)))
+    setZoom(Math.max(10, Math.min(200, view.zoom + delta)))
   }
 
   if (isLoading) return <TimelineLoadingState />
@@ -426,81 +768,26 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
     )
   }
 
+  const pixelsPerMs = Math.max(0.0004 * view.zoom, 0.01)
+  const timelineWidth = Math.max(720, Math.ceil(view.durationMs * pixelsPerMs))
+  const tickInterval = getVisibleTickInterval(pixelsPerMs)
+  const isThumbnailError = thumbnailResource.status === "error" || thumbnailSpriteError
+  const thumbnailStatus = isThumbnailError ? "error" : thumbnailResource.status
+  const effectiveThumbnailResource = thumbnailSpriteError
+    ? {
+        status: "error" as const,
+        message: "Thumbnail sprite unavailable",
+        retry: retryThumbnail,
+      }
+    : thumbnailResource
+
   return (
-    <div className="flex h-full min-h-160 flex-col overflow-hidden bg-background text-foreground select-none">
-      {/* Upper Area: Video Preview Canvas + Inspector */}
+    <div
+      className="flex h-full min-h-160 flex-col overflow-hidden bg-background text-foreground select-none"
+      onKeyDown={handleTimelineKeyDown}
+    >
       <div className="flex min-h-0 flex-1 border-b border-border">
-        {/* Main Video Viewport & Transport */}
         <div className="flex min-w-0 flex-1 flex-col bg-background p-5">
-          {/* Project header */}
-          <div className="flex items-center justify-between gap-4 pb-4">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary">
-                <Monitor className="size-4" aria-hidden />
-              </div>
-              <div className="min-w-0">
-                <h1 className="truncate text-sm font-semibold text-foreground">{timeline.name}</h1>
-                <div className="mt-0.5 flex items-center gap-2 text-[11px] text-subtle-foreground">
-                  <span className="tnum font-mono">
-                    {timeline.canvas.width}×{timeline.canvas.height}
-                  </span>
-                  <span>·</span>
-                  <span className="tnum font-mono">{timeline.canvas.fps} fps</span>
-                  <span>·</span>
-                  <span className="tnum font-mono">{formatTime(view.durationMs)}</span>
-                </div>
-              </div>
-              <span className="rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success">
-                {isUsingProxy ? "Proxy ready" : proxyPath ? "Original fallback" : "Original source"}
-              </span>
-              <span
-                className={cn(
-                  "rounded-full border px-2 py-0.5 text-[10px] font-medium",
-                  saveStatus === "error"
-                    ? "border-destructive/30 bg-destructive/10 text-destructive"
-                    : saveStatus === "saved"
-                      ? "border-success/30 bg-success/10 text-success"
-                      : "border-warning/30 bg-warning/10 text-warning",
-                )}
-                title={saveError ?? saveStatusText(saveStatus)}
-              >
-                {saveStatusText(saveStatus)}
-              </span>
-              {missingAssets.length > 0 ? (
-                <span
-                  className="flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive"
-                  title={`Missing assets: ${missingAssets.join(", ")}`}
-                >
-                  <AlertCircle className="size-3" />
-                  {missingAssets.length} missing
-                </span>
-              ) : null}
-            </div>
-
-            <div className="flex shrink-0 items-center gap-1">
-              <IconButton
-                label={undoLabel ? `Undo ${undoLabel}` : "Undo"}
-                shortcut="Ctrl Z"
-                disabled={!undoLabel}
-                onClick={undo}
-              >
-                <Undo2 />
-              </IconButton>
-              <IconButton
-                label={redoLabel ? `Redo ${redoLabel}` : "Redo"}
-                shortcut="Ctrl Y"
-                disabled={!redoLabel}
-                onClick={redo}
-              >
-                <Redo2 />
-              </IconButton>
-              <div className="mx-2 h-5 w-px bg-border" />
-              <IconButton label="Close editor" tooltipSide="bottom" onClick={onClose}>
-                <X />
-              </IconButton>
-            </div>
-          </div>
-
           {error ? (
             <div
               className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-foreground"
@@ -529,7 +816,7 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
               </div>
               <Progress value={activeJob?.progress ?? 0} />
               <p className="text-subtle-foreground">
-                Editing uses the original source while preparation runs.
+                The original source remains available while preparation runs.
               </p>
             </div>
           ) : null}
@@ -544,13 +831,13 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
             </div>
           ) : null}
 
-          {/* Video player monitor */}
           <div
             ref={monitorRef}
             className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-3 shadow-e2"
           >
             {mediaUrl && !mediaError ? (
               <video
+                key={mediaUrl}
                 ref={videoRef}
                 src={mediaUrl}
                 className="max-h-full max-w-full rounded-lg object-contain"
@@ -566,15 +853,34 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                   }
                   setMediaError(true)
                 }}
-                onLoadedMetadata={updateVideoBounds}
+                onLoadedMetadata={() => {
+                  updateVideoBounds()
+                  syncVideoToTimeline(view.playheadMs)
+                  if (view.isPlaying) void startPlayback(view.playheadMs)
+                }}
                 onLoadedData={() => {
                   setMediaError(false)
                   updateVideoBounds()
                 }}
-                onTimeUpdate={(event) => seek(event.currentTarget.currentTime * 1000)}
+                onTimeUpdate={(event) =>
+                  handleVideoTimeUpdate(event.currentTarget.currentTime * 1000)
+                }
                 onEnded={() => {
+                  if (timeline && playbackClipIdRef.current) {
+                    const clip = playbackClipIdRef.current
+                      ? findClip(timeline, playbackClipIdRef.current)?.clip
+                      : null
+                    const next = clip
+                      ? findNextTimelineClip(timeline, "screen", clip.startMs + clip.durationMs + 1)
+                      : null
+                    if (next) {
+                      seek(next.startMs)
+                      void startPlayback(next.startMs)
+                      return
+                    }
+                  }
                   pause()
-                  seek(0)
+                  seek(view.durationMs)
                 }}
               />
             ) : (
@@ -598,17 +904,17 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
             {mediaUrl && !mediaError && videoBounds ? (
               <CustomCursorOverlay
                 playheadMs={view.playheadMs}
-                cursorSettings={timeline?.canvas.cursorSettings}
+                cursorSettings={timeline.canvas.cursorSettings}
                 recordingId={recordingId}
                 telemetryPath={
-                  recording?.workDir ? `${recording.workDir}/cursor_telemetry.json` : null
+                  recording.workDir ? `${recording.workDir}/cursor_telemetry.json` : null
                 }
                 containerWidth={videoBounds.width}
                 containerHeight={videoBounds.height}
                 offsetX={videoBounds.left}
                 offsetY={videoBounds.top}
-                sourceWidth={recording?.width ?? 1920}
-                sourceHeight={recording?.height ?? 1080}
+                sourceWidth={recording.width ?? 1920}
+                sourceHeight={recording.height ?? 1080}
               />
             ) : null}
 
@@ -617,16 +923,27 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
               outputs={audioTrackOutputs}
               playheadMs={view.playheadMs}
               isPlaying={view.isPlaying}
+              playbackRate={view.playbackRate}
             />
 
             <div className="pointer-events-none absolute left-5 top-5 flex items-center gap-1.5 rounded-full border border-border bg-background/80 px-2.5 py-1 text-[10px] text-muted-foreground backdrop-blur">
-              <span className="size-1.5 rounded-full bg-success" />
-              <span>{mediaUrl && !mediaError ? "LIVE PREVIEW" : "PREVIEW UNAVAILABLE"}</span>
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  mediaUrl && !mediaError ? "bg-success" : "bg-warning",
+                )}
+              />
+              <span>
+                {mediaUrl && !mediaError
+                  ? isUsingProxy
+                    ? "PROXY PREVIEW"
+                    : "ORIGINAL FALLBACK"
+                  : "PREVIEW UNAVAILABLE"}
+              </span>
             </div>
           </div>
 
-          {/* Floating Playback Controls Bar */}
-          <div className="flex items-center justify-center gap-3 pt-4">
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
             <IconButton label="Go to start" shortcut="Home" onClick={() => seek(0)}>
               <SkipBack />
             </IconButton>
@@ -645,40 +962,36 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
             <IconButton label="Go to end" shortcut="End" onClick={() => seek(view.durationMs)}>
               <SkipForward />
             </IconButton>
-            <div className="ml-3 min-w-24 text-center font-mono text-xs font-semibold tabular-nums text-muted-foreground">
+            <div className="min-w-28 text-center font-mono text-xs font-semibold tabular-nums text-muted-foreground">
               {formatTime(view.playheadMs)} / {formatTime(view.durationMs)}
             </div>
-            {onOpenExport ? (
-              <Button
-                variant="secondary"
-                className="ml-3"
-                disabled={missingAssets.length > 0}
-                title={
-                  missingAssets.length > 0
-                    ? "Export is disabled while assets are missing"
-                    : "Open export settings"
-                }
-                onClick={onOpenExport}
-              >
-                Export
-              </Button>
-            ) : null}
+            <NativeSelect
+              aria-label="Playback speed"
+              value={String(view.playbackRate)}
+              onChange={(event) => setPlaybackRate(Number(event.target.value))}
+              className="w-20"
+            >
+              {[0.25, 0.5, 1, 1.5, 2, 4].map((rate) => (
+                <option key={rate} value={rate}>
+                  {rate}×
+                </option>
+              ))}
+            </NativeSelect>
           </div>
         </div>
 
-        {/* Right Inspector Sidebar */}
         <ClipInspector
           clip={selectedClip?.clip ?? null}
           track={selectedClip?.track ?? null}
+          marker={selectedMarker}
           metadata={metadata}
-          onClear={() => setSelectedClipId(null)}
+          selectedClipCount={selectedClipCount}
+          onClear={() => setSelection(null)}
         />
       </div>
 
-      {/* Lower Area: Multi-Track Timeline */}
       <div className="flex h-80 shrink-0 flex-col bg-surface-dim">
-        {/* Timeline Toolbar */}
-        <div className="flex h-11 items-center justify-between border-b border-border px-4">
+        <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border px-4 py-1.5">
           <div className="flex items-center gap-1">
             <div
               className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1"
@@ -688,10 +1001,7 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
               <IconButton
                 label="Selection tool"
                 tooltipSide="top"
-                aria-pressed={tool === "select"}
-                className={cn(
-                  tool === "select" && "bg-overlay text-foreground ring-1 ring-primary/30",
-                )}
+                className={cn("size-7", tool === "select" && "bg-overlay text-foreground")}
                 onClick={() => setTool("select")}
               >
                 <MousePointer2 />
@@ -700,259 +1010,161 @@ export function TimelineView({ recordingId, onClose, onOpenExport }: TimelineVie
                 label="Split tool"
                 shortcut="S"
                 tooltipSide="top"
-                aria-pressed={tool === "split"}
-                className={cn(
-                  tool === "split" && "bg-primary/20 text-primary ring-1 ring-primary/30",
-                )}
+                className={cn("size-7", tool === "split" && "bg-overlay text-foreground")}
                 onClick={() => setTool("split")}
               >
                 <Scissors />
               </IconButton>
             </div>
-            <div className="mx-2 h-5 w-px bg-border" />
-            <IconButton
-              label="Split selected clip at playhead"
-              shortcut="S"
-              tooltipSide="top"
-              disabled={!selectedClip || selectedClip.track.locked}
-              onClick={splitSelected}
+            <Button
+              variant={view.snapEnabled ? "secondary" : "ghost"}
+              size="sm"
+              aria-pressed={view.snapEnabled}
+              onClick={() => setSnapEnabled(!view.snapEnabled)}
+              title={view.snapEnabled ? "Disable timeline snapping" : "Enable timeline snapping"}
             >
-              <Scissors />
-            </IconButton>
-            <IconButton
-              label="Delete selected clip"
-              shortcut="Delete"
-              tooltipSide="top"
-              disabled={!selectedClip || selectedClip.track.locked}
-              onClick={() => deleteSelected(selectedClip?.track.kind === "screen")}
+              Snap {view.snapEnabled ? "on" : "off"}
+            </Button>
+            <NativeSelect
+              aria-label="Snap threshold"
+              value={String(view.snapThresholdMs)}
+              onChange={(event) => setSnapThreshold(Number(event.target.value))}
+              className="hidden w-24 md:block"
             >
-              <Trash2 />
-            </IconButton>
-            <IconButton
-              label="Ripple delete selected clip"
-              tooltipSide="top"
-              disabled={!selectedClip || selectedClip.track.locked}
-              onClick={() => deleteSelected(true)}
+              {[60, 120, 240, 480].map((thresholdMs) => (
+                <option key={thresholdMs} value={thresholdMs}>
+                  Snap {thresholdMs}ms
+                </option>
+              ))}
+            </NativeSelect>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={addMarker}
+              title="Add a marker at the playhead"
             >
-              <Trash2 />
-            </IconButton>
+              <Flag data-icon="inline-start" />
+              <span className="hidden md:inline">Add marker</span>
+            </Button>
           </div>
-
           <div className="flex items-center gap-2">
-            <IconButton
-              label="Zoom out timeline"
-              tooltipSide="top"
-              disabled={view.zoom <= TIMELINE_ZOOM_MIN}
-              onClick={() => adjustZoom(-TIMELINE_ZOOM_STEP)}
-            >
-              <ZoomOut />
-            </IconButton>
-            <Slider
-              value={[Math.min(TIMELINE_ZOOM_MAX, Math.max(TIMELINE_ZOOM_MIN, view.zoom))]}
-              min={TIMELINE_ZOOM_MIN}
-              max={TIMELINE_ZOOM_MAX}
-              step={1}
-              aria-label="Timeline zoom"
-              onValueChange={(value) => setZoom(value[0] ?? view.zoom)}
-              className="w-32"
+            <DerivativeState label="Thumbnails" status={thumbnailStatus} onRetry={retryThumbnail} />
+            <DerivativeState
+              label="Waveform"
+              status={waveformResources.status}
+              onRetry={waveformResources.retry}
             />
-            <IconButton
-              label="Zoom in timeline"
-              tooltipSide="top"
-              disabled={view.zoom >= TIMELINE_ZOOM_MAX}
-              onClick={() => adjustZoom(TIMELINE_ZOOM_STEP)}
-            >
-              <ZoomIn />
-            </IconButton>
-            <span className="min-w-9 text-right font-mono text-[10px] tabular-nums text-subtle-foreground">
-              {Math.round(view.zoom)}%
-            </span>
-          </div>
-        </div>
-
-        {/* Timeline Ruler & Playhead Lane */}
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Track Headers (Left Column) */}
-          <div className="z-10 w-48 shrink-0 border-r border-border bg-surface-dim">
-            <div className="flex h-8 items-center border-b border-border px-4 text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">
-              Tracks
-            </div>
-            {timeline.tracks.map((track) => {
-              const TrackIcon = getTrackIcon(track)
-              return (
-                <div
-                  key={track.id}
-                  className={cn("flex items-center justify-between px-3", TRACK_ROW_CLASS)}
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <TrackIcon
-                      className={cn("size-4 shrink-0", {
-                        "text-track-screen": track.kind === "screen",
-                        "text-track-webcam": track.kind === "camera",
-                        "text-track-mic":
-                          track.kind === "audio" && !track.name.toLowerCase().includes("system"),
-                        "text-track-system":
-                          track.kind === "audio" && track.name.toLowerCase().includes("system"),
-                      })}
-                      aria-hidden
-                    />
-                    <span className="truncate text-xs font-medium text-muted-foreground">
-                      {track.name}
-                    </span>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-0.5">
-                    <IconButton
-                      label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
-                      tooltipSide="top"
-                      className="size-7"
-                      onClick={() => toggleTrackMuted(track)}
-                    >
-                      {track.muted ? <VolumeX /> : <Volume2 />}
-                    </IconButton>
-                    <IconButton
-                      label={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`}
-                      tooltipSide="top"
-                      className="size-7"
-                      onClick={() => toggleTrackLocked(track)}
-                    >
-                      {track.locked ? <Lock /> : <LockOpen />}
-                    </IconButton>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-
-          {/* Timeline Tracks Lane */}
-          <div className="min-w-0 flex-1 overflow-x-auto overflow-y-auto" onClick={seekFromPointer}>
-            <div className="relative min-h-full" style={{ width: `${timelineWidth}px` }}>
-              <div
-                className="relative h-8 border-b border-border bg-surface-dim"
-                onClick={seekFromPointer}
+            <div className="hidden items-center gap-1 border-l border-border pl-2 sm:flex">
+              <IconButton
+                label="Zoom out"
+                tooltipSide="top"
+                className="size-7"
+                onClick={() => adjustZoom(-10)}
               >
-                {Array.from({ length: tickCount }, (_, index) => {
-                  const timeMs = Math.min(index * tickInterval, view.durationMs)
-                  return (
-                    <span
-                      key={timeMs}
-                      className="absolute bottom-1 -translate-x-1/2 font-mono text-[10px] tabular-nums text-subtle-foreground"
-                      style={{ left: `${timeMs * pixelsPerMs}px` }}
-                    >
-                      {formatTime(timeMs)}
-                    </span>
-                  )
-                })}
-              </div>
-
-              {/* Playhead vertical line */}
-              <div
-                className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-primary shadow-[0_0_8px_var(--color-primary)]"
-                style={{ left: `${view.playheadMs * pixelsPerMs}px` }}
+                <ZoomOut />
+              </IconButton>
+              <Slider
+                value={[view.zoom]}
+                min={10}
+                max={200}
+                step={10}
+                aria-label="Timeline zoom"
+                className="w-24"
+                onValueChange={(value) => setZoom(value[0] ?? view.zoom)}
+              />
+              <IconButton
+                label="Zoom in"
+                tooltipSide="top"
+                className="size-7"
+                onClick={() => adjustZoom(10)}
               >
-                <div className="absolute -left-1.5 top-0 size-3 rotate-45 rounded-xs bg-primary" />
-              </div>
-
-              {timeline.tracks.map((track) => {
-                return (
-                  <div key={track.id} className={cn("relative flex items-center", TRACK_ROW_CLASS)}>
-                    {track.clips.map((clip) => {
-                      const clipWaveformUrl =
-                        clip.kind === "audio"
-                          ? (waveformUrlsByStream.get(clip.streamIndex ?? -1) ?? waveformUrl)
-                          : null
-
-                      return (
-                        <button
-                          key={clip.id}
-                          type="button"
-                          className={cn(
-                            "absolute flex h-9 min-w-10 items-center overflow-hidden rounded-md border px-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                            getClipClass(track),
-                            selectedClipId === clip.id &&
-                              "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
-                            track.muted && "opacity-45",
-                            track.locked && "cursor-not-allowed opacity-60",
-                          )}
-                          style={{
-                            left: `${clip.startMs * pixelsPerMs}px`,
-                            width: `${Math.max(clip.durationMs * pixelsPerMs, 40)}px`,
-                          }}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            setSelectedClipId(clip.id)
-                            if (tool === "split" && !track.locked) {
-                              const bounds = event.currentTarget.getBoundingClientRect()
-                              const offsetMs = Math.round(
-                                Math.max(
-                                  1,
-                                  Math.min(
-                                    clip.durationMs - 1,
-                                    (event.clientX - bounds.left) / pixelsPerMs,
-                                  ),
-                                ),
-                              )
-                              const splitTimeMs = clip.startMs + offsetMs
-                              seek(splitTimeMs)
-                              execute(createSplitClipCommand(clip.id, splitTimeMs))
-                            } else {
-                              seek(clip.startMs)
-                            }
-                          }}
-                          title={`${getClipLabel(clip, track)} · ${formatTime(clip.durationMs)}`}
-                        >
-                          {clip.kind === "audio" && clipWaveformUrl ? (
-                            <img
-                              key={`${activeJob?.id ?? "waveform"}-${clip.id}`}
-                              src={clipWaveformUrl}
-                              alt=""
-                              aria-hidden
-                              draggable={false}
-                              loading="eager"
-                              className="pointer-events-none absolute top-0 max-w-none mix-blend-screen opacity-80"
-                              style={{
-                                left: `${-(clip.sourceInMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
-                                width: `${(waveformDurationMs * pixelsPerMs) / Math.max(clip.speed, 0.001)}px`,
-                                height: "100%",
-                              }}
-                              onError={() => setWaveformImageError(true)}
-                            />
-                          ) : null}
-                          <span className="relative z-10 truncate font-medium text-foreground">
-                            {getClipLabel(clip, track)}
-                          </span>
-                          {clip.kind === "audio" && !clipWaveformUrl ? (
-                            <span
-                              className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70"
-                              aria-hidden
-                            >
-                              {Array.from({ length: 8 }, (_, index) => (
-                                <span
-                                  key={index}
-                                  className="w-px bg-current"
-                                  style={{ height: `${6 + ((index * 7) % 10)}px` }}
-                                />
-                              ))}
-                            </span>
-                          ) : null}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )
-              })}
+                <ZoomIn />
+              </IconButton>
+              <span className="w-9 text-right font-mono text-[10px] tabular-nums text-subtle-foreground">
+                {view.zoom}%
+              </span>
             </div>
           </div>
         </div>
+
+        <TimelineLanes
+          timeline={timeline}
+          view={view}
+          timelineWidth={timelineWidth}
+          pixelsPerMs={pixelsPerMs}
+          tickInterval={tickInterval}
+          cursorClickTimesMs={cursorClickTimesMs}
+          thumbnailResource={effectiveThumbnailResource}
+          waveformResources={waveformResources}
+          onSeek={seek}
+          onSetScroll={setScroll}
+          onSelectClip={selectClip}
+          onSelectRange={selectRange}
+          onMoveClip={moveClip}
+          onTrimClip={trimClip}
+          onSelectMarker={selectMarker}
+          onDeleteSelection={deleteSelected}
+          onToggleTrackMuted={(track) =>
+            execute(createUpdateTrackCommand(track.id, { muted: !track.muted }))
+          }
+          onToggleTrackSolo={(track) =>
+            execute(createUpdateTrackCommand(track.id, { solo: !track.solo }))
+          }
+          onToggleTrackLocked={(track) =>
+            execute(createUpdateTrackCommand(track.id, { locked: !track.locked }))
+          }
+          onToggleTrackCollapsed={(track) => toggleTrackCollapsed(track.id)}
+          onCycleTrackHeight={cycleTrackHeight}
+          onSpriteError={() => setThumbnailSpriteError(true)}
+        />
       </div>
 
-      {activeExportJob?.status === "running" ? (
-        <div className="absolute bottom-4 right-4 rounded-lg border border-primary/30 bg-surface px-3 py-2 text-xs shadow-e2">
-          <span className="font-medium text-foreground">Exporting</span>
-          <span className="ml-2 font-mono text-muted-foreground">
-            {Math.round(activeExportJob.progress * 100)}%
-          </span>
+      {missingAssets.length > 0 ? (
+        <div
+          className="absolute bottom-4 left-4 rounded-lg border border-destructive/30 bg-surface px-3 py-2 text-xs text-destructive shadow-e2"
+          role="status"
+        >
+          <span className="font-medium">Export blocked:</span> relink missing assets before
+          rendering.
         </div>
       ) : null}
     </div>
+  )
+}
+
+function DerivativeState({
+  label,
+  status,
+  onRetry,
+}: {
+  label: string
+  status: "loading" | "missing" | "content" | "error"
+  onRetry: () => void
+}) {
+  if (status === "loading") {
+    return (
+      <Skeleton className="h-6 w-24 rounded-full" aria-label={`Loading ${label.toLowerCase()}`} />
+    )
+  }
+  if (status === "error") {
+    return (
+      <Button variant="ghost" size="sm" className="h-6 text-[10px] text-warning" onClick={onRetry}>
+        <AlertCircle data-icon="inline-start" />
+        Retry {label.toLowerCase()}
+      </Button>
+    )
+  }
+  if (status === "missing") {
+    return (
+      <span className="text-[10px] text-subtle-foreground">
+        No {label.toLowerCase()} derivative
+      </span>
+    )
+  }
+  return (
+    <span className="flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-1 text-[10px] text-success">
+      <CheckCircle2 className="size-3" aria-hidden />
+      {label} ready
+    </span>
   )
 }

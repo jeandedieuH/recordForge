@@ -32,6 +32,7 @@ export function AppShell() {
   const editorRecordingId = useEditorStore((state) => state.recordingId)
   const openEditor = useEditorStore((state) => state.open)
   const closeEditor = useEditorStore((state) => state.close)
+  const editorIsDirty = useEditorStore((state) => state.isDirty)
   const loadTheme = useThemeStore((state) => state.load)
   const startRecording = useRecorderStore((state) => state.start)
   const completedRecordingId = useRecorderStore((state) => state.completedRecordingId)
@@ -42,6 +43,7 @@ export function AppShell() {
   const timelineRecording = useTimelineStore((state) => state.recording)
   const timelineCanvas = useTimelineStore((state) => state.engine?.history.present.canvas)
   const timelineExport = useTimelineStore((state) => state.export)
+  const timelineSave = useTimelineStore((state) => state.save)
   const timelineError = useTimelineStore((state) => state.error)
   const clearTimelineError = useTimelineStore((state) => state.clearError)
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
@@ -97,7 +99,11 @@ export function AppShell() {
     void startRecording()
   }
 
-  function handleCloseEditor() {
+  async function handleCloseEditor() {
+    if (editorIsDirty) {
+      await timelineSave()
+      if (useEditorStore.getState().saveStatus === "error") return
+    }
     closeEditor()
     setActiveView("library")
   }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -210,13 +210,36 @@ pub fn migrate_project(value: &mut Value) -> Result<()> {
 /// Resolve a project-relative asset path to an absolute path and update status.
 fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPolicy) -> Result<()> {
     let relative = Path::new(&asset.path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+    {
+        return Err(InternalError::Permissions(format!(
+            "asset path must stay relative to the project directory: {}",
+            asset.path
+        ))
+        .into());
+    }
+
     let absolute = project_dir.join(relative);
 
     // Containment: the resolved absolute path must be inside the project directory.
+    // Canonicalize the parent when the asset is missing so Windows extended-path
+    // prefixes cannot make a valid missing asset look like traversal.
     let canonical_project = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
-    let canonical_asset = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
+    let canonical_asset = absolute.canonicalize().unwrap_or_else(|_| {
+        absolute
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| absolute.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| absolute.clone())
+    });
 
     if !policy.is_contained(&canonical_project, &canonical_asset) {
         return Err(InternalError::Permissions(format!(
@@ -307,8 +330,8 @@ pub fn save_project(project: &ProjectFile, project_dir: &Path) -> Result<Project
     }
 
     let mut to_save = project.clone();
-    to_save.checksum = compute_checksum(&to_save)?;
     to_save.updated_at = Utc::now().to_rfc3339();
+    to_save.checksum = compute_checksum(&to_save)?;
 
     let path = project_path(project_dir);
     let temp = temp_path(project_dir);
@@ -716,6 +739,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("project");
         let (recording, metadata) = make_test_recording(&project_dir);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
 
         let project = create_project(&recording, &metadata, None, &project_dir).unwrap();
         assert!(project_path(&project_dir).exists());

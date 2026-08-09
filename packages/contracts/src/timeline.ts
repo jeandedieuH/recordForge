@@ -139,8 +139,13 @@ export const timelineViewStateSchema = z.object({
   scrollMs: z.number().default(0),
   playheadMs: z.number().default(0),
   isPlaying: z.boolean().default(false),
+  playbackRate: z.number().min(0.25).max(4).default(1),
   durationMs: z.number().default(0),
   selection: timelineSelectionSchema.nullable().default(null),
+  snapEnabled: z.boolean().default(true),
+  snapThresholdMs: z.number().int().min(1).max(5_000).default(120),
+  collapsedTrackIds: z.array(z.string()).default([]),
+  trackHeights: z.record(z.number().int().min(28).max(240)).default({}),
 })
 
 export type TimelineViewState = z.infer<typeof timelineViewStateSchema>
