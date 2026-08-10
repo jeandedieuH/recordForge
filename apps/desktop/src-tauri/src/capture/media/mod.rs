@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use tracing::{info, instrument};
 
+use super::config::RecordingProfile;
 use super::disk;
 
 /// Audio source kind used to label independent track inputs.
@@ -78,7 +79,7 @@ pub fn concatenate_segments(
         .args(["-avoid_negative_ts", "make_zero"])
         .args(["-f", "concat", "-safe", "0", "-i"])
         .arg(&list_path)
-        .args(["-c", "copy", "-movflags", "+faststart"])
+        .args(["-map", "0", "-c", "copy", "-movflags", "+faststart"])
         .arg(output_path)
         .output()
         .map_err(|e| crate::errors::InternalError::Media(format!("concat run: {e}")))?;
@@ -92,20 +93,177 @@ pub fn concatenate_segments(
     Ok(())
 }
 
-/// Mux native WASAPI WAV tracks into a video fragment as separate audio
-/// streams. The streams are intentionally not mixed so the editor can expose
-/// microphone and system-audio levels independently later.
-#[instrument(skip(ffmpeg_path, video_path, tracks, output_path))]
+/// One webcam segment with its screen-relative timing information.
+#[derive(Debug, Clone)]
+pub struct WebcamSegmentInput {
+    pub path: PathBuf,
+    pub duration: Duration,
+    /// Signed camera-minus-screen start offset in milliseconds.
+    pub offset_ms: i64,
+}
+
+/// Build one standalone webcam asset from per-segment camera captures.
+///
+/// Each segment is padded or trimmed to the matching screen segment duration
+/// before concatenation. This preserves pause/resume boundaries and prevents a
+/// camera startup delay from being collapsed away by the concat demuxer. The
+/// camera is re-encoded once, independently of the screen and audio assets, so
+/// the editor can seek, trim, mute, or replace it without touching the screen
+/// recording.
+#[instrument(skip(ffmpeg_path, segments, output_path, profile))]
+pub fn concatenate_webcam_segments(
+    ffmpeg_path: &str,
+    segments: &[WebcamSegmentInput],
+    output_path: &Path,
+    profile: &RecordingProfile,
+) -> crate::errors::Result<()> {
+    if segments.is_empty() {
+        return Err(crate::errors::InternalError::Media(
+            "no webcam segments to concatenate".into(),
+        )
+        .into());
+    }
+    for segment in segments {
+        if segment.duration.is_zero() {
+            return Err(crate::errors::InternalError::Media(
+                "webcam segment duration must be positive".into(),
+            )
+            .into());
+        }
+        if !segment.path.is_file() {
+            return Err(crate::errors::InternalError::Media(format!(
+                "webcam segment does not exist: {}",
+                segment.path.display()
+            ))
+            .into());
+        }
+    }
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            crate::errors::InternalError::Storage(format!(
+                "create webcam output directory: {error}"
+            ))
+        })?;
+    }
+
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .arg("-y")
+        .args(["-hide_banner", "-loglevel", "error"]);
+    for segment in segments {
+        command.arg("-i").arg(&segment.path);
+    }
+
+    let filter = build_webcam_stitch_filter(segments);
+    command
+        .args(["-filter_complex", &filter])
+        .args(["-map", "[webcam]", "-an"]);
+    add_profile_video_encoder(&mut command, profile);
+    let total_duration = segments
+        .iter()
+        .map(|segment| segment.duration)
+        .fold(Duration::ZERO, |total, duration| {
+            total.saturating_add(duration)
+        });
+    command
+        .args(["-t", &format!("{:.6}", total_duration.as_secs_f64())])
+        .args(["-movflags", "+faststart"])
+        .arg(output_path);
+
+    let output = command.output().map_err(|error| {
+        crate::errors::InternalError::Media(format!("webcam concat run: {error}"))
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(
+            crate::errors::InternalError::Media(format!("webcam concat failed: {stderr}")).into(),
+        );
+    }
+
+    let size = std::fs::metadata(output_path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| {
+            crate::errors::InternalError::Media(format!("webcam concat output: {error}"))
+        })?;
+    if size <= 1024 {
+        return Err(crate::errors::InternalError::Media(
+            "webcam concat produced an empty asset".into(),
+        )
+        .into());
+    }
+    disk::sync_file(output_path)?;
+    Ok(())
+}
+
+fn build_webcam_stitch_filter(segments: &[WebcamSegmentInput]) -> String {
+    let mut filters = Vec::with_capacity(segments.len() + 1);
+    for (index, segment) in segments.iter().enumerate() {
+        let duration = segment.duration.as_secs_f64();
+        let offset = segment.offset_ms as f64 / 1000.0;
+        let source = if offset >= 0.0 {
+            format!(
+                "[{}:v]tpad=start_mode=add:start_duration={offset:.6}:color=black",
+                index
+            )
+        } else {
+            format!("[{}:v]trim=start={:.6}", index, -offset)
+        };
+        filters.push(format!(
+            "{source},setpts=PTS-STARTPTS,tpad=stop_mode=add:stop_duration={duration:.6}:color=black,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
+        ));
+    }
+
+    if segments.len() == 1 {
+        filters.push("[v0]null[webcam]".into());
+    } else {
+        let inputs = (0..segments.len())
+            .map(|index| format!("[v{index}]"))
+            .collect::<String>();
+        filters.push(format!(
+            "{inputs}concat=n={}:v=1:a=0[webcam]",
+            segments.len()
+        ));
+    }
+    filters.join(";")
+}
+
+fn add_profile_video_encoder(command: &mut Command, profile: &RecordingProfile) {
+    let encoder = profile
+        .encoder_priority
+        .first()
+        .map(String::as_str)
+        .unwrap_or("libx264");
+    command.args(["-c:v", encoder, "-pix_fmt", "yuv420p", "-r"]);
+    command.arg(profile.fps.to_string());
+    if let Some(crf) = profile.crf {
+        if encoder == "libx264" || encoder == "libx265" {
+            command.args(["-preset", "ultrafast", "-crf", &crf.to_string()]);
+        } else if encoder.starts_with("h264_") || encoder.starts_with("hevc_") {
+            command.args([
+                "-b:v",
+                &format!("{}k", profile.video_bitrate_kbps.unwrap_or(5000)),
+            ]);
+        }
+    } else if let Some(kbps) = profile.video_bitrate_kbps {
+        command.args(["-b:v", &format!("{kbps}k")]);
+    }
+}
+
+/// Mux native WASAPI audio tracks into a screen fragment as separate audio
+/// streams. The webcam is deliberately not an input here: it remains an
+/// independent video asset for the editor and export pipeline.
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(ffmpeg_path, video_path, audio_tracks, output_path))]
 pub fn mux_audio_tracks(
     ffmpeg_path: &str,
     video_path: &Path,
-    tracks: &[AudioTrackInput],
+    audio_tracks: &[AudioTrackInput],
     output_path: &Path,
     audio_codec: &str,
     audio_bitrate_kbps: i32,
     duration: Duration,
 ) -> crate::errors::Result<()> {
-    if tracks.is_empty() {
+    if audio_tracks.is_empty() {
         return Err(crate::errors::InternalError::Media(
             "cannot mux an empty audio track list".into(),
         )
@@ -130,11 +288,11 @@ pub fn mux_audio_tracks(
     }
     if duration.is_zero() {
         return Err(crate::errors::InternalError::Media(
-            "audio mux duration must be positive".into(),
+            "segment mux duration must be positive".into(),
         )
         .into());
     }
-    for track in tracks {
+    for track in audio_tracks {
         if !track.path.exists() {
             return Err(crate::errors::InternalError::Media(format!(
                 "audio track does not exist: {}",
@@ -143,10 +301,9 @@ pub fn mux_audio_tracks(
             .into());
         }
     }
-
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            crate::errors::InternalError::Storage(format!("create audio mux output dir: {e}"))
+            crate::errors::InternalError::Storage(format!("create segment mux output dir: {e}"))
         })?;
     }
 
@@ -154,34 +311,42 @@ pub fn mux_audio_tracks(
     command
         .arg("-y")
         .args(["-hide_banner", "-loglevel", "error"])
+        .args(["-fflags", "+genpts"])
         .arg("-i")
         .arg(video_path);
 
-    for track in tracks {
+    for track in audio_tracks {
         command.arg("-i").arg(&track.path);
     }
 
-    command.args(["-map", "0:v:0"]);
-    for index in 0..tracks.len() {
+    command.arg("-map").arg("0:v:0");
+    for index in 0..audio_tracks.len() {
         command.args(["-map", &format!("{}:a:0", index + 1)]);
     }
+
     command.args([
         "-map_metadata",
         "0",
         "-c:v",
         "copy",
-        "-c:a",
-        audio_codec,
-        "-b:a",
-        &format!("{audio_bitrate_kbps}k"),
-        "-t",
-        &format!("{:.6}", duration.as_secs_f64()),
         "-avoid_negative_ts",
         "make_zero",
         "-movflags",
         "+faststart",
     ]);
-    for (index, track) in tracks.iter().enumerate() {
+
+    if !audio_tracks.is_empty() {
+        command.args([
+            "-c:a",
+            audio_codec,
+            "-b:a",
+            &format!("{audio_bitrate_kbps}k"),
+        ]);
+    }
+
+    command.args(["-t", &format!("{:.6}", duration.as_secs_f64())]);
+
+    for (index, track) in audio_tracks.iter().enumerate() {
         command.args([
             &format!("-metadata:s:a:{index}"),
             &format!("title={}", track.title),
@@ -190,25 +355,25 @@ pub fn mux_audio_tracks(
     command.arg(output_path);
 
     info!(
-        track_count = tracks.len(),
+        audio_track_count = audio_tracks.len(),
         "muxing native WASAPI audio tracks"
     );
     let output = command
         .output()
-        .map_err(|e| crate::errors::InternalError::Media(format!("audio mux run: {e}")))?;
+        .map_err(|e| crate::errors::InternalError::Media(format!("segment mux run: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(
-            crate::errors::InternalError::Media(format!("audio mux failed: {stderr}")).into(),
+            crate::errors::InternalError::Media(format!("segment mux failed: {stderr}")).into(),
         );
     }
 
     let size = std::fs::metadata(output_path)
         .map(|metadata| metadata.len())
-        .map_err(|e| crate::errors::InternalError::Media(format!("audio mux output: {e}")))?;
+        .map_err(|e| crate::errors::InternalError::Media(format!("segment mux output: {e}")))?;
     if size <= 1024 {
         return Err(crate::errors::InternalError::Media(
-            "audio mux produced an empty fragment".into(),
+            "segment mux produced an empty fragment".into(),
         )
         .into());
     }
@@ -251,6 +416,8 @@ pub fn trim_recording(
         .arg(source_path)
         .args(["-t", &format!("{duration_sec:.3}")])
         .args([
+            "-map",
+            "0",
             "-c",
             "copy",
             "-avoid_negative_ts",
@@ -351,5 +518,30 @@ pub fn probe_dshow_device(ffmpeg_path: &str, input_spec: &str) -> bool {
             !unopenable
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webcam_stitch_filter_preserves_each_segment_start_offset() {
+        let filter = build_webcam_stitch_filter(&[
+            WebcamSegmentInput {
+                path: PathBuf::from("webcam_000.mp4"),
+                duration: Duration::from_secs(3),
+                offset_ms: 240,
+            },
+            WebcamSegmentInput {
+                path: PathBuf::from("webcam_001.mp4"),
+                duration: Duration::from_secs(2),
+                offset_ms: -80,
+            },
+        ]);
+
+        assert!(filter.contains("tpad=start_mode=add:start_duration=0.240000"));
+        assert!(filter.contains("trim=start=0.080000"));
+        assert!(filter.contains("concat=n=2:v=1:a=0[webcam]"));
     }
 }

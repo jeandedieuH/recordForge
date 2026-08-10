@@ -142,7 +142,7 @@ function isDestructiveCommand(command: TimelineCommand): boolean {
 
 function isReusablePrepareJob(job: MediaJob): boolean {
   if (job.kind !== "prepare" || job.status !== "completed") return false
-  if (job.outputs.prepareVersion < 3 || !job.outputs.proxyPath) return false
+  if (job.outputs.prepareVersion < 4 || !job.outputs.proxyPath) return false
   return job.outputs.audioTracks.every((track) =>
     Boolean(track.audioPath && track.waveformPath && track.waveformImagePath),
   )
@@ -225,21 +225,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           activeJob.outputs.prepareVersion >= 2 &&
           activeJob.outputs.audioTracks.length > 0,
         )
-      const secondaryVideoStreams = meta.streams
-        .filter((stream) => stream.kind === "video")
-        .slice(1)
-      const hasUsableVideoDerivatives =
-        secondaryVideoStreams.length === 0 ||
-        Boolean(
-          activeJob &&
-          activeJob.outputs.prepareVersion >= 3 &&
-          secondaryVideoStreams.every(
-            (stream) =>
-              activeJob?.outputs.videoTracks.some(
-                (output) => output.streamIndex === stream.index,
-              ) ?? false,
-          ),
-        )
+      // Prepare v4 understands standalone webcam assets and retains the
+      // legacy secondary-video extraction path for older recordings.
+      const hasUsableVideoDerivatives = Boolean(
+        activeJob &&
+          activeJob.outputs.prepareVersion >= 4 &&
+          (!recording.webcamPath || activeJob.outputs.videoTracks.length > 0),
+      )
       if (
         !activeJob ||
         (activeJob.status === "completed" &&

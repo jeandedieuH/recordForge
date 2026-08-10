@@ -150,6 +150,19 @@ export const recordingFragmentSchema = z.object({
 
 export type RecordingFragment = z.infer<typeof recordingFragmentSchema>
 
+// A webcam sidecar segment aligned to its matching screen fragment.
+export const recordingWebcamFragmentSchema = z.object({
+  index: z.number().int().min(0),
+  fileName: z.string(),
+  durationMs: z.number().int().min(0),
+  // Signed camera-minus-screen start offset. Positive values become a leading
+  // gap in the standalone camera asset.
+  offsetMs: z.number().int(),
+  validated: z.boolean().default(false),
+})
+
+export type RecordingWebcamFragment = z.infer<typeof recordingWebcamFragmentSchema>
+
 // The on-disk manifest for a single recording session. It is written
 // incrementally so that recovery can reconstruct as much as possible.
 export const recordingManifestSchema = z.object({
@@ -163,8 +176,11 @@ export const recordingManifestSchema = z.object({
   profileName: z.string(),
   // Working directory where fragments and the final output live.
   workDir: z.string(),
-  // Final output path; may be absent until finalization completes.
+  // Final screen/audio output path; may be absent until finalization completes.
   outputPath: z.string().optional(),
+  // Independent camera output path. Older manifests omit this field.
+  webcamPath: z.string().optional(),
+  webcamFragments: z.array(recordingWebcamFragmentSchema).default([]),
   fragments: z.array(recordingFragmentSchema),
   markers: z.array(recordingMarkerSchema).default([]),
   // Total accumulated recorded time in milliseconds (used for pause/resume).
@@ -312,6 +328,8 @@ export const libraryRecordingSchema = z.object({
   source: captureSourceSchema,
   profileName: z.string(),
   outputPath: z.string().nullish(),
+  // Standalone, timeline-aligned webcam asset for recordings that captured a camera.
+  webcamPath: z.string().nullish(),
   workDir: z.string(),
   thumbnailPath: z.string().nullish(),
   markers: z.array(recordingMarkerSchema).default([]),

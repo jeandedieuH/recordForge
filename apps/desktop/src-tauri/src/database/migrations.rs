@@ -45,9 +45,12 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if current_version < 6 {
         migrate_v6(&tx)?;
     }
+    if current_version < 7 {
+        migrate_v7(&tx)?;
+    }
 
     tx.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '6')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '7')",
         [],
     )?;
 
@@ -284,6 +287,12 @@ fn migrate_v6(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v7: persist the standalone, timeline-aligned webcam asset next to output.mp4.
+fn migrate_v7(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute("ALTER TABLE recordings ADD COLUMN webcam_path TEXT", [])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +328,15 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
+
+        let webcam_column_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('recordings') WHERE name = 'webcam_path'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(webcam_column_count, 1);
     }
 }

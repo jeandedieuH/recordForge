@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{info, instrument};
 
+use super::config::builtin_profiles;
 use super::disk;
 
 use super::manifest::{RecorderState, RecordingManifest};
@@ -186,6 +187,10 @@ pub fn recover_session(
         .into());
     }
 
+    if let Some(webcam_path) = recover_webcam_asset(work_dir, &manifest, ffmpeg_path, ffprobe_path)?
+    {
+        manifest.set_webcam_path(webcam_path.to_string_lossy());
+    }
     manifest.set_output_path(output.to_string_lossy());
     manifest.set_state(RecorderState::Finalizing);
     manifest.write()?;
@@ -235,6 +240,63 @@ pub fn delete_recovery_session(session_id: &str, sessions_dir: &Path) -> crate::
         })?;
     }
     Ok(())
+}
+
+fn recover_webcam_asset(
+    work_dir: &Path,
+    manifest: &RecordingManifest,
+    ffmpeg_path: &str,
+    ffprobe_path: &str,
+) -> crate::errors::Result<Option<PathBuf>> {
+    let Some(existing) = manifest.webcam_path.as_ref() else {
+        if manifest.webcam_fragments.is_empty() {
+            return Ok(None);
+        }
+        let Some(profile) = builtin_profiles()
+            .into_iter()
+            .find(|profile| profile.id == manifest.profile_name)
+        else {
+            return Ok(None);
+        };
+        let mut segments = Vec::with_capacity(manifest.webcam_fragments.len());
+        for fragment in &manifest.webcam_fragments {
+            let Some(path) = safe_fragment_path(work_dir, &fragment.file_name) else {
+                return Ok(None);
+            };
+            if !path.is_file() || !validate_media_file(ffprobe_path, &path) {
+                return Ok(None);
+            }
+            segments.push(media::WebcamSegmentInput {
+                path,
+                duration: std::time::Duration::from_millis(fragment.duration_ms),
+                offset_ms: fragment.offset_ms,
+            });
+        }
+
+        let output = work_dir.join("webcam.mp4");
+        let partial = work_dir.join("webcam.partial.mp4");
+        if partial.exists() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        media::concatenate_webcam_segments(ffmpeg_path, &segments, &partial, &profile)?;
+        disk::atomic_replace(&partial, &output)?;
+        return Ok(Some(output));
+    };
+
+    let path = PathBuf::from(existing);
+    if !path.is_file() || !validate_media_file(ffprobe_path, &path) {
+        return Ok(None);
+    }
+    let canonical_root = work_dir.canonicalize().map_err(|error| {
+        crate::errors::InternalError::Storage(format!("canonicalize session: {error}"))
+    })?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        crate::errors::InternalError::Storage(format!("canonicalize webcam asset: {error}"))
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Ok(None);
+    }
+    Ok(Some(canonical_path))
 }
 
 fn recovery_segments(work_dir: &Path, manifest: &RecordingManifest) -> Vec<PathBuf> {

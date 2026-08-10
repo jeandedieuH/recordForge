@@ -1467,12 +1467,22 @@ function applyAddMaskClip(
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
-  const durationMs = command.endMs - command.startMs
+  // The UI can pass fractional milliseconds (e.g. playhead from video currentTime).
+  // Project schemas require integer time fields, so normalize before creating the clip.
+  const startMs = Math.round(command.startMs)
+  const endMs = Math.round(command.endMs)
+  if (endMs <= startMs) {
+    return {
+      ok: false,
+      error: editorError("invalid_mask", "Mask end must be greater than start"),
+    }
+  }
+  const durationMs = endMs - startMs
   const mask: MaskClip = {
-    id: command.clipId ?? `mask:${track.id}:${command.startMs}`,
+    id: command.clipId ?? `mask:${track.id}:${startMs}`,
     kind: "mask",
     assetId: command.assetId,
-    startMs: command.startMs,
+    startMs,
     durationMs,
     sourceInMs: 0,
     sourceOutMs: durationMs,

@@ -18,7 +18,8 @@ sessions/
     seg_000.mp4            # First video segment
     seg_001.mp4            # Second video segment (after pause/resume or rollover)
     webcam_000.mp4         # Webcam sidecar for segment 0 (if enabled)
-    output.mp4             # Concatenated final output (created on stop/recovery)
+    webcam.mp4             # Standalone timeline-aligned webcam asset
+    output.mp4             # Concatenated screen/audio output (created on stop/recovery)
     derivatives/           # Phase 4: proxy, thumbnails, waveform
       metadata/
       proxy/
@@ -194,7 +195,7 @@ Each session will track multiple asset types:
 | `cursor_events` | `cursor.json` | Metadata (Phase 6) |
 
 ### Current implementation
-Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg applies the microphone cleanup filter and muxes the available assets as separate AAC streams in `seg_NNN.mp4`. The temporary WAV files are removed after a successful mux and retained when muxing fails so an interrupted session remains recoverable.
+Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg applies the microphone cleanup filter and muxes the available audio assets as separate AAC streams in `seg_NNN.mp4`; the audio streams remain independently addressable during preparation. Webcam capture stays outside that mux: each `webcam_NNN.mp4` sidecar records its screen-relative startup offset, and finalization builds a separate, timeline-aligned `webcam.mp4` asset. This keeps camera editing independent from the screen/audio output and preserves pause/resume timing.
 
 ---
 
@@ -202,7 +203,7 @@ Microphone and system audio are captured by native WASAPI workers into the indep
 
 | Version | Changes |
 |---------|---------|
-| 1 (current) | Initial manifest schema; segment files plus native WASAPI audio muxing |
+| 1 (current) | Initial manifest schema; segment files, native WASAPI audio muxing, and optional standalone webcam asset |
 | 2 (planned) | Add asset registry; persist separate audio assets and periodic rollover config |
 | 3 (Phase 5) | Add project reference; derivative recipe versions |
 

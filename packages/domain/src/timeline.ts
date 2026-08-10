@@ -200,6 +200,11 @@ export function createTimelineFromRecording(
   const duration = Math.max(metadata.durationMs, recording.durationMs)
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const primaryVideo = videoStreams[0]
+  const cameraStreams = recording.webcamPath
+    ? [standaloneWebcamStream(recording, metadata, duration)].filter(
+        (stream): stream is MediaStream => Boolean(stream),
+      )
+    : videoStreams.slice(1)
   const screenClip: ScreenClip = {
     id: crypto.randomUUID(),
     kind: "screen",
@@ -226,9 +231,10 @@ export function createTimelineFromRecording(
     if (clip) tracks.push(makeTrack("audio", audioStreamName(stream, index), [clip]))
   })
 
-  // Keep a camera track only when the source actually contains a second video stream.
-  const secondaryVideo = videoStreams[1]
-  if (secondaryVideo) {
+  // Standalone webcam captures and legacy secondary-video streams use the same
+  // camera track shape; only their asset resolution differs.
+  const cameraStream = cameraStreams[0]
+  if (cameraStream) {
     const width = metadata.width ?? recording.width
     const height = metadata.height ?? recording.height
     const cameraWidth = Math.round(width * 0.25)
@@ -237,7 +243,7 @@ export function createTimelineFromRecording(
       id: crypto.randomUUID(),
       kind: "camera",
       assetId: recording.id,
-      streamIndex: secondaryVideo.index,
+      streamIndex: cameraStream.index,
       startMs: 0,
       durationMs: duration,
       sourceInMs: 0,
@@ -312,6 +318,44 @@ function sourceFileName(recording: LibraryRecording): string {
   return recording.outputPath?.split(/[\\/]/).pop() ?? "output.mp4"
 }
 
+function projectRelativeAssetPath(recording: LibraryRecording, assetPath: string): string {
+  const normalizedPath = assetPath.replace(/\\/g, "/")
+  const normalizedRoot = recording.workDir.replace(/\\/g, "/").replace(/\/+$/, "")
+  const prefix = `${normalizedRoot}/`
+  if (normalizedPath.toLowerCase().startsWith(prefix.toLowerCase())) {
+    return normalizedPath.slice(prefix.length)
+  }
+  return normalizedPath.split("/").pop() ?? normalizedPath
+}
+
+function standaloneWebcamStreamIndex(metadata: MediaMetadata): number {
+  return metadata.streams.reduce((max, stream) => Math.max(max, stream.index), -1) + 1
+}
+
+function standaloneWebcamStream(
+  recording: LibraryRecording,
+  metadata: MediaMetadata,
+  duration: number,
+): MediaStream | undefined {
+  if (!recording.webcamPath) return undefined
+  return {
+    index: standaloneWebcamStreamIndex(metadata),
+    kind: "video",
+    codec: "h264",
+    title: "Webcam",
+    startMs: 0,
+    durationMs: duration,
+    width: undefined,
+    height: undefined,
+    fps: metadata.fps,
+    bitrateKbps: undefined,
+    sampleRate: undefined,
+    channels: undefined,
+    channelLayout: undefined,
+    language: undefined,
+  }
+}
+
 // Build the durable screen asset for a newly created project.
 function createScreenAsset(recording: LibraryRecording, metadata: MediaMetadata): ProjectAsset {
   return {
@@ -331,11 +375,12 @@ function createStreamAsset(
   recording: LibraryRecording,
   stream: MediaStream,
   role: ProjectAsset["role"],
+  path = sourceFileName(recording),
 ): ProjectAsset {
   return {
     id: `${recording.id}:${role}:${stream.index}`,
     role,
-    path: sourceFileName(recording),
+    path,
     status: "available",
     durationMs: stream.durationMs ?? 0,
     width: stream.width,
@@ -366,6 +411,11 @@ export function createProjectFromRecording(
     : baseTimeline
   const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
+  const cameraStreams = recording.webcamPath
+    ? [standaloneWebcamStream(recording, metadata, Math.max(metadata.durationMs, recording.durationMs))].filter(
+        (stream): stream is MediaStream => Boolean(stream),
+      )
+    : videoStreams.slice(1)
   const streamAssets = [
     ...audioStreams.map((stream, index) => {
       const audioRole = audioStreamRole(stream, index)
@@ -377,7 +427,16 @@ export function createProjectFromRecording(
             : "music"
       return createStreamAsset(recording, stream, assetRole)
     }),
-    ...(videoStreams[1] ? [createStreamAsset(recording, videoStreams[1], "webcam")] : []),
+    ...cameraStreams.map((stream) =>
+      createStreamAsset(
+        recording,
+        stream,
+        "webcam",
+        recording.webcamPath
+          ? projectRelativeAssetPath(recording, recording.webcamPath)
+          : sourceFileName(recording),
+      ),
+    ),
   ]
   const streamAssetByIndex = new Map(streamAssets.map((asset) => [asset.streamIndex, asset]))
   for (const track of timeline.tracks) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
+import { defaultCursorSettings, timelineStateSchema, type TimelineState } from "@recordforge/domain"
 import {
   createAddMaskClipCommand,
   createEngine,
@@ -170,5 +170,32 @@ describe("Phase 7 caption and privacy editing", () => {
       expect(moved.value.history.present.tracks[1].clips[0]).toMatchObject({
         rect: { x: 120, y: 80 },
       })
+  })
+
+  it("rounds fractional mask times to integers so the timeline state stays valid", () => {
+    const result = executeCommand(
+      createEngine(makeState()),
+      createAddMaskClipCommand(
+        "recording",
+        1000.7,
+        3000.3,
+        "blur",
+        { x: 100, y: 100, width: 200, height: 150 },
+        { clipId: "mask-float" },
+      ),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    // The state must parse against the contract schema without float rejections.
+    expect(() => timelineStateSchema.parse(result.value.history.present)).not.toThrow()
+
+    const effects = result.value.history.present.tracks.find((track) => track.kind === "effects")
+    expect(effects?.clips[0]).toMatchObject({
+      id: "mask-float",
+      startMs: 1001,
+      durationMs: 1999,
+      sourceOutMs: 1999,
+    })
   })
 })

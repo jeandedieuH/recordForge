@@ -77,6 +77,18 @@ pub struct RecordingFragment {
     pub validated: bool,
 }
 
+/// A finalized webcam sidecar segment. Its offset is relative to the matching
+/// screen segment and is used to build one continuous, standalone camera asset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingWebcamFragment {
+    pub index: u32,
+    pub file_name: String,
+    pub duration_ms: u64,
+    pub offset_ms: i64,
+    pub validated: bool,
+}
+
 /// Checkpoint metadata for the immutable cursor telemetry asset. Event data
 /// remains in the asset file; the manifest only carries recovery identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +117,10 @@ pub struct RecordingManifest {
     pub profile_name: String,
     pub work_dir: String,
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub webcam_path: Option<String>,
+    #[serde(default)]
+    pub webcam_fragments: Vec<RecordingWebcamFragment>,
     pub fragments: Vec<RecordingFragment>,
     #[serde(default)]
     pub markers: Vec<RecordingMarker>,
@@ -133,6 +149,8 @@ impl RecordingManifest {
             profile_name: profile_name.into(),
             work_dir: work_dir.into(),
             output_path: None,
+            webcam_path: None,
+            webcam_fragments: Vec::new(),
             fragments: Vec::new(),
             markers: Vec::new(),
             total_recorded_ms: 0,
@@ -189,6 +207,16 @@ impl RecordingManifest {
 
     pub fn set_output_path(&mut self, path: impl Into<String>) {
         self.output_path = Some(path.into());
+        self.touch();
+    }
+
+    pub fn set_webcam_path(&mut self, path: impl Into<String>) {
+        self.webcam_path = Some(path.into());
+        self.touch();
+    }
+
+    pub fn add_webcam_fragment(&mut self, fragment: RecordingWebcamFragment) {
+        self.webcam_fragments.push(fragment);
         self.touch();
     }
 

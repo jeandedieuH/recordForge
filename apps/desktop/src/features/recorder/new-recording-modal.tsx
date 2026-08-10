@@ -14,6 +14,7 @@ import {
 } from "@recordforge/ui"
 import type { RecordingConfig } from "@recordforge/contracts"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { WebcamPreview } from "./webcam-preview"
 
 interface NewRecordingModalProps {
   open: boolean
@@ -143,8 +144,11 @@ export function NewRecordingModal({
     if (!selectedSource && sources.length > 0) {
       setSelectedSource(sources[0])
     }
-    onStart()
+    // Close the modal first, then defer the start command one tick so React
+    // can unmount the live webcam preview and release the camera before Rust
+    // tries to open the same DirectShow device.
     onClose()
+    setTimeout(() => onStart(), 0)
   }
 
   const selectedDisplayResolution = selectedSource?.bounds
@@ -465,10 +469,15 @@ export function NewRecordingModal({
                     </Select>
 
                     <div className="relative flex h-24 w-full items-center justify-center overflow-hidden rounded-md border border-border bg-background">
-                      <div className="absolute bottom-2 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white font-medium truncate max-w-[80%]">
+                      <div className="absolute bottom-2 right-2 z-10 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white font-medium truncate max-w-[80%]">
                         {webcams.find((w) => w.id === selectedWebcamId)?.name || "Camera Active"}
                       </div>
-                      <Video className="size-8 text-subtle-foreground" />
+                      <WebcamPreview
+                        deviceName={
+                          webcams.find((w) => w.id === selectedWebcamId)?.name ||
+                          selectedWebcamId
+                        }
+                      />
                     </div>
                   </div>
                 ) : null}

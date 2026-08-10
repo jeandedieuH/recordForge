@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { LibraryRecording, MediaMetadata } from "@recordforge/contracts"
-import { createTimelineFromRecording } from "./timeline"
+import { createProjectFromRecording, createTimelineFromRecording } from "./timeline"
 
 function makeRecording(): LibraryRecording {
   return {
@@ -24,6 +24,7 @@ function makeRecording(): LibraryRecording {
     },
     profileName: "smooth-demo",
     outputPath: "C:/recordforge/session-1/output.mp4",
+    webcamPath: null,
     workDir: "C:/recordforge/session-1",
     thumbnailPath: null,
     markers: [],
@@ -117,5 +118,42 @@ describe("domain", () => {
       startMs: 0,
       durationMs: 60_000,
     })
+  })
+
+  it("creates a camera track backed by the standalone webcam asset", () => {
+    const recording = {
+      ...makeRecording(),
+      webcamPath: "C:/recordforge/session-1/webcam.mp4",
+    }
+    const metadata: MediaMetadata = {
+      recordingId: recording.id,
+      path: recording.outputPath ?? "",
+      durationMs: 60_000,
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      hasAudio: false,
+      streams: [{ index: 0, kind: "video", codec: "h264" }],
+      format: { name: "mov,mp4,m4a,3gp,3g2,mj2" },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+
+    const timeline = createTimelineFromRecording(recording, metadata)
+    expect(timeline.tracks.map((track) => track.kind)).toEqual(["screen", "camera"])
+    expect(timeline.tracks[1].clips[0]).toMatchObject({
+      kind: "camera",
+      streamIndex: 1,
+      durationMs: 60_000,
+    })
+
+    const project = createProjectFromRecording(recording, metadata)
+    expect(project.assets).toContainEqual(
+      expect.objectContaining({
+        role: "webcam",
+        path: "webcam.mp4",
+        streamIndex: 1,
+      }),
+    )
+    expect(project.tracks[1].clips[0].assetId).toContain(":webcam:1")
   })
 })

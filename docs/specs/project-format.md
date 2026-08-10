@@ -64,7 +64,7 @@ sessions/{session_id}/
     {
       "id": "asset-uuid-webcam",
       "role": "webcam",
-      "path": "webcam_000.mp4",
+      "path": "webcam.mp4",
       "status": "available",
       "durationMs": 180000,
       "width": 1280,

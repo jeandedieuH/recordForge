@@ -65,6 +65,7 @@ pub struct LibraryRecording {
     pub source: CaptureSource,
     pub profile_name: String,
     pub output_path: Option<String>,
+    pub webcam_path: Option<String>,
     pub work_dir: String,
     pub thumbnail_path: Option<String>,
     pub markers: Vec<RecordingMarker>,
@@ -143,9 +144,9 @@ fn insert_recording_with_status(
         "INSERT INTO recordings (
             id, session_id, name, created_at, updated_at, duration_ms, size_bytes,
             width, height, fps, status, tags, source, profile_name, output_path,
-            work_dir, thumbnail_path, markers
+            webcam_path, work_dir, thumbnail_path, markers
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
         )",
         params![
             id,
@@ -163,6 +164,7 @@ fn insert_recording_with_status(
             source_json,
             manifest.profile_name.clone(),
             output_path,
+            manifest.webcam_path.clone(),
             manifest.work_dir.clone(),
             None::<String>,
             markers_json,
@@ -189,6 +191,7 @@ fn insert_recording_with_status(
         source: manifest.source.clone(),
         profile_name: manifest.profile_name.clone(),
         output_path: manifest.output_path.clone(),
+        webcam_path: manifest.webcam_path.clone(),
         work_dir: manifest.work_dir.clone(),
         thumbnail_path: None,
         markers: manifest.markers.clone(),
@@ -196,10 +199,12 @@ fn insert_recording_with_status(
 }
 
 /// Insert a new library record for a trimmed recording.
+#[allow(clippy::too_many_arguments)]
 pub fn insert_trimmed_recording(
     conn: &Connection,
     original: &LibraryRecording,
     output_path: &Path,
+    webcam_path: Option<&Path>,
     size_bytes: u64,
     duration_ms: u64,
     start_ms: u64,
@@ -228,9 +233,9 @@ pub fn insert_trimmed_recording(
         "INSERT INTO recordings (
             id, session_id, name, created_at, updated_at, duration_ms, size_bytes,
             width, height, fps, status, tags, source, profile_name, output_path,
-            work_dir, thumbnail_path, markers
+            webcam_path, work_dir, thumbnail_path, markers
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
         )",
         params![
             id,
@@ -248,6 +253,7 @@ pub fn insert_trimmed_recording(
             source_json,
             original.profile_name.clone(),
             output,
+            webcam_path.map(|path| path.to_string_lossy().to_string()),
             original.work_dir.clone(),
             original.thumbnail_path.clone(),
             markers_json,
@@ -271,6 +277,7 @@ pub fn insert_trimmed_recording(
         source: original.source.clone(),
         profile_name: original.profile_name.clone(),
         output_path: Some(output_path.to_string_lossy().to_string()),
+        webcam_path: webcam_path.map(|path| path.to_string_lossy().to_string()),
         work_dir: original.work_dir.clone(),
         thumbnail_path: original.thumbnail_path.clone(),
         markers,
@@ -466,6 +473,7 @@ fn row_to_recording(row: &Row<'_>) -> std::result::Result<LibraryRecording, rusq
         source,
         profile_name: row.get("profile_name")?,
         output_path: row.get("output_path")?,
+        webcam_path: row.get("webcam_path")?,
         work_dir: row.get("work_dir")?,
         thumbnail_path: row.get("thumbnail_path")?,
         markers,

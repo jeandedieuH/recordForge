@@ -9,6 +9,7 @@ use super::disk;
 use super::ffmpeg::FfmpegCapture;
 use super::manifest::{
     CursorTelemetryAsset, RecorderState, RecordingManifest, RecordingMarker, RecordingStats,
+    RecordingWebcamFragment,
 };
 use super::media;
 
@@ -36,6 +37,9 @@ struct ActiveSession {
     screen_capture: Option<FfmpegCapture>,
     audio_captures: Vec<ActiveAudioCapture>,
     webcam_capture: Option<FfmpegCapture>,
+    webcam_segments: Vec<media::WebcamSegmentInput>,
+    webcam_segments_started: usize,
+    webcam_capture_failed: bool,
     cursor_tracker: Option<super::cursor::CursorTracker>,
     segment_index: u32,
     total_recorded_ms: u64,
@@ -73,6 +77,16 @@ fn cursor_asset_metadata(session_id: &str, bounds: super::source::Bounds) -> Cur
             unit: "ms".into(),
             ticks_per_second: 1_000,
         },
+    }
+}
+
+/// Signed difference between two capture start instants, rounded to milliseconds.
+/// Positive when `a` is later than `b` (so the camera needs a leading gap).
+fn signed_start_offset_ms(a: std::time::Instant, b: std::time::Instant) -> i64 {
+    if a >= b {
+        a.duration_since(b).as_millis().min(i64::MAX as u128) as i64
+    } else {
+        -(b.duration_since(a).as_millis().min(i64::MAX as u128) as i64)
     }
 }
 
@@ -182,6 +196,9 @@ impl Recorder {
             screen_capture: None,
             audio_captures: Vec::new(),
             webcam_capture: None,
+            webcam_segments: Vec::new(),
+            webcam_segments_started: 0,
+            webcam_capture_failed: false,
             cursor_tracker: None,
             segment_index: 0,
             total_recorded_ms: 0,
@@ -240,6 +257,9 @@ impl Recorder {
 
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
+        if captures.webcam.is_some() {
+            session.webcam_segments_started += 1;
+        }
         session.webcam_capture = captures.webcam;
         let bounds = session.config.source.bounds;
         session.cursor_tracker = Some(super::cursor::CursorTracker::start(
@@ -363,30 +383,24 @@ impl Recorder {
         }
 
         let webcam = if config.capture_webcam {
-            if let Some(device) = &config.webcam_device_id {
-                if !super::webcam::validate_webcam_device(&ffmpeg, device)?.available {
-                    tracing::warn!(device = %device, "webcam unavailable; continuing without webcam");
-                    None
-                } else {
-                    let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
-                    match FfmpegCapture::start_webcam(
-                        &ffmpeg,
-                        device,
-                        profile,
-                        &webcam_output.to_string_lossy(),
-                        None,
-                    ) {
-                        Ok(capture) => Some(capture),
-                        Err(error) => {
-                            tracing::warn!(error = ?error, "webcam failed to start; continuing without webcam");
-                            None
-                        }
-                    }
-                }
-            } else {
-                info!("capture_webcam enabled but no device specified; skipping webcam");
-                None
+            let device = config.webcam_device_id.as_ref().ok_or_else(|| {
+                crate::errors::InternalError::Capture("webcam device is missing".into())
+            })?;
+            if !super::webcam::validate_webcam_device(&ffmpeg, device)?.available {
+                return Err(crate::errors::InternalError::Capture(
+                    "selected webcam is no longer available".into(),
+                )
+                .into());
             }
+
+            let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
+            Some(FfmpegCapture::start_webcam(
+                &ffmpeg,
+                device,
+                profile,
+                &webcam_output.to_string_lossy(),
+                None,
+            )?)
         } else {
             None
         };
@@ -411,7 +425,6 @@ impl Recorder {
 
         let screen_path = screen.output_path().to_path_buf();
         let mut tracks = Vec::new();
-
         for mut audio_capture in audio_captures.drain(..) {
             let path = audio_capture.session.output_path().to_path_buf();
             if let Err(error) = audio_capture.session.stop() {
@@ -477,8 +490,9 @@ impl Recorder {
 
         match disk::atomic_replace(&muxed_path, &screen_path) {
             Ok(()) => {
-                // The AAC mux is the durable recording asset. Keep raw WAV files
-                // only when muxing fails so an interrupted session remains recoverable.
+                // The screen fragment is durable after its independent audio
+                // streams are added. Webcam sidecars are intentionally left
+                // untouched and finalized as a separate asset later.
                 for track in &tracks {
                     if let Err(error) = std::fs::remove_file(&track.path) {
                         tracing::warn!(
@@ -490,9 +504,96 @@ impl Recorder {
                 }
             }
             Err(error) => {
-                tracing::warn!(error = ?error, "failed to publish native WASAPI audio fragment");
+                tracing::warn!(error = ?error, "failed to publish audio-muxed screen fragment");
             }
         }
+    }
+
+    fn stop_webcam_segment(
+        &self,
+        session: &mut ActiveSession,
+        screen: &FfmpegCapture,
+        duration: Duration,
+    ) {
+        let Some(mut webcam) = session.webcam_capture.take() else {
+            return;
+        };
+        let path = webcam.output_path().to_path_buf();
+        let offset_ms = signed_start_offset_ms(webcam.started_at(), screen.started_at());
+        let index = session.segment_index;
+        if let Err(error) = webcam.stop() {
+            session.webcam_capture_failed = true;
+            error!(%error, "failed to stop webcam sidecar");
+            return;
+        }
+
+        let Some(file_name) = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+        else {
+            session.webcam_capture_failed = true;
+            error!("webcam sidecar path has no file name");
+            return;
+        };
+        session.webcam_segments.push(media::WebcamSegmentInput {
+            path: path.clone(),
+            duration,
+            offset_ms,
+        });
+
+        if let Ok(mut manifest) = session.manifest.lock() {
+            manifest.add_webcam_fragment(RecordingWebcamFragment {
+                index,
+                file_name,
+                duration_ms: duration.as_millis().min(u64::MAX as u128) as u64,
+                offset_ms,
+                validated: true,
+            });
+            if let Err(write_error) = manifest.write() {
+                tracing::warn!(error = ?write_error, "failed to persist webcam fragment metadata");
+            }
+        } else {
+            session.webcam_capture_failed = true;
+            error!("webcam manifest mutex poisoned");
+        }
+    }
+
+    fn finalize_webcam_asset(&self, session: &ActiveSession) -> Option<PathBuf> {
+        if !session.config.capture_webcam
+            || session.webcam_capture_failed
+            || session.webcam_segments.is_empty()
+            || session.webcam_segments.len() != session.webcam_segments_started
+        {
+            if session.config.capture_webcam {
+                tracing::warn!(
+                    expected = session.webcam_segments_started,
+                    finalized = session.webcam_segments.len(),
+                    failed = session.webcam_capture_failed,
+                    "standalone webcam asset was not published"
+                );
+            }
+            return None;
+        }
+
+        let output = session.work_dir.join("webcam.mp4");
+        let partial = session.work_dir.join("webcam.partial.mp4");
+        if partial.exists() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        if let Err(error) = media::concatenate_webcam_segments(
+            &self.ffmpeg_path.to_string_lossy(),
+            &session.webcam_segments,
+            &partial,
+            &session.profile,
+        ) {
+            tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
+            return None;
+        }
+        if let Err(error) = disk::atomic_replace(&partial, &output) {
+            tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
+            return None;
+        }
+        Some(output)
     }
 
     fn stop_audio_captures(&self, audio_captures: &mut Vec<ActiveAudioCapture>) {
@@ -519,6 +620,12 @@ impl Recorder {
             Ok(stats) => stats,
             Err(error) => {
                 self.stop_audio_captures(&mut session.audio_captures);
+                if let Some(mut webcam) = session.webcam_capture.take() {
+                    session.webcam_capture_failed = true;
+                    if let Err(error) = webcam.stop() {
+                        tracing::warn!(error = %error, "failed to stop webcam sidecar during pause error");
+                    }
+                }
                 if let Some(mut tracker) = session.cursor_tracker.take() {
                     tracker.stop();
                 }
@@ -532,18 +639,14 @@ impl Recorder {
             }
         };
 
+        let duration = Duration::from_millis(stats.duration_ms);
+        self.stop_webcam_segment(session, &screen, duration);
         self.finalize_audio_tracks(
             &screen,
             &mut session.audio_captures,
             &session.profile,
-            Duration::from_millis(stats.duration_ms),
+            duration,
         );
-
-        if let Some(mut webcam) = session.webcam_capture.take() {
-            if let Err(error) = webcam.stop() {
-                error!(%error, "failed to stop webcam sidecar during pause");
-            }
-        }
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
@@ -605,6 +708,9 @@ impl Recorder {
         session.segment_index = next_index;
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
+        if captures.webcam.is_some() {
+            session.webcam_segments_started += 1;
+        }
         session.webcam_capture = captures.webcam;
         let bounds = session.config.source.bounds;
         session.cursor_tracker = Some(super::cursor::CursorTracker::start(
@@ -643,6 +749,12 @@ impl Recorder {
                 Ok(stats) => stats,
                 Err(error) => {
                     self.stop_audio_captures(&mut session.audio_captures);
+                    if let Some(mut webcam) = session.webcam_capture.take() {
+                        session.webcam_capture_failed = true;
+                        if let Err(error) = webcam.stop() {
+                            tracing::warn!(error = %error, "failed to stop webcam sidecar during stop error");
+                        }
+                    }
                     if let Ok(mut manifest) = session.manifest.lock() {
                         manifest.set_state(RecorderState::Failed);
                         if let Err(write_error) = manifest.write() {
@@ -652,34 +764,40 @@ impl Recorder {
                     return Err(error);
                 }
             };
+            let duration = Duration::from_millis(stats.duration_ms);
+            self.stop_webcam_segment(session, &screen, duration);
             self.finalize_audio_tracks(
                 &screen,
                 &mut session.audio_captures,
                 &session.profile,
-                Duration::from_millis(stats.duration_ms),
+                duration,
             );
             stats
         } else {
             self.stop_audio_captures(&mut session.audio_captures);
+            if let Some(mut webcam) = session.webcam_capture.take() {
+                session.webcam_capture_failed = true;
+                if let Err(error) = webcam.stop() {
+                    tracing::warn!(error = %error, "failed to stop webcam sidecar during stop cleanup");
+                }
+            }
             RecordingStats::default()
         };
-
-        if let Some(mut webcam) = session.webcam_capture.take() {
-            if let Err(error) = webcam.stop() {
-                error!(%error, "failed to stop webcam sidecar during stop");
-            }
-        }
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
         }
 
         let total = session.total_recorded_ms + final_stats.duration_ms;
+        let webcam_output = self.finalize_webcam_asset(session);
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             manifest.set_total_recorded_ms(total);
+            if let Some(path) = webcam_output.as_ref() {
+                manifest.set_webcam_path(path.to_string_lossy());
+            }
             manifest.set_state(RecorderState::Finalizing);
             manifest.write()?;
         }

@@ -944,6 +944,7 @@ mod tests {
             },
             profile_name: "balanced".to_string(),
             output_path: Some(work_dir.join("output.mp4").to_string_lossy().to_string()),
+            webcam_path: None,
             work_dir: work_dir.to_string_lossy().to_string(),
             thumbnail_path: None,
             markers: vec![],

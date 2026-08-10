@@ -38,7 +38,7 @@ Migrations run as individual `conn.execute()` calls without a transaction. If a 
 | Test | Input | Expected |
 |------|-------|----------|
 | `test_fresh_db_creates_all_tables` | New empty database | All tables exist: `app_meta`, `recordings`, `projects`, `upload_jobs`, `media_jobs`, `media_metadata`, `derivatives`, `settings` |
-| `test_fresh_db_sets_version` | New empty database | `app_meta.schema_version = 6` (export options/attempts persisted) |
+| `test_fresh_db_sets_version` | New empty database | `app_meta.schema_version = 7` (export options/attempts and standalone webcam paths persisted) |
 | `test_fresh_db_wal_mode` | New empty database | `PRAGMA journal_mode` returns "wal" |
 | `test_fresh_db_foreign_keys` | New empty database | `PRAGMA foreign_keys` returns 1 |
 
@@ -46,7 +46,7 @@ Migrations run as individual `conn.execute()` calls without a transaction. If a 
 
 | Test | From | To | Expected |
 |------|------|----|----------|
-| `test_migrate_v0_to_v6` | Empty DB (version 0) | 6 | All tables created, media job options/attempts available, version = 6 |
+| `test_migrate_v0_to_v7` | Empty DB (version 0) | 7 | All tables created, media job options/attempts and `recordings.webcam_path` available, version = 7 |
 | `test_migrate_v2_to_v4` | Version 2 | 4 | v3 + v4 migrations applied |
 | `test_migrate_v3_to_v4` | Version 3 | 4 | v4 migration applied |
 | `test_migrate_v4_noop` | Version 4 | 4 | No changes |

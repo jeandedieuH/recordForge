@@ -107,6 +107,7 @@ fn test_p0_8_delete_recording_non_atomic() {
             source TEXT NOT NULL,
             profile_name TEXT NOT NULL,
             output_path TEXT,
+            webcam_path TEXT,
             work_dir TEXT NOT NULL,
             thumbnail_path TEXT,
             markers TEXT NOT NULL DEFAULT '[]'

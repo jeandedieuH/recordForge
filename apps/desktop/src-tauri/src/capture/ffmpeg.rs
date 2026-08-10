@@ -278,11 +278,25 @@ fn build_webcam_command(
         "dshow",
         "-thread_queue_size",
         "512",
+        "-rtbufsize",
+        "100M",
+        // DirectShow device timestamps are not guaranteed to share the same
+        // clock as WASAPI or the screen capture. Wall-clock timestamps keep the
+        // webcam on the same timeline as the other capture sources.
+        "-use_video_device_timestamps",
+        "0",
+        "-fflags",
+        "+genpts",
         "-i",
         &format!("video=\"{}\"", device),
     ]);
 
-    let filter = format!("[0:v]scale={}:{}[vout]", profile.width, profile.height);
+    // Keep the webcam's aspect ratio and fit it inside the profile bounds. Using
+    // `force_divisible_by=2` avoids odd dimensions that libx264/yuv420p reject.
+    let filter = format!(
+        "[0:v]scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2[vout]",
+        profile.width, profile.height
+    );
     command
         .args(["-filter_complex", &filter])
         .args(["-map", "[vout]"]);
@@ -398,6 +412,10 @@ fn run(
 ) -> crate::errors::Result<FfmpegCapture> {
     info!(?command, "starting ffmpeg capture");
 
+    // The timeline origin must be captured before FFmpeg startup probing. The
+    // old implementation recorded it only after the 400 ms startup window,
+    // which made the screen and webcam appear to start at different moments.
+    let start_time = Instant::now();
     let mut child = command.spawn().map_err(|e| {
         crate::errors::InternalError::Capture(format!("failed to start ffmpeg: {e}"))
     })?;
@@ -530,7 +548,7 @@ fn run(
         manifest,
         output_path: PathBuf::from(output),
         fragment_index,
-        start_time: Instant::now(),
+        start_time,
     })
 }
 
@@ -612,5 +630,31 @@ fn extract_final_stats(
             exit_code,
             ..RecordingStats::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webcam_capture_uses_wall_clock_device_timestamps() {
+        let profile = RecordingProfile {
+            id: "test".into(),
+            label: "Test".into(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            video_bitrate_kbps: None,
+            crf: Some(23),
+            encoder_priority: vec!["libx264".into()],
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        };
+        let command = build_webcam_command("ffmpeg", "USB Camera", &profile, "webcam.mp4");
+        let debug = format!("{command:?}");
+
+        assert!(debug.contains("-use_video_device_timestamps"));
+        assert!(debug.contains("\"0\""));
     }
 }

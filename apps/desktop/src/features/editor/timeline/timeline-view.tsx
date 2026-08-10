@@ -942,8 +942,10 @@ export function TimelineView({
       ?.assetId
     if (!screenAssetId) return
     const selectedRange = view.selection?.kind === "range" ? view.selection : null
-    const startMs = selectedRange?.startMs ?? view.playheadMs
-    const endMs = selectedRange?.endMs ?? Math.min(view.durationMs, startMs + 2_000)
+    // playheadMs and selection bounds can be fractional (video currentTime / mouse input).
+    // The project schema requires integer millisecond fields, so round before creating the clip.
+    const startMs = Math.round(selectedRange?.startMs ?? view.playheadMs)
+    const endMs = Math.round(selectedRange?.endMs ?? Math.min(view.durationMs, startMs + 2_000))
     if (endMs <= startMs) return
     execute(
       createAddMaskClipCommand(screenAssetId, startMs, endMs, mode, {

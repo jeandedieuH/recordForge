@@ -730,11 +730,29 @@ pub fn trim_recording(
         options.end_ms,
     )?;
 
+    let trimmed_webcam_path = if let Some(webcam_path) = original.webcam_path.as_deref() {
+        state
+            .path_policy
+            .validate_recording_path(Path::new(webcam_path))?;
+        let path = work_dir.join(format!("trim_{short}_webcam.mp4"));
+        capture::media::trim_recording(
+            &state.ffmpeg_path.to_string_lossy(),
+            Path::new(webcam_path),
+            &path,
+            options.start_ms,
+            options.end_ms,
+        )?;
+        Some(path)
+    } else {
+        None
+    };
+
     let duration_ms = options.end_ms - options.start_ms;
     insert_trimmed_recording(
         &db,
         &original,
         &trimmed_path,
+        trimmed_webcam_path.as_deref(),
         trimmed_size,
         duration_ms,
         options.start_ms,

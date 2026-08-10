@@ -23,7 +23,17 @@ use crate::media::video::extract_video_track;
 use crate::media::waveform::generate_waveform_for_stream;
 use crate::path_policy::PathPolicy;
 
-const PREPARE_OUTPUT_VERSION: u32 = 3;
+const PREPARE_OUTPUT_VERSION: u32 = 4;
+
+fn standalone_video_stream_index(metadata: &media_db::MediaMetadata) -> i32 {
+    metadata
+        .streams
+        .iter()
+        .map(|stream| stream.index)
+        .max()
+        .unwrap_or(-1)
+        .saturating_add(1)
+}
 
 /// Options for a prepare job.
 #[derive(Debug, Clone)]
@@ -693,45 +703,72 @@ impl Worker {
             return self.finish_cancelled();
         }
 
-        // Stage: extract secondary video streams so the browser preview can
-        // render camera clips without pretending the primary screen stream is a webcam.
-        let secondary_video_streams = metadata
-            .streams
-            .iter()
-            .filter(|stream| stream.kind == "video")
-            .skip(1)
-            .collect::<Vec<_>>();
-        if !secondary_video_streams.is_empty() {
-            self.set_progress(0.46, "camera tracks")?;
-            let video_dir = derivative_dir(&work_dir, "video");
-            for stream in secondary_video_streams {
-                if cancel.load(Ordering::Relaxed) {
-                    return self.finish_cancelled();
-                }
-                let title = stream
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| format!("Camera {}", stream.index));
-                let video_path = video_dir.join(format!("stream_{:03}.mp4", stream.index));
-                if self.options.force || !video_path.is_file() {
-                    if let Err(error) = extract_video_track(
-                        &self.ffmpeg_path.to_string_lossy(),
-                        &input_path,
-                        stream.index,
-                        &video_path,
-                        cancel.clone(),
-                    ) {
-                        return self.fail(&format!("video track {}: {error}", stream.index));
+        // Prefer the recorder's standalone webcam asset. The legacy branch
+        // below keeps older recordings with a secondary video stream editable.
+        let standalone_webcam_path = work_dir.join("webcam.mp4");
+        if standalone_webcam_path.is_file() {
+            self.set_progress(0.46, "camera track")?;
+            if cancel.load(Ordering::Relaxed) {
+                return self.finish_cancelled();
+            }
+            let webcam_metadata = probe_media(
+                &self.ffprobe_path.to_string_lossy(),
+                &standalone_webcam_path,
+                &self.options.recording_id,
+            )?;
+            let stream = webcam_metadata
+                .streams
+                .iter()
+                .find(|stream| stream.kind == "video")
+                .ok_or_else(|| {
+                    InternalError::Media("standalone webcam has no video stream".into())
+                })?;
+            outputs.video_tracks.push(MediaVideoTrackOutput {
+                stream_index: standalone_video_stream_index(&metadata),
+                title: "Webcam".into(),
+                video_path: standalone_webcam_path.to_string_lossy().to_string(),
+                width: stream.width,
+                height: stream.height,
+            });
+        } else {
+            let secondary_video_streams = metadata
+                .streams
+                .iter()
+                .filter(|stream| stream.kind == "video")
+                .skip(1)
+                .collect::<Vec<_>>();
+            if !secondary_video_streams.is_empty() {
+                self.set_progress(0.46, "camera tracks")?;
+                let video_dir = derivative_dir(&work_dir, "video");
+                for stream in secondary_video_streams {
+                    if cancel.load(Ordering::Relaxed) {
+                        return self.finish_cancelled();
                     }
+                    let title = stream
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("Camera {}", stream.index));
+                    let video_path = video_dir.join(format!("stream_{:03}.mp4", stream.index));
+                    if self.options.force || !video_path.is_file() {
+                        if let Err(error) = extract_video_track(
+                            &self.ffmpeg_path.to_string_lossy(),
+                            &input_path,
+                            stream.index,
+                            &video_path,
+                            cancel.clone(),
+                        ) {
+                            return self.fail(&format!("video track {}: {error}", stream.index));
+                        }
+                    }
+                    self.record_derivative(&video_path.to_string_lossy(), "video")?;
+                    outputs.video_tracks.push(MediaVideoTrackOutput {
+                        stream_index: stream.index,
+                        title,
+                        video_path: video_path.to_string_lossy().to_string(),
+                        width: stream.width,
+                        height: stream.height,
+                    });
                 }
-                self.record_derivative(&video_path.to_string_lossy(), "video")?;
-                outputs.video_tracks.push(MediaVideoTrackOutput {
-                    stream_index: stream.index,
-                    title,
-                    video_path: video_path.to_string_lossy().to_string(),
-                    width: stream.width,
-                    height: stream.height,
-                });
             }
         }
 
