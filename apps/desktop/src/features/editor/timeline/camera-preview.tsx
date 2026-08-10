@@ -10,7 +10,11 @@ interface CameraPreviewProps {
   playbackRate: number
   canvasWidth: number
   canvasHeight: number
-  onUpdateTransform?: (clipId: string, transform: ClipTransform) => void
+  onUpdateTransform?: (
+    clipId: string,
+    transform: ClipTransform,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
 }
 
 interface CameraGesture {
@@ -19,6 +23,7 @@ interface CameraGesture {
   startX: number
   startY: number
   transform: ClipTransform
+  moved: boolean
 }
 
 function isClipActive(clip: CameraClip, playheadMs: number): boolean {
@@ -71,6 +76,7 @@ export function CameraPreview({
       startX: event.clientX,
       startY: event.clientY,
       transform: clip.transform,
+      moved: false,
     }
   }
 
@@ -78,27 +84,52 @@ export function CameraPreview({
     const gesture = gestureRef.current
     if (!gesture || gesture.pointerId !== event.pointerId || !onUpdateTransform) return
     const canvasElement = event.currentTarget.parentElement
+    const dx =
+      ((event.clientX - gesture.startX) / Math.max(1, canvasElement?.clientWidth ?? 1)) *
+      canvasWidth
+    const dy =
+      ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
+      canvasHeight
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && !gesture.moved) return
+    gesture.moved = true
+    event.preventDefault()
     const next = {
       ...gesture.transform,
-      x:
-        gesture.transform.x +
-        ((event.clientX - gesture.startX) / Math.max(1, canvasElement?.clientWidth ?? 1)) *
-          canvasWidth,
-      y:
-        gesture.transform.y +
-        ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
-          canvasHeight,
+      x: gesture.transform.x + dx,
+      y: gesture.transform.y + dy,
     }
-    onUpdateTransform(gesture.clipId, next)
+    onUpdateTransform(gesture.clipId, next, { phase: "draft" })
   }
 
   function finishDrag(event: React.PointerEvent<HTMLDivElement>) {
     const gesture = gestureRef.current
     if (!gesture || gesture.pointerId !== event.pointerId) return
+    const wasCancelled = event.type === "pointercancel"
+    const didMove = gesture.moved
     gestureRef.current = null
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    if (!onUpdateTransform) return
+
+    if (wasCancelled || !didMove) {
+      onUpdateTransform(gesture.clipId, gesture.transform, { phase: "cancel" })
+      return
+    }
+
+    const canvasElement = event.currentTarget.parentElement
+    const dx =
+      ((event.clientX - gesture.startX) / Math.max(1, canvasElement?.clientWidth ?? 1)) *
+      canvasWidth
+    const dy =
+      ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
+      canvasHeight
+    const next = {
+      ...gesture.transform,
+      x: gesture.transform.x + dx,
+      y: gesture.transform.y + dy,
+    }
+    onUpdateTransform(gesture.clipId, next, { phase: "commit" })
   }
 
   return (
@@ -144,7 +175,7 @@ export function CameraPreview({
               pointerEvents: onUpdateTransform && isActive ? "auto" : "none",
             }}
             onKeyDown={(event) => {
-              if (!onUpdateTransform) return
+              if (!onUpdateTransform || gestureRef.current) return
               const step = event.shiftKey ? 10 : 1
               const delta =
                 event.key === "ArrowLeft"
@@ -158,11 +189,15 @@ export function CameraPreview({
                         : null
               if (!delta) return
               event.preventDefault()
-              onUpdateTransform(clip.id, {
-                ...transform,
-                x: transform.x + delta.x,
-                y: transform.y + delta.y,
-              })
+              onUpdateTransform(
+                clip.id,
+                {
+                  ...transform,
+                  x: transform.x + delta.x,
+                  y: transform.y + delta.y,
+                },
+                { phase: "commit" },
+              )
             }}
             onPointerDown={(event) => beginDrag(event, clip)}
             onPointerMove={moveDrag}

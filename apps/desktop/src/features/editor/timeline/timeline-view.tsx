@@ -29,8 +29,6 @@ import {
   createSplitCursorRangeCommand,
   createTrimClipCommand,
   createUpdateTrackCommand,
-  createUpdateClipTransformCommand,
-  createUpdateMaskClipCommand,
   findClip,
   findManualZoomAtTime,
   findNextTimelineClip,
@@ -216,7 +214,7 @@ export function TimelineView({
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
 
   // Phase 2: pointer/keyboard editing gestures use draft/commit/cancel semantics.
-  const { moveClip, trimClip } = useTimelineInteraction()
+  const interaction = useTimelineInteraction()
 
   // Phase 1: project loading is owned by EditorSession, not by the timeline view.
   // The view uses the already-loaded session state.
@@ -908,10 +906,6 @@ export function TimelineView({
     setSelection({ kind: "clip", primaryClipId: mask.id, clipIds: [mask.id], trackId: track.id })
   }
 
-  function updateMaskRect(clipId: string, rect: MaskClip["rect"]) {
-    execute(createUpdateMaskClipCommand(clipId, { rect }), { coalesceWindowMs: 60_000 })
-  }
-
   function adjustZoom(delta: number) {
     setZoom(Math.max(10, Math.min(200, view.zoom + delta)))
   }
@@ -1091,8 +1085,8 @@ export function TimelineView({
                   playbackRate={view.playbackRate}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
-                  onUpdateTransform={(clipId, transform) =>
-                    execute(createUpdateClipTransformCommand(clipId, transform))
+                  onUpdateTransform={(clipId, transform, options) =>
+                    interaction.updateClipTransform(clipId, transform, options)
                   }
                 />
               ) : null}
@@ -1104,7 +1098,9 @@ export function TimelineView({
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
                   onSelectMask={selectMask}
-                  onUpdateMask={updateMaskRect}
+                  onUpdateMask={(clipId, rect, options) =>
+                    interaction.updateMaskRect(clipId, rect, options)
+                  }
                 />
               ) : null}
 
@@ -1342,8 +1338,8 @@ export function TimelineView({
           onSetScroll={setScroll}
           onSelectClip={selectClip}
           onSelectRange={selectRange}
-          onMoveClip={moveClip}
-          onTrimClip={trimClip}
+          onMoveClip={interaction.moveClip}
+          onTrimClip={interaction.trimClip}
           onSelectMarker={selectMarker}
           onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
           onDeleteSelection={deleteSelected}

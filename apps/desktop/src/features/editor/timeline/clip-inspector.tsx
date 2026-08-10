@@ -21,9 +21,7 @@ import {
   createUpdateZoomSegmentCommand,
   createUpdateMarkerCommand,
   createTrimClipCommand,
-  createUpdateCaptionClipCommand,
   createUpdateClipAudioCommand,
-  createUpdateClipTransformCommand,
   createUpdateMaskClipCommand,
   createUpdateCanvasCommand,
   createUpdateCursorSettingsCommand,
@@ -45,6 +43,7 @@ import {
 } from "lucide-react"
 import { Badge, Button, Input, NativeSelect, Slider, Switch, Textarea } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { useTimelineInteraction } from "./use-timeline-interaction"
 import { CursorInspector } from "../cursor"
 
 interface ClipInspectorProps {
@@ -83,6 +82,7 @@ export function ClipInspector({
   onClear,
 }: ClipInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
+  const interaction = useTimelineInteraction()
   const project = useTimelineStore((state) => state.project)
   const view = useTimelineStore((state) => state.view)
   const timelineState = useTimelineStore((state) => state.engine?.history.present)
@@ -318,7 +318,7 @@ export function ClipInspector({
             useTimelineStore.getState().setSelection({ kind: "zoom", segmentId })
           }}
           onUpdate={(segmentId, update) =>
-            execute(createUpdateZoomSegmentCommand(segmentId, update))
+            interaction.updateZoomTarget(segmentId, update, { phase: "commit" })
           }
           onSplit={(segmentId, splitTimeMs) =>
             execute(createSplitZoomSegmentCommand(segmentId, splitTimeMs))
@@ -350,11 +350,10 @@ export function ClipInspector({
 
   function updateTransform(partial: Partial<ClipTransform>) {
     if (activeClip.kind !== "camera") return
-    execute(
-      createUpdateClipTransformCommand(activeClip.id, {
-        ...activeClip.transform,
-        ...partial,
-      }),
+    interaction.updateClipTransform(
+      activeClip.id,
+      { ...activeClip.transform, ...partial },
+      { phase: "commit" },
     )
   }
 
@@ -374,7 +373,7 @@ export function ClipInspector({
 
   function updateMask(partial: Parameters<typeof createUpdateMaskClipCommand>[1]) {
     if (activeClip.kind !== "mask") return
-    execute(createUpdateMaskClipCommand(activeClip.id, partial))
+    interaction.updateMask(activeClip.id, partial, { phase: "commit" })
   }
 
   return (
@@ -495,8 +494,10 @@ export function ClipInspector({
                 value={activeClip.text}
                 rows={3}
                 onChange={(event) =>
-                  execute(
-                    createUpdateCaptionClipCommand(activeClip.id, { text: event.target.value }),
+                  interaction.updateCaption(
+                    activeClip.id,
+                    { text: event.target.value },
+                    { phase: "commit" },
                   )
                 }
               />
@@ -507,10 +508,10 @@ export function ClipInspector({
                     aria-label="Caption style"
                     value={activeClip.style}
                     onChange={(event) =>
-                      execute(
-                        createUpdateCaptionClipCommand(activeClip.id, {
-                          style: event.target.value as typeof activeClip.style,
-                        }),
+                      interaction.updateCaption(
+                        activeClip.id,
+                        { style: event.target.value as typeof activeClip.style },
+                        { phase: "commit" },
                       )
                     }
                   >
@@ -526,10 +527,12 @@ export function ClipInspector({
                     aria-label="Caption placement"
                     value={activeClip.placement ?? "bottom"}
                     onChange={(event) =>
-                      execute(
-                        createUpdateCaptionClipCommand(activeClip.id, {
+                      interaction.updateCaption(
+                        activeClip.id,
+                        {
                           placement: event.target.value as NonNullable<typeof activeClip.placement>,
-                        }),
+                        },
+                        { phase: "commit" },
                       )
                     }
                   >

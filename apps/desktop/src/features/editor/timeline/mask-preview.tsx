@@ -7,7 +7,11 @@ interface MaskPreviewProps {
   canvasWidth: number
   canvasHeight: number
   onSelectMask?: (clip: MaskClip) => void
-  onUpdateMask?: (clipId: string, rect: MaskRect) => void
+  onUpdateMask?: (
+    clipId: string,
+    rect: MaskRect,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
 }
 
 interface MaskGesture {
@@ -17,6 +21,7 @@ interface MaskGesture {
   startX: number
   startY: number
   rect: MaskRect
+  moved: boolean
 }
 
 function isActive(clip: MaskClip, playheadMs: number): boolean {
@@ -80,12 +85,53 @@ export function MaskPreview({
       startX: event.clientX,
       startY: event.clientY,
       rect: clip.rect,
+      moved: false,
     }
   }
 
   function moveGesture(event: React.PointerEvent<HTMLDivElement>) {
     const gesture = gestureRef.current
     if (!gesture || gesture.pointerId !== event.pointerId || !onUpdateMask) return
+    const parent = event.currentTarget.parentElement
+    if (!parent) return
+    const deltaX =
+      ((event.clientX - gesture.startX) / Math.max(1, parent.clientWidth)) * canvasWidth
+    const deltaY =
+      ((event.clientY - gesture.startY) / Math.max(1, parent.clientHeight)) * canvasHeight
+    if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1 && !gesture.moved) return
+    gesture.moved = true
+    event.preventDefault()
+    const next =
+      gesture.mode === "resize"
+        ? {
+            ...gesture.rect,
+            width: gesture.rect.width + deltaX,
+            height: gesture.rect.height + deltaY,
+          }
+        : {
+            ...gesture.rect,
+            x: gesture.rect.x + deltaX,
+            y: gesture.rect.y + deltaY,
+          }
+    onUpdateMask(gesture.clipId, clampRect(next, canvasWidth, canvasHeight), { phase: "draft" })
+  }
+
+  function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current
+    if (!gesture || gesture.pointerId !== event.pointerId) return
+    const wasCancelled = event.type === "pointercancel"
+    const didMove = gesture.moved
+    gestureRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (!onUpdateMask) return
+
+    if (wasCancelled || !didMove) {
+      onUpdateMask(gesture.clipId, gesture.rect, { phase: "cancel" })
+      return
+    }
+
     const parent = event.currentTarget.parentElement
     if (!parent) return
     const deltaX =
@@ -104,16 +150,7 @@ export function MaskPreview({
             x: gesture.rect.x + deltaX,
             y: gesture.rect.y + deltaY,
           }
-    onUpdateMask(gesture.clipId, clampRect(next, canvasWidth, canvasHeight))
-  }
-
-  function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    gestureRef.current = null
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
-    }
+    onUpdateMask(gesture.clipId, clampRect(next, canvasWidth, canvasHeight), { phase: "commit" })
   }
 
   return (
