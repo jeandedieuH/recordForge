@@ -182,6 +182,7 @@ export function TimelineView({
   const activeJob = useTimelineStore((state) => state.activeJob)
   const isLoading = useTimelineStore((state) => state.isLoading)
   const error = useTimelineStore((state) => state.error)
+  const draftError = useTimelineStore((state) => state.draftError)
   const load = useTimelineStore((state) => state.load)
   const execute = useTimelineStore((state) => state.execute)
   const undo = useTimelineStore((state) => state.undo)
@@ -811,6 +812,40 @@ export function TimelineView({
     execute(createDuplicateClipCommand(selectedClip.clip.id))
   }
 
+  function duplicateClip(clip: TimelineClip) {
+    const selection = view.selection
+    if (
+      selection?.kind === "clip" &&
+      selection.clipIds.length > 1 &&
+      selection.clipIds.includes(clip.id)
+    ) {
+      execute(createDuplicateClipsCommand(selection.clipIds))
+      return
+    }
+    execute(createDuplicateClipCommand(clip.id))
+  }
+
+  function splitClip(clip: TimelineClip) {
+    if (clip.kind === "cursor-effect") {
+      execute(createSplitCursorRangeCommand(clip.id, view.playheadMs))
+      return
+    }
+    execute(createSplitClipCommand(clip.id, view.playheadMs))
+  }
+
+  function deleteClip(clip: TimelineClip) {
+    const selection = view.selection
+    if (
+      selection?.kind === "clip" &&
+      selection.clipIds.length > 1 &&
+      selection.clipIds.includes(clip.id)
+    ) {
+      execute(createDeleteClipsCommand(selection.clipIds))
+      return
+    }
+    execute(createDeleteClipCommand(clip.id))
+  }
+
   function selectClip(clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) {
     if (tool === "split" && !track.locked && !(clip.kind === "cursor-effect" && clip.locked)) {
       if (view.playheadMs > clip.startMs && view.playheadMs < clip.startMs + clip.durationMs) {
@@ -953,6 +988,18 @@ export function TimelineView({
               <Button variant="ghost" size="sm" onClick={clearError}>
                 Dismiss
               </Button>
+            </div>
+          ) : null}
+
+          {draftError ? (
+            <div
+              className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-foreground"
+              role="status"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <AlertCircle className="size-4 shrink-0 text-warning" aria-hidden />
+                <span className="truncate">{draftError.message}</span>
+              </span>
             </div>
           ) : null}
 
@@ -1343,6 +1390,9 @@ export function TimelineView({
           onSelectMarker={selectMarker}
           onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
           onDeleteSelection={deleteSelected}
+          onDuplicateClip={duplicateClip}
+          onSplitClip={splitClip}
+          onDeleteClip={deleteClip}
           onToggleTrackMuted={(track) =>
             execute(createUpdateTrackCommand(track.id, { muted: !track.muted }))
           }

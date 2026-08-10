@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import type {
   TimelineClip,
@@ -24,8 +24,20 @@ import {
   VolumeX,
   type LucideIcon,
 } from "lucide-react"
-import { IconButton, cn } from "@recordforge/ui"
-import { buildSnapTargets, snapClipStart, snapTrimEdge } from "@recordforge/editor-core"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+  IconButton,
+  cn,
+} from "@recordforge/ui"
+import {
+  buildSnapTargets,
+  snapClipStart,
+  snapTrimEdge,
+  type SnapTarget,
+} from "@recordforge/editor-core"
 import {
   toAssetUrl,
   type DerivativeResource,
@@ -76,6 +88,9 @@ interface TimelineLanesProps {
   onToggleTrackCollapsed: (track: TimelineTrack) => void
   onCycleTrackHeight: (track: TimelineTrack) => void
   onSpriteError: () => void
+  onDuplicateClip: (clip: TimelineClip) => void
+  onSplitClip: (clip: TimelineClip) => void
+  onDeleteClip: (clip: TimelineClip) => void
 }
 
 function getTrackIcon(track: TimelineTrack): LucideIcon {
@@ -163,6 +178,9 @@ export function TimelineLanes({
   onToggleTrackCollapsed,
   onCycleTrackHeight,
   onSpriteError,
+  onDuplicateClip,
+  onSplitClip,
+  onDeleteClip,
 }: TimelineLanesProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -510,6 +528,9 @@ export function TimelineLanes({
                 snapEnabled={view.snapEnabled}
                 snapThresholdMs={view.snapThresholdMs}
                 onSpriteError={onSpriteError}
+                onDuplicateClip={onDuplicateClip}
+                onSplitClip={onSplitClip}
+                onDeleteClip={onDeleteClip}
               />
             )
           })}
@@ -634,6 +655,9 @@ function TimelineTrackRow({
   snapEnabled,
   snapThresholdMs,
   onSpriteError,
+  onDuplicateClip,
+  onSplitClip,
+  onDeleteClip,
 }: {
   track: TimelineTrack
   top: number
@@ -666,7 +690,12 @@ function TimelineTrackRow({
   snapEnabled: boolean
   snapThresholdMs: number
   onSpriteError: () => void
+  onDuplicateClip: (clip: TimelineClip) => void
+  onSplitClip: (clip: TimelineClip) => void
+  onDeleteClip: (clip: TimelineClip) => void
 }) {
+  const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
+  const onSnapGuide = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
   const visibleClips = track.clips.filter((clip) =>
     clipIntersectsWindow(clip, visibleStartMs, visibleEndMs),
   )
@@ -679,6 +708,13 @@ function TimelineTrackRow({
       )}
       style={{ top, height }}
     >
+      {snapGuide ? (
+        <div
+          className="pointer-events-none absolute inset-y-0 z-10 w-px bg-primary/60"
+          style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
+          aria-hidden
+        />
+      ) : null}
       {visibleClips.map((clip) => (
         <TimelineClipItem
           key={clip.id}
@@ -701,7 +737,11 @@ function TimelineTrackRow({
           snapTargets={snapTargets}
           snapEnabled={snapEnabled}
           snapThresholdMs={snapThresholdMs}
+          onSnapGuide={onSnapGuide}
           onSpriteError={onSpriteError}
+          onDuplicateClip={onDuplicateClip}
+          onSplitClip={onSplitClip}
+          onDeleteClip={onDeleteClip}
         />
       ))}
     </div>
@@ -736,7 +776,11 @@ function TimelineClipItem({
   snapTargets,
   snapEnabled,
   snapThresholdMs,
+  onSnapGuide,
   onSpriteError,
+  onDuplicateClip,
+  onSplitClip,
+  onDeleteClip,
 }: {
   clip: TimelineClip
   track: TimelineTrack
@@ -768,7 +812,11 @@ function TimelineClipItem({
   snapTargets: ReturnType<typeof buildSnapTargets>
   snapEnabled: boolean
   snapThresholdMs: number
+  onSnapGuide: (target: SnapTarget | null) => void
   onSpriteError: () => void
+  onDuplicateClip: (clip: TimelineClip) => void
+  onSplitClip: (clip: TimelineClip) => void
+  onDeleteClip: (clip: TimelineClip) => void
 }) {
   const gestureRef = useRef<ClipGesture | null>(null)
   const suppressClickRef = useRef(false)
@@ -812,6 +860,7 @@ function TimelineClipItem({
     if (gesture.mode === "move") {
       const rawStartMs = Math.max(0, Math.round(clip.startMs + deltaMs))
       const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, snap)
+      onSnapGuide(snapped.snapped ? snapped.target : null)
       onMoveClip(clip, track, snapped.timeMs, { phase: "draft" })
       return
     }
@@ -819,6 +868,7 @@ function TimelineClipItem({
     const edge = gesture.mode === "trim-start" ? "start" : "end"
     const rawEdgeTimeMs = Math.max(0, Math.round(clip.startMs + deltaMs))
     const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
+    onSnapGuide(snapped.snapped ? snapped.target : null)
     onTrimClip(clip, track, edge, snapped.timeMs, { phase: "draft" })
   }
 
@@ -833,6 +883,7 @@ function TimelineClipItem({
     }
 
     if (wasCancelled || !didMove) {
+      onSnapGuide(null)
       if (gesture.mode === "move") {
         onMoveClip(clip, track, clip.startMs, { phase: "cancel" })
       } else {
@@ -850,6 +901,7 @@ function TimelineClipItem({
     if (gesture.mode === "move") {
       const rawStartMs = Math.max(0, Math.round(clip.startMs + deltaMs))
       const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, snap)
+      onSnapGuide(null)
       onMoveClip(clip, track, snapped.timeMs, { phase: "commit" })
       return
     }
@@ -857,6 +909,7 @@ function TimelineClipItem({
     const edge = gesture.mode === "trim-start" ? "start" : "end"
     const rawEdgeTimeMs = Math.max(0, Math.round(clip.startMs + deltaMs))
     const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
+    onSnapGuide(null)
     onTrimClip(clip, track, edge, snapped.timeMs, { phase: "commit" })
   }
 
@@ -866,125 +919,137 @@ function TimelineClipItem({
   )
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      data-timeline-clip
-      aria-label={`${getClipLabel(clip, track)} from ${formatTimelineTime(clip.startMs)} to ${formatTimelineTime(clip.startMs + clip.durationMs)}`}
-      aria-pressed={selected}
-      aria-keyshortcuts="Enter Space ArrowLeft ArrowRight"
-      className={cn(
-        "absolute flex min-w-10 items-center overflow-hidden rounded-md border px-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-        getClipClass(track),
-        selected && "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
-        track.muted && "opacity-45",
-        track.locked && "cursor-not-allowed opacity-60",
-        collapsed ? "h-6" : "h-9",
-      )}
-      style={{
-        left: `${clip.startMs * pixelsPerMs}px`,
-        width: `${Math.max(clip.durationMs * pixelsPerMs, 40)}px`,
-        height: `${clipHeight}px`,
-      }}
-      onPointerDown={(event) => beginGesture(event, "move")}
-      onPointerMove={handlePointerMove}
-      onPointerUp={finishGesture}
-      onPointerCancel={finishGesture}
-      onClick={(event) => {
-        event.stopPropagation()
-        if (suppressClickRef.current) {
-          suppressClickRef.current = false
-          return
-        }
-        onSelectClip(clip, track, event)
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault()
-          event.stopPropagation()
-          event.currentTarget.click()
-          return
-        }
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
-        const direction = event.key === "ArrowLeft" ? -1 : 1
-        if (event.altKey) {
-          event.preventDefault()
-          event.stopPropagation()
-          const edge = event.shiftKey
-            ? direction === -1
-              ? "end"
-              : "start"
-            : direction === -1
-              ? "start"
-              : "end"
-          const edgeTimeMs =
-            edge === "start"
-              ? clip.startMs + direction * frameMs
-              : clip.startMs + clip.durationMs + direction * frameMs
-          onTrimClip(clip, track, edge, edgeTimeMs, { phase: "commit" })
-          return
-        }
-        if (event.ctrlKey || event.metaKey) {
-          event.preventDefault()
-          event.stopPropagation()
-          const nextStartMs = Math.max(
-            0,
-            clip.startMs + direction * (event.shiftKey ? 1_000 : frameMs),
-          )
-          onMoveClip(clip, track, nextStartMs, { phase: "commit" })
-        }
-      }}
-      title={`${getClipLabel(clip, track)} · ${formatTimelineTime(clip.durationMs)}`}
-    >
-      <button
-        type="button"
-        className={cn(handleClass, "left-0")}
-        aria-label={`Trim start of ${getClipLabel(clip, track)}`}
-        onPointerDown={(event) => beginGesture(event, "trim-start")}
-        onClick={(event) => event.stopPropagation()}
-      />
-      {thumbnailManifest && spriteUrl ? (
-        <ThumbnailStrip
-          clip={clip}
-          manifest={thumbnailManifest}
-          spriteUrl={spriteUrl}
-          pixelsPerMs={pixelsPerMs}
-          visibleStartMs={visibleStartMs}
-          visibleEndMs={visibleEndMs}
-          onSpriteError={onSpriteError}
-        />
-      ) : null}
-      {waveformData ? (
-        <WaveformStrip
-          clip={clip}
-          data={waveformData}
-          pixelsPerMs={pixelsPerMs}
-          visibleStartMs={visibleStartMs}
-          visibleEndMs={visibleEndMs}
-        />
-      ) : null}
-      <span className="relative z-10 truncate font-medium text-foreground">
-        {getClipLabel(clip, track)}
-      </span>
-      {clip.kind === "audio" && !waveformData ? (
-        <span className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70" aria-hidden>
-          {Array.from({ length: 8 }, (_, index) => (
-            <span
-              key={index}
-              className="w-px bg-current"
-              style={{ height: `${6 + ((index * 7) % 10)}px` }}
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          role="button"
+          tabIndex={0}
+          data-timeline-clip
+          aria-label={`${getClipLabel(clip, track)} from ${formatTimelineTime(clip.startMs)} to ${formatTimelineTime(clip.startMs + clip.durationMs)}`}
+          aria-pressed={selected}
+          aria-keyshortcuts="Enter Space ArrowLeft ArrowRight"
+          className={cn(
+            "absolute flex min-w-10 items-center overflow-hidden rounded-md border px-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            getClipClass(track),
+            selected && "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
+            track.muted && "opacity-45",
+            track.locked && "cursor-not-allowed opacity-60",
+            collapsed ? "h-6" : "h-9",
+          )}
+          style={{
+            left: `${clip.startMs * pixelsPerMs}px`,
+            width: `${Math.max(clip.durationMs * pixelsPerMs, 40)}px`,
+            height: `${clipHeight}px`,
+          }}
+          onPointerDown={(event) => beginGesture(event, "move")}
+          onPointerMove={handlePointerMove}
+          onPointerUp={finishGesture}
+          onPointerCancel={finishGesture}
+          onClick={(event) => {
+            event.stopPropagation()
+            if (suppressClickRef.current) {
+              suppressClickRef.current = false
+              return
+            }
+            onSelectClip(clip, track, event)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault()
+              event.stopPropagation()
+              event.currentTarget.click()
+              return
+            }
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+            const direction = event.key === "ArrowLeft" ? -1 : 1
+            if (event.altKey) {
+              event.preventDefault()
+              event.stopPropagation()
+              const edge = event.shiftKey
+                ? direction === -1
+                  ? "end"
+                  : "start"
+                : direction === -1
+                  ? "start"
+                  : "end"
+              const edgeTimeMs =
+                edge === "start"
+                  ? clip.startMs + direction * frameMs
+                  : clip.startMs + clip.durationMs + direction * frameMs
+              onTrimClip(clip, track, edge, edgeTimeMs, { phase: "commit" })
+              return
+            }
+            if (event.ctrlKey || event.metaKey) {
+              event.preventDefault()
+              event.stopPropagation()
+              const nextStartMs = Math.max(
+                0,
+                clip.startMs + direction * (event.shiftKey ? 1_000 : frameMs),
+              )
+              onMoveClip(clip, track, nextStartMs, { phase: "commit" })
+            }
+          }}
+          title={`${getClipLabel(clip, track)} · ${formatTimelineTime(clip.durationMs)}`}
+        >
+          <button
+            type="button"
+            className={cn(handleClass, "left-0")}
+            aria-label={`Trim start of ${getClipLabel(clip, track)}`}
+            onPointerDown={(event) => beginGesture(event, "trim-start")}
+            onClick={(event) => event.stopPropagation()}
+          />
+          {thumbnailManifest && spriteUrl ? (
+            <ThumbnailStrip
+              clip={clip}
+              manifest={thumbnailManifest}
+              spriteUrl={spriteUrl}
+              pixelsPerMs={pixelsPerMs}
+              visibleStartMs={visibleStartMs}
+              visibleEndMs={visibleEndMs}
+              onSpriteError={onSpriteError}
             />
-          ))}
-        </span>
-      ) : null}
-      <button
-        type="button"
-        className={cn(handleClass, "right-0")}
-        aria-label={`Trim end of ${getClipLabel(clip, track)}`}
-        onPointerDown={(event) => beginGesture(event, "trim-end")}
-        onClick={(event) => event.stopPropagation()}
-      />
-    </div>
+          ) : null}
+          {waveformData ? (
+            <WaveformStrip
+              clip={clip}
+              data={waveformData}
+              pixelsPerMs={pixelsPerMs}
+              visibleStartMs={visibleStartMs}
+              visibleEndMs={visibleEndMs}
+            />
+          ) : null}
+          <span className="relative z-10 truncate font-medium text-foreground">
+            {getClipLabel(clip, track)}
+          </span>
+          {clip.kind === "audio" && !waveformData ? (
+            <span
+              className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70"
+              aria-hidden
+            >
+              {Array.from({ length: 8 }, (_, index) => (
+                <span
+                  key={index}
+                  className="w-px bg-current"
+                  style={{ height: `${6 + ((index * 7) % 10)}px` }}
+                />
+              ))}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={cn(handleClass, "right-0")}
+            aria-label={`Trim end of ${getClipLabel(clip, track)}`}
+            onPointerDown={(event) => beginGesture(event, "trim-end")}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => onDuplicateClip(clip)}>Duplicate</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onSplitClip(clip)}>Split at playhead</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onDeleteClip(clip)}>Delete</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   )
 }
 
