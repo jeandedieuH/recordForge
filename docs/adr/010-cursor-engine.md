@@ -109,7 +109,7 @@ The crate is intentionally throwaway. Phase 6 will either fold it into `apps/des
 
 ## Acceptance Criteria for Closing This ADR
 
-- [ ] `tooling/prototypes/cursor-engine-wasm` builds for `wasm32-unknown-unknown`.
-- [ ] Native build passes parity tests for `cursor-v1-100dpi-10s.json` through `cursor-v2-topology-multi-10s.json`.
+- [x] `tooling/prototypes/cursor-engine-wasm` builds for `wasm32-unknown-unknown`.
+- [x] Native build passes parity tests for `cursor-v1-100dpi-10s.json` through `cursor-v2-topology-multi-10s.json`.
 - [ ] A simple HTML page (or React test harness) can load the WASM module and render the same cursor position as the Rust export for the same input.
 - [ ] The decision is either confirmed, modified, or reverted with a new ADR before Phase 6 implementation.

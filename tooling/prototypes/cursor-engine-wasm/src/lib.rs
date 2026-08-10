@@ -106,8 +106,8 @@ impl Evaluator {
         let content_width = (canvas.width - padding * 2.0).max(1.0);
         let content_height = (canvas.height - padding * 2.0).max(1.0);
 
-        let fit_scale = (content_width / telemetry.source_width)
-            .min(content_height / telemetry.source_height);
+        let fit_scale =
+            (content_width / telemetry.source_width).min(content_height / telemetry.source_height);
         let fit_width = telemetry.source_width * fit_scale;
         let fit_height = telemetry.source_height * fit_scale;
         let fit_offset_x = padding + (content_width - fit_width) / 2.0;
@@ -163,7 +163,10 @@ impl Evaluator {
         let events = &self.telemetry.events;
         let event = &events[index];
         if self.smoothing >= 1.0 {
-            return Point { x: event.x, y: event.y };
+            return Point {
+                x: event.x,
+                y: event.y,
+            };
         }
 
         let window_size = 5;
@@ -184,7 +187,10 @@ impl Evaluator {
                 y: sum_y / total_weight,
             }
         } else {
-            Point { x: event.x, y: event.y }
+            Point {
+                x: event.x,
+                y: event.y,
+            }
         }
     }
 
@@ -276,7 +282,11 @@ impl Evaluator {
     }
 }
 
-pub fn evaluate_at(telemetry: CursorTelemetry, canvas: Canvas, time_ms: f64) -> Result<EvaluatedCursor, String> {
+pub fn evaluate_at(
+    telemetry: CursorTelemetry,
+    canvas: Canvas,
+    time_ms: f64,
+) -> Result<EvaluatedCursor, String> {
     Evaluator::new(telemetry, canvas).map(|e| e.evaluate(time_ms))
 }
 

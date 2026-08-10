@@ -13,7 +13,11 @@ fn project_root() -> std::path::PathBuf {
 }
 
 fn fixture_dir() -> std::path::PathBuf {
-    project_root().join("..").join("..").join("fixtures").join("cursor-fixtures")
+    project_root()
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("cursor-fixtures")
 }
 
 fn evaluate_fixture(name: &str, canvas: Canvas, times: &[f64]) -> Result<(), String> {
@@ -26,14 +30,20 @@ fn evaluate_fixture(name: &str, canvas: Canvas, times: &[f64]) -> Result<(), Str
     println!("{}:", name);
     for &t in times {
         let result = evaluator.evaluate(t);
-        println!("  t={:>6.0} ms -> ({:.2}, {:.2}) visible={} click={:?}",
-            t, result.x, result.y, result.visible, result.click_progress);
+        println!(
+            "  t={:>6.0} ms -> ({:.2}, {:.2}) visible={} click={:?}",
+            t, result.x, result.y, result.visible, result.click_progress
+        );
     }
     Ok(())
 }
 
 fn main() -> Result<(), String> {
-    let canvas = Canvas { width: 1920.0, height: 1080.0, padding: 0.0 };
+    let canvas = Canvas {
+        width: 1920.0,
+        height: 1080.0,
+        padding: 0.0,
+    };
 
     let fixtures = [
         "cursor-v1-100dpi-10s.json",
