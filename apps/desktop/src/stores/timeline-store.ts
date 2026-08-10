@@ -66,6 +66,18 @@ interface TimelineStore {
   unlisten: (() => void) | null
   // Pending autosave timer; cleared when a save runs or the editor closes.
   autosaveTimeout: number | null
+  // Phase 1: revision-aware save coordinator. projectRevision is a logical
+  // counter that increments on every in-memory project mutation. savingRevision
+  // is the revision currently being written. pendingSaveRevision is the latest
+  // revision that still needs to be persisted. savePromise is the in-flight
+  // save() call so concurrent flushers can wait instead of double-writing.
+  projectRevision: number
+  savingRevision: number | null
+  pendingSaveRevision: number | null
+  savePromise: Promise<void> | null
+  // True when a destructive command has been committed and the next save must
+  // first snapshot the on-disk project before overwriting it.
+  snapshotPending: boolean
 
   load: (recordingId: string) => Promise<void>
   startListening: () => Promise<void>
@@ -99,6 +111,20 @@ interface TimelineStore {
   save: () => Promise<void>
   scheduleAutosave: () => void
   relinkAsset: (assetId: string, newPath: string) => Promise<void>
+
+  // Phase 1: mark a new project revision, update dirty state, and schedule save.
+  markProjectChanged: (
+    nextProject: recordForgeProject,
+    options?: { needsSnapshot?: boolean },
+  ) => void
+  // Phase 1: finish an in-flight save and reconcile the in-memory revision.
+  commitSaveResult: (saved: recordForgeProject, sentRevision: number) => void
+  // Phase 1: handle a failed save while preserving dirty/recovery state.
+  handleSaveError: (err: unknown, sentRevision: number) => void
+  // Phase 1: flush and tear down a session when the user leaves the editor.
+  closeSession: () => Promise<boolean>
+  // Phase 1: reset the session without saving (used by unmount cleanup).
+  resetSession: () => void
 
   export: (outputPath: string) => Promise<void>
   clearError: () => void
@@ -138,6 +164,22 @@ function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
 
 function isDestructiveCommand(command: TimelineCommand): boolean {
   return SNAPSHOT_COMMANDS.has(command.kind)
+}
+
+interface Deferred<T> {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason?: unknown) => void
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve: (value: T) => void
+  let reject: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve: resolve!, reject: reject! }
 }
 
 function isReusablePrepareJob(job: MediaJob): boolean {
@@ -186,6 +228,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   isListening: false,
   unlisten: null,
   autosaveTimeout: null,
+  projectRevision: 0,
+  savingRevision: null,
+  pendingSaveRevision: null,
+  savePromise: null,
+  snapshotPending: false,
 
   load: async (recordingId) => {
     set({
@@ -200,6 +247,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
+      projectRevision: 0,
+      savingRevision: null,
+      pendingSaveRevision: null,
+      savePromise: null,
+      snapshotPending: false,
+      autosaveTimeout: null,
     })
     try {
       const recordings = await listRecordings()
@@ -296,10 +349,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         },
         isLoading: false,
         error: null,
+        projectRevision: 0,
+        savingRevision: null,
+        pendingSaveRevision: null,
+        savePromise: null,
+        snapshotPending: false,
       })
       if (didMigrateCursorTrack) {
-        useEditorStore.getState().setDirty(true)
-        get().scheduleAutosave()
+        // A migration changed the durable project shape; bump to revision 1 and
+        // schedule an autosave so the upgraded shape is not lost on close.
+        get().markProjectChanged(project)
       }
     } catch (err) {
       set({ error: toErrorMessage(err), isLoading: false })
@@ -361,14 +420,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const { engine, project } = get()
     if (!engine || !project) return false
 
-    if (isDestructiveCommand(command)) {
-      const recording = get().recording
-      if (recording) {
-        // Fire-and-forget snapshot; failures are not surfaced to the user.
-        void snapshotProject(recording.id).catch(() => {})
-      }
-    }
-
     const result = executeCommand(engine, command, options)
     if (!result.ok) {
       set({ error: result.error.message })
@@ -380,7 +431,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const view = get().view
     set({
       engine: result.value,
-      project: nextProject,
       error: null,
       view: {
         ...view,
@@ -388,8 +438,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         playheadMs: Math.min(view.playheadMs, duration),
       },
     })
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    // Phase 1: destructive commands require a snapshot of the on-disk project
+    // before the next save overwrites it.
+    get().markProjectChanged(nextProject, {
+      needsSnapshot: isDestructiveCommand(command),
+    })
     return true
   },
 
@@ -407,12 +460,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const view = get().view
     set({
       engine: result.value,
-      project: nextProject,
       view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    get().markProjectChanged(nextProject)
   },
 
   redo: () => {
@@ -429,18 +480,23 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const view = get().view
     set({
       engine: result.value,
-      project: nextProject,
       view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
       error: null,
     })
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    get().markProjectChanged(nextProject)
   },
 
   scheduleAutosave: () => {
-    const { autosaveTimeout } = get()
+    const { autosaveTimeout, savePromise, projectRevision } = get()
     if (autosaveTimeout) {
       window.clearTimeout(autosaveTimeout)
+    }
+
+    // Phase 1: if a save is already in flight, do not start a second timeout.
+    // Instead, mark the latest revision as pending so the active save can chain.
+    if (savePromise) {
+      set({ pendingSaveRevision: projectRevision, autosaveTimeout: null })
+      return
     }
 
     useEditorStore.getState().setSaveStatus("idle")
@@ -449,29 +505,88 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       void get().save()
     }, AUTOSAVE_DELAY_MS)
 
-    set({ autosaveTimeout: timeout })
+    set({ autosaveTimeout: timeout, pendingSaveRevision: projectRevision })
   },
 
-  save: async () => {
-    const { project, autosaveTimeout } = get()
-    if (!project) return
+  save: () => {
+    const state = get()
+    if (!state.project) return Promise.resolve()
 
-    if (autosaveTimeout) {
-      window.clearTimeout(autosaveTimeout)
-      set({ autosaveTimeout: null })
+    // Phase 1: serialize saves. If another save is already in flight, mark the
+    // latest revision and wait for the in-flight save before deciding whether
+    // another one is needed.
+    if (state.savePromise) {
+      if (state.projectRevision > (state.savingRevision ?? -1)) {
+        set({ pendingSaveRevision: state.projectRevision })
+      }
+      return state.savePromise.then(() => {
+        if (get().pendingSaveRevision) {
+          return get().save()
+        }
+        return undefined
+      })
     }
 
-    useEditorStore.getState().setSaveStatus("saving")
-    try {
-      const saved = await saveProject(project)
-      set({ project: saved })
-      useEditorStore.getState().setProject(saved)
-      useEditorStore.getState().setDirty(false)
-      useEditorStore.getState().setSaveStatus("saved")
-    } catch (err) {
-      useEditorStore.getState().setSaveStatus("error", toErrorMessage(err))
-      set({ error: toErrorMessage(err) })
+    if (state.autosaveTimeout) {
+      window.clearTimeout(state.autosaveTimeout)
     }
+
+    // Phase 1: create and store the save promise before any awaited work. This
+    // lets edits that race the save set a pending revision instead of starting
+    // a second write, and lets close/export guards wait on this promise.
+    const deferred = createDeferred<void>()
+    set({ savePromise: deferred.promise })
+
+    const run = async () => {
+      const { project, projectRevision, snapshotPending, recording } = get()
+      if (!project) return
+
+      set({
+        savingRevision: projectRevision,
+        pendingSaveRevision: null,
+        autosaveTimeout: null,
+      })
+      useEditorStore.getState().setSaveStatus("saving")
+      try {
+        // Phase 1: destructive commands get a snapshot before the new version
+        // overwrites the project file, sequencing the backup with the commit.
+        if (snapshotPending && recording) {
+          try {
+            await snapshotProject(recording.id)
+          } catch {
+            // A failed snapshot should not block saving the current edit, but
+            // it should not clear the pending flag either.
+          }
+          set({ snapshotPending: false })
+        }
+        const saved = await saveProject(project)
+        get().commitSaveResult(saved, projectRevision)
+      } catch (err) {
+        // The error is already recorded in the store. Resolve the promise so
+        // callers can read saveStatus; autosave/timeout callers are not left with
+        // an unhandled rejection.
+        get().handleSaveError(err, projectRevision)
+      } finally {
+        set({ savePromise: null })
+      }
+
+      // Phase 1: if edits arrived during the save and the save did not error,
+      // immediately start the next save so pending edits are not left behind.
+      const { pendingSaveRevision } = get()
+      const { saveStatus } = useEditorStore.getState()
+      if (pendingSaveRevision && saveStatus !== "error") {
+        return get().save()
+      }
+      // If the save errored but there are pending edits, schedule a retry so the
+      // user is not left with unsaved changes.
+      if (pendingSaveRevision && saveStatus === "error") {
+        get().scheduleAutosave()
+      }
+      return undefined
+    }
+
+    void run().then(deferred.resolve, deferred.reject)
+    return deferred.promise
   },
 
   relinkAsset: async (assetId, newPath) => {
@@ -480,12 +595,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     try {
       const updated = await relinkProjectAsset(recording.id, assetId, newPath)
       const missing = updated.assets.filter((a) => a.status === "missing").map((a) => a.id)
-      set({ project: updated, missingAssets: missing })
-      useEditorStore.getState().setProject(updated)
+      set({ missingAssets: missing })
       useEditorStore.getState().setMissingAssets(missing)
-      // Persist the relinked project immediately so a missing-asset state is
-      // never lost on close.
-      void get().save()
+      // Phase 1: mark the relinked project as changed and flush immediately so a
+      // missing-asset state is never lost on close.
+      get().markProjectChanged(updated)
+      await get().save()
     } catch (err) {
       set({ error: toErrorMessage(err) })
     }
@@ -576,10 +691,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       exportSettings: { ...project.exportSettings, captionMode: mode },
       updatedAt: new Date().toISOString(),
     }
-    set({ project: nextProject })
-    useEditorStore.getState().setProject(nextProject)
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    get().markProjectChanged(nextProject)
   },
 
   setExportPreset: (preset) => {
@@ -590,10 +702,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       exportSettings: { ...project.exportSettings, preset },
       updatedAt: new Date().toISOString(),
     }
-    set({ project: nextProject })
-    useEditorStore.getState().setProject(nextProject)
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    get().markProjectChanged(nextProject)
   },
 
   setExportCodec: (codec) => {
@@ -604,10 +713,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       exportSettings: { ...project.exportSettings, codec },
       updatedAt: new Date().toISOString(),
     }
-    set({ project: nextProject })
-    useEditorStore.getState().setProject(nextProject)
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    get().markProjectChanged(nextProject)
   },
 
   setExportRange: (range) => {
@@ -619,10 +725,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       exportSettings: { ...project.exportSettings, range },
       updatedAt: new Date().toISOString(),
     }
-    set({ project: nextProject })
-    useEditorStore.getState().setProject(nextProject)
-    useEditorStore.getState().setDirty(true)
-    get().scheduleAutosave()
+    get().markProjectChanged(nextProject)
   },
 
   cancelExport: async () => {
@@ -673,11 +776,30 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       return
     }
 
+    // Phase 1: freeze a durable project revision before building the render plan.
+    // Any unsaved edits are flushed first so the export uses the persisted state.
+    try {
+      await get().save()
+      if (useEditorStore.getState().saveStatus === "error") {
+        set({
+          error:
+            "Cannot export while the project cannot be saved. Fix the save error and try again.",
+        })
+        return
+      }
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+      return
+    }
+
+    const currentProject = get().project
+    if (!currentProject) return
+
     const plan = buildRenderPlan({
       state: engine.history.present,
-      projectId: project.id,
-      settings: project.exportSettings,
-      captionMode: project.exportSettings.captionMode,
+      projectId: currentProject.id,
+      settings: currentProject.exportSettings,
+      captionMode: currentProject.exportSettings.captionMode,
     })
     if (!plan.ok) {
       set({ error: plan.error.message })
@@ -685,15 +807,136 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     }
     try {
       const job = await exportTimeline({
-        projectId: project.id,
+        projectId: currentProject.id,
         outputPath,
         plan: plan.value,
-        settings: project.exportSettings,
+        settings: currentProject.exportSettings,
       })
       set({ activeExportJob: job })
     } catch (err) {
       set({ error: toErrorMessage(err) })
     }
+  },
+
+  // Phase 1: bump the project revision, keep the editor store in sync, and
+  // queue a save. If a snapshot is required (destructive command), flag it so
+  // the next save snapshots the on-disk project first.
+  markProjectChanged: (nextProject, options) => {
+    const { projectRevision, savePromise } = get()
+    const nextRevision = projectRevision + 1
+    set({
+      project: nextProject,
+      projectRevision: nextRevision,
+      snapshotPending: options?.needsSnapshot ? true : get().snapshotPending,
+    })
+    useEditorStore.getState().setDirty(true)
+    // Keep the save status as "saving" when an edit races an in-flight save,
+    // otherwise the UI would show idle while a save is still running.
+    if (!savePromise) {
+      useEditorStore.getState().setSaveStatus("idle")
+    }
+    get().scheduleAutosave()
+  },
+
+  // Phase 1: reconcile the result of a completed save. If the in-memory project
+  // has advanced past the revision that was sent, do not overwrite it with the
+  // stale returned copy; a new save will be chained by save().
+  commitSaveResult: (saved, sentRevision) => {
+    const { projectRevision, pendingSaveRevision } = get()
+    if (projectRevision === sentRevision) {
+      set({ project: saved, savingRevision: null })
+      useEditorStore.getState().setProject(saved)
+      useEditorStore.getState().setDirty(false)
+      useEditorStore.getState().setSaveStatus("saved")
+    } else if (projectRevision > sentRevision) {
+      // Newer edits exist. The in-memory project is authoritative; do not roll
+      // it back to the stale saved copy. Keep dirty and wait for the chained
+      // save to catch up.
+      set({ savingRevision: null })
+      useEditorStore.getState().setSaveStatus("idle")
+      // Re-arm pending so save() sees there is still work to do.
+      if (pendingSaveRevision === null || pendingSaveRevision <= sentRevision) {
+        set({ pendingSaveRevision: projectRevision })
+      }
+    }
+  },
+
+  // Phase 1: a save failed. Do not overwrite the in-memory project or clear
+  // dirty state, so the user can retry or continue editing without losing work.
+  handleSaveError: (err, _sentRevision) => {
+    set({ savingRevision: null })
+    useEditorStore.getState().setSaveStatus("error", toErrorMessage(err))
+    set({ error: toErrorMessage(err) })
+  },
+
+  // Phase 1: flush any pending save and tear down the session. Returns true
+  // when it is safe to leave the editor, and false if a save failed so the
+  // caller can keep the session open.
+  closeSession: async () => {
+    const { autosaveTimeout, savePromise } = get()
+    if (autosaveTimeout) {
+      window.clearTimeout(autosaveTimeout)
+    }
+
+    if (useEditorStore.getState().isDirty || savePromise) {
+      try {
+        await get().save()
+      } catch {
+        // Error is already in the store; do not reset the session.
+        return false
+      }
+      if (useEditorStore.getState().saveStatus === "error") {
+        return false
+      }
+    }
+
+    get().resetSession()
+    return true
+  },
+
+  // Phase 1: reset all session-scoped state without saving. Used when the
+  // session component unmounts after the session has already been closed.
+  resetSession: () => {
+    const { autosaveTimeout } = get()
+    if (autosaveTimeout) {
+      window.clearTimeout(autosaveTimeout)
+    }
+    get().stopListening()
+    set({
+      engine: null,
+      view: {
+        zoom: 50,
+        scrollMs: 0,
+        playheadMs: 0,
+        isPlaying: false,
+        playbackRate: 1,
+        durationMs: 0,
+        selection: null,
+        snapEnabled: true,
+        snapThresholdMs: 120,
+        collapsedTrackIds: [],
+        trackHeights: {},
+      },
+      recording: null,
+      metadata: null,
+      project: null,
+      cursorTelemetry: null,
+      cursorTelemetryStatus: "unavailable",
+      activeJob: null,
+      activeExportJob: null,
+      missingAssets: [],
+      isLoading: false,
+      error: null,
+      isListening: false,
+      unlisten: null,
+      autosaveTimeout: null,
+      projectRevision: 0,
+      savingRevision: null,
+      pendingSaveRevision: null,
+      savePromise: null,
+      snapshotPending: false,
+    })
+    useEditorStore.getState().close()
   },
 
   clearError: () => {

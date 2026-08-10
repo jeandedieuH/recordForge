@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
 import { ToastViewport, TooltipProvider } from "@recordforge/ui"
-import { EditorView } from "../features/editor"
+import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
 import { NewRecordingModal } from "../features/recorder"
@@ -32,7 +32,6 @@ export function AppShell() {
   const editorRecordingId = useEditorStore((state) => state.recordingId)
   const openEditor = useEditorStore((state) => state.open)
   const closeEditor = useEditorStore((state) => state.close)
-  const editorIsDirty = useEditorStore((state) => state.isDirty)
   const loadTheme = useThemeStore((state) => state.load)
   const startRecording = useRecorderStore((state) => state.start)
   const completedRecordingId = useRecorderStore((state) => state.completedRecordingId)
@@ -55,12 +54,10 @@ export function AppShell() {
   const retryExport = useTimelineStore((state) => state.retryExport)
   const revealExport = useTimelineStore((state) => state.revealExport)
   const timelineExport = useTimelineStore((state) => state.export)
-  const timelineSave = useTimelineStore((state) => state.save)
+  const closeSession = useTimelineStore((state) => state.closeSession)
   const timelineError = useTimelineStore((state) => state.error)
   const clearTimelineError = useTimelineStore((state) => state.clearError)
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
-  const startTimelineListening = useTimelineStore((state) => state.startListening)
-  const stopTimelineListening = useTimelineStore((state) => state.stopListening)
 
   // Load persisted theme/transparency preferences once at startup.
   useEffect(() => {
@@ -82,13 +79,6 @@ export function AppShell() {
     }
   }, [editorRecordingId])
 
-  // Keep media-job progress alive while moving between the editor and export views.
-  useEffect(() => {
-    if (!editorRecordingId) return
-    void startTimelineListening()
-    return () => stopTimelineListening()
-  }, [editorRecordingId, startTimelineListening, stopTimelineListening])
-
   // A successful stop publishes the exact library ID after persistence. Queue
   // derivatives here so opening the editor never owns or blocks preparation.
   useEffect(() => {
@@ -106,31 +96,46 @@ export function AppShell() {
     })
   }
 
-  function handleStartRecording() {
+  async function handleStartRecording() {
+    if (editorRecordingId) {
+      const closed = await closeSession()
+      if (!closed) return
+    }
     setActiveView("library")
     void startRecording()
   }
 
   async function handleCloseEditor() {
-    if (editorIsDirty) {
-      await timelineSave()
-      if (useEditorStore.getState().saveStatus === "error") return
-    }
+    // Phase 1: close the session, flushing any unsaved changes. If the flush
+    // fails, do not leave the editor so the user can recover.
+    const closed = await closeSession()
+    if (!closed) return
     closeEditor()
     setActiveView("library")
+  }
+
+  // Phase 1: guard navigation away from the editor when a session is open.
+  // Moving between editor and export keeps the session alive; other views close it.
+  async function handleNavigate(view: View) {
+    if (view === activeView) return
+    if (editorRecordingId && view !== "editor" && view !== "export") {
+      const closed = await closeSession()
+      if (!closed) return
+    }
+    setActiveView(view)
   }
 
   async function handleStartExport() {
     if (!timelineRecording) return
     try {
-      await timelineSave()
-      if (useEditorStore.getState().saveStatus === "error") return
       const outputPath = await save({
         title: "Export edited recording",
         defaultPath: `${timelineRecording.name}-edited.mp4`,
         filters: [{ name: "MP4 video", extensions: ["mp4"] }],
       })
       if (!outputPath) return
+      // Phase 1: the export path flushes and freezes a durable project revision
+      // before building the render plan, so it never exports unsaved edits.
       await timelineExport(outputPath)
     } catch (error) {
       useTimelineStore.setState({ error: toErrorMessage(error) })
@@ -140,12 +145,13 @@ export function AppShell() {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-screen flex-col bg-background text-foreground font-sans antialiased">
+        {editorRecordingId ? <EditorSession recordingId={editorRecordingId} /> : null}
         <Titlebar view={VIEW_TITLES[activeView]} onOpenRecord={() => setIsNewRecordingOpen(true)} />
 
         <div className="flex min-h-0 flex-1">
           <Sidebar
             activeView={activeView}
-            onNavigate={setActiveView}
+            onNavigate={handleNavigate}
             editorOpen={editorRecordingId !== null}
             collapsed={sidebarCollapsed}
             onToggleCollapsed={toggleSidebar}

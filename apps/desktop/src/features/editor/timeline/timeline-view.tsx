@@ -211,9 +211,8 @@ export function TimelineView({
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
 
-  useEffect(() => {
-    void load(recordingId)
-  }, [load, recordingId])
+  // Phase 1: project loading is owned by EditorSession, not by the timeline view.
+  // The view uses the already-loaded session state.
 
   const selectedClip = useMemo<SelectedClip | null>(() => {
     const selection = view.selection
