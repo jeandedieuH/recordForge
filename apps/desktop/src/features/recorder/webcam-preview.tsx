@@ -31,9 +31,7 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
         // granted camera access to this origin before.
         const devices = await navigator.mediaDevices.enumerateDevices()
         const videoDevices = devices.filter((d) => d.kind === "videoinput")
-        let matched = videoDevices.find(
-          (d) => d.label && matchDeviceName(d.label, deviceName),
-        )
+        let matched = videoDevices.find((d) => d.label && matchDeviceName(d.label, deviceName))
 
         if (!matched) {
           // No labels yet, so request one-time permission to reveal them.
@@ -44,12 +42,8 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
           permissionStream.getTracks().forEach((t) => t.stop())
 
           const labeledDevices = await navigator.mediaDevices.enumerateDevices()
-          const labeledVideoDevices = labeledDevices.filter(
-            (d) => d.kind === "videoinput",
-          )
-          matched = labeledVideoDevices.find(
-            (d) => d.label && matchDeviceName(d.label, deviceName),
-          )
+          const labeledVideoDevices = labeledDevices.filter((d) => d.kind === "videoinput")
+          matched = labeledVideoDevices.find((d) => d.label && matchDeviceName(d.label, deviceName))
         }
 
         if (!matched) {
@@ -126,7 +120,5 @@ function matchDeviceName(label: string, requestedName: string): boolean {
   const aBase = a.replace(/\s*\([^)]*\)\s*$/, "").trim()
   const bBase = b.replace(/\s*\([^)]*\)\s*$/, "").trim()
 
-  return (
-    aBase === bBase || aBase.includes(bBase) || bBase.includes(aBase)
-  )
+  return aBase === bBase || aBase.includes(bBase) || bBase.includes(aBase)
 }

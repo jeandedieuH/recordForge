@@ -474,8 +474,7 @@ export function NewRecordingModal({
                       </div>
                       <WebcamPreview
                         deviceName={
-                          webcams.find((w) => w.id === selectedWebcamId)?.name ||
-                          selectedWebcamId
+                          webcams.find((w) => w.id === selectedWebcamId)?.name || selectedWebcamId
                         }
                       />
                     </div>

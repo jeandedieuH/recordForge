@@ -412,9 +412,13 @@ export function createProjectFromRecording(
   const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const cameraStreams = recording.webcamPath
-    ? [standaloneWebcamStream(recording, metadata, Math.max(metadata.durationMs, recording.durationMs))].filter(
-        (stream): stream is MediaStream => Boolean(stream),
-      )
+    ? [
+        standaloneWebcamStream(
+          recording,
+          metadata,
+          Math.max(metadata.durationMs, recording.durationMs),
+        ),
+      ].filter((stream): stream is MediaStream => Boolean(stream))
     : videoStreams.slice(1)
   const streamAssets = [
     ...audioStreams.map((stream, index) => {

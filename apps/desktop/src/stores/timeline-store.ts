@@ -229,8 +229,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       // legacy secondary-video extraction path for older recordings.
       const hasUsableVideoDerivatives = Boolean(
         activeJob &&
-          activeJob.outputs.prepareVersion >= 4 &&
-          (!recording.webcamPath || activeJob.outputs.videoTracks.length > 0),
+        activeJob.outputs.prepareVersion >= 4 &&
+        (!recording.webcamPath || activeJob.outputs.videoTracks.length > 0),
       )
       if (
         !activeJob ||
