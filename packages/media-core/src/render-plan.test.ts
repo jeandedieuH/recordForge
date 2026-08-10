@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-  defaultCursorSettings,
-  type LibraryRecording,
-  type TimelineState,
-} from "@recordforge/domain"
+import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
 import { buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
 
 function makeTimeline(clipCount = 1): TimelineState {
@@ -49,37 +45,73 @@ function makeTimeline(clipCount = 1): TimelineState {
   }
 }
 
-const recording: LibraryRecording = {
-  id: "rec-1",
-  sessionId: "session-1",
-  name: "Test recording",
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  durationMs: 60_000,
-  sizeBytes: 0,
-  width: 1920,
-  height: 1080,
-  fps: 30,
-  status: "completed",
-  tags: [],
-  source: {
-    kind: "display",
-    id: "display-1",
-    name: "Display 1",
-    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-  },
-  profileName: "balanced",
-  outputPath: "/tmp/rec-1/output.mp4",
-  workDir: "/tmp/rec-1",
-  markers: [],
-}
-
 describe("render-plan", () => {
+  it("builds a project-scoped plan and preserves intentional gaps and speed", () => {
+    const state = makeTimeline()
+    state.tracks[0].clips.push({
+      id: "clip-1",
+      kind: "screen",
+      assetId: "rec-1",
+      startMs: 25_000,
+      durationMs: 2_500,
+      sourceInMs: 20_000,
+      sourceOutMs: 25_000,
+      speed: 2,
+    })
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.projectId).toBe("project-1")
+    expect(plan.value.gaps).toEqual([{ startMs: 20_000, endMs: 25_000 }])
+    expect(plan.value.segments[1]).toMatchObject({
+      speed: 2,
+      outputStartMs: 25_000,
+      outputEndMs: 27_500,
+    })
+    expect(plan.value.durationMs).toBe(27_500)
+  })
+
+  it("maps a selected range into zero-based output time", () => {
+    const state = makeTimeline()
+    state.tracks[0].clips.push({
+      id: "clip-1",
+      kind: "screen",
+      assetId: "rec-1",
+      startMs: 25_000,
+      durationMs: 2_500,
+      sourceInMs: 20_000,
+      sourceOutMs: 25_000,
+      speed: 2,
+    })
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 10_000, endMs: 27_500 },
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.gaps).toEqual([{ startMs: 10_000, endMs: 15_000 }])
+    expect(plan.value.segments[0]).toMatchObject({
+      outputStartMs: 0,
+      outputEndMs: 10_000,
+      sourceInMs: 10_000,
+    })
+    expect(plan.value.segments[1]).toMatchObject({
+      outputStartMs: 15_000,
+      outputEndMs: 17_500,
+      sourceInMs: 20_000,
+    })
+    expect(plan.value.durationMs).toBe(17_500)
+  })
+
   it("builds a plan from a single screen clip", () => {
     const plan = buildRenderPlan({
       state: makeTimeline(),
-      recording,
-      outputPath: "/tmp/export.mp4",
+      projectId: "project-1",
     })
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
@@ -120,7 +152,7 @@ describe("render-plan", () => {
       ],
     })
 
-    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
 
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
@@ -171,7 +203,7 @@ describe("render-plan", () => {
     expect(isTimelineAudioMuted(state)).toBe(false)
     state.tracks[1].muted = true
 
-    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
 
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
@@ -184,8 +216,7 @@ describe("render-plan", () => {
   it("builds a plan with continuous output times", () => {
     const plan = buildRenderPlan({
       state: makeTimeline(3),
-      recording,
-      outputPath: "/tmp/export.mp4",
+      projectId: "project-1",
     })
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
@@ -229,7 +260,7 @@ describe("render-plan", () => {
       ],
     })
 
-    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(plan.value.cursorEffects).toEqual([
@@ -291,10 +322,13 @@ describe("render-plan", () => {
         easing: "ease-out",
         enabled: true,
         locked: false,
+        mode: "auto",
+        source: "click",
+        preset: "product-demo",
       },
     ]
 
-    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(plan.value.overlays[0]).toMatchObject({
@@ -309,6 +343,9 @@ describe("render-plan", () => {
       startMs: 1_000,
       endMs: 4_000,
       target: { x: 0, y: 100 },
+      mode: "auto",
+      source: "click",
+      preset: "product-demo",
     })
   })
 
@@ -340,7 +377,7 @@ describe("render-plan", () => {
         },
       ],
     })
-    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(plan.value.audioTracks).toHaveLength(1)
@@ -409,7 +446,7 @@ describe("render-plan", () => {
       },
     )
 
-    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(plan.value.captionMode).toBe("burn-in")
@@ -459,21 +496,16 @@ describe("render-plan", () => {
     })
     const plan = buildRenderPlan({
       state,
-      recording,
-      outputPath: "/tmp/export.mp4",
+      projectId: "project-1",
       captionMode: "sidecar",
     })
     expect(plan.ok).toBe(true)
     if (plan.ok) expect(plan.value.captionMode).toBe("sidecar")
   })
 
-  it("fails when the recording has no output path", () => {
-    const badRecording = { ...recording, outputPath: undefined }
-    const plan = buildRenderPlan({
-      state: makeTimeline(),
-      recording: badRecording,
-      outputPath: "/tmp/export.mp4",
-    })
+  it("rejects a missing project identity before building a render plan", () => {
+    const plan = buildRenderPlan({ state: makeTimeline(), projectId: "" })
     expect(plan.ok).toBe(false)
+    if (!plan.ok) expect(plan.error.code).toBe("missing_project_id")
   })
 })

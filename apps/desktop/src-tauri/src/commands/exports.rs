@@ -1,88 +1,97 @@
 use std::path::Path;
-use std::sync::Arc;
-use std::thread;
 use tauri::State;
 use tracing::instrument;
 
 use crate::database::media::MediaJob;
-use crate::errors::Result;
-use crate::events::EventPublisher;
-use crate::exports::{run_render_plan, RenderPlan};
+use crate::errors::{InternalError, Result};
+use crate::exports::{ExportSettings, RenderPlan};
+use crate::jobs::ExportRequest;
 use crate::state::AppState;
 
-/// Options for exporting a timeline to a final MP4.
+/// Export input contains a project identity and an explicit destination. Rust
+/// resolves every source asset from the saved project before starting FFmpeg.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportTimelineOptions {
-    pub recording_id: String,
+    pub project_id: String,
     pub output_path: String,
     pub plan: RenderPlan,
+    pub settings: ExportSettings,
 }
 
-/// Start an export job for the current timeline.
+/// Start one durable export job. The manager persists the request before the
+/// worker thread starts, so the returned job id is authoritative end-to-end.
 #[tauri::command]
-#[instrument]
+#[instrument(skip(options))]
 pub fn export_timeline(
     options: ExportTimelineOptions,
     state: State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<MediaJob> {
-    let recording_id = options.recording_id.clone();
-    let plan = options.plan;
-    let output_path = state
-        .path_policy
-        .validate_export_destination(Path::new(&options.output_path))?;
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let job = MediaJob {
-        id: uuid::Uuid::new_v4().to_string(),
-        recording_id: recording_id.clone(),
-        kind: crate::database::media::MediaJobKind::Export,
-        status: crate::database::media::MediaJobStatus::Running,
-        progress: 0.0,
-        stage: "queued".into(),
-        message: Some("starting export".into()),
-        error: None,
-        created_at: now.clone(),
-        updated_at: now.clone(),
-        started_at: Some(now),
-        completed_at: None,
-        outputs: Default::default(),
-    };
-
-    // Emit the initial job state before spawning so the UI can show progress
-    // immediately and the command can return a job handle.
-    EventPublisher::new(&app).media_job_update(&job)?;
-
-    let ffmpeg_path = state.ffmpeg_path.clone();
-    let db = Arc::clone(&state.db);
-    let app_handle = app.clone();
-    let thread_job = job.clone();
-
-    thread::spawn(move || {
-        if let Err(err) = run_render_plan(
-            recording_id,
-            &output_path,
-            plan,
-            &ffmpeg_path,
-            db,
-            &app_handle,
-        ) {
-            let _ = emit_failed(&app_handle, &thread_job, &err.to_string());
-        }
-    });
-
-    Ok(job)
+    if options.project_id.trim().is_empty() {
+        return Err(InternalError::Project("project id is required for export".into()).into());
+    }
+    if options.plan.project_id != options.project_id {
+        return Err(InternalError::Project(
+            "render plan project does not match export project".into(),
+        )
+        .into());
+    }
+    let manager = state
+        .job_manager
+        .lock()
+        .map_err(|_| InternalError::Unknown("job manager mutex poisoned".into()))?;
+    manager.start_export(ExportRequest {
+        project_id: options.project_id,
+        output_path: options.output_path,
+        plan: options.plan,
+        settings: options.settings,
+    })
 }
 
-fn emit_failed(app: &tauri::AppHandle, job: &MediaJob, message: &str) -> Result<()> {
-    let failed = MediaJob {
-        status: crate::database::media::MediaJobStatus::Failed,
-        stage: "failed".into(),
-        message: Some(message.into()),
-        error: Some(message.into()),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        ..job.clone()
-    };
-    EventPublisher::new(app).media_job_update(&failed)
+/// Retry a failed/cancelled export with the persisted request and job identity.
+#[tauri::command]
+#[instrument]
+pub fn retry_export(job_id: String, state: State<'_, AppState>) -> Result<MediaJob> {
+    let manager = state
+        .job_manager
+        .lock()
+        .map_err(|_| InternalError::Unknown("job manager mutex poisoned".into()))?;
+    manager.retry_export(&job_id)
+}
+
+/// Reveal a completed export without allowing the UI to provide an arbitrary path.
+#[tauri::command]
+#[instrument(skip(state))]
+pub fn reveal_export(job_id: String, state: State<'_, AppState>) -> Result<()> {
+    let manager = state
+        .job_manager
+        .lock()
+        .map_err(|_| InternalError::Unknown("job manager mutex poisoned".into()))?;
+    let job = manager.get_job(&job_id)?;
+    let path = job
+        .outputs
+        .output_path
+        .ok_or_else(|| InternalError::Media("export has no published output".into()))?;
+    let validated = state
+        .path_policy
+        .validate_export_destination(Path::new(&path))?;
+    if !validated.is_file() {
+        return Err(InternalError::Storage("published export is missing".into()).into());
+    }
+
+    #[cfg(windows)]
+    {
+        let validated_str = validated.to_string_lossy();
+        std::process::Command::new("explorer")
+            .args(["/select,", validated_str.as_ref()])
+            .spawn()
+            .map_err(|error| InternalError::Media(format!("reveal export: {error}")))?;
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = validated;
+        Err(InternalError::Media("reveal is only implemented on Windows".into()).into())
+    }
 }

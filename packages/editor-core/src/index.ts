@@ -10,3 +10,19 @@ export * from "./engine"
 export * from "./selection"
 export * from "./snap"
 export * from "./composition"
+export {
+  analyzeCursorTelemetry,
+  clampZoomTarget as clampCursorZoomTarget,
+  generateSmartZoomSuggestions,
+  generateZoomSuggestions,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
+export type {
+  CursorAnalysisOptions,
+  CursorClickFeature,
+  CursorDwellFeature,
+  CursorInteractionFeatures,
+  CursorMovementFeature,
+  CursorSafeEdgeFeature,
+  SmartZoomGenerationOptions,
+} from "@recordforge/cursor-core"

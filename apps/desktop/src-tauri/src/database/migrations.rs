@@ -42,9 +42,12 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if current_version < 5 {
         migrate_v5(&tx)?;
     }
+    if current_version < 6 {
+        migrate_v6(&tx)?;
+    }
 
     tx.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '5')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '6')",
         [],
     )?;
 
@@ -267,6 +270,20 @@ fn migrate_v5(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v6: persist the full export request so one durable job identity can be
+/// retried or resumed after an application restart.
+fn migrate_v6(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "ALTER TABLE media_jobs ADD COLUMN options TEXT NOT NULL DEFAULT '{}'",
+        [],
+    )?;
+    tx.execute(
+        "ALTER TABLE media_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +319,6 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
     }
 }

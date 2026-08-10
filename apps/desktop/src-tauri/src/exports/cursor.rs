@@ -1,9 +1,9 @@
 use crate::capture::cursor::{CursorTelemetryEvent, CursorTelemetryFile};
 
-use super::{RenderPlanZoomSegment, RenderSegment};
+use super::{clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct CursorSettings {
     pub enabled: bool,
     pub preset: String,
@@ -68,8 +68,8 @@ impl Default for CursorSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct RenderCanvas {
     pub width: u32,
     pub height: u32,
@@ -90,6 +90,8 @@ pub struct RenderCanvas {
     pub shadow_offset_x: Option<f64>,
     #[serde(default)]
     pub shadow_offset_y: Option<f64>,
+    #[serde(default)]
+    pub aspect_ratio: Option<String>,
     pub cursor_settings: CursorSettings,
 }
 
@@ -122,6 +124,7 @@ pub struct CursorRenderer {
     zoom_segments: Vec<RenderPlanZoomSegment>,
     canvas_width: u32,
     canvas_height: u32,
+    canvas_padding: u32,
     fit_scale: f64,
     fit_offset_x: f64,
     fit_offset_y: f64,
@@ -133,17 +136,9 @@ impl CursorRenderer {
         settings: CursorSettings,
         telemetry: CursorTelemetryFile,
         segments: &[RenderSegment],
-        canvas_width: u32,
-        canvas_height: u32,
+        canvas: &RenderCanvas,
     ) -> Result<Self, String> {
-        Self::new_with_zoom(
-            settings,
-            telemetry,
-            segments,
-            &[],
-            canvas_width,
-            canvas_height,
-        )
+        Self::new_with_zoom(settings, telemetry, segments, &[], canvas)
     }
 
     pub fn new_with_zoom(
@@ -151,11 +146,10 @@ impl CursorRenderer {
         telemetry: CursorTelemetryFile,
         segments: &[RenderSegment],
         zoom_segments: &[RenderPlanZoomSegment],
-        canvas_width: u32,
-        canvas_height: u32,
+        canvas: &RenderCanvas,
     ) -> Result<Self, String> {
         let telemetry = telemetry.normalize();
-        if canvas_width == 0 || canvas_height == 0 {
+        if canvas.width == 0 || canvas.height == 0 {
             return Err("cursor canvas dimensions must be positive".into());
         }
         if telemetry.source_width == 0 || telemetry.source_height == 0 {
@@ -165,8 +159,11 @@ impl CursorRenderer {
             return Err("cursor renderer requires at least one video segment".into());
         }
 
-        let fit_scale = (canvas_width as f64 / telemetry.source_width as f64)
-            .min(canvas_height as f64 / telemetry.source_height as f64);
+        let padding = canvas.padding as f64;
+        let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
+        let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
+        let fit_scale = (content_width / telemetry.source_width as f64)
+            .min(content_height / telemetry.source_height as f64);
         let fit_width = telemetry.source_width as f64 * fit_scale;
         let fit_height = telemetry.source_height as f64 * fit_scale;
 
@@ -175,11 +172,12 @@ impl CursorRenderer {
             telemetry,
             segments: segments.to_vec(),
             zoom_segments: zoom_segments.to_vec(),
-            canvas_width,
-            canvas_height,
+            canvas_width: canvas.width,
+            canvas_height: canvas.height,
+            canvas_padding: canvas.padding,
             fit_scale,
-            fit_offset_x: (canvas_width as f64 - fit_width) / 2.0,
-            fit_offset_y: (canvas_height as f64 - fit_height) / 2.0,
+            fit_offset_x: padding + (content_width - fit_width) / 2.0,
+            fit_offset_y: padding + (content_height - fit_height) / 2.0,
         })
     }
 
@@ -263,6 +261,14 @@ impl CursorRenderer {
             "linear" => progress,
             "ease-in" => progress * progress,
             "ease-out" => 1.0 - (1.0 - progress).powi(2),
+            "snappy" => {
+                if progress < 0.5 {
+                    4.0 * progress.powi(3)
+                } else {
+                    1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+                }
+            }
+            "cinematic" => progress * progress * (3.0 - 2.0 * progress),
             _ => {
                 if progress < 0.5 {
                     2.0 * progress * progress
@@ -271,30 +277,28 @@ impl CursorRenderer {
                 }
             }
         };
-        let target_width =
-            (segment.target.width / segment.scale.max(1.0)).clamp(1.0, self.canvas_width as f64);
-        let target_height =
-            (segment.target.height / segment.scale.max(1.0)).clamp(1.0, self.canvas_height as f64);
-        let target_x = (segment.target.x + (segment.target.width - target_width) / 2.0)
-            .clamp(0.0, self.canvas_width as f64 - target_width);
-        let target_y = (segment.target.y + (segment.target.height - target_height) / 2.0)
-            .clamp(0.0, self.canvas_height as f64 - target_height);
-        let crop_x = target_x * eased;
-        let crop_y = target_y * eased;
-        let crop_width =
-            self.canvas_width as f64 + (target_width - self.canvas_width as f64) * eased;
-        let crop_height =
-            self.canvas_height as f64 + (target_height - self.canvas_height as f64) * eased;
+
+        // Use the same padded, aspect-preserving crop geometry as the export so
+        // the cursor overlay tracks the video frame exactly.
+        let target = clamped_zoom_target(
+            self.canvas_width,
+            self.canvas_height,
+            self.canvas_padding,
+            segment,
+        );
+        let full_w = self.canvas_width as f64;
+        let full_h = self.canvas_height as f64;
+        let crop_x = target.x * eased;
+        let crop_y = target.y * eased;
+        let crop_width = full_w + (target.width - full_w) * eased;
+        let crop_height = full_h + (target.height - full_h) * eased;
         (
-            ((x - crop_x) * self.canvas_width as f64 / crop_width)
-                .clamp(0.0, self.canvas_width as f64),
-            ((y - crop_y) * self.canvas_height as f64 / crop_height)
-                .clamp(0.0, self.canvas_height as f64),
+            ((x - crop_x) * full_w / crop_width).clamp(0.0, full_w),
+            ((y - crop_y) * full_h / crop_height).clamp(0.0, full_h),
         )
     }
 
     fn position_for_event(&self, event_index: usize) -> (f64, f64) {
-        let event = &self.telemetry.events[event_index];
         let (capture_width, capture_height) = self
             .telemetry
             .capture_bounds
@@ -311,25 +315,33 @@ impl CursorRenderer {
             self.telemetry.source_width as f64 / capture_width.max(1) as f64 * dpi_scale.0;
         let coordinate_scale_y =
             self.telemetry.source_height as f64 / capture_height.max(1) as f64 * dpi_scale.1;
-        let (mut source_x, mut source_y) =
-            (event.x * coordinate_scale_x, event.y * coordinate_scale_y);
-        source_x = source_x.clamp(0.0, self.telemetry.source_width as f64);
-        source_y = source_y.clamp(0.0, self.telemetry.source_height as f64);
-        if self.settings.smooth_movement {
+
+        let (source_x, source_y) = if self.settings.smooth_movement {
             let factor = self.settings.smooth_factor.clamp(0.05, 1.0);
             let window_size = 5;
             let mut total_weight = 0.0;
-            source_x = 0.0;
-            source_y = 0.0;
+            let mut raw_x = 0.0;
+            let mut raw_y = 0.0;
             for cursor_index in event_index.saturating_sub(window_size)..=event_index {
                 let weight = (1.0 - factor).powi((event_index - cursor_index) as i32);
-                source_x += self.telemetry.events[cursor_index].x * weight;
-                source_y += self.telemetry.events[cursor_index].y * weight;
+                let event = &self.telemetry.events[cursor_index];
+                raw_x += event.x * weight;
+                raw_y += event.y * weight;
                 total_weight += weight;
             }
-            source_x /= total_weight;
-            source_y /= total_weight;
-        }
+            (
+                (raw_x / total_weight) * coordinate_scale_x,
+                (raw_y / total_weight) * coordinate_scale_y,
+            )
+        } else {
+            let event = &self.telemetry.events[event_index];
+            (event.x * coordinate_scale_x, event.y * coordinate_scale_y)
+        };
+
+        let source_width = self.telemetry.source_width as f64;
+        let source_height = self.telemetry.source_height as f64;
+        let source_x = source_x.clamp(0.0, source_width);
+        let source_y = source_y.clamp(0.0, source_height);
 
         (
             self.fit_offset_x + source_x * self.fit_scale,
@@ -969,6 +981,7 @@ fn draw_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exports::RenderCropFloat;
 
     fn telemetry() -> CursorTelemetryFile {
         CursorTelemetryFile::new(
@@ -1006,11 +1019,12 @@ mod tests {
 
     fn segments() -> Vec<RenderSegment> {
         vec![RenderSegment {
-            asset_id: Some("recording".into()),
+            asset_id: "recording".into(),
             stream_index: None,
             volume: None,
             fade_in_ms: None,
             fade_out_ms: None,
+            speed: 1.0,
             source_in_ms: 0,
             source_out_ms: 1_000,
             output_start_ms: 0,
@@ -1023,14 +1037,22 @@ mod tests {
         assert_eq!(source_time_for_output(&segments(), 500), Some(500));
     }
 
+    fn test_canvas(width: u32, height: u32, padding: u32) -> RenderCanvas {
+        RenderCanvas {
+            width,
+            height,
+            padding,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn renders_a_non_empty_cursor_frame() {
         let renderer = CursorRenderer::new(
             CursorSettings::default(),
             telemetry(),
             &segments(),
-            100,
-            100,
+            &test_canvas(100, 100, 0),
         )
         .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
@@ -1053,8 +1075,7 @@ mod tests {
             CursorSettings::default(),
             telemetry,
             &segments(),
-            1_920,
-            1_080,
+            &test_canvas(1_920, 1_080, 0),
         )
         .expect("valid cursor renderer");
         let (x, y) = renderer.position_for_event(0);
@@ -1066,10 +1087,54 @@ mod tests {
     fn does_not_render_hidden_cursor_events() {
         let mut data = telemetry();
         data.events[1].visible = false;
-        let renderer = CursorRenderer::new(CursorSettings::default(), data, &segments(), 100, 100)
-            .expect("valid cursor renderer");
+        let renderer = CursorRenderer::new(
+            CursorSettings::default(),
+            data,
+            &segments(),
+            &test_canvas(100, 100, 0),
+        )
+        .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
         renderer.render_frame(100, &mut frame);
         assert!(frame.chunks_exact(4).all(|pixel| pixel[3] == 0));
+    }
+
+    #[test]
+    fn apply_zoom_clamps_target_to_padded_content_area() {
+        let zoom = RenderPlanZoomSegment {
+            id: "zoom".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            target: RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            enabled: true,
+            mode: "manual".into(),
+            source: "manual".into(),
+            preset: "manual-only".into(),
+        };
+        let renderer = CursorRenderer::new_with_zoom(
+            CursorSettings::default(),
+            telemetry(),
+            &segments(),
+            &[zoom],
+            &test_canvas(200, 200, 20),
+        )
+        .expect("valid cursor renderer");
+
+        // At the last frame before the segment ends, progress is 0.999 for a linear
+        // easing, so the result is within rounding distance of 150.
+        let (x, y) = renderer.apply_zoom(999, 120.0, 120.0);
+        assert!((x - 150.0).abs() < 0.1, "expected ~150.0, got {x}");
+        assert!((y - 150.0).abs() < 0.1, "expected ~150.0, got {y}");
+
+        let (no_zoom_x, no_zoom_y) = renderer.apply_zoom(1_001, 120.0, 120.0);
+        assert!((no_zoom_x - 120.0).abs() < 0.01);
+        assert!((no_zoom_y - 120.0).abs() < 0.01);
     }
 }

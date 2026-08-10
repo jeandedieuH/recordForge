@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { cursorSettingsForEffect } from "@recordforge/cursor-core"
+import { cursorSettingsForEffect, generateSmartZoomSuggestions } from "@recordforge/cursor-core"
 import type {
   ClipTransform,
   CursorSettings,
@@ -15,6 +15,7 @@ import {
   createSplitZoomSegmentCommand,
   createDeleteCursorRangeCommand,
   createDeleteZoomSegmentCommand,
+  createRegenerateZoomSuggestionsCommand,
   createDeleteMarkerCommand,
   createUpdateCursorRangeCommand,
   createUpdateZoomSegmentCommand,
@@ -26,6 +27,7 @@ import {
   createUpdateMaskClipCommand,
   createUpdateCanvasCommand,
   createUpdateCursorSettingsCommand,
+  createUpdateSmartZoomSettingsCommand,
   createUpdateTrackCommand,
   getTotalDuration,
 } from "@recordforge/editor-core"
@@ -84,6 +86,8 @@ export function ClipInspector({
   const project = useTimelineStore((state) => state.project)
   const view = useTimelineStore((state) => state.view)
   const timelineState = useTimelineStore((state) => state.engine?.history.present)
+  const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
+  const cursorTelemetryStatus = useTimelineStore((state) => state.cursorTelemetryStatus)
   const cursorSettings = timelineState?.canvas.cursorSettings
   const cursorAssetId = project?.assets.find((asset) => asset.role === "cursor_events")?.id
   const selectedRange = view.selection?.kind === "range" ? view.selection : null
@@ -147,6 +151,15 @@ export function ClipInspector({
         settings: cursorSettings,
       }),
     )
+  }
+
+  function regenerateSmartZoom() {
+    if (!timelineState || !cursorTelemetry || cursorTelemetryStatus !== "available") return
+    const suggestions = generateSmartZoomSuggestions(cursorTelemetry, timelineState.canvas, {
+      ...(timelineState.smartZoomSettings ?? {}),
+      durationMs: getTotalDuration(timelineState),
+    })
+    execute(createRegenerateZoomSuggestionsCommand(suggestions))
   }
 
   if (marker) {
@@ -292,6 +305,10 @@ export function ClipInspector({
           selectedSegment={selectedZoom}
           timelineDuration={timelineState ? getTotalDuration(timelineState) : 0}
           playheadMs={view.playheadMs}
+          telemetryStatus={cursorTelemetryStatus}
+          smartZoomPreset={timelineState?.smartZoomSettings?.preset ?? "product-demo"}
+          onRegenerate={regenerateSmartZoom}
+          onPresetChange={(preset) => execute(createUpdateSmartZoomSettingsCommand({ preset }))}
           onSelect={(segmentId) =>
             useTimelineStore.getState().setSelection({ kind: "zoom", segmentId })
           }
@@ -820,11 +837,17 @@ function ZoomInspector({
   onUpdate,
   onSplit,
   onDelete,
+  telemetryStatus,
+  smartZoomPreset,
+  onRegenerate,
+  onPresetChange,
 }: {
   segments: ManualZoomSegment[]
   selectedSegment: ManualZoomSegment | null
   timelineDuration: number
   playheadMs: number
+  telemetryStatus: "loading" | "available" | "unavailable"
+  smartZoomPreset: NonNullable<ManualZoomSegment["preset"]>
   onSelect: (segmentId: string) => void
   onAdd: (startMs: number, endMs: number, target: ManualZoomSegment["target"]) => void
   onUpdate: (
@@ -833,13 +856,15 @@ function ZoomInspector({
   ) => void
   onSplit: (segmentId: string, splitTimeMs: number) => void
   onDelete: (segmentId: string) => void
+  onRegenerate: () => void
+  onPresetChange: (preset: NonNullable<ManualZoomSegment["preset"]>) => void
 }) {
   const defaultEnd = Math.min(timelineDuration || playheadMs + 1_000, playheadMs + 1_000)
   return (
-    <div className="flex flex-col gap-2 border-b border-border pb-4">
+    <div className="flex flex-col gap-3 border-b border-border pb-4">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
-          Manual zoom
+          Zoom
         </span>
         <Button
           variant="secondary"
@@ -855,13 +880,57 @@ function ZoomInspector({
             })
           }
         >
-          Add at playhead
+          Add manual
+        </Button>
+      </div>
+      <div className="rounded-md border border-border bg-surface-dim p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-foreground">Smart suggestions</span>
+          <select
+            aria-label="Smart zoom preset"
+            value={smartZoomPreset}
+            onChange={(event) =>
+              onPresetChange(event.target.value as NonNullable<ManualZoomSegment["preset"]>)
+            }
+            className="h-7 rounded border border-border bg-surface px-1 text-[11px] text-foreground"
+          >
+            <option value="subtle">Subtle</option>
+            <option value="product-demo">Product demo</option>
+            <option value="cinematic">Cinematic</option>
+            <option value="manual-only">Manual only</option>
+          </select>
+        </div>
+        <p className="mt-1 text-[10px] leading-relaxed text-subtle-foreground">
+          Suggestions focus on clicks and sustained cursor attention. Manual and locked ranges are
+          preserved when regenerated.
+        </p>
+        {telemetryStatus === "unavailable" ? (
+          <p
+            className="mt-2 rounded border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] text-warning"
+            role="status"
+          >
+            Smart zoom unavailable: this project has no usable cursor telemetry.
+          </p>
+        ) : null}
+        {telemetryStatus === "loading" ? (
+          <p className="mt-2 text-[10px] text-subtle-foreground" role="status" aria-live="polite">
+            Checking cursor telemetry…
+          </p>
+        ) : null}
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2 h-7 w-full text-[10px]"
+          disabled={telemetryStatus !== "available" || smartZoomPreset === "manual-only"}
+          onClick={onRegenerate}
+        >
+          Regenerate suggestions
         </Button>
       </div>
       {segments.length === 0 ? (
         <p className="text-[11px] leading-relaxed text-subtle-foreground">
-          Add a range to focus on a screen area. Targets are clamped to the canvas before preview
-          and export.
+          Add a manual range or generate suggestions from cursor activity. Targets are clamped to
+          the canvas before preview and export.
         </p>
       ) : (
         <div className="flex flex-col gap-1">
@@ -876,11 +945,16 @@ function ZoomInspector({
               }`}
               onClick={() => onSelect(segment.id)}
             >
-              <span className="truncate">
+              <span className="min-w-0 truncate">
                 {formatInspectorTime(segment.startMs)} →{" "}
                 {formatInspectorTime(segment.startMs + segment.durationMs)}
+                <span className="ml-1 text-[10px] text-subtle-foreground">
+                  {segment.mode ?? "manual"} · {segment.source ?? "manual"}
+                </span>
               </span>
-              <span className="font-mono text-subtle-foreground">{segment.scale.toFixed(1)}×</span>
+              <span className="shrink-0 font-mono text-subtle-foreground">
+                {segment.scale.toFixed(1)}×
+              </span>
             </button>
           ))}
         </div>
@@ -940,6 +1014,9 @@ function ZoomInspector({
               <option value="ease-in">Ease in</option>
               <option value="ease-out">Ease out</option>
               <option value="ease-in-out">Ease in/out</option>
+              <option value="smooth">Smooth</option>
+              <option value="cinematic">Cinematic</option>
+              <option value="snappy">Snappy</option>
             </select>
           </label>
           <div className="flex gap-2">

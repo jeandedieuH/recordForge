@@ -227,6 +227,8 @@ export function findCursorEffectAtTime(
   )
 }
 
+export * from "./smart-zoom"
+
 export function cursorSettingsForEffect(
   base: CursorSettings | undefined,
   effect: CursorEffectClip | null,

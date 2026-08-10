@@ -108,6 +108,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
+        "@recordforge/cursor-core": "workspace:*",
         "@recordforge/domain": "workspace:*",
         "zod": "^3.25.11",
       },

@@ -108,6 +108,8 @@ pub struct ProjectExportSettings {
     pub container: String,
     #[serde(default = "default_caption_mode")]
     pub caption_mode: String,
+    #[serde(default)]
+    pub range: Option<crate::exports::ExportRange>,
 }
 
 impl Default for ProjectExportSettings {
@@ -117,6 +119,7 @@ impl Default for ProjectExportSettings {
             codec: default_export_codec(),
             container: default_export_container(),
             caption_mode: default_caption_mode(),
+            range: None,
         }
     }
 }
@@ -152,6 +155,8 @@ pub struct ProjectFile {
     pub markers: Value,
     #[serde(default = "empty_json_array")]
     pub zoom_segments: Value,
+    #[serde(default = "empty_json_object")]
+    pub smart_zoom_settings: Value,
     pub export_settings: ProjectExportSettings,
     pub created_at: String,
     pub updated_at: String,
@@ -160,6 +165,10 @@ pub struct ProjectFile {
 
 fn empty_json_array() -> Value {
     Value::Array(Vec::new())
+}
+
+fn empty_json_object() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
 /// Result of loading a project, with any missing asset ids.
@@ -481,7 +490,7 @@ fn cursor_effect_value(asset: &ProjectAsset, duration_ms: u64, canvas: &Value) -
 
 /// Load a project from the recording's work directory.
 /// If the project file does not exist, returns `Ok(None)` so the caller can bootstrap.
-#[instrument]
+#[instrument(skip(project_dir, policy))]
 pub fn load_project(project_dir: &Path, policy: &PathPolicy) -> Result<Option<LoadedProject>> {
     let path = project_path(project_dir);
     if !path.exists() {
@@ -550,7 +559,7 @@ pub fn load_project(project_dir: &Path, policy: &PathPolicy) -> Result<Option<Lo
 }
 
 /// Save a project to disk with an atomic write, backup copy, and fresh checksum.
-#[instrument]
+#[instrument(skip(project, project_dir))]
 pub fn save_project(project: &ProjectFile, project_dir: &Path) -> Result<ProjectFile> {
     if !project_dir.exists() {
         fs::create_dir_all(project_dir)
@@ -585,7 +594,7 @@ pub fn save_project(project: &ProjectFile, project_dir: &Path) -> Result<Project
 
 /// Create a snapshot backup before a destructive editor operation.
 /// Keeps at most 5 timestamped snapshots; older ones are pruned.
-#[instrument]
+#[instrument(skip(project_dir))]
 pub fn snapshot_project(project_dir: &Path) -> Result<PathBuf> {
     let path = project_path(project_dir);
     if !path.exists() {
@@ -617,7 +626,7 @@ fn prune_snapshots(project_dir: &Path) -> Result<()> {
     while snapshots.len() > 5 {
         if let Some(oldest) = snapshots.first() {
             if let Err(err) = fs::remove_file(oldest) {
-                warn!(path = %oldest.display(), error = %err, "failed to prune old snapshot");
+                warn!(error = %err, "failed to prune old snapshot");
             }
             snapshots.remove(0);
         }
@@ -678,7 +687,7 @@ fn create_screen_asset(recording: &LibraryRecording, metadata: &MediaMetadata) -
 }
 
 /// Bootstrap a new project file from a library recording and cached metadata.
-#[instrument]
+#[instrument(skip(recording, metadata, project_dir))]
 pub fn create_project(
     recording: &LibraryRecording,
     metadata: &MediaMetadata,
@@ -768,6 +777,7 @@ pub fn create_project(
         tracks,
         markers: Value::Array(vec![]),
         zoom_segments: Value::Array(vec![]),
+        smart_zoom_settings: empty_json_object(),
         export_settings: ProjectExportSettings::default(),
         created_at: now.clone(),
         updated_at: now,
@@ -813,7 +823,7 @@ pub fn duplicate_project(project: &ProjectFile, new_name: Option<&str>) -> Proje
 }
 
 /// Delete a project's persisted files and return the project id.
-#[instrument]
+#[instrument(skip(project_dir))]
 pub fn delete_project(project_dir: &Path) -> Result<()> {
     let path = project_path(project_dir);
     if path.exists() {
@@ -840,7 +850,7 @@ pub fn delete_project(project_dir: &Path) -> Result<()> {
 
 /// Relink an asset to a new file path. The new path is stored relative to the
 /// project directory when possible.
-#[instrument]
+#[instrument(skip(project, project_dir, new_path, policy))]
 pub fn relink_asset(
     project: &ProjectFile,
     project_dir: &Path,
@@ -884,12 +894,23 @@ pub fn asset_path_map(project: &ProjectFile, project_dir: &Path) -> HashMap<Stri
 }
 
 /// Resolve all exportable assets through the same containment checks used by
-/// project loading. Export callers receive IDs mapped to trusted paths only.
+/// project loading. Export callers receive canonical IDs mapped to existing paths only.
 pub fn load_asset_path_map(project_dir: &Path) -> Result<HashMap<String, PathBuf>> {
     let policy = PathPolicy::new(project_dir.to_path_buf(), project_dir.to_path_buf());
     let loaded = load_project(project_dir, &policy)?
         .ok_or_else(|| InternalError::Project("project file is required for export".into()))?;
-    Ok(asset_path_map(&loaded.project, project_dir))
+    let mut paths = HashMap::new();
+    for asset in loaded.project.assets.iter().filter(|asset| {
+        matches!(
+            asset.status,
+            ProjectAssetStatus::Available | ProjectAssetStatus::Relinked
+        )
+    }) {
+        let path = project_dir.join(&asset.path);
+        let canonical = policy.validate_project_asset_path(project_dir, &path)?;
+        paths.insert(asset.id.clone(), canonical);
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -965,6 +986,7 @@ mod tests {
             tracks: Value::Null,
             markers: Value::Null,
             zoom_segments: Value::Null,
+            smart_zoom_settings: Value::Null,
             export_settings: ProjectExportSettings::default(),
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),

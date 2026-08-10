@@ -1,6 +1,6 @@
 # Security and Path Policy Specification
 
-> **Status:** Draft — Phase 0  
+> **Status:** Draft — Phase 8 implementation
 > **Scope:** Path authorization, UUID validation, containment rules, symlink defense, command validation  
 > **Owner:** Rust `path_policy`, `validation` modules
 
@@ -20,7 +20,7 @@ recordForge is a desktop app that receives untrusted input from:
 |---------|------|---------|
 | IPC string → filesystem path | Path traversal, arbitrary file deletion | `delete_recovery_session("../../important")` |
 | IPC string → SQL | Injection (mitigated by parameterized queries) | — |
-| Render plan paths | Read arbitrary files during export | `inputPath: "C:\\Windows\\system32\\config\\SAM"` |
+| Render plan asset references | Unknown or missing asset IDs could select unintended media | `assetId: "unregistered-asset"` (rejected by Rust) |
 | Log/diagnostic output | Credential/PII leakage | OAuth token in debug log |
 | Capability scope | Over-privileged windows | Floating controls with `dialog:allow-save` |
 

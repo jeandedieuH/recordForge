@@ -1,0 +1,46 @@
+{
+  "projectId": "project-phase8",
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "background": "#000000",
+    "padding": 0,
+    "borderRadius": 0,
+    "shadow": false
+  },
+  "durationMs": 6000,
+  "segments": [
+    {
+      "assetId": "asset-screen",
+      "streamIndex": 0,
+      "sourceInMs": 0,
+      "sourceOutMs": 3000,
+      "outputStartMs": 0,
+      "outputEndMs": 3000,
+      "speed": 1
+    },
+    {
+      "assetId": "asset-screen",
+      "streamIndex": 0,
+      "sourceInMs": 6000,
+      "sourceOutMs": 7500,
+      "outputStartMs": 5000,
+      "outputEndMs": 6000,
+      "speed": 1.5
+    }
+  ],
+  "gaps": [
+    {
+      "startMs": 3000,
+      "endMs": 5000
+    }
+  ],
+  "audioTracks": [],
+  "overlays": [],
+  "captions": [],
+  "captionMode": "burn-in",
+  "masks": [],
+  "zoomSegments": [],
+  "cursorEffects": []
+}

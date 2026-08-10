@@ -1,6 +1,6 @@
 # Media Export Test Plan
 
-> **Status:** Draft — Phase 0  
+> **Status:** Draft — Phase 8 implementation
 > **Scope:** Golden media comparison, partial output cleanup, cancel behavior, export pipeline validation
 
 ---
@@ -27,7 +27,7 @@
 | `test_trim_inverted_range` | start > end | Error: invalid range |
 | `test_trim_beyond_duration` | end > total duration | Error or clamp to duration |
 
-### 1.3 Render plan export (Phase 6)
+### 1.3 Render plan export (Phase 8)
 
 | Test | Input | Expected Output |
 |------|-------|----------------|
@@ -38,6 +38,9 @@
 | `test_render_audio_mix` | Mic at 50%, system at 100% | Both tracks mixed at specified volumes |
 | `test_render_webcam_pip` | Screen + webcam overlay | Webcam visible at specified position |
 | `test_render_canvas` | 1080p canvas with padding | Output matches canvas dimensions |
+| `test_render_camera_speed` | Camera clip at 2× speed | Overlay timing matches preview |
+| `test_render_captions_masks_cursor` | Combined Phase 7 effects | All enabled effects are present or export is blocked |
+| `test_render_selected_range` | Selected timeline range | Output starts at zero and preserves internal gaps |
 
 ---
 
@@ -64,14 +67,15 @@
 
 ## 3. Export Job Persistence Tests (P0.10)
 
-### 3.1 Current issues
+### 3.1 Phase 8 lifecycle contract
 
-| Issue | Current | Required |
-|-------|---------|----------|
-| Job not persisted | Export creates in-memory `MediaJob`, not saved to DB | Persist before thread starts |
-| Inconsistent IDs | Export creates its own UUID | Use scheduler's `insert_job` |
-| No cancellation | Export thread runs without cancel token | AtomicBool check between stages |
-| App crash during export | Partial file may remain | Cleanup on startup |
+| Concern | Phase 8 behavior |
+|---------|------------------|
+| Job persistence | Export request is stored in `media_jobs.options` before the worker starts |
+| Job identity | Scheduler-created id is used from command response through completion/cancellation/retry |
+| Cancellation | AtomicBool is checked between stages and while cursor frames are streamed |
+| App restart | Pending/running export rows are reloaded from persisted options |
+| Retry | Failed/cancelled row is re-queued with the same id and stale partial files removed |
 
 ### 3.2 Job lifecycle tests
 
@@ -83,6 +87,7 @@
 | `test_export_job_failed` | On FFmpeg error, job status = "failed", error message set |
 | `test_export_job_cancelled` | On cancel, job status = "cancelled", partial cleaned |
 | `test_export_job_restart` | App restart with pending export → job resumed |
+| `test_export_retry_same_identity` | Retry failed export | Same job id, no stale partial/published output |
 
 ---
 

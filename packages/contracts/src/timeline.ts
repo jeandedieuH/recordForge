@@ -19,7 +19,15 @@ import {
 export const canvasAspectRatioSchema = z.enum(["16:9", "1:1", "9:16", "custom"])
 export type CanvasAspectRatio = z.infer<typeof canvasAspectRatioSchema>
 
-export const zoomEasingSchema = z.enum(["linear", "ease-in", "ease-out", "ease-in-out"])
+export const zoomEasingSchema = z.enum([
+  "linear",
+  "ease-in",
+  "ease-out",
+  "ease-in-out",
+  "smooth",
+  "cinematic",
+  "snappy",
+])
 export type ZoomEasing = z.infer<typeof zoomEasingSchema>
 
 export const zoomTargetSchema = z.object({
@@ -29,6 +37,36 @@ export const zoomTargetSchema = z.object({
   height: z.number().positive(),
 })
 export type ZoomTarget = z.infer<typeof zoomTargetSchema>
+
+export const zoomModeSchema = z.enum(["auto", "manual", "follow-cursor"])
+export type ZoomMode = z.infer<typeof zoomModeSchema>
+
+export const zoomSourceSchema = z.enum(["click", "dwell", "movement", "manual", "follow"])
+export type ZoomSource = z.infer<typeof zoomSourceSchema>
+
+export const zoomPresetSchema = z.enum(["subtle", "product-demo", "cinematic", "manual-only"])
+export type ZoomPreset = z.infer<typeof zoomPresetSchema>
+
+// Smart zoom settings are optional in project files so older projects remain
+// readable while a regeneration keeps the selected preset and thresholds durable.
+export const smartZoomSettingsSchema = z.object({
+  preset: zoomPresetSchema.default("product-demo"),
+  minDwellMs: z.number().int().min(100).max(10_000).default(700),
+  dwellTolerancePx: z.number().min(0).max(500).default(12),
+  clickLeadInMs: z.number().int().min(0).max(5_000).default(220),
+  clickDurationMs: z.number().int().min(100).max(10_000).default(1_100),
+  dwellLeadInMs: z.number().int().min(0).max(5_000).default(160),
+  dwellTailMs: z.number().int().min(0).max(10_000).default(540),
+  minSegmentDurationMs: z.number().int().min(100).max(10_000).default(500),
+  maxSegmentDurationMs: z.number().int().min(100).max(20_000).default(2_400),
+  safeEdgePadding: z.number().min(0).max(1_000).default(32),
+  targetScale: z.number().min(1.05).max(4).default(1.5),
+  includeClicks: z.boolean().default(true),
+  includeDwells: z.boolean().default(true),
+})
+
+export type SmartZoomSettings = z.infer<typeof smartZoomSettingsSchema>
+export const defaultSmartZoomSettings: SmartZoomSettings = smartZoomSettingsSchema.parse({})
 
 // Canvas settings shared by the timeline, the preview, and the final render.
 export const timelineCanvasSchema = z.object({
@@ -74,8 +112,10 @@ export const clipTransformSchema = z.object({
 
 export type ClipTransform = z.infer<typeof clipTransformSchema>
 
-// Manual zoom ranges are timeline effects rather than media clips. The target
-// is clamped to the canvas before it reaches either the preview or the exporter.
+// Zoom ranges are timeline effects rather than media clips. The target is
+// clamped to the canvas before it reaches either the preview or the exporter.
+// Optional Phase 9 metadata keeps v1 manual zooms readable while distinguishing
+// generated suggestions from user-authored ranges.
 export const manualZoomSegmentSchema = z.object({
   id: z.string(),
   startMs: z.number().int().min(0),
@@ -85,9 +125,14 @@ export const manualZoomSegmentSchema = z.object({
   easing: zoomEasingSchema.default("ease-in-out"),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
+  mode: zoomModeSchema.optional(),
+  source: zoomSourceSchema.optional(),
+  preset: zoomPresetSchema.optional(),
 })
 
 export type ManualZoomSegment = z.infer<typeof manualZoomSegmentSchema>
+export const zoomSegmentSchema = manualZoomSegmentSchema
+export type ZoomSegment = ManualZoomSegment
 
 // Core clip fields. Clips are non-destructive references into source media.
 export const timelineClipBaseSchema = z.object({
@@ -254,8 +299,9 @@ export const timelineStateSchema = z.object({
   tracks: z.array(timelineTrackSchema),
   markers: z.array(timelineMarkerSchema),
   // Optional keeps projects created before Phase 6 valid while still making
-  // manual zoom ranges durable as soon as the user creates one.
+  // manual and generated zoom ranges durable as soon as the user creates one.
   zoomSegments: z.array(manualZoomSegmentSchema).optional(),
+  smartZoomSettings: smartZoomSettingsSchema.optional(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 })
@@ -279,6 +325,39 @@ export const timelineViewStateSchema = z.object({
 
 export type TimelineViewState = z.infer<typeof timelineViewStateSchema>
 
+export const exportPresetSchema = z.enum([
+  "default-mp4",
+  "fast-share",
+  "balanced",
+  "high-quality",
+  "vertical",
+  "square",
+  "selected-range",
+])
+export type ExportPreset = z.infer<typeof exportPresetSchema>
+
+export const exportRangeSchema = z.object({
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+})
+export type ExportRange = z.infer<typeof exportRangeSchema>
+
+// Export settings are sent with the job so Rust renders the settings shown by the UI.
+export const exportSettingsSchema = z.object({
+  preset: exportPresetSchema.default("default-mp4"),
+  codec: z.enum(["h264", "hevc"]).default("h264"),
+  container: z.literal("mp4").default("mp4"),
+  captionMode: renderCaptionModeSchema.default("burn-in"),
+  range: exportRangeSchema.nullish(),
+})
+export type ExportSettings = z.infer<typeof exportSettingsSchema>
+
+export const renderPlanGapSchema = z.object({
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+})
+export type RenderPlanGap = z.infer<typeof renderPlanGapSchema>
+
 // A single continuous segment in the final render plan.
 export const renderSegmentSchema = z.object({
   assetId: z.string(),
@@ -286,7 +365,7 @@ export const renderSegmentSchema = z.object({
   volume: z.number().min(0).max(2).optional(),
   fadeInMs: z.number().min(0).optional(),
   fadeOutMs: z.number().min(0).optional(),
-  speed: z.number().min(0).default(1),
+  speed: z.number().positive().default(1),
   sourceInMs: z.number().int().min(0),
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
@@ -315,6 +394,7 @@ export const renderPlanOverlaySchema = z.object({
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
   outputEndMs: z.number().int().min(0),
+  speed: z.number().positive().default(1),
   x: z.number(),
   y: z.number(),
   width: z.number(),
@@ -370,6 +450,9 @@ export const renderPlanZoomSegmentSchema = z.object({
   scale: z.number().min(1).max(8).default(1),
   easing: zoomEasingSchema.default("ease-in-out"),
   enabled: z.boolean().default(true),
+  mode: zoomModeSchema.optional(),
+  source: zoomSourceSchema.optional(),
+  preset: zoomPresetSchema.optional(),
 })
 
 export type RenderPlanZoomSegment = z.infer<typeof renderPlanZoomSegmentSchema>
@@ -390,31 +473,129 @@ export const renderPlanCursorEffectSchema = z.object({
 
 export type RenderPlanCursorEffect = z.infer<typeof renderPlanCursorEffectSchema>
 
-// Render plan produced by media-core from a timeline.
-export const renderPlanSchema = z.object({
-  recordingId: z.string(),
-  canvas: timelineCanvasSchema,
-  durationMs: z.number().int().min(0),
-  segments: z.array(renderSegmentSchema),
-  // `audio` remains for backwards-compatible consumers; new exports use all tracks.
-  audio: renderPlanAudioSchema.optional(),
-  audioTracks: z.array(renderPlanAudioSchema).default([]),
-  overlays: z.array(renderPlanOverlaySchema).default([]),
-  captions: z.array(renderPlanCaptionSchema).default([]),
-  captionMode: renderCaptionModeSchema.default("burn-in"),
-  masks: z.array(renderPlanMaskSchema).default([]),
-  zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
-  cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
-})
+// Render plan produced by media-core from a saved project timeline.
+export const renderPlanSchema = z
+  .object({
+    projectId: z.string().min(1),
+    canvas: timelineCanvasSchema,
+    durationMs: z.number().int().positive(),
+    segments: z.array(renderSegmentSchema).min(1),
+    gaps: z.array(renderPlanGapSchema).default([]),
+    // `audio` remains for backwards-compatible consumers; new exports use all tracks.
+    audio: renderPlanAudioSchema.optional(),
+    audioTracks: z.array(renderPlanAudioSchema).default([]),
+    overlays: z.array(renderPlanOverlaySchema).default([]),
+    captions: z.array(renderPlanCaptionSchema).default([]),
+    captionMode: renderCaptionModeSchema.default("burn-in"),
+    masks: z.array(renderPlanMaskSchema).default([]),
+    zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
+    cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
+  })
+  .superRefine((plan, context) => {
+    let cursorMs = 0
+    const expectedGaps: Array<{ startMs: number; endMs: number }> = []
+    for (const [index, segment] of plan.segments.entries()) {
+      if (segment.sourceOutMs <= segment.sourceInMs) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["segments", index, "sourceOutMs"],
+          message: "Render segment source range must be positive",
+        })
+      }
+      if (segment.outputEndMs <= segment.outputStartMs || segment.outputEndMs > plan.durationMs) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["segments", index, "outputEndMs"],
+          message: "Render segment output range is invalid",
+        })
+      }
+      if (segment.outputStartMs < cursorMs) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["segments", index, "outputStartMs"],
+          message: "Render segments cannot overlap",
+        })
+      }
+      if (segment.outputStartMs > cursorMs) {
+        expectedGaps.push({ startMs: cursorMs, endMs: segment.outputStartMs })
+      }
+      cursorMs = Math.max(cursorMs, segment.outputEndMs)
+    }
+    if (cursorMs < plan.durationMs) expectedGaps.push({ startMs: cursorMs, endMs: plan.durationMs })
+    if (JSON.stringify(expectedGaps) !== JSON.stringify(plan.gaps)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["gaps"],
+        message: "Render gaps must match segment output timing",
+      })
+    }
+    for (const [index, gap] of plan.gaps.entries()) {
+      if (gap.endMs <= gap.startMs || gap.endMs > plan.durationMs) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gaps", index],
+          message: "Render gap range is invalid",
+        })
+      }
+    }
+    for (const [key, effects] of [
+      ["captions", plan.captions],
+      ["masks", plan.masks],
+      ["zoomSegments", plan.zoomSegments],
+    ] as const) {
+      effects.forEach((effect, index) => {
+        if (effect.endMs > plan.durationMs || effect.endMs <= effect.startMs) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [key, index, "endMs"],
+            message: "Render effect range is invalid",
+          })
+        }
+      })
+    }
+    plan.overlays.forEach((overlay, index) => {
+      if (
+        overlay.sourceOutMs <= overlay.sourceInMs ||
+        overlay.outputEndMs <= overlay.outputStartMs ||
+        overlay.outputEndMs > plan.durationMs
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["overlays", index],
+          message: "Camera overlay range is invalid",
+        })
+      }
+    })
+  })
 
 export type RenderPlan = z.infer<typeof renderPlanSchema>
 
-// Options submitted to the Rust export command.
-export const exportTimelineOptionsSchema = z.object({
-  recordingId: z.string(),
-  outputPath: z.string(),
-  plan: renderPlanSchema,
-})
+// Options submitted to the Rust export command. `outputPath` is a validated
+// destination selected by the user, never a source-media path.
+export const exportTimelineOptionsSchema = z
+  .object({
+    projectId: z.string().min(1),
+    outputPath: z.string().min(1),
+    plan: renderPlanSchema,
+    settings: exportSettingsSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.plan.projectId !== value.projectId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["plan", "projectId"],
+        message: "Render plan project must match export project",
+      })
+    }
+
+    if (value.settings.preset === "selected-range" && !value.settings.range) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["settings", "range"],
+        message: "Selected-range export requires a range",
+      })
+    }
+  })
 
 export type ExportTimelineOptions = z.infer<typeof exportTimelineOptionsSchema>
 

@@ -1,6 +1,6 @@
 # Media Jobs and Render Plan Specification
 
-> **Status:** Draft — Phase 0  
+> **Status:** Draft — Phase 8 implementation
 > **Scope:** Durable job scheduler contract, render plan DTO, filter DAG, export pipeline  
 > **Owner:** Rust `jobs`, `exports` modules; `packages/media-core`, `packages/contracts`
 
@@ -46,8 +46,8 @@ The durable job scheduler manages three categories of background work:
     "waveformPath": "...",
     "waveformImagePath": "..."
   },
-  "options": "{ ... }",          // Serialized job-specific options (persisted)
-  "cancellationToken": "token-uuid"
+  "options": { "projectId": "...", "outputPath": "...", "plan": "...", "settings": "..." }, // JSON persisted in SQLite
+  "cancellationToken": "in-memory AtomicBool"
 }
 ```
 
@@ -72,8 +72,9 @@ The durable job scheduler manages three categories of background work:
 ### 3.3 Deduplication
 
 Before creating a job, check if an equivalent job already exists:
-- Same `recordingId` + same `kind` + status is `pending` or `running` → reject duplicate
-- If `force: true`, cancel existing and create new
+- Same `recordingId` + same `kind` + status is `pending` or `running` → reuse the scheduler-owned job identity
+- Export retries re-queue the failed/cancelled row and retain its id/options
+- Prepare jobs may still create a new row when `force: true`
 
 ### 3.4 Cancellation
 
@@ -97,42 +98,38 @@ The render plan is the contract between the editor (TypeScript) and the export e
 
 ### 4.1 Current schema (from `packages/contracts/src/timeline.ts`)
 
+The Phase 8 DTO is project-scoped and contains no source-media paths:
+
 ```typescript
 interface RenderPlan {
-  recordingId: string
-  outputPath: string        // ← SECURITY ISSUE: frontend supplies path
+  projectId: string
   canvas: TimelineCanvas
   durationMs: number
   segments: RenderSegment[]
-  audio?: RenderPlanAudio
+  gaps: Array<{ startMs: number; endMs: number }>
+  audioTracks: RenderPlanAudio[]
   overlays: RenderPlanOverlay[]
+  captions: RenderPlanCaption[]
+  masks: RenderPlanMask[]
+  zoomSegments: RenderPlanZoomSegment[]
+  cursorEffects: RenderPlanCursorEffect[]
+}
+
+interface RenderPlanZoomSegment {
+  id: string
+  startMs: number
+  endMs: number
+  target: { x: number; y: number; width: number; height: number }
+  scale: number
+  easing: "linear" | "ease-in" | "ease-out" | "ease-in-out" | "smooth" | "cinematic" | "snappy"
+  enabled: boolean
+  mode?: "auto" | "manual" | "follow-cursor"
+  source?: "click" | "dwell" | "movement" | "manual" | "follow"
+  preset?: "subtle" | "product-demo" | "cinematic" | "manual-only"
 }
 
 interface RenderSegment {
-  inputPath: string         // ← SECURITY ISSUE: frontend supplies path
-  sourceInMs: number
-  sourceOutMs: number
-  outputStartMs: number
-  outputEndMs: number
-}
-```
-
-### 4.2 Required changes (Phase 1)
-
-**Remove all paths from the frontend-supplied render plan.** Replace with asset IDs:
-
-```typescript
-interface RenderPlan {
-  projectId: string         // Rust resolves project → assets → paths
-  canvas: TimelineCanvas
-  durationMs: number
-  segments: RenderSegment[]
-  audioMix: AudioMixPlan
-  overlays: OverlayPlan[]
-}
-
-interface RenderSegment {
-  assetId: string           // Rust resolves to trusted path
+  assetId: string           // Rust resolves project assetId → canonical path
   sourceInMs: number
   sourceOutMs: number
   outputStartMs: number
@@ -140,32 +137,23 @@ interface RenderSegment {
   speed: number
 }
 
-interface AudioMixPlan {
-  tracks: AudioTrackPlan[]
-}
-
-interface AudioTrackPlan {
-  assetId: string
-  muted: boolean
-  volume: number
-  fadeInMs: number
-  fadeOutMs: number
-}
-
-interface OverlayPlan {
-  assetId: string
-  sourceInMs: number
-  sourceOutMs: number
-  outputStartMs: number
-  outputEndMs: number
-  x: number
-  y: number
-  width: number
-  height: number
-  opacity: number
-  shape: "rectangle" | "rounded" | "circle"
+interface ExportTimelineOptions {
+  projectId: string
+  outputPath: string        // validated destination, never source media
+  plan: RenderPlan
+  settings: ProjectExportSettings
 }
 ```
+
+TypeScript validates the plan and project identity before IPC. Rust validates the same ranges, effect timing, canvas, settings, and asset references before scheduling FFmpeg.
+
+### 4.2 Boundary guarantees
+
+- `outputPath` is the user-selected destination and is validated by Rust path policy.
+- Source paths never cross IPC; Rust loads the saved project by `projectId` and resolves canonical asset paths.
+- The plan includes explicit gaps, speed, source/output ranges, audio roles/fades, camera transforms, canvas, zoom, cursor, captions, and masks.
+- Zoom suggestions are project metadata with editable `mode`, `source`, and `preset` fields; regeneration happens before plan construction and preserves manual/locked ranges.
+- Selected-range export remaps the chosen timeline range to zero-based output time.
 
 ---
 
@@ -188,23 +176,24 @@ flowchart TD
 
 The render engine builds an FFmpeg complex filter graph from the render plan:
 
-1. **Video segments**: `[input]trim=start:end,setpts=PTS-STARTPTS[v0]`
-2. **Concatenation**: `[v0][v1]concat=n=2:v=1:a=0[vout]`
-3. **Speed changes**: `setpts=PTS/speed`
-4. **Audio mixing**: `amix`, `volume`, `afade`
-5. **Webcam PiP**: `overlay=x:y` with crop and shape mask
-6. **Canvas**: `pad=width:height:x:y:color`
+1. **Video segments**: resolve each `assetId`, then `trim`, `setpts`, speed, scale, and pad.
+2. **Gaps**: generate canvas-sized color segments and concatenate them with screen clips.
+3. **Concatenation**: `[v0][gap0][v1]concat=n=3:v=1:a=0[vout]`
+4. **Speed and audio**: `setpts=PTS/speed`, `atempo`, `amix`, `volume`, `afade`.
+5. **Webcam PiP**: independently resolved input, trim, speed, crop, shape, border, shadow, and `overlay=enable`.
+6. **Canvas/effects**: `pad`, zoom crop, privacy mask filters, and caption drawtext.
+7. **Cursor**: telemetry is resolved as a project asset and composited into RGBA frames in Rust.
 
 ### 5.3 Current gaps
 
-| Gap | Current | Required |
-|-----|---------|----------|
-| Stream-copy only | `export_recording` does `fs::copy` | Full FFmpeg filter graph render |
-| Paths from frontend | `inputPath` in render plan | Asset ID → Rust-resolved path |
-| No cancel | Export runs in a thread with no cancellation | AtomicBool cancellation token |
-| No .partial | Writes directly to output | Write to `.partial`, validate, rename |
-| No job persistence | Export job is created in memory, not in DB | Persist to `media_jobs` table |
-| Inconsistent job IDs | Export creates its own `MediaJob` struct | Use the scheduler's job creation |
+| Concern | Phase 8 behavior |
+|---------|------------------|
+| Source authority | `projectId` and trusted asset IDs; Rust resolves canonical paths |
+| Render graph | FFmpeg graph covers cuts, gaps, speed, audio, camera, canvas, zoom, cursor, captions, and masks |
+| Cancellation | `AtomicBool` is checked between stages and while streaming cursor frames |
+| Atomic output | Render writes to `.partial`, FFprobe validates, then Rust publishes atomically |
+| Job persistence | Export request is stored in `media_jobs.options` before the worker starts |
+| Job identity | Scheduler-created id is used for events, completion, cancellation, retry, and resume |
 
 ---
 
@@ -212,13 +201,15 @@ The render engine builds an FFmpeg complex filter graph from the render plan:
 
 | Preset | Container | Video Codec | Audio Codec | Notes |
 |--------|-----------|-------------|-------------|-------|
-| `default-mp4` | MP4 | H.264 (libx264 or HW) | AAC 128kbps | Default |
-| `high-quality` | MP4 | H.264 CRF 18 | AAC 192kbps | Larger files |
-| `60fps` | MP4 | H.264 60fps | AAC 128kbps | Only if source is 60fps |
-| `gif` | GIF | — | — | Short clips only (< 30s) |
-| `vertical` | MP4 | H.264 9:16 | AAC 128kbps | Social media |
+| `default-mp4` | MP4 | H.264 | AAC 128kbps | Legacy balanced default |
+| `fast-share` | MP4 | H.264 | AAC 128kbps | Very fast, smaller output |
+| `balanced` | MP4 | H.264 or HEVC | AAC 128kbps | Recommended |
+| `high-quality` | MP4 | H.264 or HEVC, CRF 18 | AAC 192kbps | Larger files |
+| `vertical` | MP4 | H.264 or HEVC | AAC 128kbps | Enabled only for vertical canvases |
+| `square` | MP4 | H.264 or HEVC | AAC 128kbps | Enabled only for square canvases |
+| `selected-range` | MP4 | Project codec | Project bitrate | Requires a positive range |
 
-Presets are capability-driven: if the source is 30fps, the 60fps preset is disabled with explanation.
+Presets are capability-driven. Unsupported canvas shapes and invalid ranges are disabled in the UI and rejected by Rust.
 
 ---
 

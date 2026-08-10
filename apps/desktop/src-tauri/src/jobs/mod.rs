@@ -13,6 +13,7 @@ use crate::database::media::{
 };
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
+use crate::exports::{run_render_plan, ExportSettings, RenderPlan};
 use crate::media::audio::extract_audio_track;
 use crate::media::disk::{available_space, derivative_dir, estimate_derivative_size};
 use crate::media::probe::probe_media;
@@ -20,6 +21,7 @@ use crate::media::proxy::generate_proxy;
 use crate::media::thumbnails::generate_thumbnails;
 use crate::media::video::extract_video_track;
 use crate::media::waveform::generate_waveform_for_stream;
+use crate::path_policy::PathPolicy;
 
 const PREPARE_OUTPUT_VERSION: u32 = 3;
 
@@ -32,13 +34,25 @@ pub struct PrepareOptions {
     pub force: bool,
 }
 
-/// Manages background media preparation jobs.
+/// Durable export request stored in the media job options column.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportRequest {
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(rename = "outputPath")]
+    pub output_path: String,
+    pub plan: RenderPlan,
+    pub settings: ExportSettings,
+}
+
+/// Manages background media preparation and export jobs.
 #[derive(Debug)]
 pub struct JobManager {
     app: tauri::AppHandle,
     db: Arc<Mutex<rusqlite::Connection>>,
     ffmpeg_path: PathBuf,
     ffprobe_path: PathBuf,
+    path_policy: PathPolicy,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
     start_lock: Arc<Mutex<()>>,
@@ -50,12 +64,14 @@ impl JobManager {
         db: Arc<Mutex<rusqlite::Connection>>,
         ffmpeg_path: PathBuf,
         ffprobe_path: PathBuf,
+        path_policy: PathPolicy,
     ) -> Self {
         Self {
             app,
             db,
             ffmpeg_path,
             ffprobe_path,
+            path_policy,
             active_tokens: Arc::new(Mutex::new(HashMap::new())),
             worker_lock: Arc::new(Mutex::new(())),
             start_lock: Arc::new(Mutex::new(())),
@@ -117,6 +133,169 @@ impl JobManager {
         Ok(job.id)
     }
 
+    /// Persist and start one export job. The job row and its restartable request
+    /// are committed before the worker thread is spawned.
+    #[instrument(skip(self, request))]
+    pub fn start_export(&self, request: ExportRequest) -> Result<MediaJob> {
+        let _start_lock = self
+            .start_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("job start mutex poisoned".into()))?;
+        request.plan.validate()?;
+        crate::exports::validate_export_settings(&request.settings, &request.plan)?;
+        if request.plan.project_id != request.project_id {
+            return Err(InternalError::Project(
+                "render plan project does not match export project".into(),
+            )
+            .into());
+        }
+        let destination_path = Path::new(&request.output_path);
+        if !destination_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+        {
+            return Err(InternalError::Media(
+                "export destination must use the MP4 extension".into(),
+            )
+            .into());
+        }
+        let destination = self
+            .path_policy
+            .validate_export_destination(destination_path)?;
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let project = crate::database::projects::get_project(&conn, &request.project_id)?
+            .ok_or_else(|| InternalError::Project("export project was not found".into()))?;
+        let active = media_db::list_jobs(&conn, &project.recording_id)?
+            .into_iter()
+            .find(|job| {
+                job.kind == MediaJobKind::Export
+                    && matches!(
+                        job.status,
+                        crate::database::media::MediaJobStatus::Pending
+                            | crate::database::media::MediaJobStatus::Running
+                    )
+            });
+        if let Some(active) = active {
+            return Ok(active);
+        }
+
+        let mut request = request;
+        request.output_path = destination.to_string_lossy().to_string();
+        let options = serde_json::to_value(&request).map_err(|error| {
+            InternalError::Storage(format!("serialize export request: {error}"))
+        })?;
+        let job = media_db::insert_job_with_options(
+            &conn,
+            &project.recording_id,
+            MediaJobKind::Export,
+            options,
+        )?;
+        drop(conn);
+
+        let token = Arc::new(AtomicBool::new(false));
+        self.active_tokens
+            .lock()
+            .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
+            .insert(job.id.clone(), token.clone());
+        self.emit_job_update(&job)?;
+        self.spawn_export(job.clone(), request, token);
+        Ok(job)
+    }
+
+    /// Retry an export using its persisted request and the same job identity.
+    #[instrument]
+    pub fn retry_export(&self, job_id: &str) -> Result<MediaJob> {
+        let _start_lock = self
+            .start_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("job start mutex poisoned".into()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let existing = media_db::get_job(&conn, job_id)?;
+        if existing.kind != MediaJobKind::Export
+            || !matches!(
+                existing.status,
+                crate::database::media::MediaJobStatus::Failed
+                    | crate::database::media::MediaJobStatus::Cancelled
+            )
+        {
+            return Ok(existing);
+        }
+        if let Some(active) = media_db::list_jobs(&conn, &existing.recording_id)?
+            .into_iter()
+            .find(|job| {
+                job.id != existing.id
+                    && job.kind == MediaJobKind::Export
+                    && matches!(
+                        job.status,
+                        crate::database::media::MediaJobStatus::Pending
+                            | crate::database::media::MediaJobStatus::Running
+                    )
+            })
+        {
+            return Ok(active);
+        }
+        let request: ExportRequest =
+            serde_json::from_value(existing.options.clone()).map_err(|error| {
+                InternalError::Media(format!("stored export request is invalid: {error}"))
+            })?;
+        request.plan.validate()?;
+        crate::exports::validate_export_settings(&request.settings, &request.plan)?;
+        let destination_path = Path::new(&request.output_path);
+        if !destination_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+        {
+            return Err(InternalError::Media(
+                "export destination must use the MP4 extension".into(),
+            )
+            .into());
+        }
+        let destination = self
+            .path_policy
+            .validate_export_destination(destination_path)?;
+        let mut request = request;
+        request.output_path = destination.to_string_lossy().to_string();
+        let job = media_db::retry_job(&conn, job_id)?;
+        drop(conn);
+
+        let token = Arc::new(AtomicBool::new(false));
+        self.active_tokens
+            .lock()
+            .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
+            .insert(job.id.clone(), token.clone());
+        self.emit_job_update(&job)?;
+        self.spawn_export(job.clone(), request, token);
+        Ok(job)
+    }
+
+    fn spawn_export(&self, job: MediaJob, request: ExportRequest, token: Arc<AtomicBool>) {
+        let worker = ExportWorker {
+            app: self.app.clone(),
+            db: Arc::clone(&self.db),
+            ffmpeg_path: self.ffmpeg_path.clone(),
+            ffprobe_path: self.ffprobe_path.clone(),
+            active_tokens: Arc::clone(&self.active_tokens),
+            worker_lock: Arc::clone(&self.worker_lock),
+            job_id: job.id,
+            request,
+        };
+        let worker_id = worker.job_id.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = worker.run(token) {
+                error!(job_id = %worker_id, error = %error, "export job failed");
+            }
+        });
+    }
+
     /// Cancel an active or pending job.
     #[instrument]
     pub fn cancel_job(&self, job_id: &str) -> Result<()> {
@@ -170,6 +349,39 @@ impl JobManager {
         drop(conn);
 
         for job in jobs {
+            if matches!(job.kind, crate::database::media::MediaJobKind::Export) {
+                let request = match serde_json::from_value::<ExportRequest>(job.options.clone()) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        error!(job_id = %job.id, error = %error, "cannot resume export with invalid options");
+                        continue;
+                    }
+                };
+                if let Err(error) = request.plan.validate() {
+                    error!(job_id = %job.id, error = %error, "cannot resume invalid export plan");
+                    continue;
+                }
+                if let Err(error) =
+                    crate::exports::validate_export_settings(&request.settings, &request.plan)
+                {
+                    error!(job_id = %job.id, error = %error, "cannot resume export with invalid settings");
+                    continue;
+                }
+                if let Err(error) = self
+                    .path_policy
+                    .validate_export_destination(Path::new(&request.output_path))
+                {
+                    error!(job_id = %job.id, error = %error, "cannot resume export with an invalid destination");
+                    continue;
+                }
+                let token = Arc::new(AtomicBool::new(false));
+                self.active_tokens
+                    .lock()
+                    .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
+                    .insert(job.id.clone(), token.clone());
+                self.spawn_export(job, request, token);
+                continue;
+            }
             if !matches!(job.kind, crate::database::media::MediaJobKind::Prepare) {
                 continue;
             }
@@ -210,6 +422,133 @@ impl JobManager {
     }
 
     fn emit_job_update(&self, job: &MediaJob) -> Result<()> {
+        EventPublisher::new(&self.app).media_job_update(job)
+    }
+}
+
+#[derive(Debug)]
+struct ExportWorker {
+    app: tauri::AppHandle,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    ffmpeg_path: PathBuf,
+    ffprobe_path: PathBuf,
+    active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    worker_lock: Arc<Mutex<()>>,
+    job_id: String,
+    request: ExportRequest,
+}
+
+impl ExportWorker {
+    fn run(self, cancel: Arc<AtomicBool>) -> Result<()> {
+        let _lock = self
+            .worker_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("worker lock poisoned".into()))?;
+        if cancel.load(Ordering::Relaxed) {
+            return self.finish_cancelled();
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::start_job(&conn, &self.job_id)?;
+        drop(conn);
+        self.emit(&job)?;
+
+        let result = run_render_plan(
+            &self.job_id,
+            &self.request.project_id,
+            Path::new(&self.request.output_path),
+            self.request.plan.clone(),
+            self.request.settings.clone(),
+            &self.ffmpeg_path,
+            &self.ffprobe_path,
+            Arc::clone(&self.db),
+            &self.app,
+            cancel.clone(),
+        );
+
+        if cancel.load(Ordering::Relaxed) {
+            return self.finish_cancelled();
+        }
+        match result {
+            Ok(()) => {
+                let conn = self
+                    .db
+                    .lock()
+                    .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+                let completed = media_db::complete_job(
+                    &conn,
+                    &self.job_id,
+                    &media_db::MediaJobOutputs {
+                        output_path: Some(self.request.output_path.clone()),
+                        captions_path: if self.request.plan.caption_mode == "sidecar" {
+                            Some(
+                                Path::new(&self.request.output_path)
+                                    .with_extension("srt")
+                                    .to_string_lossy()
+                                    .to_string(),
+                            )
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    },
+                )?;
+                drop(conn);
+                if matches!(
+                    completed.status,
+                    crate::database::media::MediaJobStatus::Cancelled
+                ) {
+                    let _ = std::fs::remove_file(&self.request.output_path);
+                    let _ = std::fs::remove_file(
+                        Path::new(&self.request.output_path).with_extension("srt"),
+                    );
+                }
+                self.emit(&completed)?;
+                self.cleanup_active_token();
+                Ok(())
+            }
+            Err(error) => self.fail(&error.to_string()),
+        }
+    }
+
+    fn fail(&self, message: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::fail_job(&conn, &self.job_id, message)?;
+        drop(conn);
+        self.cleanup_partial_outputs();
+        self.cleanup_active_token();
+        self.emit(&job)
+    }
+
+    fn finish_cancelled(&self) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::cancel_job(&conn, &self.job_id)?;
+        drop(conn);
+        self.cleanup_partial_outputs();
+        self.cleanup_active_token();
+        self.emit(&job)
+    }
+
+    fn cleanup_partial_outputs(&self) {
+        crate::exports::cleanup_export_files(Path::new(&self.request.output_path));
+    }
+
+    fn cleanup_active_token(&self) {
+        if let Ok(mut tokens) = self.active_tokens.lock() {
+            tokens.remove(&self.job_id);
+        }
+    }
+
+    fn emit(&self, job: &MediaJob) -> Result<()> {
         EventPublisher::new(&self.app).media_job_update(job)
     }
 }

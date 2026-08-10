@@ -67,6 +67,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         Arc::clone(&db),
         ffmpeg_path.clone(),
         ffprobe_path.clone(),
+        path_policy.clone(),
     );
 
     // Resume any pending or interrupted jobs from a previous run.

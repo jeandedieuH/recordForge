@@ -1,4 +1,8 @@
-import { defaultCursorSettings, defaultProjectExportSettings } from "@recordforge/contracts"
+import {
+  defaultCursorSettings,
+  defaultProjectExportSettings,
+  defaultSmartZoomSettings,
+} from "@recordforge/contracts"
 import type {
   AudioClip,
   AudioRole,
@@ -275,6 +279,8 @@ export function createTimelineFromRecording(
     },
     tracks,
     markers,
+    zoomSegments: [],
+    smartZoomSettings: defaultSmartZoomSettings,
     createdAt: now,
     updatedAt: now,
   }
@@ -396,6 +402,7 @@ export function createProjectFromRecording(
     tracks: timeline.tracks,
     markers: timeline.markers,
     zoomSegments: timeline.zoomSegments ?? [],
+    smartZoomSettings: timeline.smartZoomSettings ?? defaultSmartZoomSettings,
     exportSettings: exportSettings ?? defaultProjectExportSettings,
     createdAt: timeline.createdAt,
     updatedAt: timeline.updatedAt,
@@ -414,6 +421,7 @@ export function projectToTimeline(project: Project): TimelineState {
     tracks: project.tracks,
     markers: project.markers,
     zoomSegments: project.zoomSegments ?? [],
+    smartZoomSettings: project.smartZoomSettings ?? defaultSmartZoomSettings,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   }
@@ -432,6 +440,7 @@ export function timelineToProject(timeline: TimelineState, base: Project): Proje
     tracks: timeline.tracks,
     markers: timeline.markers,
     zoomSegments: timeline.zoomSegments ?? [],
+    smartZoomSettings: timeline.smartZoomSettings ?? defaultSmartZoomSettings,
     exportSettings: base.exportSettings ?? defaultProjectExportSettings,
     updatedAt: new Date().toISOString(),
   }

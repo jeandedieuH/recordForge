@@ -41,9 +41,13 @@ import {
 import {
   cursorSettingsForEffect,
   findCursorEffectAtTime,
+  findCursorEventAtTime,
+  fitCursorPoint,
   isCursorClickEdge,
   normalizeCursorTelemetry,
+  smoothCursorPosition,
   timelineToCursorSourceTime,
+  zoomTargetForCursorPoint,
 } from "@recordforge/cursor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
@@ -172,6 +176,7 @@ export function TimelineView({
   const view = useTimelineStore((state) => state.view)
   const recording = useTimelineStore((state) => state.recording)
   const metadata = useTimelineStore((state) => state.metadata)
+  const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
   const activeJob = useTimelineStore((state) => state.activeJob)
   const isLoading = useTimelineStore((state) => state.isLoading)
   const error = useTimelineStore((state) => state.error)
@@ -279,12 +284,44 @@ export function TimelineView({
     () => (timeline ? findManualZoomAtTime(timeline, view.playheadMs) : null),
     [timeline, view.playheadMs],
   )
+  const followZoomTarget = useMemo(() => {
+    if (
+      !activeZoomSegment ||
+      activeZoomSegment.mode !== "follow-cursor" ||
+      !timeline ||
+      !cursorTelemetry
+    ) {
+      return undefined
+    }
+    const sourceTimeMs = timelineToCursorSourceTime(timeline, view.playheadMs)
+    if (sourceTimeMs === null) return undefined
+    const lookup = findCursorEventAtTime(cursorTelemetry, sourceTimeMs)
+    if (!lookup) return undefined
+    const smoothed = smoothCursorPosition(
+      cursorTelemetry,
+      lookup.index,
+      timeline.canvas.cursorSettings,
+    )
+    const fitted = fitCursorPoint(
+      smoothed,
+      cursorTelemetry,
+      timeline.canvas.width,
+      timeline.canvas.height,
+    )
+    const desiredScale = Math.max(
+      1.05,
+      timeline.canvas.width / Math.max(1, activeZoomSegment.target.width),
+    )
+    return zoomTargetForCursorPoint({ x: fitted.x, y: fitted.y }, timeline.canvas, desiredScale)
+  }, [activeZoomSegment, cursorTelemetry, timeline, view.playheadMs])
   const zoomTransform = useMemo(
     () =>
       activeZoomSegment && timeline
-        ? resolveZoomTransform(activeZoomSegment, view.playheadMs, timeline.canvas)
+        ? resolveZoomTransform(activeZoomSegment, view.playheadMs, timeline.canvas, {
+            target: followZoomTarget,
+          })
         : null,
-    [activeZoomSegment, timeline, view.playheadMs],
+    [activeZoomSegment, followZoomTarget, timeline, view.playheadMs],
   )
   const activeCursorEffect = useMemo(
     () => (timeline ? findCursorEffectAtTime(timeline, view.playheadMs) : null),
@@ -394,11 +431,15 @@ export function TimelineView({
       const element = videoRef.current
       const position = getPlaybackPosition(timelineMs)
       if (!element || !position) {
-        if (element) element.pause()
+        if (element) {
+          element.pause()
+          element.style.visibility = "hidden"
+        }
         playbackClipIdRef.current = null
         return false
       }
 
+      element.style.visibility = "visible"
       playbackClipIdRef.current = position.clipId
       element.playbackRate = Math.max(0.25, Math.min(4, view.playbackRate * position.clip.speed))
       const sourceSeconds = position.sourceMs / 1000

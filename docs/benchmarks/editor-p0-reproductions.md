@@ -74,11 +74,11 @@ Preview and export use the same source/timeline/output mapping and coordinate tr
 2. Call `buildRenderPlan()` for the project.
 3. Inspect the returned plan and compare it with the project state.
 
-### Current result
+### Result before Phase 8
 
-The plan represents screen segments and audio tracks, with limited overlay support. Camera overlays, canvas composition, captions, masks, zoom, speed, fades, and annotations are absent or not consumed by Rust. Existing state can therefore appear editable while being ignored by export.
+The plan represented screen segments and audio tracks, with limited overlay support. Camera overlays, canvas composition, captions, masks, zoom, speed, fades, and annotations were absent or not consumed by Rust.
 
-### Expected result after Phase 8
+### Result after Phase 8
 
 Every supported project field either appears in the validated render plan and final filter graph or is not exposed as an enabled feature.
 
@@ -97,11 +97,11 @@ Every supported project field either appears in the validated render plan and fi
 2. Parse the request through the current TypeScript contract.
 3. Observe that the request has no project asset registry reference and that Rust resolves the source from the recording database row.
 
-### Current result
+### Result before Phase 8
 
-`exportTimelineOptionsSchema` includes `outputPath` and `recordingId`, while the render plan is not rooted in a durable project asset registry. Rust validates the destination through the current path policy, but it resolves the source recording directly and cannot yet resolve a complete multi-asset project safely.
+`exportTimelineOptionsSchema` included `outputPath` and `recordingId`, while the render plan was not rooted in a durable project asset registry.
 
-### Expected result after Phase 1/8
+### Result after Phase 8
 
 React supplies a project ID, asset IDs, and a user-selected destination. Rust validates the destination and resolves all source paths from the project registry with canonical containment checks.
 
@@ -110,7 +110,7 @@ React supplies a project ID, asset IDs, and a user-selected destination. Rust va
 - `packages/contracts/src/timeline.ts`
 - `packages/media-core/src/render-plan.ts`
 - `apps/desktop/src-tauri/src/commands/exports.rs`
-- `docs/specs/media-jobs-render-plan.md` (its current-path examples are stale and are superseded by the Phase 1 contract decision)
+- `docs/specs/media-jobs-render-plan.md`
 
 ## P0-5: Export Job Identity And Cancellation
 
@@ -122,11 +122,11 @@ React supplies a project ID, asset IDs, and a user-selected destination. Rust va
 4. Attempt to cancel the export through the media job cancellation path.
 5. Inspect the destination after cancellation or process failure.
 
-### Current result
+### Result before Phase 8
 
-The command and render path can create different job identities. Export runs outside the preparation cancellation token path, and output validation/partial publication is incomplete. A user cannot reliably cancel, retry, or recover an export job.
+The command and render path could create different job identities. Export ran outside the preparation cancellation token path, and output validation/partial publication was incomplete.
 
-### Expected result after Phase 8
+### Result after Phase 8
 
 One durable scheduler-owned job controls the export from request through completion. Cancellation cleans partial output, retry starts from a known state, and only FFprobe-validated output is published.
 

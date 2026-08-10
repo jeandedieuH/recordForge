@@ -14,26 +14,37 @@ mod captions;
 mod cursor;
 
 /// A single trimmed segment in the final export.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderSegment {
-    pub asset_id: Option<String>,
+    pub asset_id: String,
     pub stream_index: Option<i32>,
     pub volume: Option<f64>,
     pub fade_in_ms: Option<f64>,
     pub fade_out_ms: Option<f64>,
+    pub speed: f64,
     pub source_in_ms: u64,
     pub source_out_ms: u64,
     pub output_start_ms: u64,
     pub output_end_ms: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanGap {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
 /// Render plan sent from the TypeScript timeline editor.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlan {
+    pub project_id: String,
     pub duration_ms: u64,
     pub segments: Vec<RenderSegment>,
+    #[serde(default)]
+    pub gaps: Vec<RenderPlanGap>,
     #[serde(default)]
     pub overlays: Vec<RenderPlanOverlay>,
     #[serde(default)]
@@ -55,8 +66,8 @@ pub struct RenderPlan {
     pub audio_tracks: Option<Vec<RenderPlanAudio>>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanCaption {
     pub id: String,
     pub text: String,
@@ -70,8 +81,8 @@ pub struct RenderPlanCaption {
     pub safe_area_margin: u64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanMask {
     pub id: String,
     pub asset_id: Option<String>,
@@ -89,15 +100,17 @@ pub struct RenderPlanMask {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanOverlay {
-    pub asset_id: Option<String>,
+    pub asset_id: String,
     pub stream_index: Option<i32>,
     pub source_in_ms: u64,
     pub source_out_ms: u64,
     pub output_start_ms: u64,
     pub output_end_ms: u64,
+    #[serde(default = "default_overlay_speed")]
+    pub speed: f64,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -119,8 +132,8 @@ pub struct RenderPlanOverlay {
     pub shadow_offset_y: Option<f64>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderCrop {
     pub x: i32,
     pub y: i32,
@@ -128,8 +141,8 @@ pub struct RenderCrop {
     pub height: i32,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanZoomSegment {
     pub id: String,
     pub start_ms: u64,
@@ -141,10 +154,16 @@ pub struct RenderPlanZoomSegment {
     pub easing: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_zoom_mode")]
+    pub mode: String,
+    #[serde(default = "default_zoom_source")]
+    pub source: String,
+    #[serde(default = "default_zoom_preset")]
+    pub preset: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderCropFloat {
     pub x: f64,
     pub y: f64,
@@ -184,6 +203,10 @@ fn default_overlay_opacity() -> f64 {
     1.0
 }
 
+fn default_overlay_speed() -> f64 {
+    1.0
+}
+
 fn default_true() -> bool {
     true
 }
@@ -200,10 +223,22 @@ fn default_zoom_easing() -> String {
     "ease-in-out".into()
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+fn default_zoom_mode() -> String {
+    "manual".into()
+}
+
+fn default_zoom_source() -> String {
+    "manual".into()
+}
+
+fn default_zoom_preset() -> String {
+    "manual-only".into()
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanAudio {
-    pub asset_id: Option<String>,
+    pub asset_id: String,
     pub stream_index: Option<i32>,
     pub role: Option<String>,
     #[serde(default)]
@@ -218,8 +253,42 @@ fn default_audio_volume() -> f64 {
     1.0
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportSettings {
+    #[serde(default = "default_export_preset")]
+    pub preset: String,
+    #[serde(default = "default_export_codec")]
+    pub codec: String,
+    #[serde(default = "default_export_container")]
+    pub container: String,
+    #[serde(default = "default_caption_mode")]
+    pub caption_mode: String,
+    #[serde(default)]
+    pub range: Option<ExportRange>,
+}
+
+fn default_export_preset() -> String {
+    "default-mp4".into()
+}
+
+fn default_export_codec() -> String {
+    "h264".into()
+}
+
+fn default_export_container() -> String {
+    "mp4".into()
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct RenderPlanCursorEffect {
     pub id: String,
     pub asset_id: String,
@@ -232,109 +301,166 @@ pub struct RenderPlanCursorEffect {
     pub settings: serde_json::Value,
 }
 
-/// Run a render plan in a background thread, trimming and concatenating segments.
-#[instrument(skip(ffmpeg_path, db, plan, app))]
+/// Render one persisted project request into a validated, atomically published file.
+#[allow(clippy::too_many_arguments)]
+#[instrument(skip(
+    ffmpeg_path,
+    ffprobe_path,
+    db,
+    plan,
+    app,
+    cancel,
+    output_path,
+    settings
+))]
 pub fn run_render_plan(
-    recording_id: String,
+    job_id: &str,
+    project_id: &str,
     output_path: &Path,
     plan: RenderPlan,
-    ffmpeg_path: &std::path::Path,
+    settings: ExportSettings,
+    ffmpeg_path: &Path,
+    ffprobe_path: &Path,
     db: Arc<Mutex<rusqlite::Connection>>,
     app: &tauri::AppHandle,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let job = MediaJob {
-        id: uuid::Uuid::new_v4().to_string(),
-        recording_id: recording_id.clone(),
-        kind: crate::database::media::MediaJobKind::Export,
-        status: crate::database::media::MediaJobStatus::Running,
-        progress: 0.0,
-        stage: "preparing".into(),
-        message: Some("building segments".into()),
-        error: None,
-        created_at: now.clone(),
-        updated_at: now.clone(),
-        started_at: Some(now),
-        completed_at: None,
-        outputs: Default::default(),
-    };
-
-    emit_job_update(app, &job)?;
-
-    let conn = db
-        .lock()
-        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    let recording = get_recording(&conn, &recording_id)?;
-    drop(conn);
-
-    let source_path = recording
-        .output_path
-        .as_ref()
-        .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
-    let work_dir = PathBuf::from(&recording.work_dir);
-    let asset_paths = crate::projects::load_asset_path_map(&work_dir)?;
-
-    if plan.caption_mode != "burn-in"
-        && plan.caption_mode != "sidecar"
-        && plan.caption_mode != "none"
-    {
-        return Err(InternalError::Media("caption export mode is unsupported".into()).into());
+    plan.validate()?;
+    if plan.project_id != project_id {
+        return Err(
+            InternalError::Project("render plan project does not match the job".into()).into(),
+        );
+    }
+    validate_export_settings(&settings, &plan)?;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(InternalError::Media("export cancelled".into()).into());
     }
 
+    let work_dir = {
+        let conn = db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let project = crate::database::projects::get_project(&conn, project_id)?
+            .ok_or_else(|| InternalError::Project("export project was not found".into()))?;
+        let recording = get_recording(&conn, &project.recording_id)?;
+        PathBuf::from(recording.work_dir)
+    };
+    let policy = crate::path_policy::PathPolicy::new(work_dir.clone(), work_dir.clone());
+    let loaded = crate::projects::load_project(&work_dir, &policy)?
+        .ok_or_else(|| InternalError::Project("project file is required for export".into()))?;
+    if loaded.project.id != project_id {
+        return Err(InternalError::Project(
+            "project identity does not match the export request".into(),
+        )
+        .into());
+    }
+    let asset_paths = crate::projects::load_asset_path_map(&work_dir)?;
+    if asset_paths
+        .values()
+        .any(|asset_path| asset_path == output_path)
+    {
+        return Err(InternalError::Permissions(
+            "export destination cannot overwrite a project asset".into(),
+        )
+        .into());
+    }
+    let partial_path = partial_output_path(output_path);
+    cleanup_export_files(output_path);
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| InternalError::Storage(format!("create export dir: {e}")))?;
+            .map_err(|error| InternalError::Storage(format!("create export directory: {error}")))?;
     }
 
-    info!(recording_id = %recording_id, ?output_path, "starting timeline export");
-
-    emit_progress(
+    update_progress(
+        &db,
         app,
-        &job,
+        job_id,
+        0.08,
+        "resolving-assets",
+        Some("resolving project assets"),
+    )?;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        cleanup_export_files(output_path);
+        return Err(InternalError::Media("export cancelled".into()).into());
+    }
+
+    update_progress(
+        &db,
+        app,
+        job_id,
         0.15,
         "rendering",
         Some("compositing timeline tracks"),
     )?;
     render_timeline_composition(
         &ffmpeg_path.to_string_lossy(),
-        Path::new(source_path),
-        output_path,
+        &partial_path,
         &plan,
-        &recording_id,
+        project_id,
         &asset_paths,
+        &settings,
+        cancel.clone(),
     )?;
 
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        cleanup_export_files(output_path);
+        return Err(InternalError::Media("export cancelled".into()).into());
+    }
+
+    update_progress(
+        &db,
+        app,
+        job_id,
+        0.72,
+        "cursor",
+        Some("rendering cursor effects"),
+    )?;
     apply_cursor_overlay(
         &ffmpeg_path.to_string_lossy(),
-        output_path,
+        &partial_path,
         &plan,
-        &recording_id,
+        project_id,
         &asset_paths,
+        cancel.clone(),
     )?;
 
-    let captions_path = if plan.caption_mode == "sidecar" {
-        Some(write_caption_sidecar(output_path, &plan.captions)?)
-    } else {
-        None
-    };
+    if plan.caption_mode == "sidecar" {
+        update_progress(
+            &db,
+            app,
+            job_id,
+            0.84,
+            "captions",
+            Some("writing caption sidecar"),
+        )?;
+        write_caption_sidecar(&partial_path, &plan.captions)?;
+    }
 
-    let completed = MediaJob {
-        status: crate::database::media::MediaJobStatus::Completed,
-        progress: 1.0,
-        stage: "completed".into(),
-        message: Some("export finished".into()),
-        completed_at: Some(chrono::Utc::now().to_rfc3339()),
-        outputs: crate::database::media::MediaJobOutputs {
-            output_path: Some(output_path.to_string_lossy().to_string()),
-            captions_path: captions_path.map(|path| path.to_string_lossy().to_string()),
-            ..Default::default()
-        },
-        ..job
-    };
+    update_progress(
+        &db,
+        app,
+        job_id,
+        0.9,
+        "validating",
+        Some("validating rendered media"),
+    )?;
+    validate_export_output(ffprobe_path, &partial_path, &plan, &settings)?;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        cleanup_export_files(output_path);
+        return Err(InternalError::Media("export cancelled".into()).into());
+    }
 
-    emit_job_update(app, &completed)?;
-    info!(recording_id = %recording_id, "timeline export completed");
-
+    crate::capture::disk::atomic_replace(&partial_path, output_path)?;
+    if plan.caption_mode == "sidecar" {
+        let partial_sidecar = partial_path.with_extension("srt");
+        let final_sidecar = output_path.with_extension("srt");
+        if let Err(error) = crate::capture::disk::atomic_replace(&partial_sidecar, &final_sidecar) {
+            let _ = std::fs::remove_file(output_path);
+            let _ = std::fs::remove_file(&final_sidecar);
+            return Err(error);
+        }
+    }
+    info!(project_id = %project_id, "timeline export rendered");
     Ok(())
 }
 
@@ -343,11 +469,12 @@ pub fn run_render_plan(
 /// path authoritative for every control exposed by the Phase 6 inspector.
 fn render_timeline_composition(
     ffmpeg_path: &str,
-    source_path: &Path,
     output_path: &Path,
     plan: &RenderPlan,
-    recording_id: &str,
+    project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
+    settings: &ExportSettings,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
@@ -378,38 +505,72 @@ fn render_timeline_composition(
         )
         .into());
     }
-    if plan.canvas.is_none()
-        && plan.overlays.is_empty()
-        && plan.captions.is_empty()
-        && plan.masks.is_empty()
-        && plan.zoom_segments.is_empty()
-    {
-        return render_timeline_with_audio(
-            ffmpeg_path,
-            source_path,
-            output_path,
-            plan,
-            recording_id,
-        );
-    }
     let canvas = plan
         .canvas
         .as_ref()
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
-
+    let input_assets = collect_input_assets(plan, asset_paths)?;
+    let input_indices = input_assets
+        .iter()
+        .enumerate()
+        .map(|(index, (asset_id, _))| (asset_id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let content_width = canvas
+        .width
+        .saturating_sub(canvas.padding.saturating_mul(2))
+        .max(1);
+    let content_height = canvas
+        .height
+        .saturating_sub(canvas.padding.saturating_mul(2))
+        .max(1);
+    let background = safe_filter_color(&canvas.background);
     let mut filters = Vec::new();
     let mut video_labels = Vec::new();
+    let mut cursor_ms = 0;
     for (index, segment) in plan.segments.iter().enumerate() {
-        validate_segment_known(segment, recording_id, asset_paths)?;
-        let input = input_stream(segment.stream_index, false)?;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(InternalError::Media("export cancelled".into()).into());
+        }
+        if segment.output_start_ms > cursor_ms {
+            let gap_label = format!("gap{index}");
+            filters.push(format!(
+                "color=c={background}:s={content_width}x{content_height}:r={}:d={}[{gap_label}]",
+                canvas.fps,
+                seconds(segment.output_start_ms - cursor_ms),
+            ));
+            video_labels.push(format!("[{gap_label}]"));
+        }
+        validate_segment_known(segment, project_id, asset_paths)?;
+        let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
+            InternalError::Media("render plan references an unknown asset".into())
+        })?;
+        let input = input_stream_at(input_index, segment.stream_index, false)?;
         let label = format!("screen{index}");
-        filters.push(format!(
-            "{input}trim=start={}:end={},setpts=PTS-STARTPTS[{label}]",
+        let mut filter = format!(
+            "{input}trim=start={}:end={},setpts=PTS-STARTPTS",
             seconds(segment.source_in_ms),
             seconds(segment.source_out_ms),
+        );
+        if (segment.speed - 1.0).abs() > f64::EPSILON {
+            filter.push_str(&format!(",setpts=PTS/{:.6}", segment.speed));
+        }
+        filter.push_str(&format!(
+            ",scale={content_width}:{content_height}:force_original_aspect_ratio=decrease,pad={content_width}:{content_height}:(ow-iw)/2:(oh-ih)/2:color={background},fps={}:setsar=1[{label}]",
+            canvas.fps,
         ));
+        filters.push(filter);
         video_labels.push(format!("[{label}]"));
+        cursor_ms = segment.output_end_ms;
+    }
+    if cursor_ms < plan.duration_ms {
+        let gap_label = "gap_trailing";
+        filters.push(format!(
+            "color=c={background}:s={content_width}x{content_height}:r={}:d={}[{gap_label}]",
+            canvas.fps,
+            seconds(plan.duration_ms - cursor_ms),
+        ));
+        video_labels.push(format!("[{gap_label}]"));
     }
 
     let video_input = if video_labels.len() == 1 {
@@ -424,15 +585,6 @@ fn render_timeline_composition(
         format!("[{label}]")
     };
 
-    let content_width = canvas
-        .width
-        .saturating_sub(canvas.padding.saturating_mul(2))
-        .max(1);
-    let content_height = canvas
-        .height
-        .saturating_sub(canvas.padding.saturating_mul(2))
-        .max(1);
-    let background = safe_filter_color(&canvas.background);
     let mut canvas_filter = format!(
         "{video_input}scale={content_width}:{content_height}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color={background},setsar=1",
         canvas.width, canvas.height
@@ -482,14 +634,21 @@ fn render_timeline_composition(
         if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
             continue;
         }
-        validate_overlay(overlay, recording_id, asset_paths, canvas)?;
-        let input = input_stream(overlay.stream_index, false)?;
+        validate_overlay(overlay, project_id, asset_paths, canvas)?;
+        let input_index = *input_indices.get(&overlay.asset_id).ok_or_else(|| {
+            InternalError::Media("camera overlay references an unknown asset".into())
+        })?;
+        let input = input_stream_at(input_index, overlay.stream_index, false)?;
         let camera_label = format!("camera{index}");
         let camera_color = safe_filter_color(overlay.border_color.as_deref().unwrap_or("#ffffff"));
+        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
+            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
+        }
         let mut camera_filter = format!(
-            "{input}trim=start={}:end={},setpts=PTS-STARTPTS+{}/TB",
+            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS)/{:.6}+{}/TB",
             seconds(overlay.source_in_ms),
             seconds(overlay.source_out_ms),
+            overlay.speed,
             seconds(overlay.output_start_ms),
         );
         if let Some(crop) = &overlay.crop {
@@ -499,7 +658,9 @@ fn render_timeline_composition(
             ));
         }
         camera_filter.push_str(&format!(
-            ",scale={}:{}:force_original_aspect_ratio=decrease,format=rgba",
+            ",scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba",
+            overlay.width.max(1.0),
+            overlay.height.max(1.0),
             overlay.width.max(1.0),
             overlay.height.max(1.0)
         ));
@@ -510,6 +671,13 @@ fn render_timeline_composition(
             camera_filter.push_str(
                 ",geq=r='r':g='g':b='b':a='if(lte((X-W/2)^2+(Y-H/2)^2,(min(W,H)/2)^2),255,0)'",
             );
+        } else if overlay.shape == "rounded" {
+            let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0);
+            let radius_squared = radius * radius;
+            let alpha = format!(
+                "if((X>={radius:.2})*(X<=W-{radius:.2})+(Y>={radius:.2})*(Y<=H-{radius:.2})+((X-{radius:.2})^2+(Y-{radius:.2})^2<={radius_squared:.2})+((X-W+{radius:.2})^2+(Y-{radius:.2})^2<={radius_squared:.2})+((X-{radius:.2})^2+(Y-H+{radius:.2})^2<={radius_squared:.2})+((X-W+{radius:.2})^2+(Y-H+{radius:.2})^2<={radius_squared:.2})>0,255,0)"
+            );
+            camera_filter.push_str(&format!(",geq=r='r':g='g':b='b':a='{alpha}'"));
         }
         if overlay.shadow_enabled.unwrap_or(false) {
             let shadow_color =
@@ -549,7 +717,7 @@ fn render_timeline_composition(
         if !mask.enabled || mask.end_ms <= mask.start_ms {
             continue;
         }
-        validate_mask(mask, recording_id, asset_paths, canvas)?;
+        validate_mask(mask, project_id, asset_paths, canvas)?;
         let x = mask
             .rect
             .x
@@ -660,6 +828,7 @@ fn render_timeline_composition(
             asset_id: track.asset_id.clone(),
             stream_index: track.stream_index,
             volume: Some(track.volume),
+            speed: 1.0,
             fade_in_ms: None,
             fade_out_ms: None,
             source_in_ms: 0,
@@ -673,19 +842,33 @@ fn render_timeline_composition(
             track.segments.clone()
         };
         for segment in segments {
-            validate_segment_known(&segment, recording_id, asset_paths)?;
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(InternalError::Media("export cancelled".into()).into());
+            }
+            validate_segment_known(&segment, project_id, asset_paths)?;
             let volume = segment.volume.unwrap_or(track.volume).clamp(0.0, 2.0);
-            let input = input_stream(segment.stream_index.or(track.stream_index), true)?;
+            let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
+                InternalError::Media("audio track references an unknown asset".into())
+            })?;
+            let input = input_stream_at(
+                input_index,
+                segment.stream_index.or(track.stream_index),
+                true,
+            )?;
             let label = format!("audio{audio_segment_index}");
             let clip_duration_ms = segment
                 .output_end_ms
                 .saturating_sub(segment.output_start_ms)
                 .max(1);
             let mut audio_filter = format!(
-                "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS,volume={volume:.4}",
+                "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
                 seconds(segment.source_in_ms),
                 seconds(segment.source_out_ms),
             );
+            if (segment.speed - 1.0).abs() > f64::EPSILON {
+                audio_filter.push_str(&atempo_filter(segment.speed));
+            }
+            audio_filter.push_str(&format!(",volume={volume:.4}"));
             if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
                 audio_filter.push_str(&format!(
                     ",afade=t=in:st=0:d={}",
@@ -726,13 +909,14 @@ fn render_timeline_composition(
         ));
     }
 
-    let partial_path = partial_output_path(output_path);
     let mut command = Command::new(ffmpeg_path);
     command
         .arg("-y")
-        .args(["-hide_banner", "-loglevel", "error"])
-        .arg("-i")
-        .arg(source_path)
+        .args(["-hide_banner", "-loglevel", "error"]);
+    for (_, asset_path) in &input_assets {
+        command.arg("-i").arg(asset_path);
+    }
+    command
         .args(["-filter_complex", &filters.join(";")])
         .args(["-map", &format!("[{current_label}]")]);
     if audio_labels.is_empty() {
@@ -740,29 +924,19 @@ fn render_timeline_composition(
     } else {
         command.args(["-map", "[aout]"]);
     }
-    command.args([
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-    ]);
+    append_video_encoding_args(&mut command, settings, canvas.fps);
     if !audio_labels.is_empty() {
-        command.args(["-c:a", "aac", "-b:a", "128k"]);
+        command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
     }
     command
         .arg("-shortest")
         .args(["-movflags", "+faststart"])
-        .arg(&partial_path);
+        .arg(output_path);
 
-    let output = command
-        .output()
-        .map_err(|error| InternalError::Media(format!("timeline composition run: {error}")))?;
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&partial_path);
-        warn!("timeline composition process failed; stderr is intentionally redacted");
-        return Err(InternalError::Media("timeline composition failed".into()).into());
-    }
-    crate::capture::disk::atomic_replace(&partial_path, output_path)?;
-    Ok(())
+    run_ffmpeg_command(&mut command, &cancel, output_path, "timeline composition")
 }
 
+#[allow(dead_code)]
 fn render_timeline_with_audio(
     ffmpeg_path: &str,
     source_path: &Path,
@@ -786,7 +960,7 @@ fn render_timeline_with_audio(
 
     for (index, segment) in plan.segments.iter().enumerate() {
         validate_segment(segment, recording_id)?;
-        let input = input_stream(segment.stream_index, false)?;
+        let input = input_stream_at(0, segment.stream_index, false)?;
         let output_label = if video_count == 1 {
             "vout".to_string()
         } else {
@@ -819,13 +993,14 @@ fn render_timeline_with_audio(
         if track.muted {
             continue;
         }
-        validate_asset(track.asset_id.as_ref(), recording_id)?;
+        validate_asset(&track.asset_id)?;
         let fallback_segment = RenderSegment {
             asset_id: track.asset_id.clone(),
             stream_index: track.stream_index,
             volume: Some(track.volume),
             fade_in_ms: None,
             fade_out_ms: None,
+            speed: 1.0,
             source_in_ms: 0,
             source_out_ms: duration_ms,
             output_start_ms: 0,
@@ -846,7 +1021,7 @@ fn render_timeline_with_audio(
                 )
                 .into());
             }
-            let input = input_stream(segment.stream_index.or(track.stream_index), true)?;
+            let input = input_stream_at(0, segment.stream_index.or(track.stream_index), true)?;
             let label = format!("a{audio_segment_count}");
             let mut filter = format!(
                 "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS,volume={volume:.4}",
@@ -922,8 +1097,9 @@ fn apply_cursor_overlay(
     ffmpeg_path: &str,
     output_path: &Path,
     plan: &RenderPlan,
-    recording_id: &str,
+    project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     let canvas = match plan.canvas.as_ref() {
         Some(canvas) => canvas,
@@ -943,39 +1119,16 @@ fn apply_cursor_overlay(
         );
     }
 
-    let effects = if plan.cursor_effects.is_empty() {
-        vec![RenderPlanCursorEffect {
-            id: format!("cursor-effect:{recording_id}"),
-            asset_id: format!("cursor-events:{recording_id}"),
-            start_ms: 0,
-            end_ms: plan.duration_ms,
-            enabled: true,
-            preset_id: canvas.cursor_settings.preset.clone(),
-            scale: canvas.cursor_settings.scale,
-            smoothing: if canvas.cursor_settings.smooth_movement {
-                "smooth".into()
-            } else {
-                "off".into()
-            },
-            settings: serde_json::Value::Object(serde_json::Map::new()),
-        }]
-    } else {
-        plan.cursor_effects.clone()
-    };
+    let effects = plan.cursor_effects.clone();
 
     let mut renderers = Vec::new();
     for effect in effects {
         if !effect.enabled || effect.end_ms <= effect.start_ms {
             continue;
         }
-        let Some(telemetry_path) = asset_paths.get(&effect.asset_id) else {
-            tracing::warn!(
-                %recording_id,
-                asset_id = %effect.asset_id,
-                "cursor telemetry asset is unavailable; skipping cursor range"
-            );
-            continue;
-        };
+        let telemetry_path = asset_paths.get(&effect.asset_id).ok_or_else(|| {
+            InternalError::Permissions("cursor effect references a missing asset".into())
+        })?;
         let telemetry_text = std::fs::read_to_string(telemetry_path).map_err(|error| {
             InternalError::Storage(format!("read cursor telemetry asset: {error}"))
         })?;
@@ -994,14 +1147,13 @@ fn apply_cursor_overlay(
             telemetry,
             &plan.segments,
             &plan.zoom_segments,
-            canvas.width,
-            canvas.height,
+            canvas,
         )
         .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
         renderers.push((effect.start_ms, effect.end_ms, renderer));
     }
     if renderers.is_empty() {
-        tracing::warn!(%recording_id, "cursor telemetry is unavailable; exporting without a cursor overlay");
+        tracing::warn!(%project_id, "cursor telemetry is unavailable; exporting without a cursor overlay");
         return Ok(());
     }
     let frame_size = (canvas.width as usize)
@@ -1069,6 +1221,12 @@ fn apply_cursor_overlay(
         .ok_or_else(|| InternalError::Media("cursor overlay stdin unavailable".into()))?;
     let mut frame = vec![0; frame_size];
     for frame_index in 0..frame_count {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(InternalError::Media("export cancelled".into()).into());
+        }
         let output_ms = frame_index.saturating_mul(1000) / canvas.fps as u64;
         frame.fill(0);
         if let Some((_, _, renderer)) = renderers
@@ -1132,7 +1290,7 @@ fn cursor_settings_for_effect(
     serde_json::from_value(value).unwrap_or_else(|_| base.clone())
 }
 
-fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
+pub(crate) fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
     let stem = output_path
         .file_stem()
         .map(|value| value.to_string_lossy())
@@ -1141,6 +1299,419 @@ fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!("{stem}.cursor.partial.mp4"))
+}
+
+fn collect_input_assets(
+    plan: &RenderPlan,
+    asset_paths: &HashMap<String, PathBuf>,
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut asset_ids = std::collections::BTreeSet::new();
+    asset_ids.extend(plan.segments.iter().map(|segment| segment.asset_id.clone()));
+    asset_ids.extend(plan.overlays.iter().map(|overlay| overlay.asset_id.clone()));
+    if let Some(tracks) = &plan.audio_tracks {
+        for track in tracks {
+            asset_ids.insert(track.asset_id.clone());
+            asset_ids.extend(
+                track
+                    .segments
+                    .iter()
+                    .map(|segment| segment.asset_id.clone()),
+            );
+        }
+    }
+    if let Some(track) = &plan.audio {
+        asset_ids.insert(track.asset_id.clone());
+        asset_ids.extend(
+            track
+                .segments
+                .iter()
+                .map(|segment| segment.asset_id.clone()),
+        );
+    }
+    for effect in plan.cursor_effects.iter().filter(|effect| effect.enabled) {
+        let path = asset_paths.get(&effect.asset_id).ok_or_else(|| {
+            InternalError::Permissions("cursor effect references a missing asset".into())
+        })?;
+        if !path.is_file() {
+            return Err(InternalError::Storage("cursor effect asset is not a file".into()).into());
+        }
+    }
+
+    asset_ids
+        .into_iter()
+        .map(|asset_id| {
+            let path = asset_paths.get(&asset_id).cloned().ok_or_else(|| {
+                InternalError::Permissions(
+                    "render plan references a missing or unauthorized asset".into(),
+                )
+            })?;
+            if !path.is_file() {
+                return Err(InternalError::Storage("render asset is not a file".into()).into());
+            }
+            Ok((asset_id, path))
+        })
+        .collect()
+}
+
+impl RenderPlan {
+    pub fn validate(&self) -> Result<()> {
+        if self.project_id.trim().is_empty() || self.duration_ms == 0 || self.segments.is_empty() {
+            return Err(InternalError::Media(
+                "render plan identity, duration, and segments are required".into(),
+            )
+            .into());
+        }
+        let canvas = self
+            .canvas
+            .as_ref()
+            .ok_or_else(|| InternalError::Media("render plan canvas is required".into()))?;
+        validate_canvas(canvas)?;
+
+        let mut previous_end = 0;
+        for segment in &self.segments {
+            validate_segment(segment, &self.project_id)?;
+            if segment.output_start_ms < previous_end {
+                return Err(
+                    InternalError::Media("render segments overlap in output time".into()).into(),
+                );
+            }
+            previous_end = segment.output_end_ms;
+            if !segment.speed.is_finite() || segment.speed <= 0.0 {
+                return Err(InternalError::Media("render segment speed is invalid".into()).into());
+            }
+        }
+        if previous_end > self.duration_ms {
+            return Err(InternalError::Media("render segment exceeds plan duration".into()).into());
+        }
+        let mut expected_gaps = Vec::new();
+        let mut cursor_ms = 0;
+        for segment in &self.segments {
+            if segment.output_start_ms > cursor_ms {
+                expected_gaps.push((cursor_ms, segment.output_start_ms));
+            }
+            cursor_ms = segment.output_end_ms;
+        }
+        if cursor_ms < self.duration_ms {
+            expected_gaps.push((cursor_ms, self.duration_ms));
+        }
+        if expected_gaps.len() != self.gaps.len()
+            || expected_gaps
+                .iter()
+                .zip(&self.gaps)
+                .any(|((start, end), gap)| *start != gap.start_ms || *end != gap.end_ms)
+        {
+            return Err(
+                InternalError::Media("render gaps do not match output timing".into()).into(),
+            );
+        }
+        for gap in &self.gaps {
+            if gap.start_ms >= gap.end_ms || gap.end_ms > self.duration_ms {
+                return Err(InternalError::Media("render gap range is invalid".into()).into());
+            }
+        }
+        if self.caption_mode != "burn-in"
+            && self.caption_mode != "sidecar"
+            && self.caption_mode != "none"
+        {
+            return Err(InternalError::Media("caption export mode is unsupported".into()).into());
+        }
+        if self
+            .overlays
+            .iter()
+            .any(|overlay| !overlay_values_are_finite(overlay))
+            || self.masks.iter().any(|mask| !mask_values_are_finite(mask))
+            || self
+                .zoom_segments
+                .iter()
+                .any(|segment| !zoom_values_are_finite(segment))
+        {
+            return Err(
+                InternalError::Media("render effect contains a non-finite value".into()).into(),
+            );
+        }
+        for effect in self.cursor_effects.iter().filter(|effect| effect.enabled) {
+            if !effect.scale.is_finite() || effect.scale <= 0.0 || effect.start_ms >= effect.end_ms
+            {
+                return Err(
+                    InternalError::Media("cursor effect settings are invalid".into()).into(),
+                );
+            }
+        }
+        let audio_tracks = self
+            .audio_tracks
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .chain(self.audio.iter());
+        for track in audio_tracks {
+            if !track.volume.is_finite() || !(0.0..=2.0).contains(&track.volume) {
+                return Err(InternalError::Media("audio track volume is invalid".into()).into());
+            }
+            for segment in &track.segments {
+                validate_segment(segment, &self.project_id)?;
+            }
+        }
+        if self
+            .captions
+            .iter()
+            .any(|caption| caption.start_ms >= caption.end_ms || caption.end_ms > self.duration_ms)
+            || self
+                .masks
+                .iter()
+                .any(|mask| mask.start_ms >= mask.end_ms || mask.end_ms > self.duration_ms)
+            || self.overlays.iter().any(|overlay| {
+                overlay.source_in_ms >= overlay.source_out_ms
+                    || overlay.output_start_ms >= overlay.output_end_ms
+                    || overlay.output_end_ms > self.duration_ms
+            })
+            || self.zoom_segments.iter().any(|segment| {
+                segment.start_ms >= segment.end_ms || segment.end_ms > self.duration_ms
+            })
+            || self
+                .cursor_effects
+                .iter()
+                .any(|effect| effect.start_ms >= effect.end_ms || effect.end_ms > self.duration_ms)
+        {
+            return Err(
+                InternalError::Media("render effect range exceeds plan duration".into()).into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderPlan) -> Result<()> {
+    if settings.container != "mp4" || !matches!(settings.codec.as_str(), "h264" | "hevc") {
+        return Err(InternalError::Media("export codec or container is unsupported".into()).into());
+    }
+    if !matches!(
+        settings.preset.as_str(),
+        "default-mp4"
+            | "fast-share"
+            | "balanced"
+            | "high-quality"
+            | "vertical"
+            | "square"
+            | "selected-range"
+    ) {
+        return Err(InternalError::Media("export preset is unsupported".into()).into());
+    }
+    if settings.caption_mode != plan.caption_mode {
+        return Err(InternalError::Media(
+            "export caption settings do not match the render plan".into(),
+        )
+        .into());
+    }
+    if let Some(range) = &settings.range {
+        if range.end_ms <= range.start_ms {
+            return Err(InternalError::Media("export range is invalid".into()).into());
+        }
+    }
+    if settings.preset == "selected-range" && settings.range.is_none() {
+        return Err(InternalError::Media("selected-range export requires a range".into()).into());
+    }
+    if settings.preset == "vertical"
+        && plan
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.width >= canvas.height)
+    {
+        return Err(InternalError::Media(
+            "vertical export requires a vertical project canvas".into(),
+        )
+        .into());
+    }
+    if settings.preset == "square"
+        && plan
+            .canvas
+            .as_ref()
+            .is_some_and(|canvas| canvas.width != canvas.height)
+    {
+        return Err(
+            InternalError::Media("square export requires a square project canvas".into()).into(),
+        );
+    }
+    Ok(())
+}
+
+fn append_video_encoding_args(command: &mut Command, settings: &ExportSettings, fps: u32) {
+    let codec = if settings.codec == "hevc" {
+        "libx265"
+    } else {
+        "libx264"
+    };
+    let (preset, crf) = match settings.preset.as_str() {
+        "fast-share" => ("ultrafast", "23"),
+        "high-quality" => ("slow", "18"),
+        "vertical" | "square" => ("veryfast", "20"),
+        _ => ("veryfast", "20"),
+    };
+    command
+        .arg("-c:v")
+        .arg(codec)
+        .arg("-preset")
+        .arg(preset)
+        .arg("-crf")
+        .arg(crf)
+        .arg("-r")
+        .arg(fps.to_string())
+        .args(["-pix_fmt", "yuv420p"]);
+}
+
+fn audio_bitrate(settings: &ExportSettings) -> &'static str {
+    if settings.preset == "high-quality" {
+        "192k"
+    } else {
+        "128k"
+    }
+}
+
+fn atempo_filter(speed: f64) -> String {
+    let mut remaining = speed;
+    let mut filters = Vec::new();
+    while remaining > 2.0 {
+        filters.push("atempo=2.0".to_string());
+        remaining /= 2.0;
+    }
+    while remaining < 0.5 {
+        filters.push("atempo=0.5".to_string());
+        remaining /= 0.5;
+    }
+    if (remaining - 1.0).abs() > f64::EPSILON {
+        filters.push(format!("atempo={remaining:.6}"));
+    }
+    if filters.is_empty() {
+        String::new()
+    } else {
+        format!(",{}", filters.join(","))
+    }
+}
+
+fn run_ffmpeg_command(
+    command: &mut Command,
+    cancel: &std::sync::atomic::AtomicBool,
+    partial_path: &Path,
+    stage: &str,
+) -> Result<()> {
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| InternalError::Media(format!("start {stage}: {error}")))?;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(partial_path);
+            return Err(InternalError::Media("export cancelled".into()).into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(partial_path);
+                warn!(
+                    stage,
+                    "ffmpeg export process failed; stderr is intentionally redacted"
+                );
+                return Err(InternalError::Media(format!("{stage} failed")).into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(partial_path);
+                return Err(InternalError::Media(format!("wait for {stage}: {error}")).into());
+            }
+        }
+    }
+}
+
+fn validate_export_output(
+    ffprobe_path: &Path,
+    path: &Path,
+    plan: &RenderPlan,
+    settings: &ExportSettings,
+) -> Result<()> {
+    let metadata =
+        crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)?;
+    let duration_delta = metadata.duration_ms.abs_diff(plan.duration_ms);
+    if duration_delta > 150 {
+        return Err(InternalError::Media("export duration failed validation".into()).into());
+    }
+    let video = metadata
+        .streams
+        .iter()
+        .find(|stream| stream.kind == "video")
+        .ok_or_else(|| InternalError::Media("export has no video stream".into()))?;
+    let canvas = plan
+        .canvas
+        .as_ref()
+        .ok_or_else(|| InternalError::Media("render canvas is required".into()))?;
+    if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32) {
+        return Err(InternalError::Media("export dimensions failed validation".into()).into());
+    }
+    let expected_video_codec = if settings.codec == "hevc" {
+        "hevc"
+    } else {
+        "h264"
+    };
+    if video.codec != expected_video_codec {
+        return Err(InternalError::Media("export video codec failed validation".into()).into());
+    }
+    let expected_audio = plan.audio_tracks.as_ref().is_some_and(|tracks| {
+        tracks
+            .iter()
+            .any(|track| !track.muted && !track.segments.is_empty())
+    }) || plan
+        .audio
+        .as_ref()
+        .is_some_and(|track| !track.muted && !track.segments.is_empty());
+    if expected_audio != metadata.has_audio {
+        return Err(InternalError::Media("export audio stream failed validation".into()).into());
+    }
+    for stream in metadata
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == "audio")
+    {
+        if stream.codec != "aac" {
+            return Err(InternalError::Media("export audio codec failed validation".into()).into());
+        }
+        if let Some(duration_ms) = stream.duration_ms {
+            if duration_ms.abs_diff(plan.duration_ms) > 250 {
+                return Err(
+                    InternalError::Media("audio and video duration are misaligned".into()).into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cleanup_export_files(output_path: &Path) {
+    let partial = partial_output_path(output_path);
+    let _ = std::fs::remove_file(&partial);
+    let _ = std::fs::remove_file(cursor_partial_output_path(output_path));
+    let _ = std::fs::remove_file(partial.with_extension("srt"));
+    let _ = std::fs::remove_file(cursor_partial_output_path(&partial));
+}
+
+fn update_progress(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    app: &tauri::AppHandle,
+    job_id: &str,
+    progress: f64,
+    stage: &str,
+    message: Option<&str>,
+) -> Result<()> {
+    let conn = db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    crate::database::media::update_job_progress(&conn, job_id, progress, stage, message)?;
+    let job = crate::database::media::get_job(&conn, job_id)?;
+    drop(conn);
+    emit_job_update(app, &job)
 }
 
 fn validate_canvas(canvas: &cursor::RenderCanvas) -> Result<()> {
@@ -1200,9 +1771,57 @@ fn zoom_easing_expression(progress: &str, easing: &str) -> String {
         "linear" => progress.to_string(),
         "ease-in" => format!("({progress})*({progress})"),
         "ease-out" => format!("1-(1-({progress}))*(1-({progress}))"),
+        "snappy" => {
+            format!("if(lte(({progress}),0.5),4*pow(({progress}),3),1-pow(-2*({progress})+2,3)/2)")
+        }
+        "cinematic" => format!("({progress})*({progress})*(3-2*({progress}))"),
         _ => format!(
             "if(lte(({progress}),0.5),2*({progress})*({progress}),1-pow(-2*({progress})+2,2)/2)"
         ),
+    }
+}
+
+/// Clamp a zoom segment target to the padded visible content area and apply its
+/// additional scale, returning the final crop rectangle in full-canvas coordinates.
+/// This mirrors the TypeScript `clampZoomTarget` and `resolveZoomTransform`
+/// behavior used by the preview so exports produce the same framing.
+pub(crate) fn clamped_zoom_target(
+    canvas_width: u32,
+    canvas_height: u32,
+    canvas_padding: u32,
+    segment: &RenderPlanZoomSegment,
+) -> RenderCropFloat {
+    let padding = canvas_padding as f64;
+    let content_width = (canvas_width as f64 - padding * 2.0).max(1.0);
+    let content_height = (canvas_height as f64 - padding * 2.0).max(1.0);
+    let scale = segment.scale.clamp(1.0, 8.0);
+
+    // Clamp the declared target to the padded safe area in full-canvas coordinates.
+    let target_width = segment.target.width.max(1.0).min(content_width);
+    let target_height = segment.target.height.max(1.0).min(content_height);
+    let target_x = segment
+        .target
+        .x
+        .clamp(padding, canvas_width as f64 - padding - target_width);
+    let target_y = segment
+        .target
+        .y
+        .clamp(padding, canvas_height as f64 - padding - target_height);
+
+    // Apply the additional zoom scale, keeping the final crop centered within
+    // the safe target and clamped back to the padded safe area.
+    let final_width = (target_width / scale).max(1.0);
+    let final_height = (target_height / scale).max(1.0);
+    let final_x = (target_x + (target_width - final_width) / 2.0)
+        .clamp(padding, canvas_width as f64 - padding - final_width);
+    let final_y = (target_y + (target_height - final_height) / 2.0)
+        .clamp(padding, canvas_height as f64 - padding - final_height);
+
+    RenderCropFloat {
+        x: final_x,
+        y: final_y,
+        width: final_width,
+        height: final_height,
     }
 }
 
@@ -1211,6 +1830,11 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         "width" => canvas.width as f64,
         "height" => canvas.height as f64,
         _ => 0.0,
+    };
+    let start = if axis == "x" || axis == "y" {
+        0.0
+    } else {
+        full
     };
     let mut expression = format!("{full:.3}");
     for segment in plan
@@ -1222,19 +1846,13 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         if segment.end_ms <= segment.start_ms {
             continue;
         }
-        let scale = segment.scale.clamp(1.0, 8.0);
-        let target_width = segment.target.width.max(1.0).min(canvas.width as f64) / scale;
-        let target_height = segment.target.height.max(1.0).min(canvas.height as f64) / scale;
-        let target_x = (segment.target.x + (segment.target.width - target_width) / 2.0)
-            .clamp(0.0, canvas.width as f64 - target_width);
-        let target_y = (segment.target.y + (segment.target.height - target_height) / 2.0)
-            .clamp(0.0, canvas.height as f64 - target_height);
-        let (target, start) = match axis {
-            "width" => (target_width, 0.0),
-            "height" => (target_height, 0.0),
-            "x" => (target_x, 0.0),
-            "y" => (target_y, 0.0),
-            _ => (full, 0.0),
+        let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
+        let target_value = match axis {
+            "width" => target.width,
+            "height" => target.height,
+            "x" => target.x,
+            "y" => target.y,
+            _ => full,
         };
         let progress = format!(
             "((t-{:.3})/{:.3})",
@@ -1243,12 +1861,12 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         );
         let eased = zoom_easing_expression(&progress, &segment.easing);
         let interpolated = if axis == "x" || axis == "y" {
-            format!("({start:.3})+(({target:.3})-({start:.3}))*({eased})")
+            format!("({start:.3})+(({target_value:.3})-({start:.3}))*({eased})")
         } else {
-            format!("({full:.3})+(({target:.3})-({full:.3}))*({eased})")
+            format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased})")
         };
         expression = format!(
-            "if(between(t,{:.3},{:.3}),{interpolated},{expression})",
+            "if(gte(t,{:.3})*lt(t,{:.3}),{interpolated},{expression})",
             segment.start_ms as f64 / 1000.0,
             segment.end_ms as f64 / 1000.0
         );
@@ -1258,30 +1876,30 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
 
 fn validate_segment_known(
     segment: &RenderSegment,
-    recording_id: &str,
+    project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
 ) -> Result<()> {
-    if let Some(asset_id) = segment.asset_id.as_ref() {
-        if asset_id != recording_id && !asset_paths.contains_key(asset_id) {
-            return Err(
-                InternalError::Media("render plan references an unknown asset".into()).into(),
-            );
-        }
+    if !asset_paths.contains_key(&segment.asset_id) {
+        return Err(InternalError::Permissions(
+            "render plan references a missing or unauthorized asset".into(),
+        )
+        .into());
     }
-    validate_segment(segment, recording_id)
+    validate_segment(segment, project_id)
 }
 
 fn validate_mask(
     mask: &RenderPlanMask,
-    recording_id: &str,
+    _project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
     canvas: &cursor::RenderCanvas,
 ) -> Result<()> {
     if let Some(asset_id) = mask.asset_id.as_ref() {
-        if asset_id != recording_id && !asset_paths.contains_key(asset_id) {
-            return Err(
-                InternalError::Media("privacy mask references an unknown asset".into()).into(),
-            );
+        if !asset_paths.contains_key(asset_id) {
+            return Err(InternalError::Permissions(
+                "privacy mask references an unknown asset".into(),
+            )
+            .into());
         }
     }
     if !matches!(mask.mode.as_str(), "blur" | "pixelate" | "redact")
@@ -1305,18 +1923,63 @@ fn validate_mask(
     Ok(())
 }
 
+fn overlay_values_are_finite(overlay: &RenderPlanOverlay) -> bool {
+    [
+        overlay.source_in_ms as f64,
+        overlay.source_out_ms as f64,
+        overlay.output_start_ms as f64,
+        overlay.output_end_ms as f64,
+        overlay.speed,
+        overlay.x,
+        overlay.y,
+        overlay.width,
+        overlay.height,
+        overlay.opacity,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+}
+
+fn mask_values_are_finite(mask: &RenderPlanMask) -> bool {
+    [
+        mask.start_ms as f64,
+        mask.end_ms as f64,
+        mask.rect.x,
+        mask.rect.y,
+        mask.rect.width,
+        mask.rect.height,
+        mask.blur_radius,
+        mask.pixel_size as f64,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+}
+
+fn zoom_values_are_finite(segment: &RenderPlanZoomSegment) -> bool {
+    [
+        segment.start_ms as f64,
+        segment.end_ms as f64,
+        segment.target.x,
+        segment.target.y,
+        segment.target.width,
+        segment.target.height,
+        segment.scale,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+}
+
 fn validate_overlay(
     overlay: &RenderPlanOverlay,
-    recording_id: &str,
+    _project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
     canvas: &cursor::RenderCanvas,
 ) -> Result<()> {
-    if let Some(asset_id) = overlay.asset_id.as_ref() {
-        if asset_id != recording_id && !asset_paths.contains_key(asset_id) {
-            return Err(
-                InternalError::Media("camera overlay references an unknown asset".into()).into(),
-            );
-        }
+    if !asset_paths.contains_key(&overlay.asset_id) {
+        return Err(InternalError::Permissions(
+            "camera overlay references an unknown asset".into(),
+        )
+        .into());
     }
     if overlay.source_in_ms >= overlay.source_out_ms
         || overlay.output_start_ms >= overlay.output_end_ms
@@ -1324,6 +1987,8 @@ fn validate_overlay(
         || overlay.height <= 0.0
         || overlay.opacity < 0.0
         || overlay.opacity > 1.0
+        || !overlay.speed.is_finite()
+        || overlay.speed <= 0.0
         || overlay.x < 0.0
         || overlay.y < 0.0
         || overlay.x + overlay.width > canvas.width as f64 + 0.5
@@ -1339,19 +2004,15 @@ fn validate_overlay(
     Ok(())
 }
 
-fn validate_asset(asset_id: Option<&String>, recording_id: &str) -> Result<()> {
-    if let Some(asset_id) = asset_id {
-        if asset_id != recording_id && !asset_id.starts_with(&format!("{recording_id}:")) {
-            return Err(
-                InternalError::Media("render plan references an unknown asset".into()).into(),
-            );
-        }
+fn validate_asset(asset_id: &str) -> Result<()> {
+    if asset_id.trim().is_empty() {
+        return Err(InternalError::Media("render plan asset id is empty".into()).into());
     }
     Ok(())
 }
 
-fn validate_segment(segment: &RenderSegment, recording_id: &str) -> Result<()> {
-    validate_asset(segment.asset_id.as_ref(), recording_id)?;
+fn validate_segment(segment: &RenderSegment, _project_id: &str) -> Result<()> {
+    validate_asset(&segment.asset_id)?;
     if segment.source_in_ms >= segment.source_out_ms {
         return Err(
             InternalError::Media("render segment has an invalid source range".into()).into(),
@@ -1360,6 +2021,23 @@ fn validate_segment(segment: &RenderSegment, recording_id: &str) -> Result<()> {
     if segment.output_end_ms <= segment.output_start_ms {
         return Err(
             InternalError::Media("render segment has an invalid output range".into()).into(),
+        );
+    }
+    if !segment.speed.is_finite() || segment.speed <= 0.0 {
+        return Err(InternalError::Media("render segment has an invalid speed".into()).into());
+    }
+    if segment
+        .volume
+        .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+        || segment
+            .fade_in_ms
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        || segment
+            .fade_out_ms
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Err(
+            InternalError::Media("render segment audio settings are invalid".into()).into(),
         );
     }
     if let Some(stream_index) = segment.stream_index {
@@ -1372,16 +2050,20 @@ fn validate_segment(segment: &RenderSegment, recording_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn input_stream(stream_index: Option<i32>, audio: bool) -> Result<String> {
+fn input_stream_at(input_index: usize, stream_index: Option<i32>, audio: bool) -> Result<String> {
     if let Some(index) = stream_index {
         if index < 0 {
             return Err(
                 InternalError::Media("render plan has an invalid stream index".into()).into(),
             );
         }
-        return Ok(format!("[0:{index}]"));
+        return Ok(format!("[{input_index}:{index}]"));
     }
-    Ok(if audio { "[0:a:0]" } else { "[0:v:0]" }.to_string())
+    Ok(if audio {
+        format!("[{input_index}:a:0]")
+    } else {
+        format!("[{input_index}:v:0]")
+    })
 }
 
 fn seconds(milliseconds: u64) -> String {
@@ -1392,7 +2074,7 @@ fn write_caption_sidecar(output_path: &Path, captions: &[RenderPlanCaption]) -> 
     captions::write_sidecar(output_path, captions)
 }
 
-fn partial_output_path(output_path: &Path) -> PathBuf {
+pub(crate) fn partial_output_path(output_path: &Path) -> PathBuf {
     let stem = output_path
         .file_stem()
         .map(|value| value.to_string_lossy())
@@ -1409,6 +2091,7 @@ fn emit_job_update(app: &tauri::AppHandle, job: &MediaJob) -> Result<()> {
     EventPublisher::new(app).media_job_update(job)
 }
 
+#[allow(dead_code)]
 fn emit_progress(
     app: &tauri::AppHandle,
     job: &MediaJob,
@@ -1424,4 +2107,167 @@ fn emit_progress(
         ..job.clone()
     };
     emit_job_update(app, &updated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_plan() -> RenderPlan {
+        RenderPlan {
+            project_id: "project-1".into(),
+            duration_ms: 3_000,
+            segments: vec![
+                RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 1_000,
+                    output_start_ms: 0,
+                    output_end_ms: 1_000,
+                },
+                RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    speed: 2.0,
+                    source_in_ms: 2_000,
+                    source_out_ms: 4_000,
+                    output_start_ms: 2_000,
+                    output_end_ms: 3_000,
+                },
+            ],
+            gaps: vec![RenderPlanGap {
+                start_ms: 1_000,
+                end_ms: 2_000,
+            }],
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            canvas: Some(cursor::RenderCanvas {
+                width: 1_920,
+                height: 1_080,
+                fps: 30,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: Some(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn validates_project_scoped_timing_and_gaps() {
+        assert!(valid_plan().validate().is_ok());
+        let mut invalid = valid_plan();
+        invalid.gaps[0].end_ms = 2_500;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn parses_the_shared_render_plan_fixture() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tooling/golden-fixtures/render-plan.json");
+        let json = std::fs::read_to_string(path).expect("shared render plan fixture");
+        let plan: RenderPlan = serde_json::from_str(&json).expect("serde render plan fixture");
+        assert_eq!(plan.project_id, "project-phase8");
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn uses_shared_zoom_easing_names_and_exclusive_segment_end() {
+        let progress = zoom_easing_expression("p", "cinematic");
+        assert!(progress.contains("3-2*"));
+        let crop = zoom_crop_expression(
+            &RenderPlan {
+                zoom_segments: vec![RenderPlanZoomSegment {
+                    id: "zoom".into(),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    target: RenderCropFloat {
+                        x: 100.0,
+                        y: 100.0,
+                        width: 960.0,
+                        height: 540.0,
+                    },
+                    scale: 1.0,
+                    easing: "cinematic".into(),
+                    enabled: true,
+                    mode: "auto".into(),
+                    source: "click".into(),
+                    preset: "product-demo".into(),
+                }],
+                ..valid_plan()
+            },
+            &cursor::RenderCanvas {
+                width: 1_920,
+                height: 1_080,
+                fps: 30,
+                ..Default::default()
+            },
+            "width",
+        );
+        assert!(crop.contains("lt(t,1.000)"));
+    }
+
+    #[test]
+    fn clamps_zoom_crop_to_padded_content_area() {
+        let crop = zoom_crop_expression(
+            &RenderPlan {
+                zoom_segments: vec![RenderPlanZoomSegment {
+                    id: "zoom".into(),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    target: RenderCropFloat {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 4_000.0,
+                        height: 2_000.0,
+                    },
+                    scale: 1.0,
+                    easing: "linear".into(),
+                    enabled: true,
+                    mode: "auto".into(),
+                    source: "click".into(),
+                    preset: "product-demo".into(),
+                }],
+                ..valid_plan()
+            },
+            &cursor::RenderCanvas {
+                width: 1_920,
+                height: 1_080,
+                fps: 30,
+                padding: 48,
+                ..Default::default()
+            },
+            "width",
+        );
+        // The content area for a 48px padded 1920x1080 canvas is 1824x984,
+        // so the final crop width should be clamped to 1824, not 4000.
+        assert!(crop.contains("1824.000"));
+        assert!(!crop.contains("4000"));
+    }
+
+    #[test]
+    fn builds_atempo_chain_for_extreme_speed_changes() {
+        let filter = atempo_filter(4.0);
+        assert_eq!(filter, ",atempo=2.0,atempo=2.000000");
+    }
+
+    #[test]
+    fn keeps_partial_paths_separate_from_published_paths() {
+        let output = Path::new("C:/exports/demo.mp4");
+        assert_ne!(partial_output_path(output), output);
+        assert!(partial_output_path(output)
+            .to_string_lossy()
+            .contains("partial"));
+    }
 }

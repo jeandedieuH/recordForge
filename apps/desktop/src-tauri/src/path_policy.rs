@@ -91,6 +91,19 @@ impl PathPolicy {
             .ok_or_else(|| InternalError::Permissions("export path has no filename".into()))?;
 
         let canonical = parent_canonical.join(filename);
+        if std::fs::symlink_metadata(path).is_ok() {
+            let existing = path.canonicalize().map_err(|error| {
+                InternalError::Storage(format!(
+                    "failed to canonicalize existing export destination: {error}"
+                ))
+            })?;
+            if existing != canonical {
+                return Err(InternalError::Permissions(
+                    "export destination symlinks are not supported".into(),
+                )
+                .into());
+            }
+        }
 
         // Block writing to system directories on Windows
         #[cfg(windows)]
@@ -225,6 +238,18 @@ mod tests {
     fn test_traversal_uuid_rejected() {
         let (_temp, policy) = setup_policy();
         let result = policy.validate_session_dir("../../system32");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_project_asset_outside_project_directory() {
+        let (temp, policy) = setup_policy();
+        let project_dir = temp.path().join("project");
+        let outside_file = temp.path().join("outside.mp4");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(&outside_file, b"fixture").unwrap();
+
+        let result = policy.validate_project_asset_path(&project_dir, &outside_file);
         assert!(result.is_err());
     }
 }

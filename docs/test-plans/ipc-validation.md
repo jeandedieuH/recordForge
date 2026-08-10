@@ -49,7 +49,9 @@
 | Test | Command | Input | Expected |
 |------|---------|-------|----------|
 | `test_export_path_traversal` | `export_timeline` | `outputPath: "C:\\Windows\\system32\\evil.mp4"` | Error: blocked destination |
-| `test_export_input_path_traversal` | `export_timeline` | Render plan with `inputPath: "C:\\secret.txt"` | Error: paths must use asset IDs |
+| `test_export_input_path_traversal` | `export_timeline` | Render plan with `inputPath: "C:\\secret.txt"` | Error: unknown field / paths must use asset IDs |
+| `test_export_unknown_asset` | `export_timeline` | `projectId` plan references an unregistered asset | Error: missing or unauthorized asset |
+| `test_export_project_mismatch` | `export_timeline` | Top-level and plan project IDs differ | TypeScript and Rust validation error |
 | `test_export_unc_path` | `export_timeline` | `outputPath: "\\\\server\\share\\file.mp4"` | Error or blocked |
 
 ---
@@ -85,7 +87,7 @@ CI step:
 
 | DTO | TypeScript | Rust | Drift |
 |-----|-----------|------|-------|
-| `RenderPlan` | Uses `inputPath: string` | Uses `input_path: String` | Both accept paths from frontend (security gap) |
+| `RenderPlan` | Uses `projectId` and asset IDs | Uses `project_id` and asset IDs | Rust rejects unknown fields and resolves paths from the saved project |
 | `RecorderState` | `z.enum([...])` with kebab-case | `#[serde(rename_all = "lowercase")]` | Rust uses lowercase, TS uses kebab-case for some values |
 | `MediaJobOutputs` | Optional fields | `Default::default()` | Semantically compatible but untested |
 

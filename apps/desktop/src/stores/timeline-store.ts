@@ -1,7 +1,10 @@
 import { create } from "zustand"
 import type {
+  ExportPreset,
+  ExportRange,
   LibraryRecording,
   MediaJob,
+  CursorTelemetryFile,
   MediaMetadata,
   recordForgeProject,
   TimelineViewState,
@@ -29,16 +32,19 @@ import {
   saveProject,
   snapshotProject,
 } from "../lib/project"
+import { getCursorTelemetry } from "../lib/cursor"
 import { listRecordings } from "../lib/library"
 import { toErrorMessage } from "../lib/errors"
+import { isTauri } from "../lib/settings"
 import {
+  cancelMediaJob,
   getMediaJob,
   getMediaMetadata,
   listMediaJobs,
   onMediaJobUpdate,
   prepareRecordingMedia,
 } from "../lib/media"
-import { exportTimeline } from "../lib/timeline"
+import { exportTimeline, retryExport as retryExportRequest, revealExport } from "../lib/timeline"
 import { useEditorStore } from "./editor-store"
 
 interface TimelineStore {
@@ -47,6 +53,8 @@ interface TimelineStore {
   recording: LibraryRecording | null
   metadata: MediaMetadata | null
   project: recordForgeProject | null
+  cursorTelemetry: CursorTelemetryFile | null
+  cursorTelemetryStatus: "loading" | "available" | "unavailable"
   activeJob: MediaJob | null
   isLoading: boolean
   error: string | null
@@ -80,6 +88,12 @@ interface TimelineStore {
   setTrackHeight: (trackId: string, height: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
+  setExportPreset: (preset: ExportPreset) => void
+  setExportCodec: (codec: "h264" | "hevc") => void
+  setExportRange: (range: ExportRange | undefined) => void
+  cancelExport: () => Promise<void>
+  retryExport: () => Promise<void>
+  revealExport: () => Promise<void>
   setSelection: (selection: TimelineSelection | null) => void
 
   save: () => Promise<void>
@@ -102,6 +116,7 @@ const SNAPSHOT_COMMANDS = new Set([
   "delete-track",
   "delete-cursor-range",
   "delete-zoom-segment",
+  "regenerate-zoom-suggestions",
   "trim-clip",
   "import-caption-cues",
   "add-mask-clip",
@@ -161,6 +176,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   recording: null,
   metadata: null,
   project: null,
+  cursorTelemetry: null,
+  cursorTelemetryStatus: "unavailable",
   activeJob: null,
   isLoading: false,
   error: null,
@@ -178,6 +195,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       recording: null,
       metadata: null,
       project: null,
+      cursorTelemetry: null,
+      cursorTelemetryStatus: "loading",
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
@@ -189,9 +208,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         throw new Error(`Recording ${recordingId} not found`)
       }
 
-      const [metadata, jobs] = await Promise.all([
+      const [metadata, jobs, initialCursorTelemetry] = await Promise.all([
         getMediaMetadata(recordingId),
         listMediaJobs(recordingId),
+        isTauri() ? getCursorTelemetry(recordingId).catch(() => null) : Promise.resolve(null),
       ])
 
       const meta = metadata ?? fallbackMetadata(recording)
@@ -264,6 +284,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         recording,
         metadata: meta,
         project,
+        cursorTelemetry: initialCursorTelemetry,
+        cursorTelemetryStatus: initialCursorTelemetry ? "available" : "unavailable",
         activeJob,
         activeExportJob: null,
         missingAssets,
@@ -568,6 +590,80 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().scheduleAutosave()
   },
 
+  setExportPreset: (preset) => {
+    const project = get().project
+    if (!project || project.exportSettings.preset === preset) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, preset },
+      updatedAt: new Date().toISOString(),
+    }
+    set({ project: nextProject })
+    useEditorStore.getState().setProject(nextProject)
+    useEditorStore.getState().setDirty(true)
+    get().scheduleAutosave()
+  },
+
+  setExportCodec: (codec) => {
+    const project = get().project
+    if (!project || project.exportSettings.codec === codec) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, codec },
+      updatedAt: new Date().toISOString(),
+    }
+    set({ project: nextProject })
+    useEditorStore.getState().setProject(nextProject)
+    useEditorStore.getState().setDirty(true)
+    get().scheduleAutosave()
+  },
+
+  setExportRange: (range) => {
+    const project = get().project
+    const current = project?.exportSettings.range
+    if (!project || (current?.startMs === range?.startMs && current?.endMs === range?.endMs)) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, range },
+      updatedAt: new Date().toISOString(),
+    }
+    set({ project: nextProject })
+    useEditorStore.getState().setProject(nextProject)
+    useEditorStore.getState().setDirty(true)
+    get().scheduleAutosave()
+  },
+
+  cancelExport: async () => {
+    const job = get().activeExportJob
+    if (!job || !["pending", "running"].includes(job.status)) return
+    try {
+      await cancelMediaJob(job.id)
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+    }
+  },
+
+  retryExport: async () => {
+    const job = get().activeExportJob
+    if (!job || !["failed", "cancelled"].includes(job.status)) return
+    try {
+      const retried = await retryExportRequest(job.id)
+      set({ activeExportJob: retried, error: null })
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+    }
+  },
+
+  revealExport: async () => {
+    const job = get().activeExportJob
+    if (!job || job.status !== "completed") return
+    try {
+      await revealExport(job.id)
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+    }
+  },
+
   setSelection: (selection) => {
     const { view } = get()
     set({ view: { ...view, selection } })
@@ -587,8 +683,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
     const plan = buildRenderPlan({
       state: engine.history.present,
-      recording,
-      outputPath,
+      projectId: project.id,
+      settings: project.exportSettings,
       captionMode: project.exportSettings.captionMode,
     })
     if (!plan.ok) {
@@ -597,9 +693,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     }
     try {
       const job = await exportTimeline({
-        recordingId: recording.id,
+        projectId: project.id,
         outputPath,
         plan: plan.value,
+        settings: project.exportSettings,
       })
       set({ activeExportJob: job })
     } catch (err) {

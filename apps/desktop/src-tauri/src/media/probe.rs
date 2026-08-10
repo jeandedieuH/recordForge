@@ -44,7 +44,7 @@ struct FfprobeOutput {
 }
 
 /// Probe a media file with FFprobe and return normalized metadata.
-#[instrument]
+#[instrument(skip(ffprobe_path, input))]
 pub fn probe_media(ffprobe_path: &str, input: &Path, recording_id: &str) -> Result<MediaMetadata> {
     if !input.exists() {
         return Err(InternalError::Media(format!("input not found: {}", input.display())).into());

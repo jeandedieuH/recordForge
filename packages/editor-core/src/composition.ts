@@ -5,6 +5,14 @@ import type {
   TimelineState,
   ZoomTarget,
 } from "@recordforge/contracts"
+import { clampZoomTarget } from "@recordforge/cursor-core"
+
+/**
+ * Keep an effect target inside the usable canvas. This is shared by the
+ * command engine, preview, and export plan so an off-canvas drag cannot create
+ * a transform that only one renderer understands.
+ */
+export { clampZoomTarget } from "@recordforge/cursor-core"
 
 export interface CanvasSize {
   width: number
@@ -51,36 +59,13 @@ export function canvasSizeForAspectRatio(
   return { width: current.width, height: Math.max(1, Math.round(current.width / ratio)) }
 }
 
-/**
- * Keep an effect target inside the usable canvas. This is shared by the
- * command engine, preview, and export plan so an off-canvas drag cannot create
- * a transform that only one renderer understands.
- */
-export function clampZoomTarget(
-  target: ZoomTarget,
-  canvas: Pick<TimelineCanvas, "width" | "height" | "padding">,
-): ZoomTarget {
-  const padding = Math.max(0, canvas.padding ?? 0)
-  const left = Math.min(padding, Math.max(0, canvas.width - 1))
-  const top = Math.min(padding, Math.max(0, canvas.height - 1))
-  const right = Math.max(left + 1, canvas.width - padding)
-  const bottom = Math.max(top + 1, canvas.height - padding)
-  const width = Math.min(Math.max(1, target.width), right - left)
-  const height = Math.min(Math.max(1, target.height), bottom - top)
-
-  return {
-    x: Math.min(Math.max(target.x, left), right - width),
-    y: Math.min(Math.max(target.y, top), bottom - height),
-    width,
-    height,
-  }
-}
-
 export function zoomEasedProgress(progress: number, easing: ManualZoomSegment["easing"]): number {
   const value = Math.min(1, Math.max(0, progress))
   if (easing === "linear") return value
   if (easing === "ease-in") return value * value
   if (easing === "ease-out") return 1 - (1 - value) ** 2
+  if (easing === "snappy") return value < 0.5 ? 4 * value ** 3 : 1 - (-2 * value + 2) ** 3 / 2
+  if (easing === "cinematic") return value * value * (3 - 2 * value)
   return value < 0.5 ? 2 * value * value : 1 - (-2 * value + 2) ** 2 / 2
 }
 
@@ -110,12 +95,17 @@ export function findManualZoomAtTime(
  * rectangle in canvas coordinates, while translation/scale are convenient for
  * a DOM compositor using a canvas-centered transform origin.
  */
+export interface ZoomTransformOptions {
+  target?: ZoomTarget
+}
+
 export function resolveZoomTransform(
   segment: ManualZoomSegment,
   timeMs: number,
   canvas: Pick<TimelineCanvas, "width" | "height" | "padding">,
+  options: ZoomTransformOptions = {},
 ): ZoomTransform {
-  const target = clampZoomTarget(segment.target, canvas)
+  const target = clampZoomTarget(options.target ?? segment.target, canvas)
   const duration = Math.max(1, segment.durationMs)
   const progress = zoomEasedProgress((timeMs - segment.startMs) / duration, segment.easing)
   const full: CanvasRect = { x: 0, y: 0, width: canvas.width, height: canvas.height }

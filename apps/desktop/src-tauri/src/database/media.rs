@@ -145,6 +145,10 @@ pub struct MediaJob {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub outputs: MediaJobOutputs,
+    #[serde(default, skip_serializing)]
+    pub options: serde_json::Value,
+    #[serde(default, skip_serializing)]
+    pub attempts: u32,
 }
 
 /// Cached FFprobe metadata for a recording.
@@ -210,18 +214,30 @@ pub struct DerivativeFile {
     pub created_at: String,
 }
 
-/// Create a new pending media job.
+/// Create a new pending media job without job-specific options.
 pub fn insert_job(conn: &Connection, recording_id: &str, kind: MediaJobKind) -> Result<MediaJob> {
+    insert_job_with_options(conn, recording_id, kind, serde_json::json!({}))
+}
+
+/// Create a durable job and persist its restartable options before a worker starts.
+pub fn insert_job_with_options(
+    conn: &Connection,
+    recording_id: &str,
+    kind: MediaJobKind,
+    options: serde_json::Value,
+) -> Result<MediaJob> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let outputs_json = serde_json::to_string(&MediaJobOutputs::default())
         .map_err(|e| InternalError::Storage(format!("serialize outputs: {e}")))?;
+    let options_json = serde_json::to_string(&options)
+        .map_err(|e| InternalError::Storage(format!("serialize job options: {e}")))?;
 
     conn.execute(
         "INSERT INTO media_jobs (
             id, recording_id, kind, status, progress, stage, message, error,
-            created_at, updated_at, started_at, completed_at, outputs
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            created_at, updated_at, started_at, completed_at, outputs, options, attempts
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
             recording_id,
@@ -236,6 +252,8 @@ pub fn insert_job(conn: &Connection, recording_id: &str, kind: MediaJobKind) -> 
             None::<String>,
             None::<String>,
             outputs_json,
+            options_json,
+            0_i64,
         ],
     )
     .map_err(|e| InternalError::Storage(format!("insert media job: {e}")))?;
@@ -254,6 +272,8 @@ pub fn insert_job(conn: &Connection, recording_id: &str, kind: MediaJobKind) -> 
         started_at: None,
         completed_at: None,
         outputs: MediaJobOutputs::default(),
+        options,
+        attempts: 0,
     })
 }
 
@@ -296,7 +316,7 @@ pub fn find_reusable_prepare_job(
 pub fn start_job(conn: &Connection, id: &str) -> Result<MediaJob> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE media_jobs SET status = ?1, stage = ?2, started_at = ?3, updated_at = ?3 WHERE id = ?4",
+        "UPDATE media_jobs SET status = ?1, stage = ?2, started_at = ?3, updated_at = ?3, attempts = attempts + 1 WHERE id = ?4 AND status IN ('pending', 'running')",
         params![MediaJobStatus::Running.as_str(), "starting", now, id],
     )
     .map_err(|e| InternalError::Storage(format!("start job: {e}")))?;
@@ -314,7 +334,7 @@ pub fn update_job_progress(
 ) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE media_jobs SET progress = ?1, stage = ?2, message = ?3, updated_at = ?4 WHERE id = ?5",
+        "UPDATE media_jobs SET progress = ?1, stage = ?2, message = ?3, updated_at = ?4 WHERE id = ?5 AND status = 'running'",
         params![progress.clamp(0.0, 1.0), stage, message, now, id],
     )
     .map_err(|e| InternalError::Storage(format!("update job progress: {e}")))?;
@@ -328,7 +348,7 @@ pub fn complete_job(conn: &Connection, id: &str, outputs: &MediaJobOutputs) -> R
         .map_err(|e| InternalError::Storage(format!("serialize outputs: {e}")))?;
 
     conn.execute(
-        "UPDATE media_jobs SET status = ?1, progress = ?2, stage = ?3, completed_at = ?4, updated_at = ?4, outputs = ?5 WHERE id = ?6",
+        "UPDATE media_jobs SET status = ?1, progress = ?2, stage = ?3, completed_at = ?4, updated_at = ?4, outputs = ?5 WHERE id = ?6 AND status IN ('pending', 'running')",
         params![
             MediaJobStatus::Completed.as_str(),
             1.0,
@@ -347,7 +367,7 @@ pub fn complete_job(conn: &Connection, id: &str, outputs: &MediaJobOutputs) -> R
 pub fn fail_job(conn: &Connection, id: &str, error: &str) -> Result<MediaJob> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE media_jobs SET status = ?1, progress = ?2, stage = ?3, error = ?4, completed_at = ?5, updated_at = ?5 WHERE id = ?6",
+        "UPDATE media_jobs SET status = ?1, progress = ?2, stage = ?3, error = ?4, completed_at = ?5, updated_at = ?5 WHERE id = ?6 AND status IN ('pending', 'running')",
         params![
             MediaJobStatus::Failed.as_str(),
             0.0,
@@ -366,11 +386,28 @@ pub fn fail_job(conn: &Connection, id: &str, error: &str) -> Result<MediaJob> {
 pub fn cancel_job(conn: &Connection, id: &str) -> Result<MediaJob> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE media_jobs SET status = ?1, stage = ?2, completed_at = ?3, updated_at = ?3 WHERE id = ?4",
+        "UPDATE media_jobs SET status = ?1, stage = ?2, completed_at = ?3, updated_at = ?3 WHERE id = ?4 AND status IN ('pending', 'running')",
         params![MediaJobStatus::Cancelled.as_str(), "cancelled", now, id],
     )
     .map_err(|e| InternalError::Storage(format!("cancel job: {e}")))?;
 
+    get_job(conn, id)
+}
+
+/// Re-queue a failed or cancelled job while retaining its durable identity and options.
+pub fn retry_job(conn: &Connection, id: &str) -> Result<MediaJob> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE media_jobs SET status = ?1, progress = 0, stage = ?2, message = ?3, error = NULL, started_at = NULL, completed_at = NULL, updated_at = ?4 WHERE id = ?5 AND status IN ('failed', 'cancelled')",
+        params![
+            MediaJobStatus::Pending.as_str(),
+            "queued",
+            "retry queued",
+            now,
+            id,
+        ],
+    )
+    .map_err(|e| InternalError::Storage(format!("retry job: {e}")))?;
     get_job(conn, id)
 }
 
@@ -444,6 +481,12 @@ fn row_to_job(row: &Row<'_>) -> std::result::Result<MediaJob, rusqlite::Error> {
         started_at: row.get("started_at")?,
         completed_at: row.get("completed_at")?,
         outputs,
+        options: row
+            .get::<_, String>("options")
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_else(|| serde_json::json!({})),
+        attempts: row.get::<_, i64>("attempts").unwrap_or(0).max(0) as u32,
     })
 }
 
@@ -671,5 +714,40 @@ mod tests {
                 .map(|job| job.id),
             Some(completed.id)
         );
+    }
+
+    #[test]
+    fn persists_export_options_and_retries_with_the_same_identity() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+        let options = serde_json::json!({
+            "projectId": "project-1",
+            "outputPath": "C:/exports/demo.mp4",
+        });
+        let job =
+            insert_job_with_options(&conn, "recording-1", MediaJobKind::Export, options.clone())
+                .expect("insert export job");
+        assert_eq!(job.options, options);
+        assert_eq!(job.attempts, 0);
+
+        start_job(&conn, &job.id).expect("start export job");
+        fail_job(&conn, &job.id, "render failed").expect("fail export job");
+        let retried = retry_job(&conn, &job.id).expect("retry export job");
+        assert_eq!(retried.id, job.id);
+        assert_eq!(retried.status, MediaJobStatus::Pending);
+        assert_eq!(retried.options, options);
+        assert_eq!(retried.attempts, 1);
+    }
+
+    #[test]
+    fn cancellation_does_not_overwrite_completed_jobs() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+        let job =
+            insert_job(&conn, "recording-1", MediaJobKind::Export).expect("insert export job");
+        start_job(&conn, &job.id).expect("start export job");
+        complete_job(&conn, &job.id, &MediaJobOutputs::default()).expect("complete export job");
+        let cancelled = cancel_job(&conn, &job.id).expect("cancel completed export");
+        assert_eq!(cancelled.status, MediaJobStatus::Completed);
     }
 }

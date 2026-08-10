@@ -6,6 +6,7 @@ import {
   recordingConfigSchema,
   recordingStatusSchema,
   libraryRecordingSchema,
+  renderPlanSchema,
 } from "@recordforge/contracts"
 
 interface EditorFixtureClip {
@@ -52,6 +53,14 @@ describe("Fixture Validation", () => {
     const parsed = libraryRecordingSchema.parse(json)
     expect(parsed.status).toBe("completed")
     expect(parsed.tags).toContain("demo")
+  })
+
+  test("render-plan.json matches the project-scoped renderPlanSchema", () => {
+    const json = JSON.parse(readFileSync(join(__dirname, "render-plan.json"), "utf-8"))
+    const parsed = renderPlanSchema.parse(json)
+    expect(parsed.projectId).toBe("project-phase8")
+    expect(parsed.gaps).toEqual([{ startMs: 3000, endMs: 5000 }])
+    expect(parsed.segments[1].speed).toBe(1.5)
   })
 
   test("editor cursor fixture matches cursorTelemetryFileSchema", () => {

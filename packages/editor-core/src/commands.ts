@@ -15,7 +15,13 @@ import type {
   TimelineTrack,
   TrackUpdate,
 } from "@recordforge/domain"
-import { findClip, findTrack, getTotalDuration, validateNoOverlap } from "@recordforge/domain"
+import {
+  defaultSmartZoomSettings,
+  findClip,
+  findTrack,
+  getTotalDuration,
+  validateNoOverlap,
+} from "@recordforge/domain"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
@@ -32,6 +38,7 @@ import type {
   DeleteZoomSegmentCommand,
   DeleteMarkerCommand,
   DeleteRangeCommand,
+  RegenerateZoomSuggestionsCommand,
   DeleteTrackCommand,
   MoveClipCommand,
   MoveClipsCommand,
@@ -46,6 +53,7 @@ import type {
   TrimClipCommand,
   TrimTimelineEndsCommand,
   UpdateCanvasCommand,
+  UpdateSmartZoomSettingsCommand,
   UpdateClipAudioCommand,
   UpdateCaptionClipCommand,
   UpdateMaskClipCommand,
@@ -488,6 +496,10 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "regenerate-zoom-suggestions": {
+      const valid = validateZoomSegments(command.segments)
+      return valid.ok ? { ok: true, value: undefined } : valid
+    }
     case "split-zoom-segment":
     case "resize-zoom-segment":
     case "update-zoom-segment":
@@ -505,7 +517,10 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
           command.target === undefined &&
           command.scale === undefined &&
           command.easing === undefined &&
-          command.enabled === undefined
+          command.enabled === undefined &&
+          command.mode === undefined &&
+          command.source === undefined &&
+          command.preset === undefined
         if (!onlyUnlock) {
           return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
         }
@@ -535,6 +550,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       return { ok: true, value: undefined }
     }
     case "update-canvas":
+      return { ok: true, value: undefined }
+    case "update-smart-zoom-settings":
       return { ok: true, value: undefined }
     case "update-cursor-settings":
       return { ok: true, value: undefined }
@@ -608,6 +625,8 @@ export function applyCommand(
       return applyUpdateMaskClip(state, command)
     case "update-canvas":
       return applyUpdateCanvas(state, command)
+    case "update-smart-zoom-settings":
+      return applyUpdateSmartZoomSettings(state, command)
     case "update-cursor-settings":
       return applyUpdateCursorSettings(state, command)
     case "add-cursor-range":
@@ -630,6 +649,8 @@ export function applyCommand(
       return applyResizeZoomSegment(state, command)
     case "delete-zoom-segment":
       return applyDeleteZoomSegment(state, command)
+    case "regenerate-zoom-suggestions":
+      return applyRegenerateZoomSuggestions(state, command)
     case "trim-timeline-ends":
       return applyTrimTimelineEnds(state, command)
     default:
@@ -1534,6 +1555,24 @@ function applyUpdateCanvas(
   }
 }
 
+function applyUpdateSmartZoomSettings(
+  state: TimelineState,
+  command: UpdateSmartZoomSettingsCommand,
+): CommandResult<TimelineState> {
+  return {
+    ok: true,
+    value: {
+      ...state,
+      smartZoomSettings: {
+        ...defaultSmartZoomSettings,
+        ...state.smartZoomSettings,
+        ...command.settings,
+      },
+      updatedAt: now(),
+    },
+  }
+}
+
 function applyUpdateCursorSettings(
   state: TimelineState,
   command: UpdateCursorSettingsCommand,
@@ -1694,6 +1733,9 @@ function applyAddZoomSegment(
     easing: command.easing ?? "ease-in-out",
     enabled: true,
     locked: false,
+    mode: command.mode ?? "manual",
+    source: command.source ?? "manual",
+    preset: command.preset ?? "manual-only",
   }
   const segments = [...getManualZoomSegments(state), segment]
   const valid = validateZoomSegments(segments)
@@ -1711,6 +1753,25 @@ function applyUpdateZoomSegment(
   }
   const startMs = command.startMs ?? current.startMs
   const endMs = command.endMs ?? current.startMs + current.durationMs
+  const onlyUnlock =
+    command.locked === false &&
+    command.startMs === undefined &&
+    command.endMs === undefined &&
+    command.target === undefined &&
+    command.scale === undefined &&
+    command.easing === undefined &&
+    command.enabled === undefined &&
+    command.mode === undefined &&
+    command.source === undefined &&
+    command.preset === undefined
+  const hasManualEdit =
+    !onlyUnlock &&
+    (command.startMs !== undefined ||
+      command.endMs !== undefined ||
+      command.target !== undefined ||
+      command.scale !== undefined ||
+      command.easing !== undefined ||
+      command.enabled !== undefined)
   const next: ManualZoomSegment = {
     ...current,
     startMs,
@@ -1722,6 +1783,9 @@ function applyUpdateZoomSegment(
     easing: command.easing ?? current.easing,
     enabled: command.enabled ?? current.enabled,
     locked: command.locked ?? current.locked,
+    mode: command.mode ?? (hasManualEdit ? "manual" : current.mode),
+    source: command.source ?? (hasManualEdit ? "manual" : current.source),
+    preset: command.preset ?? (hasManualEdit ? "manual-only" : current.preset),
   }
   const segments = getManualZoomSegments(state).map((segment) =>
     segment.id === command.segmentId ? next : segment,
@@ -1795,6 +1859,40 @@ function applyDeleteZoomSegment(
       updatedAt: now(),
     },
   }
+}
+
+function zoomSegmentsOverlap(left: ManualZoomSegment, right: ManualZoomSegment): boolean {
+  return (
+    left.startMs < right.startMs + right.durationMs &&
+    right.startMs < left.startMs + left.durationMs
+  )
+}
+
+function applyRegenerateZoomSuggestions(
+  state: TimelineState,
+  command: RegenerateZoomSuggestionsCommand,
+): CommandResult<TimelineState> {
+  const existing = getManualZoomSegments(state)
+  const preserved = existing.filter((segment) => {
+    const mode = segment.mode ?? "manual"
+    return mode === "manual" || segment.locked
+  })
+  const generated = command.segments
+    .map((segment) => ({
+      ...segment,
+      target: clampZoomTarget(segment.target, state.canvas),
+      mode: segment.mode ?? "auto",
+      source: segment.source ?? "manual",
+      preset: segment.preset ?? "product-demo",
+      locked: segment.locked ?? false,
+    }))
+    .filter((segment) => !preserved.some((existing) => zoomSegmentsOverlap(existing, segment)))
+    .filter((segment, index, segments) =>
+      segments.slice(0, index).every((previous) => !zoomSegmentsOverlap(previous, segment)),
+    )
+  const valid = validateZoomSegments([...preserved, ...generated])
+  if (!valid.ok) return valid
+  return { ok: true, value: { ...state, zoomSegments: valid.value, updatedAt: now() } }
 }
 
 function applyTrimTimelineEnds(
@@ -2117,6 +2215,9 @@ export function createAddZoomSegmentCommand(
     segmentId?: string
     scale?: number
     easing?: ManualZoomSegment["easing"]
+    mode?: ManualZoomSegment["mode"]
+    source?: ManualZoomSegment["source"]
+    preset?: ManualZoomSegment["preset"]
   } = {},
 ): CommandRecord {
   return {
@@ -2128,6 +2229,9 @@ export function createAddZoomSegmentCommand(
     target,
     scale: options.scale,
     easing: options.easing,
+    mode: options.mode,
+    source: options.source,
+    preset: options.preset,
   }
 }
 
@@ -2141,6 +2245,9 @@ export function createUpdateZoomSegmentCommand(
     easing?: ManualZoomSegment["easing"]
     enabled?: boolean
     locked?: boolean
+    mode?: ManualZoomSegment["mode"]
+    source?: ManualZoomSegment["source"]
+    preset?: ManualZoomSegment["preset"]
   },
 ): CommandRecord {
   return {
@@ -2187,6 +2294,16 @@ export function createDeleteZoomSegmentCommand(segmentId: string): CommandRecord
     kind: "delete-zoom-segment",
     name: "Delete zoom segment",
     segmentId,
+  }
+}
+
+export function createRegenerateZoomSuggestionsCommand(
+  segments: ManualZoomSegment[],
+): CommandRecord {
+  return {
+    kind: "regenerate-zoom-suggestions",
+    name: "Regenerate smart zoom suggestions",
+    segments: segments.map((segment) => ({ ...segment })),
   }
 }
 
@@ -2348,6 +2465,18 @@ export function createUpdateCanvasCommand(canvas: Partial<TimelineCanvas>): Comm
     kind: "update-canvas",
     name: "Update canvas",
     canvas,
+  }
+}
+
+export function createUpdateSmartZoomSettingsCommand(
+  settings: Partial<import("@recordforge/contracts").SmartZoomSettings>,
+): CommandRecord {
+  return {
+    kind: "update-smart-zoom-settings",
+    name: "Update smart zoom settings",
+    settings,
+    coalesce: true,
+    coalesceKey: "smart-zoom-settings",
   }
 }
 

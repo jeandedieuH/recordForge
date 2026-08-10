@@ -11,10 +11,15 @@ import {
   cursorIconPresetSchema,
   cursorSettingsSchema,
   cursorSmoothingSchema,
+  manualZoomSegmentSchema,
+  smartZoomSettingsSchema,
   timelineCanvasSchema,
   timelineTrackKindSchema,
   trackUpdateSchema,
   zoomEasingSchema,
+  zoomModeSchema,
+  zoomPresetSchema,
+  zoomSourceSchema,
   zoomTargetSchema,
 } from "@recordforge/contracts"
 
@@ -264,6 +269,13 @@ export const updateCanvasCommandSchema = commandMetaSchema.extend({
 
 export type UpdateCanvasCommand = z.infer<typeof updateCanvasCommandSchema>
 
+export const updateSmartZoomSettingsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-smart-zoom-settings"),
+  settings: smartZoomSettingsSchema.partial(),
+})
+
+export type UpdateSmartZoomSettingsCommand = z.infer<typeof updateSmartZoomSettingsCommandSchema>
+
 export const updateCursorSettingsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-cursor-settings"),
   cursorSettings: cursorSettingsSchema.partial(),
@@ -333,6 +345,9 @@ export const addZoomSegmentCommandSchema = commandMetaSchema.extend({
   target: zoomTargetSchema,
   scale: z.number().min(1).max(8).optional(),
   easing: zoomEasingSchema.optional(),
+  mode: zoomModeSchema.optional(),
+  source: zoomSourceSchema.optional(),
+  preset: zoomPresetSchema.optional(),
 })
 
 export type AddZoomSegmentCommand = z.infer<typeof addZoomSegmentCommandSchema>
@@ -347,6 +362,9 @@ export const updateZoomSegmentCommandSchema = commandMetaSchema.extend({
   easing: zoomEasingSchema.optional(),
   enabled: z.boolean().optional(),
   locked: z.boolean().optional(),
+  mode: zoomModeSchema.optional(),
+  source: zoomSourceSchema.optional(),
+  preset: zoomPresetSchema.optional(),
 })
 
 export type UpdateZoomSegmentCommand = z.infer<typeof updateZoomSegmentCommandSchema>
@@ -376,6 +394,15 @@ export const deleteZoomSegmentCommandSchema = commandMetaSchema.extend({
 })
 
 export type DeleteZoomSegmentCommand = z.infer<typeof deleteZoomSegmentCommandSchema>
+
+export const regenerateZoomSuggestionsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("regenerate-zoom-suggestions"),
+  segments: z.array(manualZoomSegmentSchema),
+})
+
+export type RegenerateZoomSuggestionsCommand = z.infer<
+  typeof regenerateZoomSuggestionsCommandSchema
+>
 
 export const trimTimelineEndsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("trim-timeline-ends"),
@@ -410,6 +437,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   addMaskClipCommandSchema,
   updateMaskClipCommandSchema,
   updateCanvasCommandSchema,
+  updateSmartZoomSettingsCommandSchema,
   updateCursorSettingsCommandSchema,
   addCursorRangeCommandSchema,
   splitCursorRangeCommandSchema,
@@ -421,6 +449,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   splitZoomSegmentCommandSchema,
   resizeZoomSegmentCommandSchema,
   deleteZoomSegmentCommandSchema,
+  regenerateZoomSuggestionsCommandSchema,
   trimTimelineEndsCommandSchema,
 ])
 

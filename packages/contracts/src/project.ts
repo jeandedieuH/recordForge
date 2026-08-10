@@ -4,11 +4,12 @@ import { boundsSchema } from "./recording"
 import { projectAssetRoleSchema } from "./media"
 import {
   manualZoomSegmentSchema,
+  smartZoomSettingsSchema,
   timelineCanvasSchema,
   timelineMarkerSchema,
   timelineTrackSchema,
 } from "./timeline"
-import { renderCaptionModeSchema } from "./captions"
+import { exportSettingsSchema } from "./timeline"
 
 // Canvas settings are stored in the on-disk project file under the same schema.
 export const canvasSettingsSchema = timelineCanvasSchema
@@ -51,12 +52,7 @@ export const projectAssetSchema = z.object({
 export type ProjectAsset = z.infer<typeof projectAssetSchema>
 
 // Export settings persisted with the project.
-export const projectExportSettingsSchema = z.object({
-  preset: z.string().default("default-mp4"),
-  codec: z.string().default("h264"),
-  container: z.string().default("mp4"),
-  captionMode: renderCaptionModeSchema.default("burn-in"),
-})
+export const projectExportSettingsSchema = exportSettingsSchema
 
 export type ProjectExportSettings = z.infer<typeof projectExportSettingsSchema>
 
@@ -76,8 +72,9 @@ export const projectSchema = z.object({
   tracks: z.array(timelineTrackSchema),
   markers: z.array(timelineMarkerSchema),
   // Optional for projects created before Phase 6. New edits persist the
-  // collection so zoom behavior survives reopen.
+  // collection so manual and generated zoom behavior survives reopen.
   zoomSegments: z.array(manualZoomSegmentSchema).optional(),
+  smartZoomSettings: smartZoomSettingsSchema.optional(),
   exportSettings: projectExportSettingsSchema,
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),

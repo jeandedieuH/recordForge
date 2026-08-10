@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { exportTimelineOptionsSchema, renderPlanSchema } from "./timeline"
 import { projectSchema, projectAssetSchema, projectExportSettingsSchema } from "./project"
 
 const minimalProject = {
@@ -99,6 +100,34 @@ describe("project contract", () => {
     expect(parsed.tracks[0].clips[0].assetId).toBe("asset-1")
   })
 
+  it("keeps generated zoom metadata editable in the durable project shape", () => {
+    const parsed = projectSchema.parse({
+      ...minimalProject,
+      smartZoomSettings: { preset: "cinematic", minDwellMs: 900 },
+      zoomSegments: [
+        {
+          id: "smart-zoom-1",
+          startMs: 1_000,
+          durationMs: 800,
+          target: { x: 100, y: 50, width: 960, height: 540 },
+          scale: 1,
+          easing: "cinematic",
+          enabled: true,
+          locked: false,
+          mode: "auto",
+          source: "click",
+          preset: "cinematic",
+        },
+      ],
+    })
+    expect(parsed.smartZoomSettings?.preset).toBe("cinematic")
+    expect(parsed.zoomSegments?.[0]).toMatchObject({
+      mode: "auto",
+      source: "click",
+      preset: "cinematic",
+    })
+  })
+
   it("rejects a project with the wrong format", () => {
     expect(() => projectSchema.parse({ ...minimalProject, format: "other.project" })).toThrow()
   })
@@ -115,6 +144,57 @@ describe("project contract", () => {
       container: "mp4",
       captionMode: "burn-in",
     })
+  })
+
+  it("requires project-scoped render plans and keeps media paths out of the DTO", () => {
+    const plan = renderPlanSchema.parse({
+      projectId: "project-1",
+      canvas: minimalProject.canvas,
+      durationMs: 10_000,
+      segments: [
+        {
+          assetId: "asset-1",
+          sourceInMs: 0,
+          sourceOutMs: 10_000,
+          outputStartMs: 0,
+          outputEndMs: 10_000,
+          speed: 1,
+        },
+      ],
+      gaps: [],
+    })
+    expect(plan.projectId).toBe("project-1")
+    expect("inputPath" in plan.segments[0]).toBe(false)
+    expect(() =>
+      renderPlanSchema.parse({ ...plan, gaps: [{ startMs: 1_000, endMs: 2_000 }] }),
+    ).toThrow()
+    expect(() => renderPlanSchema.parse({ ...plan, projectId: "" })).toThrow()
+  })
+
+  it("validates export settings separately from the render plan", () => {
+    const parsed = exportTimelineOptionsSchema.parse({
+      projectId: "project-1",
+      outputPath: "C:/exports/demo.mp4",
+      plan: {
+        projectId: "project-1",
+        canvas: minimalProject.canvas,
+        durationMs: 10_000,
+        segments: [
+          {
+            assetId: "asset-1",
+            sourceInMs: 0,
+            sourceOutMs: 10_000,
+            outputStartMs: 0,
+            outputEndMs: 10_000,
+            speed: 1,
+          },
+        ],
+        gaps: [],
+      },
+      settings: { preset: "high-quality", codec: "h264", container: "mp4", captionMode: "burn-in" },
+    })
+    expect(parsed.settings.preset).toBe("high-quality")
+    expect(parsed.plan.projectId).toBe(parsed.projectId)
   })
 
   it("preserves cursor telemetry metadata in the asset registry", () => {

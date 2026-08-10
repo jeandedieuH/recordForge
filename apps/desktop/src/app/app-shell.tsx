@@ -42,10 +42,18 @@ export function AppShell() {
   const clearSaveMessage = useRecorderStore((state) => state.clearSaveMessage)
   const timelineRecording = useTimelineStore((state) => state.recording)
   const timelineCanvas = useTimelineStore((state) => state.engine?.history.present.canvas)
+  const timelineDurationMs = useTimelineStore((state) => state.view.durationMs)
+  const exportSettings = useTimelineStore((state) => state.project?.exportSettings)
   const captionMode = useTimelineStore(
     (state) => state.project?.exportSettings.captionMode ?? "burn-in",
   )
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
+  const setExportPreset = useTimelineStore((state) => state.setExportPreset)
+  const setExportCodec = useTimelineStore((state) => state.setExportCodec)
+  const setExportRange = useTimelineStore((state) => state.setExportRange)
+  const cancelExport = useTimelineStore((state) => state.cancelExport)
+  const retryExport = useTimelineStore((state) => state.retryExport)
+  const revealExport = useTimelineStore((state) => state.revealExport)
   const timelineExport = useTimelineStore((state) => state.export)
   const timelineSave = useTimelineStore((state) => state.save)
   const timelineError = useTimelineStore((state) => state.error)
@@ -115,6 +123,8 @@ export function AppShell() {
   async function handleStartExport() {
     if (!timelineRecording) return
     try {
+      await timelineSave()
+      if (useEditorStore.getState().saveStatus === "error") return
       const outputPath = await save({
         title: "Export edited recording",
         defaultPath: `${timelineRecording.name}-edited.mp4`,
@@ -181,11 +191,19 @@ export function AppShell() {
               <ExportView
                 projectName={timelineRecording?.name}
                 canvas={timelineCanvas}
+                durationMs={timelineDurationMs}
+                exportSettings={exportSettings}
                 captionMode={captionMode}
                 onCaptionModeChange={setCaptionMode}
+                onPresetChange={setExportPreset}
+                onCodecChange={setExportCodec}
+                onRangeChange={setExportRange}
                 exportJob={activeExportJob}
                 error={timelineError}
                 onDismissError={clearTimelineError}
+                onCancelExport={cancelExport}
+                onRetryExport={retryExport}
+                onRevealExport={revealExport}
                 onBack={() => setActiveView("editor")}
                 onStartExport={handleStartExport}
               />
