@@ -34,6 +34,8 @@ import type {
   CommandRecord,
   DeleteClipCommand,
   DeleteClipsCommand,
+  DuplicateClipCommand,
+  DuplicateClipsCommand,
   DeleteCursorRangeCommand,
   DeleteZoomSegmentCommand,
   DeleteMarkerCommand,
@@ -296,7 +298,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
     case "update-clip-transform":
     case "update-caption-clip":
     case "update-mask-clip":
-    case "move-clip": {
+    case "move-clip":
+    case "duplicate-clip": {
       const found = findClip(state, command.clipId)
       if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       const trackResult = checkTrackLocked(found.track)
@@ -313,7 +316,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
-    case "move-clips": {
+    case "move-clips":
+    case "duplicate-clips": {
       const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
       if (foundClips.some((found) => !found)) {
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
@@ -328,7 +332,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
           error: editorError("track_locked", `Track "${lockedClip.track.name}" is locked`),
         }
       }
-      if (foundClips.some((found) => (found?.clip.startMs ?? 0) + command.deltaMs < 0)) {
+      const deltaMs = "deltaMs" in command ? (command.deltaMs ?? 0) : 0
+      if (foundClips.some((found) => (found?.clip.startMs ?? 0) + deltaMs < 0)) {
         return { ok: false, error: editorError("invalid_move", "Clip cannot start before zero") }
       }
       return { ok: true, value: undefined }
@@ -593,8 +598,12 @@ export function applyCommand(
       return applySplitClip(state, command)
     case "move-clip":
       return applyMoveClip(state, command)
+    case "duplicate-clip":
+      return applyDuplicateClip(state, command)
     case "move-clips":
       return applyMoveClips(state, command)
+    case "duplicate-clips":
+      return applyDuplicateClips(state, command)
     case "delete-clip":
       return applyDeleteClip(state, command)
     case "delete-clips":
@@ -962,6 +971,116 @@ function applyMoveClips(
     if (!trackResult.ok) return trackResult
     next = updateTrackInState(next, track.id, trackResult.value)
   }
+  return { ok: true, value: { ...next, updatedAt: now() } }
+}
+
+function duplicateClipWithStart(
+  clip: TimelineClip,
+  newId: string,
+  newStartMs: number,
+): TimelineClip {
+  return { ...clip, id: newId, startMs: newStartMs }
+}
+
+function applyDuplicateClip(
+  state: TimelineState,
+  command: DuplicateClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) {
+    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  }
+  const { track, clip } = found
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  if (clip.kind === "cursor-effect" && clip.locked) {
+    return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
+  }
+
+  const frameMs = Math.round(1000 / Math.max(1, state.canvas.fps))
+  const newStartMs = command.newStartMs ?? clip.startMs + clip.durationMs + frameMs
+  if (newStartMs < 0) {
+    return {
+      ok: false,
+      error: editorError("invalid_duplicate", "Duplicate cannot start before zero"),
+    }
+  }
+
+  const newClipId = command.newClipId ?? `${clip.id}:dup:${newStartMs}`
+  const newClip = duplicateClipWithStart(clip, newClipId, newStartMs)
+  const newClips = [...track.clips, newClip]
+  const trackResult = sortAndValidateTrack(
+    updateTrackInState(state, track.id, { ...track, clips: newClips }),
+    track.id,
+  )
+  if (!trackResult.ok) return trackResult
+
+  return { ok: true, value: updateTrackInState(state, track.id, trackResult.value) }
+}
+
+function applyDuplicateClips(
+  state: TimelineState,
+  command: DuplicateClipsCommand,
+): CommandResult<TimelineState> {
+  const clipIds = new Set(command.clipIds)
+  const foundClips: { track: TimelineTrack; clip: TimelineClip }[] = []
+  for (const track of state.tracks) {
+    for (const clip of track.clips) {
+      if (clipIds.has(clip.id)) {
+        if (track.locked) {
+          return {
+            ok: false,
+            error: editorError("track_locked", `Track "${track.name}" is locked`),
+          }
+        }
+        if (clip.kind === "cursor-effect" && clip.locked) {
+          return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
+        }
+        foundClips.push({ track, clip })
+      }
+    }
+  }
+  if (foundClips.length !== command.clipIds.length) {
+    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  }
+
+  const leftmost = Math.min(...foundClips.map(({ clip }) => clip.startMs))
+  const rightmost = Math.max(...foundClips.map(({ clip }) => clip.startMs + clip.durationMs))
+  const frameMs = Math.round(1000 / Math.max(1, state.canvas.fps))
+  const deltaMs = command.deltaMs ?? rightmost - leftmost + frameMs
+  if (foundClips.some(({ clip }) => clip.startMs + deltaMs < 0)) {
+    return {
+      ok: false,
+      error: editorError("invalid_duplicate", "Duplicate cannot start before zero"),
+    }
+  }
+
+  const duplicatedByTrack = new Map<string, TimelineClip[]>()
+  for (const { track, clip } of foundClips) {
+    const newClip = duplicateClipWithStart(
+      clip,
+      `${clip.id}:dup:${clip.startMs + deltaMs}`,
+      clip.startMs + deltaMs,
+    )
+    const trackClips = duplicatedByTrack.get(track.id) ?? []
+    trackClips.push(newClip)
+    duplicatedByTrack.set(track.id, trackClips)
+  }
+
+  let next = state
+  for (const [trackId, newClips] of duplicatedByTrack) {
+    const track = findTrack(next, trackId)
+    if (!track) return { ok: false, error: editorError("track_not_found", "Track not found") }
+    const combined = [...track.clips, ...newClips]
+    const trackResult = sortAndValidateTrack(
+      updateTrackInState(next, trackId, { ...track, clips: combined }),
+      trackId,
+    )
+    if (!trackResult.ok) return trackResult
+    next = updateTrackInState(next, trackId, trackResult.value)
+  }
+
   return { ok: true, value: { ...next, updatedAt: now() } }
 }
 
@@ -2080,6 +2199,31 @@ export function createMoveClipsCommand(
     deltaMs,
     coalesce: true,
     coalesceKey: options.coalesceKey ?? `move-clips:${[...new Set(clipIds)].sort().join(",")}`,
+  }
+}
+
+export function createDuplicateClipCommand(
+  clipId: string,
+  options: { newStartMs?: number; newClipId?: string } = {},
+): CommandRecord {
+  return {
+    kind: "duplicate-clip",
+    name: "Duplicate clip",
+    clipId,
+    newStartMs: options.newStartMs,
+    newClipId: options.newClipId,
+  }
+}
+
+export function createDuplicateClipsCommand(
+  clipIds: string[],
+  options: { deltaMs?: number } = {},
+): CommandRecord {
+  return {
+    kind: "duplicate-clips",
+    name: "Duplicate clips",
+    clipIds: [...new Set(clipIds)],
+    deltaMs: options.deltaMs,
   }
 }
 

@@ -58,14 +58,14 @@ interface TimelineLanesProps {
     clip: TimelineClip,
     track: TimelineTrack,
     newStartMs: number,
-    coalesceKey: string,
+    options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onTrimClip: (
     clip: TimelineClip,
     track: TimelineTrack,
     edge: "start" | "end",
     edgeTimeMs: number,
-    coalesceKey: string,
+    options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onSelectMarker: (marker: TimelineMarker) => void
   onSelectZoom: (segmentId: string) => void
@@ -652,14 +652,14 @@ function TimelineTrackRow({
     clip: TimelineClip,
     track: TimelineTrack,
     newStartMs: number,
-    coalesceKey: string,
+    options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onTrimClip: (
     clip: TimelineClip,
     track: TimelineTrack,
     edge: "start" | "end",
     edgeTimeMs: number,
-    coalesceKey: string,
+    options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   getTimelineTime: (clientX: number) => number
   snapTargets: ReturnType<typeof buildSnapTargets>
@@ -714,7 +714,6 @@ interface ClipGesture {
   initialClientX: number
   initialTimelineMs: number
   moved: boolean
-  coalesceKey: string
 }
 
 function TimelineClipItem({
@@ -756,14 +755,14 @@ function TimelineClipItem({
     clip: TimelineClip,
     track: TimelineTrack,
     newStartMs: number,
-    coalesceKey: string,
+    options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onTrimClip: (
     clip: TimelineClip,
     track: TimelineTrack,
     edge: "start" | "end",
     edgeTimeMs: number,
-    coalesceKey: string,
+    options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   getTimelineTime: (clientX: number) => number
   snapTargets: ReturnType<typeof buildSnapTargets>
@@ -795,7 +794,6 @@ function TimelineClipItem({
       initialClientX: event.clientX,
       initialTimelineMs: getTimelineTime(event.clientX),
       moved: false,
-      coalesceKey: `${mode}:${clip.id}:${crypto.randomUUID()}`,
     }
   }
 
@@ -809,32 +807,57 @@ function TimelineClipItem({
     suppressClickRef.current = true
     event.preventDefault()
 
+    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
+
     if (gesture.mode === "move") {
       const rawStartMs = Math.max(0, Math.round(clip.startMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, {
-        enabled: snapEnabled,
-        thresholdMs: snapThresholdMs,
-      })
-      onMoveClip(clip, track, snapped.timeMs, gesture.coalesceKey)
+      const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, snap)
+      onMoveClip(clip, track, snapped.timeMs, { phase: "draft" })
       return
     }
 
     const edge = gesture.mode === "trim-start" ? "start" : "end"
     const rawEdgeTimeMs = Math.max(0, Math.round(clip.startMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, {
-      enabled: snapEnabled,
-      thresholdMs: snapThresholdMs,
-    })
-    onTrimClip(clip, track, edge, snapped.timeMs, gesture.coalesceKey)
+    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
+    onTrimClip(clip, track, edge, snapped.timeMs, { phase: "draft" })
   }
 
   function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
     const gesture = gestureRef.current
     if (!gesture || gesture.pointerId !== event.pointerId) return
+    const wasCancelled = event.type === "pointercancel"
+    const didMove = gesture.moved
     gestureRef.current = null
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+
+    if (wasCancelled || !didMove) {
+      if (gesture.mode === "move") {
+        onMoveClip(clip, track, clip.startMs, { phase: "cancel" })
+      } else {
+        const edge = gesture.mode === "trim-start" ? "start" : "end"
+        const edgeTimeMs = edge === "start" ? clip.startMs : clip.startMs + clip.durationMs
+        onTrimClip(clip, track, edge, edgeTimeMs, { phase: "cancel" })
+      }
+      return
+    }
+
+    const currentMs = getTimelineTime(event.clientX)
+    const deltaMs = currentMs - gesture.initialTimelineMs
+    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
+
+    if (gesture.mode === "move") {
+      const rawStartMs = Math.max(0, Math.round(clip.startMs + deltaMs))
+      const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, snap)
+      onMoveClip(clip, track, snapped.timeMs, { phase: "commit" })
+      return
+    }
+
+    const edge = gesture.mode === "trim-start" ? "start" : "end"
+    const rawEdgeTimeMs = Math.max(0, Math.round(clip.startMs + deltaMs))
+    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
+    onTrimClip(clip, track, edge, snapped.timeMs, { phase: "commit" })
   }
 
   const handleClass = cn(
@@ -898,7 +921,7 @@ function TimelineClipItem({
             edge === "start"
               ? clip.startMs + direction * frameMs
               : clip.startMs + clip.durationMs + direction * frameMs
-          onTrimClip(clip, track, edge, edgeTimeMs, `keyboard-trim:${clip.id}`)
+          onTrimClip(clip, track, edge, edgeTimeMs, { phase: "commit" })
           return
         }
         if (event.ctrlKey || event.metaKey) {
@@ -908,7 +931,7 @@ function TimelineClipItem({
             0,
             clip.startMs + direction * (event.shiftKey ? 1_000 : frameMs),
           )
-          onMoveClip(clip, track, nextStartMs, `keyboard-move:${clip.id}`)
+          onMoveClip(clip, track, nextStartMs, { phase: "commit" })
         }
       }}
       title={`${getClipLabel(clip, track)} · ${formatTimelineTime(clip.durationMs)}`}

@@ -17,6 +17,8 @@ import {
   createDeleteRangeCommand,
   createDeleteCursorRangeCommand,
   createDeleteZoomSegmentCommand,
+  createDuplicateClipCommand,
+  createDuplicateClipsCommand,
   createMoveClipCommand,
   createMoveClipsCommand,
   createRippleDeleteClipCommand,
@@ -89,6 +91,7 @@ import { CameraPreview } from "./camera-preview"
 import { ClipInspector } from "./clip-inspector"
 import { MaskPreview } from "./mask-preview"
 import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
+import { useTimelineInteraction } from "./use-timeline-interaction"
 import { CustomCursorOverlay } from "../cursor"
 
 interface TimelineViewProps {
@@ -172,7 +175,8 @@ export function TimelineView({
   waveformResources,
 }: TimelineViewProps) {
   const engine = useTimelineStore((state) => state.engine)
-  const timeline = engine?.history.present ?? null
+  const draftTimeline = useTimelineStore((state) => state.draftTimeline)
+  const timeline = draftTimeline ?? engine?.history.present ?? null
   const view = useTimelineStore((state) => state.view)
   const recording = useTimelineStore((state) => state.recording)
   const metadata = useTimelineStore((state) => state.metadata)
@@ -210,6 +214,9 @@ export function TimelineView({
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
+
+  // Phase 2: pointer/keyboard editing gestures use draft/commit/cancel semantics.
+  const { moveClip, trimClip } = useTimelineInteraction()
 
   // Phase 1: project loading is owned by EditorSession, not by the timeline view.
   // The view uses the already-loaded session state.
@@ -595,6 +602,9 @@ export function TimelineView({
       } else if (hasModifier && key === "s") {
         event.preventDefault()
         void save()
+      } else if (hasModifier && key === "d") {
+        event.preventDefault()
+        duplicateSelected()
       } else if (key === "s") {
         event.preventDefault()
         splitSelected()
@@ -645,6 +655,7 @@ export function TimelineView({
     [
       addMarker,
       deleteSelected,
+      duplicateSelected,
       nudgeSelected,
       pause,
       play,
@@ -787,6 +798,21 @@ export function TimelineView({
     execute(createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs))
   }
 
+  function duplicateSelected() {
+    const selection = view.selection
+    if (selection?.kind === "clip" && selection.clipIds.length > 1) {
+      execute(createDuplicateClipsCommand(selection.clipIds))
+      return
+    }
+    if (
+      !selectedClip ||
+      selectedClip.track.locked ||
+      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
+    )
+      return
+    execute(createDuplicateClipCommand(selectedClip.clip.id))
+  }
+
   function selectClip(clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) {
     if (tool === "split" && !track.locked && !(clip.kind === "cursor-effect" && clip.locked)) {
       if (view.playheadMs > clip.startMs && view.playheadMs < clip.startMs + clip.durationMs) {
@@ -841,86 +867,6 @@ export function TimelineView({
   function selectMarker(marker: TimelineMarker) {
     setSelection({ kind: "marker", markerId: marker.id })
     seek(marker.timeMs)
-  }
-
-  function moveClip(
-    clip: TimelineClip,
-    track: TimelineTrack,
-    newStartMs: number,
-    coalesceKey: string,
-  ) {
-    if (track.locked || (clip.kind === "cursor-effect" && clip.locked)) return
-    const selection = view.selection
-    if (
-      selection?.kind === "clip" &&
-      selection.clipIds.length > 1 &&
-      selection.clipIds.includes(clip.id)
-    ) {
-      execute(
-        createMoveClipsCommand(selection.clipIds, Math.round(newStartMs - clip.startMs), {
-          coalesceKey,
-        }),
-        { coalesceWindowMs: 60_000 },
-      )
-      return
-    }
-    execute(
-      createMoveClipCommand(clip.id, Math.max(0, Math.round(newStartMs)), undefined, {
-        coalesceKey,
-      }),
-      { coalesceWindowMs: 60_000 },
-    )
-  }
-
-  function trimClip(
-    clip: TimelineClip,
-    track: TimelineTrack,
-    edge: "start" | "end",
-    edgeTimeMs: number,
-    coalesceKey: string,
-  ) {
-    if (track.locked || (clip.kind === "cursor-effect" && clip.locked)) return
-    const clipEndMs = clip.startMs + clip.durationMs
-    const nextEdgeMs = Math.round(edgeTimeMs)
-    if (clip.kind === "cursor-effect") {
-      execute(
-        createResizeCursorRangeCommand(
-          clip.id,
-          edge === "start"
-            ? { startMs: Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs)) }
-            : { endMs: Math.max(clip.startMs + 1, nextEdgeMs) },
-          { coalesceKey },
-        ),
-        { coalesceWindowMs: 60_000 },
-      )
-      return
-    }
-    if (edge === "start") {
-      const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, nextEdgeMs))
-      const sourceInMs = Math.max(
-        0,
-        clip.sourceInMs + Math.round((nextStartMs - clip.startMs) * clip.speed),
-      )
-      if (sourceInMs >= clip.sourceOutMs) return
-      execute(
-        createTrimClipCommand(clip.id, sourceInMs, clip.sourceOutMs, {
-          startMs: nextStartMs,
-          coalesceKey,
-        }),
-        { coalesceWindowMs: 60_000 },
-      )
-      return
-    }
-    const nextEndMs = Math.max(clip.startMs + 1, nextEdgeMs)
-    const sourceDurationMs = Math.max(metadata?.durationMs ?? 0, clip.sourceOutMs)
-    const sourceOutMs = Math.min(
-      sourceDurationMs,
-      clip.sourceInMs + Math.round((nextEndMs - clip.startMs) * clip.speed),
-    )
-    if (sourceOutMs <= clip.sourceInMs) return
-    execute(createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs, { coalesceKey }), {
-      coalesceWindowMs: 60_000,
-    })
   }
 
   function cycleTrackHeight(track: TimelineTrack) {

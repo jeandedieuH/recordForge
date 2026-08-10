@@ -13,15 +13,19 @@ import {
   createEngine,
   createProjectFromRecording,
   executeCommand,
+  findClip,
+  findMarker,
   getTotalDuration,
   projectToTimeline,
   redoCommand,
   timelineToProject,
+  type AppError,
   type CommandEngine,
   type ExecuteOptions,
   type TimelineCommand,
   type TimelineSelection,
   type RenderCaptionMode,
+  type TimelineState,
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
@@ -60,6 +64,10 @@ interface TimelineStore {
   error: string | null
   activeExportJob: MediaJob | null
   missingAssets: string[]
+  // Phase 2: transient draft state shown while a pointer gesture is active.
+  // Committed state remains in engine.history.present.
+  draftTimeline: TimelineState | null
+  draftError: AppError | null
   // True while the media-job-update listener is active; prevents duplicate
   // subscriptions and races between mount and unmount.
   isListening: boolean
@@ -108,6 +116,10 @@ interface TimelineStore {
   revealExport: () => Promise<void>
   setSelection: (selection: TimelineSelection | null) => void
 
+  // Phase 2: set or clear the transient draft timeline and any validation error.
+  setDraftTimeline: (draft: TimelineState | null, error?: AppError | null) => void
+  clearDraft: () => void
+
   save: () => Promise<void>
   scheduleAutosave: () => void
   relinkAsset: (assetId: string, newPath: string) => Promise<void>
@@ -128,6 +140,8 @@ interface TimelineStore {
 
   export: (outputPath: string) => Promise<void>
   clearError: () => void
+  // Phase 2: surface a validation or commit error without mutating project state.
+  setError: (message: string) => void
 }
 
 const AUTOSAVE_DELAY_MS = 2000
@@ -164,6 +178,30 @@ function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
 
 function isDestructiveCommand(command: TimelineCommand): boolean {
   return SNAPSHOT_COMMANDS.has(command.kind)
+}
+
+// Phase 2: after a command mutates the timeline, drop the selection if its
+// primary object no longer exists so the UI never holds a ghost selection.
+function reconcileSelection(
+  selection: TimelineSelection | null,
+  timeline: TimelineState,
+): TimelineSelection | null {
+  if (!selection) return null
+  if (selection.kind === "clip") {
+    const found = findClip(timeline, selection.primaryClipId)
+    if (!found) return null
+    const validIds = selection.clipIds.filter((id) => findClip(timeline, id))
+    if (validIds.length === 0) return { ...selection, clipIds: [selection.primaryClipId] }
+    return { ...selection, clipIds: validIds }
+  }
+  if (selection.kind === "marker") {
+    return findMarker(timeline, selection.markerId) ? selection : null
+  }
+  if (selection.kind === "zoom") {
+    return timeline.zoomSegments?.find((s) => s.id === selection.segmentId) ? selection : null
+  }
+  // Range selections are intentional and do not require reconciliation.
+  return selection
 }
 
 interface Deferred<T> {
@@ -225,6 +263,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   error: null,
   activeExportJob: null,
   missingAssets: [],
+  draftTimeline: null,
+  draftError: null,
   isListening: false,
   unlisten: null,
   autosaveTimeout: null,
@@ -247,6 +287,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
+      draftTimeline: null,
+      draftError: null,
       projectRevision: 0,
       savingRevision: null,
       pendingSaveRevision: null,
@@ -429,13 +471,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = timelineToProject(nextTimeline, project)
     const duration = getTotalDuration(nextTimeline)
     const view = get().view
+    const nextSelection = reconcileSelection(view.selection, nextTimeline)
     set({
       engine: result.value,
       error: null,
+      draftTimeline: null,
+      draftError: null,
       view: {
         ...view,
         durationMs: duration,
         playheadMs: Math.min(view.playheadMs, duration),
+        selection: nextSelection,
       },
     })
     // Phase 1: destructive commands require a snapshot of the on-disk project
@@ -458,10 +504,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = timelineToProject(nextTimeline, project)
     const duration = getTotalDuration(nextTimeline)
     const view = get().view
+    const nextSelection = reconcileSelection(view.selection, nextTimeline)
     set({
       engine: result.value,
-      view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
+      view: {
+        ...view,
+        durationMs: duration,
+        playheadMs: Math.min(view.playheadMs, duration),
+        selection: nextSelection,
+      },
       error: null,
+      draftTimeline: null,
+      draftError: null,
     })
     get().markProjectChanged(nextProject)
   },
@@ -478,10 +532,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = timelineToProject(nextTimeline, project)
     const duration = getTotalDuration(nextTimeline)
     const view = get().view
+    const nextSelection = reconcileSelection(view.selection, nextTimeline)
     set({
       engine: result.value,
-      view: { ...view, durationMs: duration, playheadMs: Math.min(view.playheadMs, duration) },
+      view: {
+        ...view,
+        durationMs: duration,
+        playheadMs: Math.min(view.playheadMs, duration),
+        selection: nextSelection,
+      },
       error: null,
+      draftTimeline: null,
+      draftError: null,
     })
     get().markProjectChanged(nextProject)
   },
@@ -764,6 +826,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     set({ view: { ...view, selection } })
   },
 
+  setDraftTimeline: (draft, error) => {
+    set({ draftTimeline: draft, draftError: error ?? null, error: null })
+  },
+
+  clearDraft: () => {
+    set({ draftTimeline: null, draftError: null })
+  },
+
   export: async (outputPath) => {
     const { engine, recording, project } = get()
     if (!engine || !recording || !project) return
@@ -941,5 +1011,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   clearError: () => {
     set({ error: null })
+  },
+
+  setError: (message) => {
+    set({ error: message, draftTimeline: null, draftError: null })
   },
 }))

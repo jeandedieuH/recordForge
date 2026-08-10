@@ -118,6 +118,25 @@ export const moveClipCommandSchema = commandMetaSchema.extend({
 
 export type MoveClipCommand = z.infer<typeof moveClipCommandSchema>
 
+export const duplicateClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("duplicate-clip"),
+  clipId: z.string(),
+  /** Optional explicit start time; defaults to one frame after the original clip ends. */
+  newStartMs: z.number().int().min(0).optional(),
+  newClipId: z.string().optional(),
+})
+
+export type DuplicateClipCommand = z.infer<typeof duplicateClipCommandSchema>
+
+export const duplicateClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("duplicate-clips"),
+  clipIds: z.array(z.string()).min(1),
+  /** Offset applied to every selected clip. Defaults to one frame after the rightmost selection ends. */
+  deltaMs: z.number().int().optional(),
+})
+
+export type DuplicateClipsCommand = z.infer<typeof duplicateClipsCommandSchema>
+
 export const deleteClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("delete-clip"),
   clipId: z.string(),
@@ -421,6 +440,8 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   trimClipCommandSchema,
   splitClipCommandSchema,
   moveClipCommandSchema,
+  duplicateClipCommandSchema,
+  duplicateClipsCommandSchema,
   deleteClipCommandSchema,
   moveClipsCommandSchema,
   deleteClipsCommandSchema,

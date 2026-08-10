@@ -10,6 +10,7 @@ export * from "./engine"
 export * from "./selection"
 export * from "./snap"
 export * from "./composition"
+export * from "./interaction-transaction"
 export {
   analyzeCursorTelemetry,
   clampZoomTarget as clampCursorZoomTarget,
