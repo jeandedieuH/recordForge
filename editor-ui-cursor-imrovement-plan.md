@@ -520,9 +520,9 @@ Every editing command must preserve:
 
 ## 8. Cursor Rewrite
 
-## 8.1 Target user experience
+### 8.1 Target user experience
 
-### Default behavior
+#### Default behavior
 
 A new recordForge recording should open with:
 
@@ -536,7 +536,7 @@ A new recordForge recording should open with:
 
 Imported videos without cursor metadata show a clear unavailable state. recordForge must not invent a centered or synthetic cursor path.
 
-### Basic cursor controls
+#### Basic cursor controls
 
 - Show cursor.
 - Style: Recorded/System, Clean Pointer, High Contrast, Touch Dot.
@@ -545,7 +545,7 @@ Imported videos without cursor metadata show a clear unavailable state. recordFo
 - Click emphasis: Off, Subtle, Strong.
 - Hide when idle.
 
-### Advanced controls
+#### Advanced controls
 
 - Preserve recorded cursor types vs always use one pointer.
 - Shake removal.
@@ -556,7 +556,7 @@ Imported videos without cursor metadata show a clear unavailable state. recordFo
 - Reduced-motion preview behavior.
 - Motion blur later, only after parity.
 
-### Range workflow
+#### Range workflow
 
 - Project cursor profile defines the default.
 - Sparse cursor override ranges change only selected fields.
@@ -564,11 +564,11 @@ Imported videos without cursor metadata show a clear unavailable state. recordFo
 - Cursor ranges appear in a dedicated lane and can be moved, resized, split, locked, and deleted.
 - The inspector clearly states whether a value is inherited from the project profile or overridden by the range.
 
-## 8.2 Cursor Telemetry V2
+### 8.2 Cursor Telemetry V2
 
 Replace the current sample shape with a versioned, explicitly synchronized asset.
 
-### Header metadata
+#### Header metadata
 
 - Format discriminator and schema version.
 - Stable asset and recording IDs.
@@ -581,7 +581,7 @@ Replace the current sample shape with a versioned, explicitly synchronized asset
 - Monitor topology and per-monitor scale/DPI snapshots relevant to the capture.
 - Nominal sample rate and measured quality data.
 
-### Continuous samples
+#### Continuous samples
 
 - Monotonic timestamp from the shared recording clock.
 - Physical virtual-desktop x/y.
@@ -589,7 +589,7 @@ Replace the current sample shape with a versioned, explicitly synchronized asset
 - Active cursor shape ID.
 - Button bitset/drag state.
 
-### Discrete events
+#### Discrete events
 
 - Independent left, right, and middle button down/up edges.
 - Wheel deltas where available for future zoom/attention analysis.
@@ -597,7 +597,7 @@ Replace the current sample shape with a versioned, explicitly synchronized asset
 - Monitor/DPI/topology changes.
 - Pause/resume and segment boundaries.
 
-### Cursor asset manifest
+#### Cursor asset manifest
 
 Each known cursor shape provides:
 
@@ -610,7 +610,7 @@ Each known cursor shape provides:
 
 Use Windows cursor APIs such as `GetCursorInfo` and icon information APIs to determine actual visibility, handle/shape identity, bitmap, and hotspot. Record only cursor assets and metadata; never record screen content in cursor logs.
 
-### Capture health and fallback
+#### Capture health and fallback
 
 - Start and validate cursor tracking before starting an FFmpeg path that omits the native cursor.
 - If custom-cursor capture cannot initialize, either fall back to recording the native cursor or require an explicit user choice. Never silently produce a cursorless recording.
@@ -618,9 +618,9 @@ Use Windows cursor APIs such as `GetCursorInfo` and icon information APIs to det
 - Recovery must trim/normalize cursor data to the recovered media timeline.
 - Record local diagnostics for sample gaps, clock offset, dropped samples, shape failures, and topology changes without logging coordinates or media paths.
 
-## 8.3 Canonical cursor engine
+### 8.3 Canonical cursor engine
 
-### Preferred module design
+#### Preferred module design
 
 Create one deep `cursor-engine` implementation in Rust:
 
@@ -646,7 +646,7 @@ Rust compiles canonical source-time CursorMotionPlan
 
 Do not continue with two independent smoothing, hotspot, click-animation, and geometry implementations.
 
-### Small external interface
+#### Small external interface
 
 ```ts
 interface CursorEvaluator {
@@ -674,16 +674,16 @@ interface CursorFrame {
 
 Callers should not know about sample search, interpolation windows, spring state, idle indexes, cut resets, DPI transforms, or asset fallback.
 
-## 8.4 Motion model
+### 8.4 Motion model
 
-### Position reconstruction
+#### Position reconstruction
 
 - Separate continuous position interpolation from discrete click/button events.
 - Interpolate between bracketing position samples; never use a future button edge to affect an earlier frame.
 - Detect telemetry gaps and lower confidence or hold safely rather than bridging long gaps with a false sweep.
 - Precompute indexes and activity intervals; no backward O(n) idle scan per frame.
 
-### Natural smoothing
+#### Natural smoothing
 
 Use a deterministic, seek-safe analytical motion model:
 
@@ -694,7 +694,7 @@ Use a deterministic, seek-safe analytical motion model:
 - Precompute or analytically solve state so evaluating time `t` does not depend on having rendered frames `0…t-1`.
 - “Precise” must preserve raw intent for menus, drawing, resize handles, and small controls.
 
-### Cut and time-remap policy
+#### Cut and time-remap policy
 
 - Map timeline time through the active screen segment before evaluating cursor source time.
 - Never interpolate across hard cuts, gaps, asset changes, or discontinuous source ranges.
@@ -704,22 +704,22 @@ Use a deterministic, seek-safe analytical motion model:
 - Duplicated clips reuse immutable source telemetry but maintain independent timeline evaluation state.
 - Gaps render no cursor unless a future scene type explicitly defines one.
 
-### Zoom and canvas policy
+#### Zoom and canvas policy
 
 - Apply the same source → canvas → zoomed viewport transform to screen pixels, cursor position, click effects, spotlight, masks, and direct-manipulation overlays.
 - Cursor size has an explicit policy: screen-relative or output-relative. Default to output-relative readability unless product testing chooses otherwise.
 - Auto-zoom uses recorded click positions and safe-edge clamping.
 - Follow-cursor remains a later capability until click-based auto zoom and static target parity are stable.
 
-## 8.5 Rendering
+### 8.5 Rendering
 
-### Shared assets
+#### Shared assets
 
 - Preview displays the exact shared SVG/raster asset from the cursor manifest.
 - Export rasterizes the same asset using a deterministic renderer and the same hotspot.
 - Remove separately hand-authored React and Rust approximations once V2 parity is proven.
 
-### Effects
+#### Effects
 
 All effects are functions of project time:
 
@@ -732,7 +732,7 @@ All effects are functions of project time:
 
 No effect uses an autonomous CSS animation in Quality mode. CSS may be used only as a presentation mechanism for values already evaluated from project time.
 
-### Preview quality modes
+#### Preview quality modes
 
 | Mode         | Behavior                                                                     |
 | ------------ | ---------------------------------------------------------------------------- |
@@ -740,7 +740,7 @@ No effect uses an autonomous CSS animation in Quality mode. CSS may be used only
 | Performance  | Same geometry/timing, optional expensive blur disabled; clear badge          |
 | Power Saving | Lower preview cadence/resolution without changing project or export settings |
 
-## 8.6 Cursor migration
+### 8.6 Cursor migration
 
 - Preserve V1 telemetry and project files; never rewrite originals without backup.
 - Add a forward V1 → V2 normalization adapter.
@@ -751,7 +751,7 @@ No effect uses an autonomous CSS animation in Quality mode. CSS may be used only
 - Preserve range timing, enabled state, preset, scale, smoothing, lock, and supported visual settings.
 - Keep a compatibility reader for shipped projects until migration telemetry proves it can be removed.
 
-## 8.7 Cursor observability
+### 8.7 Cursor observability
 
 Local, redacted diagnostics may include:
 
@@ -773,7 +773,7 @@ Do not log cursor coordinates, click locations, window titles, monitor content, 
 
 The sequence below is dependency order, not a calendar estimate.
 
-## Phase 0 — Freeze behavior, fixtures, and architecture decisions
+### Phase 0 — Freeze behavior, fixtures, and architecture decisions
 
 **Goal:** Prevent another partial rewrite built on ambiguous behavior.
 
@@ -789,7 +789,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Approved action contract, cursor-engine ADR, fixture inventory, and measurable baseline.
 
-## Phase 1 — Editor session and persistence safety
+### Phase 1 — Editor session and persistence safety
 
 **Goal:** Eliminate edit loss before UI polish.
 
@@ -807,7 +807,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Rapid edit/save/navigation/export/close tests cannot lose or roll back a newer edit.
 
-## Phase 2 — Transactional editing interactions
+### Phase 2 — Transactional editing interactions
 
 **Goal:** Make core actions smooth, cancellable, and one-step undoable.
 
@@ -824,7 +824,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Every gesture passes pointer-up, Escape, pointer-cancel, focus-loss, invalid-drop, undo, save, reopen, and export checks.
 
-## Phase 3 — Focused editor shell and visual redesign
+### Phase 3 — Focused editor shell and visual redesign
 
 **Goal:** Deliver the modern, organized workspace without changing established command semantics.
 
@@ -844,7 +844,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** All editor tasks remain reachable by mouse and keyboard at every supported window size; WCAG AA contrast and keyboard checks pass.
 
-## Phase 4 — Frame-accurate preview composition
+### Phase 4 — Frame-accurate preview composition
 
 **Goal:** Establish one clock and one geometry model before cursor replacement.
 
@@ -858,7 +858,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Preview drift remains within 1 output frame on deterministic fixtures and direct overlays share the same canvas geometry.
 
-## Phase 5 — Cursor Telemetry V2 capture and migration
+### Phase 5 — Cursor Telemetry V2 capture and migration
 
 **Goal:** Produce trustworthy, recoverable cursor source metadata.
 
@@ -875,7 +875,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Windows hardware matrix passes full-screen, window, region, mixed-DPI, multi-monitor, pause/resume, forced-exit, and recovery tests.
 
-## Phase 6 — Canonical cursor engine and preview
+### Phase 6 — Canonical cursor engine and preview
 
 **Goal:** Replace nearest-sample/EMA/CSS behavior with natural deterministic motion.
 
@@ -890,7 +890,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Arbitrary seeking produces the same cursor frame as uninterrupted playback; 60-minute cursor assets meet memory and frame budgets.
 
-## Phase 7 — Cursor export and parity
+### Phase 7 — Cursor export and parity
 
 **Goal:** Make Quality preview trustworthy.
 
@@ -905,7 +905,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** Geometry/timing parity is within 0.5 output pixel and 1 output frame on all fixtures; agreed pixel-diff tolerance passes for cursor assets/effects.
 
-## Phase 8 — Cursor/zoom workflow polish
+### Phase 8 — Cursor/zoom workflow polish
 
 **Goal:** Reach the reference-product interaction standard.
 
@@ -920,7 +920,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 **Exit gate:** A user can record, trim, apply/review cursor polish and zoom, override one fragment, and export without opening advanced settings.
 
-## Phase 9 — Performance, accessibility, and release hardening
+### Phase 9 — Performance, accessibility, and release hardening
 
 **Goal:** Prove the editor on the low-end Windows baseline.
 
@@ -939,7 +939,7 @@ The sequence below is dependency order, not a calendar estimate.
 
 ## 10. Test Strategy
 
-## 10.1 Pure unit and property tests
+### 10.1 Pure unit and property tests
 
 - Timeline invariants for every command.
 - Lock-aware atomic ripple behavior.
@@ -951,7 +951,7 @@ The sequence below is dependency order, not a calendar estimate.
 - Cursor interpolation, gap handling, deterministic analytical smoothing, idle intervals, click causality, shape/hotspot, and cut resets.
 - Zoom/cursor shared transforms.
 
-## 10.2 React component and integration tests
+### 10.2 React component and integration tests
 
 Add desktop test infrastructure only after explicit dependency review. Cover:
 
@@ -966,7 +966,7 @@ Add desktop test infrastructure only after explicit dependency review. Cover:
 - Toast and jobs-drawer terminal feedback.
 - Quality/performance mode labeling.
 
-## 10.3 Desktop end-to-end flows
+### 10.3 Desktop end-to-end flows
 
 - Open, split, ripple-delete, undo, redo, close, reopen.
 - Trim and export; compare source/output timing.
@@ -976,7 +976,7 @@ Add desktop test infrastructure only after explicit dependency review. Cover:
 - Missing asset relink.
 - Save failure recovery.
 
-## 10.4 Cursor parity fixtures
+### 10.4 Cursor parity fixtures
 
 At selected frames, compare:
 
@@ -999,7 +999,7 @@ Required cases:
 - Sparse samples, long gaps, pause/resume, recovery, legacy V1.
 - Cursor at safe edges under zoom and canvas padding.
 
-## 10.5 Performance evidence
+### 10.5 Performance evidence
 
 Measure on the recorded baseline machine:
 
