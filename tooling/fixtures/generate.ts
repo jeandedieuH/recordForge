@@ -32,6 +32,8 @@ const AUDIO_SAMPLE_RATE = 48000
 const AUDIO_CHANNELS = 2
 const EDITOR_METADATA_FILES = [
   "project.json",
+  "project-cuts-locks.json",
+  "project-duplicate-ranges.json",
   "project-long.json",
   "project-no-cursor.json",
   "cursor-telemetry.json",

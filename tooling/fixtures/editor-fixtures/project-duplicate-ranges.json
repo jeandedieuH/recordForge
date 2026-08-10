@@ -1,0 +1,225 @@
+{
+  "format": "recordforge.project",
+  "version": 1,
+  "id": "fixture-project-duplicate-ranges",
+  "name": "Editor Duplicate Source Ranges Fixture",
+  "recordingId": "fixture-recording-duplicate-ranges",
+  "canvas": {
+    "width": 1024,
+    "height": 768,
+    "fps": 30,
+    "background": "#101828",
+    "padding": 24,
+    "borderRadius": 16,
+    "shadow": true
+  },
+  "assets": [
+    {
+      "id": "asset-screen-4x3",
+      "role": "screen",
+      "path": "4_3_aspect_10s.mp4",
+      "durationMs": 10000,
+      "width": 1024,
+      "height": 768,
+      "fps": 30,
+      "hasAudio": true
+    },
+    {
+      "id": "asset-camera",
+      "role": "webcam",
+      "path": "camera_10s.mp4",
+      "durationMs": 10000,
+      "width": 640,
+      "height": 360,
+      "fps": 30,
+      "hasAudio": false
+    },
+    {
+      "id": "asset-microphone",
+      "role": "microphone",
+      "path": "microphone_10s.wav",
+      "durationMs": 10000,
+      "sampleRate": 48000,
+      "hasAudio": true
+    },
+    {
+      "id": "asset-system-audio",
+      "role": "system_audio",
+      "path": "system_audio_10s.wav",
+      "durationMs": 10000,
+      "sampleRate": 48000,
+      "hasAudio": true
+    },
+    {
+      "id": "asset-cursor-events",
+      "role": "cursor_events",
+      "path": "cursor-telemetry.json",
+      "durationMs": 10000,
+      "sourceWidth": 1024,
+      "sourceHeight": 768
+    },
+    {
+      "id": "asset-captions",
+      "role": "caption",
+      "path": "captions.srt",
+      "durationMs": 8500
+    }
+  ],
+  "tracks": [
+    {
+      "id": "track-screen",
+      "kind": "screen",
+      "name": "Screen",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "screen-clip-first",
+          "kind": "screen",
+          "assetId": "asset-screen-4x3",
+          "startMs": 0,
+          "durationMs": 3000,
+          "sourceInMs": 0,
+          "sourceOutMs": 3000,
+          "speed": 1
+        },
+        {
+          "id": "screen-clip-duplicate",
+          "kind": "screen",
+          "assetId": "asset-screen-4x3",
+          "startMs": 3000,
+          "durationMs": 3000,
+          "sourceInMs": 2000,
+          "sourceOutMs": 5000,
+          "speed": 1
+        }
+      ]
+    },
+    {
+      "id": "track-camera",
+      "kind": "camera",
+      "name": "Webcam",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "camera-clip",
+          "kind": "camera",
+          "assetId": "asset-camera",
+          "startMs": 0,
+          "durationMs": 6000,
+          "sourceInMs": 0,
+          "sourceOutMs": 6000,
+          "speed": 1,
+          "transform": {
+            "x": 720,
+            "y": 520,
+            "width": 240,
+            "height": 135,
+            "opacity": 1,
+            "shape": "rounded"
+          }
+        }
+      ]
+    },
+    {
+      "id": "track-microphone",
+      "kind": "microphone",
+      "name": "Microphone",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "microphone-clip",
+          "kind": "audio",
+          "assetId": "asset-microphone",
+          "startMs": 0,
+          "durationMs": 6000,
+          "sourceInMs": 0,
+          "sourceOutMs": 6000,
+          "speed": 1,
+          "volume": 0.9,
+          "fadeInMs": 100,
+          "fadeOutMs": 200
+        }
+      ]
+    },
+    {
+      "id": "track-cursor",
+      "kind": "cursor",
+      "name": "Cursor",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "cursor-effect-default",
+          "kind": "cursor-effect",
+          "startMs": 0,
+          "durationMs": 6000,
+          "assetId": "asset-cursor-events",
+          "presetId": "modern-neon",
+          "scale": 1.2,
+          "smoothing": "smooth",
+          "locked": false
+        }
+      ]
+    },
+    {
+      "id": "track-captions",
+      "kind": "captions",
+      "name": "Captions",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "caption-1",
+          "kind": "caption",
+          "assetId": "asset-captions",
+          "startMs": 500,
+          "durationMs": 1500,
+          "sourceInMs": 500,
+          "sourceOutMs": 2000,
+          "speed": 1,
+          "text": "Open the project fixture.",
+          "style": "default"
+        }
+      ]
+    },
+    {
+      "id": "track-masks",
+      "kind": "masks",
+      "name": "Masks",
+      "muted": false,
+      "locked": false,
+      "clips": [
+        {
+          "id": "mask-sensitive-area",
+          "kind": "mask",
+          "startMs": 1000,
+          "durationMs": 2000,
+          "mode": "redaction",
+          "shape": "rectangle",
+          "x": 420,
+          "y": 240,
+          "width": 260,
+          "height": 96
+        }
+      ]
+    }
+  ],
+  "markers": [
+    {
+      "id": "marker-duplicate-start",
+      "timeMs": 3000,
+      "label": "Duplicate source range starts",
+      "color": "#ef4444"
+    }
+  ],
+  "exportSettings": {
+    "preset": "default-mp4",
+    "codec": "h264",
+    "container": "mp4"
+  },
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:00:00.000Z"
+}

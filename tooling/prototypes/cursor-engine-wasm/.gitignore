@@ -1,0 +1,4 @@
+# Rust build output and lockfile are local to the prototype.
+/target
+Cargo.lock
+/pkg

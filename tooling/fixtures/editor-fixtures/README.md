@@ -5,6 +5,8 @@ This directory contains deterministic, checked-in metadata fixtures for editor P
 ## Contents
 
 - `project.json` describes a target editor project with screen, camera, separate audio, cursor, captions, a timeline gap, and a speed-adjusted clip.
+- `project-cuts-locks.json` describes a project with explicit split cuts, a locked microphone track, and a locked zoom segment.
+- `project-duplicate-ranges.json` describes a project where the same source range appears in two non-overlapping timeline clips to test source↔timeline mapping.
 - `project-long.json` describes a five-minute project for timeline and playback performance checks.
 - `project-no-cursor.json` describes an imported MP4 with unavailable cursor metadata.
 - `cursor-telemetry.json` contains source-relative cursor events, including left/right click samples and a non-16:9 source size.
@@ -37,8 +39,9 @@ Increment the generator's `FIXTURE_RECIPE_VERSION` whenever a media recipe, enco
 ## Fixture Invariants
 
 - All media uses deterministic lavfi sources.
-- The project contains an intentional two-second timeline gap.
-- One screen clip uses a slower playback speed.
+- The base `project.json` contains an intentional two-second timeline gap and a speed-adjusted clip.
+- `project-cuts-locks.json` contains explicit cuts and locked tracks to test ripple/lock behavior.
+- `project-duplicate-ranges.json` contains overlapping source ranges to test mapping ambiguity.
 - Cursor coordinates are relative to the declared source dimensions.
 - Captions have stable millisecond boundaries.
 - No fixture contains user media, secrets, or absolute machine paths.
