@@ -18,6 +18,7 @@ import {
   type ExecuteOptions,
   type TimelineCommand,
   type TimelineSelection,
+  type RenderCaptionMode,
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
@@ -62,7 +63,7 @@ interface TimelineStore {
   startListening: () => Promise<void>
   stopListening: () => void
 
-  execute: (command: TimelineCommand, options?: ExecuteOptions) => void
+  execute: (command: TimelineCommand, options?: ExecuteOptions) => boolean
   undo: () => void
   redo: () => void
 
@@ -78,6 +79,7 @@ interface TimelineStore {
   toggleTrackCollapsed: (trackId: string) => void
   setTrackHeight: (trackId: string, height: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
+  setCaptionMode: (mode: RenderCaptionMode) => void
   setSelection: (selection: TimelineSelection | null) => void
 
   save: () => Promise<void>
@@ -101,6 +103,8 @@ const SNAPSHOT_COMMANDS = new Set([
   "delete-cursor-range",
   "delete-zoom-segment",
   "trim-clip",
+  "import-caption-cues",
+  "add-mask-clip",
 ])
 
 function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
@@ -341,7 +345,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   execute: (command, options) => {
     const { engine, project } = get()
-    if (!engine || !project) return
+    if (!engine || !project) return false
 
     if (isDestructiveCommand(command)) {
       const recording = get().recording
@@ -354,7 +358,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const result = executeCommand(engine, command, options)
     if (!result.ok) {
       set({ error: result.error.message })
-      return
+      return false
     }
     const nextTimeline = result.value.history.present
     const nextProject = timelineToProject(nextTimeline, project)
@@ -372,6 +376,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     })
     useEditorStore.getState().setDirty(true)
     get().scheduleAutosave()
+    return true
   },
 
   undo: () => {
@@ -549,6 +554,20 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     set({ activeExportJob: job })
   },
 
+  setCaptionMode: (mode) => {
+    const project = get().project
+    if (!project || project.exportSettings.captionMode === mode) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, captionMode: mode },
+      updatedAt: new Date().toISOString(),
+    }
+    set({ project: nextProject })
+    useEditorStore.getState().setProject(nextProject)
+    useEditorStore.getState().setDirty(true)
+    get().scheduleAutosave()
+  },
+
   setSelection: (selection) => {
     const { view } = get()
     set({ view: { ...view, selection } })
@@ -570,6 +589,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       state: engine.history.present,
       recording,
       outputPath,
+      captionMode: project.exportSettings.captionMode,
     })
     if (!plan.ok) {
       set({ error: plan.error.message })

@@ -1,7 +1,13 @@
 import { z } from "zod"
 import {
+  captionCueSchema,
+  captionPlacementSchema,
+  captionStylePresetSchema,
   clipTransformSchema,
   cursorEffectSettingsSchema,
+  maskColorSchema,
+  maskModeSchema,
+  maskRectSchema,
   cursorIconPresetSchema,
   cursorSettingsSchema,
   cursorSmoothingSchema,
@@ -189,12 +195,67 @@ export const addCaptionClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-caption-clip"),
   trackId: z.string(),
   clipId: z.string().optional(),
-  text: z.string(),
+  text: z.string().min(1),
   startMs: z.number().int().min(0),
-  durationMs: z.number().int().min(0),
+  durationMs: z.number().int().positive(),
+  style: captionStylePresetSchema.optional(),
+  placement: captionPlacementSchema.optional(),
+  safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
 })
 
 export type AddCaptionClipCommand = z.infer<typeof addCaptionClipCommandSchema>
+
+export const updateCaptionClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-caption-clip"),
+  clipId: z.string(),
+  text: z.string().min(1).optional(),
+  style: captionStylePresetSchema.optional(),
+  placement: captionPlacementSchema.optional(),
+  safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
+})
+
+export type UpdateCaptionClipCommand = z.infer<typeof updateCaptionClipCommandSchema>
+
+export const importCaptionCuesCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("import-caption-cues"),
+  trackId: z.string().optional(),
+  trackName: z.string().min(1).optional(),
+  cues: z.array(captionCueSchema).min(1),
+  style: captionStylePresetSchema.optional(),
+  placement: captionPlacementSchema.optional(),
+  safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
+})
+
+export type ImportCaptionCuesCommand = z.infer<typeof importCaptionCuesCommandSchema>
+
+export const addMaskClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-mask-clip"),
+  trackId: z.string().optional(),
+  clipId: z.string().optional(),
+  assetId: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  mode: maskModeSchema,
+  rect: maskRectSchema,
+  blurRadius: z.number().min(1).max(128).optional(),
+  pixelSize: z.number().int().min(2).max(128).optional(),
+  redactColor: maskColorSchema.optional(),
+})
+
+export type AddMaskClipCommand = z.infer<typeof addMaskClipCommandSchema>
+
+export const updateMaskClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-mask-clip"),
+  clipId: z.string(),
+  mode: maskModeSchema.optional(),
+  rect: maskRectSchema.partial().optional(),
+  blurRadius: z.number().min(1).max(128).optional(),
+  pixelSize: z.number().int().min(2).max(128).optional(),
+  redactColor: maskColorSchema.optional(),
+  enabled: z.boolean().optional(),
+})
+
+export type UpdateMaskClipCommand = z.infer<typeof updateMaskClipCommandSchema>
 
 export const updateCanvasCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-canvas"),
@@ -344,6 +405,10 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateClipAudioCommandSchema,
   updateClipTransformCommandSchema,
   addCaptionClipCommandSchema,
+  updateCaptionClipCommandSchema,
+  importCaptionCuesCommandSchema,
+  addMaskClipCommandSchema,
+  updateMaskClipCommandSchema,
   updateCanvasCommandSchema,
   updateCursorSettingsCommandSchema,
   addCursorRangeCommandSchema,

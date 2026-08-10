@@ -352,6 +352,121 @@ describe("render-plan", () => {
     })
   })
 
+  it("includes editable captions and static privacy masks in the render plan", () => {
+    const state = makeTimeline()
+    state.tracks.push(
+      {
+        id: "captions-track",
+        kind: "captions",
+        name: "Captions",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "caption-1",
+            kind: "caption",
+            assetId: "captions-track",
+            startMs: 1_000,
+            durationMs: 2_000,
+            sourceInMs: 1_000,
+            sourceOutMs: 3_000,
+            speed: 1,
+            text: "Private caption",
+            style: "boxed",
+            placement: "bottom",
+            safeAreaMargin: 48,
+          },
+        ],
+      },
+      {
+        id: "effects-track",
+        kind: "effects",
+        name: "Effects",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "mask-1",
+            kind: "mask",
+            assetId: "rec-1",
+            startMs: 500,
+            durationMs: 3_000,
+            sourceInMs: 0,
+            sourceOutMs: 3_000,
+            speed: 1,
+            mode: "pixelate",
+            rect: { x: 100, y: 120, width: 480, height: 260 },
+            blurRadius: 24,
+            pixelSize: 16,
+            redactColor: "black",
+            enabled: true,
+          },
+        ],
+      },
+    )
+
+    const plan = buildRenderPlan({ state, recording, outputPath: "/tmp/export.mp4" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.captionMode).toBe("burn-in")
+    expect(plan.value.captions).toEqual([
+      expect.objectContaining({
+        id: "caption-1",
+        startMs: 1_000,
+        endMs: 3_000,
+        text: "Private caption",
+        style: "boxed",
+        placement: "bottom",
+      }),
+    ])
+    expect(plan.value.masks).toEqual([
+      expect.objectContaining({
+        id: "mask-1",
+        mode: "pixelate",
+        rect: { x: 100, y: 120, width: 480, height: 260 },
+      }),
+    ])
+  })
+
+  it("supports sidecar captions without changing the source timeline", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "captions-track",
+      kind: "captions",
+      name: "Captions",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "caption-1",
+          kind: "caption",
+          assetId: "captions-track",
+          startMs: 0,
+          durationMs: 1_000,
+          sourceInMs: 0,
+          sourceOutMs: 1_000,
+          speed: 1,
+          text: "Sidecar cue",
+          style: "minimal",
+        },
+      ],
+    })
+    const plan = buildRenderPlan({
+      state,
+      recording,
+      outputPath: "/tmp/export.mp4",
+      captionMode: "sidecar",
+    })
+    expect(plan.ok).toBe(true)
+    if (plan.ok) expect(plan.value.captionMode).toBe("sidecar")
+  })
+
   it("fails when the recording has no output path", () => {
     const badRecording = { ...recording, outputPath: undefined }
     const plan = buildRenderPlan({

@@ -1,10 +1,14 @@
 import type {
   AppError,
   AudioClip,
+  CaptionClip,
+  CaptionCue,
   CameraClip,
   ClipTransform,
   CursorEffectClip,
   ManualZoomSegment,
+  MaskClip,
+  MaskRect,
   TimelineClip,
   TimelineCanvas,
   TimelineState,
@@ -16,6 +20,7 @@ import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
   AddCaptionClipCommand,
+  AddMaskClipCommand,
   AddCursorRangeCommand,
   AddZoomSegmentCommand,
   AddMarkerCommand,
@@ -42,6 +47,9 @@ import type {
   TrimTimelineEndsCommand,
   UpdateCanvasCommand,
   UpdateClipAudioCommand,
+  UpdateCaptionClipCommand,
+  UpdateMaskClipCommand,
+  ImportCaptionCuesCommand,
   UpdateCursorRangeCommand,
   UpdateZoomSegmentCommand,
   UpdateClipTransformCommand,
@@ -116,9 +124,10 @@ function sortAndValidateTrack(
     return { ok: false, error: editorError("track_not_found", "Track not found") }
   }
   const sorted = [...track.clips].sort((a, b) => a.startMs - b.startMs)
-  // A track is a single ordered lane. Rejecting overlap for every lane keeps
-  // drag and keyboard moves safe instead of silently covering existing content.
-  if (!validateNoOverlap(sorted, ignoreClipId)) {
+  // Privacy masks are independent compositing layers and may overlap; every
+  // other track remains a single ordered lane to keep edits deterministic.
+  const allowsOverlap = track.kind === "effects" && sorted.every((clip) => clip.kind === "mask")
+  if (!allowsOverlap && !validateNoOverlap(sorted, ignoreClipId)) {
     return { ok: false, error: editorError("clip_overlap", "Clips overlap on this track") }
   }
   return { ok: true, value: { ...track, clips: sorted } }
@@ -187,6 +196,39 @@ function validateZoomSegments(segments: ManualZoomSegment[]): CommandResult<Manu
   return { ok: true, value: sorted }
 }
 
+function validateCaptionCues(cues: CaptionCue[]): CommandResult<CaptionCue[]> {
+  const sorted = [...cues].sort(
+    (left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id),
+  )
+  for (let index = 0; index < sorted.length; index++) {
+    const cue = sorted[index]
+    if (cue.endMs <= cue.startMs || cue.text.trim().length === 0 || cue.text.length > 10_000) {
+      return {
+        ok: false,
+        error: editorError("invalid_caption", "Caption timing or text is invalid"),
+      }
+    }
+    if (index > 0 && cue.startMs < sorted[index - 1].endMs) {
+      return {
+        ok: false,
+        error: editorError("caption_overlap", "Caption clips cannot overlap on one track"),
+      }
+    }
+  }
+  return { ok: true, value: sorted }
+}
+
+function normalizeMaskRect(rect: MaskRect, canvas: TimelineState["canvas"]): MaskRect {
+  const width = Math.min(Math.max(1, rect.width), canvas.width)
+  const height = Math.min(Math.max(1, rect.height), canvas.height)
+  return {
+    x: Math.min(Math.max(0, rect.x), Math.max(0, canvas.width - width)),
+    y: Math.min(Math.max(0, rect.y), Math.max(0, canvas.height - height)),
+    width,
+    height,
+  }
+}
+
 function validateCursorRanges(track: TimelineTrack): CommandResult<TimelineTrack> {
   const ranges = track.clips
     .filter((clip): clip is CursorEffectClip => clip.kind === "cursor-effect")
@@ -244,6 +286,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
     case "ripple-delete-clip":
     case "update-clip-audio":
     case "update-clip-transform":
+    case "update-caption-clip":
+    case "update-mask-clip":
     case "move-clip": {
       const found = findClip(state, command.clipId)
       if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
@@ -326,6 +370,40 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
         return {
           ok: false,
           error: editorError("invalid_track", "Captions can only be added to a captions track"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "import-caption-cues": {
+      const track = command.trackId
+        ? findTrack(state, command.trackId)
+        : state.tracks.find((candidate) => candidate.kind === "captions")
+      if (track?.kind !== undefined && track.kind !== "captions") {
+        return {
+          ok: false,
+          error: editorError("invalid_track", "Captions can only be imported to a captions track"),
+        }
+      }
+      if (track?.locked) {
+        return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+      }
+      const valid = validateCaptionCues(command.cues)
+      return valid.ok ? { ok: true, value: undefined } : valid
+    }
+    case "add-mask-clip": {
+      const track = command.trackId
+        ? findTrack(state, command.trackId)
+        : state.tracks.find((candidate) => candidate.kind === "effects")
+      if (track?.kind !== undefined && track.kind !== "effects") {
+        return { ok: false, error: editorError("invalid_track", "Masks require an effects track") }
+      }
+      if (track?.locked) {
+        return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+      }
+      if (command.startMs >= command.endMs) {
+        return {
+          ok: false,
+          error: editorError("invalid_mask", "Mask end must be greater than start"),
         }
       }
       return { ok: true, value: undefined }
@@ -520,6 +598,14 @@ export function applyCommand(
       return applyUpdateClipTransform(state, command)
     case "add-caption-clip":
       return applyAddCaptionClip(state, command)
+    case "update-caption-clip":
+      return applyUpdateCaptionClip(state, command)
+    case "import-caption-cues":
+      return applyImportCaptionCues(state, command)
+    case "add-mask-clip":
+      return applyAddMaskClip(state, command)
+    case "update-mask-clip":
+      return applyUpdateMaskClip(state, command)
     case "update-canvas":
       return applyUpdateCanvas(state, command)
     case "update-cursor-settings":
@@ -800,6 +886,7 @@ function applyMoveClip(
   const targetAcceptsClip =
     (targetTrack.kind === "captions" && clip.kind === "caption") ||
     (targetTrack.kind === "cursor" && clip.kind === "cursor-effect") ||
+    (targetTrack.kind === "effects" && clip.kind === "mask") ||
     targetTrack.kind === clip.kind
   if (!targetAcceptsClip) {
     return {
@@ -1230,7 +1317,9 @@ function applyAddCaptionClip(
     sourceOutMs: command.startMs + command.durationMs,
     speed: 1,
     text: command.text,
-    style: "default",
+    style: command.style ?? "default",
+    placement: command.placement ?? "bottom",
+    safeAreaMargin: command.safeAreaMargin ?? 48,
   }
   const newTrack: TimelineTrack = { ...track, clips: [...track.clips, newClip] }
   const trackResult = sortAndValidateTrack(
@@ -1239,6 +1328,182 @@ function applyAddCaptionClip(
   )
   if (!trackResult.ok) return trackResult
   return { ok: true, value: updateTrackInState(state, command.trackId, trackResult.value) }
+}
+
+function applyUpdateCaptionClip(
+  state: TimelineState,
+  command: UpdateCaptionClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  if (found.track.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+    }
+  }
+  if (found.clip.kind !== "caption") {
+    return {
+      ok: false,
+      error: editorError("invalid_clip", "Only caption clips support caption settings"),
+    }
+  }
+  if (
+    command.text !== undefined &&
+    (command.text.trim().length === 0 || command.text.length > 10_000)
+  ) {
+    return {
+      ok: false,
+      error: editorError("invalid_caption", "Caption text must be between 1 and 10,000 characters"),
+    }
+  }
+  const next: CaptionClip = {
+    ...found.clip,
+    ...(command.text === undefined ? {} : { text: command.text }),
+    ...(command.style === undefined ? {} : { style: command.style }),
+    ...(command.placement === undefined ? {} : { placement: command.placement }),
+    ...(command.safeAreaMargin === undefined ? {} : { safeAreaMargin: command.safeAreaMargin }),
+  }
+  return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
+}
+
+function applyImportCaptionCues(
+  state: TimelineState,
+  command: ImportCaptionCuesCommand,
+): CommandResult<TimelineState> {
+  const valid = validateCaptionCues(command.cues)
+  if (!valid.ok) return valid
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((track) => track.kind === "captions")
+  if (existingTrack?.kind !== undefined && existingTrack.kind !== "captions") {
+    return { ok: false, error: editorError("invalid_track", "Captions require a captions track") }
+  }
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? "track:captions",
+    kind: "captions",
+    name: command.trackName ?? "Captions",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const existingIds = new Set(track.clips.map((clip) => clip.id))
+  const imported: CaptionClip[] = valid.value.map((cue, index) => {
+    const baseId = `caption:${track.id}:${cue.id}:${cue.startMs}`
+    const id = existingIds.has(baseId) ? `${baseId}:${index}` : baseId
+    existingIds.add(id)
+    return {
+      id,
+      kind: "caption",
+      assetId: track.id,
+      startMs: cue.startMs,
+      durationMs: cue.endMs - cue.startMs,
+      sourceInMs: cue.startMs,
+      sourceOutMs: cue.endMs,
+      speed: 1,
+      text: cue.text,
+      style: command.style ?? "default",
+      placement: command.placement ?? "bottom",
+      safeAreaMargin: command.safeAreaMargin ?? 48,
+    }
+  })
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, ...imported] }
+  const trackResult = existingTrack
+    ? sortAndValidateTrack(updateTrackInState(state, track.id, nextTrack), track.id)
+    : { ok: true as const, value: nextTrack }
+  if (!trackResult.ok) return trackResult
+  const tracks = existingTrack
+    ? state.tracks.map((candidate) => (candidate.id === track.id ? trackResult.value : candidate))
+    : [...state.tracks, trackResult.value]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyAddMaskClip(
+  state: TimelineState,
+  command: AddMaskClipCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((track) => track.kind === "effects")
+  if (existingTrack?.kind !== undefined && existingTrack.kind !== "effects") {
+    return { ok: false, error: editorError("invalid_track", "Masks require an effects track") }
+  }
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? "track:effects",
+    kind: "effects",
+    name: "Effects",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const durationMs = command.endMs - command.startMs
+  const mask: MaskClip = {
+    id: command.clipId ?? `mask:${track.id}:${command.startMs}`,
+    kind: "mask",
+    assetId: command.assetId,
+    startMs: command.startMs,
+    durationMs,
+    sourceInMs: 0,
+    sourceOutMs: durationMs,
+    speed: 1,
+    mode: command.mode,
+    rect: normalizeMaskRect(command.rect, state.canvas),
+    blurRadius: command.blurRadius ?? 24,
+    pixelSize: command.pixelSize ?? 12,
+    redactColor: command.redactColor ?? "black",
+    enabled: true,
+  }
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, mask] }
+  const trackResult = existingTrack
+    ? sortAndValidateTrack(updateTrackInState(state, track.id, nextTrack), track.id)
+    : { ok: true as const, value: nextTrack }
+  if (!trackResult.ok) return trackResult
+  const tracks = existingTrack
+    ? state.tracks.map((candidate) => (candidate.id === track.id ? trackResult.value : candidate))
+    : [...state.tracks, trackResult.value]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyUpdateMaskClip(
+  state: TimelineState,
+  command: UpdateMaskClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  if (found.track.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+    }
+  }
+  if (found.clip.kind !== "mask") {
+    return {
+      ok: false,
+      error: editorError("invalid_clip", "Only mask clips support mask settings"),
+    }
+  }
+  const next: MaskClip = {
+    ...found.clip,
+    ...(command.mode === undefined ? {} : { mode: command.mode }),
+    ...(command.blurRadius === undefined ? {} : { blurRadius: command.blurRadius }),
+    ...(command.pixelSize === undefined ? {} : { pixelSize: command.pixelSize }),
+    ...(command.redactColor === undefined ? {} : { redactColor: command.redactColor }),
+    ...(command.enabled === undefined ? {} : { enabled: command.enabled }),
+    rect: command.rect
+      ? normalizeMaskRect({ ...found.clip.rect, ...command.rect }, state.canvas)
+      : found.clip.rect,
+  }
+  return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
 function applyUpdateCanvas(
@@ -1978,15 +2243,103 @@ export function createAddCaptionClipCommand(
   text: string,
   startMs: number,
   durationMs: number,
+  options: {
+    clipId?: string
+    style?: CaptionClip["style"]
+    placement?: CaptionClip["placement"]
+    safeAreaMargin?: number
+  } = {},
 ): CommandRecord {
   return {
     kind: "add-caption-clip",
     name: "Add caption",
     trackId,
-    clipId: crypto.randomUUID(),
+    clipId: options.clipId ?? crypto.randomUUID(),
     text,
     startMs,
     durationMs,
+    style: options.style,
+    placement: options.placement,
+    safeAreaMargin: options.safeAreaMargin,
+  }
+}
+
+export function createUpdateCaptionClipCommand(
+  clipId: string,
+  update: Partial<Pick<CaptionClip, "text" | "style" | "placement" | "safeAreaMargin">>,
+): CommandRecord {
+  return {
+    kind: "update-caption-clip",
+    name: "Update caption",
+    clipId,
+    ...update,
+    coalesce: update.text !== undefined,
+    coalesceKey: update.text !== undefined ? `caption:${clipId}` : undefined,
+  }
+}
+
+export function createImportCaptionCuesCommand(
+  cues: CaptionCue[],
+  options: {
+    trackId?: string
+    trackName?: string
+    style?: CaptionClip["style"]
+    placement?: CaptionClip["placement"]
+    safeAreaMargin?: number
+  } = {},
+): CommandRecord {
+  return {
+    kind: "import-caption-cues",
+    name: "Import captions",
+    ...options,
+    cues,
+  }
+}
+
+export function createAddMaskClipCommand(
+  assetId: string,
+  startMs: number,
+  endMs: number,
+  mode: MaskClip["mode"],
+  rect: MaskClip["rect"],
+  options: {
+    trackId?: string
+    clipId?: string
+    blurRadius?: number
+    pixelSize?: number
+    redactColor?: MaskClip["redactColor"]
+  } = {},
+): CommandRecord {
+  return {
+    kind: "add-mask-clip",
+    name: "Add privacy mask",
+    ...options,
+    assetId,
+    startMs,
+    endMs,
+    mode,
+    rect,
+  }
+}
+
+export function createUpdateMaskClipCommand(
+  clipId: string,
+  update: {
+    mode?: MaskClip["mode"]
+    rect?: Partial<MaskClip["rect"]>
+    blurRadius?: MaskClip["blurRadius"]
+    pixelSize?: MaskClip["pixelSize"]
+    redactColor?: MaskClip["redactColor"]
+    enabled?: MaskClip["enabled"]
+  },
+): CommandRecord {
+  return {
+    kind: "update-mask-clip",
+    name: "Update privacy mask",
+    clipId,
+    ...update,
+    coalesce: update.rect !== undefined,
+    coalesceKey: update.rect !== undefined ? `mask:${clipId}` : undefined,
   }
 }
 

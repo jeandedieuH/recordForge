@@ -42,6 +42,10 @@ export function AppShell() {
   const clearSaveMessage = useRecorderStore((state) => state.clearSaveMessage)
   const timelineRecording = useTimelineStore((state) => state.recording)
   const timelineCanvas = useTimelineStore((state) => state.engine?.history.present.canvas)
+  const captionMode = useTimelineStore(
+    (state) => state.project?.exportSettings.captionMode ?? "burn-in",
+  )
+  const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
   const timelineExport = useTimelineStore((state) => state.export)
   const timelineSave = useTimelineStore((state) => state.save)
   const timelineError = useTimelineStore((state) => state.error)
@@ -177,6 +181,8 @@ export function AppShell() {
               <ExportView
                 projectName={timelineRecording?.name}
                 canvas={timelineCanvas}
+                captionMode={captionMode}
+                onCaptionModeChange={setCaptionMode}
                 exportJob={activeExportJob}
                 error={timelineError}
                 onDismissError={clearTimelineError}

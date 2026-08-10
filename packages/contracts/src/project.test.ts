@@ -83,6 +83,7 @@ const minimalProject = {
     preset: "default-mp4",
     codec: "h264",
     container: "mp4",
+    captionMode: "burn-in",
   },
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
@@ -112,6 +113,7 @@ describe("project contract", () => {
       preset: "default-mp4",
       codec: "h264",
       container: "mp4",
+      captionMode: "burn-in",
     })
   })
 
@@ -131,6 +133,70 @@ describe("project contract", () => {
     expect(parsed.role).toBe("cursor_events")
     expect(parsed.captureBounds?.width).toBe(1024)
     expect(parsed.timebase?.ticksPerSecond).toBe(1000)
+  })
+
+  it("round-trips caption and privacy mask clips in the durable project shape", () => {
+    const project = projectSchema.parse({
+      ...minimalProject,
+      tracks: [
+        ...minimalProject.tracks,
+        {
+          id: "captions-track",
+          kind: "captions",
+          name: "Captions",
+          muted: false,
+          locked: false,
+          solo: false,
+          volume: 1,
+          clips: [
+            {
+              id: "caption-1",
+              kind: "caption",
+              assetId: "captions-track",
+              startMs: 500,
+              durationMs: 1_000,
+              sourceInMs: 500,
+              sourceOutMs: 1_500,
+              speed: 1,
+              text: "Safe caption",
+              style: "boxed",
+              placement: "bottom",
+              safeAreaMargin: 48,
+            },
+          ],
+        },
+        {
+          id: "effects-track",
+          kind: "effects",
+          name: "Effects",
+          muted: false,
+          locked: false,
+          solo: false,
+          volume: 1,
+          clips: [
+            {
+              id: "mask-1",
+              kind: "mask",
+              assetId: "asset-1",
+              startMs: 500,
+              durationMs: 2_000,
+              sourceInMs: 0,
+              sourceOutMs: 2_000,
+              speed: 1,
+              mode: "redact",
+              rect: { x: 10, y: 20, width: 320, height: 180 },
+              blurRadius: 24,
+              pixelSize: 12,
+              redactColor: "black",
+              enabled: true,
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(project.tracks[1].clips[0]).toMatchObject({ kind: "caption", text: "Safe caption" })
+    expect(project.tracks[2].clips[0]).toMatchObject({ kind: "mask", mode: "redact" })
   })
 
   it("defaults missing asset status", () => {

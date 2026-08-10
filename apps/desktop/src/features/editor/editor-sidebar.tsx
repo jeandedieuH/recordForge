@@ -16,6 +16,7 @@ import type {
   WaveformResources,
   ThumbnailManifest,
 } from "./media/derivative-resources"
+import { CaptionImportPanel } from "./captions/caption-import-panel"
 
 interface EditorSidebarProps {
   timeline: TimelineState | null
@@ -107,20 +108,26 @@ export function EditorSidebar({
             />
           </TabsContent>
 
-          <TabsContent value="captions">
-            <EmptyState
+          <TabsContent value="captions" className="flex flex-col gap-4">
+            <PanelHeading
               icon={Captions}
-              title="Captions are not available yet"
-              description="This project has no caption cues. Caption editing will appear here when a captions track is added."
+              title="Captions"
+              description="Import timed cues without changing the original media."
             />
+            <CaptionImportPanel />
           </TabsContent>
 
-          <TabsContent value="effects">
+          <TabsContent value="effects" className="flex flex-col gap-3">
             <EmptyState
               icon={Sparkles}
-              title="No effects applied"
-              description="Effects stay non-destructive and will appear here when an effect track is added."
+              title="Privacy masks are timeline effects"
+              description="Add blur, pixelation, or redaction from the timeline toolbar. Select a mask to edit its range and rectangle."
             />
+            <div className="rounded-lg border border-dashed border-border bg-surface-dim p-3 text-[11px] leading-relaxed text-subtle-foreground">
+              Callouts, arrows, outline highlights, spotlights, and numbered steps are intentionally
+              deferred until the render-plan annotation contract is ready. They will not be shown as
+              working controls before preview/export parity exists.
+            </div>
           </TabsContent>
 
           <TabsContent value="layouts" className="flex flex-col gap-4">

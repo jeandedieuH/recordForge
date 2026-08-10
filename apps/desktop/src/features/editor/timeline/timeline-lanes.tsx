@@ -9,6 +9,7 @@ import type {
 } from "@recordforge/contracts"
 import {
   AudioLines,
+  Captions,
   ChevronDown,
   ChevronUp,
   Headphones,
@@ -17,6 +18,7 @@ import {
   Monitor,
   MousePointer2,
   Rows3,
+  ShieldAlert,
   Video,
   Volume2,
   VolumeX,
@@ -80,6 +82,8 @@ function getTrackIcon(track: TimelineTrack): LucideIcon {
   if (track.kind === "screen") return Monitor
   if (track.kind === "camera") return Video
   if (track.kind === "cursor") return MousePointer2
+  if (track.kind === "captions") return Captions
+  if (track.kind === "effects") return ShieldAlert
   return AudioLines
 }
 
@@ -87,6 +91,8 @@ function getTrackAccent(track: TimelineTrack): string {
   if (track.kind === "screen") return "screen"
   if (track.kind === "camera") return "camera"
   if (track.kind === "cursor") return "cursor"
+  if (track.kind === "captions") return "captions"
+  if (track.kind === "effects") return "effects"
   if (track.name.toLowerCase().includes("system")) return "system"
   return "mic"
 }
@@ -100,6 +106,8 @@ function getClipClass(track: TimelineTrack): string {
       mic: "border-track-mic/70 bg-track-mic/20 hover:bg-track-mic/30",
       system: "border-track-system/70 bg-track-system/20 hover:bg-track-system/30",
       cursor: "border-primary/70 bg-primary/15 hover:bg-primary/25",
+      captions: "border-primary/70 bg-primary/15 hover:bg-primary/25",
+      effects: "border-warning/70 bg-warning/15 hover:bg-warning/25",
     }[accent] ?? "border-border bg-surface"
   )
 }
@@ -109,6 +117,7 @@ function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
   if (clip.kind === "camera") return "Camera capture"
   if (clip.kind === "cursor-effect") return `${clip.presetId} cursor effect`
   if (clip.kind === "caption") return clip.text
+  if (clip.kind === "mask") return `${clip.mode} privacy mask`
   return track.name
 }
 
@@ -434,7 +443,7 @@ export function TimelineLanes({
                   data-timeline-zoom
                   aria-label={`Zoom segment from ${formatTimelineTime(segment.startMs)} to ${formatTimelineTime(segment.startMs + segment.durationMs)}`}
                   className={cn(
-                    "absolute bottom-0 h-1.5 -translate-x-0 rounded-full bg-primary/70 outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                    "absolute bottom-0 h-1.5 translate-x-0 rounded-full bg-primary/70 outline-none focus-visible:ring-2 focus-visible:ring-primary",
                     selectedZoomId === segment.id && "bg-primary ring-1 ring-primary",
                     segment.locked && "bg-muted-foreground/60",
                   )}
@@ -551,7 +560,8 @@ function TrackHeader({
               track.kind === "audio" && !track.name.toLowerCase().includes("system"),
             "text-track-system":
               track.kind === "audio" && track.name.toLowerCase().includes("system"),
-            "text-primary": track.kind === "cursor",
+            "text-primary": track.kind === "cursor" || track.kind === "captions",
+            "text-warning": track.kind === "effects",
           })}
           aria-hidden
         />

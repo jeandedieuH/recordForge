@@ -97,7 +97,7 @@ pub struct ProjectAsset {
 }
 
 /// Export settings persisted with the project.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectExportSettings {
     #[serde(default = "default_export_preset")]
@@ -106,6 +106,19 @@ pub struct ProjectExportSettings {
     pub codec: String,
     #[serde(default = "default_export_container")]
     pub container: String,
+    #[serde(default = "default_caption_mode")]
+    pub caption_mode: String,
+}
+
+impl Default for ProjectExportSettings {
+    fn default() -> Self {
+        Self {
+            preset: default_export_preset(),
+            codec: default_export_codec(),
+            container: default_export_container(),
+            caption_mode: default_caption_mode(),
+        }
+    }
 }
 
 fn default_export_preset() -> String {
@@ -118,6 +131,10 @@ fn default_export_codec() -> String {
 
 fn default_export_container() -> String {
     "mp4".to_string()
+}
+
+fn default_caption_mode() -> String {
+    "burn-in".to_string()
 }
 
 /// Durable, versioned project file.

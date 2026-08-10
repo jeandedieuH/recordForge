@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import {
+  type MaskClip,
   type MediaJob,
   type MediaVideoTrackOutput,
   type TimelineClip,
@@ -8,6 +9,7 @@ import {
   type TimelineTrack,
 } from "@recordforge/contracts"
 import {
+  createAddMaskClipCommand,
   createAddMarkerCommand,
   createDeleteClipCommand,
   createDeleteClipsCommand,
@@ -26,6 +28,7 @@ import {
   createTrimClipCommand,
   createUpdateTrackCommand,
   createUpdateClipTransformCommand,
+  createUpdateMaskClipCommand,
   findClip,
   findManualZoomAtTime,
   findNextTimelineClip,
@@ -52,6 +55,7 @@ import {
   Pause,
   Play,
   Scissors,
+  ShieldAlert,
   SkipBack,
   SkipForward,
   ZoomIn,
@@ -76,8 +80,10 @@ import type {
   ThumbnailManifest,
 } from "../media/derivative-resources"
 import { AudioTrackPreview } from "./audio-track-preview"
+import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
 import { ClipInspector } from "./clip-inspector"
+import { MaskPreview } from "./mask-preview"
 import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
 import { CustomCursorOverlay } from "../cursor"
 
@@ -311,6 +317,25 @@ export function TimelineView({
         .flatMap((track) =>
           track.clips.filter(
             (clip): clip is Extract<TimelineClip, { kind: "camera" }> => clip.kind === "camera",
+          ),
+        ) ?? [],
+    [timeline],
+  )
+  const maskClips = useMemo(
+    () =>
+      timeline?.tracks
+        .filter((track) => track.kind === "effects" && !track.muted)
+        .flatMap((track) => track.clips.filter((clip): clip is MaskClip => clip.kind === "mask")) ??
+      [],
+    [timeline],
+  )
+  const captionClips = useMemo(
+    () =>
+      timeline?.tracks
+        .filter((track) => track.kind === "captions" && !track.muted)
+        .flatMap((track) =>
+          track.clips.filter(
+            (clip): clip is Extract<TimelineClip, { kind: "caption" }> => clip.kind === "caption",
           ),
         ) ?? [],
     [timeline],
@@ -870,6 +895,35 @@ export function TimelineView({
     )
   }
 
+  function addMask(mode: MaskClip["mode"]) {
+    if (!timeline) return
+    const screenAssetId = timeline.tracks.find((track) => track.kind === "screen")?.clips[0]
+      ?.assetId
+    if (!screenAssetId) return
+    const selectedRange = view.selection?.kind === "range" ? view.selection : null
+    const startMs = selectedRange?.startMs ?? view.playheadMs
+    const endMs = selectedRange?.endMs ?? Math.min(view.durationMs, startMs + 2_000)
+    if (endMs <= startMs) return
+    execute(
+      createAddMaskClipCommand(screenAssetId, startMs, endMs, mode, {
+        x: timeline.canvas.width * 0.3,
+        y: timeline.canvas.height * 0.3,
+        width: timeline.canvas.width * 0.4,
+        height: timeline.canvas.height * 0.25,
+      }),
+    )
+  }
+
+  function selectMask(mask: MaskClip) {
+    const track = timeline?.tracks.find((candidate) => candidate.kind === "effects")
+    if (!track) return
+    setSelection({ kind: "clip", primaryClipId: mask.id, clipIds: [mask.id], trackId: track.id })
+  }
+
+  function updateMaskRect(clipId: string, rect: MaskClip["rect"]) {
+    execute(createUpdateMaskClipCommand(clipId, { rect }), { coalesceWindowMs: 60_000 })
+  }
+
   function adjustZoom(delta: number) {
     setZoom(Math.max(10, Math.min(200, view.zoom + delta)))
   }
@@ -1040,19 +1094,6 @@ export function TimelineView({
                 </div>
               )}
 
-              {mediaUrl && !mediaError && videoBounds ? (
-                <CustomCursorOverlay
-                  playheadMs={view.playheadMs}
-                  sourceTimeMs={cursorSourceTimeMs}
-                  cursorSettings={cursorSettings}
-                  recordingId={recordingId}
-                  containerWidth={videoBounds.width}
-                  containerHeight={videoBounds.height}
-                  offsetX={videoBounds.left}
-                  offsetY={videoBounds.top}
-                />
-              ) : null}
-
               {mediaUrl && cameraClips.length > 0 ? (
                 <CameraPreview
                   clips={cameraClips}
@@ -1065,6 +1106,38 @@ export function TimelineView({
                   onUpdateTransform={(clipId, transform) =>
                     execute(createUpdateClipTransformCommand(clipId, transform))
                   }
+                />
+              ) : null}
+
+              {mediaUrl && maskClips.length > 0 ? (
+                <MaskPreview
+                  clips={maskClips}
+                  playheadMs={view.playheadMs}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  onSelectMask={selectMask}
+                  onUpdateMask={updateMaskRect}
+                />
+              ) : null}
+
+              {captionClips.length > 0 ? (
+                <CaptionPreview
+                  clips={captionClips}
+                  playheadMs={view.playheadMs}
+                  canvasHeight={timeline.canvas.height}
+                />
+              ) : null}
+
+              {mediaUrl && !mediaError && videoBounds ? (
+                <CustomCursorOverlay
+                  playheadMs={view.playheadMs}
+                  sourceTimeMs={cursorSourceTimeMs}
+                  cursorSettings={cursorSettings}
+                  recordingId={recordingId}
+                  containerWidth={videoBounds.width}
+                  containerHeight={videoBounds.height}
+                  offsetX={videoBounds.left}
+                  offsetY={videoBounds.top}
                 />
               ) : null}
             </div>
@@ -1197,6 +1270,36 @@ export function TimelineView({
               <Flag data-icon="inline-start" />
               <span className="hidden md:inline">Add marker</span>
             </Button>
+            <div
+              className="hidden items-center gap-1 border-l border-border pl-2 md:flex"
+              aria-label="Privacy masks"
+            >
+              <ShieldAlert className="size-3.5 text-warning" aria-hidden />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => addMask("blur")}
+              >
+                Blur
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => addMask("pixelate")}
+              >
+                Pixelate
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => addMask("redact")}
+              >
+                Redact
+              </Button>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <DerivativeState label="Thumbnails" status={thumbnailStatus} onRetry={retryThumbnail} />

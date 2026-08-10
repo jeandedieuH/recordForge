@@ -20,8 +20,10 @@ import {
   createUpdateZoomSegmentCommand,
   createUpdateMarkerCommand,
   createTrimClipCommand,
+  createUpdateCaptionClipCommand,
   createUpdateClipAudioCommand,
   createUpdateClipTransformCommand,
+  createUpdateMaskClipCommand,
   createUpdateCanvasCommand,
   createUpdateCursorSettingsCommand,
   createUpdateTrackCommand,
@@ -39,7 +41,7 @@ import {
   Sparkles,
   Volume2,
 } from "lucide-react"
-import { Badge, Button, Input, Slider, Switch } from "@recordforge/ui"
+import { Badge, Button, Input, NativeSelect, Slider, Switch, Textarea } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { CursorInspector } from "../cursor"
 
@@ -343,7 +345,19 @@ export function ClipInspector({
     const sourceInMs = Number.parseInt(sourceInText, 10)
     const sourceOutMs = Number.parseInt(sourceOutText, 10)
     if (Number.isNaN(sourceInMs) || Number.isNaN(sourceOutMs)) return
-    execute(createTrimClipCommand(activeClip.id, sourceInMs, sourceOutMs))
+    execute(
+      createTrimClipCommand(
+        activeClip.id,
+        sourceInMs,
+        sourceOutMs,
+        activeClip.kind === "caption" ? { startMs: sourceInMs } : undefined,
+      ),
+    )
+  }
+
+  function updateMask(partial: Parameters<typeof createUpdateMaskClipCommand>[1]) {
+    if (activeClip.kind !== "mask") return
+    execute(createUpdateMaskClipCommand(activeClip.id, partial))
   }
 
   return (
@@ -450,6 +464,122 @@ export function ClipInspector({
               <Button variant="secondary" size="sm" onClick={applyTrim}>
                 Apply source trim
               </Button>
+            </div>
+          ) : null}
+
+          {activeClip.kind === "caption" ? (
+            <div className="flex flex-col gap-3 border-t border-border pt-4">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                <Sparkles className="size-4 text-primary" aria-hidden />
+                <span>Caption</span>
+              </div>
+              <Textarea
+                aria-label="Caption text"
+                value={activeClip.text}
+                rows={3}
+                onChange={(event) =>
+                  execute(
+                    createUpdateCaptionClipCommand(activeClip.id, { text: event.target.value }),
+                  )
+                }
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+                  Style
+                  <NativeSelect
+                    aria-label="Caption style"
+                    value={activeClip.style}
+                    onChange={(event) =>
+                      execute(
+                        createUpdateCaptionClipCommand(activeClip.id, {
+                          style: event.target.value as typeof activeClip.style,
+                        }),
+                      )
+                    }
+                  >
+                    <option value="default">Default</option>
+                    <option value="minimal">Minimal</option>
+                    <option value="boxed">Boxed</option>
+                    <option value="highlight">Highlight</option>
+                  </NativeSelect>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+                  Placement
+                  <NativeSelect
+                    aria-label="Caption placement"
+                    value={activeClip.placement ?? "bottom"}
+                    onChange={(event) =>
+                      execute(
+                        createUpdateCaptionClipCommand(activeClip.id, {
+                          placement: event.target.value as NonNullable<typeof activeClip.placement>,
+                        }),
+                      )
+                    }
+                  >
+                    <option value="top">Top</option>
+                    <option value="center">Center</option>
+                    <option value="bottom">Bottom</option>
+                  </NativeSelect>
+                </label>
+              </div>
+              <p className="text-[11px] leading-relaxed text-subtle-foreground">
+                Edit start and end in the source fields above; caption timing remains
+                non-destructive.
+              </p>
+            </div>
+          ) : null}
+
+          {activeClip.kind === "mask" ? (
+            <div className="flex flex-col gap-3 border-t border-border pt-4">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                <Sparkles className="size-4 text-primary" aria-hidden />
+                <span>Privacy mask</span>
+              </div>
+              <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+                Mode
+                <NativeSelect
+                  aria-label="Mask mode"
+                  value={activeClip.mode}
+                  onChange={(event) =>
+                    updateMask({ mode: event.target.value as typeof activeClip.mode })
+                  }
+                >
+                  <option value="blur">Blur</option>
+                  <option value="pixelate">Pixelate</option>
+                  <option value="redact">Redact</option>
+                </NativeSelect>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {(["x", "y", "width", "height"] as const).map((field) => (
+                  <NumberField
+                    key={field}
+                    label={field}
+                    value={activeClip.rect[field]}
+                    onChange={(value) => updateMask({ rect: { [field]: value } })}
+                  />
+                ))}
+              </div>
+              {activeClip.mode === "blur" ? (
+                <NumberField
+                  label="Blur radius"
+                  value={activeClip.blurRadius}
+                  onChange={(value) => updateMask({ blurRadius: value })}
+                />
+              ) : null}
+              {activeClip.mode === "pixelate" ? (
+                <NumberField
+                  label="Pixel size"
+                  value={activeClip.pixelSize}
+                  onChange={(value) => updateMask({ pixelSize: Math.round(value) })}
+                />
+              ) : null}
+              <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+                <span>Enabled in preview and export</span>
+                <Switch
+                  checked={activeClip.enabled}
+                  onCheckedChange={(enabled) => updateMask({ enabled })}
+                />
+              </label>
             </div>
           ) : null}
 

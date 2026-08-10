@@ -1,5 +1,5 @@
 import { useState } from "react"
-import type { MediaJob, TimelineCanvas } from "@recordforge/contracts"
+import type { MediaJob, RenderCaptionMode, TimelineCanvas } from "@recordforge/contracts"
 import {
   ArrowLeft,
   ChevronDown,
@@ -24,6 +24,8 @@ import {
 interface ExportViewProps {
   projectName?: string
   canvas?: TimelineCanvas
+  captionMode?: RenderCaptionMode
+  onCaptionModeChange?: (mode: RenderCaptionMode) => void
   exportJob?: MediaJob | null
   error?: string | null
   onDismissError?: () => void
@@ -36,6 +38,8 @@ type PresetId = "fast-share" | "balanced" | "smooth-demo" | "archive"
 export function ExportView({
   projectName = "Recording",
   canvas,
+  captionMode = "burn-in",
+  onCaptionModeChange,
   exportJob = null,
   error = null,
   onDismissError,
@@ -332,6 +336,36 @@ export function ExportView({
               </div>
             </div>
           ) : null}
+        </div>
+
+        <div className="mb-4 flex flex-col gap-3 rounded-xl border border-border bg-surface p-5">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-subtle-foreground font-label">
+            <Film className="size-4 text-primary" aria-hidden />
+            <span>Caption Delivery</span>
+          </div>
+          <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+            Caption output
+            <Select
+              value={captionMode}
+              onValueChange={(value) => onCaptionModeChange?.(value as RenderCaptionMode)}
+            >
+              <SelectTrigger
+                aria-label="Caption output mode"
+                className="border-border bg-background text-xs text-foreground"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="burn-in">Burn into video</SelectItem>
+                <SelectItem value="sidecar">Write SRT sidecar</SelectItem>
+                <SelectItem value="none">Do not export captions</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <p className="text-[11px] leading-relaxed text-subtle-foreground">
+            Burn-in uses the same safe-area preset shown in preview. Sidecar writes an SRT beside
+            the MP4.
+          </p>
         </div>
 
         {/* Section 3: Audio Configuration Accordion */}

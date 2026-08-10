@@ -125,6 +125,7 @@ pub struct MediaJobOutputs {
     #[serde(default)]
     pub video_tracks: Vec<MediaVideoTrackOutput>,
     pub output_path: Option<String>,
+    pub captions_path: Option<String>,
 }
 
 /// Media job record persisted in SQLite.

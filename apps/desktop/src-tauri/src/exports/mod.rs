@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
+mod captions;
 mod cursor;
 
 /// A single trimmed segment in the final export.
@@ -36,6 +37,12 @@ pub struct RenderPlan {
     #[serde(default)]
     pub overlays: Vec<RenderPlanOverlay>,
     #[serde(default)]
+    pub captions: Vec<RenderPlanCaption>,
+    #[serde(default = "default_caption_mode")]
+    pub caption_mode: String,
+    #[serde(default)]
+    pub masks: Vec<RenderPlanMask>,
+    #[serde(default)]
     pub zoom_segments: Vec<RenderPlanZoomSegment>,
     #[serde(default)]
     pub cursor_effects: Vec<RenderPlanCursorEffect>,
@@ -46,6 +53,40 @@ pub struct RenderPlan {
     // `Some(empty)` means the current editor intentionally has no audio tracks.
     #[serde(default)]
     pub audio_tracks: Option<Vec<RenderPlanAudio>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPlanCaption {
+    pub id: String,
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default = "default_caption_style")]
+    pub style: String,
+    #[serde(default = "default_caption_placement")]
+    pub placement: String,
+    #[serde(default = "default_caption_margin")]
+    pub safe_area_margin: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderPlanMask {
+    pub id: String,
+    pub asset_id: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub mode: String,
+    pub rect: RenderCropFloat,
+    #[serde(default = "default_mask_blur_radius")]
+    pub blur_radius: f64,
+    #[serde(default = "default_mask_pixel_size")]
+    pub pixel_size: u64,
+    #[serde(default = "default_mask_color")]
+    pub redact_color: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -109,6 +150,34 @@ pub struct RenderCropFloat {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+fn default_caption_mode() -> String {
+    "burn-in".into()
+}
+
+fn default_caption_style() -> String {
+    "default".into()
+}
+
+fn default_caption_placement() -> String {
+    "bottom".into()
+}
+
+fn default_caption_margin() -> u64 {
+    48
+}
+
+fn default_mask_blur_radius() -> f64 {
+    24.0
+}
+
+fn default_mask_pixel_size() -> u64 {
+    12
+}
+
+fn default_mask_color() -> String {
+    "black".into()
 }
 
 fn default_overlay_opacity() -> f64 {
@@ -205,6 +274,13 @@ pub fn run_render_plan(
     let work_dir = PathBuf::from(&recording.work_dir);
     let asset_paths = crate::projects::load_asset_path_map(&work_dir)?;
 
+    if plan.caption_mode != "burn-in"
+        && plan.caption_mode != "sidecar"
+        && plan.caption_mode != "none"
+    {
+        return Err(InternalError::Media("caption export mode is unsupported".into()).into());
+    }
+
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| InternalError::Storage(format!("create export dir: {e}")))?;
@@ -236,6 +312,12 @@ pub fn run_render_plan(
         &asset_paths,
     )?;
 
+    let captions_path = if plan.caption_mode == "sidecar" {
+        Some(write_caption_sidecar(output_path, &plan.captions)?)
+    } else {
+        None
+    };
+
     let completed = MediaJob {
         status: crate::database::media::MediaJobStatus::Completed,
         progress: 1.0,
@@ -244,6 +326,7 @@ pub fn run_render_plan(
         completed_at: Some(chrono::Utc::now().to_rfc3339()),
         outputs: crate::database::media::MediaJobOutputs {
             output_path: Some(output_path.to_string_lossy().to_string()),
+            captions_path: captions_path.map(|path| path.to_string_lossy().to_string()),
             ..Default::default()
         },
         ..job
@@ -269,7 +352,38 @@ fn render_timeline_composition(
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
     }
-    if plan.canvas.is_none() && plan.overlays.is_empty() && plan.zoom_segments.is_empty() {
+    captions::validate_captions(&plan.captions)?;
+    let video_duration_ms = plan
+        .segments
+        .iter()
+        .map(|segment| segment.output_end_ms)
+        .max()
+        .unwrap_or(0);
+    if plan
+        .captions
+        .iter()
+        .any(|caption| caption.end_ms > video_duration_ms)
+    {
+        return Err(
+            InternalError::Media("caption extends beyond the rendered timeline".into()).into(),
+        );
+    }
+    if plan
+        .masks
+        .iter()
+        .any(|mask| mask.end_ms > video_duration_ms)
+    {
+        return Err(InternalError::Media(
+            "privacy mask extends beyond the rendered timeline".into(),
+        )
+        .into());
+    }
+    if plan.canvas.is_none()
+        && plan.overlays.is_empty()
+        && plan.captions.is_empty()
+        && plan.masks.is_empty()
+        && plan.zoom_segments.is_empty()
+    {
         return render_timeline_with_audio(
             ffmpeg_path,
             source_path,
@@ -431,6 +545,105 @@ fn render_timeline_composition(
         current_label = next_label;
     }
 
+    for (index, mask) in plan.masks.iter().enumerate() {
+        if !mask.enabled || mask.end_ms <= mask.start_ms {
+            continue;
+        }
+        validate_mask(mask, recording_id, asset_paths, canvas)?;
+        let x = mask
+            .rect
+            .x
+            .round()
+            .clamp(0.0, canvas.width.saturating_sub(1) as f64);
+        let y = mask
+            .rect
+            .y
+            .round()
+            .clamp(0.0, canvas.height.saturating_sub(1) as f64);
+        let width = mask
+            .rect
+            .width
+            .round()
+            .clamp(1.0, (canvas.width as f64 - x).max(1.0));
+        let height = mask
+            .rect
+            .height
+            .round()
+            .clamp(1.0, (canvas.height as f64 - y).max(1.0));
+        let enable = format!(
+            "between(t,{},{})",
+            seconds(mask.start_ms),
+            seconds(mask.end_ms)
+        );
+        let next_label = format!("mask_composite{index}");
+        match mask.mode.as_str() {
+            "redact" => {
+                let color = safe_filter_color(&mask.redact_color);
+                filters.push(format!(
+                    "[{current_label}]drawbox=x={x:.0}:y={y:.0}:w={width:.0}:h={height:.0}:color={color}:t=fill:enable='{enable}'[{next_label}]"
+                ));
+            }
+            "blur" | "pixelate" => {
+                let base_label = format!("mask_base{index}");
+                let source_label = format!("mask_source{index}");
+                let filtered_label = format!("mask_filtered{index}");
+                filters.push(format!(
+                    "[{current_label}]split=2[{base_label}][{source_label}]"
+                ));
+                let mut region_filter =
+                    format!("[{source_label}]crop=w={width:.0}:h={height:.0}:x={x:.0}:y={y:.0}");
+                if mask.mode == "blur" {
+                    region_filter.push_str(&format!(
+                        ",boxblur=luma_radius={:.0}:luma_power=2",
+                        mask.blur_radius.clamp(1.0, 128.0)
+                    ));
+                } else {
+                    let pixel_size = mask.pixel_size.clamp(2, 128) as f64;
+                    let small_width = (width / pixel_size).floor().max(1.0);
+                    let small_height = (height / pixel_size).floor().max(1.0);
+                    region_filter.push_str(&format!(
+                        ",scale=w={small_width:.0}:h={small_height:.0}:flags=neighbor,scale=w={width:.0}:h={height:.0}:flags=neighbor"
+                    ));
+                }
+                region_filter.push_str(&format!("[{filtered_label}]"));
+                filters.push(region_filter);
+                filters.push(format!(
+                    "[{base_label}][{filtered_label}]overlay=x={x:.0}:y={y:.0}:eof_action=pass:enable='{enable}'[{next_label}]"
+                ));
+            }
+            _ => {
+                return Err(InternalError::Media("mask mode is unsupported".into()).into());
+            }
+        }
+        current_label = next_label;
+    }
+
+    for (caption_index, caption) in plan.captions.iter().enumerate() {
+        captions::validate_caption(caption)?;
+        if plan.caption_mode != "burn-in" {
+            continue;
+        }
+        let safe_id = caption
+            .id
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let next_label = format!("caption_{caption_index}_{safe_id}");
+        filters.push(captions::drawtext_filter(
+            caption,
+            &current_label,
+            &next_label,
+            canvas.height,
+        )?);
+        current_label = next_label;
+    }
+
     let audio_tracks = plan
         .audio_tracks
         .as_ref()
@@ -543,8 +756,8 @@ fn render_timeline_composition(
         .map_err(|error| InternalError::Media(format!("timeline composition run: {error}")))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&partial_path);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InternalError::Media(format!("timeline composition failed: {stderr}")).into());
+        warn!("timeline composition process failed; stderr is intentionally redacted");
+        return Err(InternalError::Media("timeline composition failed".into()).into());
     }
     crate::capture::disk::atomic_replace(&partial_path, output_path)?;
     Ok(())
@@ -697,8 +910,8 @@ fn render_timeline_with_audio(
         .map_err(|error| InternalError::Media(format!("timeline render run: {error}")))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&partial_path);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InternalError::Media(format!("timeline render failed: {stderr}")).into());
+        warn!("timeline render process failed; stderr is intentionally redacted");
+        return Err(InternalError::Media("timeline render failed".into()).into());
     }
 
     crate::capture::disk::atomic_replace(&partial_path, output_path)?;
@@ -880,8 +1093,8 @@ fn apply_cursor_overlay(
     })?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&partial_path);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(InternalError::Media(format!("cursor overlay render failed: {stderr}")).into());
+        warn!("cursor overlay process failed; stderr is intentionally redacted");
+        return Err(InternalError::Media("cursor overlay render failed".into()).into());
     }
 
     crate::capture::disk::atomic_replace(&partial_path, output_path)?;
@@ -959,9 +1172,15 @@ fn safe_filter_color(value: &str) -> String {
             .chars()
             .all(|character| character.is_ascii_hexdigit());
     if is_hex {
-        trimmed.to_string()
-    } else {
-        "#000000".into()
+        return trimmed.to_string();
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "white" => "#ffffff".into(),
+        "red" => "#ef4444".into(),
+        "blue" => "#3b82f6".into(),
+        "yellow" => "#facc15".into(),
+        "transparent" => "#00000000".into(),
+        _ => "#000000".into(),
     }
 }
 
@@ -1052,6 +1271,40 @@ fn validate_segment_known(
     validate_segment(segment, recording_id)
 }
 
+fn validate_mask(
+    mask: &RenderPlanMask,
+    recording_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    canvas: &cursor::RenderCanvas,
+) -> Result<()> {
+    if let Some(asset_id) = mask.asset_id.as_ref() {
+        if asset_id != recording_id && !asset_paths.contains_key(asset_id) {
+            return Err(
+                InternalError::Media("privacy mask references an unknown asset".into()).into(),
+            );
+        }
+    }
+    if !matches!(mask.mode.as_str(), "blur" | "pixelate" | "redact")
+        || mask.rect.width <= 0.0
+        || mask.rect.height <= 0.0
+        || mask.rect.x < 0.0
+        || mask.rect.y < 0.0
+        || mask.rect.x >= canvas.width as f64
+        || mask.rect.y >= canvas.height as f64
+        || mask.rect.x + mask.rect.width > canvas.width as f64 + 0.5
+        || mask.rect.y + mask.rect.height > canvas.height as f64 + 0.5
+    {
+        return Err(InternalError::Media("privacy mask rectangle is invalid".into()).into());
+    }
+    if !mask.blur_radius.is_finite() || !(1.0..=128.0).contains(&mask.blur_radius) {
+        return Err(InternalError::Media("privacy mask blur radius is unsupported".into()).into());
+    }
+    if !(2..=128).contains(&mask.pixel_size) {
+        return Err(InternalError::Media("privacy mask pixel size is unsupported".into()).into());
+    }
+    Ok(())
+}
+
 fn validate_overlay(
     overlay: &RenderPlanOverlay,
     recording_id: &str,
@@ -1133,6 +1386,10 @@ fn input_stream(stream_index: Option<i32>, audio: bool) -> Result<String> {
 
 fn seconds(milliseconds: u64) -> String {
     format!("{:.3}", milliseconds as f64 / 1000.0)
+}
+
+fn write_caption_sidecar(output_path: &Path, captions: &[RenderPlanCaption]) -> Result<PathBuf> {
+    captions::write_sidecar(output_path, captions)
 }
 
 fn partial_output_path(output_path: &Path) -> PathBuf {

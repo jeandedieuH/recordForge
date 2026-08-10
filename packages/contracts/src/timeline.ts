@@ -8,6 +8,11 @@ import {
   defaultCursorSettings,
 } from "./cursor"
 import { timelineSelectionSchema } from "./selection"
+import {
+  captionPlacementSchema,
+  captionStylePresetSchema,
+  renderCaptionModeSchema,
+} from "./captions"
 
 // Output framing presets are intentionally explicit so preview and export can
 // reject unsupported aspect ratios instead of silently cropping the recording.
@@ -117,6 +122,22 @@ export type CameraClip = z.infer<typeof cameraClipSchema>
 export const audioRoleSchema = z.enum(["microphone", "system_audio", "music", "other"])
 export type AudioRole = z.infer<typeof audioRoleSchema>
 
+export const maskModeSchema = z.enum(["blur", "pixelate", "redact"])
+export type MaskMode = z.infer<typeof maskModeSchema>
+
+export const maskColorSchema = z
+  .string()
+  .regex(/^(?:#[0-9a-fA-F]{6}|[a-zA-Z]+)$/, "Mask color must be a hex or named color")
+export type MaskColor = z.infer<typeof maskColorSchema>
+
+export const maskRectSchema = z.object({
+  x: z.number().min(0),
+  y: z.number().min(0),
+  width: z.number().positive(),
+  height: z.number().positive(),
+})
+export type MaskRect = z.infer<typeof maskRectSchema>
+
 // Audio clip: an audio source slice with volume and fade controls.
 export const audioClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("audio"),
@@ -131,11 +152,27 @@ export type AudioClip = z.infer<typeof audioClipSchema>
 // Caption clip: a timed text cue on the captions track.
 export const captionClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("caption"),
-  text: z.string(),
-  style: z.string().default("default"),
+  text: z.string().min(1),
+  style: captionStylePresetSchema.default("default"),
+  placement: captionPlacementSchema.optional(),
+  safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
 })
 
 export type CaptionClip = z.infer<typeof captionClipSchema>
+
+// Static privacy mask clip. Coordinates are in output-canvas pixels so the
+// preview and exporter can apply the same rectangle without source-frame IPC.
+export const maskClipSchema = timelineClipBaseSchema.extend({
+  kind: z.literal("mask"),
+  mode: maskModeSchema,
+  rect: maskRectSchema,
+  blurRadius: z.number().min(1).max(128).default(24),
+  pixelSize: z.number().int().min(2).max(128).default(12),
+  redactColor: maskColorSchema.default("black"),
+  enabled: z.boolean().default(true),
+})
+
+export type MaskClip = z.infer<typeof maskClipSchema>
 
 // Cursor effects are timeline ranges rather than source-media clips. The
 // source fields stay optional-compatible with the existing clip engine so
@@ -165,6 +202,7 @@ export const timelineClipSchema = z.discriminatedUnion("kind", [
   cameraClipSchema,
   audioClipSchema,
   captionClipSchema,
+  maskClipSchema,
   cursorEffectClipSchema,
 ])
 
@@ -297,6 +335,33 @@ export const renderPlanOverlaySchema = z.object({
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
 
+export const renderPlanCaptionSchema = z.object({
+  id: z.string(),
+  text: z.string().min(1),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  style: captionStylePresetSchema.default("default"),
+  placement: captionPlacementSchema.default("bottom"),
+  safeAreaMargin: z.number().int().min(0).max(2_000).default(48),
+})
+
+export type RenderPlanCaption = z.infer<typeof renderPlanCaptionSchema>
+
+export const renderPlanMaskSchema = z.object({
+  id: z.string(),
+  assetId: z.string().optional(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  mode: maskModeSchema,
+  rect: maskRectSchema,
+  blurRadius: z.number().min(1).max(128).default(24),
+  pixelSize: z.number().int().min(2).max(128).default(12),
+  redactColor: maskColorSchema.default("black"),
+  enabled: z.boolean().default(true),
+})
+
+export type RenderPlanMask = z.infer<typeof renderPlanMaskSchema>
+
 export const renderPlanZoomSegmentSchema = z.object({
   id: z.string(),
   startMs: z.number().int().min(0),
@@ -335,6 +400,9 @@ export const renderPlanSchema = z.object({
   audio: renderPlanAudioSchema.optional(),
   audioTracks: z.array(renderPlanAudioSchema).default([]),
   overlays: z.array(renderPlanOverlaySchema).default([]),
+  captions: z.array(renderPlanCaptionSchema).default([]),
+  captionMode: renderCaptionModeSchema.default("burn-in"),
+  masks: z.array(renderPlanMaskSchema).default([]),
   zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
   cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
 })

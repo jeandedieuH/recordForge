@@ -161,6 +161,7 @@ export const mediaJobOutputsSchema = z.object({
   audioTracks: z.array(mediaAudioTrackOutputSchema).default([]),
   videoTracks: z.array(mediaVideoTrackOutputSchema).default([]),
   outputPath: z.string().nullish(),
+  captionsPath: z.string().nullish(),
 })
 
 export type MediaJobOutputs = z.infer<typeof mediaJobOutputsSchema>

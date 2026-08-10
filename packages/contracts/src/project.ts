@@ -8,6 +8,7 @@ import {
   timelineMarkerSchema,
   timelineTrackSchema,
 } from "./timeline"
+import { renderCaptionModeSchema } from "./captions"
 
 // Canvas settings are stored in the on-disk project file under the same schema.
 export const canvasSettingsSchema = timelineCanvasSchema
@@ -54,6 +55,7 @@ export const projectExportSettingsSchema = z.object({
   preset: z.string().default("default-mp4"),
   codec: z.string().default("h264"),
   container: z.string().default("mp4"),
+  captionMode: renderCaptionModeSchema.default("burn-in"),
 })
 
 export type ProjectExportSettings = z.infer<typeof projectExportSettingsSchema>

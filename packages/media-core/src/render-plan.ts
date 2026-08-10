@@ -3,7 +3,10 @@ import type {
   LibraryRecording,
   RenderPlan,
   RenderPlanAudio,
+  RenderPlanCaption,
+  RenderPlanMask,
   RenderPlanCursorEffect,
+  RenderCaptionMode,
   RenderPlanOverlay,
   RenderPlanZoomSegment,
   RenderSegment,
@@ -80,6 +83,59 @@ function toOverlays(
     })
 }
 
+function toCaptions(state: TimelineState): RenderPlanCaption[] {
+  return state.tracks
+    .filter((track) => track.kind === "captions" && !track.muted)
+    .flatMap((track) =>
+      sortClips(track.clips)
+        .filter(
+          (clip): clip is Extract<TimelineClip, { kind: "caption" }> => clip.kind === "caption",
+        )
+        .map((clip) => ({
+          id: clip.id,
+          text: clip.text,
+          startMs: clip.startMs,
+          endMs: clip.startMs + clip.durationMs,
+          style: clip.style,
+          placement: clip.placement ?? "bottom",
+          safeAreaMargin: clip.safeAreaMargin ?? 48,
+        })),
+    )
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+}
+
+function toMasks(state: TimelineState, assetId: string): RenderPlanMask[] {
+  return state.tracks
+    .filter((track) => track.kind === "effects" && !track.muted)
+    .flatMap((track) =>
+      sortClips(track.clips)
+        .filter((clip): clip is Extract<TimelineClip, { kind: "mask" }> => clip.kind === "mask")
+        .map((clip) => {
+          const width = Math.min(Math.max(1, clip.rect.width), state.canvas.width)
+          const height = Math.min(Math.max(1, clip.rect.height), state.canvas.height)
+          return {
+            id: clip.id,
+            // Masks are output-canvas effects; the recording id keeps the
+            // render plan anchored to a trusted source without treating the mask as media.
+            assetId,
+            startMs: clip.startMs,
+            endMs: clip.startMs + clip.durationMs,
+            mode: clip.mode,
+            rect: {
+              x: Math.min(Math.max(0, clip.rect.x), Math.max(0, state.canvas.width - width)),
+              y: Math.min(Math.max(0, clip.rect.y), Math.max(0, state.canvas.height - height)),
+              width,
+              height,
+            },
+            blurRadius: clip.blurRadius,
+            pixelSize: clip.pixelSize,
+            redactColor: clip.redactColor,
+            enabled: clip.enabled,
+          }
+        }),
+    )
+}
+
 function toZoomSegments(state: TimelineState): RenderPlanZoomSegment[] {
   return getManualZoomSegments(state)
     .filter((segment) => segment.enabled)
@@ -154,6 +210,7 @@ export interface BuildRenderPlanInput {
   state: TimelineState
   recording: LibraryRecording
   outputPath: string
+  captionMode?: RenderCaptionMode
 }
 
 // Build a render plan from a timeline and a destination path. Camera overlays,
@@ -192,6 +249,41 @@ export function buildRenderPlan(
   const audioTracks = buildAudioTracks(recording, state)
   const zoomSegments = toZoomSegments(state)
   const cursorEffects = toCursorEffects(state)
+  const captions = toCaptions(state)
+  const masks = toMasks(state, recording.id)
+  const screenDurationMs = segments.reduce(
+    (duration, segment) => Math.max(duration, segment.outputEndMs),
+    0,
+  )
+  if (captions.some((caption) => caption.endMs > screenDurationMs)) {
+    return {
+      ok: false,
+      error: editorError(
+        "invalid_caption_range",
+        "A caption extends beyond the rendered screen timeline",
+      ),
+    }
+  }
+  if (masks.some((mask) => mask.endMs > screenDurationMs)) {
+    return {
+      ok: false,
+      error: editorError(
+        "invalid_mask_range",
+        "A privacy mask extends beyond the rendered screen timeline",
+      ),
+    }
+  }
+  for (let index = 1; index < captions.length; index++) {
+    if (captions[index].startMs < captions[index - 1].endMs) {
+      return {
+        ok: false,
+        error: editorError(
+          "caption_overlap",
+          "Caption clips overlap and cannot be rendered safely",
+        ),
+      }
+    }
+  }
 
   return {
     ok: true,
@@ -208,6 +300,9 @@ export function buildRenderPlan(
       },
       audioTracks,
       overlays,
+      captions,
+      captionMode: input.captionMode ?? "burn-in",
+      masks,
       zoomSegments,
       cursorEffects,
     },
