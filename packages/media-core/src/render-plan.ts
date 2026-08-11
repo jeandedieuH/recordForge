@@ -83,13 +83,9 @@ function toSegments(
       const durationMs = window.outputEndMs - window.outputStartMs
       const asset = assetForClip(assets, clip.assetId)
       const sourceWidth =
-        asset && typeof asset.width === "number" && asset.width > 0
-          ? asset.width
-          : undefined
+        asset && typeof asset.width === "number" && asset.width > 0 ? asset.width : undefined
       const sourceHeight =
-        asset && typeof asset.height === "number" && asset.height > 0
-          ? asset.height
-          : undefined
+        asset && typeof asset.height === "number" && asset.height > 0 ? asset.height : undefined
       return {
         assetId: clip.assetId,
         ...("streamIndex" in clip && clip.streamIndex !== undefined
