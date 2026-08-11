@@ -16,10 +16,10 @@ pub struct WebcamCapabilities {
 
 /// Preflight check for a webcam device before starting recording.
 pub fn validate_webcam_device(ffmpeg_path: &str, device_name: &str) -> Result<WebcamCapabilities> {
-    // Keep the DirectShow device name quoted inside the input spec. The quotes
-    // are part of FFmpeg's dshow syntax and protect spaces, punctuation, and
-    // trailing USB identifiers in the device label.
-    let spec = format!("video=\"{device_name}\"");
+    // Pass the dshow device as a single argument without inner quotes.  FFmpeg
+    // receives one argv token, so spaces in the device name are preserved and
+    // the dshow parser sees the name correctly.
+    let spec = format!("video={device_name}");
     let available = super::media::probe_dshow_device(ffmpeg_path, &spec);
 
     Ok(WebcamCapabilities {

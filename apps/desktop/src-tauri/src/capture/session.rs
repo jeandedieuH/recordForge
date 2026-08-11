@@ -160,7 +160,7 @@ impl Recorder {
         crate::media::resolve_executable("ffmpeg")
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn prepare(&self, config: RecordingConfig) -> crate::errors::Result<String> {
         config.validate()?;
         let mut guard = self
@@ -246,7 +246,7 @@ impl Recorder {
         Ok(session_id)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn start_prepared(&self, session_id: &str) -> crate::errors::Result<()> {
         let mut guard = self
             .current
@@ -332,7 +332,7 @@ impl Recorder {
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn cancel_prepared(&self, session_id: &str) -> crate::errors::Result<()> {
         let mut guard = self
             .current
@@ -363,7 +363,7 @@ impl Recorder {
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn start(&self, config: RecordingConfig) -> crate::errors::Result<String> {
         let session_id = self.prepare(config)?;
         self.start_prepared(&session_id)?;
@@ -433,41 +433,75 @@ impl Recorder {
         let mut webcam_failed = false;
         if config.capture_webcam {
             if let Some(device) = config.webcam_device_id.as_ref() {
-                match super::webcam::validate_webcam_device(&ffmpeg, device) {
-                    Ok(capabilities) if capabilities.available => {
-                        let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
-                        match FfmpegCapture::start_webcam(
-                            &ffmpeg,
-                            device,
-                            profile,
-                            &webcam_output.to_string_lossy(),
-                            None,
-                        ) {
-                            Ok(capture) => webcam = Some(capture),
-                            Err(error) => {
+                const MAX_WEBCAM_ATTEMPTS: usize = 15;
+                const WEBCAM_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+                for attempt in 1..=MAX_WEBCAM_ATTEMPTS {
+                    match super::webcam::validate_webcam_device(&ffmpeg, device) {
+                        Ok(capabilities) if capabilities.available => {
+                            let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
+                            match FfmpegCapture::start_webcam(
+                                &ffmpeg,
+                                device,
+                                profile,
+                                &webcam_output.to_string_lossy(),
+                                None,
+                            ) {
+                                Ok(capture) => {
+                                    webcam = Some(capture);
+                                    break;
+                                }
+                                Err(error) => {
+                                    if attempt == MAX_WEBCAM_ATTEMPTS {
+                                        webcam_failed = true;
+                                        tracing::warn!(
+                                            error = %error,
+                                            device,
+                                            "failed to start webcam sidecar; continuing without camera"
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            error = %error,
+                                            device,
+                                            attempt,
+                                            "webcam sidecar start failed, retrying"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            if attempt == MAX_WEBCAM_ATTEMPTS {
+                                webcam_failed = true;
+                                tracing::warn!(
+                                    device,
+                                    "selected webcam is not available; continuing without camera"
+                                );
+                            } else {
+                                tracing::debug!(device, attempt, "webcam device is busy, retrying");
+                            }
+                        }
+                        Err(error) => {
+                            if attempt == MAX_WEBCAM_ATTEMPTS {
                                 webcam_failed = true;
                                 tracing::warn!(
                                     error = %error,
                                     device,
-                                    "failed to start webcam sidecar; continuing without camera"
+                                    "failed to validate webcam device; continuing without camera"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    error = %error,
+                                    device,
+                                    attempt,
+                                    "webcam validation failed, retrying"
                                 );
                             }
                         }
                     }
-                    Ok(_) => {
-                        webcam_failed = true;
-                        tracing::warn!(
-                            device,
-                            "selected webcam is no longer available; continuing without camera"
-                        );
-                    }
-                    Err(error) => {
-                        webcam_failed = true;
-                        tracing::warn!(
-                            error = %error,
-                            device,
-                            "failed to validate webcam device; continuing without camera"
-                        );
+
+                    if webcam.is_none() && attempt < MAX_WEBCAM_ATTEMPTS {
+                        std::thread::sleep(WEBCAM_RETRY_DELAY);
                     }
                 }
             } else {
@@ -681,7 +715,7 @@ impl Recorder {
         }
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn pause(&self) -> crate::errors::Result<RecordingStatus> {
         let mut guard = self
             .current
@@ -745,7 +779,7 @@ impl Recorder {
         self.status_from_session(session)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn resume(&self) -> crate::errors::Result<RecordingStatus> {
         let mut guard = self
             .current
@@ -820,7 +854,7 @@ impl Recorder {
         self.status_from_session(session)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn stop(&self) -> crate::errors::Result<RecordingStats> {
         let mut guard = self
             .current
@@ -1020,7 +1054,7 @@ impl Recorder {
     }
 
     /// Insert a marker at the current playback position.
-    #[instrument]
+    #[instrument(skip(self))]
     pub fn insert_marker(&self, label: String) -> crate::errors::Result<RecordingMarker> {
         let guard = self
             .current
@@ -1140,7 +1174,9 @@ pub struct RecordingStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::devices::enumerate_video_devices;
     use crate::capture::source::{Bounds, CaptureSource};
+    use std::time::Duration;
 
     #[test]
     fn cancel_prepared_session_removes_pending_capture_and_work_dir() {
@@ -1238,5 +1274,71 @@ mod tests {
 
         let status = recorder.status().expect("read recording status");
         assert_eq!(status.state, RecorderState::Recording);
+    }
+
+    #[test]
+    #[ignore = "requires a real webcam and will activate it briefly"]
+    fn recording_captures_webcam_when_available() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("target/debug/ffmpeg.exe");
+        let ffprobe = manifest_dir.join("target/debug/ffprobe.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+
+        let device = enumerate_video_devices(&ffmpeg.to_string_lossy())
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|d| d.kind == "webcam"))
+            .map(|d| d.name);
+        let Some(device) = device else {
+            eprintln!("skipping: no real webcam found");
+            return;
+        };
+
+        let recorder = Recorder::new(ffmpeg, ffprobe, temp_dir.path().to_path_buf(), db);
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "region".into(),
+                id: "region-0".into(),
+                name: "Region".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 320,
+                    height: 240,
+                },
+            },
+            profile: "low-impact".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: true,
+            webcam_device_id: Some(device),
+            microphone_device_id: None,
+            system_audio_device_id: None,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start recording with webcam");
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        recorder.stop().expect("stop recording");
+
+        let session_dir = temp_dir.path().join(&session_id);
+        let manifest =
+            RecordingManifest::read(session_dir.join("session.json")).expect("read manifest");
+        assert_eq!(manifest.state, RecorderState::Completed);
+        assert!(
+            manifest.webcam_path.is_some(),
+            "webcam asset should be produced"
+        );
+        assert!(PathBuf::from(manifest.webcam_path.unwrap()).exists());
     }
 }

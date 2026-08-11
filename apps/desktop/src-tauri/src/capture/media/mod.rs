@@ -514,7 +514,11 @@ pub fn probe_dshow_device(ffmpeg_path: &str, input_spec: &str) -> bool {
             let unopenable = stderr.contains("Error opening input")
                 || stderr.contains("Could not find")
                 || stderr.contains("Cannot run dshow");
-            info!(openable = !unopenable, "probed dshow device");
+            info!(
+                openable = !unopenable,
+                input = input_spec,
+                "probed dshow device"
+            );
             !unopenable
         }
         Err(_) => false,

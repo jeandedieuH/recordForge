@@ -144,11 +144,14 @@ export function NewRecordingModal({
     if (!selectedSource && sources.length > 0) {
       setSelectedSource(sources[0])
     }
-    // Close the modal first, then defer the start command one tick so React
-    // can unmount the live webcam preview and release the camera before Rust
-    // tries to open the same DirectShow device.
+    // Close the modal first, then defer the start command so React can unmount
+    // the live webcam preview and the DirectShow device has time to release.
+    // A slightly longer delay is used when the webcam is active because
+    // getUserMedia tracks can hold the camera for a few hundred milliseconds
+    // after they are stopped.
     onClose()
-    setTimeout(() => onStart(), 0)
+    const startDelay = webcamEnabled ? 500 : 0
+    setTimeout(() => onStart(), startDelay)
   }
 
   const selectedDisplayResolution = selectedSource?.bounds

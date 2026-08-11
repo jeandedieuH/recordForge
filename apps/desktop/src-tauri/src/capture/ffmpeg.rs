@@ -288,7 +288,7 @@ fn build_webcam_command(
         "-fflags",
         "+genpts",
         "-i",
-        &format!("video=\"{}\"", device),
+        &format!("video={}", device),
     ]);
 
     // Keep the webcam's aspect ratio and fit it inside the profile bounds. Using
