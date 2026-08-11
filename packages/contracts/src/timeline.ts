@@ -315,6 +315,7 @@ export const timelineViewStateSchema = z.object({
   playheadMs: z.number().default(0),
   isPlaying: z.boolean().default(false),
   playbackRate: z.number().min(0.25).max(4).default(1),
+  previewQuality: z.enum(["quality", "performance", "power"]).default("quality"),
   durationMs: z.number().default(0),
   selection: timelineSelectionSchema.nullable().default(null),
   snapEnabled: z.boolean().default(true),

@@ -10,6 +10,8 @@ export * from "./engine"
 export * from "./selection"
 export * from "./snap"
 export * from "./composition"
+export * from "./playback-clock"
+export * from "./preview-composition"
 export * from "./interaction-transaction"
 export {
   analyzeCursorTelemetry,

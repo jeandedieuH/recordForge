@@ -33,12 +33,13 @@ interface CustomCursorOverlayProps {
   cursorSettings?: CursorSettings
   recordingId?: string | null
   // Browser previews may provide a fixture URL. Tauri always resolves the
-  // cursor_events asset through the Rust project registry command.
+  // cursor_events asset through the Rust project command.
   telemetryPath?: string | null
   containerWidth: number
   containerHeight: number
   offsetX?: number
   offsetY?: number
+  zoomTransform?: string
 }
 
 function toAssetUrl(path: string | null): string | null {
@@ -56,6 +57,7 @@ export function CustomCursorOverlay({
   containerHeight,
   offsetX = 0,
   offsetY = 0,
+  zoomTransform,
 }: CustomCursorOverlayProps) {
   const [telemetry, setTelemetry] = useState<CursorTelemetryFile | null>(null)
   const [telemetryStatus, setTelemetryStatus] = useState<"loading" | "available" | "unavailable">(
@@ -177,6 +179,8 @@ export function CustomCursorOverlay({
         top: offsetY,
         width: containerWidth,
         height: containerHeight,
+        transform: zoomTransform,
+        transformOrigin: "center",
       }}
     >
       {isUnavailable ? (

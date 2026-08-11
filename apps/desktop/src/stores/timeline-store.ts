@@ -104,6 +104,7 @@ interface TimelineStore {
   setScroll: (ms: number) => void
   setSnapEnabled: (enabled: boolean) => void
   setSnapThreshold: (thresholdMs: number) => void
+  setPreviewQuality: (mode: "quality" | "performance" | "power") => void
   toggleTrackCollapsed: (trackId: string) => void
   setTrackHeight: (trackId: string, height: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
@@ -246,6 +247,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     playheadMs: 0,
     isPlaying: false,
     playbackRate: 1,
+    previewQuality: "quality",
     durationMs: 0,
     selection: null,
     snapEnabled: true,
@@ -382,6 +384,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           playheadMs: 0,
           isPlaying: false,
           playbackRate: 1,
+          previewQuality: "quality",
           durationMs: duration,
           selection: null,
           snapEnabled: true,
@@ -720,6 +723,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     })
   },
 
+  setPreviewQuality: (mode) => {
+    const { view } = get()
+    if (view.previewQuality === mode) return
+    set({ view: { ...view, previewQuality: mode } })
+  },
+
   toggleTrackCollapsed: (trackId) => {
     const { view } = get()
     const collapsed = new Set(view.collapsedTrackIds)
@@ -980,6 +989,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         playheadMs: 0,
         isPlaying: false,
         playbackRate: 1,
+        previewQuality: "quality",
         durationMs: 0,
         selection: null,
         snapEnabled: true,

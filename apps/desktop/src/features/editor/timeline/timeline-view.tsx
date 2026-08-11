@@ -30,25 +30,14 @@ import {
   createTrimClipCommand,
   createUpdateTrackCommand,
   findClip,
-  findManualZoomAtTime,
-  findNextTimelineClip,
-  resolveZoomTransform,
+  resolvePreviewComposition,
+  sourceToTimelineForTrack,
+  zoomTransformToCss,
+  type PlaybackBoundary,
   canvasShadowStyle,
   formatTime,
-  sourceToTimelineForTrack,
-  timelineToSourceForTrack,
 } from "@recordforge/editor-core"
-import {
-  cursorSettingsForEffect,
-  findCursorEffectAtTime,
-  findCursorEventAtTime,
-  fitCursorPoint,
-  isCursorClickEdge,
-  normalizeCursorTelemetry,
-  smoothCursorPosition,
-  timelineToCursorSourceTime,
-  zoomTargetForCursorPoint,
-} from "@recordforge/cursor-core"
+import { isCursorClickEdge, normalizeCursorTelemetry } from "@recordforge/cursor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
@@ -89,6 +78,7 @@ import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
 import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
 import { useTimelineInteraction } from "./use-timeline-interaction"
+import { usePlaybackClock } from "./use-playback-clock"
 import { CustomCursorOverlay } from "../cursor"
 import { ResizableHandle } from "../shell/resizable-handle"
 import { useResizableDimension } from "../shell/use-resizable-dimension"
@@ -200,14 +190,13 @@ export function TimelineView({
   const setSnapThreshold = useTimelineStore((state) => state.setSnapThreshold)
   const toggleTrackCollapsed = useTimelineStore((state) => state.toggleTrackCollapsed)
   const setTrackHeight = useTimelineStore((state) => state.setTrackHeight)
+  const setPreviewQuality = useTimelineStore((state) => state.setPreviewQuality)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const clearError = useTimelineStore((state) => state.clearError)
   const missingAssets = useEditorStore((state) => state.missingAssets)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const monitorRef = useRef<HTMLDivElement>(null)
-  const playbackClipIdRef = useRef<string | null>(null)
-  const suppressPlayheadSyncRef = useRef(false)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
   const [tool, setTool] = useState<"select" | "split">("select")
   const [cursorClickSourceTimesMs, setCursorClickSourceTimesMs] = useState<number[]>([])
@@ -253,7 +242,6 @@ export function TimelineView({
     setUseOriginalMedia(false)
     setMediaError(false)
     setThumbnailSpriteError(false)
-    playbackClipIdRef.current = null
   }, [recordingId])
 
   useEffect(() => {
@@ -292,61 +280,21 @@ export function TimelineView({
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
   const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
-  const activeZoomSegment = useMemo(
-    () => (timeline ? findManualZoomAtTime(timeline, view.playheadMs) : null),
-    [timeline, view.playheadMs],
-  )
-  const followZoomTarget = useMemo(() => {
-    if (
-      !activeZoomSegment ||
-      activeZoomSegment.mode !== "follow-cursor" ||
-      !timeline ||
-      !cursorTelemetry
-    ) {
-      return undefined
-    }
-    const sourceTimeMs = timelineToCursorSourceTime(timeline, view.playheadMs)
-    if (sourceTimeMs === null) return undefined
-    const lookup = findCursorEventAtTime(cursorTelemetry, sourceTimeMs)
-    if (!lookup) return undefined
-    const smoothed = smoothCursorPosition(
-      cursorTelemetry,
-      lookup.index,
-      timeline.canvas.cursorSettings,
-    )
-    const fitted = fitCursorPoint(
-      smoothed,
-      cursorTelemetry,
-      timeline.canvas.width,
-      timeline.canvas.height,
-    )
-    const desiredScale = Math.max(
-      1.05,
-      timeline.canvas.width / Math.max(1, activeZoomSegment.target.width),
-    )
-    return zoomTargetForCursorPoint({ x: fitted.x, y: fitted.y }, timeline.canvas, desiredScale)
-  }, [activeZoomSegment, cursorTelemetry, timeline, view.playheadMs])
-  const zoomTransform = useMemo(
+  const composition = useMemo(
     () =>
-      activeZoomSegment && timeline
-        ? resolveZoomTransform(activeZoomSegment, view.playheadMs, timeline.canvas, {
-            target: followZoomTarget,
-          })
-        : null,
-    [activeZoomSegment, followZoomTarget, timeline, view.playheadMs],
+      timeline ? resolvePreviewComposition(timeline, view.playheadMs, { cursorTelemetry }) : null,
+    [cursorTelemetry, timeline, view.playheadMs],
   )
-  const activeCursorEffect = useMemo(
-    () => (timeline ? findCursorEffectAtTime(timeline, view.playheadMs) : null),
-    [timeline, view.playheadMs],
+  const zoomTransformStyle = useMemo(
+    () =>
+      composition?.screen.zoomTransform
+        ? zoomTransformToCss(
+            composition.screen.zoomTransform,
+            timeline?.canvas ?? { width: 1, height: 1 },
+          )
+        : undefined,
+    [composition, timeline?.canvas],
   )
-  const cursorSettings = useMemo(() => {
-    const base = cursorSettingsForEffect(timeline?.canvas.cursorSettings, activeCursorEffect)
-    if (!activeCursorEffect && timeline?.tracks.some((track) => track.kind === "cursor")) {
-      return { ...base, enabled: false }
-    }
-    return base
-  }, [activeCursorEffect, timeline])
-  const cursorSourceTimeMs = timeline ? timelineToCursorSourceTime(timeline, view.playheadMs) : null
   const cursorClickTimesMs = useMemo(() => {
     if (!timeline) return []
     const screenAssetId = timeline.tracks.find((track) => track.kind === "screen")?.clips[0]
@@ -430,94 +378,33 @@ export function TimelineView({
     })
   }, [])
 
-  // The playhead is always timeline time. The media element is only a source
-  // clock, so every seek and timeupdate crosses this shared mapping seam.
-  const getPlaybackPosition = useCallback(
-    (timelineMs: number) =>
-      timeline ? timelineToSourceForTrack(timeline, "screen", timelineMs) : null,
-    [timeline],
-  )
-
-  const syncVideoToTimeline = useCallback(
-    (timelineMs: number): boolean => {
-      const element = videoRef.current
-      const position = getPlaybackPosition(timelineMs)
-      if (!element || !position) {
-        if (element) {
-          element.pause()
-          element.style.visibility = "hidden"
-        }
-        playbackClipIdRef.current = null
-        return false
-      }
-
-      element.style.visibility = "visible"
-      playbackClipIdRef.current = position.clipId
-      element.playbackRate = Math.max(0.25, Math.min(4, view.playbackRate * position.clip.speed))
-      const sourceSeconds = position.sourceMs / 1000
-      if (Math.abs(element.currentTime - sourceSeconds) > 0.08) {
-        element.currentTime = sourceSeconds
-      }
-      return true
-    },
-    [getPlaybackPosition, view.playbackRate],
-  )
-
-  const startPlayback = useCallback(
-    async (timelineMs: number) => {
-      const element = videoRef.current
-      if (!element) return
-
-      let startMs = timelineMs
-      if (!getPlaybackPosition(startMs)) {
-        const next = timeline ? findNextTimelineClip(timeline, "screen", startMs) : null
-        if (!next) {
-          pause()
-          return
-        }
-        startMs = next.startMs
-        seek(startMs)
-      }
-
-      if (!syncVideoToTimeline(startMs)) {
+  const handleClockBoundary = useCallback(
+    (boundary: PlaybackBoundary) => {
+      if (boundary.kind === "end") {
         pause()
-        return
-      }
-      try {
-        await element.play()
-      } catch {
-        pause()
+        seek(boundary.timelineMs)
+      } else {
+        seek(boundary.timelineMs)
       }
     },
-    [getPlaybackPosition, pause, seek, syncVideoToTimeline, timeline],
+    [pause, seek],
   )
 
-  useEffect(() => {
-    const element = videoRef.current
-    if (!element) return
-    if (view.isPlaying) {
-      void startPlayback(view.playheadMs)
-      return
-    }
-    element.pause()
-  }, [startPlayback, view.isPlaying])
-
-  useEffect(() => {
-    if (suppressPlayheadSyncRef.current) {
-      suppressPlayheadSyncRef.current = false
-      return
-    }
-    syncVideoToTimeline(view.playheadMs)
-  }, [syncVideoToTimeline, view.playheadMs])
-
-  useEffect(() => {
-    if (!view.isPlaying || getPlaybackPosition(view.playheadMs)) return
-    void startPlayback(view.playheadMs)
-  }, [getPlaybackPosition, startPlayback, view.isPlaying, view.playheadMs])
+  usePlaybackClock({
+    videoRef,
+    timeline,
+    playheadMs: view.playheadMs,
+    isPlaying: view.isPlaying,
+    playbackRate: view.playbackRate,
+    previewQuality: view.previewQuality,
+    mediaUrl,
+    onSeek: seek,
+    onPause: pause,
+    onPlayNext: handleClockBoundary,
+  })
 
   useEffect(() => {
     setVideoBounds(null)
-    playbackClipIdRef.current = null
   }, [mediaUrl])
 
   useEffect(() => {
@@ -530,62 +417,6 @@ export function TimelineView({
     updateVideoBounds()
     return () => observer.disconnect()
   }, [mediaUrl, updateVideoBounds])
-
-  const handleVideoTimeUpdate = useCallback(
-    (sourceMs: number) => {
-      if (!timeline) return
-      const currentClip = playbackClipIdRef.current
-        ? (findClip(timeline, playbackClipIdRef.current)?.clip ?? null)
-        : null
-      const screenAssetId =
-        currentClip?.assetId ??
-        timeline.tracks.find((track) => track.kind === "screen")?.clips[0]?.assetId ??
-        recordingId
-      if (currentClip && sourceMs >= currentClip.sourceOutMs - 40) {
-        const next = findNextTimelineClip(
-          timeline,
-          "screen",
-          currentClip.startMs + currentClip.durationMs + 1,
-        )
-        if (next) {
-          playbackClipIdRef.current = next.id
-          suppressPlayheadSyncRef.current = true
-          seek(next.startMs)
-          window.requestAnimationFrame(() => {
-            syncVideoToTimeline(next.startMs)
-            void startPlayback(next.startMs)
-          })
-        } else {
-          pause()
-          suppressPlayheadSyncRef.current = true
-          seek(view.durationMs)
-        }
-        return
-      }
-
-      const preferred = playbackClipIdRef.current
-      const mapped =
-        sourceToTimelineForTrack(timeline, "screen", screenAssetId, sourceMs, {
-          preferClipId: preferred ?? undefined,
-        }) ?? sourceToTimelineForTrack(timeline, "screen", screenAssetId, sourceMs)
-      if (!mapped) {
-        pause()
-        return
-      }
-      suppressPlayheadSyncRef.current = true
-      seek(mapped.timelineMs)
-    },
-    [
-      pause,
-      recordingId,
-      seek,
-      startPlayback,
-      syncVideoToTimeline,
-      timeline,
-      view.durationMs,
-      view.playheadMs,
-    ],
-  )
 
   const handleTimelineKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1059,9 +890,9 @@ export function TimelineView({
                   src={mediaUrl}
                   className="size-full rounded-lg object-contain"
                   style={
-                    zoomTransform
+                    zoomTransformStyle
                       ? {
-                          transform: `translate(${(zoomTransform.translateX / timeline.canvas.width) * 100}%, ${(zoomTransform.translateY / timeline.canvas.height) * 100}%) scale(${zoomTransform.scale})`,
+                          transform: zoomTransformStyle,
                           transformOrigin: "center",
                         }
                       : undefined
@@ -1080,36 +911,10 @@ export function TimelineView({
                   }}
                   onLoadedMetadata={() => {
                     updateVideoBounds()
-                    syncVideoToTimeline(view.playheadMs)
-                    if (view.isPlaying) void startPlayback(view.playheadMs)
                   }}
                   onLoadedData={() => {
                     setMediaError(false)
                     updateVideoBounds()
-                  }}
-                  onTimeUpdate={(event) =>
-                    handleVideoTimeUpdate(event.currentTarget.currentTime * 1000)
-                  }
-                  onEnded={() => {
-                    if (timeline && playbackClipIdRef.current) {
-                      const clip = playbackClipIdRef.current
-                        ? findClip(timeline, playbackClipIdRef.current)?.clip
-                        : null
-                      const next = clip
-                        ? findNextTimelineClip(
-                            timeline,
-                            "screen",
-                            clip.startMs + clip.durationMs + 1,
-                          )
-                        : null
-                      if (next) {
-                        seek(next.startMs)
-                        void startPlayback(next.startMs)
-                        return
-                      }
-                    }
-                    pause()
-                    seek(view.durationMs)
                   }}
                 />
               ) : (
@@ -1166,16 +971,17 @@ export function TimelineView({
                 />
               ) : null}
 
-              {mediaUrl && !mediaError && videoBounds ? (
+              {mediaUrl && !mediaError && videoBounds && composition?.cursor.active ? (
                 <CustomCursorOverlay
                   playheadMs={view.playheadMs}
-                  sourceTimeMs={cursorSourceTimeMs}
-                  cursorSettings={cursorSettings}
+                  sourceTimeMs={composition.cursor.sourceTimeMs}
+                  cursorSettings={composition.cursor.settings}
                   recordingId={recordingId}
                   containerWidth={videoBounds.width}
                   containerHeight={videoBounds.height}
                   offsetX={videoBounds.left}
                   offsetY={videoBounds.top}
+                  zoomTransform={zoomTransformStyle}
                 />
               ) : null}
             </div>
@@ -1238,6 +1044,18 @@ export function TimelineView({
                   {rate}×
                 </option>
               ))}
+            </NativeSelect>
+            <NativeSelect
+              aria-label="Preview quality"
+              value={view.previewQuality}
+              onChange={(event) =>
+                setPreviewQuality(event.target.value as "quality" | "performance" | "power")
+              }
+              className="w-28"
+            >
+              <option value="quality">Quality</option>
+              <option value="performance">Performance</option>
+              <option value="power">Power saving</option>
             </NativeSelect>
           </div>
         </div>
