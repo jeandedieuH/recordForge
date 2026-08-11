@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import type {
+  CursorSmoothing,
   TimelineClip,
   TimelineMarker,
   TimelineState,
@@ -28,6 +29,12 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuRadioGroup,
+  ContextMenuRadioItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
   IconButton,
   cn,
@@ -52,6 +59,17 @@ const TRACK_ROW_HEIGHT = 56
 const COLLAPSED_TRACK_HEIGHT = 32
 const VIRTUAL_OVERSCAN = 4
 const TICK_INTERVALS = [1_000, 5_000, 10_000, 30_000, 60_000]
+
+export interface CursorRangeAction {
+  kind: "toggle-enabled" | "set-smoothing" | "toggle-lock"
+  rangeId: string
+  smoothing?: CursorSmoothing
+}
+
+export interface ZoomSegmentAction {
+  kind: "select" | "toggle-lock" | "split" | "delete" | "regenerate-from-click"
+  segmentId: string
+}
 
 interface TimelineLanesProps {
   timeline: TimelineState
@@ -91,6 +109,8 @@ interface TimelineLanesProps {
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip) => void
   onDeleteClip: (clip: TimelineClip) => void
+  onCursorRangeAction?: (action: CursorRangeAction) => void
+  onZoomSegmentAction?: (action: ZoomSegmentAction) => void
 }
 
 function getTrackIcon(track: TimelineTrack): LucideIcon {
@@ -181,6 +201,8 @@ export function TimelineLanes({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onCursorRangeAction,
+  onZoomSegmentAction,
 }: TimelineLanesProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -455,25 +477,76 @@ export function TimelineLanes({
                   segment.startMs + segment.durationMs >= visibleStartMs,
               )
               .map((segment) => (
-                <button
-                  key={segment.id}
-                  type="button"
-                  data-timeline-zoom
-                  aria-label={`Zoom segment from ${formatTimelineTime(segment.startMs)} to ${formatTimelineTime(segment.startMs + segment.durationMs)}`}
-                  className={cn(
-                    "absolute bottom-0 h-1.5 translate-x-0 rounded-full bg-primary/70 outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                    selectedZoomId === segment.id && "bg-primary ring-1 ring-primary",
-                    segment.locked && "bg-muted-foreground/60",
-                  )}
-                  style={{
-                    left: `${segment.startMs * pixelsPerMs}px`,
-                    width: `${Math.max(4, segment.durationMs * pixelsPerMs)}px`,
-                  }}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onSelectZoom(segment.id)
-                  }}
-                />
+                <ContextMenu key={segment.id}>
+                  <ContextMenuTrigger asChild>
+                    <button
+                      type="button"
+                      data-timeline-zoom
+                      aria-label={`Zoom segment from ${formatTimelineTime(segment.startMs)} to ${formatTimelineTime(segment.startMs + segment.durationMs)}`}
+                      className={cn(
+                        "absolute bottom-0 h-1.5 translate-x-0 rounded-full bg-primary/70 outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                        selectedZoomId === segment.id && "bg-primary ring-1 ring-primary",
+                        segment.locked && "bg-muted-foreground/60",
+                      )}
+                      style={{
+                        left: `${segment.startMs * pixelsPerMs}px`,
+                        width: `${Math.max(4, segment.durationMs * pixelsPerMs)}px`,
+                      }}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onSelectZoom(segment.id)
+                      }}
+                    />
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onSelect={() => onSelectZoom(segment.id)}>
+                      Edit target
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onSelect={() =>
+                        onZoomSegmentAction?.({
+                          kind: "regenerate-from-click",
+                          segmentId: segment.id,
+                        })
+                      }
+                    >
+                      Regenerate from click
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onSelect={() =>
+                        onZoomSegmentAction?.({
+                          kind: "toggle-lock",
+                          segmentId: segment.id,
+                        })
+                      }
+                    >
+                      {segment.locked ? "Unlock" : "Lock"}
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      onSelect={() =>
+                        onZoomSegmentAction?.({
+                          kind: "split",
+                          segmentId: segment.id,
+                        })
+                      }
+                      disabled={segment.locked}
+                    >
+                      Split
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onSelect={() =>
+                        onZoomSegmentAction?.({
+                          kind: "delete",
+                          segmentId: segment.id,
+                        })
+                      }
+                      disabled={segment.locked}
+                    >
+                      Delete
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               ))}
           </div>
 
@@ -531,6 +604,7 @@ export function TimelineLanes({
                 onDuplicateClip={onDuplicateClip}
                 onSplitClip={onSplitClip}
                 onDeleteClip={onDeleteClip}
+                onCursorRangeAction={onCursorRangeAction}
               />
             )
           })}
@@ -658,6 +732,7 @@ function TimelineTrackRow({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onCursorRangeAction,
 }: {
   track: TimelineTrack
   top: number
@@ -693,6 +768,7 @@ function TimelineTrackRow({
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip) => void
   onDeleteClip: (clip: TimelineClip) => void
+  onCursorRangeAction?: (action: CursorRangeAction) => void
 }) {
   const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
   const onSnapGuide = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
@@ -742,6 +818,7 @@ function TimelineTrackRow({
           onDuplicateClip={onDuplicateClip}
           onSplitClip={onSplitClip}
           onDeleteClip={onDeleteClip}
+          onCursorRangeAction={onCursorRangeAction}
         />
       ))}
     </div>
@@ -781,6 +858,7 @@ function TimelineClipItem({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onCursorRangeAction,
 }: {
   clip: TimelineClip
   track: TimelineTrack
@@ -817,6 +895,7 @@ function TimelineClipItem({
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip) => void
   onDeleteClip: (clip: TimelineClip) => void
+  onCursorRangeAction?: (action: CursorRangeAction) => void
 }) {
   const gestureRef = useRef<ClipGesture | null>(null)
   const suppressClickRef = useRef(false)
@@ -825,6 +904,7 @@ function TimelineClipItem({
   const waveformData = waveformResource?.status === "content" ? waveformResource.data : null
   const clipTargets = snapTargets.filter((target) => !target.id.startsWith(`${clip.id}:`))
   const clipHeight = collapsed ? 24 : Math.max(32, Math.min(height - 16, 40))
+  const cursorRange = clip.kind === "cursor-effect" ? clip : null
 
   function beginGesture(
     event: React.PointerEvent<HTMLDivElement | HTMLButtonElement>,
@@ -1045,9 +1125,49 @@ function TimelineClipItem({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        {cursorRange && onCursorRangeAction ? (
+          <>
+            <ContextMenuItem
+              onSelect={() =>
+                onCursorRangeAction({ kind: "toggle-enabled", rangeId: cursorRange.id })
+              }
+            >
+              {cursorRange.enabled ? "Hide cursor" : "Show cursor"}
+            </ContextMenuItem>
+            <ContextMenuSub>
+              <ContextMenuSubTrigger>Smoothing</ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                <ContextMenuRadioGroup
+                  value={cursorRange.smoothing}
+                  onValueChange={(value) =>
+                    onCursorRangeAction({
+                      kind: "set-smoothing",
+                      rangeId: cursorRange.id,
+                      smoothing: value as CursorSmoothing,
+                    })
+                  }
+                >
+                  <ContextMenuRadioItem value="smooth">Smooth</ContextMenuRadioItem>
+                  <ContextMenuRadioItem value="off">Precise</ContextMenuRadioItem>
+                </ContextMenuRadioGroup>
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+            <ContextMenuItem
+              onSelect={() => onCursorRangeAction({ kind: "toggle-lock", rangeId: cursorRange.id })}
+            >
+              {cursorRange.locked ? "Unlock range" : "Lock range"}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+          </>
+        ) : null}
         <ContextMenuItem onSelect={() => onDuplicateClip(clip)}>Duplicate</ContextMenuItem>
         <ContextMenuItem onSelect={() => onSplitClip(clip)}>Split at playhead</ContextMenuItem>
-        <ContextMenuItem onSelect={() => onDeleteClip(clip)}>Delete</ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => onDeleteClip(clip)}
+          disabled={cursorRange ? cursorRange.locked : false}
+        >
+          Delete
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   )

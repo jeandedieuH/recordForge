@@ -1818,7 +1818,9 @@ function applyUpdateCursorRange(
   const found = findCursorRange(state, command.rangeId)
   if (!found)
     return { ok: false, error: editorError("cursor_range_not_found", "Cursor range not found") }
-  const nextSettings = { ...found.range.settings, ...(command.settings ?? {}) }
+  const nextSettings = command.replaceSettings
+    ? { ...(command.settings ?? {}) }
+    : { ...found.range.settings, ...(command.settings ?? {}) }
   const range: CursorEffectClip = {
     ...found.range,
     ...(command.enabled === undefined ? {} : { enabled: command.enabled }),
@@ -2341,6 +2343,7 @@ export function createUpdateCursorRangeCommand(
     scale?: number
     smoothing?: import("@recordforge/contracts").CursorSmoothing
     settings?: import("@recordforge/contracts").CursorEffectSettings
+    replaceSettings?: boolean
   },
 ): CommandRecord {
   return {

@@ -310,7 +310,7 @@ function resolvedGenerationSettings(options: SmartZoomGenerationOptions): {
   return { settings, profile }
 }
 
-function sourcePointToCanvas(
+export function sourcePointToCanvas(
   telemetry: CursorTelemetryFile,
   canvas: Pick<TimelineCanvas, "width" | "height">,
   point: { x: number; y: number },

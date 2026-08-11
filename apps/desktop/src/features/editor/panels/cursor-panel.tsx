@@ -1,5 +1,6 @@
 import type { CursorEffectClip, CursorSettings } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
+import { cursorRangeOverrideLabels } from "@recordforge/cursor-core"
 import {
   createAddCursorRangeCommand,
   createDeleteCursorRangeCommand,
@@ -8,7 +9,7 @@ import {
   getTotalDuration,
 } from "@recordforge/editor-core"
 import { MousePointer2, Plus } from "lucide-react"
-import { Button } from "@recordforge/ui"
+import { Badge, Button } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { CursorInspector } from "../cursor"
 
@@ -64,8 +65,32 @@ export function CursorPanel() {
     execute(createUpdateCursorRangeCommand(range.id, { enabled: !range.enabled }))
   }
 
+  function toggleRangeLocked(range: CursorEffectClip) {
+    execute(createUpdateCursorRangeCommand(range.id, { locked: !range.locked }))
+  }
+
+  function clearRangeOverrides(range: CursorEffectClip) {
+    execute(
+      createUpdateCursorRangeCommand(range.id, {
+        presetId: cursorSettings.preset,
+        scale: cursorSettings.scale,
+        smoothing: cursorSettings.smoothMovement ? "smooth" : "off",
+        settings: {},
+        replaceSettings: true,
+      }),
+    )
+  }
+
   function deleteRange(range: CursorEffectClip) {
     execute(createDeleteCursorRangeCommand(range.id))
+  }
+
+  function badgeVariant(
+    variant: "default" | "secondary" | "outline" | "warning",
+  ): "default" | "accent" | "outline" | "warning" {
+    if (variant === "secondary") return "outline"
+    if (variant === "default") return "accent"
+    return variant
   }
 
   return (
@@ -101,41 +126,87 @@ export function CursorPanel() {
         </p>
       ) : (
         <div className="flex flex-col gap-1.5">
-          {cursorRanges.map((range) => (
-            <div
-              key={range.id}
-              className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-dim p-2 text-[11px]"
-            >
-              <button
-                type="button"
-                className="min-w-0 truncate text-left text-foreground"
-                onClick={() => selectRange(range)}
+          {cursorRanges.map((range) => {
+            const badges = cursorRangeOverrideLabels(range, cursorSettings)
+            return (
+              <div
+                key={range.id}
+                className="flex flex-col gap-1.5 rounded-md border border-border bg-surface-dim p-2 text-[11px]"
               >
-                {formatCursorTime(range.startMs)} →{" "}
-                {formatCursorTime(range.startMs + range.durationMs)}
-                <span className="ml-1 text-subtle-foreground">{range.enabled ? "" : "(off)"}</span>
-              </button>
-              <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-1.5 text-[10px]"
-                  onClick={() => toggleRangeEnabled(range)}
-                >
-                  {range.enabled ? "Disable" : "Enable"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-1.5 text-[10px] text-recording hover:text-recording"
-                  onClick={() => deleteRange(range)}
-                  disabled={range.locked}
-                >
-                  Delete
-                </Button>
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    className="min-w-0 truncate text-left text-foreground"
+                    onClick={() => selectRange(range)}
+                  >
+                    {formatCursorTime(range.startMs)} →{" "}
+                    {formatCursorTime(range.startMs + range.durationMs)}
+                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      onClick={() => toggleRangeEnabled(range)}
+                    >
+                      {range.enabled ? "Disable" : "Enable"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px]"
+                      onClick={() => toggleRangeLocked(range)}
+                    >
+                      {range.locked ? "Unlock" : "Lock"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-1.5 text-[10px] text-recording hover:text-recording"
+                      onClick={() => deleteRange(range)}
+                      disabled={range.locked}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+                {badges.length > 0 ? (
+                  <>
+                    <div className="flex flex-wrap gap-1">
+                      {badges.map((badge) => (
+                        <Badge
+                          key={badge.key}
+                          variant={badgeVariant(badge.variant)}
+                          className="text-[10px]"
+                        >
+                          {badge.label}
+                        </Badge>
+                      ))}
+                    </div>
+                    {!range.locked ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-fit text-[10px]"
+                        onClick={() => clearRangeOverrides(range)}
+                      >
+                        Clear overrides
+                      </Button>
+                    ) : null}
+                  </>
+                ) : !range.locked ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-fit text-[10px]"
+                    onClick={() => selectRange(range)}
+                  >
+                    Edit to override profile
+                  </Button>
+                ) : null}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

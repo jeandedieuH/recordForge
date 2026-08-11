@@ -17,6 +17,8 @@ import { RenderCursorPreset } from "./cursor-asset"
 interface CursorInspectorProps {
   settings?: CursorSettings
   onChange: (updated: Partial<CursorSettings>) => void
+  onReset?: () => void
+  resetLabel?: string
 }
 
 const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
@@ -40,6 +42,8 @@ const CLICK_EMPHASIS: { id: CursorSettings["clickFeedback"]; label: string }[] =
 export function CursorInspector({
   settings = defaultCursorSettings,
   onChange,
+  onReset,
+  resetLabel = "Reset",
 }: CursorInspectorProps) {
   const activePreset = settings.preset ?? "modern-neon"
   const scale = settings.scale ?? 1.0
@@ -55,9 +59,9 @@ export function CursorInspector({
           variant="ghost"
           size="sm"
           className="h-7 text-[11px]"
-          onClick={() => onChange(defaultCursorSettings)}
+          onClick={() => (onReset ? onReset() : onChange(defaultCursorSettings))}
         >
-          Reset
+          {resetLabel}
         </Button>
       </div>
 

@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest"
 import {
+  cursorRangeOverrideLabels,
   findCursorEventAtTime,
   fitCursorPoint,
   isCursorButtonEnabled,
   isCursorIdle,
   normalizeCursorTelemetry,
   timelineToCursorSourceTime,
+  zoomSegmentBadges,
 } from "./index"
-import { defaultCursorSettings, type TimelineState } from "@recordforge/contracts"
+import {
+  defaultCursorSettings,
+  type CursorEffectClip,
+  type ManualZoomSegment,
+  type TimelineState,
+} from "@recordforge/contracts"
 
 const telemetry = normalizeCursorTelemetry({
   recordingId: "recording",
@@ -49,6 +56,75 @@ describe("cursor-core", () => {
     expect(result.wasClamped).toBe(true)
     expect(result.sourceX).toBe(0)
     expect(result.sourceY).toBe(768)
+  })
+
+  it("labels cursor range overrides against the project profile", () => {
+    const base = defaultCursorSettings
+    const range = {
+      id: "range",
+      kind: "cursor-effect" as const,
+      assetId: "cursor",
+      startMs: 0,
+      durationMs: 1000,
+      sourceInMs: 0,
+      sourceOutMs: 0,
+      speed: 1,
+      enabled: false,
+      locked: true,
+      presetId: "sleek-dark",
+      scale: 1.5,
+      smoothing: "off" as const,
+      settings: { clickFeedback: "spotlight" as const },
+    } satisfies CursorEffectClip
+    const labels = cursorRangeOverrideLabels(range, base)
+    const keys = labels.map((label) => label.key)
+    expect(keys).toContain("locked")
+    expect(keys).toContain("hidden")
+    expect(keys).toContain("preset")
+    expect(keys).toContain("scale")
+    expect(keys).toContain("smoothing")
+    expect(keys).toContain("click")
+  })
+
+  it("returns empty cursor range labels when the range inherits the project profile", () => {
+    const range = {
+      id: "range",
+      kind: "cursor-effect" as const,
+      assetId: "cursor",
+      startMs: 0,
+      durationMs: 1000,
+      sourceInMs: 0,
+      sourceOutMs: 0,
+      speed: 1,
+      enabled: true,
+      locked: false,
+      presetId: defaultCursorSettings.preset,
+      scale: defaultCursorSettings.scale,
+      smoothing: defaultCursorSettings.smoothMovement ? "smooth" : ("off" as const),
+      settings: {},
+    } satisfies CursorEffectClip
+    expect(cursorRangeOverrideLabels(range, defaultCursorSettings)).toHaveLength(0)
+  })
+
+  it("produces zoom segment source and lock badges", () => {
+    const segment = {
+      id: "zoom",
+      startMs: 0,
+      durationMs: 1000,
+      target: { x: 0, y: 0, width: 100, height: 100 },
+      scale: 1,
+      easing: "ease-in-out" as const,
+      enabled: true,
+      locked: true,
+      mode: "auto" as const,
+      source: "click" as const,
+      preset: "product-demo" as const,
+    } satisfies ManualZoomSegment
+    const labels = zoomSegmentBadges(segment)
+    const keys = labels.map((label) => label.key)
+    expect(keys).toContain("locked")
+    expect(keys).toContain("source")
+    expect(keys).toContain("preset")
   })
 
   it("supports idle hiding and source mapping through a sped-up clip", () => {

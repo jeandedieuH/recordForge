@@ -345,6 +345,9 @@ export const updateCursorRangeCommandSchema = commandMetaSchema.extend({
   scale: z.number().min(0.2).max(5).optional(),
   smoothing: cursorSmoothingSchema.optional(),
   settings: cursorEffectSettingsSchema.optional(),
+  // Phase 8: when true, command.settings replaces the range's stored settings
+  // instead of being merged. This lets a range reset to the project profile.
+  replaceSettings: z.boolean().optional(),
 })
 
 export type UpdateCursorRangeCommand = z.infer<typeof updateCursorRangeCommandSchema>

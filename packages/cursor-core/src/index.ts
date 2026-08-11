@@ -5,6 +5,7 @@ import {
   type CursorSettings,
   type CursorTelemetryEvent,
   type CursorTelemetryFile,
+  type ManualZoomSegment,
   type TimelineClip,
   type TimelineState,
 } from "@recordforge/contracts"
@@ -248,4 +249,95 @@ export function cursorSettingsForEffect(
     smoothFactor:
       effect.settings.smoothFactor ?? getSmoothingFactor(effect.smoothing, settings.smoothFactor),
   }
+}
+
+export interface CursorRangeBadge {
+  key: string
+  label: string
+  variant: "default" | "secondary" | "outline" | "warning"
+}
+
+/**
+ * Return a small set of human-readable badges that describe how a cursor range
+ * differs from the project cursor profile. Empty when the range fully inherits.
+ */
+export function cursorRangeOverrideLabels(
+  range: CursorEffectClip,
+  base: CursorSettings | undefined,
+): CursorRangeBadge[] {
+  const badges: CursorRangeBadge[] = []
+  if (range.locked) badges.push({ key: "locked", label: "Locked", variant: "secondary" })
+  if (!range.enabled) badges.push({ key: "hidden", label: "Hidden", variant: "outline" })
+
+  const effectivePreset = range.settings?.preset ?? range.presetId
+  if (base && effectivePreset !== base.preset) {
+    badges.push({ key: "preset", label: `Style: ${effectivePreset}`, variant: "default" })
+  }
+
+  const effectiveScale = range.settings?.scale ?? range.scale
+  if (base && effectiveScale !== base.scale) {
+    badges.push({
+      key: "scale",
+      label: `Size ${Math.round(effectiveScale * 100)}%`,
+      variant: "secondary",
+    })
+  }
+
+  const effectiveSmoothMovement = range.settings?.smoothMovement ?? range.smoothing !== "off"
+  if (base && effectiveSmoothMovement !== base.smoothMovement) {
+    badges.push({
+      key: "smoothing",
+      label: effectiveSmoothMovement ? "Smooth" : "Precise",
+      variant: "secondary",
+    })
+  }
+
+  const effectiveClick = range.settings?.clickFeedback
+  if (base && effectiveClick && effectiveClick !== base.clickFeedback) {
+    badges.push({ key: "click", label: `Click: ${effectiveClick}`, variant: "secondary" })
+  }
+
+  const effectiveIdle = range.settings?.autoHideIdle
+  if (base && effectiveIdle !== undefined && effectiveIdle !== base.autoHideIdle) {
+    badges.push({
+      key: "idle",
+      label: effectiveIdle ? "Idle fade" : "Always show",
+      variant: "secondary",
+    })
+  }
+
+  return badges
+}
+
+export interface ZoomSegmentBadge {
+  key: string
+  label: string
+  variant: "default" | "secondary" | "outline" | "warning"
+}
+
+/** Human-readable badges for a zoom segment: source, lock state, and preset. */
+export function zoomSegmentBadges(segment: ManualZoomSegment): ZoomSegmentBadge[] {
+  const badges: ZoomSegmentBadge[] = []
+  if (segment.locked) badges.push({ key: "locked", label: "Locked", variant: "secondary" })
+
+  if (segment.mode === "auto") {
+    badges.push({
+      key: "source",
+      label:
+        segment.source === "click"
+          ? "From click"
+          : segment.source === "dwell"
+            ? "From dwell"
+            : "Auto",
+      variant: "default",
+    })
+  } else {
+    badges.push({ key: "source", label: "Manual", variant: "outline" })
+  }
+
+  if (segment.preset && segment.preset !== "manual-only") {
+    badges.push({ key: "preset", label: segment.preset, variant: "secondary" })
+  }
+
+  return badges
 }

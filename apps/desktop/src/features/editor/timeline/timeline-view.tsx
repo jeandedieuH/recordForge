@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import {
+  type CursorSmoothing,
+  type ManualZoomSegment,
   type MaskClip,
   type MediaJob,
   type MediaVideoTrackOutput,
@@ -27,9 +29,13 @@ import {
   createResizeCursorRangeCommand,
   createSplitClipCommand,
   createSplitCursorRangeCommand,
+  createSplitZoomSegmentCommand,
   createTrimClipCommand,
+  createUpdateCursorRangeCommand,
   createUpdateTrackCommand,
+  createUpdateZoomSegmentCommand,
   findClip,
+  getManualZoomSegments,
   resolvePreviewComposition,
   sourceToTimelineForTrack,
   zoomTransformToCss,
@@ -37,7 +43,12 @@ import {
   canvasShadowStyle,
   formatTime,
 } from "@recordforge/editor-core"
-import { isCursorClickEdge } from "@recordforge/cursor-core"
+import {
+  findCursorEventAtTime,
+  isCursorClickEdge,
+  sourcePointToCanvas,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
@@ -76,7 +87,12 @@ import { AudioTrackPreview } from "./audio-track-preview"
 import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
-import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
+import {
+  TimelineLanes,
+  getVisibleTickInterval,
+  type CursorRangeAction,
+  type ZoomSegmentAction,
+} from "./timeline-lanes"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
 import { CustomCursorOverlay } from "../cursor"
@@ -663,6 +679,94 @@ export function TimelineView({
     execute(createDeleteClipCommand(clip.id))
   }
 
+  function onCursorRangeAction(action: CursorRangeAction) {
+    const range = findClip(timeline!, action.rangeId)?.clip
+    if (!range || range.kind !== "cursor-effect") return
+    if (range.locked && action.kind !== "toggle-lock") return
+
+    if (action.kind === "toggle-enabled") {
+      execute(createUpdateCursorRangeCommand(range.id, { enabled: !range.enabled }))
+      return
+    }
+
+    if (action.kind === "toggle-lock") {
+      execute(createUpdateCursorRangeCommand(range.id, { locked: !range.locked }))
+      return
+    }
+
+    if (action.kind === "set-smoothing") {
+      const smoothing: CursorSmoothing = action.smoothing ?? "smooth"
+      execute(createUpdateCursorRangeCommand(range.id, { smoothing }))
+    }
+  }
+
+  function findNearestClickTimeMs(timeMs: number): number | null {
+    if (!cursorTelemetry || cursorClickSourceTimesMs.length === 0) return null
+    let nearest = cursorClickSourceTimesMs[0]
+    let nearestDistance = Math.abs(nearest - timeMs)
+    for (const clickMs of cursorClickSourceTimesMs) {
+      const distance = Math.abs(clickMs - timeMs)
+      if (distance < nearestDistance) {
+        nearest = clickMs
+        nearestDistance = distance
+      }
+    }
+    return nearest
+  }
+
+  function regenerateZoomFromClick(segment: ManualZoomSegment) {
+    if (!cursorTelemetry || !timeline) return
+    const clickTimeMs = findNearestClickTimeMs(segment.startMs + Math.floor(segment.durationMs / 2))
+    if (clickTimeMs === null) return
+    const lookup = findCursorEventAtTime(cursorTelemetry, clickTimeMs)
+    if (!lookup) return
+    const point = sourcePointToCanvas(cursorTelemetry, timeline.canvas, {
+      x: lookup.event.x,
+      y: lookup.event.y,
+    })
+    const targetScale = timeline.smartZoomSettings?.targetScale ?? 1.5
+    const target = zoomTargetForCursorPoint(point, timeline.canvas, targetScale)
+    execute(
+      createUpdateZoomSegmentCommand(segment.id, {
+        target,
+        mode: "manual",
+        source: "manual",
+      }),
+    )
+  }
+
+  function onZoomSegmentAction(action: ZoomSegmentAction) {
+    if (!timeline) return
+    const segment = getManualZoomSegments(timeline).find((s) => s.id === action.segmentId)
+    if (!segment) return
+
+    switch (action.kind) {
+      case "toggle-lock":
+        execute(createUpdateZoomSegmentCommand(segment.id, { locked: !segment.locked }))
+        return
+      case "split":
+        if (segment.locked) return
+        execute(
+          createSplitZoomSegmentCommand(
+            segment.id,
+            segment.startMs + Math.floor(segment.durationMs / 2),
+          ),
+        )
+        return
+      case "delete":
+        if (segment.locked) return
+        execute(createDeleteZoomSegmentCommand(segment.id))
+        if (view.selection?.kind === "zoom" && view.selection.segmentId === segment.id) {
+          setSelection(null)
+        }
+        return
+      case "regenerate-from-click":
+        if (segment.locked) return
+        regenerateZoomFromClick(segment)
+        return
+    }
+  }
+
   function selectClip(clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) {
     if (tool === "split" && !track.locked && !(clip.kind === "cursor-effect" && clip.locked)) {
       if (view.playheadMs > clip.startMs && view.playheadMs < clip.startMs + clip.durationMs) {
@@ -1201,6 +1305,8 @@ export function TimelineView({
           onDuplicateClip={duplicateClip}
           onSplitClip={splitClip}
           onDeleteClip={deleteClip}
+          onCursorRangeAction={onCursorRangeAction}
+          onZoomSegmentAction={onZoomSegmentAction}
           onToggleTrackMuted={(track) =>
             execute(createUpdateTrackCommand(track.id, { muted: !track.muted }))
           }

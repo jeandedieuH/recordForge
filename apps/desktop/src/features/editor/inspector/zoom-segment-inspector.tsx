@@ -1,10 +1,12 @@
+import { useState } from "react"
 import type { ManualZoomSegment } from "@recordforge/contracts"
+import { clampZoomTarget, zoomSegmentBadges } from "@recordforge/cursor-core"
 import {
   createDeleteZoomSegmentCommand,
   createSplitZoomSegmentCommand,
 } from "@recordforge/editor-core"
 import { ZoomIn } from "lucide-react"
-import { Button, NativeSelect } from "@recordforge/ui"
+import { Badge, Button, NativeSelect } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { NumberField } from "./fields"
@@ -14,13 +16,31 @@ interface ZoomSegmentInspectorProps {
   onClear: () => void
 }
 
+function badgeVariant(
+  variant: "default" | "secondary" | "outline" | "warning",
+): "default" | "accent" | "outline" | "warning" {
+  if (variant === "secondary") return "outline"
+  if (variant === "default") return "accent"
+  return variant
+}
+
 export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
   const interaction = useTimelineInteraction()
+  const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const [extraPadding, setExtraPadding] = useState(0)
 
   function handleUpdate(update: Parameters<typeof interaction.updateZoomTarget>[1]) {
     interaction.updateZoomTarget(segment.id, update, { phase: "commit" })
   }
+
+  function clampTarget() {
+    if (!timeline) return
+    const clamped = clampZoomTarget(segment.target, timeline.canvas, extraPadding)
+    handleUpdate({ target: clamped })
+  }
+
+  const badges = zoomSegmentBadges(segment)
 
   return (
     <div className="flex flex-col gap-4">
@@ -33,6 +53,16 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           Clear
         </Button>
       </div>
+
+      {badges.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {badges.map((badge) => (
+            <Badge key={badge.key} variant={badgeVariant(badge.variant)} className="text-[10px]">
+              {badge.label}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-2 gap-2">
         <NumberField
@@ -91,6 +121,31 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           <option value="snappy">Snappy</option>
         </NativeSelect>
       </label>
+
+      <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold">Safe edges</span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px]"
+            disabled={segment.locked || !timeline}
+            onClick={clampTarget}
+          >
+            Clamp target
+          </Button>
+        </div>
+        <NumberField
+          label="Extra padding (px)"
+          value={extraPadding}
+          min={0}
+          step={1}
+          onChange={setExtraPadding}
+        />
+        <p className="text-[10px] text-muted-foreground">
+          Clamp keeps the zoom target inside the padded canvas. Locked segments cannot be clamped.
+        </p>
+      </div>
 
       <div className="flex gap-2">
         <Button

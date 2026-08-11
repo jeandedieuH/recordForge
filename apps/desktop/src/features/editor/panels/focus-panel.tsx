@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react"
 import type { ManualZoomSegment, ZoomPreset } from "@recordforge/contracts"
+import { zoomSegmentBadges } from "@recordforge/cursor-core"
 import {
   createAddZoomSegmentCommand,
   createDeleteZoomSegmentCommand,
@@ -11,9 +12,17 @@ import {
   getManualZoomSegments,
   getTotalDuration,
 } from "@recordforge/editor-core"
-import { Maximize2, Sparkles, ZoomIn } from "lucide-react"
-import { Button, NativeSelect } from "@recordforge/ui"
+import { Check, Maximize2, Sparkles, X, ZoomIn } from "lucide-react"
+import { Badge, Button, NativeSelect } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+
+function badgeVariant(
+  variant: "default" | "secondary" | "outline" | "warning",
+): "default" | "accent" | "outline" | "warning" {
+  if (variant === "secondary") return "outline"
+  if (variant === "default") return "accent"
+  return variant
+}
 
 export function FocusPanel() {
   const execute = useTimelineStore((state) => state.execute)
@@ -31,6 +40,7 @@ export function FocusPanel() {
   const smartZoomPreset = timeline?.smartZoomSettings?.preset ?? "product-demo"
 
   const [preset, setPreset] = useState<ZoomPreset>(smartZoomPreset)
+  const [reviewing, setReviewing] = useState<ManualZoomSegment[] | null>(null)
 
   const timelineDuration = timeline ? getTotalDuration(timeline) : 0
 
@@ -65,13 +75,28 @@ export function FocusPanel() {
     setSelection({ kind: "zoom", segmentId })
   }
 
-  function regenerate() {
-    if (!timeline || !cursorTelemetry || cursorTelemetryStatus !== "available") return
-    const suggestions = generateSmartZoomSuggestions(cursorTelemetry, timeline.canvas, {
+  function generateSuggestions() {
+    if (!timeline || !cursorTelemetry || cursorTelemetryStatus !== "available") return []
+    return generateSmartZoomSuggestions(cursorTelemetry, timeline.canvas, {
       ...(timeline.smartZoomSettings ?? {}),
       durationMs: getTotalDuration(timeline),
     })
-    execute(createRegenerateZoomSuggestionsCommand(suggestions))
+  }
+
+  function startReview() {
+    const suggestions = generateSuggestions()
+    if (suggestions.length === 0) return
+    setReviewing(suggestions)
+  }
+
+  function acceptSuggestions() {
+    if (!reviewing) return
+    execute(createRegenerateZoomSuggestionsCommand(reviewing))
+    setReviewing(null)
+  }
+
+  function rejectSuggestions() {
+    setReviewing(null)
   }
 
   function selectSegment(segment: ManualZoomSegment) {
@@ -136,12 +161,73 @@ export function FocusPanel() {
           size="sm"
           className="h-7 w-full text-[10px]"
           disabled={cursorTelemetryStatus !== "available" || preset === "manual-only"}
-          onClick={regenerate}
+          onClick={startReview}
         >
           <Sparkles data-icon="inline-start" />
-          Regenerate suggestions
+          Review suggestions
         </Button>
       </div>
+
+      {reviewing ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-primary/30 bg-primary/5 p-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-foreground">
+              Review {reviewing.length} suggestion{reviewing.length === 1 ? "" : "s"}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-1.5 text-[10px]"
+              onClick={rejectSuggestions}
+            >
+              <X data-icon="inline-start" />
+              Cancel
+            </Button>
+          </div>
+          <p className="text-[10px] text-subtle-foreground">
+            Locked or manual segments are preserved. Overlapping suggestions are merged on accept.
+          </p>
+          <div className="flex max-h-48 flex-col gap-1.5 overflow-auto">
+            {reviewing.map((segment) => {
+              const badges = zoomSegmentBadges(segment)
+              return (
+                <div
+                  key={segment.id}
+                  className="flex flex-col gap-1 rounded-md border border-border bg-surface-dim p-2 text-[10px]"
+                >
+                  <div className="flex items-center justify-between">
+                    <span>
+                      {formatZoomTime(segment.startMs)} →{" "}
+                      {formatZoomTime(segment.startMs + segment.durationMs)}
+                    </span>
+                    <span className="font-mono tabular-nums">{segment.scale.toFixed(1)}×</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {badges.map((badge) => (
+                      <Badge
+                        key={badge.key}
+                        variant={badgeVariant(badge.variant)}
+                        className="text-[9px]"
+                      >
+                        {badge.label}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-7 text-[10px]"
+            onClick={acceptSuggestions}
+          >
+            <Check data-icon="inline-start" />
+            Accept all suggestions
+          </Button>
+        </div>
+      ) : null}
 
       <Button
         variant="secondary"
@@ -161,61 +247,74 @@ export function FocusPanel() {
         </p>
       ) : (
         <div className="flex flex-col gap-1.5">
-          {segments.map((segment) => (
-            <div
-              key={segment.id}
-              className={`flex flex-col gap-1.5 rounded-md border p-2 text-[11px] ${
-                selectedSegment?.id === segment.id
-                  ? "border-primary/60 bg-primary/10"
-                  : "border-border bg-surface-dim"
-              }`}
-            >
-              <button
-                type="button"
-                className="flex items-center justify-between text-left"
-                onClick={() => selectSegment(segment)}
+          {segments.map((segment) => {
+            const badges = zoomSegmentBadges(segment)
+            return (
+              <div
+                key={segment.id}
+                className={`flex flex-col gap-1.5 rounded-md border p-2 text-[11px] ${
+                  selectedSegment?.id === segment.id
+                    ? "border-primary/60 bg-primary/10"
+                    : "border-border bg-surface-dim"
+                }`}
               >
-                <span className="min-w-0 truncate">
-                  {formatZoomTime(segment.startMs)} →{" "}
-                  {formatZoomTime(segment.startMs + segment.durationMs)}
-                  <span className="ml-1 text-[10px] text-subtle-foreground">
-                    {segment.mode ?? "manual"} · {segment.source ?? "manual"}
+                <button
+                  type="button"
+                  className="flex items-center justify-between text-left"
+                  onClick={() => selectSegment(segment)}
+                >
+                  <span className="min-w-0 truncate">
+                    {formatZoomTime(segment.startMs)} →{" "}
+                    {formatZoomTime(segment.startMs + segment.durationMs)}
                   </span>
-                </span>
-                <span className="shrink-0 font-mono text-subtle-foreground">
-                  {segment.scale.toFixed(1)}×
-                </span>
-              </button>
-              <div className="flex gap-1.5">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-1.5 text-[10px]"
-                  onClick={() => splitSegment(segment)}
-                  disabled={segment.locked}
-                >
-                  Split
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-1.5 text-[10px]"
-                  onClick={() => toggleLock(segment)}
-                >
-                  {segment.locked ? "Unlock" : "Lock"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-1.5 text-[10px] text-recording hover:text-recording"
-                  onClick={() => deleteSegment(segment)}
-                  disabled={segment.locked}
-                >
-                  Delete
-                </Button>
+                  <span className="shrink-0 font-mono text-subtle-foreground">
+                    {segment.scale.toFixed(1)}×
+                  </span>
+                </button>
+                {badges.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {badges.map((badge) => (
+                      <Badge
+                        key={badge.key}
+                        variant={badgeVariant(badge.variant)}
+                        className="text-[9px]"
+                      >
+                        {badge.label}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="flex gap-1.5">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-1.5 text-[10px]"
+                    onClick={() => splitSegment(segment)}
+                    disabled={segment.locked}
+                  >
+                    Split
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-1.5 text-[10px]"
+                    onClick={() => toggleLock(segment)}
+                  >
+                    {segment.locked ? "Unlock" : "Lock"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-1.5 text-[10px] text-recording hover:text-recording"
+                    onClick={() => deleteSegment(segment)}
+                    disabled={segment.locked}
+                  >
+                    Delete
+                  </Button>
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
