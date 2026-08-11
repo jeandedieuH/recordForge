@@ -57,6 +57,25 @@ impl Rgba {
     }
 }
 
+/// A pixel-aligned rectangle used to clip all cursor drawing to the fitted
+/// recorded video screen. The full canvas is used when a zoom effect is active.
+#[derive(Debug, Clone, Copy)]
+struct ClipRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+impl ClipRect {
+    fn contains(&self, px: i32, py: i32) -> bool {
+        px >= self.x as i32
+            && px < (self.x + self.w) as i32
+            && py >= self.y as i32
+            && py < (self.y + self.h) as i32
+    }
+}
+
 /// A software-rasterized cursor ready to be composited onto the export frame.
 #[derive(Debug, Clone)]
 struct RasterizedCursor {
@@ -76,6 +95,10 @@ pub struct CursorRenderer {
     canvas_width: u32,
     canvas_height: u32,
     canvas_padding: u32,
+    /// The recorded video screen in full-canvas coordinates. Cursor drawing is
+    /// clipped to this rectangle unless a zoom effect expands the view to the
+    /// full canvas.
+    video_screen: ClipRect,
     /// The final cursor scale is the user setting combined with the fit scale
     /// so the rendered cursor stays visually proportional to the output video.
     cursor_scale: f64,
@@ -118,6 +141,14 @@ impl CursorRenderer {
         let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
         let fit_scale =
             (content_width / telemetry.source_width).min(content_height / telemetry.source_height);
+        let fit_width = telemetry.source_width * fit_scale;
+        let fit_height = telemetry.source_height * fit_scale;
+        let video_screen = ClipRect {
+            x: (padding + (content_width - fit_width) / 2.0).round() as u32,
+            y: (padding + (content_height - fit_height) / 2.0).round() as u32,
+            w: fit_width.round() as u32,
+            h: fit_height.round() as u32,
+        };
 
         let options = cursor_engine::CursorEngineOptions::default();
         let engine = cursor_engine::CursorEngine::new(telemetry, options)
@@ -132,6 +163,7 @@ impl CursorRenderer {
             canvas_width: canvas.width,
             canvas_height: canvas.height,
             canvas_padding: canvas.padding,
+            video_screen,
             cursor_scale,
             cursor_cache: None,
         })
@@ -192,9 +224,10 @@ impl CursorRenderer {
             self.canvas_padding as f64,
         );
         let (x, y) = self.apply_zoom(output_ms, point.x, point.y);
+        let clip = self.clip_for_output(output_ms);
 
         if self.settings.spotlight_mode {
-            self.render_spotlight(frame, x, y);
+            self.render_spotlight(frame, x, y, &clip);
         }
 
         if self.settings.click_feedback != "none" {
@@ -207,14 +240,33 @@ impl CursorRenderer {
                     self.canvas_padding as f64,
                 );
                 let (cx, cy) = self.apply_zoom(output_ms, click_point.x, click_point.y);
-                self.render_click_feedback(frame, cx, cy, click);
+                self.render_click_feedback(frame, cx, cy, click, &clip);
             }
         }
 
         let shape_id = self.resolve_cursor_shape_id(&cursor_frame.shape_id);
         // Apply the idle fade opacity computed by the canonical engine. The
         // cached asset is rendered at full opacity and modulated per-frame.
-        self.draw_cursor(frame, x, y, cursor_frame.opacity, &shape_id);
+        self.draw_cursor(frame, x, y, cursor_frame.opacity, &shape_id, &clip);
+    }
+
+    fn zoom_active(&self, output_ms: u64) -> bool {
+        self.zoom_segments.iter().any(|segment| {
+            segment.enabled && output_ms >= segment.start_ms && output_ms < segment.end_ms
+        })
+    }
+
+    fn clip_for_output(&self, output_ms: u64) -> ClipRect {
+        if self.zoom_active(output_ms) {
+            ClipRect {
+                x: 0,
+                y: 0,
+                w: self.canvas_width,
+                h: self.canvas_height,
+            }
+        } else {
+            self.video_screen
+        }
     }
 
     fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {
@@ -267,23 +319,32 @@ impl CursorRenderer {
         )
     }
 
-    fn render_spotlight(&self, frame: &mut [u8], x: f64, y: f64) {
+    fn render_spotlight(&self, frame: &mut [u8], x: f64, y: f64, clip: &ClipRect) {
         let dim = parse_color(&self.settings.shadow_color, Rgba::opaque(0, 0, 0))
             .with_alpha(self.settings.spotlight_dim_opacity);
         fill_rect(
             frame,
             self.canvas_width,
             self.canvas_height,
-            0,
-            0,
-            self.canvas_width,
-            self.canvas_height,
+            clip.x,
+            clip.y,
+            clip.w,
+            clip.h,
             dim,
+            clip,
         );
         // The spotlight radius scales with the cursor so it stays proportional
         // to the fitted video, matching the preview overlay.
         let radius = self.settings.spotlight_radius.max(0.0) * self.cursor_scale;
-        clear_circle(frame, self.canvas_width, self.canvas_height, x, y, radius);
+        clear_circle(
+            frame,
+            self.canvas_width,
+            self.canvas_height,
+            x,
+            y,
+            radius,
+            clip,
+        );
     }
 
     fn render_click_feedback(
@@ -292,6 +353,7 @@ impl CursorRenderer {
         x: f64,
         y: f64,
         click: &cursor_engine::CursorClickEffect,
+        clip: &ClipRect,
     ) {
         let progress = click.progress.clamp(0.0, 1.0);
         // The preview scales the click effect with the cursor scale and then
@@ -313,6 +375,7 @@ impl CursorRenderer {
                 radius * 0.8,
                 color,
                 alpha,
+                clip,
             ),
             "pulse" => fill_circle(
                 frame,
@@ -322,6 +385,7 @@ impl CursorRenderer {
                 y,
                 radius,
                 color.with_alpha(alpha),
+                clip,
             ),
             "ripple" => draw_ring(
                 frame,
@@ -332,12 +396,21 @@ impl CursorRenderer {
                 radius,
                 (3.0 * effect_scale).max(1.0),
                 color.with_alpha(alpha),
+                clip,
             ),
             _ => {}
         }
     }
 
-    fn draw_cursor(&mut self, frame: &mut [u8], x: f64, y: f64, opacity: f64, shape_id: &str) {
+    fn draw_cursor(
+        &mut self,
+        frame: &mut [u8],
+        x: f64,
+        y: f64,
+        opacity: f64,
+        shape_id: &str,
+        clip: &ClipRect,
+    ) {
         let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
         if self.cursor_cache.is_none() {
             match self.rasterize_cursor_asset(asset) {
@@ -349,7 +422,7 @@ impl CursorRenderer {
             }
         }
         let cursor = self.cursor_cache.as_ref().unwrap();
-        self.blit_cursor(frame, cursor, x, y, opacity);
+        self.blit_cursor(frame, cursor, x, y, opacity, clip);
     }
 
     fn blit_cursor(
@@ -359,6 +432,7 @@ impl CursorRenderer {
         x: f64,
         y: f64,
         opacity: f64,
+        clip: &ClipRect,
     ) {
         let opacity = opacity.clamp(0.0, 1.0) as f32;
         if opacity <= 0.0 {
@@ -373,7 +447,7 @@ impl CursorRenderer {
             }
             for col in 0..cursor.width as i32 {
                 let fx = x0 + col;
-                if fx < 0 || fx >= self.canvas_width as i32 {
+                if fx < 0 || fx >= self.canvas_width as i32 || !clip.contains(fx, fy) {
                     continue;
                 }
                 let src = (row as usize * cursor.width as usize + col as usize) * 4;
@@ -387,7 +461,7 @@ impl CursorRenderer {
                     blue: cursor.data[src + 2],
                     alpha,
                 };
-                blend_pixel(frame, self.canvas_width, fx, fy, color);
+                blend_pixel(frame, self.canvas_width, fx, fy, color, clip);
             }
         }
     }
@@ -635,8 +709,8 @@ impl Rgba {
     }
 }
 
-fn blend_pixel(frame: &mut [u8], width: u32, x: i32, y: i32, color: Rgba) {
-    if x < 0 || y < 0 || x >= width as i32 {
+fn blend_pixel(frame: &mut [u8], width: u32, x: i32, y: i32, color: Rgba, clip: &ClipRect) {
+    if x < 0 || y < 0 || x >= width as i32 || !clip.contains(x, y) {
         return;
     }
     let index = (y as usize * width as usize + x as usize) * 4;
@@ -671,17 +745,26 @@ fn fill_rect(
     rect_width: u32,
     rect_height: u32,
     color: Rgba,
+    clip: &ClipRect,
 ) {
     let end_x = x.saturating_add(rect_width).min(width);
     let end_y = y.saturating_add(rect_height).min(height);
     for py in y..end_y {
         for px in x..end_x {
-            blend_pixel(frame, width, px as i32, py as i32, color);
+            blend_pixel(frame, width, px as i32, py as i32, color, clip);
         }
     }
 }
 
-fn clear_circle(frame: &mut [u8], width: u32, height: u32, cx: f64, cy: f64, radius: f64) {
+fn clear_circle(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    clip: &ClipRect,
+) {
     let min_x = (cx - radius).floor().max(0.0) as u32;
     let max_x = (cx + radius).ceil().min(width as f64) as u32;
     let min_y = (cy - radius).floor().max(0.0) as u32;
@@ -689,6 +772,9 @@ fn clear_circle(frame: &mut [u8], width: u32, height: u32, cx: f64, cy: f64, rad
     let radius_squared = radius * radius;
     for py in min_y..max_y {
         for px in min_x..max_x {
+            if !clip.contains(px as i32, py as i32) {
+                continue;
+            }
             let dx = px as f64 - cx;
             let dy = py as f64 - cy;
             if dx * dx + dy * dy <= radius_squared {
@@ -699,6 +785,7 @@ fn clear_circle(frame: &mut [u8], width: u32, height: u32, cx: f64, cy: f64, rad
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_circle(
     frame: &mut [u8],
     width: u32,
@@ -707,6 +794,7 @@ fn fill_circle(
     cy: f64,
     radius: f64,
     color: Rgba,
+    clip: &ClipRect,
 ) {
     let min_x = (cx - radius).floor().max(0.0) as u32;
     let max_x = (cx + radius).ceil().min(width as f64) as u32;
@@ -715,10 +803,13 @@ fn fill_circle(
     let radius_squared = radius * radius;
     for py in min_y..max_y {
         for px in min_x..max_x {
+            if !clip.contains(px as i32, py as i32) {
+                continue;
+            }
             let dx = px as f64 - cx;
             let dy = py as f64 - cy;
             if dx * dx + dy * dy <= radius_squared {
-                blend_pixel(frame, width, px as i32, py as i32, color);
+                blend_pixel(frame, width, px as i32, py as i32, color, clip);
             }
         }
     }
@@ -739,6 +830,7 @@ fn fill_radial_glow(
     glow_radius: f64,
     color: Rgba,
     alpha: f64,
+    clip: &ClipRect,
 ) {
     let outer = core_radius + glow_radius.max(0.0);
     let min_x = (cx - outer).floor().max(0.0) as u32;
@@ -751,6 +843,9 @@ fn fill_radial_glow(
 
     for py in min_y..max_y {
         for px in min_x..max_x {
+            if !clip.contains(px as i32, py as i32) {
+                continue;
+            }
             let dx = px as f64 - cx;
             let dy = py as f64 - cy;
             let distance_squared = dx * dx + dy * dy;
@@ -766,7 +861,7 @@ fn fill_radial_glow(
                 let glow_alpha = alpha * ((1.0 - t * t) as f32) * 0.5;
                 color.with_alpha(glow_alpha as f64)
             };
-            blend_pixel(frame, width, px as i32, py as i32, pixel_color);
+            blend_pixel(frame, width, px as i32, py as i32, pixel_color, clip);
         }
     }
 }
@@ -781,6 +876,7 @@ fn draw_ring(
     radius: f64,
     thickness: f64,
     color: Rgba,
+    clip: &ClipRect,
 ) {
     let outer = radius.max(0.0);
     let inner = (outer - thickness.max(1.0)).max(0.0);
@@ -792,11 +888,14 @@ fn draw_ring(
     let inner_squared = inner * inner;
     for py in min_y..max_y {
         for px in min_x..max_x {
+            if !clip.contains(px as i32, py as i32) {
+                continue;
+            }
             let dx = px as f64 - cx;
             let dy = py as f64 - cy;
             let distance_squared = dx * dx + dy * dy;
             if distance_squared <= outer_squared && distance_squared >= inner_squared {
-                blend_pixel(frame, width, px as i32, py as i32, color);
+                blend_pixel(frame, width, px as i32, py as i32, color, clip);
             }
         }
     }

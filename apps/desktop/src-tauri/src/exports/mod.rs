@@ -591,9 +591,16 @@ fn render_timeline_composition(
     );
     if canvas.border_radius > 0 {
         let (red, green, blue) = hex_rgb(&background);
-        let radius = canvas.border_radius as f64;
+        // Round the recorded video screen (the centered content area), not the full canvas.
+        let radius = (canvas.border_radius as f64)
+            .min(content_width as f64 / 2.0)
+            .min(content_height as f64 / 2.0);
+        let left = canvas.padding as f64 + radius;
+        let right = canvas.width as f64 - canvas.padding as f64 - radius;
+        let top = canvas.padding as f64 + radius;
+        let bottom = canvas.height as f64 - canvas.padding as f64 - radius;
         let mask = format!(
-            "(((X<{radius})*(Y<{radius})*(hypot(X-{radius},Y-{radius})>{radius})+(X>W-{radius})*(Y<{radius})*(hypot(X-(W-{radius}),Y-{radius})>{radius})+(X<{radius})*(Y>H-{radius})*(hypot(X-{radius},Y-(H-{radius}))>{radius})+(X>W-{radius})*(Y>H-{radius})*(hypot(X-(W-{radius}),Y-(H-{radius}))>{radius}))>0)"
+            "(((X<{left})*(Y<{top})*(hypot(X-{left},Y-{top})>{radius})+(X>{right})*(Y<{top})*(hypot(X-{right},Y-{top})>{radius})+(X<{left})*(Y>{bottom})*(hypot(X-{left},Y-{bottom})>{radius})+(X>{right})*(Y>{bottom})*(hypot(X-{right},Y-{bottom})>{radius}))>0)"
         );
         canvas_filter.push_str(&format!(
             ",format=rgb24,geq=r='if({mask},{red},r)':g='if({mask},{green},g)':b='if({mask},{blue},b)'"
