@@ -1129,15 +1129,13 @@ fn apply_cursor_overlay(
         let telemetry_path = asset_paths.get(&effect.asset_id).ok_or_else(|| {
             InternalError::Permissions("cursor effect references a missing asset".into())
         })?;
-        let telemetry_text = std::fs::read_to_string(telemetry_path).map_err(|error| {
-            InternalError::Storage(format!("read cursor telemetry asset: {error}"))
+        let work_dir = telemetry_path
+            .parent()
+            .ok_or_else(|| InternalError::Storage("cursor telemetry path has no parent".into()))?;
+        let v2 = crate::capture::cursor::read_any_telemetry(work_dir).ok_or_else(|| {
+            InternalError::Storage("cursor telemetry asset is missing or corrupt".into())
         })?;
-        let telemetry =
-            serde_json::from_str::<crate::capture::cursor::CursorTelemetryFile>(&telemetry_text)
-                .map_err(|error| {
-                    InternalError::Storage(format!("parse cursor telemetry: {error}"))
-                })?
-                .normalize();
+        let telemetry = crate::capture::cursor::v2_to_v1_telemetry(&v2);
         if telemetry.events.is_empty() {
             continue;
         }

@@ -6,30 +6,17 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
+// Re-export V2 types and helpers so consumers can find them under the cursor
+// module while the legacy V1 tracker and V1 file type remain available.
+pub use super::cursor_v2::{
+    check_cursor_capture_health, enumerate_topologies, probe_cursor_topology, read_any_telemetry,
+    read_v2_telemetry, write_v2_telemetry, CursorCaptureBounds, CursorCaptureMode,
+    CursorCoordinateTransform, CursorDpiScale, CursorEventIndexEntry, CursorTelemetryEventV2,
+    CursorTelemetryFileV2, CursorTelemetryHealth, CursorTelemetryMetadata, CursorTelemetryTimebase,
+    CursorTopology, CursorTrackerV2,
+};
+
 const CURSOR_TELEMETRY_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CursorCaptureBounds {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CursorDpiScale {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CursorTelemetryTimebase {
-    pub unit: String,
-    pub ticks_per_second: u32,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,7 +153,7 @@ impl CursorTracker {
                         recording_id.clone(),
                         width,
                         height,
-                        capture_bounds.clone(),
+                        capture_bounds,
                         Vec::with_capacity(3600),
                     )
                 });
@@ -300,6 +287,86 @@ fn capture_mouse_state() -> (f64, f64, bool, &'static str, bool) {
 #[cfg(not(target_os = "windows"))]
 fn capture_mouse_state() -> (f64, f64, bool, &'static str, bool) {
     (0.0, 0.0, false, "none", false)
+}
+
+/// Convert a V2 telemetry asset to the legacy V1 format used by the existing
+/// export renderer. This preserves the raw capture coordinates and metadata so
+/// the V1 evaluator produces the same source position as the V2 evaluator.
+pub fn v2_to_v1_telemetry(v2: &CursorTelemetryFileV2) -> CursorTelemetryFile {
+    let meta = &v2.metadata;
+    let events: Vec<CursorTelemetryEvent> = v2
+        .events
+        .iter()
+        .map(|event| {
+            // V1 x/y are capture-bounds relative (offset removed, not DPI scaled).
+            let x = event.raw_x as f64 - meta.capture_bounds.x as f64;
+            let y = event.raw_y as f64 - meta.capture_bounds.y as f64;
+            let clicked = event.buttons.any_down();
+            let button = if event.buttons.left {
+                "left"
+            } else if event.buttons.right {
+                "right"
+            } else if event.buttons.middle {
+                "middle"
+            } else {
+                "none"
+            };
+            let button_event = if event.button_event.ends_with("-down") {
+                "down"
+            } else if event.button_event.ends_with("-up") {
+                "up"
+            } else if event.button_event.ends_with("-held") {
+                "held"
+            } else {
+                "none"
+            };
+            CursorTelemetryEvent {
+                t_ms: event.t_ms,
+                x,
+                y,
+                clicked,
+                button: button.into(),
+                button_event: button_event.into(),
+                visible: event.visible,
+            }
+        })
+        .collect();
+
+    let v1_timebase = Some(CursorTelemetryTimebase {
+        unit: "ms".into(),
+        ticks_per_second: 1_000,
+    });
+
+    let v1_dpi = meta
+        .coordinate_transform
+        .dpi_scale_from_bounds(meta.source_width, meta.source_height, &meta.capture_bounds)
+        .or_else(|| {
+            meta.topology
+                .as_ref()
+                .map(|topology| super::cursor_v2::CursorDpiScale {
+                    x: topology.dpi_x / 96.0,
+                    y: topology.dpi_y / 96.0,
+                })
+        })
+        .map(|dpi| CursorDpiScale { x: dpi.x, y: dpi.y });
+
+    CursorTelemetryFile {
+        schema_version: v2.metadata.schema_version,
+        asset_id: meta.asset_id.clone(),
+        recording_id: meta.recording_id.clone(),
+        source_width: meta.source_width,
+        source_height: meta.source_height,
+        capture_bounds: Some(CursorCaptureBounds {
+            x: meta.capture_bounds.x,
+            y: meta.capture_bounds.y,
+            width: meta.capture_bounds.width,
+            height: meta.capture_bounds.height,
+        }),
+        dpi_scale: v1_dpi,
+        timebase: v1_timebase,
+        sample_rate_hz: meta.sample_rate_hz,
+        events,
+    }
 }
 
 #[cfg(test)]

@@ -321,36 +321,40 @@ fn telemetry_asset_from_file(
         return Ok(None);
     }
 
-    let text = fs::read_to_string(&path)
-        .map_err(|e| InternalError::Storage(format!("read cursor telemetry asset: {e}")))?;
-    let telemetry = match serde_json::from_str::<CursorTelemetryFile>(&text) {
-        Ok(telemetry) => telemetry.normalize(),
-        Err(error) => {
-            warn!(error = %error, "cursor telemetry asset is unavailable");
+    // Phase 5: cursor telemetry may be V2 (metadata JSON + binary events) or
+    // legacy V1 (all events in JSON). read_any_telemetry migrates either into
+    // the canonical V2 model, then we convert back to V1 for the export renderer.
+    let v2 = match crate::capture::cursor::read_any_telemetry(project_dir) {
+        Some(telemetry) => telemetry,
+        None => {
+            warn!("cursor telemetry asset is unavailable or corrupt");
             return Ok(None);
         }
     };
+
+    let v1 = crate::capture::cursor::v2_to_v1_telemetry(&v2);
+    let meta = &v2.metadata;
     let asset = ProjectAsset {
-        id: telemetry.asset_id.clone(),
+        id: meta.asset_id.clone(),
         role: ProjectAssetRole::CursorEvents,
         path: "cursor_telemetry.json".into(),
         status: ProjectAssetStatus::Available,
-        duration_ms: telemetry.events.last().map(|event| event.t_ms).unwrap_or(0),
-        width: Some(telemetry.source_width as i32),
-        height: Some(telemetry.source_height as i32),
-        fps: Some(telemetry.sample_rate_hz as f64),
+        duration_ms: v2.events.last().map(|event| event.t_ms).unwrap_or(0),
+        width: Some(meta.source_width as i32),
+        height: Some(meta.source_height as i32),
+        fps: Some(meta.sample_rate_hz as f64),
         has_audio: false,
         stream_index: None,
-        source_width: Some(telemetry.source_width),
-        source_height: Some(telemetry.source_height),
-        sample_rate_hz: Some(telemetry.sample_rate_hz as f64),
-        schema_version: Some(telemetry.schema_version),
-        capture_bounds: telemetry.capture_bounds.clone(),
-        dpi_scale: telemetry.dpi_scale.clone(),
-        timebase: telemetry.timebase.clone(),
+        source_width: Some(meta.source_width),
+        source_height: Some(meta.source_height),
+        sample_rate_hz: Some(meta.sample_rate_hz as f64),
+        schema_version: Some(meta.schema_version),
+        capture_bounds: Some(meta.capture_bounds),
+        dpi_scale: v1.dpi_scale,
+        timebase: v1.timebase.clone(),
         cursor_metadata: Some("available".into()),
     };
-    Ok(Some((asset, telemetry)))
+    Ok(Some((asset, v1)))
 }
 
 fn timeline_duration(value: &Value) -> u64 {

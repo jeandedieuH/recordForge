@@ -2,6 +2,7 @@ pub mod audio;
 pub mod benchmark;
 pub mod config;
 pub mod cursor;
+pub mod cursor_v2;
 pub mod devices;
 pub mod disk;
 pub mod encoder;

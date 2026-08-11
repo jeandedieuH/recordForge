@@ -40,7 +40,7 @@ struct ActiveSession {
     webcam_segments: Vec<media::WebcamSegmentInput>,
     webcam_segments_started: usize,
     webcam_capture_failed: bool,
-    cursor_tracker: Option<super::cursor::CursorTracker>,
+    cursor_tracker: Option<super::cursor_v2::CursorTrackerV2>,
     segment_index: u32,
     total_recorded_ms: u64,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -59,25 +59,62 @@ struct SegmentCaptures {
     webcam: Option<FfmpegCapture>,
 }
 
-fn cursor_asset_metadata(session_id: &str, bounds: super::source::Bounds) -> CursorTelemetryAsset {
-    CursorTelemetryAsset {
+fn cursor_asset_metadata(
+    session_id: &str,
+    bounds: super::source::Bounds,
+) -> crate::errors::Result<CursorTelemetryAsset> {
+    let capture_bounds = super::cursor::CursorCaptureBounds {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width.max(1) as u32,
+        height: bounds.height.max(1) as u32,
+    };
+
+    let topology = super::cursor_v2::probe_cursor_topology(bounds.x, bounds.y)
+        .or_else(|| super::cursor_v2::probe_cursor_topology(0, 0));
+    let health = topology.as_ref().map_or(
+        super::cursor_v2::CursorTelemetryHealth::TopologyUnavailable,
+        |_| super::cursor_v2::CursorTelemetryHealth::Healthy,
+    );
+
+    let dpi_scale = topology.as_ref().map_or(
+        super::cursor::CursorDpiScale { x: 1.0, y: 1.0 },
+        |topology| super::cursor::CursorDpiScale {
+            x: topology.dpi_x / 96.0,
+            y: topology.dpi_y / 96.0,
+        },
+    );
+
+    let source_width = capture_bounds.width;
+    let source_height = capture_bounds.height;
+    let coordinate_transform = super::cursor_v2::CursorCoordinateTransform::from_bounds(
+        &capture_bounds,
+        source_width,
+        source_height,
+        &super::cursor_v2::CursorDpiScale {
+            x: dpi_scale.x,
+            y: dpi_scale.y,
+        },
+    );
+
+    Ok(CursorTelemetryAsset {
         asset_id: format!("cursor-events:{session_id}"),
         path: "cursor_telemetry.json".into(),
-        schema_version: 1,
-        source_width: bounds.width.max(1) as u32,
-        source_height: bounds.height.max(1) as u32,
-        capture_bounds: super::cursor::CursorCaptureBounds {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width.max(1) as u32,
-            height: bounds.height.max(1) as u32,
-        },
-        dpi_scale: super::cursor::CursorDpiScale { x: 1.0, y: 1.0 },
+        schema_version: 2,
+        source_width,
+        source_height,
+        capture_bounds,
+        dpi_scale,
         timebase: super::cursor::CursorTelemetryTimebase {
             unit: "ms".into(),
             ticks_per_second: 1_000,
         },
-    }
+        coordinate_transform: Some(coordinate_transform),
+        topology,
+        shapes: Vec::new(),
+        event_file: Some("cursor_events.bin".into()),
+        health: Some(health),
+    })
 }
 
 /// Signed difference between two capture start instants, rounded to milliseconds.
@@ -255,6 +292,7 @@ impl Recorder {
             }
         };
 
+        let timeline_origin = captures.screen.started_at();
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
         if captures.webcam.is_some() {
@@ -262,21 +300,28 @@ impl Recorder {
         }
         session.webcam_capture = captures.webcam;
         let bounds = session.config.source.bounds;
-        session.cursor_tracker = Some(super::cursor::CursorTracker::start(
+        let capture_bounds = super::cursor::CursorCaptureBounds {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width.max(1) as u32,
+            height: bounds.height.max(1) as u32,
+        };
+        session.cursor_tracker = Some(super::cursor_v2::CursorTrackerV2::start(
             session.session_id.clone(),
             session.work_dir.clone(),
-            bounds.x,
-            bounds.y,
-            bounds.width as u32,
-            bounds.height as u32,
+            capture_bounds,
+            capture_bounds.width,
+            capture_bounds.height,
+            timeline_origin,
             0,
+            super::cursor_v2::CursorCaptureMode::Full,
         ));
         session.started_at = Some(chrono::Utc::now());
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds));
+            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds)?);
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }
@@ -705,6 +750,7 @@ impl Recorder {
             Arc::clone(&session.manifest),
         )?;
 
+        let timeline_origin = captures.screen.started_at();
         session.segment_index = next_index;
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
@@ -713,20 +759,27 @@ impl Recorder {
         }
         session.webcam_capture = captures.webcam;
         let bounds = session.config.source.bounds;
-        session.cursor_tracker = Some(super::cursor::CursorTracker::start(
+        let capture_bounds = super::cursor::CursorCaptureBounds {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width.max(1) as u32,
+            height: bounds.height.max(1) as u32,
+        };
+        session.cursor_tracker = Some(super::cursor_v2::CursorTrackerV2::start(
             session.session_id.clone(),
             session.work_dir.clone(),
-            bounds.x,
-            bounds.y,
-            bounds.width as u32,
-            bounds.height as u32,
+            capture_bounds,
+            capture_bounds.width,
+            capture_bounds.height,
+            timeline_origin,
             session.total_recorded_ms,
+            super::cursor_v2::CursorCaptureMode::Full,
         ));
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds));
+            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds)?);
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }

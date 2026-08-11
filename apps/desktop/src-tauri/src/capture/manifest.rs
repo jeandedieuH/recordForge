@@ -91,6 +91,10 @@ pub struct RecordingWebcamFragment {
 
 /// Checkpoint metadata for the immutable cursor telemetry asset. Event data
 /// remains in the asset file; the manifest only carries recovery identity.
+///
+/// Phase 5 extends the asset with V2 fields (coordinate transform, topology,
+/// shape table, health, and the binary event file path). V1-only readers ignore
+/// the new optional fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorTelemetryAsset {
@@ -102,6 +106,16 @@ pub struct CursorTelemetryAsset {
     pub capture_bounds: CursorCaptureBounds,
     pub dpi_scale: CursorDpiScale,
     pub timebase: CursorTelemetryTimebase,
+    #[serde(default)]
+    pub coordinate_transform: Option<super::cursor_v2::CursorCoordinateTransform>,
+    #[serde(default)]
+    pub topology: Option<super::cursor_v2::CursorTopology>,
+    #[serde(default)]
+    pub shapes: Vec<super::cursor_v2::CursorShapeInfo>,
+    #[serde(default)]
+    pub event_file: Option<String>,
+    #[serde(default)]
+    pub health: Option<super::cursor_v2::CursorTelemetryHealth>,
 }
 
 /// On-disk manifest for a recording session.

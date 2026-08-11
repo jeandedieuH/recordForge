@@ -98,13 +98,7 @@ pub fn scan_recovery(sessions_dir: &Path) -> crate::errors::Result<Vec<RecoveryS
                 (None, total_size, err.or(fragment_error))
             };
         let is_recoverable = fragment_count > 0 || output_path.is_some();
-        let cursor_telemetry_available = work_dir.join("cursor_telemetry.json").is_file()
-            && std::fs::read_to_string(work_dir.join("cursor_telemetry.json"))
-                .ok()
-                .and_then(|text| {
-                    serde_json::from_str::<super::cursor::CursorTelemetryFile>(&text).ok()
-                })
-                .is_some();
+        let cursor_telemetry_available = super::cursor_v2::read_any_telemetry(&work_dir).is_some();
 
         results.push(RecoveryScanResult {
             session_id: manifest.session_id,

@@ -894,12 +894,13 @@ pub fn get_cursor_telemetry(
         return Ok(None);
     }
 
-    let path = project_dir.join(&asset.path);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| InternalError::Storage(format!("read cursor telemetry asset: {e}")))?;
-    let telemetry: crate::capture::cursor::CursorTelemetryFile = serde_json::from_str(&text)
-        .map_err(|e| InternalError::Storage(format!("parse cursor telemetry json: {e}")))?;
-    let telemetry = telemetry.normalize();
+    // Phase 5: cursor telemetry is written as V2 (metadata JSON + binary events).
+    // The command returns the legacy V1 shape for the editor while migration to a
+    // V2 editor contract is in progress.
+    let v2 = crate::capture::cursor::read_any_telemetry(&project_dir).ok_or_else(|| {
+        InternalError::Storage("cursor telemetry asset is missing or corrupt".into())
+    })?;
+    let telemetry = crate::capture::cursor::v2_to_v1_telemetry(&v2);
     if telemetry.asset_id != asset.id {
         return Err(
             InternalError::Project("cursor telemetry asset identity mismatch".into()).into(),
