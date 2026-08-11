@@ -6,6 +6,7 @@ describe("cursor contracts", () => {
   it("keeps the custom cursor enabled by default", () => {
     expect(defaultCursorSettings.preset).toBe("modern-neon")
     expect(defaultCursorSettings.hideNativeCursor).toBe(true)
+    expect(defaultCursorSettings.shapeMode).toBe("optimized")
   })
 
   it("accepts telemetry emitted by the Rust tracker", () => {

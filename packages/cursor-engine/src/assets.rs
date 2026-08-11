@@ -33,6 +33,21 @@ pub fn resolve_cursor_asset(id: &str) -> Option<&'static CursorAsset> {
         .get(id)
 }
 
+/// Resolve a shape id (usually from telemetry) to a canonical asset id.
+///
+/// The map lets the renderer use the recorded system cursor shape when it is
+/// known, while still falling back to the curated preset for unknown shapes.
+pub fn resolve_cursor_shape_id(shape_id: &str) -> String {
+    static SHAPE_MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let map = SHAPE_MAP.get_or_init(|| {
+        serde_json::from_str(include_str!("../shape-map.json"))
+            .expect("embedded cursor shape map should be valid JSON")
+    });
+    map.get(shape_id)
+        .map(|s| s.clone())
+        .unwrap_or_else(|| shape_id.to_string())
+}
+
 /// Resolve an asset id, falling back to a default arrow cursor.
 pub fn resolve_cursor_asset_or_default(id: &str) -> &'static CursorAsset {
     resolve_cursor_asset(id)

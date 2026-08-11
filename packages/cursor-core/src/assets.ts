@@ -1,3 +1,5 @@
+import type { CursorShapeMode } from "@recordforge/contracts"
+
 // Shared cursor asset manifest.
 //
 // Preview and export should resolve the same asset id to the same geometry,
@@ -32,6 +34,36 @@ export type CursorAssetId =
   | "cyberpunk"
   | "minimal-dot"
   | "hand-pointer"
+
+/**
+ * Map common system/telemetry cursor shape identifiers to our canonical asset IDs.
+ * This lets the renderer use the recorded shape when available but fall back to
+ * a curated preset when the recorded shape is not in our manifest.
+ */
+export const SHAPE_ID_TO_ASSET: Record<string, CursorAssetId> = {
+  "recorded-system": "recorded-system",
+  arrow: "default",
+  arrow2: "default",
+  uparrow: "default",
+  hand: "hand-pointer",
+  hand2: "hand-pointer",
+  ibeam: "clean-pointer",
+  text: "clean-pointer",
+  cross: "cyberpunk",
+  crosshair: "cyberpunk",
+  help: "high-contrast",
+  "help-arrow": "high-contrast",
+  wait: "modern-neon",
+  appstarting: "modern-neon",
+  no: "cyberpunk",
+  size: "default",
+  sizenesw: "default",
+  sizens: "default",
+  sizenwse: "default",
+  sizewe: "default",
+  pen: "default",
+  split: "default",
+}
 
 export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = {
   "recorded-system": {
@@ -194,13 +226,31 @@ export interface ResolvedCursorAsset extends CursorAsset {
 export function resolveCursorAsset(
   shapeId: string | undefined | null,
   preset: string,
+  shapeMode: CursorShapeMode = "optimized",
 ): ResolvedCursorAsset {
   const manifest = CURSOR_ASSET_MANIFEST
   const fallback = (manifest[preset as CursorAssetId] ?? manifest.default) as CursorAsset
 
-  if (shapeId && manifest[shapeId as CursorAssetId]) {
-    return { effectiveId: shapeId, ...manifest[shapeId as CursorAssetId] }
+  if (!shapeId || shapeMode === "preset") {
+    return { effectiveId: preset, ...fallback }
   }
+
+  // Recorded mode: only use the shape if it is a literal asset id we know.
+  if (shapeMode === "recorded") {
+    const asset = manifest[shapeId as CursorAssetId]
+    if (asset) return { effectiveId: shapeId, ...asset }
+    return { effectiveId: preset, ...fallback }
+  }
+
+  // Optimized mode: map telemetry shape ids to our canonical assets, then fall
+  // back to the preset when no mapping exists.
+  const mapped = SHAPE_ID_TO_ASSET[shapeId]
+  if (mapped) {
+    return { effectiveId: mapped, ...manifest[mapped] }
+  }
+
+  const asset = manifest[shapeId as CursorAssetId]
+  if (asset) return { effectiveId: shapeId, ...asset }
 
   return { effectiveId: preset, ...fallback }
 }

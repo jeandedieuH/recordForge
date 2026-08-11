@@ -306,6 +306,15 @@ export function cursorRangeOverrideLabels(
     })
   }
 
+  const effectiveShapeMode = range.settings?.shapeMode
+  if (base && effectiveShapeMode && effectiveShapeMode !== base.shapeMode) {
+    badges.push({
+      key: "shape",
+      label: `Shape: ${effectiveShapeMode}`,
+      variant: "secondary",
+    })
+  }
+
   return badges
 }
 

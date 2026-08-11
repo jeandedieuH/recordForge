@@ -328,7 +328,11 @@ export function ClipInspector({
             onClear()
           }}
         />
-        <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
+        <CursorInspector
+          settings={cursorSettings}
+          onChange={handleCursorChange}
+          presetsEnabled={false}
+        />
         {cursorAssetId ? (
           <Button variant="secondary" size="sm" onClick={addCursorRange}>
             {selectedRange ? "Add selected cursor range" : "Add full-duration cursor range"}
@@ -405,7 +409,11 @@ export function ClipInspector({
 
       {activeTab === "cursor" ? (
         <div className="flex flex-col gap-3">
-          <CursorInspector settings={cursorRangeSettings} onChange={handleCursorChange} />
+          <CursorInspector
+            settings={cursorRangeSettings}
+            onChange={handleCursorChange}
+            presetsEnabled={false}
+          />
           {cursorRange ? (
             <div className="flex gap-2">
               <Button

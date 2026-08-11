@@ -6,6 +6,8 @@ import {
   isCursorButtonEnabled,
   isCursorIdle,
   normalizeCursorTelemetry,
+  resolveCursorAsset,
+  SHAPE_ID_TO_ASSET,
   timelineToCursorSourceTime,
   zoomSegmentBadges,
 } from "./index"
@@ -104,6 +106,33 @@ describe("cursor-core", () => {
       settings: {},
     } satisfies CursorEffectClip
     expect(cursorRangeOverrideLabels(range, defaultCursorSettings)).toHaveLength(0)
+  })
+
+  it("maps recorded system cursor shapes to canonical assets in optimized mode", () => {
+    const mapped = resolveCursorAsset("hand", "modern-neon", "optimized")
+    expect(mapped.id).toBe(SHAPE_ID_TO_ASSET.hand)
+    expect(mapped.effectiveId).toBe("hand-pointer")
+  })
+
+  it("falls back to the chosen preset when the recorded shape is unknown", () => {
+    const asset = resolveCursorAsset("unknown-shape", "modern-neon", "optimized")
+    expect(asset.id).toBe("modern-neon")
+    expect(asset.effectiveId).toBe("modern-neon")
+  })
+
+  it("honors the recorded shape mode only for literal manifest ids", () => {
+    const asset = resolveCursorAsset("modern-neon", "default", "recorded")
+    expect(asset.id).toBe("modern-neon")
+    expect(asset.effectiveId).toBe("modern-neon")
+
+    const fallback = resolveCursorAsset("hand", "default", "recorded")
+    expect(fallback.id).toBe("default")
+  })
+
+  it("uses the preset exclusively when shape mode is preset", () => {
+    const asset = resolveCursorAsset("hand", "cyberpunk", "preset")
+    expect(asset.id).toBe("cyberpunk")
+    expect(asset.effectiveId).toBe("cyberpunk")
   })
 
   it("produces zoom segment source and lock badges", () => {

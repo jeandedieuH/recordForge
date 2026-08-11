@@ -26,6 +26,9 @@ export type ClickFeedback = z.infer<typeof clickFeedbackSchema>
 export const cursorSmoothingSchema = z.enum(["off", "smooth", "strong"])
 export type CursorSmoothing = z.infer<typeof cursorSmoothingSchema>
 
+export const cursorShapeModeSchema = z.enum(["preset", "recorded", "optimized"])
+export type CursorShapeMode = z.infer<typeof cursorShapeModeSchema>
+
 // `down` and `up` are edge samples; `held` is intentionally not treated as a
 // click by preview/export. Older telemetry only has `clicked`, so consumers must
 // keep the legacy fallback when buttonEvent is `none`.
@@ -61,6 +64,7 @@ export const cursorSettingsSchema = z.object({
   spotlightRadius: z.number().min(40).max(300).default(120),
   spotlightDimOpacity: z.number().min(0).max(0.9).default(0.5),
   hideNativeCursor: z.boolean().default(true),
+  shapeMode: cursorShapeModeSchema.default("optimized"),
 })
 
 export type CursorSettings = z.infer<typeof cursorSettingsSchema>

@@ -107,6 +107,7 @@ export function CursorRangeInspector({ range, onClear }: CursorRangeInspectorPro
         onChange={handleChange}
         onReset={clearOverrides}
         resetLabel="Clear overrides"
+        presetsEnabled={false}
       />
 
       <div className="flex gap-2">

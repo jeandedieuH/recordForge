@@ -191,6 +191,7 @@ pub struct CursorCanvas {
 #[serde(rename_all = "camelCase", default)]
 pub struct CursorSettings {
     pub enabled: bool,
+    pub shape_mode: String,
     pub preset: String,
     pub scale: f64,
     pub fill_color: String,
@@ -224,6 +225,7 @@ impl Default for CursorSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            shape_mode: "optimized".into(),
             preset: "modern-neon".into(),
             scale: 1.0,
             fill_color: "#3b82f6".into(),

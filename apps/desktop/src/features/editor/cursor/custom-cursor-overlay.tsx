@@ -67,8 +67,8 @@ export function CustomCursorOverlay({
   )
 
   const asset = useMemo(
-    () => resolveCursorAsset(frame.shapeId, cursorSettings.preset),
-    [frame.shapeId, cursorSettings.preset],
+    () => resolveCursorAsset(frame.shapeId, cursorSettings.preset, cursorSettings.shapeMode),
+    [frame.shapeId, cursorSettings.preset, cursorSettings.shapeMode],
   )
 
   if (!containerWidth || !containerHeight) return null

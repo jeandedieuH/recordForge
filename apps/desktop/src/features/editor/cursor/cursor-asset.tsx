@@ -54,5 +54,7 @@ export function RenderCursorPreset({
 }
 
 function useMemoizedAsset(shapeId: string | undefined, preset: string): CursorAsset {
-  return useMemo(() => resolveCursorAsset(shapeId, preset), [shapeId, preset])
+  // Previews in the inspector should always show the chosen preset style, not
+  // an optimized shape from telemetry.
+  return useMemo(() => resolveCursorAsset(shapeId, preset, "preset"), [shapeId, preset])
 }

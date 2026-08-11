@@ -145,6 +145,30 @@ impl CursorRenderer {
         })
     }
 
+    /// Resolve the effective asset id for a cursor frame, honoring the user's
+    /// shape mode preference (preset, recorded, or optimized mapping).
+    fn resolve_cursor_shape_id(&self, frame_shape_id: &str) -> String {
+        if frame_shape_id.is_empty() || self.settings.shape_mode == "preset" {
+            return self.settings.preset.clone();
+        }
+
+        if self.settings.shape_mode == "recorded" {
+            if cursor_engine::assets::resolve_cursor_asset(frame_shape_id).is_some() {
+                return frame_shape_id.to_string();
+            }
+            return self.settings.preset.clone();
+        }
+
+        // Optimized mode: map recorded system shape ids to our canonical assets,
+        // then fall back to the preset when no mapping exists.
+        let mapped = cursor_engine::assets::resolve_cursor_shape_id(frame_shape_id);
+        if cursor_engine::assets::resolve_cursor_asset(&mapped).is_some() {
+            return mapped;
+        }
+
+        self.settings.preset.clone()
+    }
+
     pub fn render_frame(&mut self, output_ms: u64, frame: &mut [u8]) {
         frame.fill(0);
         let expected_len = self.canvas_width as usize * self.canvas_height as usize * 4;
@@ -192,11 +216,7 @@ impl CursorRenderer {
             }
         }
 
-        let shape_id = if cursor_frame.shape_id.is_empty() {
-            self.settings.preset.clone()
-        } else {
-            cursor_frame.shape_id
-        };
+        let shape_id = self.resolve_cursor_shape_id(&cursor_frame.shape_id);
         // Apply the idle fade opacity computed by the canonical engine. The
         // cached asset is rendered at full opacity and modulated per-frame.
         self.draw_cursor(frame, x, y, cursor_frame.opacity, &shape_id);

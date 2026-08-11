@@ -4,10 +4,16 @@
 import { writeFileSync } from "node:fs"
 import { resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { CURSOR_ASSET_MANIFEST } from "../src/assets"
+import { CURSOR_ASSET_MANIFEST, SHAPE_ID_TO_ASSET } from "../src/assets"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const outputPath = resolve(__dirname, "../../cursor-engine/assets.json")
-const json = JSON.stringify(CURSOR_ASSET_MANIFEST, null, 2)
-writeFileSync(outputPath, `${json}\n`)
-console.log(`Wrote ${outputPath}`)
+const assetsPath = resolve(__dirname, "../../cursor-engine/assets.json")
+const shapeMapPath = resolve(__dirname, "../../cursor-engine/shape-map.json")
+
+const assetsJson = JSON.stringify(CURSOR_ASSET_MANIFEST, null, 2)
+writeFileSync(assetsPath, `${assetsJson}\n`)
+console.log(`Wrote ${assetsPath}`)
+
+const shapeMapJson = JSON.stringify(SHAPE_ID_TO_ASSET, null, 2)
+writeFileSync(shapeMapPath, `${shapeMapJson}\n`)
+console.log(`Wrote ${shapeMapPath}`)

@@ -1,9 +1,14 @@
+import { useEffect, useState } from "react"
 import type { CursorIconPreset, CursorSettings } from "@recordforge/contracts"
-import { defaultCursorSettings } from "@recordforge/contracts"
-import { MousePointer2, Sliders } from "lucide-react"
+import { cursorSettingsSchema, defaultCursorSettings } from "@recordforge/contracts"
+import { MousePointer2, Save, Sliders, Trash2 } from "lucide-react"
+import { getSetting, isTauri, setSetting } from "../../../lib/settings"
 import {
   Button,
+  IconButton,
+  Input,
   Label,
+  NativeSelect,
   Slider,
   Switch,
   Tabs,
@@ -14,11 +19,50 @@ import {
 } from "@recordforge/ui"
 import { RenderCursorPreset } from "./cursor-asset"
 
+/** Motion presets that map to tested smoothing parameters. */
+const MOTION_PRESETS: {
+  id: string
+  label: string
+  smoothMovement: boolean
+  smoothFactor: number
+}[] = [
+  { id: "precise", label: "Precise", smoothMovement: false, smoothFactor: 0.25 },
+  { id: "natural", label: "Natural", smoothMovement: true, smoothFactor: 0.25 },
+  { id: "cinematic", label: "Cinematic", smoothMovement: true, smoothFactor: 0.15 },
+]
+
+const CLICK_PRESETS: {
+  id: string
+  label: string
+  clickFeedback: CursorSettings["clickFeedback"]
+  clickSize?: number
+  clickDurationMs?: number
+}[] = [
+  { id: "subtle", label: "Subtle", clickFeedback: "ripple", clickSize: 24, clickDurationMs: 250 },
+  {
+    id: "standard",
+    label: "Standard",
+    clickFeedback: "ripple",
+    clickSize: 36,
+    clickDurationMs: 350,
+  },
+  {
+    id: "dramatic",
+    label: "Dramatic",
+    clickFeedback: "spotlight",
+    clickSize: 64,
+    clickDurationMs: 600,
+  },
+  { id: "off", label: "Off", clickFeedback: "none" },
+]
+
 interface CursorInspectorProps {
   settings?: CursorSettings
   onChange: (updated: Partial<CursorSettings>) => void
   onReset?: () => void
   resetLabel?: string
+  /** When true, the user can save and load named cursor presets. */
+  presetsEnabled?: boolean
 }
 
 const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
@@ -32,21 +76,77 @@ const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
   { id: "default", label: "Classic Arrow", desc: "Standard screen arrow" },
 ]
 
-const CLICK_EMPHASIS: { id: CursorSettings["clickFeedback"]; label: string }[] = [
-  { id: "ripple", label: "Ripple" },
-  { id: "pulse", label: "Pulse" },
-  { id: "spotlight", label: "Spotlight" },
-  { id: "none", label: "Off" },
-]
+const CURSOR_PRESETS_KEY = "cursorPresets"
 
 export function CursorInspector({
   settings = defaultCursorSettings,
   onChange,
   onReset,
   resetLabel = "Reset",
+  presetsEnabled = true,
 }: CursorInspectorProps) {
   const activePreset = settings.preset ?? "modern-neon"
   const scale = settings.scale ?? 1.0
+  const [savedPresets, setSavedPresets] = useState<Record<string, CursorSettings>>({})
+  const [presetName, setPresetName] = useState("")
+  const [selectedPreset, setSelectedPreset] = useState("")
+  const [presetsLoaded, setPresetsLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!presetsEnabled) return
+    async function load() {
+      try {
+        const raw = isTauri() ? await getSetting(CURSOR_PRESETS_KEY) : null
+        if (!raw) return
+        const parsed = JSON.parse(raw) as unknown
+        if (typeof parsed !== "object" || parsed === null) return
+        const entries = Object.entries(parsed as Record<string, unknown>)
+          .map(([name, value]) => {
+            const validated = cursorSettingsSchema.safeParse(value)
+            return validated.success ? ([name, validated.data] as const) : null
+          })
+          .filter((entry): entry is [string, CursorSettings] => entry !== null)
+        setSavedPresets(Object.fromEntries(entries))
+      } catch {
+        // Ignore corrupted presets.
+      } finally {
+        setPresetsLoaded(true)
+      }
+    }
+    void load()
+  }, [presetsEnabled])
+
+  async function persistPresets(next: Record<string, CursorSettings>) {
+    setSavedPresets(next)
+    if (isTauri()) {
+      try {
+        await setSetting(CURSOR_PRESETS_KEY, JSON.stringify(next))
+      } catch {
+        // Settings may be unavailable during tests/dev.
+      }
+    }
+  }
+
+  function saveCurrentPreset() {
+    const name = presetName.trim()
+    if (!name) return
+    const next = { ...savedPresets, [name]: { ...settings } }
+    void persistPresets(next)
+    setPresetName("")
+  }
+
+  function loadPreset(name: string) {
+    setSelectedPreset(name)
+    const preset = savedPresets[name]
+    if (!preset) return
+    onChange(preset)
+  }
+
+  function deletePreset(name: string) {
+    const { [name]: _, ...rest } = savedPresets
+    void persistPresets(rest)
+    if (selectedPreset === name) setSelectedPreset("")
+  }
 
   return (
     <div className="space-y-4 text-xs text-foreground p-1">
@@ -77,6 +177,71 @@ export function CursorInspector({
           onCheckedChange={(value) => onChange({ enabled: value })}
         />
       </div>
+
+      {presetsEnabled ? (
+        <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
+          <div className="flex items-center justify-between">
+            <p className="font-semibold text-[11px]">Saved presets</p>
+            {presetsLoaded && Object.keys(savedPresets).length === 0 ? (
+              <span className="text-[10px] text-muted-foreground">No saved presets</span>
+            ) : null}
+          </div>
+
+          {Object.keys(savedPresets).length > 0 ? (
+            <div className="flex items-center gap-2">
+              <NativeSelect
+                aria-label="Load cursor preset"
+                value={selectedPreset}
+                onChange={(event) => loadPreset(event.target.value)}
+                className="flex-1 text-[10px]"
+              >
+                <option value="">Load a preset…</option>
+                {Object.keys(savedPresets).map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </NativeSelect>
+              <IconButton
+                label="Delete selected preset"
+                variant="ghost"
+                size="sm"
+                className="size-7 text-recording"
+                disabled={!selectedPreset}
+                onClick={() => deletePreset(selectedPreset)}
+              >
+                <Trash2 className="size-4" />
+              </IconButton>
+            </div>
+          ) : null}
+
+          <div className="flex items-center gap-2">
+            <Input
+              type="text"
+              placeholder="Preset name"
+              value={presetName}
+              onChange={(event) => setPresetName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") saveCurrentPreset()
+              }}
+              className="h-7 flex-1 text-[10px]"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-[10px]"
+              disabled={!presetName.trim()}
+              onClick={saveCurrentPreset}
+            >
+              <Save className="size-3.5 mr-1.5" />
+              Save
+            </Button>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            Save the current cursor profile so you can reuse it on other projects.
+          </p>
+        </div>
+      ) : null}
 
       <Tabs defaultValue="basic" className="w-full">
         <TabsList className="grid w-full grid-cols-2">
@@ -170,6 +335,61 @@ function BasicCursorSettings({
       </div>
 
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Shape source</p>
+            <p className="text-[10px] text-muted-foreground">
+              Use the recorded system cursor or a preset
+            </p>
+          </div>
+          <NativeSelect
+            aria-label="Cursor shape source"
+            value={settings.shapeMode ?? "optimized"}
+            onChange={(event) =>
+              onChange({ shapeMode: event.target.value as CursorSettings["shapeMode"] })
+            }
+            className="w-36 text-[10px]"
+          >
+            <option value="optimized">Optimized</option>
+            <option value="recorded">Recorded</option>
+            <option value="preset">Preset</option>
+          </NativeSelect>
+        </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Motion style</p>
+            <p className="text-[10px] text-muted-foreground">Choose how the cursor moves</p>
+          </div>
+          <NativeSelect
+            aria-label="Cursor motion style"
+            value={
+              MOTION_PRESETS.find(
+                (p) =>
+                  p.smoothMovement === (settings.smoothMovement ?? true) &&
+                  p.smoothFactor === (settings.smoothFactor ?? 0.25),
+              )?.id ?? "custom"
+            }
+            onChange={(event) => {
+              const preset = MOTION_PRESETS.find((p) => p.id === event.target.value)
+              if (preset) {
+                onChange({
+                  smoothMovement: preset.smoothMovement,
+                  smoothFactor: preset.smoothFactor,
+                })
+              }
+            }}
+            className="w-36 text-[10px]"
+          >
+            {MOTION_PRESETS.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.label}
+              </option>
+            ))}
+            <option value="custom">Custom</option>
+          </NativeSelect>
+        </div>
+
         <div className="flex items-center justify-between">
           <div className="space-y-0.5">
             <p className="font-medium text-[11px]">Natural motion</p>
@@ -181,21 +401,41 @@ function BasicCursorSettings({
           />
         </div>
 
-        <div className="space-y-2">
-          <Label className="text-[11px] font-semibold text-muted-foreground">Click emphasis</Label>
-          <div className="grid grid-cols-4 gap-1.5">
-            {CLICK_EMPHASIS.map((kind) => (
-              <Button
-                key={kind.id}
-                variant={settings.clickFeedback === kind.id ? "secondary" : "outline"}
-                size="sm"
-                className="h-8 text-[10px] capitalize"
-                onClick={() => onChange({ clickFeedback: kind.id })}
-              >
-                {kind.label}
-              </Button>
-            ))}
+        <div className="flex items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Click style</p>
+            <p className="text-[10px] text-muted-foreground">Choose how clicks are emphasized</p>
           </div>
+          <NativeSelect
+            aria-label="Cursor click style"
+            value={
+              CLICK_PRESETS.find(
+                (p) =>
+                  p.clickFeedback === settings.clickFeedback &&
+                  (p.clickSize === undefined || p.clickSize === settings.clickSize) &&
+                  (p.clickDurationMs === undefined ||
+                    p.clickDurationMs === settings.clickDurationMs),
+              )?.id ?? "custom"
+            }
+            onChange={(event) => {
+              const preset = CLICK_PRESETS.find((p) => p.id === event.target.value)
+              if (preset) {
+                onChange({
+                  clickFeedback: preset.clickFeedback,
+                  clickSize: preset.clickSize,
+                  clickDurationMs: preset.clickDurationMs,
+                })
+              }
+            }}
+            className="w-36 text-[10px]"
+          >
+            {CLICK_PRESETS.map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.label}
+              </option>
+            ))}
+            <option value="custom">Custom</option>
+          </NativeSelect>
         </div>
 
         <div className="flex items-center justify-between pt-1">
