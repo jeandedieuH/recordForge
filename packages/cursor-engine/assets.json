@@ -1,48 +1,4 @@
 {
-  "recorded-system": {
-    "id": "recorded-system",
-    "label": "Recorded / System",
-    "viewBox": "0 0 24 24",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
-    "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
-  },
-  "clean-pointer": {
-    "id": "clean-pointer",
-    "label": "Clean Pointer",
-    "viewBox": "0 0 24 24",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
-    "isCenterHotspot": false,
-    "svg": "<path d=\"M3 3L11 20L14 13.5L20.5 10.5L3 3Z\" fill=\"#FFFFFF\" fill-opacity=\"{fillOpacity}\" stroke=\"#1E1E1E\" stroke-width=\"{strokeWidth || 1.5}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />"
-  },
-  "high-contrast": {
-    "id": "high-contrast",
-    "label": "High Contrast",
-    "viewBox": "0 0 32 32",
-    "width": 32,
-    "height": 32,
-    "hotspotX": 16,
-    "hotspotY": 16,
-    "isCenterHotspot": true,
-    "svg": "<circle cx=\"16\" cy=\"16\" r=\"13\" fill=\"{fill}\" fill-opacity=\"0.35\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />\n      <circle cx=\"16\" cy=\"16\" r=\"3\" fill=\"{stroke}\" opacity=\"{strokeOpacity}\" />"
-  },
-  "touch-dot": {
-    "id": "touch-dot",
-    "label": "Touch Dot",
-    "viewBox": "0 0 20 20",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 10,
-    "hotspotY": 10,
-    "isCenterHotspot": true,
-    "svg": "<circle cx=\"10\" cy=\"10\" r=\"7\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />"
-  },
   "default": {
     "id": "default",
     "label": "Classic Arrow",
@@ -76,20 +32,9 @@
     "isCenterHotspot": false,
     "svg": "<path d=\"M3 3L10 21L13.5 13.5L21 10L3 3Z\" fill=\"#121212\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{Math.max(2, strokeWidth)}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />"
   },
-  "highlighter-circle": {
-    "id": "highlighter-circle",
-    "label": "Highlighter",
-    "viewBox": "0 0 32 32",
-    "width": 32,
-    "height": 32,
-    "hotspotX": 16,
-    "hotspotY": 16,
-    "isCenterHotspot": true,
-    "svg": "<circle cx=\"16\" cy=\"16\" r=\"13\" fill=\"{fill}\" fill-opacity=\"0.35\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />\n      <circle cx=\"16\" cy=\"16\" r=\"3\" fill=\"{stroke}\" opacity=\"{strokeOpacity}\" />"
-  },
   "mac-pro": {
     "id": "mac-pro",
-    "label": "Mac Pro",
+    "label": "Mark Pro",
     "viewBox": "0 0 24 24",
     "width": 28,
     "height": 28,
@@ -98,37 +43,147 @@
     "isCenterHotspot": false,
     "svg": "<g transform=\"translate(0.25, 0.25)\">\n      <path d=\"M3 3L11 20L14 13.5L20.5 10.5L3 3Z\" fill=\"#FFFFFF\" fill-opacity=\"{fillOpacity}\" stroke=\"#1E1E1E\" stroke-width=\"{strokeWidth || 1.5}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
   },
-  "cyberpunk": {
-    "id": "cyberpunk",
-    "label": "Cyberpunk",
-    "viewBox": "0 0 32 32",
-    "width": 32,
-    "height": 32,
-    "hotspotX": 16,
-    "hotspotY": 16,
-    "isCenterHotspot": true,
-    "svg": "<circle cx=\"16\" cy=\"16\" r=\"12\" stroke=\"{fill}\" stroke-width=\"{strokeWidth || 2}\" fill=\"none\" stroke-dasharray=\"4 2\" />\n      <line x1=\"16\" y1=\"2\" x2=\"16\" y2=\"8\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <line x1=\"16\" y1=\"24\" x2=\"16\" y2=\"30\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <line x1=\"2\" y1=\"16\" x2=\"8\" y2=\"16\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <line x1=\"24\" y1=\"16\" x2=\"30\" y2=\"16\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <circle cx=\"16\" cy=\"16\" r=\"3\" fill=\"{fill}\" />"
-  },
-  "minimal-dot": {
-    "id": "minimal-dot",
-    "label": "Minimal Dot",
-    "viewBox": "0 0 20 20",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 10,
-    "hotspotY": 10,
-    "isCenterHotspot": true,
-    "svg": "<circle cx=\"10\" cy=\"10\" r=\"7\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />"
-  },
-  "hand-pointer": {
-    "id": "hand-pointer",
-    "label": "Hand Pointer",
+  "recorded-system": {
+    "id": "recorded-system",
+    "label": "Recorded / System",
     "viewBox": "0 0 24 24",
     "width": 28,
     "height": 28,
     "hotspotX": 0,
     "hotspotY": 0,
     "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(-0.11, 0.15)\">\n      <path d=\"M10 11V4.5C10 3.67 9.33 3 8.5 3C7.67 3 7 3.67 7 4.5V12.79L5.44 11.23C4.85 10.64 3.9 10.64 3.31 11.23C2.72 11.82 2.72 12.77 3.31 13.36L8.5 18.55C9.88 19.93 11.75 20.7 13.7 20.7H16.5C19.26 20.7 21.5 18.46 21.5 15.7V11.5C21.5 10.67 20.83 10 20 10C19.17 10 18.5 10.67 18.5 11.5V10C18.5 9.17 17.83 8.5 17 8.5C16.17 8.5 15.5 9.17 15.5 10V9.5C15.5 8.67 14.83 8 14 8C13.17 8 12.5 8.67 12.5 9.5V11\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  },
+  "shape-arrow": {
+    "id": "shape-arrow",
+    "label": "Arrow",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10 19L13 12L20 10L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  },
+  "shape-hand": {
+    "id": "shape-hand",
+    "label": "Hand",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M8 20 C6 20 4 18 4 15 L4 11 C4 10 5 9 6 9 C7 9 8 10 8 11 L8 14 L8 7 C8 6 9 5 10 5 C11 5 12 6 12 7 L12 14 L12 9 C12 8 13 7 14 7 C15 7 16 8 16 9 L16 14 L16 11 C16 10 17 9 18 9 C19 9 20 10 20 11 L20 15 C20 18 18 20 16 20 Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  },
+  "shape-ibeam": {
+    "id": "shape-ibeam",
+    "label": "I-Beam",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"12\" y1=\"4\" x2=\"12\" y2=\"20\" />\n      <line x1=\"8\" y1=\"4\" x2=\"16\" y2=\"4\" />\n      <line x1=\"8\" y1=\"20\" x2=\"16\" y2=\"20\" />\n    </g>"
+  },
+  "shape-crosshair": {
+    "id": "shape-crosshair",
+    "label": "Crosshair",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"12\" y1=\"2\" x2=\"12\" y2=\"22\" />\n      <line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" />\n    </g>"
+  },
+  "shape-wait": {
+    "id": "shape-wait",
+    "label": "Wait",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\">\n      <circle cx=\"12\" cy=\"12\" r=\"9\" />\n      <line x1=\"12\" y1=\"12\" x2=\"12\" y2=\"6\" stroke-linecap=\"round\" />\n      <line x1=\"12\" y1=\"12\" x2=\"16\" y2=\"14\" stroke-linecap=\"round\" />\n    </g>"
+  },
+  "shape-help": {
+    "id": "shape-help",
+    "label": "Help",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10 19L13 12L20 10L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n      <text x=\"14\" y=\"14\" font-size=\"8\" fill=\"{stroke}\" font-family=\"sans-serif\" font-weight=\"bold\">?</text>\n    </g>"
+  },
+  "shape-move": {
+    "id": "shape-move",
+    "label": "Move",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"12\" y1=\"4\" x2=\"12\" y2=\"20\" />\n      <line x1=\"4\" y1=\"12\" x2=\"20\" y2=\"12\" />\n      <line x1=\"12\" y1=\"4\" x2=\"9\" y2=\"7\" />\n      <line x1=\"12\" y1=\"4\" x2=\"15\" y2=\"7\" />\n      <line x1=\"4\" y1=\"12\" x2=\"7\" y2=\"9\" />\n      <line x1=\"4\" y1=\"12\" x2=\"7\" y2=\"15\" />\n      <line x1=\"20\" y1=\"12\" x2=\"17\" y2=\"9\" />\n      <line x1=\"20\" y1=\"12\" x2=\"17\" y2=\"15\" />\n      <line x1=\"12\" y1=\"20\" x2=\"9\" y2=\"17\" />\n      <line x1=\"12\" y1=\"20\" x2=\"15\" y2=\"17\" />\n    </g>"
+  },
+  "shape-resize-diagonal-1": {
+    "id": "shape-resize-diagonal-1",
+    "label": "Resize Diagonal 1",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"4\" y1=\"20\" x2=\"20\" y2=\"4\" />\n      <line x1=\"4\" y1=\"20\" x2=\"7\" y2=\"17\" />\n      <line x1=\"4\" y1=\"20\" x2=\"7\" y2=\"23\" />\n      <line x1=\"20\" y1=\"4\" x2=\"17\" y2=\"1\" />\n      <line x1=\"20\" y1=\"4\" x2=\"23\" y2=\"7\" />\n    </g>"
+  },
+  "shape-resize-diagonal-2": {
+    "id": "shape-resize-diagonal-2",
+    "label": "Resize Diagonal 2",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"4\" y1=\"4\" x2=\"20\" y2=\"20\" />\n      <line x1=\"4\" y1=\"4\" x2=\"7\" y2=\"1\" />\n      <line x1=\"4\" y1=\"4\" x2=\"1\" y2=\"7\" />\n      <line x1=\"20\" y1=\"20\" x2=\"17\" y2=\"23\" />\n      <line x1=\"20\" y1=\"20\" x2=\"23\" y2=\"17\" />\n    </g>"
+  },
+  "shape-resize-horizontal": {
+    "id": "shape-resize-horizontal",
+    "label": "Resize Horizontal",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"4\" y1=\"12\" x2=\"20\" y2=\"12\" />\n      <line x1=\"4\" y1=\"12\" x2=\"7\" y2=\"9\" />\n      <line x1=\"4\" y1=\"12\" x2=\"7\" y2=\"15\" />\n      <line x1=\"20\" y1=\"12\" x2=\"17\" y2=\"9\" />\n      <line x1=\"20\" y1=\"12\" x2=\"17\" y2=\"15\" />\n    </g>"
+  },
+  "shape-resize-vertical": {
+    "id": "shape-resize-vertical",
+    "label": "Resize Vertical",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linecap=\"round\">\n      <line x1=\"12\" y1=\"4\" x2=\"12\" y2=\"20\" />\n      <line x1=\"12\" y1=\"4\" x2=\"9\" y2=\"7\" />\n      <line x1=\"12\" y1=\"4\" x2=\"15\" y2=\"7\" />\n      <line x1=\"12\" y1=\"20\" x2=\"9\" y2=\"17\" />\n      <line x1=\"12\" y1=\"20\" x2=\"15\" y2=\"17\" />\n    </g>"
+  },
+  "shape-unavailable": {
+    "id": "shape-unavailable",
+    "label": "Unavailable",
+    "viewBox": "0 0 24 24",
+    "width": 24,
+    "height": 24,
+    "hotspotX": 12,
+    "hotspotY": 12,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\">\n      <circle cx=\"12\" cy=\"12\" r=\"8\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" />\n      <line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\" stroke-linecap=\"round\" />\n    </g>"
   }
 }

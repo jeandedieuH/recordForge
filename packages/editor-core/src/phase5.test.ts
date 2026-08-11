@@ -116,7 +116,7 @@ describe("Phase 5 cursor range commands", () => {
     const updated = executeCommand(
       createEngine(makeState()),
       createUpdateCursorRangeCommand("cursor-range", {
-        presetId: "cyberpunk",
+        presetId: "sleek-dark",
         scale: 1.8,
         locked: true,
       }),
@@ -124,7 +124,7 @@ describe("Phase 5 cursor range commands", () => {
     expect(updated.ok).toBe(true)
     if (!updated.ok) return
     expect(cursorRanges(updated.value.history.present)[0]).toMatchObject({
-      presetId: "cyberpunk",
+      presetId: "sleek-dark",
       scale: 1.8,
       locked: true,
     })

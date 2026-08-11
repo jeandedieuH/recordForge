@@ -65,14 +65,13 @@ interface CursorInspectorProps {
   presetsEnabled?: boolean
 }
 
+// The editor only supports four curated cursor styles. New presets are ignored
+// by the Zod schema, so the UI just renders the allowed choices.
 const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
+  { id: "recorded-system", label: "Recorded / System", desc: "Use the captured system cursor" },
   { id: "modern-neon", label: "Modern Neon", desc: "Luminous pointer arrow" },
   { id: "sleek-dark", label: "Sleek Dark", desc: "Stealth dark pointer" },
-  { id: "highlighter-circle", label: "Highlighter", desc: "Halo circle focus" },
-  { id: "mac-pro", label: "Mac Pro", desc: "Classic white rounded pointer" },
-  { id: "cyberpunk", label: "Cyberpunk", desc: "Tech crosshair reticle" },
-  { id: "minimal-dot", label: "Minimal Dot", desc: "Clean precision dot" },
-  { id: "hand-pointer", label: "Hand Pointer", desc: "Expressive hand icon" },
+  { id: "mac-pro", label: "Mark Pro", desc: "Classic white rounded pointer" },
   { id: "default", label: "Classic Arrow", desc: "Standard screen arrow" },
 ]
 
@@ -335,27 +334,6 @@ function BasicCursorSettings({
       </div>
 
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="space-y-0.5">
-            <p className="font-medium text-[11px]">Shape source</p>
-            <p className="text-[10px] text-muted-foreground">
-              Use the recorded system cursor or a preset
-            </p>
-          </div>
-          <NativeSelect
-            aria-label="Cursor shape source"
-            value={settings.shapeMode ?? "optimized"}
-            onChange={(event) =>
-              onChange({ shapeMode: event.target.value as CursorSettings["shapeMode"] })
-            }
-            className="w-36 text-[10px]"
-          >
-            <option value="optimized">Optimized</option>
-            <option value="recorded">Recorded</option>
-            <option value="preset">Preset</option>
-          </NativeSelect>
-        </div>
-
         <div className="flex items-center justify-between gap-2">
           <div className="space-y-0.5">
             <p className="font-medium text-[11px]">Motion style</p>

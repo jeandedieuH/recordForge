@@ -377,7 +377,6 @@ impl CursorTelemetryMetadata {
 pub struct CursorTelemetryFileV2 {
     #[serde(flatten)]
     pub metadata: CursorTelemetryMetadata,
-    #[serde(skip)]
     pub events: Vec<CursorTelemetryEventV2>,
 }
 
@@ -541,19 +540,28 @@ pub fn migrate_v1_to_v2(v1: CursorTelemetryFileV1) -> CursorTelemetryFileV2 {
 }
 
 fn derive_button_event(previous: &CursorButtonState, current: &CursorButtonState) -> String {
-    for (was_down, is_down, name) in [
+    let buttons = [
         (previous.left, current.left, "left"),
         (previous.right, current.right, "right"),
         (previous.middle, current.middle, "middle"),
         (previous.x1, current.x1, "x1"),
         (previous.x2, current.x2, "x2"),
-    ] {
+    ];
+
+    // Prefer edge transitions in the standard button order, then held states,
+    // then no event. This avoids reporting a held button when another button
+    // was the one that actually changed.
+    for (was_down, is_down, name) in buttons {
         if !was_down && is_down {
             return format!("{name}-down");
         }
+    }
+    for (was_down, is_down, name) in buttons {
         if was_down && !is_down {
             return format!("{name}-up");
         }
+    }
+    for (was_down, is_down, name) in buttons {
         if was_down && is_down {
             return format!("{name}-held");
         }
@@ -577,7 +585,7 @@ fn derive_button_event(previous: &CursorButtonState, current: &CursorButtonState
 //   8  source_x (f64)
 //   4  source_y (f64)
 //   1  button_flags
-//   1  button_event_kind
+//   1  button_event_kind (stored hint; read derives the event from adjacent button states)
 //   1  visible
 //   1  shape_index
 //
@@ -614,16 +622,6 @@ fn encode_button_event(event: &str) -> u8 {
         3
     } else {
         0
-    }
-}
-
-fn decode_button_event(kind: u8, buttons: &CursorButtonState) -> String {
-    let name = buttons.primary_button();
-    match kind {
-        1 => format!("{name}-down"),
-        2 => format!("{name}-up"),
-        3 => format!("{name}-held"),
-        _ => "none".into(),
     }
 }
 
@@ -673,6 +671,7 @@ fn write_event_record<W: Write>(
 fn read_event_record(
     data: &[u8],
     offset: usize,
+    previous_buttons: &CursorButtonState,
     shapes: &[CursorShapeInfo],
 ) -> Option<CursorTelemetryEventV2> {
     if offset + EVENT_RECORD_SIZE > data.len() {
@@ -685,7 +684,10 @@ fn read_event_record(
     let source_x = f64::from_le_bytes(slice[16..24].try_into().ok()?);
     let source_y = f32::from_le_bytes(slice[24..28].try_into().ok()?);
     let buttons = decode_button_flags(slice[28]);
-    let button_event = decode_button_event(slice[29], &buttons);
+    // button_event is derived from adjacent button states, not the stored
+    // button_event_kind. This preserves the correct button name across up
+    // events where the current frame has no button pressed.
+    let button_event = derive_button_event(previous_buttons, &buttons);
     let visible = slice[30] != 0;
     let shape_id = shape_id_for_index(slice[31], shapes);
     Some(CursorTelemetryEventV2 {
@@ -813,9 +815,11 @@ pub fn read_v2_telemetry(work_dir: &Path) -> Option<CursorTelemetryFileV2> {
     let event_count = u64::from_le_bytes(data[8..16].try_into().ok()?) as usize;
 
     let mut events = Vec::with_capacity(event_count);
+    let mut previous_buttons = CursorButtonState::default();
     for i in 0..event_count {
         let offset = 16 + i * EVENT_RECORD_SIZE;
-        let event = read_event_record(&data, offset, &metadata.shapes)?;
+        let event = read_event_record(&data, offset, &previous_buttons, &metadata.shapes)?;
+        previous_buttons = event.buttons;
         events.push(event);
     }
 

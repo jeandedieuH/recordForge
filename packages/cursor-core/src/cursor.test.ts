@@ -7,7 +7,6 @@ import {
   isCursorIdle,
   normalizeCursorTelemetry,
   resolveCursorAsset,
-  SHAPE_ID_TO_ASSET,
   timelineToCursorSourceTime,
   zoomSegmentBadges,
 } from "./index"
@@ -18,21 +17,50 @@ import {
   type TimelineState,
 } from "@recordforge/contracts"
 
+const buttons = (left: boolean, right = false, middle = false) => ({
+  left,
+  right,
+  middle,
+  x1: false,
+  x2: false,
+})
+
+const v2Event = (
+  tMs: number,
+  x: number,
+  y: number,
+  buttonEvent: string,
+  isLeft = false,
+  isRight = false,
+  isMiddle = false,
+) => ({
+  tMs,
+  rawX: x,
+  rawY: y,
+  sourceX: x,
+  sourceY: y,
+  buttons: buttons(isLeft, isRight, isMiddle),
+  buttonEvent,
+  visible: true,
+  shapeId: "arrow",
+  shapeChanged: false,
+})
+
 const telemetry = normalizeCursorTelemetry({
   recordingId: "recording",
   sourceWidth: 1024,
   sourceHeight: 768,
   events: [
-    { tMs: 0, x: 10, y: 20, button: "none", clicked: false },
-    { tMs: 100, x: 20, y: 30, button: "left", buttonEvent: "down", clicked: true },
-    { tMs: 200, x: 20, y: 30, button: "left", buttonEvent: "held", clicked: false },
+    v2Event(0, 10, 20, "none"),
+    v2Event(100, 20, 30, "left-down", true),
+    v2Event(200, 20, 30, "left-held", true),
   ],
 })
 
 describe("cursor-core", () => {
-  it("normalizes legacy telemetry with stable metadata", () => {
+  it("normalizes v2 telemetry with stable metadata", () => {
     expect(telemetry.assetId).toBe("cursor-events:recording")
-    expect(telemetry.schemaVersion).toBe(1)
+    expect(telemetry.schemaVersion).toBe(2)
     expect(telemetry.captureBounds.width).toBe(1024)
   })
 
@@ -108,31 +136,50 @@ describe("cursor-core", () => {
     expect(cursorRangeOverrideLabels(range, defaultCursorSettings)).toHaveLength(0)
   })
 
-  it("maps recorded system cursor shapes to canonical assets in optimized mode", () => {
-    const mapped = resolveCursorAsset("hand", "modern-neon", "optimized")
-    expect(mapped.id).toBe(SHAPE_ID_TO_ASSET.hand)
-    expect(mapped.effectiveId).toBe("hand-pointer")
+  it("falls back to the chosen preset for recorded system cursor shapes", () => {
+    const asset = resolveCursorAsset("hand", "modern-neon", { shapeMode: "optimized" })
+    expect(asset.id).toBe("modern-neon")
+    expect(asset.effectiveId).toBe("modern-neon")
   })
 
   it("falls back to the chosen preset when the recorded shape is unknown", () => {
-    const asset = resolveCursorAsset("unknown-shape", "modern-neon", "optimized")
-    expect(asset.id).toBe("modern-neon")
-    expect(asset.effectiveId).toBe("modern-neon")
+    const asset = resolveCursorAsset("unknown-shape", "sleek-dark", { shapeMode: "optimized" })
+    expect(asset.id).toBe("sleek-dark")
+    expect(asset.effectiveId).toBe("sleek-dark")
   })
 
   it("honors the recorded shape mode only for literal manifest ids", () => {
-    const asset = resolveCursorAsset("modern-neon", "default", "recorded")
+    const asset = resolveCursorAsset("modern-neon", "default", { shapeMode: "recorded" })
     expect(asset.id).toBe("modern-neon")
     expect(asset.effectiveId).toBe("modern-neon")
 
-    const fallback = resolveCursorAsset("hand", "default", "recorded")
+    const fallback = resolveCursorAsset("hand", "default", { shapeMode: "recorded" })
     expect(fallback.id).toBe("default")
   })
 
   it("uses the preset exclusively when shape mode is preset", () => {
-    const asset = resolveCursorAsset("hand", "cyberpunk", "preset")
-    expect(asset.id).toBe("cyberpunk")
-    expect(asset.effectiveId).toBe("cyberpunk")
+    const asset = resolveCursorAsset("hand", "mac-pro", { shapeMode: "preset" })
+    expect(asset.id).toBe("mac-pro")
+    expect(asset.effectiveId).toBe("mac-pro")
+  })
+
+  it("resolves the recorded system style to a shape-specific asset", () => {
+    const asset = resolveCursorAsset("hand-32", "recorded-system", {
+      shapes: [
+        {
+          shapeId: "hand-32",
+          hotspotX: 0,
+          hotspotY: 0,
+          width: 32,
+          height: 32,
+          kind: "hand",
+        },
+      ],
+    })
+    expect(asset.id).toBe("shape-hand:hand-32")
+    expect(asset.effectiveId).toBe("hand-32")
+    expect(asset.width).toBe(32)
+    expect(asset.height).toBe(32)
   })
 
   it("produces zoom segment source and lock badges", () => {

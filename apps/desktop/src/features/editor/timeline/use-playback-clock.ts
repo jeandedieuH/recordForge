@@ -49,6 +49,7 @@ export function usePlaybackClock({
   const [isReady, setIsReady] = useState(false)
 
   const playheadRef = useRef(playheadMs)
+  const drivenPlayheadRef = useRef(playheadMs)
   const isPlayingRef = useRef(isPlaying)
   const playbackRateRef = useRef(playbackRate)
   const clipIdRef = useRef<string | null>(null)
@@ -61,7 +62,12 @@ export function usePlaybackClock({
 
   useEffect(() => {
     playheadRef.current = playheadMs
-  }, [playheadMs])
+    // If the authoritative playhead has jumped (e.g. user seek while paused),
+    // reset the driven playhead so the frame loop starts from the right place.
+    if (Math.abs(drivenPlayheadRef.current - playheadMs) > (clock?.frameMs ?? 33) * 2) {
+      drivenPlayheadRef.current = playheadMs
+    }
+  }, [playheadMs, clock])
 
   useEffect(() => {
     isPlayingRef.current = isPlaying
@@ -101,11 +107,27 @@ export function usePlaybackClock({
     video.style.visibility = "visible"
     clipIdRef.current = position.clipId
     video.playbackRate = position.playbackRate
+
     const sourceSeconds = position.sourceMs / 1000
-    const driftSeconds = Math.abs(video.currentTime - sourceSeconds)
-    if (driftSeconds > clock.frameMs / 1000 / 2) {
-      video.currentTime = sourceSeconds
+    const previousDrivenMs = drivenPlayheadRef.current
+    const playheadJumpMs = Math.abs(playheadRef.current - previousDrivenMs)
+
+    // The playhead is driven from the video frame clock during playback, so
+    // we only force the video element to a new time when the playhead has
+    // jumped (user seek / boundary) or when we are not currently playing.
+    // Chasing the video time on every playhead update creates a feedback loop
+    // where the playhead appears to dance between two frames.
+    const shouldSeekVideo = !isPlayingRef.current || playheadJumpMs > clock.frameMs * 2
+    if (shouldSeekVideo) {
+      const driftSeconds = Math.abs(video.currentTime - sourceSeconds)
+      if (driftSeconds > (clock.frameMs * 2) / 1000) {
+        video.currentTime = sourceSeconds
+      }
     }
+
+    // Keep the driven playhead in sync with the authoritative playhead so the
+    // frame loop does not fight a user seek or boundary transition.
+    drivenPlayheadRef.current = playheadRef.current
     setIsReady(true)
   }, [clock, videoRef])
 
@@ -132,14 +154,19 @@ export function usePlaybackClock({
       })
       if (mapped) {
         const rounded = clock.roundToFrame(mapped.timelineMs)
-        clock.reportDrift(playheadRef.current, rounded)
-        if (shouldCorrectDrift(clock, playheadRef.current, rounded)) {
+        clock.reportDrift(drivenPlayheadRef.current, rounded)
+        // Drive the playhead from the video frame clock. The driven playhead is
+        // updated immediately here so we do not need to wait for the next React
+        // render to see the new position; the playhead ref follows on the next
+        // render and keeps the sync effect from fighting user seeks.
+        if (shouldCorrectDrift(clock, drivenPlayheadRef.current, rounded)) {
           onSeekRef.current(rounded)
+          drivenPlayheadRef.current = rounded
         }
         clipIdRef.current = mapped.clipId
       }
 
-      const position = clock.mapTimelineToSource(playheadRef.current, playbackRateRef.current)
+      const position = clock.mapTimelineToSource(drivenPlayheadRef.current, playbackRateRef.current)
       if (!position) return
       if (sourceMs >= position.clip.sourceOutMs - clock.frameMs * 2) {
         const boundary = clock.nextBoundary(playheadRef.current)
@@ -226,11 +253,12 @@ export function usePlaybackClock({
       if (!isPlayingRef.current || !clock) return
       const elapsed = now - lastTime
       lastTime = now
-      const position = clock.mapTimelineToSource(playheadRef.current, playbackRateRef.current)
+      const position = clock.mapTimelineToSource(drivenPlayheadRef.current, playbackRateRef.current)
       if (!position) {
-        const next = clock.advanceFrame(playheadRef.current, elapsed, playbackRateRef.current)
-        if (next !== playheadRef.current) {
+        const next = clock.advanceFrame(drivenPlayheadRef.current, elapsed, playbackRateRef.current)
+        if (next !== drivenPlayheadRef.current) {
           onSeekRef.current(next)
+          drivenPlayheadRef.current = next
         }
       }
       gapRafRef.current = requestAnimationFrame(step)

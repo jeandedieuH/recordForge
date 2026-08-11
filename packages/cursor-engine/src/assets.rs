@@ -3,6 +3,8 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::CursorShapeInfo;
+
 /// Static cursor asset data shared with the React overlay.
 ///
 /// The manifest is generated from `packages/cursor-core/src/assets.ts` and
@@ -35,17 +37,41 @@ pub fn resolve_cursor_asset(id: &str) -> Option<&'static CursorAsset> {
 
 /// Resolve a shape id (usually from telemetry) to a canonical asset id.
 ///
-/// The map lets the renderer use the recorded system cursor shape when it is
-/// known, while still falling back to the curated preset for unknown shapes.
-pub fn resolve_cursor_shape_id(shape_id: &str) -> String {
+/// The map contains two kinds of lookups:
+///   * direct asset ids (`modern-neon`, `shape-arrow`, etc.) pass through;
+///   * recorded system `kind` strings (`arrow`, `hand`, etc.) are mapped to the
+///     generic shape asset for that kind;
+///   * V2 `shapeId` hashes are looked up in the provided `shapes` metadata to
+///     find their `kind`, then mapped to the generic shape asset.
+pub fn resolve_cursor_shape_id(shape_id: &str, shapes: &[CursorShapeInfo]) -> String {
+    if shape_id.is_empty() {
+        return shape_id.to_string();
+    }
+
+    // Direct asset ids are stored in the manifest.
+    if resolve_cursor_asset(shape_id).is_some() {
+        return shape_id.to_string();
+    }
+
     static SHAPE_MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     let map = SHAPE_MAP.get_or_init(|| {
         serde_json::from_str(include_str!("../shape-map.json"))
             .expect("embedded cursor shape map should be valid JSON")
     });
-    map.get(shape_id)
-        .map(|s| s.clone())
-        .unwrap_or_else(|| shape_id.to_string())
+
+    // Legacy V1 kind strings and the recorded-system `recorded-system` entry.
+    if let Some(asset_id) = map.get(shape_id) {
+        return asset_id.clone();
+    }
+
+    // V2 shape hashes: find the metadata for this hash and map from its kind.
+    if let Some(shape) = shapes.iter().find(|s| s.shape_id == shape_id) {
+        if let Some(asset_id) = map.get(&shape.kind) {
+            return asset_id.clone();
+        }
+    }
+
+    shape_id.to_string()
 }
 
 /// Resolve an asset id, falling back to a default arrow cursor.

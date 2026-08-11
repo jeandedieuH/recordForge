@@ -1,4 +1,4 @@
-use crate::capture::cursor::CursorTelemetryFile;
+use cursor_engine::CursorTelemetryFile;
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg;
@@ -106,30 +106,22 @@ impl CursorRenderer {
         if canvas.width == 0 || canvas.height == 0 {
             return Err("cursor canvas dimensions must be positive".into());
         }
-        if telemetry.source_width == 0 || telemetry.source_height == 0 {
+        if telemetry.source_width == 0.0 || telemetry.source_height == 0.0 {
             return Err("cursor telemetry dimensions must be positive".into());
         }
         if segments.is_empty() {
             return Err("cursor renderer requires at least one video segment".into());
         }
 
-        let telemetry_json = serde_json::to_string(&telemetry)
-            .map_err(|e| format!("failed to serialize cursor telemetry: {e}"))?;
-        let options_json = serde_json::to_string(&cursor_engine::CursorEngineOptions::default())
-            .map_err(|e| format!("failed to serialize cursor engine options: {e}"))?;
-
-        let engine = cursor_engine::CursorEngine::new(
-            serde_json::from_str(&telemetry_json)
-                .map_err(|e| format!("failed to parse cursor telemetry: {e}"))?,
-            serde_json::from_str(&options_json)
-                .map_err(|e| format!("failed to parse cursor engine options: {e}"))?,
-        )?;
-
         let padding = canvas.padding as f64;
         let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
         let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
-        let fit_scale = (content_width / telemetry.source_width as f64)
-            .min(content_height / telemetry.source_height as f64);
+        let fit_scale =
+            (content_width / telemetry.source_width).min(content_height / telemetry.source_height);
+
+        let options = cursor_engine::CursorEngineOptions::default();
+        let engine = cursor_engine::CursorEngine::new(telemetry, options)
+            .map_err(|e| format!("failed to build cursor engine: {e}"))?;
         let cursor_scale = settings.scale.clamp(0.2, 5.0) * fit_scale;
 
         Ok(Self {
@@ -161,7 +153,10 @@ impl CursorRenderer {
 
         // Optimized mode: map recorded system shape ids to our canonical assets,
         // then fall back to the preset when no mapping exists.
-        let mapped = cursor_engine::assets::resolve_cursor_shape_id(frame_shape_id);
+        let mapped = cursor_engine::assets::resolve_cursor_shape_id(
+            frame_shape_id,
+            &self.engine.telemetry().shapes,
+        );
         if cursor_engine::assets::resolve_cursor_asset(&mapped).is_some() {
             return mapped;
         }
@@ -810,45 +805,51 @@ fn draw_ring(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::cursor::CursorTelemetryEvent;
     use crate::exports::RenderCropFloat;
 
-    fn telemetry() -> CursorTelemetryFile {
-        CursorTelemetryFile::new(
-            "recording".into(),
-            100,
-            100,
-            crate::capture::cursor::CursorCaptureBounds {
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
-            },
-            vec![
-                CursorTelemetryEvent {
+    fn make_v2_telemetry() -> CursorTelemetryFile {
+        CursorTelemetryFile {
+            schema_version: 2,
+            asset_id: "cursor-events:recording".into(),
+            recording_id: "recording".into(),
+            source_width: 100.0,
+            source_height: 100.0,
+            sample_rate_hz: 60.0,
+            capture_bounds: Some(cursor_engine::CursorCaptureBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }),
+            coordinate_transform: cursor_engine::CursorCoordinateTransform::default(),
+            shapes: Vec::new(),
+            click_window_ms: 350,
+            health: cursor_engine::CursorTelemetryHealth::Healthy,
+            event_count: 2,
+            index: Vec::new(),
+            event_file: "cursor_events.bin".into(),
+            timebase: cursor_engine::CursorTelemetryTimebase::default(),
+            events: vec![
+                cursor_engine::CursorEvent {
                     t_ms: 0,
                     x: 10.0,
                     y: 20.0,
-                    clicked: false,
-                    button: "none".into(),
-                    button_event: "none".into(),
                     visible: true,
-                    shape_id: None,
-                    shape_changed: false,
+                    ..Default::default()
                 },
-                CursorTelemetryEvent {
+                cursor_engine::CursorEvent {
                     t_ms: 100,
                     x: 40.0,
                     y: 50.0,
+                    button: Some("left".into()),
+                    button_event: Some("down".into()),
                     clicked: true,
-                    button: "left".into(),
-                    button_event: "down".into(),
                     visible: true,
-                    shape_id: None,
-                    shape_changed: false,
+                    ..Default::default()
                 },
             ],
-        )
+        }
+        .normalize()
     }
 
     fn segments() -> Vec<RenderSegment> {
@@ -884,7 +885,7 @@ mod tests {
     fn renders_a_non_empty_cursor_frame() {
         let mut renderer = CursorRenderer::new(
             CursorSettings::default(),
-            telemetry(),
+            make_v2_telemetry(),
             &segments(),
             &test_canvas(100, 100, 0),
         )
@@ -905,7 +906,7 @@ mod tests {
 
         let mut renderer = CursorRenderer::new(
             settings,
-            telemetry(),
+            make_v2_telemetry(),
             &segments(),
             &test_canvas(100, 100, 0),
         )
@@ -938,7 +939,7 @@ mod tests {
 
         let mut renderer = CursorRenderer::new(
             settings,
-            telemetry(),
+            make_v2_telemetry(),
             &segments(),
             &test_canvas(100, 100, 0),
         )
@@ -982,7 +983,7 @@ mod tests {
         let telemetry = serde_json::from_str::<CursorTelemetryFile>(fixture)
             .expect("shared cursor fixture should parse")
             .normalize();
-        assert_eq!(telemetry.schema_version, 1);
+        assert_eq!(telemetry.schema_version, 2);
         assert_eq!(telemetry.asset_id, "asset-cursor-events");
         let renderer = CursorRenderer::new(
             CursorSettings::default(),
@@ -1002,7 +1003,7 @@ mod tests {
 
     #[test]
     fn does_not_render_hidden_cursor_events() {
-        let mut data = telemetry();
+        let mut data = make_v2_telemetry();
         data.events[1].visible = false;
         let mut renderer = CursorRenderer::new(
             CursorSettings::default(),
@@ -1037,7 +1038,7 @@ mod tests {
         };
         let renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),
-            telemetry(),
+            make_v2_telemetry(),
             &segments(),
             &[zoom],
             &test_canvas(200, 200, 20),

@@ -2,17 +2,47 @@ import { describe, expect, it } from "vitest"
 import { defaultCursorSettings } from "@recordforge/contracts"
 import { createCursorEngine, normalizeCursorTelemetry, fitCursorPoint } from "./index"
 
+const buttons = (left: boolean, right = false, middle = false) => ({
+  left,
+  right,
+  middle,
+  x1: false,
+  x2: false,
+})
+
+const v2Event = (
+  tMs: number,
+  x: number,
+  y: number,
+  buttonEvent: string,
+  isLeft = false,
+  isRight = false,
+  isMiddle = false,
+  visible = true,
+) => ({
+  tMs,
+  rawX: x,
+  rawY: y,
+  sourceX: x,
+  sourceY: y,
+  buttons: buttons(isLeft, isRight, isMiddle),
+  buttonEvent,
+  visible,
+  shapeId: "arrow",
+  shapeChanged: false,
+})
+
 const telemetry = normalizeCursorTelemetry({
   recordingId: "recording",
   sourceWidth: 1920,
   sourceHeight: 1080,
   sampleRateHz: 60,
   events: [
-    { tMs: 0, x: 0, y: 0, visible: true, clicked: false, button: "none", buttonEvent: "none" },
-    { tMs: 100, x: 100, y: 0, visible: true, clicked: true, button: "left", buttonEvent: "down" },
-    { tMs: 200, x: 100, y: 0, visible: true, clicked: false, button: "left", buttonEvent: "held" },
-    { tMs: 500, x: 500, y: 0, visible: true, clicked: false, button: "none", buttonEvent: "none" },
-    { tMs: 600, x: 500, y: 0, visible: true, clicked: false, button: "none", buttonEvent: "none" },
+    v2Event(0, 0, 0, "none"),
+    v2Event(100, 100, 0, "left-down", true),
+    v2Event(200, 100, 0, "left-held", true),
+    v2Event(500, 500, 0, "none"),
+    v2Event(600, 500, 0, "none"),
   ],
 })
 
@@ -38,10 +68,10 @@ describe("cursor engine", () => {
       sourceHeight: 1080,
       sampleRateHz: 60,
       events: [
-        { tMs: 0, x: 0, y: 0, visible: true },
-        { tMs: 16, x: 10, y: 5, visible: true },
-        { tMs: 32, x: 20, y: 10, visible: true },
-        { tMs: 48, x: 30, y: 15, visible: true },
+        v2Event(0, 0, 0, "none"),
+        v2Event(16, 10, 5, "none"),
+        v2Event(32, 20, 10, "none"),
+        v2Event(48, 30, 15, "none"),
       ],
     })
     const engine = createCursorEngine(dense)
@@ -69,9 +99,9 @@ describe("cursor engine", () => {
       sourceHeight: 1080,
       sampleRateHz: 60,
       events: [
-        { tMs: 0, x: 0, y: 0, visible: true },
-        { tMs: 16, x: 10, y: 10, visible: true },
-        { tMs: 2000, x: 500, y: 500, visible: true },
+        v2Event(0, 0, 0, "none"),
+        v2Event(16, 10, 10, "none"),
+        v2Event(2000, 500, 500, "none"),
       ],
     })
     const engine = createCursorEngine(gapped, { gapThresholdMs: 100 })
@@ -88,9 +118,9 @@ describe("cursor engine", () => {
       sourceHeight: 1080,
       sampleRateHz: 60,
       events: [
-        { tMs: 0, x: 0, y: 0, visible: true },
-        { tMs: 16, x: 10, y: 10, visible: true },
-        { tMs: 2000, x: 500, y: 500, visible: true },
+        v2Event(0, 0, 0, "none"),
+        v2Event(16, 10, 10, "none"),
+        v2Event(2000, 500, 500, "none"),
       ],
     })
     const engine = createCursorEngine(gapped, { gapThresholdMs: 100, smoothingWindowSize: 5 })
@@ -108,9 +138,9 @@ describe("cursor engine", () => {
       sourceHeight: 1080,
       sampleRateHz: 60,
       events: [
-        { tMs: 0, x: 100, y: 100, visible: true },
-        { tMs: 16, x: 100, y: 100, visible: true },
-        { tMs: 32, x: 100, y: 100, visible: true },
+        v2Event(0, 100, 100, "none"),
+        v2Event(16, 100, 100, "none"),
+        v2Event(32, 100, 100, "none"),
       ],
     })
     const engine = createCursorEngine(idle, { idleFadeDurationMs: 0 })

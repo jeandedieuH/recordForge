@@ -5,21 +5,44 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Raw cursor telemetry event, compatible with the TypeScript `CursorTelemetryEvent` schema.
+/// Raw cursor telemetry event. Supports both V2 (source/raw split, button
+/// events, shape hashes) and legacy V1 (x/y, clicked, button) inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CursorEvent {
     pub t_ms: u64,
-    pub x: f64,
-    pub y: f64,
-    pub visible: bool,
-    pub clicked: bool,
+    /// V2 physical pixel on the virtual desktop.
     #[serde(default)]
-    pub button: Option<String>,
+    pub raw_x: Option<f64>,
+    #[serde(default)]
+    pub raw_y: Option<f64>,
+    /// V2 pre-transformed source coordinate (matches the output frame).
+    #[serde(default)]
+    pub source_x: Option<f64>,
+    #[serde(default)]
+    pub source_y: Option<f64>,
+    /// V1 coordinates for backward-compatible fixtures.
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    /// V2 independent button states.
+    #[serde(default)]
+    pub buttons: CursorButtonState,
+    /// V2 button event such as `left-down` or `none`.
     #[serde(default)]
     pub button_event: Option<String>,
+    /// V1 button label.
+    #[serde(default)]
+    pub button: Option<String>,
+    /// V1 synthetic click flag.
+    #[serde(default)]
+    pub clicked: bool,
+    pub visible: bool,
+    /// Stable-ish hash derived from the current system cursor icon.
     #[serde(default)]
     pub shape_id: Option<String>,
+    /// True when this sample is the first after the system cursor shape changed.
     #[serde(default)]
     pub shape_changed: bool,
 }
@@ -28,12 +51,17 @@ impl Default for CursorEvent {
     fn default() -> Self {
         Self {
             t_ms: 0,
+            raw_x: None,
+            raw_y: None,
+            source_x: None,
+            source_y: None,
             x: 0.0,
             y: 0.0,
-            visible: true,
-            clicked: false,
-            button: None,
+            buttons: CursorButtonState::default(),
             button_event: None,
+            button: None,
+            clicked: false,
+            visible: true,
             shape_id: None,
             shape_changed: false,
         }
@@ -41,24 +69,81 @@ impl Default for CursorEvent {
 }
 
 impl CursorEvent {
-    fn button_event_str(&self) -> &str {
-        self.button_event.as_deref().unwrap_or("none")
+    /// Resolve the source coordinates, migrating V1 `x`/`y` when V2 values are absent.
+    pub fn source(&self) -> (f64, f64) {
+        let x = self.source_x.unwrap_or(self.x);
+        let y = self.source_y.unwrap_or(self.y);
+        (x, y)
+    }
+
+    fn button_event_str(&self) -> String {
+        if let Some(ref be) = self.button_event {
+            if !be.is_empty() {
+                return be.clone();
+            }
+        }
+        // Legacy V1 fallback: reconstruct from button + clicked.
+        let button = self.button.as_deref().unwrap_or("none");
+        if self.clicked {
+            return format!("{}-down", button);
+        }
+        if self.buttons.any_down() {
+            return format!("{}-down", button);
+        }
+        "none".into()
     }
 
     fn is_click_down(&self) -> bool {
         let be = self.button_event_str();
-        be.ends_with("-down") || be == "down" || (be == "none" && self.clicked)
+        be == "down" || (be != "none" && be.ends_with("-down"))
     }
 
     fn click_button(&self) -> CursorButton {
-        if let Some(b) = self.button.as_deref().and_then(CursorButton::from_known) {
-            return b;
+        if let Some(ref b) = self.button {
+            if let Some(btn) = CursorButton::from_known(b) {
+                return btn;
+            }
         }
         let be = self.button_event_str();
         if let Some(prefix) = be.split('-').next() {
             return CursorButton::from(prefix);
         }
         CursorButton::Left
+    }
+}
+
+/// Independent button states with per-button edge detection.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorButtonState {
+    pub left: bool,
+    pub right: bool,
+    pub middle: bool,
+    pub x1: bool,
+    pub x2: bool,
+}
+
+impl CursorButtonState {
+    /// Returns true if any button is currently pressed.
+    pub fn any_down(&self) -> bool {
+        self.left || self.right || self.middle || self.x1 || self.x2
+    }
+
+    /// Returns the first pressed button, or "none" if no button is pressed.
+    pub fn primary_button(&self) -> &'static str {
+        if self.left {
+            "left"
+        } else if self.right {
+            "right"
+        } else if self.middle {
+            "middle"
+        } else if self.x1 {
+            "x1"
+        } else if self.x2 {
+            "x2"
+        } else {
+            "none"
+        }
     }
 }
 
@@ -128,7 +213,50 @@ fn one() -> f64 {
     1.0
 }
 
-/// Telemetry file schema, camelCase to match the TypeScript contracts.
+/// 2x2 linear transform plus translation for raw-to-source coordinate mapping.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorCoordinateTransform {
+    #[serde(default)]
+    pub a00: f64,
+    #[serde(default)]
+    pub a01: f64,
+    #[serde(default)]
+    pub a10: f64,
+    #[serde(default)]
+    pub a11: f64,
+    #[serde(default)]
+    pub b0: f64,
+    #[serde(default)]
+    pub b1: f64,
+}
+
+/// Cursor shape metadata captured with V2 telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorShapeInfo {
+    pub shape_id: String,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub kind: String,
+}
+
+impl Default for CursorShapeInfo {
+    fn default() -> Self {
+        Self {
+            shape_id: String::new(),
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 0,
+            kind: "arrow".into(),
+        }
+    }
+}
+
+/// Telemetry file schema, camelCase to match the TypeScript V2 contracts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorTelemetryFile {
@@ -141,17 +269,66 @@ pub struct CursorTelemetryFile {
     pub source_width: f64,
     pub source_height: f64,
     #[serde(default)]
-    pub sample_rate_hz: f64,
-    #[serde(default)]
     pub capture_bounds: Option<CursorCaptureBounds>,
     #[serde(default)]
-    pub dpi_scale: Option<CursorDpiScale>,
+    pub coordinate_transform: CursorCoordinateTransform,
+    #[serde(default)]
+    pub shapes: Vec<CursorShapeInfo>,
+    #[serde(default)]
+    pub click_window_ms: u64,
+    #[serde(default = "default_health")]
+    pub health: CursorTelemetryHealth,
+    #[serde(default)]
+    pub event_count: u64,
+    #[serde(default)]
+    pub index: Vec<CursorEventIndexEntry>,
+    #[serde(default)]
+    pub event_file: String,
+    #[serde(default)]
+    pub timebase: CursorTelemetryTimebase,
+    #[serde(default)]
+    pub sample_rate_hz: f64,
     #[serde(default)]
     pub events: Vec<CursorEvent>,
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorTelemetryHealth {
+    #[default]
+    Healthy,
+    ShapesUnavailable,
+    PositionUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorEventIndexEntry {
+    pub event_index: u64,
+    pub t_ms: u64,
+    pub file_offset: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorTelemetryTimebase {
+    pub unit: CursorTimebaseUnit,
+    pub ticks_per_second: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorTimebaseUnit {
+    #[default]
+    Ms,
+}
+
 fn default_schema_version() -> u32 {
-    1
+    2
+}
+
+fn default_health() -> CursorTelemetryHealth {
+    CursorTelemetryHealth::Healthy
 }
 
 impl CursorTelemetryFile {
@@ -164,16 +341,20 @@ impl CursorTelemetryFile {
                 height: self.source_height,
             });
         }
-        if self.dpi_scale.is_none() {
-            self.dpi_scale = Some(CursorDpiScale { x: 1.0, y: 1.0 });
-        }
         if self.sample_rate_hz <= 0.0 {
             self.sample_rate_hz = 60.0;
         }
+        if self.events.is_empty() && self.event_count > 0 {
+            // Preserve the reported count when no in-memory events are loaded.
+        } else {
+            self.event_count = self.events.len() as u64;
+        }
         self.events.sort_by_key(|event| event.t_ms);
-        // Remove events with missing coordinates.
-        self.events
-            .retain(|event| event.x.is_finite() && event.y.is_finite());
+        // Remove events with missing source coordinates.
+        self.events.retain(|event| {
+            let (x, y) = event.source();
+            x.is_finite() && y.is_finite()
+        });
         self
     }
 }
@@ -350,7 +531,7 @@ struct PreparedEvent {
     denoised_x: f64,
     denoised_y: f64,
     visible: bool,
-    shape_id: Option<String>,
+    shape_id: String,
     speed_px_per_sec: f64,
     last_motion_ms: u64,
 }
@@ -371,8 +552,6 @@ pub struct CursorEngine {
     times: Vec<u64>,
     segment_start_index: Vec<usize>,
     clicks: Vec<ClickEntry>,
-    source_scale_x: f64,
-    source_scale_y: f64,
 }
 
 impl CursorEngine {
@@ -390,13 +569,6 @@ impl CursorEngine {
         let mut segment_start_index = Vec::with_capacity(telemetry.events.len());
         let mut clicks = Vec::new();
 
-        let bounds = telemetry.capture_bounds.as_ref().unwrap();
-        let dpi = telemetry.dpi_scale.as_ref().unwrap();
-        let capture_width = bounds.width.max(1.0);
-        let capture_height = bounds.height.max(1.0);
-        let source_scale_x = (telemetry.source_width / capture_width) * dpi.x;
-        let source_scale_y = (telemetry.source_height / capture_height) * dpi.y;
-
         let expected_interval_ms = 1000.0 / telemetry.sample_rate_hz;
         // The gap threshold is the larger of a multiple of the expected sample
         // interval and an absolute floor. This must stay in sync with the
@@ -405,22 +577,22 @@ impl CursorEngine {
             .max(options.min_gap_threshold_ms);
 
         for (index, event) in telemetry.events.iter().enumerate() {
-            let raw_x = event.x;
-            let raw_y = event.y;
+            let (source_x, source_y) = event.source();
+            let shape_id = event.shape_id.clone().unwrap_or_default();
 
             let (denoised_x, denoised_y) = if index > 0 {
                 let previous: &PreparedEvent = &prepared[index - 1];
                 let dt = (event.t_ms.saturating_sub(previous.t_ms)) as f64;
-                let dx = raw_x - previous.denoised_x;
-                let dy = raw_y - previous.denoised_y;
+                let dx = source_x - previous.denoised_x;
+                let dy = source_y - previous.denoised_y;
                 let displacement = (dx * dx + dy * dy).sqrt();
                 if dt < expected_interval_ms * 2.0 && displacement < options.jitter_threshold_px {
                     (previous.denoised_x, previous.denoised_y)
                 } else {
-                    (raw_x, raw_y)
+                    (source_x, source_y)
                 }
             } else {
-                (raw_x, raw_y)
+                (source_x, source_y)
             };
 
             let speed_px_per_sec = if index > 0 {
@@ -484,7 +656,7 @@ impl CursorEngine {
                 denoised_x,
                 denoised_y,
                 visible: event.visible,
-                shape_id: event.shape_id.clone(),
+                shape_id,
                 speed_px_per_sec,
                 last_motion_ms,
             });
@@ -499,8 +671,6 @@ impl CursorEngine {
             times,
             segment_start_index,
             clicks,
-            source_scale_x,
-            source_scale_y,
         })
     }
 
@@ -579,7 +749,7 @@ impl CursorEngine {
             source_y,
             visible,
             opacity,
-            shape_id: event.shape_id.clone().unwrap_or_default(),
+            shape_id: event.shape_id.clone(),
             is_idle,
             active_clicks: self.active_clicks(time_ms, settings),
             velocity_px_per_sec: event.speed_px_per_sec,
@@ -594,11 +764,8 @@ impl CursorEngine {
         target_height: f64,
         padding: f64,
     ) -> CursorPoint {
-        let raw_x = source_x * self.source_scale_x;
-        let raw_y = source_y * self.source_scale_y;
-
-        let clamped_x = raw_x.clamp(0.0, self.telemetry.source_width);
-        let clamped_y = raw_y.clamp(0.0, self.telemetry.source_height);
+        let clamped_x = source_x.clamp(0.0, self.telemetry.source_width);
+        let clamped_y = source_y.clamp(0.0, self.telemetry.source_height);
 
         let content_width = (target_width - padding * 2.0).max(1.0);
         let content_height = (target_height - padding * 2.0).max(1.0);
@@ -806,14 +973,21 @@ mod tests {
 
     fn make_telemetry(events: Vec<CursorEvent>) -> CursorTelemetryFile {
         CursorTelemetryFile {
-            schema_version: 1,
+            schema_version: 2,
             asset_id: "test".into(),
             recording_id: "test".into(),
             source_width: 1920.0,
             source_height: 1080.0,
             sample_rate_hz: 60.0,
             capture_bounds: None,
-            dpi_scale: None,
+            coordinate_transform: CursorCoordinateTransform::default(),
+            shapes: Vec::new(),
+            click_window_ms: 350,
+            health: CursorTelemetryHealth::Healthy,
+            event_count: events.len() as u64,
+            index: Vec::new(),
+            event_file: "cursor_events.bin".into(),
+            timebase: CursorTelemetryTimebase::default(),
             events,
         }
         .normalize()

@@ -1158,7 +1158,12 @@ fn apply_cursor_overlay(
             _ => {}
         }
 
-        let telemetry = crate::capture::cursor::v2_to_v1_telemetry(&v2);
+        let telemetry_json = serde_json::to_string(&v2)
+            .map_err(|e| InternalError::Media(format!("serialize cursor telemetry: {e}")))?;
+        let telemetry: cursor_engine::CursorTelemetryFile = serde_json::from_str(&telemetry_json)
+            .map_err(|e| {
+            InternalError::Media(format!("parse cursor telemetry for engine: {e}"))
+        })?;
         if telemetry.events.is_empty() {
             continue;
         }

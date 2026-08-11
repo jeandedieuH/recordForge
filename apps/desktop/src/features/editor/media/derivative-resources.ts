@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import {
   thumbnailManifestSchema,
@@ -95,6 +95,13 @@ export function useWaveformResources(outputs: MediaAudioTrackOutput[]): Waveform
       })),
     [outputs],
   )
+  const requestsKey = useMemo(
+    () => requests.map((request) => `${request.streamIndex}:${request.path}`).join("|"),
+    [requests],
+  )
+  const lastRequestsKeyRef = useRef("")
+  const lastRetryTokenRef = useRef(0)
+
   const [retryToken, setRetryToken] = useState(0)
   const [byStream, setByStream] = useState<Map<number, DerivativeResource<WaveformData>>>(
     () => new Map(),
@@ -102,6 +109,14 @@ export function useWaveformResources(outputs: MediaAudioTrackOutput[]): Waveform
   const retry = useCallback(() => setRetryToken((value) => value + 1), [])
 
   useEffect(() => {
+    // Avoid refetching when only the array identity changes; content and retry
+    // intent are the real triggers.
+    if (requestsKey === lastRequestsKeyRef.current && retryToken === lastRetryTokenRef.current) {
+      return
+    }
+    lastRequestsKeyRef.current = requestsKey
+    lastRetryTokenRef.current = retryToken
+
     let isMounted = true
     if (requests.length === 0) {
       setByStream(new Map())
@@ -130,7 +145,7 @@ export function useWaveformResources(outputs: MediaAudioTrackOutput[]): Waveform
     return () => {
       isMounted = false
     }
-  }, [requests, retryToken])
+  }, [requests, requestsKey, retryToken])
 
   const status = useMemo<WaveformResources["status"]>(() => {
     if (requests.length === 0) return "missing"

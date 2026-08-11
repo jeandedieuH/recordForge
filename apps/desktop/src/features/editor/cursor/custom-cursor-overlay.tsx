@@ -67,8 +67,12 @@ export function CustomCursorOverlay({
   )
 
   const asset = useMemo(
-    () => resolveCursorAsset(frame.shapeId, cursorSettings.preset, cursorSettings.shapeMode),
-    [frame.shapeId, cursorSettings.preset, cursorSettings.shapeMode],
+    () =>
+      resolveCursorAsset(frame.shapeId, cursorSettings.preset, {
+        shapeMode: cursorSettings.shapeMode,
+        shapes: telemetry.shapes,
+      }),
+    [frame.shapeId, cursorSettings.preset, cursorSettings.shapeMode, telemetry],
   )
 
   if (!containerWidth || !containerHeight) return null
@@ -165,8 +169,8 @@ export function CustomCursorOverlay({
         <div
           className="pointer-events-none absolute"
           style={{
-            left: posX,
-            top: posY,
+            left: posX - asset.hotspotX * cursorScale,
+            top: posY - asset.hotspotY * cursorScale,
             transform: asset.isCenterHotspot
               ? `translate(-50%, -50%) scale(${cursorScale})`
               : `scale(${cursorScale})`,

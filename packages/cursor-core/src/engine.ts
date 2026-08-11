@@ -58,9 +58,7 @@ interface PreparedEvent {
   visible: boolean
   shapeId: string
   shapeChanged: boolean
-  button: CursorTelemetryEvent["button"]
   buttonEvent: CursorTelemetryEvent["buttonEvent"]
-  clicked: boolean
   segmentId: number
   speedPxPerSec: number
   isMotion: boolean
@@ -95,15 +93,7 @@ function distance(left: CursorPoint, right: CursorPoint): number {
   return Math.hypot(left.x - right.x, left.y - right.y)
 }
 
-function normalizeButton(value: string | undefined): CursorTelemetryEvent["button"] {
-  if (value === "left" || value === "right" || value === "middle") return value
-  return "none"
-}
-
 function parseClickButton(event: CursorTelemetryEvent): "left" | "right" | "middle" {
-  const raw = event.button
-  if (raw === "left" || raw === "right" || raw === "middle") return raw
-
   const be = event.buttonEvent ?? "none"
   const prefix = be.split("-")[0]
   if (prefix === "left" || prefix === "right" || prefix === "middle") return prefix
@@ -113,9 +103,7 @@ function parseClickButton(event: CursorTelemetryEvent): "left" | "right" | "midd
 
 function isClickEdge(event: CursorTelemetryEvent): boolean {
   const be = event.buttonEvent ?? "none"
-  if (be.endsWith("-down")) return true
-  if (be === "down") return true
-  return be === "none" && event.clicked === true
+  return be !== "none" && be.endsWith("-down")
 }
 
 function getSmoothingAlpha(settings: CursorSettings): number {
@@ -180,15 +168,13 @@ export function createCursorEngine(
 
   for (let index = 0; index < count; index++) {
     const event = events[index]
-    const rawX = Number.isFinite((event as { rawX?: number }).rawX)
-      ? ((event as { rawX?: number }).rawX ?? event.x)
-      : event.x
-    const rawY = Number.isFinite((event as { rawY?: number }).rawY)
-      ? ((event as { rawY?: number }).rawY ?? event.y)
-      : event.y
+    const rawX = event.rawX
+    const rawY = event.rawY
+    const sourceX = event.sourceX
+    const sourceY = event.sourceY
 
-    let denoisedX = rawX
-    let denoisedY = rawY
+    let denoisedX = sourceX
+    let denoisedY = sourceY
 
     if (index > 0) {
       const previous = prepared[index - 1]
@@ -245,10 +231,7 @@ export function createCursorEngine(
         { x: denoisedX, y: denoisedY },
         { x: previous.denoisedX, y: previous.denoisedY },
       )
-      isMotion =
-        displacement > motionThresholdPx ||
-        click ||
-        (event as { shapeChanged?: boolean }).shapeChanged === true
+      isMotion = displacement > motionThresholdPx || click || event.shapeChanged
     }
 
     const lastMotionMs = isMotion
@@ -274,11 +257,9 @@ export function createCursorEngine(
       denoisedX,
       denoisedY,
       visible: event.visible,
-      shapeId: String((event as { shapeId?: string }).shapeId ?? ""),
-      shapeChanged: Boolean((event as { shapeChanged?: boolean }).shapeChanged),
-      button: normalizeButton(event.button),
-      buttonEvent: event.buttonEvent ?? "none",
-      clicked: event.clicked,
+      shapeId: event.shapeId,
+      shapeChanged: event.shapeChanged,
+      buttonEvent: event.buttonEvent,
       segmentId: currentSegmentId,
       speedPxPerSec,
       isMotion,

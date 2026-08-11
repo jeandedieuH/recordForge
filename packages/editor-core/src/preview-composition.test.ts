@@ -168,36 +168,43 @@ function makeState(): TimelineState {
   }
 }
 
+const event = (tMs: number, x: number, y: number) => ({
+  tMs,
+  rawX: x,
+  rawY: y,
+  sourceX: x,
+  sourceY: y,
+  buttons: { left: false, right: false, middle: false, x1: false, x2: false } as const,
+  buttonEvent: "none" as const,
+  visible: true,
+  shapeId: "arrow",
+  shapeChanged: false,
+})
+
 const telemetry = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   assetId: "cursor-events:recording",
   recordingId: "recording",
   sourceWidth: 1920,
   sourceHeight: 1080,
   captureBounds: { x: 0, y: 0, width: 1920, height: 1080 },
-  dpiScale: { x: 1, y: 1 },
+  coordinateTransform: {
+    a00: 1,
+    a01: 0,
+    a10: 0,
+    a11: 1,
+    b0: 0,
+    b1: 0,
+  },
+  shapes: [],
   timebase: { unit: "ms" as const, ticksPerSecond: 1000 },
   sampleRateHz: 60,
-  events: [
-    {
-      tMs: 0,
-      x: 960,
-      y: 540,
-      visible: true,
-      clicked: false,
-      button: "none" as const,
-      buttonEvent: "none" as const,
-    },
-    {
-      tMs: 3_000,
-      x: 100,
-      y: 100,
-      visible: true,
-      clicked: false,
-      button: "none" as const,
-      buttonEvent: "none" as const,
-    },
-  ],
+  clickWindowMs: 350,
+  health: "healthy" as const,
+  eventCount: 2,
+  index: [],
+  eventFile: "cursor_events.bin",
+  events: [event(0, 960, 540), event(3_000, 100, 100)],
 }
 
 describe("resolvePreviewComposition", () => {

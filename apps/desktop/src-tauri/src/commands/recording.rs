@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
-use tracing::instrument;
+use tracing::{info, instrument, warn};
 
 use crate::path_policy::PathPolicy;
 
@@ -855,14 +855,15 @@ fn diagnostic_os() -> String {
     }
 }
 
-/// Load cursor telemetry through the project asset registry. React only sends
-/// the recording id; Rust resolves and validates the registered asset path.
+/// Load cursor telemetry for the recording. React only sends the recording id;
+/// Rust reads the V2 metadata/binary files directly, so the cursor is available
+/// even before the project file is created during the bootstrap path.
 #[tauri::command]
 #[instrument(skip(state))]
 pub fn get_cursor_telemetry(
     state: State<'_, AppState>,
     recording_id: String,
-) -> Result<Option<crate::capture::cursor::CursorTelemetryFile>> {
+) -> Result<Option<crate::capture::cursor_v2::CursorTelemetryFileV2>> {
     let conn = state
         .db
         .lock()
@@ -874,37 +875,30 @@ pub fn get_cursor_telemetry(
     drop(conn);
 
     let project_dir = crate::projects::project_dir_for_recording(&recording);
-    let loaded = crate::projects::load_project(&project_dir, &state.path_policy)?;
-    let Some(loaded) = loaded else {
-        return Ok(None);
-    };
-    let Some(asset) = loaded
-        .project
-        .assets
-        .iter()
-        .find(|asset| asset.role == crate::projects::ProjectAssetRole::CursorEvents)
-    else {
-        return Ok(None);
-    };
-    if !matches!(
-        asset.status,
-        crate::projects::ProjectAssetStatus::Available
-            | crate::projects::ProjectAssetStatus::Relinked
-    ) {
-        return Ok(None);
-    }
+    let meta_path = project_dir.join("cursor_telemetry.json");
+    let event_path = project_dir.join("cursor_events.bin");
 
-    // Phase 5: cursor telemetry is written as V2 (metadata JSON + binary events).
-    // The command returns the legacy V1 shape for the editor while migration to a
-    // V2 editor contract is in progress.
-    let v2 = crate::capture::cursor::read_any_telemetry(&project_dir).ok_or_else(|| {
-        InternalError::Storage("cursor telemetry asset is missing or corrupt".into())
-    })?;
-    let telemetry = crate::capture::cursor::v2_to_v1_telemetry(&v2);
-    if telemetry.asset_id != asset.id {
-        return Err(
-            InternalError::Project("cursor telemetry asset identity mismatch".into()).into(),
-        );
+    let result = crate::capture::cursor_v2::read_v2_telemetry(&project_dir);
+    match result {
+        Some(ref telemetry) => {
+            info!(
+                recording_id = %recording_id,
+                project_dir = %project_dir.display(),
+                event_count = telemetry.events.len(),
+                "loaded V2 cursor telemetry",
+            );
+        }
+        None => {
+            warn!(
+                recording_id = %recording_id,
+                project_dir = %project_dir.display(),
+                meta_exists = meta_path.exists(),
+                meta_size = meta_path.metadata().map(|m| m.len()).unwrap_or(0),
+                event_exists = event_path.exists(),
+                event_size = event_path.metadata().map(|m| m.len()).unwrap_or(0),
+                "failed to load V2 cursor telemetry",
+            );
+        }
     }
-    Ok(Some(telemetry))
+    Ok(result)
 }

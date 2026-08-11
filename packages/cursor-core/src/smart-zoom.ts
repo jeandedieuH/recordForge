@@ -1,5 +1,5 @@
 import type {
-  CursorButtonEvent,
+  CursorButtonEventV2,
   CursorTelemetryEvent,
   CursorTelemetryFile,
   ManualZoomSegment,
@@ -16,8 +16,8 @@ export interface CursorClickFeature {
   timeMs: number
   x: number
   y: number
-  button: CursorTelemetryEvent["button"]
-  buttonEvent: CursorButtonEvent
+  button: "left" | "right" | "middle"
+  buttonEvent: CursorButtonEventV2
 }
 
 export interface CursorDwellFeature {
@@ -103,6 +103,10 @@ function distanceBetween(left: { x: number; y: number }, right: { x: number; y: 
   return Math.hypot(left.x - right.x, left.y - right.y)
 }
 
+function sourcePoint(event: CursorTelemetryEvent): { x: number; y: number } {
+  return { x: event.sourceX, y: event.sourceY }
+}
+
 function clampRange(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
@@ -118,10 +122,13 @@ function finishDwell(
   if (!start || !end || end.tMs - start.tMs < minDwellMs) return null
 
   const samples = telemetry.events.slice(startIndex, endIndex + 1)
-  const position = samples.reduce((sum, event) => ({ x: sum.x + event.x, y: sum.y + event.y }), {
-    x: 0,
-    y: 0,
-  })
+  const position = samples.reduce(
+    (sum, event) => ({ x: sum.x + event.sourceX, y: sum.y + event.sourceY }),
+    {
+      x: 0,
+      y: 0,
+    },
+  )
   return {
     kind: "dwell",
     startMs: start.tMs,
@@ -147,15 +154,21 @@ export function analyzeCursorTelemetry(
     0,
     options.safeEdgePadding ?? defaultSmartZoomSettings.safeEdgePadding,
   )
+  function clickButton(event: CursorTelemetryEvent): "left" | "right" | "middle" {
+    const prefix = event.buttonEvent.split("-")[0]
+    if (prefix === "left" || prefix === "right" || prefix === "middle") return prefix
+    return "left"
+  }
+
   const clicks = events.flatMap<CursorClickFeature>((event) =>
-    event.buttonEvent === "down" || (event.buttonEvent === "none" && event.clicked)
+    event.buttonEvent !== "none" && event.buttonEvent.endsWith("-down")
       ? [
           {
             kind: "click",
             timeMs: event.tMs,
-            x: event.x,
-            y: event.y,
-            button: event.button,
+            x: event.sourceX,
+            y: event.sourceY,
+            button: clickButton(event),
             buttonEvent: event.buttonEvent,
           },
         ]
@@ -165,15 +178,15 @@ export function analyzeCursorTelemetry(
   const dwells: CursorDwellFeature[] = []
   if (events.length > 0) {
     let startIndex = 0
-    const anchor = { x: events[0].x, y: events[0].y }
+    const anchor = sourcePoint(events[0])
     for (let index = 1; index < events.length; index++) {
       const event = events[index]
-      if (distanceBetween(anchor, event) > dwellTolerancePx) {
+      if (distanceBetween(anchor, sourcePoint(event)) > dwellTolerancePx) {
         const dwell = finishDwell(telemetry, startIndex, index - 1, minDwellMs)
         if (dwell) dwells.push(dwell)
         startIndex = index
-        anchor.x = event.x
-        anchor.y = event.y
+        anchor.x = event.sourceX
+        anchor.y = event.sourceY
       }
     }
     const dwell = finishDwell(telemetry, startIndex, events.length - 1, minDwellMs)
@@ -185,7 +198,7 @@ export function analyzeCursorTelemetry(
     const previous = events[index - 1]
     const current = events[index]
     const durationMs = current.tMs - previous.tMs
-    const distancePx = distanceBetween(previous, current)
+    const distancePx = distanceBetween(sourcePoint(previous), sourcePoint(current))
     if (durationMs <= 0 || distancePx < minMovementPx) continue
     movements.push({
       kind: "movement",
@@ -194,8 +207,8 @@ export function analyzeCursorTelemetry(
       durationMs,
       distancePx,
       speedPxPerSecond: (distancePx * 1_000) / durationMs,
-      from: { x: previous.x, y: previous.y },
-      to: { x: current.x, y: current.y },
+      from: sourcePoint(previous),
+      to: sourcePoint(current),
     })
   }
 
@@ -204,16 +217,16 @@ export function analyzeCursorTelemetry(
   const safeEdges = events.map<CursorSafeEdgeFeature>((event) => ({
     kind: "safe-edge",
     timeMs: event.tMs,
-    x: event.x,
-    y: event.y,
-    distanceToLeft: event.x,
-    distanceToRight: Math.max(0, sourceWidth - event.x),
-    distanceToTop: event.y,
-    distanceToBottom: Math.max(0, sourceHeight - event.y),
-    nearLeft: event.x <= safeEdgePadding,
-    nearRight: sourceWidth - event.x <= safeEdgePadding,
-    nearTop: event.y <= safeEdgePadding,
-    nearBottom: sourceHeight - event.y <= safeEdgePadding,
+    x: event.sourceX,
+    y: event.sourceY,
+    distanceToLeft: event.sourceX,
+    distanceToRight: Math.max(0, sourceWidth - event.sourceX),
+    distanceToTop: event.sourceY,
+    distanceToBottom: Math.max(0, sourceHeight - event.sourceY),
+    nearLeft: event.sourceX <= safeEdgePadding,
+    nearRight: sourceWidth - event.sourceX <= safeEdgePadding,
+    nearTop: event.sourceY <= safeEdgePadding,
+    nearBottom: sourceHeight - event.sourceY <= safeEdgePadding,
   }))
 
   return { clicks, dwells, movements, safeEdges }
@@ -317,12 +330,8 @@ export function sourcePointToCanvas(
 ): { x: number; y: number } {
   const sourceWidth = Math.max(1, telemetry.sourceWidth)
   const sourceHeight = Math.max(1, telemetry.sourceHeight)
-  const captureWidth = Math.max(1, telemetry.captureBounds.width)
-  const captureHeight = Math.max(1, telemetry.captureBounds.height)
-  const scaleX = (sourceWidth / captureWidth) * telemetry.dpiScale.x
-  const scaleY = (sourceHeight / captureHeight) * telemetry.dpiScale.y
-  const sourceX = clampRange(point.x * scaleX, 0, sourceWidth)
-  const sourceY = clampRange(point.y * scaleY, 0, sourceHeight)
+  const sourceX = clampRange(point.x, 0, sourceWidth)
+  const sourceY = clampRange(point.y, 0, sourceHeight)
   const scale = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight)
   return {
     x: (canvas.width - sourceWidth * scale) / 2 + sourceX * scale,

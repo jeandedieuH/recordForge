@@ -1,4 +1,4 @@
-import type { CursorShapeMode } from "@recordforge/contracts"
+import type { CursorShapeInfo, CursorShapeMode } from "@recordforge/contracts"
 
 // Shared cursor asset manifest.
 //
@@ -21,101 +21,41 @@ export interface CursorAsset {
   svg: string
 }
 
+// Four curated cursor styles plus a Recorded/System style that resolves to the
+// actual captured cursor shape when V2 telemetry is available.
 export type CursorAssetId =
-  | "recorded-system"
-  | "clean-pointer"
-  | "high-contrast"
-  | "touch-dot"
   | "default"
   | "modern-neon"
   | "sleek-dark"
-  | "highlighter-circle"
   | "mac-pro"
-  | "cyberpunk"
-  | "minimal-dot"
-  | "hand-pointer"
+  | "recorded-system"
+  | "shape-arrow"
+  | "shape-hand"
+  | "shape-ibeam"
+  | "shape-crosshair"
+  | "shape-wait"
+  | "shape-help"
+  | "shape-move"
+  | "shape-resize-diagonal-1"
+  | "shape-resize-diagonal-2"
+  | "shape-resize-horizontal"
+  | "shape-resize-vertical"
+  | "shape-unavailable"
 
-/**
- * Map common system/telemetry cursor shape identifiers to our canonical asset IDs.
- * This lets the renderer use the recorded shape when available but fall back to
- * a curated preset when the recorded shape is not in our manifest.
- */
-export const SHAPE_ID_TO_ASSET: Record<string, CursorAssetId> = {
-  "recorded-system": "recorded-system",
-  arrow: "default",
-  arrow2: "default",
-  uparrow: "default",
-  hand: "hand-pointer",
-  hand2: "hand-pointer",
-  ibeam: "clean-pointer",
-  text: "clean-pointer",
-  cross: "cyberpunk",
-  crosshair: "cyberpunk",
-  help: "high-contrast",
-  "help-arrow": "high-contrast",
-  wait: "modern-neon",
-  appstarting: "modern-neon",
-  no: "cyberpunk",
-  size: "default",
-  sizenesw: "default",
-  sizens: "default",
-  sizenwse: "default",
-  sizewe: "default",
-  pen: "default",
-  split: "default",
+const SVG_TOKENS = {
+  fill: "{fill}",
+  fillOpacity: "{fillOpacity}",
+  stroke: "{stroke}",
+  strokeWidth: "{strokeWidth}",
+  strokeOpacity: "{strokeOpacity}",
+  maxStroke: "{Math.max(2, strokeWidth)}",
+  fallbackStroke: "{strokeWidth || 1.5}",
 }
 
-export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = {
-  "recorded-system": {
-    id: "recorded-system",
-    label: "Recorded / System",
-    viewBox: "0 0 24 24",
-    width: 28,
-    height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
-    isCenterHotspot: false,
-    svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-    </g>`,
-  },
-  "clean-pointer": {
-    id: "clean-pointer",
-    label: "Clean Pointer",
-    viewBox: "0 0 24 24",
-    width: 28,
-    height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
-    isCenterHotspot: false,
-    svg: `<path d="M3 3L11 20L14 13.5L20.5 10.5L3 3Z" fill="#FFFFFF" fill-opacity="{fillOpacity}" stroke="#1E1E1E" stroke-width="{strokeWidth || 1.5}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />`,
-  },
-  "high-contrast": {
-    id: "high-contrast",
-    label: "High Contrast",
-    viewBox: "0 0 32 32",
-    width: 32,
-    height: 32,
-    hotspotX: 16,
-    hotspotY: 16,
-    isCenterHotspot: true,
-    svg: `<circle cx="16" cy="16" r="13" fill="{fill}" fill-opacity="0.35" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <circle cx="16" cy="16" r="3" fill="{stroke}" opacity="{strokeOpacity}" />`,
-  },
-  "touch-dot": {
-    id: "touch-dot",
-    label: "Touch Dot",
-    viewBox: "0 0 20 20",
-    width: 28,
-    height: 28,
-    hotspotX: 10,
-    hotspotY: 10,
-    isCenterHotspot: true,
-    svg: `<circle cx="10" cy="10" r="7" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />`,
-  },
+// Preset SVGs are authored in a 24x24 view box. Their `hotspotX`/`hotspotY`
+// represent the active point within that view box.
+const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
   default: {
-    id: "default",
-    label: "Classic Arrow",
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
@@ -127,8 +67,6 @@ export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = {
     </g>`,
   },
   "modern-neon": {
-    id: "modern-neon",
-    label: "Modern Neon",
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
@@ -141,8 +79,6 @@ export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = {
     </g>`,
   },
   "sleek-dark": {
-    id: "sleek-dark",
-    label: "Sleek Dark",
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
@@ -151,21 +87,7 @@ export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = {
     isCenterHotspot: false,
     svg: `<path d="M3 3L10 21L13.5 13.5L21 10L3 3Z" fill="#121212" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{Math.max(2, strokeWidth)}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />`,
   },
-  "highlighter-circle": {
-    id: "highlighter-circle",
-    label: "Highlighter",
-    viewBox: "0 0 32 32",
-    width: 32,
-    height: 32,
-    hotspotX: 16,
-    hotspotY: 16,
-    isCenterHotspot: true,
-    svg: `<circle cx="16" cy="16" r="13" fill="{fill}" fill-opacity="0.35" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />
-      <circle cx="16" cy="16" r="3" fill="{stroke}" opacity="{strokeOpacity}" />`,
-  },
   "mac-pro": {
-    id: "mac-pro",
-    label: "Mac Pro",
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
@@ -176,81 +98,324 @@ export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = {
       <path d="M3 3L11 20L14 13.5L20.5 10.5L3 3Z" fill="#FFFFFF" fill-opacity="{fillOpacity}" stroke="#1E1E1E" stroke-width="{strokeWidth || 1.5}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
     </g>`,
   },
-  cyberpunk: {
-    id: "cyberpunk",
-    label: "Cyberpunk",
-    viewBox: "0 0 32 32",
-    width: 32,
-    height: 32,
-    hotspotX: 16,
-    hotspotY: 16,
-    isCenterHotspot: true,
-    svg: `<circle cx="16" cy="16" r="12" stroke="{fill}" stroke-width="{strokeWidth || 2}" fill="none" stroke-dasharray="4 2" />
-      <line x1="16" y1="2" x2="16" y2="8" stroke="{stroke}" stroke-width="2" />
-      <line x1="16" y1="24" x2="16" y2="30" stroke="{stroke}" stroke-width="2" />
-      <line x1="2" y1="16" x2="8" y2="16" stroke="{stroke}" stroke-width="2" />
-      <line x1="24" y1="16" x2="30" y2="16" stroke="{stroke}" stroke-width="2" />
-      <circle cx="16" cy="16" r="3" fill="{fill}" />`,
-  },
-  "minimal-dot": {
-    id: "minimal-dot",
-    label: "Minimal Dot",
-    viewBox: "0 0 20 20",
-    width: 28,
-    height: 28,
-    hotspotX: 10,
-    hotspotY: 10,
-    isCenterHotspot: true,
-    svg: `<circle cx="10" cy="10" r="7" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" />`,
-  },
-  "hand-pointer": {
-    id: "hand-pointer",
-    label: "Hand Pointer",
+  "recorded-system": {
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
     hotspotX: 0,
     hotspotY: 0,
     isCenterHotspot: false,
-    svg: `<g transform="translate(-0.11, 0.15)">
-      <path d="M10 11V4.5C10 3.67 9.33 3 8.5 3C7.67 3 7 3.67 7 4.5V12.79L5.44 11.23C4.85 10.64 3.9 10.64 3.31 11.23C2.72 11.82 2.72 12.77 3.31 13.36L8.5 18.55C9.88 19.93 11.75 20.7 13.7 20.7H16.5C19.26 20.7 21.5 18.46 21.5 15.7V11.5C21.5 10.67 20.83 10 20 10C19.17 10 18.5 10.67 18.5 11.5V10C18.5 9.17 17.83 8.5 17 8.5C16.17 8.5 15.5 9.17 15.5 10V9.5C15.5 8.67 14.83 8 14 8C13.17 8 12.5 8.67 12.5 9.5V11" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
     </g>`,
   },
+  // Generic recorded-shape SVGs. The active point is marked by hotspotX/Y.
+  "shape-arrow": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 0,
+    hotspotY: 0,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+    </g>`,
+  },
+  "shape-hand": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 0,
+    hotspotY: 0,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M8 20 C6 20 4 18 4 15 L4 11 C4 10 5 9 6 9 C7 9 8 10 8 11 L8 14 L8 7 C8 6 9 5 10 5 C11 5 12 6 12 7 L12 14 L12 9 C12 8 13 7 14 7 C15 7 16 8 16 9 L16 14 L16 11 C16 10 17 9 18 9 C19 9 20 10 20 11 L20 15 C20 18 18 20 16 20 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+    </g>`,
+  },
+  "shape-ibeam": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="12" y1="4" x2="12" y2="20" />
+      <line x1="8" y1="4" x2="16" y2="4" />
+      <line x1="8" y1="20" x2="16" y2="20" />
+    </g>`,
+  },
+  "shape-crosshair": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="12" y1="2" x2="12" y2="22" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+    </g>`,
+  },
+  "shape-wait": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}">
+      <circle cx="12" cy="12" r="9" />
+      <line x1="12" y1="12" x2="12" y2="6" stroke-linecap="round" />
+      <line x1="12" y1="12" x2="16" y2="14" stroke-linecap="round" />
+    </g>`,
+  },
+  "shape-help": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 0,
+    hotspotY: 0,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)">
+      <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+      <text x="14" y="14" font-size="8" fill="{stroke}" font-family="sans-serif" font-weight="bold">?</text>
+    </g>`,
+  },
+  "shape-move": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="12" y1="4" x2="12" y2="20" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="12" y1="4" x2="9" y2="7" />
+      <line x1="12" y1="4" x2="15" y2="7" />
+      <line x1="4" y1="12" x2="7" y2="9" />
+      <line x1="4" y1="12" x2="7" y2="15" />
+      <line x1="20" y1="12" x2="17" y2="9" />
+      <line x1="20" y1="12" x2="17" y2="15" />
+      <line x1="12" y1="20" x2="9" y2="17" />
+      <line x1="12" y1="20" x2="15" y2="17" />
+    </g>`,
+  },
+  "shape-resize-diagonal-1": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="4" y1="20" x2="20" y2="4" />
+      <line x1="4" y1="20" x2="7" y2="17" />
+      <line x1="4" y1="20" x2="7" y2="23" />
+      <line x1="20" y1="4" x2="17" y2="1" />
+      <line x1="20" y1="4" x2="23" y2="7" />
+    </g>`,
+  },
+  "shape-resize-diagonal-2": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="4" y1="4" x2="20" y2="20" />
+      <line x1="4" y1="4" x2="7" y2="1" />
+      <line x1="4" y1="4" x2="1" y2="7" />
+      <line x1="20" y1="20" x2="17" y2="23" />
+      <line x1="20" y1="20" x2="23" y2="17" />
+    </g>`,
+  },
+  "shape-resize-horizontal": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="12" x2="7" y2="9" />
+      <line x1="4" y1="12" x2="7" y2="15" />
+      <line x1="20" y1="12" x2="17" y2="9" />
+      <line x1="20" y1="12" x2="17" y2="15" />
+    </g>`,
+  },
+  "shape-resize-vertical": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
+      <line x1="12" y1="4" x2="12" y2="20" />
+      <line x1="12" y1="4" x2="9" y2="7" />
+      <line x1="12" y1="4" x2="15" y2="7" />
+      <line x1="12" y1="20" x2="9" y2="17" />
+      <line x1="12" y1="20" x2="15" y2="17" />
+    </g>`,
+  },
+  "shape-unavailable": {
+    viewBox: "0 0 24 24",
+    width: 24,
+    height: 24,
+    hotspotX: 12,
+    hotspotY: 12,
+    isCenterHotspot: false,
+    svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}">
+      <circle cx="12" cy="12" r="8" fill="{fill}" fill-opacity="{fillOpacity}" />
+      <line x1="6" y1="6" x2="18" y2="18" stroke-linecap="round" />
+    </g>`,
+  },
+}
+
+export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = Object.fromEntries(
+  (Object.keys(PRESET_SVGS) as CursorAssetId[]).map((id) => [
+    id,
+    { id, label: labelForAssetId(id), ...PRESET_SVGS[id] },
+  ]),
+) as Record<CursorAssetId, CursorAsset>
+
+function labelForAssetId(id: CursorAssetId): string {
+  const labels: Record<CursorAssetId, string> = {
+    default: "Classic Arrow",
+    "modern-neon": "Modern Neon",
+    "sleek-dark": "Sleek Dark",
+    "mac-pro": "Mark Pro",
+    "recorded-system": "Recorded / System",
+    "shape-arrow": "Arrow",
+    "shape-hand": "Hand",
+    "shape-ibeam": "I-Beam",
+    "shape-crosshair": "Crosshair",
+    "shape-wait": "Wait",
+    "shape-help": "Help",
+    "shape-move": "Move",
+    "shape-resize-diagonal-1": "Resize Diagonal 1",
+    "shape-resize-diagonal-2": "Resize Diagonal 2",
+    "shape-resize-horizontal": "Resize Horizontal",
+    "shape-resize-vertical": "Resize Vertical",
+    "shape-unavailable": "Unavailable",
+  }
+  return labels[id] ?? id
+}
+
+// Map V2 cursor `kind` strings from `capture/cursor_v2.rs` to the generic shape
+// asset used when the user selects the Recorded/System preset.
+export const SHAPE_ID_TO_ASSET: Record<string, CursorAssetId> = {
+  arrow: "shape-arrow",
+  hand: "shape-hand",
+  ibeam: "shape-ibeam",
+  crosshair: "shape-crosshair",
+  wait: "shape-wait",
+  help: "shape-help",
+  move: "shape-move",
+  "resize-diagonal-1": "shape-resize-diagonal-1",
+  "resize-diagonal-2": "shape-resize-diagonal-2",
+  "resize-horizontal": "shape-resize-horizontal",
+  "resize-vertical": "shape-resize-vertical",
+  unavailable: "shape-unavailable",
 }
 
 export interface ResolvedCursorAsset extends CursorAsset {
   effectiveId: string
 }
 
+interface ResolveCursorAssetOptions {
+  shapeMode?: CursorShapeMode
+  shapes?: CursorShapeInfo[]
+}
+
+function buildRecordedShapeAsset(shape: CursorShapeInfo): ResolvedCursorAsset | null {
+  const baseId = SHAPE_ID_TO_ASSET[shape.kind] ?? "recorded-system"
+  const base = CURSOR_ASSET_MANIFEST[baseId]
+  if (!base) return null
+
+  // The recorded cursor may have different dimensions and a different hotspot
+  // than our generic 24x24 base asset. Wrap the base SVG in a translate so the
+  // active point (base.hotspotX/Y) aligns with the recorded hotspot scaled to
+  // the 24x24 view box.
+  const targetHotspotX = (shape.hotspotX * 24) / shape.width
+  const targetHotspotY = (shape.hotspotY * 24) / shape.height
+  const offsetX = targetHotspotX - base.hotspotX
+  const offsetY = targetHotspotY - base.hotspotY
+
+  return {
+    ...base,
+    id: `${base.id}:${shape.shapeId}`,
+    label: `Recorded ${shape.kind}`,
+    viewBox: "0 0 24 24",
+    width: shape.width,
+    height: shape.height,
+    hotspotX: shape.hotspotX,
+    hotspotY: shape.hotspotY,
+    isCenterHotspot: false,
+    effectiveId: shape.shapeId,
+    svg:
+      offsetX === 0 && offsetY === 0
+        ? base.svg
+        : `<g transform="translate(${offsetX.toFixed(2)} ${offsetY.toFixed(2)})">${base.svg}</g>`,
+  }
+}
+
 /** Resolve a cursor asset from a telemetry shape id or a chosen preset. */
 export function resolveCursorAsset(
   shapeId: string | undefined | null,
   preset: string,
-  shapeMode: CursorShapeMode = "optimized",
+  options: ResolveCursorAssetOptions = {},
 ): ResolvedCursorAsset {
   const manifest = CURSOR_ASSET_MANIFEST
   const fallback = (manifest[preset as CursorAssetId] ?? manifest.default) as CursorAsset
+
+  // Recorded/System always attempts to render the captured shape, then falls
+  // back to the generic recorded-system arrow when no shape info is available.
+  if (preset === "recorded-system") {
+    if (shapeId && options.shapes) {
+      const shape = options.shapes.find((s) => s.shapeId === shapeId)
+      if (shape) {
+        const recorded = buildRecordedShapeAsset(shape)
+        if (recorded) return recorded
+      }
+    }
+
+    if (shapeId) {
+      const directAsset = manifest[shapeId as CursorAssetId]
+      if (directAsset) return { effectiveId: shapeId, ...directAsset }
+
+      const mappedAssetId = SHAPE_ID_TO_ASSET[shapeId]
+      if (mappedAssetId && manifest[mappedAssetId]) {
+        return { effectiveId: mappedAssetId, ...manifest[mappedAssetId] }
+      }
+    }
+
+    return { effectiveId: preset, ...fallback }
+  }
+
+  const shapeMode = options.shapeMode ?? "optimized"
 
   if (!shapeId || shapeMode === "preset") {
     return { effectiveId: preset, ...fallback }
   }
 
-  // Recorded mode: only use the shape if it is a literal asset id we know.
+  // For a curated preset style, the only telemetry shape ids we honor are the
+  // preset ids themselves. We do not switch to a recorded hand/ibeam/etc. while
+  // the user has explicitly chosen an arrow style.
   if (shapeMode === "recorded") {
-    const asset = manifest[shapeId as CursorAssetId]
-    if (asset) return { effectiveId: shapeId, ...asset }
+    const directAsset = manifest[shapeId as CursorAssetId]
+    if (directAsset) return { effectiveId: shapeId, ...directAsset }
     return { effectiveId: preset, ...fallback }
   }
 
-  // Optimized mode: map telemetry shape ids to our canonical assets, then fall
-  // back to the preset when no mapping exists.
-  const mapped = SHAPE_ID_TO_ASSET[shapeId]
-  if (mapped) {
-    return { effectiveId: mapped, ...manifest[mapped] }
-  }
-
-  const asset = manifest[shapeId as CursorAssetId]
-  if (asset) return { effectiveId: shapeId, ...asset }
+  // Optimized mode: only map to the curated preset assets. Recorded shape kinds
+  // are reserved for the Recorded/System preset.
+  const directAsset = manifest[shapeId as CursorAssetId]
+  if (directAsset) return { effectiveId: shapeId, ...directAsset }
 
   return { effectiveId: preset, ...fallback }
 }
@@ -281,12 +446,12 @@ export function renderCursorAssetSvg(
   }
 
   let svg = asset.svg
-  svg = replaceToken(svg, "{fill}", values.fill)
-  svg = replaceToken(svg, "{fillOpacity}", String(values.fillOpacity))
-  svg = replaceToken(svg, "{stroke}", values.stroke)
-  svg = replaceToken(svg, "{strokeWidth}", String(values.strokeWidth))
-  svg = replaceToken(svg, "{strokeOpacity}", String(values.strokeOpacity))
-  svg = replaceToken(svg, "{Math.max(2, strokeWidth)}", String(Math.max(2, values.strokeWidth)))
-  svg = replaceToken(svg, "{strokeWidth || 1.5}", String(values.strokeWidth || 1.5))
+  svg = replaceToken(svg, SVG_TOKENS.fill, values.fill)
+  svg = replaceToken(svg, SVG_TOKENS.fillOpacity, String(values.fillOpacity))
+  svg = replaceToken(svg, SVG_TOKENS.stroke, values.stroke)
+  svg = replaceToken(svg, SVG_TOKENS.strokeWidth, String(values.strokeWidth))
+  svg = replaceToken(svg, SVG_TOKENS.strokeOpacity, String(values.strokeOpacity))
+  svg = replaceToken(svg, SVG_TOKENS.maxStroke, String(Math.max(2, values.strokeWidth)))
+  svg = replaceToken(svg, SVG_TOKENS.fallbackStroke, String(values.strokeWidth || 1.5))
   return svg
 }

@@ -280,6 +280,7 @@ export function TimelineView({
       timeline ? resolvePreviewComposition(timeline, view.playheadMs, { cursorEngine }) : null,
     [cursorEngine, timeline, view.playheadMs],
   )
+
   const zoomTransformStyle = useMemo(
     () =>
       composition?.screen.zoomTransform
@@ -721,8 +722,8 @@ export function TimelineView({
     const lookup = findCursorEventAtTime(cursorTelemetry, clickTimeMs)
     if (!lookup) return
     const point = sourcePointToCanvas(cursorTelemetry, timeline.canvas, {
-      x: lookup.event.x,
-      y: lookup.event.y,
+      x: lookup.event.sourceX,
+      y: lookup.event.sourceY,
     })
     const targetScale = timeline.smartZoomSettings?.targetScale ?? 1.5
     const target = zoomTargetForCursorPoint(point, timeline.canvas, targetScale)

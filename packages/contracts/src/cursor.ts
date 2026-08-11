@@ -1,19 +1,17 @@
 import { z } from "zod"
 import { boundsSchema } from "./recording"
 
-// Phase 5 — V2 cursor telemetry: independent buttons, shape metadata, topology,
-// and an explicit affine source transform. V1 schemas remain below for legacy
-// recordings and the current V1 editor contract.
+// V2 cursor telemetry is the single source of truth for preview, export,
+// recovery, and capture. V1 schemas have been removed.
 
+// The editor and export support four curated cursor styles plus a
+// Recorded/System option that renders the actual captured cursor shape.
 export const cursorIconPresetSchema = z.enum([
   "default",
   "modern-neon",
   "sleek-dark",
-  "highlighter-circle",
   "mac-pro",
-  "cyberpunk",
-  "minimal-dot",
-  "hand-pointer",
+  "recorded-system",
 ])
 
 export type CursorIconPreset = z.infer<typeof cursorIconPresetSchema>
@@ -29,11 +27,26 @@ export type CursorSmoothing = z.infer<typeof cursorSmoothingSchema>
 export const cursorShapeModeSchema = z.enum(["preset", "recorded", "optimized"])
 export type CursorShapeMode = z.infer<typeof cursorShapeModeSchema>
 
-// `down` and `up` are edge samples; `held` is intentionally not treated as a
-// click by preview/export. Older telemetry only has `clicked`, so consumers must
-// keep the legacy fallback when buttonEvent is `none`.
-export const cursorButtonEventSchema = z.enum(["none", "down", "held", "up"])
-export type CursorButtonEvent = z.infer<typeof cursorButtonEventSchema>
+export const cursorButtonEventV2Schema = z.enum([
+  "none",
+  "left-down",
+  "left-up",
+  "left-held",
+  "right-down",
+  "right-up",
+  "right-held",
+  "middle-down",
+  "middle-up",
+  "middle-held",
+  "x1-down",
+  "x1-up",
+  "x1-held",
+  "x2-down",
+  "x2-up",
+  "x2-held",
+])
+
+export type CursorButtonEventV2 = z.infer<typeof cursorButtonEventV2Schema>
 
 export const cursorSettingsSchema = z.object({
   enabled: z.boolean().default(true),
@@ -70,86 +83,6 @@ export const cursorSettingsSchema = z.object({
 export type CursorSettings = z.infer<typeof cursorSettingsSchema>
 
 export const defaultCursorSettings: CursorSettings = cursorSettingsSchema.parse({})
-
-export const cursorTelemetryEventSchema = z.object({
-  tMs: z.number().int().min(0),
-  x: z.number().finite(),
-  y: z.number().finite(),
-  clicked: z.boolean().default(false),
-  button: z.enum(["left", "right", "middle", "none"]).default("none"),
-  buttonEvent: cursorButtonEventSchema.default("none"),
-  visible: z.boolean().default(true),
-  shapeId: z.string().optional(),
-})
-
-export type CursorTelemetryEvent = z.infer<typeof cursorTelemetryEventSchema>
-
-export const cursorTelemetryTimebaseSchema = z.object({
-  unit: z.literal("ms").default("ms"),
-  ticksPerSecond: z.number().int().positive().default(1000),
-})
-
-export type CursorTelemetryTimebase = z.infer<typeof cursorTelemetryTimebaseSchema>
-
-export const cursorDpiScaleSchema = z.object({
-  x: z.number().positive().default(1),
-  y: z.number().positive().default(1),
-})
-
-export type CursorDpiScale = z.infer<typeof cursorDpiScaleSchema>
-
-export const cursorTelemetryAssetMetadataSchema = z.object({
-  schemaVersion: z.number().int().positive().default(1),
-  assetId: z.string().min(1),
-  recordingId: z.string().min(1),
-  sourceWidth: z.number().int().positive(),
-  sourceHeight: z.number().int().positive(),
-  captureBounds: boundsSchema,
-  dpiScale: cursorDpiScaleSchema.default({}),
-  timebase: cursorTelemetryTimebaseSchema.default({}),
-  sampleRateHz: z.number().positive().default(60),
-})
-
-export type CursorTelemetryAssetMetadata = z.infer<typeof cursorTelemetryAssetMetadataSchema>
-
-const cursorTelemetryFileBaseSchema = cursorTelemetryAssetMetadataSchema.extend({
-  events: z.array(cursorTelemetryEventSchema),
-})
-
-function addTelemetryDefaults(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value
-  const input = value as Record<string, unknown>
-  const recordingId = typeof input.recordingId === "string" ? input.recordingId : "recording"
-  const sourceWidth = typeof input.sourceWidth === "number" ? input.sourceWidth : 1
-  const sourceHeight = typeof input.sourceHeight === "number" ? input.sourceHeight : 1
-
-  return {
-    ...input,
-    schemaVersion: input.schemaVersion ?? 1,
-    assetId: input.assetId ?? `cursor-events:${recordingId}`,
-    captureBounds: input.captureBounds ?? {
-      x: 0,
-      y: 0,
-      width: sourceWidth,
-      height: sourceHeight,
-    },
-    dpiScale: input.dpiScale ?? { x: 1, y: 1 },
-    timebase: input.timebase ?? { unit: "ms", ticksPerSecond: 1000 },
-  }
-}
-
-// The preprocess keeps v1 recordings readable while guaranteeing that every
-// normalized file has the metadata needed by preview, export, and recovery.
-export const cursorTelemetryFileSchema = z.preprocess(
-  addTelemetryDefaults,
-  cursorTelemetryFileBaseSchema,
-)
-
-export type CursorTelemetryFile = z.infer<typeof cursorTelemetryFileSchema>
-
-// ---------------------------------------------------------------------------
-// V2 cursor telemetry schemas
-// ---------------------------------------------------------------------------
 
 export const cursorCoordinateTransformSchema = z.object({
   a00: z.number().finite(),
@@ -195,27 +128,6 @@ export const cursorButtonStateSchema = z.object({
 
 export type CursorButtonState = z.infer<typeof cursorButtonStateSchema>
 
-export const cursorButtonEventV2Schema = z.enum([
-  "none",
-  "left-down",
-  "left-up",
-  "left-held",
-  "right-down",
-  "right-up",
-  "right-held",
-  "middle-down",
-  "middle-up",
-  "middle-held",
-  "x1-down",
-  "x1-up",
-  "x1-held",
-  "x2-down",
-  "x2-up",
-  "x2-held",
-])
-
-export type CursorButtonEventV2 = z.infer<typeof cursorButtonEventV2Schema>
-
 export const cursorTelemetryHealthSchema = z.enum([
   "healthy",
   "positionUnavailable",
@@ -234,7 +146,7 @@ export const cursorEventIndexEntrySchema = z.object({
 
 export type CursorEventIndexEntry = z.infer<typeof cursorEventIndexEntrySchema>
 
-export const cursorTelemetryEventV2Schema = z.object({
+export const cursorTelemetryEventSchema = z.object({
   tMs: z.number().int().min(0),
   rawX: z.number().int(),
   rawY: z.number().int(),
@@ -247,7 +159,21 @@ export const cursorTelemetryEventV2Schema = z.object({
   shapeChanged: z.boolean(),
 })
 
-export type CursorTelemetryEventV2 = z.infer<typeof cursorTelemetryEventV2Schema>
+export type CursorTelemetryEvent = z.infer<typeof cursorTelemetryEventSchema>
+
+export const cursorTelemetryTimebaseSchema = z.object({
+  unit: z.literal("ms").default("ms"),
+  ticksPerSecond: z.number().int().positive().default(1000),
+})
+
+export type CursorTelemetryTimebase = z.infer<typeof cursorTelemetryTimebaseSchema>
+
+export const cursorDpiScaleSchema = z.object({
+  x: z.number().positive().default(1),
+  y: z.number().positive().default(1),
+})
+
+export type CursorDpiScale = z.infer<typeof cursorDpiScaleSchema>
 
 export const cursorTelemetryMetadataSchema = z.object({
   schemaVersion: z.number().int().positive(),
@@ -270,11 +196,55 @@ export const cursorTelemetryMetadataSchema = z.object({
 
 export type CursorTelemetryMetadata = z.infer<typeof cursorTelemetryMetadataSchema>
 
-export const cursorTelemetryFileV2Schema = cursorTelemetryMetadataSchema.extend({
-  events: z.array(cursorTelemetryEventV2Schema),
-})
+function identityTransform(): CursorCoordinateTransform {
+  return {
+    a00: 1,
+    a01: 0,
+    a10: 0,
+    a11: 1,
+    b0: 0,
+    b1: 0,
+  }
+}
 
-export type CursorTelemetryFileV2 = z.infer<typeof cursorTelemetryFileV2Schema>
+function addV2Defaults(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value
+  const input = value as Record<string, unknown>
+  const recordingId = typeof input.recordingId === "string" ? input.recordingId : "recording"
+  const sourceWidth = typeof input.sourceWidth === "number" ? input.sourceWidth : 1
+  const sourceHeight = typeof input.sourceHeight === "number" ? input.sourceHeight : 1
+
+  return {
+    ...input,
+    schemaVersion: typeof input.schemaVersion === "number" ? input.schemaVersion : 2,
+    assetId: input.assetId ?? `cursor-events:${recordingId}`,
+    recordingId,
+    captureBounds: input.captureBounds ?? {
+      x: 0,
+      y: 0,
+      width: sourceWidth,
+      height: sourceHeight,
+    },
+    coordinateTransform: input.coordinateTransform ?? identityTransform(),
+    shapes: Array.isArray(input.shapes) ? input.shapes : [],
+    timebase: input.timebase ?? { unit: "ms", ticksPerSecond: 1000 },
+    sampleRateHz: typeof input.sampleRateHz === "number" ? input.sampleRateHz : 60,
+    clickWindowMs: typeof input.clickWindowMs === "number" ? input.clickWindowMs : 350,
+    health: input.health ?? "healthy",
+    eventCount: typeof input.eventCount === "number" ? input.eventCount : 0,
+    index: Array.isArray(input.index) ? input.index : [],
+    eventFile: typeof input.eventFile === "string" ? input.eventFile : "cursor_events.bin",
+  }
+}
+
+export const cursorTelemetryFileSchema = z.preprocess(
+  addV2Defaults,
+  cursorTelemetryMetadataSchema.extend({
+    events: z.array(cursorTelemetryEventSchema),
+  }),
+)
+
+export type CursorTelemetryFile = z.infer<typeof cursorTelemetryFileSchema>
 
 // Partial settings are persisted on a cursor range. The renderer merges them
 // with the full-duration default, so adding a new setting remains migration-safe.

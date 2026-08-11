@@ -18,16 +18,20 @@ describe("cursor contracts", () => {
       events: [
         {
           tMs: 0,
-          x: 320,
-          y: 180,
-          clicked: false,
-          button: "none",
+          rawX: 320,
+          rawY: 180,
+          sourceX: 320,
+          sourceY: 180,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          buttonEvent: "none",
           visible: true,
+          shapeId: "arrow",
+          shapeChanged: false,
         },
       ],
     })
 
-    expect(telemetry.events[0]).toMatchObject({ x: 320, y: 180, visible: true })
+    expect(telemetry.events[0]).toMatchObject({ sourceX: 320, sourceY: 180, visible: true })
     expect(telemetry.assetId).toBe("cursor-events:recording-1")
     expect(telemetry.captureBounds).toMatchObject({ width: 1920, height: 1080 })
     expect(telemetry.timebase).toEqual({ unit: "ms", ticksPerSecond: 1000 })
@@ -39,11 +43,33 @@ describe("cursor contracts", () => {
       sourceWidth: 100,
       sourceHeight: 100,
       events: [
-        { tMs: 0, x: 10, y: 10, button: "left", buttonEvent: "down", clicked: true },
-        { tMs: 16, x: 10, y: 10, button: "left", buttonEvent: "held", clicked: false },
+        {
+          tMs: 0,
+          rawX: 10,
+          rawY: 10,
+          sourceX: 10,
+          sourceY: 10,
+          buttons: { left: true, right: false, middle: false, x1: false, x2: false },
+          buttonEvent: "left-down",
+          visible: true,
+          shapeId: "arrow",
+          shapeChanged: false,
+        },
+        {
+          tMs: 16,
+          rawX: 10,
+          rawY: 10,
+          sourceX: 10,
+          sourceY: 10,
+          buttons: { left: true, right: false, middle: false, x1: false, x2: false },
+          buttonEvent: "left-held",
+          visible: true,
+          shapeId: "arrow",
+          shapeChanged: false,
+        },
       ],
     })
-    expect(parsed.events.map((event) => event.buttonEvent)).toEqual(["down", "held"])
+    expect(parsed.events.map((event) => event.buttonEvent)).toEqual(["left-down", "left-held"])
   })
 
   it("accepts the durable cursor effect range shape", () => {

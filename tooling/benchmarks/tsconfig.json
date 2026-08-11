@@ -1,0 +1,7 @@
+{
+  "extends": "@recordforge/config/tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["*.ts"]
+}

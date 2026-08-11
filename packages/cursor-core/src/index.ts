@@ -9,6 +9,7 @@ import {
   type TimelineClip,
   type TimelineState,
 } from "@recordforge/contracts"
+import { CURSOR_ASSET_MANIFEST, type CursorAssetId } from "./assets"
 
 export interface CursorEventLookup {
   event: CursorTelemetryEvent
@@ -43,7 +44,9 @@ export function normalizeCursorTelemetry(input: unknown): CursorTelemetryFile {
     .map((event, index) => ({ event, index }))
     .filter(
       ({ event }) =>
-        Number.isFinite(event.tMs) && Number.isFinite(event.x) && Number.isFinite(event.y),
+        Number.isFinite(event.tMs) &&
+        Number.isFinite(event.sourceX) &&
+        Number.isFinite(event.sourceY),
     )
     .sort((left, right) => left.event.tMs - right.event.tMs || left.index - right.index)
     .map(({ event }) => event)
@@ -79,7 +82,7 @@ export function findCursorEventAtTime(
 }
 
 export function isCursorClickEdge(event: CursorTelemetryEvent): boolean {
-  return event.buttonEvent === "down" || (event.buttonEvent === "none" && event.clicked)
+  return event.buttonEvent !== "none" && event.buttonEvent.endsWith("-down")
 }
 
 export function isCursorButtonEnabled(
@@ -87,8 +90,8 @@ export function isCursorButtonEnabled(
   settings: Pick<CursorSettings, "leftClickEnabled" | "rightClickEnabled">,
 ): boolean {
   if (!isCursorClickEdge(event)) return false
-  if (event.button === "left") return settings.leftClickEnabled
-  if (event.button === "right") return settings.rightClickEnabled
+  if (event.buttonEvent.startsWith("left")) return settings.leftClickEnabled
+  if (event.buttonEvent.startsWith("right")) return settings.rightClickEnabled
   return true
 }
 
@@ -110,7 +113,7 @@ export function smoothCursorPosition(
 ): CursorSourcePoint {
   const event = telemetry.events[eventIndex]
   if (!event || !settings.smoothMovement || settings.smoothing === "off") {
-    return { x: event?.x ?? 0, y: event?.y ?? 0 }
+    return { x: event?.sourceX ?? 0, y: event?.sourceY ?? 0 }
   }
 
   const factor = getSmoothingFactor(settings.smoothing ?? "smooth", settings.smoothFactor)
@@ -120,13 +123,13 @@ export function smoothCursorPosition(
   let totalWeight = 0
   for (let index = Math.max(0, eventIndex - windowSize); index <= eventIndex; index++) {
     const weight = Math.pow(1 - factor, eventIndex - index)
-    sumX += telemetry.events[index].x * weight
-    sumY += telemetry.events[index].y * weight
+    sumX += telemetry.events[index].sourceX * weight
+    sumY += telemetry.events[index].sourceY * weight
     totalWeight += weight
   }
   return {
-    x: totalWeight > 0 ? sumX / totalWeight : event.x,
-    y: totalWeight > 0 ? sumY / totalWeight : event.y,
+    x: totalWeight > 0 ? sumX / totalWeight : event.sourceX,
+    y: totalWeight > 0 ? sumY / totalWeight : event.sourceY,
   }
 }
 
@@ -140,7 +143,11 @@ export function isCursorIdle(
   const current = telemetry.events[eventIndex]
   for (let index = eventIndex - 1; index >= 0; index--) {
     const previous = telemetry.events[index]
-    if (previous.x !== current.x || previous.y !== current.y || isCursorClickEdge(previous)) {
+    if (
+      previous.sourceX !== current.sourceX ||
+      previous.sourceY !== current.sourceY ||
+      isCursorClickEdge(previous)
+    ) {
       return Math.max(0, timeMs - previous.tMs) >= timeoutMs
     }
   }
@@ -153,23 +160,16 @@ export function isCursorIdle(
  */
 export function fitCursorPoint(
   point: CursorSourcePoint,
-  telemetry: Pick<
-    CursorTelemetryFile,
-    "sourceWidth" | "sourceHeight" | "captureBounds" | "dpiScale"
-  >,
+  telemetry: Pick<CursorTelemetryFile, "sourceWidth" | "sourceHeight">,
   targetWidth: number,
   targetHeight: number,
   options: CursorFitOptions = {},
 ): CursorFitResult {
   const sourceWidth = Math.max(1, telemetry.sourceWidth)
   const sourceHeight = Math.max(1, telemetry.sourceHeight)
-  const captureWidth = Math.max(1, telemetry.captureBounds.width)
-  const captureHeight = Math.max(1, telemetry.captureBounds.height)
-  const sourceScaleX = (sourceWidth / captureWidth) * telemetry.dpiScale.x
-  const sourceScaleY = (sourceHeight / captureHeight) * telemetry.dpiScale.y
-  const rawSourceX = point.x * sourceScaleX
-  const rawSourceY = point.y * sourceScaleY
   const clampToSource = options.clampToSource ?? true
+  const rawSourceX = point.x
+  const rawSourceY = point.y
   const sourceX = clampToSource ? Math.min(sourceWidth, Math.max(0, rawSourceX)) : rawSourceX
   const sourceY = clampToSource ? Math.min(sourceHeight, Math.max(0, rawSourceY)) : rawSourceY
   const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight)
@@ -271,7 +271,9 @@ export function cursorRangeOverrideLabels(
 
   const effectivePreset = range.settings?.preset ?? range.presetId
   if (base && effectivePreset !== base.preset) {
-    badges.push({ key: "preset", label: `Style: ${effectivePreset}`, variant: "default" })
+    const presetLabel =
+      CURSOR_ASSET_MANIFEST[effectivePreset as CursorAssetId]?.label ?? effectivePreset
+    badges.push({ key: "preset", label: `Style: ${presetLabel}`, variant: "default" })
   }
 
   const effectiveScale = range.settings?.scale ?? range.scale

@@ -1,0 +1,25 @@
+{
+  "name": "@recordforge/editor-benchmarks",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "benchmark:phase9": "bun run editor-phase9-benchmark.ts",
+    "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@recordforge/contracts": "workspace:*",
+    "@recordforge/cursor-core": "workspace:*",
+    "@recordforge/domain": "workspace:*",
+    "@recordforge/editor-core": "workspace:*",
+    "@recordforge/media-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@recordforge/config": "workspace:*",
+    "@types/node": "^26.1.2",
+    "prettier": "^3.5.6",
+    "typescript": "~7.0.2"
+  }
+}

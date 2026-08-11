@@ -191,6 +191,23 @@
         "react-dom": "^19.0.0",
       },
     },
+    "tooling/benchmarks": {
+      "name": "@recordforge/editor-benchmarks",
+      "version": "0.1.0",
+      "dependencies": {
+        "@recordforge/contracts": "workspace:*",
+        "@recordforge/cursor-core": "workspace:*",
+        "@recordforge/domain": "workspace:*",
+        "@recordforge/editor-core": "workspace:*",
+        "@recordforge/media-core": "workspace:*",
+      },
+      "devDependencies": {
+        "@recordforge/config": "workspace:*",
+        "@types/node": "^26.1.2",
+        "prettier": "^3.5.6",
+        "typescript": "~7.0.2",
+      },
+    },
     "tooling/ffmpeg": {
       "name": "@recordforge/setup-ffmpeg",
     },
@@ -471,6 +488,8 @@
     "@recordforge/desktop": ["@recordforge/desktop@workspace:apps/desktop"],
 
     "@recordforge/domain": ["@recordforge/domain@workspace:packages/domain"],
+
+    "@recordforge/editor-benchmarks": ["@recordforge/editor-benchmarks@workspace:tooling/benchmarks"],
 
     "@recordforge/editor-core": ["@recordforge/editor-core@workspace:packages/editor-core"],
 

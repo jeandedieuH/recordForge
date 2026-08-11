@@ -8,7 +8,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 
-use crate::capture::cursor::CursorTelemetryFile;
 use crate::capture::disk::atomic_replace;
 use crate::database::library::LibraryRecording;
 use crate::database::media::MediaMetadata;
@@ -315,15 +314,15 @@ fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPoli
 fn telemetry_asset_from_file(
     project_dir: &Path,
     _recording_id: &str,
-) -> Result<Option<(ProjectAsset, CursorTelemetryFile)>> {
+) -> Result<Option<(ProjectAsset, u64)>> {
     let path = project_dir.join("cursor_telemetry.json");
     if !path.exists() {
         return Ok(None);
     }
 
-    // Phase 5: cursor telemetry may be V2 (metadata JSON + binary events) or
-    // legacy V1 (all events in JSON). read_any_telemetry migrates either into
-    // the canonical V2 model, then we convert back to V1 for the export renderer.
+    // Cursor telemetry may be V2 (metadata JSON + binary events) or legacy V1
+    // (all events in JSON). read_any_telemetry migrates either into the
+    // canonical V2 model for project registration.
     let v2 = match crate::capture::cursor::read_any_telemetry(project_dir) {
         Some(telemetry) => telemetry,
         None => {
@@ -332,14 +331,28 @@ fn telemetry_asset_from_file(
         }
     };
 
-    let v1 = crate::capture::cursor::v2_to_v1_telemetry(&v2);
     let meta = &v2.metadata;
+    let duration_ms = v2.events.last().map(|event| event.t_ms).unwrap_or(0);
+
+    let dpi_scale = meta
+        .coordinate_transform
+        .dpi_scale_from_bounds(meta.source_width, meta.source_height, &meta.capture_bounds)
+        .map(|scale| crate::capture::cursor::CursorDpiScale {
+            x: scale.x,
+            y: scale.y,
+        });
+
+    let timebase = Some(crate::capture::cursor::CursorTelemetryTimebase {
+        unit: meta.timebase.unit.clone(),
+        ticks_per_second: meta.timebase.ticks_per_second,
+    });
+
     let asset = ProjectAsset {
         id: meta.asset_id.clone(),
         role: ProjectAssetRole::CursorEvents,
         path: "cursor_telemetry.json".into(),
         status: ProjectAssetStatus::Available,
-        duration_ms: v2.events.last().map(|event| event.t_ms).unwrap_or(0),
+        duration_ms,
         width: Some(meta.source_width as i32),
         height: Some(meta.source_height as i32),
         fps: Some(meta.sample_rate_hz as f64),
@@ -350,11 +363,11 @@ fn telemetry_asset_from_file(
         sample_rate_hz: Some(meta.sample_rate_hz as f64),
         schema_version: Some(meta.schema_version),
         capture_bounds: Some(meta.capture_bounds),
-        dpi_scale: v1.dpi_scale,
-        timebase: v1.timebase.clone(),
+        dpi_scale,
+        timebase,
         cursor_metadata: Some("available".into()),
     };
-    Ok(Some((asset, v1)))
+    Ok(Some((asset, duration_ms)))
 }
 
 fn timeline_duration(value: &Value) -> u64 {
@@ -377,7 +390,7 @@ fn timeline_duration(value: &Value) -> u64 {
 /// Register cursor telemetry in the project asset registry and migrate the
 /// legacy global cursor settings into a full-duration cursor range.
 pub fn ensure_cursor_asset(project: &mut ProjectFile, project_dir: &Path) -> Result<bool> {
-    let Some((asset, telemetry)) = telemetry_asset_from_file(project_dir, &project.recording_id)?
+    let Some((asset, duration_ms)) = telemetry_asset_from_file(project_dir, &project.recording_id)?
     else {
         return Ok(false);
     };
@@ -401,8 +414,7 @@ pub fn ensure_cursor_asset(project: &mut ProjectFile, project_dir: &Path) -> Res
         changed = true;
     }
 
-    let duration_ms = timeline_duration(&project.tracks)
-        .max(telemetry.events.last().map(|event| event.t_ms).unwrap_or(1));
+    let duration_ms = timeline_duration(&project.tracks).max(duration_ms);
     let canvas = project.canvas.clone();
     let tracks = project
         .tracks
@@ -920,6 +932,7 @@ pub fn load_asset_path_map(project_dir: &Path) -> Result<HashMap<String, PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::cursor::CursorTelemetryFile;
 
     fn make_test_recording(work_dir: &Path) -> (LibraryRecording, MediaMetadata) {
         let recording = LibraryRecording {

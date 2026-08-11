@@ -17,17 +17,46 @@ const canvas: TimelineCanvas = {
   cursorSettings: defaultCursorSettings,
 }
 
+const buttons = (left: boolean, right = false, middle = false) => ({
+  left,
+  right,
+  middle,
+  x1: false,
+  x2: false,
+})
+
+const v2Event = (
+  tMs: number,
+  x: number,
+  y: number,
+  buttonEvent: string,
+  isLeft = false,
+  isRight = false,
+  isMiddle = false,
+) => ({
+  tMs,
+  rawX: x,
+  rawY: y,
+  sourceX: x,
+  sourceY: y,
+  buttons: buttons(isLeft, isRight, isMiddle),
+  buttonEvent,
+  visible: true,
+  shapeId: "arrow",
+  shapeChanged: false,
+})
+
 const telemetry = normalizeCursorTelemetry({
   recordingId: "recording",
   sourceWidth: 1920,
   sourceHeight: 1080,
   events: [
-    { tMs: 0, x: 200, y: 180 },
-    { tMs: 100, x: 960, y: 540, clicked: true, button: "left", buttonEvent: "down" },
-    { tMs: 500, x: 960, y: 540 },
-    { tMs: 1_200, x: 960, y: 540 },
-    { tMs: 1_500, x: 1_700, y: 900 },
-    { tMs: 2_000, x: 1_900, y: 1_060, clicked: true, button: "right", buttonEvent: "down" },
+    v2Event(0, 200, 180, "none"),
+    v2Event(100, 960, 540, "left-down", true),
+    v2Event(500, 960, 540, "none"),
+    v2Event(1_200, 960, 540, "none"),
+    v2Event(1_500, 1_700, 900, "none"),
+    v2Event(2_000, 1_900, 1_060, "right-down", false, true),
   ],
 })
 

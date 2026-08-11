@@ -62,6 +62,12 @@ pub fn create_project(project: ProjectFile, state: State<'_, AppState>) -> Resul
         .into());
     }
 
+    // Register the cursor telemetry asset and a full-duration cursor range if
+    // the recording has cursor data. This keeps the bootstrap project in sync
+    // with the available source assets without requiring a separate migration.
+    let mut project = project;
+    crate::projects::ensure_cursor_asset(&mut project, &project_dir)?;
+
     let saved = save_project_file(&project, &project_dir)?;
     index_project(&state, &saved)?;
     Ok(saved)

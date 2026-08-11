@@ -74,14 +74,14 @@ describe("Fixture Validation", () => {
 
     expect(parsed.sourceWidth).toBe(1024)
     expect(parsed.sourceHeight).toBe(768)
-    expect(parsed.events.some((event) => event.button === "left")).toBe(true)
-    expect(parsed.events.some((event) => event.button === "right")).toBe(true)
+    expect(parsed.events.some((event) => event.buttonEvent.startsWith("left"))).toBe(true)
+    expect(parsed.events.some((event) => event.buttonEvent.startsWith("right"))).toBe(true)
 
     for (const [index, event] of parsed.events.entries()) {
-      expect(event.x).toBeGreaterThanOrEqual(0)
-      expect(event.x).toBeLessThanOrEqual(parsed.sourceWidth)
-      expect(event.y).toBeGreaterThanOrEqual(0)
-      expect(event.y).toBeLessThanOrEqual(parsed.sourceHeight)
+      expect(event.sourceX).toBeGreaterThanOrEqual(0)
+      expect(event.sourceX).toBeLessThanOrEqual(parsed.sourceWidth)
+      expect(event.sourceY).toBeGreaterThanOrEqual(0)
+      expect(event.sourceY).toBeLessThanOrEqual(parsed.sourceHeight)
       if (index > 0) expect(event.tMs).toBeGreaterThan(parsed.events[index - 1].tMs)
     }
   })
