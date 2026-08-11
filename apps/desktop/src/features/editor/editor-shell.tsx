@@ -1,25 +1,16 @@
-import { useEffect } from "react"
-import {
-  AlertCircle,
-  ArrowLeft,
-  CheckCircle2,
-  CircleHelp,
-  FileOutput,
-  Redo2,
-  Save,
-  ShieldCheck,
-  Undo2,
-  X,
-} from "lucide-react"
-import { getRedoLabel, getUndoLabel } from "@recordforge/editor-core"
-import { Badge, Button, IconButton, Separator } from "@recordforge/ui"
-import { EditorSidebar } from "./editor-sidebar"
-import { TimelineView } from "./timeline"
-import { useThumbnailManifest, useWaveformResources } from "./media/derivative-resources"
-import { isTauri } from "../../lib/settings"
-import { useEditorStore, type SaveStatus } from "../../stores/editor-store"
-import { useRecorderStore } from "../../stores/recorder-store"
+import { useEffect, useState } from "react"
+import { X } from "lucide-react"
+import { Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
 import { useTimelineStore } from "../../stores/timeline-store"
+import { useThumbnailManifest, useWaveformResources } from "./media/derivative-resources"
+import { TimelineView } from "./timeline"
+import { InspectorShell } from "./inspector/inspector-shell"
+import { ActivePanel } from "./shell/active-panel"
+import { EditorTopBar } from "./shell/editor-top-bar"
+import { ResizableHandle } from "./shell/resizable-handle"
+import { TaskRail, type EditorTask, EDITOR_TASKS } from "./shell/task-rail"
+import { useResizableDimension } from "./shell/use-resizable-dimension"
+import { useNarrowViewport } from "./shell/use-narrow-viewport"
 
 interface EditorShellProps {
   recordingId: string
@@ -27,207 +18,187 @@ interface EditorShellProps {
   onOpenExport?: () => void
 }
 
-function saveStatusText(status: SaveStatus): string {
-  switch (status) {
-    case "saving":
-      return "Saving"
-    case "saved":
-      return "Saved"
-    case "error":
-      return "Save failed"
-    case "idle":
-    default:
-      return "Unsaved changes"
+const ACTIVE_TASK_STORAGE_KEY = "recordforge:editor:activeTask"
+const ACTIVE_PANEL_WIDTH_KEY = "recordforge:editor:activePanelWidth"
+const INSPECTOR_WIDTH_KEY = "recordforge:editor:inspectorWidth"
+
+function loadActiveTask(): EditorTask {
+  try {
+    const stored = localStorage.getItem(ACTIVE_TASK_STORAGE_KEY)
+    if (stored && EDITOR_TASKS.some((task) => task.value === stored)) {
+      return stored as EditorTask
+    }
+  } catch {
+    // Ignore storage errors.
   }
+  return "media"
 }
 
 export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellProps) {
-  const engine = useTimelineStore((state) => state.engine)
-  const timeline = engine?.history.present ?? null
+  const [activeTask, setActiveTask] = useState(loadActiveTask)
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false)
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false)
+
+  const [activePanelWidth, setActivePanelWidth] = useResizableDimension({
+    defaultValue: 260,
+    min: 200,
+    max: 380,
+    storageKey: ACTIVE_PANEL_WIDTH_KEY,
+  })
+
+  const [inspectorWidth, setInspectorWidth] = useResizableDimension({
+    defaultValue: 320,
+    min: 240,
+    max: 420,
+    storageKey: INSPECTOR_WIDTH_KEY,
+  })
+
+  const isNarrow = useNarrowViewport()
+
+  const activeJob = useTimelineStore((state) => state.activeJob)
   const recording = useTimelineStore((state) => state.recording)
   const metadata = useTimelineStore((state) => state.metadata)
-  const activeJob = useTimelineStore((state) => state.activeJob)
-  const saveProject = useTimelineStore((state) => state.save)
-  const undo = useTimelineStore((state) => state.undo)
-  const redo = useTimelineStore((state) => state.redo)
-  const missingAssets = useTimelineStore((state) => state.missingAssets)
-  const activeExportJob = useTimelineStore((state) => state.activeExportJob)
-  const saveStatus = useEditorStore((state) => state.saveStatus)
-  const saveError = useEditorStore((state) => state.saveError)
-  const isDirty = useEditorStore((state) => state.isDirty)
-  const recovery = useRecorderStore((state) => state.recovery)
-  const diagnostics = useRecorderStore((state) => state.diagnostics)
-  const loadRecovery = useRecorderStore((state) => state.loadRecovery)
-  const loadDiagnostics = useRecorderStore((state) => state.loadDiagnostics)
+  const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
+  const view = useTimelineStore((state) => state.view)
 
   const thumbnailResource = useThumbnailManifest(activeJob?.outputs?.thumbnailManifestPath ?? null)
   const waveformResources = useWaveformResources(activeJob?.outputs?.audioTracks ?? [])
-  const undoLabel = engine ? getUndoLabel(engine) : null
-  const redoLabel = engine ? getRedoLabel(engine) : null
 
+  // Persist the active task whenever it changes.
   useEffect(() => {
-    if (!isTauri()) return
-    void Promise.all([loadRecovery(), loadDiagnostics()])
-  }, [loadDiagnostics, loadRecovery])
+    try {
+      localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, activeTask)
+    } catch {
+      // Ignore storage errors.
+    }
+  }, [activeTask])
+
+  // Close the mobile inspector when a selection is made so the user can see the workspace.
+  useEffect(() => {
+    if (view.selection && mobileInspectorOpen) {
+      setMobileInspectorOpen(false)
+    }
+  }, [view.selection, mobileInspectorOpen])
+
+  function handleSelectTask(task: EditorTask) {
+    setActiveTask(task)
+    if (isNarrow) setMobilePanelOpen(true)
+  }
+
+  const activePanel = (
+    <ActivePanel
+      activeTask={activeTask}
+      timeline={timeline}
+      recording={recording}
+      metadata={metadata}
+      thumbnailResource={thumbnailResource}
+      waveformResources={waveformResources}
+      onOpenExport={onOpenExport}
+    />
+  )
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
-      <EditorTopBar
-        timelineName={timeline?.name ?? recording?.name ?? "Editor"}
-        saveStatus={saveStatus}
-        saveError={saveError}
-        isDirty={isDirty}
-        missingAssets={missingAssets}
-        recoveryCount={recovery.length}
-        diagnosticsReady={diagnostics !== null}
-        activeExportJob={activeExportJob}
-        undoLabel={undoLabel}
-        redoLabel={redoLabel}
-        onSave={() => void saveProject()}
-        onUndo={undo}
-        onRedo={redo}
-        onClose={onClose}
-        onOpenExport={onOpenExport}
-      />
+      <EditorTopBar onClose={onClose} onOpenExport={onOpenExport} />
+
       <div className="flex min-h-0 flex-1">
-        <EditorSidebar
-          timeline={timeline}
-          recording={recording}
-          metadata={metadata}
-          thumbnailResource={thumbnailResource}
-          waveformResources={waveformResources}
-          onOpenExport={onOpenExport}
-          onReturnToLibrary={onClose}
+        <TaskRail
+          activeTask={activeTask}
+          onSelect={handleSelectTask}
+          onToggleInspector={() => setMobileInspectorOpen(true)}
+          showInspectorToggle={isNarrow}
         />
-        <section className="min-w-0 flex-1" aria-label="Editor workspace">
+
+        {!isNarrow ? (
+          <>
+            <div
+              className="flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-surface"
+              style={{ width: activePanelWidth }}
+            >
+              {activePanel}
+            </div>
+            <ResizableHandle
+              direction="horizontal"
+              value={activePanelWidth}
+              min={200}
+              max={380}
+              onChange={setActivePanelWidth}
+            />
+          </>
+        ) : null}
+
+        <section className="flex min-w-0 flex-1 flex-col" aria-label="Editor workspace">
           <TimelineView
             recordingId={recordingId}
             thumbnailResource={thumbnailResource}
             waveformResources={waveformResources}
           />
         </section>
-      </div>
-    </div>
-  )
-}
 
-function EditorTopBar({
-  timelineName,
-  saveStatus,
-  saveError,
-  isDirty,
-  missingAssets,
-  recoveryCount,
-  diagnosticsReady,
-  activeExportJob,
-  undoLabel,
-  redoLabel,
-  onSave,
-  onUndo,
-  onRedo,
-  onClose,
-  onOpenExport,
-}: {
-  timelineName: string
-  saveStatus: SaveStatus
-  saveError: string | null
-  isDirty: boolean
-  missingAssets: string[]
-  recoveryCount: number
-  diagnosticsReady: boolean
-  activeExportJob: import("@recordforge/contracts").MediaJob | null
-  undoLabel: string | null
-  redoLabel: string | null
-  onSave: () => void
-  onUndo: () => void
-  onRedo: () => void
-  onClose: () => void
-  onOpenExport?: () => void
-}) {
-  const isExporting = activeExportJob?.status === "running" || activeExportJob?.status === "pending"
-  return (
-    <header className="flex min-h-12 shrink-0 items-center gap-3 border-b border-border bg-surface px-3 select-none">
-      <IconButton label="Return to library" tooltipSide="bottom" onClick={onClose}>
-        <ArrowLeft />
-      </IconButton>
-      <Separator orientation="vertical" className="h-5" />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <h1 className="truncate text-sm font-semibold text-foreground">{timelineName}</h1>
-          <Badge
-            variant={
-              saveStatus === "error" ? "recording" : saveStatus === "saved" ? "success" : "warning"
-            }
-            title={saveError ?? saveStatusText(saveStatus)}
-          >
-            {saveStatusText(saveStatus)}
-          </Badge>
-          {isDirty ? <span className="sr-only">There are unsaved changes</span> : null}
-        </div>
-        <div className="hidden items-center gap-2 text-[10px] text-subtle-foreground md:flex">
-          <span>Project editor</span>
-          {isExporting ? <span className="text-primary">Export in progress</span> : null}
-        </div>
+        {!isNarrow ? (
+          <>
+            <ResizableHandle
+              direction="horizontal"
+              value={inspectorWidth}
+              min={240}
+              max={420}
+              onChange={setInspectorWidth}
+            />
+            <div
+              className="flex h-full shrink-0 flex-col overflow-hidden"
+              style={{ width: inspectorWidth }}
+            >
+              <InspectorShell metadata={metadata} />
+            </div>
+          </>
+        ) : null}
       </div>
 
-      <div className="hidden items-center gap-1 lg:flex" aria-label="Editor health status">
-        <Badge variant={recoveryCount > 0 ? "warning" : "success"} title="Recovery session status">
-          {recoveryCount > 0 ? <AlertCircle aria-hidden /> : <ShieldCheck aria-hidden />}
-          {recoveryCount > 0 ? `${recoveryCount} recovery` : "Recovery clear"}
-        </Badge>
-        <Badge variant={diagnosticsReady ? "info" : "outline"} title="Diagnostic status">
-          {diagnosticsReady ? <CheckCircle2 aria-hidden /> : <CircleHelp aria-hidden />}
-          {diagnosticsReady ? "Diagnostics ready" : "Diagnostics pending"}
-        </Badge>
-      </div>
-
-      {missingAssets.length > 0 ? (
-        <Badge variant="recording" title={`Missing assets: ${missingAssets.join(", ")}`}>
-          <AlertCircle aria-hidden />
-          {missingAssets.length} missing
-        </Badge>
+      {/* Narrow-viewport active panel drawer */}
+      {isNarrow ? (
+        <Sheet open={mobilePanelOpen} onOpenChange={setMobilePanelOpen}>
+          <SheetContent side="left" className="w-[min(80vw,360px)] p-0">
+            <SheetTitle className="sr-only">{activeTask} panel</SheetTitle>
+            <div className="flex h-full flex-col">
+              <div className="flex items-center justify-end border-b border-border px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => setMobilePanelOpen(false)}
+                  className="rounded p-1 text-subtle-foreground transition-colors duration-fast hover:text-foreground"
+                  aria-label="Close panel"
+                >
+                  <X className="size-4" aria-hidden />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto">{activePanel}</div>
+            </div>
+          </SheetContent>
+        </Sheet>
       ) : null}
 
-      <div className="flex shrink-0 items-center gap-1">
-        <IconButton
-          label={undoLabel ? `Undo ${undoLabel}` : "Undo"}
-          shortcut="Ctrl Z"
-          disabled={!undoLabel}
-          onClick={onUndo}
-        >
-          <Undo2 />
-        </IconButton>
-        <IconButton
-          label={redoLabel ? `Redo ${redoLabel}` : "Redo"}
-          shortcut="Ctrl Shift Z"
-          disabled={!redoLabel}
-          onClick={onRedo}
-        >
-          <Redo2 />
-        </IconButton>
-        <IconButton label="Save project" shortcut="Ctrl S" onClick={onSave}>
-          <Save />
-        </IconButton>
-        {onOpenExport ? (
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={missingAssets.length > 0 || isExporting}
-            onClick={onOpenExport}
-            title={
-              missingAssets.length > 0
-                ? "Relink missing assets before exporting"
-                : "Open export settings"
-            }
-          >
-            <FileOutput data-icon="inline-start" />
-            <span className="hidden sm:inline">Export</span>
-          </Button>
-        ) : null}
-        <IconButton label="Close editor" tooltipSide="bottom" onClick={onClose}>
-          <X />
-        </IconButton>
-      </div>
-    </header>
+      {/* Narrow-viewport inspector drawer */}
+      {isNarrow ? (
+        <Sheet open={mobileInspectorOpen} onOpenChange={setMobileInspectorOpen}>
+          <SheetContent side="right" className="w-[min(80vw,360px)] p-0">
+            <SheetTitle className="sr-only">Inspector</SheetTitle>
+            <div className="flex h-full flex-col">
+              <div className="flex items-center justify-end border-b border-border px-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => setMobileInspectorOpen(false)}
+                  className="rounded p-1 text-subtle-foreground transition-colors duration-fast hover:text-foreground"
+                  aria-label="Close inspector"
+                >
+                  <X className="size-4" aria-hidden />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                <InspectorShell metadata={metadata} />
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
+      ) : null}
+    </div>
   )
 }

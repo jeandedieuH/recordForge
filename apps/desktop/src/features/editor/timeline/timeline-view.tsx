@@ -86,11 +86,12 @@ import type {
 import { AudioTrackPreview } from "./audio-track-preview"
 import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
-import { ClipInspector } from "./clip-inspector"
 import { MaskPreview } from "./mask-preview"
 import { TimelineLanes, getVisibleTickInterval } from "./timeline-lanes"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { CustomCursorOverlay } from "../cursor"
+import { ResizableHandle } from "../shell/resizable-handle"
+import { useResizableDimension } from "../shell/use-resizable-dimension"
 
 interface TimelineViewProps {
   recordingId: string
@@ -214,6 +215,13 @@ export function TimelineView({
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
 
+  const [timelineHeight, setTimelineHeight] = useResizableDimension({
+    defaultValue: 320,
+    min: 160,
+    max: 520,
+    storageKey: "recordforge:editor:timelineHeight",
+  })
+
   // Phase 2: pointer/keyboard editing gestures use draft/commit/cancel semantics.
   const interaction = useTimelineInteraction()
 
@@ -235,7 +243,6 @@ export function TimelineView({
     if (!timeline || !selection || selection.kind !== "marker") return null
     return timeline.markers.find((marker) => marker.id === selection.markerId) ?? null
   }, [timeline, view.selection])
-  const selectedClipCount = view.selection?.kind === "clip" ? view.selection.clipIds.length : 0
 
   useEffect(() => {
     if (view.selection?.kind === "clip" && !selectedClip) setSelection(null)
@@ -1234,18 +1241,18 @@ export function TimelineView({
             </NativeSelect>
           </div>
         </div>
-
-        <ClipInspector
-          clip={selectedClip?.clip ?? null}
-          track={selectedClip?.track ?? null}
-          marker={selectedMarker}
-          metadata={metadata}
-          selectedClipCount={selectedClipCount}
-          onClear={() => setSelection(null)}
-        />
       </div>
 
-      <div className="flex h-80 shrink-0 flex-col bg-surface-dim">
+      <ResizableHandle
+        direction="vertical"
+        value={timelineHeight}
+        min={160}
+        max={520}
+        onChange={setTimelineHeight}
+        className="bg-surface-dim"
+      />
+
+      <div className="flex shrink-0 flex-col bg-surface-dim" style={{ height: timelineHeight }}>
         <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border px-4 py-1.5">
           <div className="flex items-center gap-1">
             <div

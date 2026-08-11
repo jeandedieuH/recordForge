@@ -73,7 +73,7 @@ export function CursorInspector({
                 type="button"
                 onClick={() => onChange({ preset: item.id })}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-2 rounded-xl border p-2.5 text-center transition-all hover:bg-surface-elevated",
+                  "flex flex-col items-center justify-center gap-2 rounded-xl border p-2.5 text-center transition-colors hover:bg-surface-elevated",
                   isSelected
                     ? "border-primary bg-primary/10 ring-1 ring-primary"
                     : "border-border bg-surface",

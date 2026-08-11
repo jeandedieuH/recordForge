@@ -73,6 +73,18 @@ export {
   DialogTrigger,
 } from "./components/overlay/dialog"
 export {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetOverlay,
+  SheetPortal,
+  SheetTitle,
+  SheetTrigger,
+} from "./components/overlay/sheet"
+export {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,

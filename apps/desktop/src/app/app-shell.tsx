@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
-import { ToastViewport, TooltipProvider } from "@recordforge/ui"
+import { ToastViewport, TooltipProvider, cn } from "@recordforge/ui"
 import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
@@ -149,15 +149,24 @@ export function AppShell() {
         <Titlebar view={VIEW_TITLES[activeView]} onOpenRecord={() => setIsNewRecordingOpen(true)} />
 
         <div className="flex min-h-0 flex-1">
-          <Sidebar
-            activeView={activeView}
-            onNavigate={handleNavigate}
-            editorOpen={editorRecordingId !== null}
-            collapsed={sidebarCollapsed}
-            onToggleCollapsed={toggleSidebar}
-          />
+          {activeView === "editor" || activeView === "export" ? null : (
+            <Sidebar
+              activeView={activeView}
+              onNavigate={handleNavigate}
+              editorOpen={editorRecordingId !== null}
+              collapsed={sidebarCollapsed}
+              onToggleCollapsed={toggleSidebar}
+            />
+          )}
 
-          <main className="min-w-0 flex-1 overflow-y-auto bg-background">
+          <main
+            className={cn(
+              "min-w-0 flex-1 bg-background",
+              activeView === "editor" || activeView === "export"
+                ? "overflow-hidden"
+                : "overflow-y-auto",
+            )}
+          >
             {saveMessage ? (
               <div
                 role="status"
