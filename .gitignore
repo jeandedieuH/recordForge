@@ -13,6 +13,13 @@ apps/desktop/src-tauri/gen
 apps/desktop/src-tauri/Wix?i
 apps/desktop/src-tauri/binaries
 
+# Rust cursor engine
+packages/cursor-engine/target
+packages/cursor-engine/pkg
+packages/cursor-engine/Cargo.lock
+tooling/prototypes/cursor-engine-wasm/target
+tooling/prototypes/cursor-engine-wasm/pkg
+
 # Turbo cache
 .turbo
 

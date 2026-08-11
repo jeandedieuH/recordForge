@@ -228,6 +228,9 @@ export function findCursorEffectAtTime(
 }
 
 export * from "./smart-zoom"
+export * from "./engine"
+export * from "./wasm-engine"
+export * from "./assets"
 
 export function cursorSettingsForEffect(
   base: CursorSettings | undefined,

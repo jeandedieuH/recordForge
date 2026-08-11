@@ -1,72 +1,13 @@
-use crate::capture::cursor::{CursorTelemetryEvent, CursorTelemetryFile};
+use crate::capture::cursor::CursorTelemetryFile;
+
+use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::usvg;
 
 use super::{clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
-pub struct CursorSettings {
-    pub enabled: bool,
-    pub preset: String,
-    pub scale: f64,
-    pub fill_color: String,
-    pub fill_opacity: f64,
-    pub stroke_color: String,
-    pub stroke_width: f64,
-    pub stroke_opacity: f64,
-    pub shadow_enabled: bool,
-    pub shadow_color: String,
-    pub shadow_blur: f64,
-    pub shadow_offset_x: f64,
-    pub shadow_offset_y: f64,
-    pub shadow_opacity: f64,
-    pub click_feedback: String,
-    pub click_color: String,
-    pub click_size: f64,
-    pub left_click_enabled: bool,
-    pub right_click_enabled: bool,
-    pub spotlight_mode: bool,
-    pub spotlight_radius: f64,
-    pub spotlight_dim_opacity: f64,
-    pub hide_native_cursor: bool,
-    pub smooth_movement: bool,
-    pub smooth_factor: f64,
-    pub auto_hide_idle: bool,
-    pub idle_timeout_ms: u64,
-}
-
-impl Default for CursorSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            preset: "modern-neon".into(),
-            scale: 1.0,
-            fill_color: "#3b82f6".into(),
-            fill_opacity: 1.0,
-            stroke_color: "#ffffff".into(),
-            stroke_width: 2.0,
-            stroke_opacity: 1.0,
-            shadow_enabled: true,
-            shadow_color: "#000000".into(),
-            shadow_blur: 8.0,
-            shadow_offset_x: 2.0,
-            shadow_offset_y: 4.0,
-            shadow_opacity: 0.4,
-            click_feedback: "ripple".into(),
-            click_color: "#60a5fa".into(),
-            click_size: 36.0,
-            left_click_enabled: true,
-            right_click_enabled: true,
-            spotlight_mode: false,
-            spotlight_radius: 120.0,
-            spotlight_dim_opacity: 0.5,
-            hide_native_cursor: true,
-            smooth_movement: true,
-            smooth_factor: 0.25,
-            auto_hide_idle: false,
-            idle_timeout_ms: 2_000,
-        }
-    }
-}
+// Re-export the canonical cursor settings so the renderer and engine share the
+// same type and defaults.
+pub use cursor_engine::CursorSettings;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -116,18 +57,32 @@ impl Rgba {
     }
 }
 
+/// A software-rasterized cursor ready to be composited onto the export frame.
+#[derive(Debug, Clone)]
+struct RasterizedCursor {
+    width: u32,
+    height: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+    data: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CursorRenderer {
     settings: CursorSettings,
-    telemetry: CursorTelemetryFile,
+    pub(crate) engine: cursor_engine::CursorEngine,
     segments: Vec<RenderSegment>,
     zoom_segments: Vec<RenderPlanZoomSegment>,
     canvas_width: u32,
     canvas_height: u32,
     canvas_padding: u32,
-    fit_scale: f64,
-    fit_offset_x: f64,
-    fit_offset_y: f64,
+    /// The final cursor scale is the user setting combined with the fit scale
+    /// so the rendered cursor stays visually proportional to the output video.
+    cursor_scale: f64,
+    /// Cached rasterization of the cursor asset. The asset and settings are
+    /// constant for a given export, so the expensive SVG parse/render happens
+    /// once and is blitted each frame.
+    cursor_cache: Option<RasterizedCursor>,
 }
 
 impl CursorRenderer {
@@ -148,7 +103,6 @@ impl CursorRenderer {
         zoom_segments: &[RenderPlanZoomSegment],
         canvas: &RenderCanvas,
     ) -> Result<Self, String> {
-        let telemetry = telemetry.normalize();
         if canvas.width == 0 || canvas.height == 0 {
             return Err("cursor canvas dimensions must be positive".into());
         }
@@ -159,29 +113,39 @@ impl CursorRenderer {
             return Err("cursor renderer requires at least one video segment".into());
         }
 
+        let telemetry_json = serde_json::to_string(&telemetry)
+            .map_err(|e| format!("failed to serialize cursor telemetry: {e}"))?;
+        let options_json = serde_json::to_string(&cursor_engine::CursorEngineOptions::default())
+            .map_err(|e| format!("failed to serialize cursor engine options: {e}"))?;
+
+        let engine = cursor_engine::CursorEngine::new(
+            serde_json::from_str(&telemetry_json)
+                .map_err(|e| format!("failed to parse cursor telemetry: {e}"))?,
+            serde_json::from_str(&options_json)
+                .map_err(|e| format!("failed to parse cursor engine options: {e}"))?,
+        )?;
+
         let padding = canvas.padding as f64;
         let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
         let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
         let fit_scale = (content_width / telemetry.source_width as f64)
             .min(content_height / telemetry.source_height as f64);
-        let fit_width = telemetry.source_width as f64 * fit_scale;
-        let fit_height = telemetry.source_height as f64 * fit_scale;
+        let cursor_scale = settings.scale.clamp(0.2, 5.0) * fit_scale;
 
         Ok(Self {
             settings,
-            telemetry,
+            engine,
             segments: segments.to_vec(),
             zoom_segments: zoom_segments.to_vec(),
             canvas_width: canvas.width,
             canvas_height: canvas.height,
             canvas_padding: canvas.padding,
-            fit_scale,
-            fit_offset_x: padding + (content_width - fit_width) / 2.0,
-            fit_offset_y: padding + (content_height - fit_height) / 2.0,
+            cursor_scale,
+            cursor_cache: None,
         })
     }
 
-    pub fn render_frame(&self, output_ms: u64, frame: &mut [u8]) {
+    pub fn render_frame(&mut self, output_ms: u64, frame: &mut [u8]) {
         frame.fill(0);
         let expected_len = self.canvas_width as usize * self.canvas_height as usize * 4;
         if frame.len() != expected_len {
@@ -195,57 +159,47 @@ impl CursorRenderer {
         if !self.settings.enabled {
             return;
         }
-        let event_index = match closest_event(&self.telemetry.events, source_time_ms) {
-            Some((index, event)) => {
-                if !event.visible
-                    || (self.settings.auto_hide_idle
-                        && is_cursor_idle(
-                            &self.telemetry.events,
-                            index,
-                            source_time_ms,
-                            self.settings.idle_timeout_ms,
-                        ))
-                {
-                    return;
-                }
-                index
-            }
-            None => return,
-        };
-        let (x, y) = self.position_for_event(event_index);
-        let (x, y) = self.apply_zoom(output_ms, x, y);
+
+        let cursor_frame = self.engine.evaluate(source_time_ms as f64, &self.settings);
+        if !cursor_frame.visible {
+            return;
+        }
+
+        let point = self.engine.fit(
+            cursor_frame.source_x,
+            cursor_frame.source_y,
+            self.canvas_width as f64,
+            self.canvas_height as f64,
+            self.canvas_padding as f64,
+        );
+        let (x, y) = self.apply_zoom(output_ms, point.x, point.y);
 
         if self.settings.spotlight_mode {
             self.render_spotlight(frame, x, y);
         }
 
-        if is_recent_click(
-            &self.telemetry.events,
-            source_time_ms,
-            self.settings.left_click_enabled,
-            self.settings.right_click_enabled,
-        ) && self.settings.click_feedback != "none"
-        {
-            self.render_click_feedback(frame, x, y, source_time_ms);
+        if self.settings.click_feedback != "none" {
+            for click in &cursor_frame.active_clicks {
+                let click_point = self.engine.fit(
+                    click.source_x,
+                    click.source_y,
+                    self.canvas_width as f64,
+                    self.canvas_height as f64,
+                    self.canvas_padding as f64,
+                );
+                let (cx, cy) = self.apply_zoom(output_ms, click_point.x, click_point.y);
+                self.render_click_feedback(frame, cx, cy, click);
+            }
         }
 
-        let shadow = parse_color(&self.settings.shadow_color, Rgba::opaque(0, 0, 0))
-            .with_alpha(self.settings.shadow_opacity);
-        if self.settings.shadow_enabled {
-            self.draw_cursor(
-                frame,
-                x + self.settings.shadow_offset_x,
-                y + self.settings.shadow_offset_y,
-                shadow,
-                shadow,
-                0.0,
-            );
-        }
-        let fill = parse_color(&self.settings.fill_color, Rgba::opaque(59, 130, 246))
-            .with_alpha(self.settings.fill_opacity);
-        let stroke = parse_color(&self.settings.stroke_color, Rgba::opaque(255, 255, 255))
-            .with_alpha(self.settings.stroke_opacity);
-        self.draw_cursor(frame, x, y, fill, stroke, self.settings.stroke_width);
+        let shape_id = if cursor_frame.shape_id.is_empty() {
+            self.settings.preset.clone()
+        } else {
+            cursor_frame.shape_id
+        };
+        // Apply the idle fade opacity computed by the canonical engine. The
+        // cached asset is rendered at full opacity and modulated per-frame.
+        self.draw_cursor(frame, x, y, cursor_frame.opacity, &shape_id);
     }
 
     fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {
@@ -298,57 +252,6 @@ impl CursorRenderer {
         )
     }
 
-    fn position_for_event(&self, event_index: usize) -> (f64, f64) {
-        let (capture_width, capture_height) = self
-            .telemetry
-            .capture_bounds
-            .as_ref()
-            .map(|bounds| (bounds.width, bounds.height))
-            .unwrap_or((self.telemetry.source_width, self.telemetry.source_height));
-        let dpi_scale = self
-            .telemetry
-            .dpi_scale
-            .as_ref()
-            .map(|scale| (scale.x, scale.y))
-            .unwrap_or((1.0, 1.0));
-        let coordinate_scale_x =
-            self.telemetry.source_width as f64 / capture_width.max(1) as f64 * dpi_scale.0;
-        let coordinate_scale_y =
-            self.telemetry.source_height as f64 / capture_height.max(1) as f64 * dpi_scale.1;
-
-        let (source_x, source_y) = if self.settings.smooth_movement {
-            let factor = self.settings.smooth_factor.clamp(0.05, 1.0);
-            let window_size = 5;
-            let mut total_weight = 0.0;
-            let mut raw_x = 0.0;
-            let mut raw_y = 0.0;
-            for cursor_index in event_index.saturating_sub(window_size)..=event_index {
-                let weight = (1.0 - factor).powi((event_index - cursor_index) as i32);
-                let event = &self.telemetry.events[cursor_index];
-                raw_x += event.x * weight;
-                raw_y += event.y * weight;
-                total_weight += weight;
-            }
-            (
-                (raw_x / total_weight) * coordinate_scale_x,
-                (raw_y / total_weight) * coordinate_scale_y,
-            )
-        } else {
-            let event = &self.telemetry.events[event_index];
-            (event.x * coordinate_scale_x, event.y * coordinate_scale_y)
-        };
-
-        let source_width = self.telemetry.source_width as f64;
-        let source_height = self.telemetry.source_height as f64;
-        let source_x = source_x.clamp(0.0, source_width);
-        let source_y = source_y.clamp(0.0, source_height);
-
-        (
-            self.fit_offset_x + source_x * self.fit_scale,
-            self.fit_offset_y + source_y * self.fit_scale,
-        )
-    }
-
     fn render_spotlight(&self, frame: &mut [u8], x: f64, y: f64) {
         let dim = parse_color(&self.settings.shadow_color, Rgba::opaque(0, 0, 0))
             .with_alpha(self.settings.spotlight_dim_opacity);
@@ -362,48 +265,37 @@ impl CursorRenderer {
             self.canvas_height,
             dim,
         );
-        clear_circle(
-            frame,
-            self.canvas_width,
-            self.canvas_height,
-            x,
-            y,
-            self.settings.spotlight_radius.max(0.0),
-        );
+        // The spotlight radius scales with the cursor so it stays proportional
+        // to the fitted video, matching the preview overlay.
+        let radius = self.settings.spotlight_radius.max(0.0) * self.cursor_scale;
+        clear_circle(frame, self.canvas_width, self.canvas_height, x, y, radius);
     }
 
-    fn render_click_feedback(&self, frame: &mut [u8], x: f64, y: f64, time_ms: u64) {
-        let click = closest_click(
-            &self.telemetry.events,
-            time_ms,
-            self.settings.left_click_enabled,
-            self.settings.right_click_enabled,
-        );
-        let elapsed = click
-            .map(|event| time_ms.saturating_sub(event.t_ms) as f64)
-            .unwrap_or(0.0);
-        let progress = (elapsed / 350.0).clamp(0.0, 1.0);
+    fn render_click_feedback(
+        &self,
+        frame: &mut [u8],
+        x: f64,
+        y: f64,
+        click: &cursor_engine::CursorClickEffect,
+    ) {
+        let progress = click.progress.clamp(0.0, 1.0);
+        // The preview scales the click effect with the cursor scale and then
+        // expands it from 25% to 100% over the effect duration.
+        let effect_scale = 0.25 + progress * 0.75;
+        let click_size = self.settings.click_size.max(10.0) * self.cursor_scale;
+        let radius = (click_size / 2.0 * effect_scale).max(1.0);
         let color = parse_color(&self.settings.click_color, Rgba::opaque(96, 165, 250));
-        let radius = self.settings.click_size.max(10.0) * (0.55 + progress * 0.45);
+        let alpha = 0.75 * click.intensity;
 
         match self.settings.click_feedback.as_str() {
-            "pulse" => fill_circle(
+            "pulse" | "spotlight" => fill_circle(
                 frame,
                 self.canvas_width,
                 self.canvas_height,
                 x,
                 y,
-                radius / 2.0,
-                color.with_alpha(0.65 * (1.0 - progress)),
-            ),
-            "spotlight" => fill_circle(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
-                x,
-                y,
-                radius / 2.0,
-                color.with_alpha(0.55 * (1.0 - progress)),
+                radius,
+                color.with_alpha(alpha),
             ),
             "ripple" => draw_ring(
                 frame,
@@ -412,175 +304,249 @@ impl CursorRenderer {
                 x,
                 y,
                 radius,
-                (3.0 * (1.0 - progress)).max(1.0),
-                color.with_alpha(0.8 * (1.0 - progress)),
+                (3.0 * effect_scale).max(1.0),
+                color.with_alpha(alpha),
             ),
             _ => {}
         }
     }
 
-    fn draw_cursor(
+    fn draw_cursor(&mut self, frame: &mut [u8], x: f64, y: f64, opacity: f64, shape_id: &str) {
+        let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
+        if self.cursor_cache.is_none() {
+            match self.rasterize_cursor_asset(asset) {
+                Ok(cursor) => self.cursor_cache = Some(cursor),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to rasterize cursor asset; skipping cursor");
+                    return;
+                }
+            }
+        }
+        let cursor = self.cursor_cache.as_ref().unwrap();
+        self.blit_cursor(frame, cursor, x, y, opacity);
+    }
+
+    fn blit_cursor(
         &self,
         frame: &mut [u8],
+        cursor: &RasterizedCursor,
         x: f64,
         y: f64,
-        fill: Rgba,
-        stroke: Rgba,
-        stroke_width: f64,
+        opacity: f64,
     ) {
-        let scale = self.settings.scale.clamp(0.2, 5.0);
-        match self.settings.preset.as_str() {
-            "highlighter-circle" => {
-                fill_circle(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    15.0 * scale,
-                    fill.with_alpha(0.35),
-                );
-                draw_ring(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    15.0 * scale,
-                    stroke_width * scale,
-                    stroke,
-                );
-                fill_circle(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    3.0 * scale,
-                    stroke,
-                );
+        let opacity = opacity.clamp(0.0, 1.0) as f32;
+        if opacity <= 0.0 {
+            return;
+        }
+        let x0 = x.round() as i32 - cursor.hotspot_x;
+        let y0 = y.round() as i32 - cursor.hotspot_y;
+        for row in 0..cursor.height as i32 {
+            let fy = y0 + row;
+            if fy < 0 || fy >= self.canvas_height as i32 {
+                continue;
             }
-            "minimal-dot" => {
-                fill_circle(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    7.0 * scale,
-                    fill,
-                );
-                draw_ring(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    7.0 * scale,
-                    stroke_width * scale,
-                    stroke,
-                );
+            for col in 0..cursor.width as i32 {
+                let fx = x0 + col;
+                if fx < 0 || fx >= self.canvas_width as i32 {
+                    continue;
+                }
+                let src = (row as usize * cursor.width as usize + col as usize) * 4;
+                let alpha = cursor.data[src + 3] as f32 / 255.0 * opacity;
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let color = Rgba {
+                    red: cursor.data[src],
+                    green: cursor.data[src + 1],
+                    blue: cursor.data[src + 2],
+                    alpha,
+                };
+                blend_pixel(frame, self.canvas_width, fx, fy, color);
             }
-            "cyberpunk" => {
-                draw_ring(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    12.0 * scale,
-                    stroke_width.max(2.0) * scale,
-                    fill,
-                );
-                let length = 6.0 * scale;
-                let gap = 8.0 * scale;
-                draw_line(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y - gap,
-                    x,
-                    y - gap - length,
-                    stroke,
-                    2.0 * scale,
-                );
-                draw_line(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y + gap,
-                    x,
-                    y + gap + length,
-                    stroke,
-                    2.0 * scale,
-                );
-                draw_line(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x - gap,
-                    y,
-                    x - gap - length,
-                    y,
-                    stroke,
-                    2.0 * scale,
-                );
-                draw_line(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x + gap,
-                    y,
-                    x + gap + length,
-                    y,
-                    stroke,
-                    2.0 * scale,
-                );
-                fill_circle(
-                    frame,
-                    self.canvas_width,
-                    self.canvas_height,
-                    x,
-                    y,
-                    3.0 * scale,
-                    fill,
-                );
-            }
-            "sleek-dark" => draw_arrow(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
-                x,
-                y,
-                scale,
-                Rgba::opaque(18, 18, 18).with_alpha(self.settings.fill_opacity),
-                stroke,
-                stroke_width.max(2.0),
-            ),
-            "mac-pro" => draw_arrow(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
-                x,
-                y,
-                scale,
-                Rgba::opaque(255, 255, 255).with_alpha(self.settings.fill_opacity),
-                Rgba::opaque(30, 30, 30).with_alpha(self.settings.stroke_opacity),
-                stroke_width.max(1.5),
-            ),
-            _ => draw_arrow(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
-                x,
-                y,
-                scale,
-                fill,
-                stroke,
-                stroke_width,
-            ),
+        }
+    }
+
+    /// Renders the shared SVG cursor asset to a straight-alpha RGBA buffer.
+    /// The result includes the configured drop shadow (if enabled) and uses the
+    /// asset hotspot so the blit position matches the preview overlay exactly.
+    fn rasterize_cursor_asset(
+        &self,
+        asset: &cursor_engine::assets::CursorAsset,
+    ) -> Result<RasterizedCursor, String> {
+        let view_box: Vec<f64> = asset
+            .view_box
+            .split_whitespace()
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        let (vb_x, vb_y, vb_w, vb_h) = match view_box.as_slice() {
+            &[x, y, w, h] if w > 0.0 && h > 0.0 => (x, y, w, h),
+            _ => (0.0, 0.0, asset.width, asset.height),
+        };
+
+        let rendered_width = (asset.width * self.cursor_scale).max(1.0);
+        let rendered_height = (asset.height * self.cursor_scale).max(1.0);
+        let unit_scale_x = rendered_width / vb_w;
+        let unit_scale_y = rendered_height / vb_h;
+        let unit_scale = unit_scale_x.min(unit_scale_y);
+
+        let shadow = self.settings.shadow_enabled
+            && self.settings.shadow_opacity > 0.0
+            && (self.settings.shadow_blur.abs() > f64::EPSILON
+                || self.settings.shadow_offset_x.abs() > f64::EPSILON
+                || self.settings.shadow_offset_y.abs() > f64::EPSILON);
+
+        let pad_vb = if shadow {
+            let blur_extent = self.settings.shadow_blur * 2.0;
+            let max_offset = self
+                .settings
+                .shadow_offset_x
+                .abs()
+                .max(self.settings.shadow_offset_y.abs());
+            ((max_offset + blur_extent) / unit_scale).ceil()
+        } else {
+            0.0
+        };
+
+        let svg_width = (vb_w + pad_vb * 2.0) * unit_scale_x;
+        let svg_height = (vb_h + pad_vb * 2.0) * unit_scale_y;
+        let hotspot_x = (asset.hotspot_x - vb_x + pad_vb) * unit_scale_x;
+        let hotspot_y = (asset.hotspot_y - vb_y + pad_vb) * unit_scale_y;
+
+        let svg = build_cursor_svg(
+            asset,
+            &self.settings,
+            shadow,
+            pad_vb,
+            svg_width,
+            svg_height,
+            vb_x,
+            vb_y,
+            vb_w,
+            vb_h,
+        );
+
+        let options = usvg::Options::default();
+        let tree = usvg::Tree::from_str(&svg, &options)
+            .map_err(|error| format!("failed to parse cursor SVG: {error}"))?;
+        let size = tree.size().to_int_size();
+        let Some(mut pixmap) = Pixmap::new(size.width(), size.height()) else {
+            return Err("failed to allocate cursor pixmap".into());
+        };
+        resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+
+        let mut data = pixmap.data().to_vec();
+        unpremultiply_rgba(&mut data);
+
+        Ok(RasterizedCursor {
+            width: size.width(),
+            height: size.height(),
+            hotspot_x: hotspot_x.round() as i32,
+            hotspot_y: hotspot_y.round() as i32,
+            data,
+        })
+    }
+}
+
+/// Substitutes the shared asset template tokens and builds a full SVG document.
+/// When shadow is enabled a `<feDropShadow>` filter is injected so the cached
+/// pixmap already contains the shadow, matching the preview overlay.
+#[allow(clippy::too_many_arguments)]
+fn build_cursor_svg(
+    asset: &cursor_engine::assets::CursorAsset,
+    settings: &CursorSettings,
+    shadow: bool,
+    pad_vb: f64,
+    width: f64,
+    height: f64,
+    vb_x: f64,
+    vb_y: f64,
+    vb_w: f64,
+    vb_h: f64,
+) -> String {
+    let fill = parse_hex_color(&settings.fill_color, "#3b82f6");
+    let stroke = parse_hex_color(&settings.stroke_color, "#ffffff");
+    let stroke_width = settings.stroke_width;
+
+    let mut markup = asset.svg.clone();
+    markup = markup.replace(
+        "{Math.max(2, strokeWidth)}",
+        &stroke_width.max(2.0).to_string(),
+    );
+    markup = markup.replace(
+        "{strokeWidth || 1.5}",
+        &if stroke_width > 0.0 {
+            stroke_width
+        } else {
+            1.5
+        }
+        .to_string(),
+    );
+    markup = markup.replace("{strokeWidth}", &stroke_width.to_string());
+    markup = markup.replace("{fill}", &fill);
+    markup = markup.replace("{stroke}", &stroke);
+    markup = markup.replace("{fillOpacity}", &settings.fill_opacity.to_string());
+    markup = markup.replace("{strokeOpacity}", &settings.stroke_opacity.to_string());
+
+    let view_box = format!(
+        "{} {} {} {}",
+        vb_x - pad_vb,
+        vb_y - pad_vb,
+        vb_w + pad_vb * 2.0,
+        vb_h + pad_vb * 2.0
+    );
+
+    if shadow {
+        let shadow_color = parse_hex_color(&settings.shadow_color, "#000000");
+        let std_deviation = (settings.shadow_blur / 2.0).max(0.0);
+        // The filter region is expanded in view-box units to avoid clipping the
+        // blurred shadow. pad_vb is already sized for the shadow extent.
+        let filter_x = vb_x - pad_vb * 2.0;
+        let filter_y = vb_y - pad_vb * 2.0;
+        let filter_w = vb_w + pad_vb * 4.0;
+        let filter_h = vb_h + pad_vb * 4.0;
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}" width="{width}" height="{height}">
+<defs>
+<filter id="cursor-shadow" x="{filter_x}" y="{filter_y}" width="{filter_w}" height="{filter_h}" filterUnits="userSpaceOnUse">
+<feDropShadow dx="{dx}" dy="{dy}" stdDeviation="{std_deviation}" flood-color="{shadow_color}" flood-opacity="{shadow_opacity}"/>
+</filter>
+</defs>
+<g filter="url(#cursor-shadow)">{markup}</g>
+</svg>"#,
+            dx = settings.shadow_offset_x,
+            dy = settings.shadow_offset_y,
+            shadow_opacity = settings.shadow_opacity,
+        )
+    } else {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}" width="{width}" height="{height}">{markup}</svg>"#
+        )
+    }
+}
+
+fn parse_hex_color(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with('#') && (trimmed.len() == 7 || trimmed.len() == 9) {
+        return trimmed.into();
+    }
+    // Named colors used by the fixtures/tests.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "black" => "#000000".into(),
+        "white" => "#ffffff".into(),
+        _ => fallback.into(),
+    }
+}
+
+/// tiny-skia / resvg store pixels as premultiplied RGBA. The export frame uses
+/// straight-alpha RGBA, so convert once when the cursor asset is cached.
+fn unpremultiply_rgba(data: &mut [u8]) {
+    for pixel in data.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha > 0 && alpha < 255 {
+            let inv = 255.0 / alpha as f32;
+            pixel[0] = (pixel[0] as f32 * inv).min(255.0) as u8;
+            pixel[1] = (pixel[1] as f32 * inv).min(255.0) as u8;
+            pixel[2] = (pixel[2] as f32 * inv).min(255.0) as u8;
         }
     }
 }
@@ -603,103 +569,6 @@ fn source_time_for_output(segments: &[RenderSegment], output_ms: u64) -> Option<
             .source_in_ms
             .saturating_add((elapsed * ratio) as u64),
     )
-}
-
-fn closest_event(
-    events: &[CursorTelemetryEvent],
-    time_ms: u64,
-) -> Option<(usize, &CursorTelemetryEvent)> {
-    if events.is_empty() {
-        return None;
-    }
-
-    let mut low = 0;
-    let mut high = events.len();
-    while low < high {
-        let middle = low + (high - low) / 2;
-        if events[middle].t_ms < time_ms {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-
-    let right = low.min(events.len() - 1);
-    let left = right.saturating_sub(1);
-    let index = if events[left].t_ms.abs_diff(time_ms) <= events[right].t_ms.abs_diff(time_ms) {
-        left
-    } else {
-        right
-    };
-    Some((index, &events[index]))
-}
-
-fn closest_click(
-    events: &[CursorTelemetryEvent],
-    time_ms: u64,
-    left_enabled: bool,
-    right_enabled: bool,
-) -> Option<&CursorTelemetryEvent> {
-    let mut low = 0;
-    let mut high = events.len();
-    while low < high {
-        let middle = low + (high - low) / 2;
-        if events[middle].t_ms <= time_ms {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-
-    for index in (0..low).rev() {
-        let event = &events[index];
-        let elapsed = time_ms.saturating_sub(event.t_ms);
-        if elapsed >= 350 {
-            break;
-        }
-        let is_edge =
-            event.button_event == "down" || (event.button_event == "none" && event.clicked);
-        let is_enabled = match event.button.as_str() {
-            "left" => left_enabled,
-            "right" => right_enabled,
-            _ => true,
-        };
-        if is_edge && is_enabled {
-            return Some(event);
-        }
-    }
-    None
-}
-
-fn is_recent_click(
-    events: &[CursorTelemetryEvent],
-    time_ms: u64,
-    left_enabled: bool,
-    right_enabled: bool,
-) -> bool {
-    closest_click(events, time_ms, left_enabled, right_enabled).is_some()
-}
-
-fn is_cursor_idle(
-    events: &[CursorTelemetryEvent],
-    event_index: usize,
-    time_ms: u64,
-    timeout_ms: u64,
-) -> bool {
-    if event_index == 0 || timeout_ms == 0 {
-        return false;
-    }
-    let current = &events[event_index];
-    for previous in events[..event_index].iter().rev() {
-        if previous.x != current.x
-            || previous.y != current.y
-            || previous.button_event == "down"
-            || (previous.button_event == "none" && previous.clicked)
-        {
-            return time_ms.saturating_sub(previous.t_ms) >= timeout_ms;
-        }
-    }
-    time_ms.saturating_sub(current.t_ms) >= timeout_ms
 }
 
 fn parse_color(value: &str, fallback: Rgba) -> Rgba {
@@ -860,127 +729,10 @@ fn draw_ring(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_arrow(
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
-    x: f64,
-    y: f64,
-    scale: f64,
-    fill: Rgba,
-    stroke: Rgba,
-    stroke_width: f64,
-) {
-    let points = [
-        (x + 3.0 * scale, y + 3.0 * scale),
-        (x + 10.5 * scale, y + 20.5 * scale),
-        (x + 13.8 * scale, y + 13.8 * scale),
-        (x + 20.5 * scale, y + 10.5 * scale),
-    ];
-    fill_polygon(frame, width, height, &points, fill);
-    for index in 0..points.len() {
-        let next = points[(index + 1) % points.len()];
-        draw_line(
-            frame,
-            width,
-            height,
-            points[index].0,
-            points[index].1,
-            next.0,
-            next.1,
-            stroke,
-            stroke_width * scale,
-        );
-    }
-}
-
-fn fill_polygon(frame: &mut [u8], width: u32, height: u32, points: &[(f64, f64)], color: Rgba) {
-    if points.len() < 3 {
-        return;
-    }
-    let min_x = points
-        .iter()
-        .map(|point| point.0)
-        .fold(f64::INFINITY, f64::min)
-        .floor()
-        .max(0.0) as u32;
-    let max_x = points
-        .iter()
-        .map(|point| point.0)
-        .fold(f64::NEG_INFINITY, f64::max)
-        .ceil()
-        .min(width as f64) as u32;
-    let min_y = points
-        .iter()
-        .map(|point| point.1)
-        .fold(f64::INFINITY, f64::min)
-        .floor()
-        .max(0.0) as u32;
-    let max_y = points
-        .iter()
-        .map(|point| point.1)
-        .fold(f64::NEG_INFINITY, f64::max)
-        .ceil()
-        .min(height as f64) as u32;
-    for py in min_y..max_y {
-        for px in min_x..max_x {
-            if point_in_polygon(px as f64 + 0.5, py as f64 + 0.5, points) {
-                blend_pixel(frame, width, px as i32, py as i32, color);
-            }
-        }
-    }
-}
-
-fn point_in_polygon(x: f64, y: f64, points: &[(f64, f64)]) -> bool {
-    let mut inside = false;
-    let mut previous = points.len() - 1;
-    for current in 0..points.len() {
-        let (current_x, current_y) = points[current];
-        let (previous_x, previous_y) = points[previous];
-        let intersects = (current_y > y) != (previous_y > y)
-            && x < (previous_x - current_x) * (y - current_y) / (previous_y - current_y)
-                + current_x;
-        if intersects {
-            inside = !inside;
-        }
-        previous = current;
-    }
-    inside
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_line(
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    color: Rgba,
-    thickness: f64,
-) {
-    let distance = (x2 - x1).hypot(y2 - y1).max(1.0);
-    let steps = distance.ceil() as usize;
-    let radius = (thickness / 2.0).max(0.5);
-    for step in 0..=steps {
-        let ratio = step as f64 / steps as f64;
-        fill_circle(
-            frame,
-            width,
-            height,
-            x1 + (x2 - x1) * ratio,
-            y1 + (y2 - y1) * ratio,
-            radius,
-            color,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::cursor::CursorTelemetryEvent;
     use crate::exports::RenderCropFloat;
 
     fn telemetry() -> CursorTelemetryFile {
@@ -1003,6 +755,7 @@ mod tests {
                     button: "none".into(),
                     button_event: "none".into(),
                     visible: true,
+                    shape_id: None,
                 },
                 CursorTelemetryEvent {
                     t_ms: 100,
@@ -1012,6 +765,7 @@ mod tests {
                     button: "left".into(),
                     button_event: "down".into(),
                     visible: true,
+                    shape_id: None,
                 },
             ],
         )
@@ -1048,7 +802,7 @@ mod tests {
 
     #[test]
     fn renders_a_non_empty_cursor_frame() {
-        let renderer = CursorRenderer::new(
+        let mut renderer = CursorRenderer::new(
             CursorSettings::default(),
             telemetry(),
             &segments(),
@@ -1058,6 +812,41 @@ mod tests {
         let mut frame = vec![0; 100 * 100 * 4];
         renderer.render_frame(100, &mut frame);
         assert!(frame.chunks_exact(4).any(|pixel| pixel[3] > 0));
+    }
+
+    #[test]
+    fn rasterized_cursor_uses_asset_hotspot_and_fill_color() {
+        let mut settings = CursorSettings::default();
+        settings.preset = "modern-neon".into();
+        settings.fill_color = "#ff0000".into();
+        settings.stroke_color = "#ffffff".into();
+        settings.shadow_enabled = false;
+        settings.scale = 2.0;
+
+        let mut renderer = CursorRenderer::new(
+            settings,
+            telemetry(),
+            &segments(),
+            &test_canvas(100, 100, 0),
+        )
+        .expect("valid cursor renderer");
+        let mut frame = vec![0; 100 * 100 * 4];
+        // Time 0 places the cursor at the first telemetry sample (10, 20).
+        renderer.render_frame(0, &mut frame);
+
+        let mut found = false;
+        for index in (0..frame.len()).step_by(4) {
+            let pixel = &frame[index..index + 4];
+            // The modern-neon arrow is filled with the configured red.
+            if pixel[3] > 200 && pixel[0] > 200 && pixel[1] < 50 && pixel[2] < 50 {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "expected a solid red cursor pixel in the rendered frame"
+        );
     }
 
     #[test]
@@ -1078,16 +867,20 @@ mod tests {
             &test_canvas(1_920, 1_080, 0),
         )
         .expect("valid cursor renderer");
-        let (x, y) = renderer.position_for_event(0);
-        assert!((x - 352.5).abs() < 0.01);
-        assert!((y - 135.0).abs() < 0.01);
+        let frame = renderer.engine.evaluate(0.0, &renderer.settings);
+        assert!(frame.visible);
+        let point = renderer
+            .engine
+            .fit(frame.source_x, frame.source_y, 1_920.0, 1_080.0, 0.0);
+        assert!((point.x - 352.5).abs() < 0.01);
+        assert!((point.y - 135.0).abs() < 0.01);
     }
 
     #[test]
     fn does_not_render_hidden_cursor_events() {
         let mut data = telemetry();
         data.events[1].visible = false;
-        let renderer = CursorRenderer::new(
+        let mut renderer = CursorRenderer::new(
             CursorSettings::default(),
             data,
             &segments(),

@@ -37,6 +37,11 @@ import {
   snapshotProject,
 } from "../lib/project"
 import { getCursorTelemetry } from "../lib/cursor"
+import {
+  createCursorEngine,
+  createWasmCursorEngine,
+  type CursorEngine,
+} from "@recordforge/cursor-core"
 import { listRecordings } from "../lib/library"
 import { toErrorMessage } from "../lib/errors"
 import { isTauri } from "../lib/settings"
@@ -58,6 +63,7 @@ interface TimelineStore {
   metadata: MediaMetadata | null
   project: recordForgeProject | null
   cursorTelemetry: CursorTelemetryFile | null
+  cursorEngine: CursorEngine | null
   cursorTelemetryStatus: "loading" | "available" | "unavailable"
   activeJob: MediaJob | null
   isLoading: boolean
@@ -259,6 +265,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   metadata: null,
   project: null,
   cursorTelemetry: null,
+  cursorEngine: null,
   cursorTelemetryStatus: "unavailable",
   activeJob: null,
   isLoading: false,
@@ -285,6 +292,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       metadata: null,
       project: null,
       cursorTelemetry: null,
+      cursorEngine: null,
       cursorTelemetryStatus: "loading",
       activeJob: null,
       activeExportJob: null,
@@ -363,6 +371,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       }
       const engine = createEngine(timeline)
       const duration = getTotalDuration(timeline)
+      const cursorEngine = initialCursorTelemetry
+        ? createCursorEngine(initialCursorTelemetry)
+        : null
 
       // Keep the editor store in sync for UI surfaces (save status, missing assets).
       useEditorStore.getState().open(recordingId, project)
@@ -374,6 +385,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         metadata: meta,
         project,
         cursorTelemetry: initialCursorTelemetry,
+        cursorEngine,
         cursorTelemetryStatus: initialCursorTelemetry ? "available" : "unavailable",
         activeJob,
         activeExportJob: null,
@@ -404,6 +416,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         // A migration changed the durable project shape; bump to revision 1 and
         // schedule an autosave so the upgraded shape is not lost on close.
         get().markProjectChanged(project)
+      }
+
+      // Try to upgrade to the canonical Rust + WASM cursor engine for the preview.
+      // The TypeScript engine remains in use until the WASM module loads.
+      if (initialCursorTelemetry) {
+        createWasmCursorEngine(initialCursorTelemetry)
+          .then((wasmEngine) => {
+            set({ cursorEngine: wasmEngine })
+          })
+          .catch((err) => {
+            console.warn("Failed to load WASM cursor engine, using TypeScript fallback:", err)
+          })
       }
     } catch (err) {
       set({ error: toErrorMessage(err), isLoading: false })
@@ -1001,6 +1025,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       metadata: null,
       project: null,
       cursorTelemetry: null,
+      cursorEngine: null,
       cursorTelemetryStatus: "unavailable",
       activeJob: null,
       activeExportJob: null,

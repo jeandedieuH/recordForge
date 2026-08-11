@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { convertFileSrc, invoke } from "@tauri-apps/api/core"
+import { convertFileSrc } from "@tauri-apps/api/core"
 import {
   type MaskClip,
   type MediaJob,
@@ -37,7 +37,7 @@ import {
   canvasShadowStyle,
   formatTime,
 } from "@recordforge/editor-core"
-import { isCursorClickEdge, normalizeCursorTelemetry } from "@recordforge/cursor-core"
+import { isCursorClickEdge } from "@recordforge/cursor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
@@ -170,7 +170,12 @@ export function TimelineView({
   const recording = useTimelineStore((state) => state.recording)
   const metadata = useTimelineStore((state) => state.metadata)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
+  const cursorEngine = useTimelineStore((state) => state.cursorEngine)
   const activeJob = useTimelineStore((state) => state.activeJob)
+  const cursorClickSourceTimesMs = useMemo(() => {
+    if (!cursorTelemetry) return []
+    return cursorTelemetry.events.filter(isCursorClickEdge).map((event) => event.tMs)
+  }, [cursorTelemetry])
   const isLoading = useTimelineStore((state) => state.isLoading)
   const error = useTimelineStore((state) => state.error)
   const draftError = useTimelineStore((state) => state.draftError)
@@ -199,7 +204,6 @@ export function TimelineView({
   const monitorRef = useRef<HTMLDivElement>(null)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
   const [tool, setTool] = useState<"select" | "split">("select")
-  const [cursorClickSourceTimesMs, setCursorClickSourceTimesMs] = useState<number[]>([])
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
@@ -245,31 +249,6 @@ export function TimelineView({
   }, [recordingId])
 
   useEffect(() => {
-    let cancelled = false
-    setCursorClickSourceTimesMs([])
-
-    async function loadCursorClickTimes() {
-      try {
-        const raw = isTauri()
-          ? await invoke<unknown>("get_cursor_telemetry", { recordingId })
-          : null
-        if (cancelled || !raw) return
-        const telemetry = normalizeCursorTelemetry(raw)
-        setCursorClickSourceTimesMs(
-          telemetry.events.filter(isCursorClickEdge).map((event) => event.tMs),
-        )
-      } catch {
-        if (!cancelled) setCursorClickSourceTimesMs([])
-      }
-    }
-
-    void loadCursorClickTimes()
-    return () => {
-      cancelled = true
-    }
-  }, [recording?.id, recordingId])
-
-  useEffect(() => {
     setThumbnailSpriteError(false)
   }, [activeJob?.id, activeJob?.outputs?.thumbnailManifestPath])
 
@@ -282,8 +261,8 @@ export function TimelineView({
   const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
   const composition = useMemo(
     () =>
-      timeline ? resolvePreviewComposition(timeline, view.playheadMs, { cursorTelemetry }) : null,
-    [cursorTelemetry, timeline, view.playheadMs],
+      timeline ? resolvePreviewComposition(timeline, view.playheadMs, { cursorEngine }) : null,
+    [cursorEngine, timeline, view.playheadMs],
   )
   const zoomTransformStyle = useMemo(
     () =>
@@ -971,12 +950,16 @@ export function TimelineView({
                 />
               ) : null}
 
-              {mediaUrl && !mediaError && videoBounds && composition?.cursor.active ? (
+              {mediaUrl &&
+              !mediaError &&
+              videoBounds &&
+              composition?.cursor.active &&
+              composition.cursor.frame &&
+              cursorTelemetry ? (
                 <CustomCursorOverlay
-                  playheadMs={view.playheadMs}
-                  sourceTimeMs={composition.cursor.sourceTimeMs}
+                  frame={composition.cursor.frame}
                   cursorSettings={composition.cursor.settings}
-                  recordingId={recordingId}
+                  telemetry={cursorTelemetry}
                   containerWidth={videoBounds.width}
                   containerHeight={videoBounds.height}
                   offsetX={videoBounds.left}

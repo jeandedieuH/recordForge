@@ -5,3 +5,4 @@ src-tauri/target
 .bun
 coverage
 *.lock
+packages/cursor-core/wasm

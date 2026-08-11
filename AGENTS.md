@@ -18,6 +18,7 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 | Local database | SQLite |
 | Video processing | FFmpeg + FFprobe |
 | Windows audio capture | Native WASAPI via `wasapi` |
+| Cursor SVG rasterization | `resvg` + `tiny-skia` in export |
 | State management | Zustand |
 | Validation | Zod |
 | UI kit | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010) |

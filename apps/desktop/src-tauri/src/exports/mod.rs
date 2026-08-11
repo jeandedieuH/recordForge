@@ -1135,6 +1135,29 @@ fn apply_cursor_overlay(
         let v2 = crate::capture::cursor::read_any_telemetry(work_dir).ok_or_else(|| {
             InternalError::Storage("cursor telemetry asset is missing or corrupt".into())
         })?;
+
+        // Degraded telemetry should not crash the export. Position loss means
+        // there is nothing to render; missing shapes/topology still allow the
+        // configured preset cursor to be drawn.
+        match v2.metadata.health {
+            crate::capture::cursor::CursorTelemetryHealth::PositionUnavailable => {
+                tracing::warn!(
+                    %project_id,
+                    asset_id = %effect.asset_id,
+                    "cursor position unavailable; exporting without cursor overlay"
+                );
+                continue;
+            }
+            crate::capture::cursor::CursorTelemetryHealth::ShapesUnavailable => {
+                tracing::info!(
+                    %project_id,
+                    asset_id = %effect.asset_id,
+                    "cursor shape metadata unavailable; using preset fallback"
+                );
+            }
+            _ => {}
+        }
+
         let telemetry = crate::capture::cursor::v2_to_v1_telemetry(&v2);
         if telemetry.events.is_empty() {
             continue;
@@ -1228,7 +1251,7 @@ fn apply_cursor_overlay(
         let output_ms = frame_index.saturating_mul(1000) / canvas.fps as u64;
         frame.fill(0);
         if let Some((_, _, renderer)) = renderers
-            .iter()
+            .iter_mut()
             .find(|(start_ms, end_ms, _)| output_ms >= *start_ms && output_ms < *end_ms)
         {
             renderer.render_frame(output_ms, &mut frame);
@@ -2267,5 +2290,28 @@ mod tests {
         assert!(partial_output_path(output)
             .to_string_lossy()
             .contains("partial"));
+    }
+
+    #[test]
+    fn cursor_partial_path_is_distinct_from_video_partial_path() {
+        let output = Path::new("C:/exports/demo.mp4");
+        let video_partial = partial_output_path(output);
+        let cursor_partial = cursor_partial_output_path(output);
+        assert_ne!(video_partial, cursor_partial);
+        assert!(cursor_partial.to_string_lossy().contains("partial"));
+        assert!(cursor_partial.to_string_lossy().contains("cursor"));
+    }
+
+    #[test]
+    fn cleanup_export_files_removes_cursor_partial_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("demo.mp4");
+        let cursor_partial = cursor_partial_output_path(&output);
+        std::fs::write(&cursor_partial, b"partial").expect("write partial");
+        assert!(cursor_partial.exists());
+
+        cleanup_export_files(&output);
+
+        assert!(!cursor_partial.exists());
     }
 }

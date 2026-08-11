@@ -50,6 +50,7 @@ export const cursorSettingsSchema = z.object({
   clickFeedback: clickFeedbackSchema.default("ripple"),
   clickColor: z.string().default("#60a5fa"),
   clickSize: z.number().min(10).max(100).default(36.0),
+  clickDurationMs: z.number().min(100).max(2000).default(350),
   leftClickEnabled: z.boolean().default(true),
   rightClickEnabled: z.boolean().default(true),
   smoothMovement: z.boolean().default(true),
@@ -74,6 +75,7 @@ export const cursorTelemetryEventSchema = z.object({
   button: z.enum(["left", "right", "middle", "none"]).default("none"),
   buttonEvent: cursorButtonEventSchema.default("none"),
   visible: z.boolean().default(true),
+  shapeId: z.string().optional(),
 })
 
 export type CursorTelemetryEvent = z.infer<typeof cursorTelemetryEventSchema>

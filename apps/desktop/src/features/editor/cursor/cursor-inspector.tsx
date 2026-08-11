@@ -1,8 +1,18 @@
 import type { CursorIconPreset, CursorSettings } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
-import { MousePointer2, Sliders, Sparkles, Zap } from "lucide-react"
-import { Button, Label, Slider, Switch, cn } from "@recordforge/ui"
-import { RenderCursorPreset } from "./custom-cursor-overlay"
+import { MousePointer2, Sliders } from "lucide-react"
+import {
+  Button,
+  Label,
+  Slider,
+  Switch,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+  cn,
+} from "@recordforge/ui"
+import { RenderCursorPreset } from "./cursor-asset"
 
 interface CursorInspectorProps {
   settings?: CursorSettings
@@ -20,6 +30,13 @@ const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
   { id: "default", label: "Classic Arrow", desc: "Standard screen arrow" },
 ]
 
+const CLICK_EMPHASIS: { id: CursorSettings["clickFeedback"]; label: string }[] = [
+  { id: "ripple", label: "Ripple" },
+  { id: "pulse", label: "Pulse" },
+  { id: "spotlight", label: "Spotlight" },
+  { id: "none", label: "Off" },
+]
+
 export function CursorInspector({
   settings = defaultCursorSettings,
   onChange,
@@ -28,12 +45,11 @@ export function CursorInspector({
   const scale = settings.scale ?? 1.0
 
   return (
-    <div className="space-y-6 text-xs text-foreground p-1">
-      {/* Header */}
+    <div className="space-y-4 text-xs text-foreground p-1">
       <div className="flex items-center justify-between border-b border-border pb-3">
         <div className="flex items-center gap-2 font-semibold">
-          <MousePointer2 className="size-4 text-primary" />
-          <span>Cursor Customization</span>
+          <MousePointer2 className="size-4 text-primary" aria-hidden />
+          <span>Cursor</span>
         </div>
         <Button
           variant="ghost"
@@ -45,7 +61,6 @@ export function CursorInspector({
         </Button>
       </div>
 
-      {/* Availability is explicit so disabled ranges never look like missing media. */}
       <div className="flex items-center justify-between rounded-xl border border-border bg-surface p-3">
         <div className="space-y-0.5">
           <p className="font-semibold">Show custom cursor</p>
@@ -59,11 +74,46 @@ export function CursorInspector({
         />
       </div>
 
-      {/* 1. Preset Selector Grid */}
+      <Tabs defaultValue="basic" className="w-full">
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="basic">Basic</TabsTrigger>
+          <TabsTrigger value="advanced">Advanced</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="basic" className="space-y-4 pt-2">
+          <BasicCursorSettings
+            settings={settings}
+            onChange={onChange}
+            activePreset={activePreset}
+            scale={scale}
+          />
+        </TabsContent>
+
+        <TabsContent value="advanced" className="space-y-4 pt-2">
+          <AdvancedCursorSettings settings={settings} onChange={onChange} />
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+
+interface BasicCursorSettingsProps {
+  settings: CursorSettings
+  onChange: (updated: Partial<CursorSettings>) => void
+  activePreset: CursorIconPreset
+  scale: number
+}
+
+function BasicCursorSettings({
+  settings,
+  onChange,
+  activePreset,
+  scale,
+}: BasicCursorSettingsProps) {
+  return (
+    <>
       <div className="space-y-2">
-        <Label className="text-[11px] font-semibold text-muted-foreground">
-          Cursor Style Preset
-        </Label>
+        <Label className="text-[11px] font-semibold text-muted-foreground">Style</Label>
         <div className="grid grid-cols-2 gap-2">
           {PRESETS.map((item) => {
             const isSelected = activePreset === item.id
@@ -101,10 +151,9 @@ export function CursorInspector({
         </div>
       </div>
 
-      {/* 2. Size & Scale Slider */}
       <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
         <div className="flex items-center justify-between">
-          <Label className="font-semibold">Cursor Size ({Math.round(scale * 100)}%)</Label>
+          <Label className="font-semibold">Size ({Math.round(scale * 100)}%)</Label>
         </div>
         <Slider
           value={[scale]}
@@ -112,23 +161,63 @@ export function CursorInspector({
           max={3.0}
           step={0.1}
           onValueChange={([val]) => onChange({ scale: val })}
-        />
-        <div className="flex justify-between text-[10px]">
-          <span>Cursor opacity</span>
-          <span className="font-mono">{Math.round((settings.fillOpacity ?? 1) * 100)}%</span>
-        </div>
-        <Slider
-          value={[settings.fillOpacity ?? 1]}
-          min={0}
-          max={1}
-          step={0.05}
-          aria-label="Cursor opacity"
-          onValueChange={([val]) => onChange({ fillOpacity: val })}
+          aria-label="Cursor size"
         />
       </div>
 
-      {/* 3. Colors & Outline */}
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Natural motion</p>
+            <p className="text-[10px] text-muted-foreground">Smooths small mouse jitters</p>
+          </div>
+          <Switch
+            checked={settings.smoothMovement ?? true}
+            onCheckedChange={(value) => onChange({ smoothMovement: value })}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label className="text-[11px] font-semibold text-muted-foreground">Click emphasis</Label>
+          <div className="grid grid-cols-4 gap-1.5">
+            {CLICK_EMPHASIS.map((kind) => (
+              <Button
+                key={kind.id}
+                variant={settings.clickFeedback === kind.id ? "secondary" : "outline"}
+                size="sm"
+                className="h-8 text-[10px] capitalize"
+                onClick={() => onChange({ clickFeedback: kind.id })}
+              >
+                {kind.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between pt-1">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Hide when idle</p>
+            <p className="text-[10px] text-muted-foreground">Fade after a quiet stretch</p>
+          </div>
+          <Switch
+            checked={settings.autoHideIdle ?? false}
+            onCheckedChange={(value) => onChange({ autoHideIdle: value })}
+          />
+        </div>
+      </div>
+    </>
+  )
+}
+
+interface AdvancedCursorSettingsProps {
+  settings: CursorSettings
+  onChange: (updated: Partial<CursorSettings>) => void
+}
+
+function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsProps) {
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
         <Label className="font-semibold text-[11px]">Fill & Outline</Label>
 
         <div className="grid grid-cols-2 gap-3">
@@ -140,6 +229,7 @@ export function CursorInspector({
                 value={settings.fillColor ?? "#3b82f6"}
                 onChange={(e) => onChange({ fillColor: e.target.value })}
                 className="size-7 cursor-pointer rounded-lg border border-border bg-transparent"
+                aria-label="Fill color"
               />
               <span className="font-mono text-[11px]">{settings.fillColor ?? "#3b82f6"}</span>
             </div>
@@ -153,6 +243,7 @@ export function CursorInspector({
                 value={settings.strokeColor ?? "#ffffff"}
                 onChange={(e) => onChange({ strokeColor: e.target.value })}
                 className="size-7 cursor-pointer rounded-lg border border-border bg-transparent"
+                aria-label="Stroke color"
               />
               <span className="font-mono text-[11px]">{settings.strokeColor ?? "#ffffff"}</span>
             </div>
@@ -170,15 +261,30 @@ export function CursorInspector({
             max={8}
             step={0.5}
             onValueChange={([val]) => onChange({ strokeWidth: val })}
+            aria-label="Stroke width"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-[11px]">
+            <span>Cursor opacity</span>
+            <span className="font-mono">{Math.round((settings.fillOpacity ?? 1) * 100)}%</span>
+          </div>
+          <Slider
+            value={[settings.fillOpacity ?? 1]}
+            min={0}
+            max={1}
+            step={0.05}
+            onValueChange={([val]) => onChange({ fillOpacity: val })}
+            aria-label="Cursor opacity"
           />
         </div>
       </div>
 
-      {/* 4. Drop Shadow Controls */}
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 font-semibold">
-            <Sparkles className="size-3.5 text-warning" />
+            <Sliders className="size-3.5 text-warning" aria-hidden />
             <span>Drop Shadow</span>
           </div>
           <Switch
@@ -196,6 +302,7 @@ export function CursorInspector({
                 value={settings.shadowColor ?? "#000000"}
                 onChange={(e) => onChange({ shadowColor: e.target.value })}
                 className="size-6 cursor-pointer rounded border border-border bg-transparent"
+                aria-label="Shadow color"
               />
             </div>
             <div className="space-y-1">
@@ -209,52 +316,35 @@ export function CursorInspector({
                 max={25}
                 step={1}
                 onValueChange={([val]) => onChange({ shadowBlur: val })}
+                aria-label="Shadow blur"
               />
             </div>
           </div>
         ) : null}
       </div>
 
-      {/* 5. Click Feedback Animations */}
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
-        <div className="flex items-center gap-2 font-semibold">
-          <Zap className="size-3.5 text-primary" />
-          <span>Click Feedback Animation</span>
-        </div>
-
-        <div className="grid grid-cols-4 gap-1.5">
-          {(["ripple", "pulse", "spotlight", "none"] as const).map((kind) => (
-            <Button
-              key={kind}
-              variant={settings.clickFeedback === kind ? "secondary" : "outline"}
-              size="sm"
-              className="h-8 capitalize text-[10px]"
-              onClick={() => onChange({ clickFeedback: kind })}
-            >
-              {kind}
-            </Button>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 pt-1">
-          <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
-            <span className="text-[10px]">Left click</span>
-            <Switch
-              checked={settings.leftClickEnabled ?? true}
-              onCheckedChange={(value) => onChange({ leftClickEnabled: value })}
-            />
-          </div>
-          <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
-            <span className="text-[10px]">Right click</span>
-            <Switch
-              checked={settings.rightClickEnabled ?? true}
-              onCheckedChange={(value) => onChange({ rightClickEnabled: value })}
-            />
-          </div>
-        </div>
+        <Label className="font-semibold text-[11px]">Click Feedback</Label>
 
         {settings.clickFeedback !== "none" ? (
-          <div className="space-y-2 pt-1">
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
+                <span className="text-[10px]">Left click</span>
+                <Switch
+                  checked={settings.leftClickEnabled ?? true}
+                  onCheckedChange={(value) => onChange({ leftClickEnabled: value })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
+                <span className="text-[10px]">Right click</span>
+                <Switch
+                  checked={settings.rightClickEnabled ?? true}
+                  onCheckedChange={(value) => onChange({ rightClickEnabled: value })}
+                />
+              </div>
+            </div>
+
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">Ring / Glow Color</span>
               <input
@@ -262,109 +352,126 @@ export function CursorInspector({
                 value={settings.clickColor ?? "#60a5fa"}
                 onChange={(e) => onChange({ clickColor: e.target.value })}
                 className="size-6 cursor-pointer rounded border border-border bg-transparent"
+                aria-label="Click effect color"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px]">
+                <span>Ring Size</span>
+                <span className="font-mono">{settings.clickSize ?? 36}px</span>
+              </div>
+              <Slider
+                value={[settings.clickSize ?? 36]}
+                min={10}
+                max={100}
+                step={1}
+                onValueChange={([val]) => onChange({ clickSize: val })}
+                aria-label="Click effect size"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px]">
+                <span>Effect Duration</span>
+                <span className="font-mono">{settings.clickDurationMs ?? 350}ms</span>
+              </div>
+              <Slider
+                value={[settings.clickDurationMs ?? 350]}
+                min={100}
+                max={2000}
+                step={50}
+                onValueChange={([val]) => onChange({ clickDurationMs: val })}
+                aria-label="Click effect duration"
+              />
+            </div>
+          </div>
+        ) : (
+          <p className="text-[10px] text-muted-foreground">
+            Turn on a click emphasis style in Basic to adjust these options.
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Focus Spotlight</p>
+            <p className="text-[10px] text-muted-foreground">Dim background around cursor</p>
+          </div>
+          <Switch
+            checked={settings.spotlightMode ?? false}
+            onCheckedChange={(val) => onChange({ spotlightMode: val })}
+          />
+        </div>
+
+        {settings.spotlightMode ? (
+          <div className="space-y-2 pl-2 border-l-2 border-primary/40 pt-1">
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px]">
+                <span>Spotlight Radius</span>
+                <span className="font-mono">{settings.spotlightRadius ?? 120}px</span>
+              </div>
+              <Slider
+                value={[settings.spotlightRadius ?? 120]}
+                min={50}
+                max={250}
+                step={10}
+                onValueChange={([val]) => onChange({ spotlightRadius: val })}
+                aria-label="Spotlight radius"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px]">
+                <span>Dim opacity</span>
+                <span className="font-mono">
+                  {Math.round((settings.spotlightDimOpacity ?? 0.5) * 100)}%
+                </span>
+              </div>
+              <Slider
+                value={[settings.spotlightDimOpacity ?? 0.5]}
+                min={0}
+                max={0.9}
+                step={0.05}
+                onValueChange={([val]) => onChange({ spotlightDimOpacity: val })}
+                aria-label="Spotlight dim opacity"
               />
             </div>
           </div>
         ) : null}
-      </div>
 
-      {/* 6. Motion & Focus Spotlight */}
-      <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
-        <div className="flex items-center gap-2 font-semibold">
-          <Sliders className="size-3.5 text-success" />
-          <span>Motion & Focus Mode</span>
-        </div>
-
-        <div className="space-y-3 pt-1">
-          <div className="flex items-center justify-between">
-            <div className="space-y-0.5">
-              <p className="font-medium text-[11px]">Motion Smoothing</p>
-              <p className="text-[10px] text-muted-foreground">
-                Removes mouse jitter during playback
-              </p>
+        {settings.autoHideIdle ? (
+          <div className="space-y-1 pl-2 border-l-2 border-success/40 pt-2">
+            <div className="flex justify-between text-[10px]">
+              <span>Idle timeout</span>
+              <span className="font-mono">{settings.idleTimeoutMs ?? 2000}ms</span>
             </div>
-            <Switch
-              checked={settings.smoothMovement ?? true}
-              onCheckedChange={(val) => onChange({ smoothMovement: val })}
+            <Slider
+              value={[settings.idleTimeoutMs ?? 2000]}
+              min={500}
+              max={10000}
+              step={100}
+              onValueChange={([value]) => onChange({ idleTimeoutMs: value })}
+              aria-label="Idle timeout"
             />
           </div>
+        ) : null}
 
-          {settings.smoothMovement ? (
-            <div className="space-y-1 pt-1">
-              <div className="flex justify-between text-[10px]">
-                <span>Smoothing strength</span>
-                <span className="font-mono">
-                  {Math.round((1 - (settings.smoothFactor ?? 0.25)) * 100)}%
-                </span>
-              </div>
-              <Slider
-                value={[settings.smoothFactor ?? 0.25]}
-                min={0.05}
-                max={1}
-                step={0.05}
-                aria-label="Cursor smoothing strength"
-                onValueChange={([value]) => onChange({ smoothFactor: value })}
-              />
-            </div>
-          ) : null}
-
-          <div className="flex items-center justify-between pt-1">
-            <div className="space-y-0.5">
-              <p className="font-medium text-[11px]">Hide when idle</p>
-              <p className="text-[10px] text-muted-foreground">
-                Hide after a quiet stretch of telemetry
-              </p>
-            </div>
-            <Switch
-              checked={settings.autoHideIdle ?? false}
-              onCheckedChange={(value) => onChange({ autoHideIdle: value })}
-            />
+        <div className="space-y-1 pt-1">
+          <div className="flex justify-between text-[10px]">
+            <span>Smoothing strength</span>
+            <span className="font-mono">
+              {Math.round((1 - (settings.smoothFactor ?? 0.25)) * 100)}%
+            </span>
           </div>
-
-          {settings.autoHideIdle ? (
-            <div className="space-y-1 pl-2 border-l-2 border-success/40 pt-1">
-              <div className="flex justify-between text-[10px]">
-                <span>Idle timeout</span>
-                <span className="font-mono">{settings.idleTimeoutMs ?? 2000}ms</span>
-              </div>
-              <Slider
-                value={[settings.idleTimeoutMs ?? 2000]}
-                min={500}
-                max={10000}
-                step={100}
-                onValueChange={([value]) => onChange({ idleTimeoutMs: value })}
-              />
-            </div>
-          ) : null}
-
-          <div className="flex items-center justify-between pt-1">
-            <div className="space-y-0.5">
-              <p className="font-medium text-[11px]">Focus Spotlight Mode</p>
-              <p className="text-[10px] text-muted-foreground">Dims background around cursor</p>
-            </div>
-            <Switch
-              checked={settings.spotlightMode ?? false}
-              onCheckedChange={(val) => onChange({ spotlightMode: val })}
-            />
-          </div>
-
-          {settings.spotlightMode ? (
-            <div className="space-y-2 pl-2 border-l-2 border-primary/40 pt-1">
-              <div className="space-y-1">
-                <div className="flex justify-between text-[10px]">
-                  <span>Spotlight Radius</span>
-                  <span className="font-mono">{settings.spotlightRadius ?? 120}px</span>
-                </div>
-                <Slider
-                  value={[settings.spotlightRadius ?? 120]}
-                  min={50}
-                  max={250}
-                  step={10}
-                  onValueChange={([val]) => onChange({ spotlightRadius: val })}
-                />
-              </div>
-            </div>
-          ) : null}
+          <Slider
+            value={[settings.smoothFactor ?? 0.25]}
+            min={0.05}
+            max={1}
+            step={0.05}
+            aria-label="Cursor smoothing strength"
+            onValueChange={([value]) => onChange({ smoothFactor: value })}
+          />
         </div>
       </div>
     </div>

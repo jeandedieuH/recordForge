@@ -29,6 +29,8 @@ pub struct CursorTelemetryEvent {
     #[serde(default = "default_button_event")]
     pub button_event: String,
     pub visible: bool,
+    #[serde(default)]
+    pub shape_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +184,7 @@ impl CursorTracker {
                     button: button.to_string(),
                     button_event: button_event.to_string(),
                     visible: is_visible,
+                    shape_id: None,
                 });
 
                 // Checkpointing makes cursor metadata recoverable even when the
@@ -328,6 +331,7 @@ pub fn v2_to_v1_telemetry(v2: &CursorTelemetryFileV2) -> CursorTelemetryFile {
                 button: button.into(),
                 button_event: button_event.into(),
                 visible: event.visible,
+                shape_id: Some(event.shape_id.clone()),
             }
         })
         .collect();
@@ -394,6 +398,7 @@ mod tests {
                 button: "none".into(),
                 button_event: "none".into(),
                 visible: true,
+                shape_id: None,
             }],
         );
         let path = work_dir.path().join("cursor_telemetry.json");

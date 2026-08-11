@@ -1,0 +1,20 @@
+{
+  "name": "cursor-engine",
+  "type": "module",
+  "collaborators": [
+    "recordForge"
+  ],
+  "description": "Canonical cursor evaluation engine for preview and export",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "cursor_engine_bg.wasm",
+    "cursor_engine.js",
+    "cursor_engine.d.ts"
+  ],
+  "main": "cursor_engine.js",
+  "types": "cursor_engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

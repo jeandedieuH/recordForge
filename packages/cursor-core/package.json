@@ -8,6 +8,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "build:wasm": "bun scripts/build-wasm.ts",
+    "generate:assets": "bun scripts/generate-assets.ts",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format:check": "prettier --check .",

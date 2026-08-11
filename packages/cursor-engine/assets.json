@@ -1,0 +1,134 @@
+{
+  "recorded-system": {
+    "id": "recorded-system",
+    "label": "Recorded / System",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  },
+  "clean-pointer": {
+    "id": "clean-pointer",
+    "label": "Clean Pointer",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<path d=\"M3 3L11 20L14 13.5L20.5 10.5L3 3Z\" fill=\"#FFFFFF\" fill-opacity=\"{fillOpacity}\" stroke=\"#1E1E1E\" stroke-width=\"{strokeWidth || 1.5}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />"
+  },
+  "high-contrast": {
+    "id": "high-contrast",
+    "label": "High Contrast",
+    "viewBox": "0 0 32 32",
+    "width": 32,
+    "height": 32,
+    "hotspotX": 16,
+    "hotspotY": 16,
+    "isCenterHotspot": true,
+    "svg": "<circle cx=\"16\" cy=\"16\" r=\"13\" fill=\"{fill}\" fill-opacity=\"0.35\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />\n      <circle cx=\"16\" cy=\"16\" r=\"3\" fill=\"{stroke}\" opacity=\"{strokeOpacity}\" />"
+  },
+  "touch-dot": {
+    "id": "touch-dot",
+    "label": "Touch Dot",
+    "viewBox": "0 0 20 20",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 10,
+    "hotspotY": 10,
+    "isCenterHotspot": true,
+    "svg": "<circle cx=\"10\" cy=\"10\" r=\"7\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />"
+  },
+  "default": {
+    "id": "default",
+    "label": "Classic Arrow",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  },
+  "modern-neon": {
+    "id": "modern-neon",
+    "label": "Modern Neon",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.25, 0.25)\">\n      <path d=\"M3 3L10.5 20.5L13.8 13.8L20.5 10.5L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n      <circle cx=\"4\" cy=\"4\" r=\"2\" fill=\"{stroke}\" opacity=\"{strokeOpacity}\" />\n    </g>"
+  },
+  "sleek-dark": {
+    "id": "sleek-dark",
+    "label": "Sleek Dark",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<path d=\"M3 3L10 21L13.5 13.5L21 10L3 3Z\" fill=\"#121212\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{Math.max(2, strokeWidth)}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />"
+  },
+  "highlighter-circle": {
+    "id": "highlighter-circle",
+    "label": "Highlighter",
+    "viewBox": "0 0 32 32",
+    "width": 32,
+    "height": 32,
+    "hotspotX": 16,
+    "hotspotY": 16,
+    "isCenterHotspot": true,
+    "svg": "<circle cx=\"16\" cy=\"16\" r=\"13\" fill=\"{fill}\" fill-opacity=\"0.35\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />\n      <circle cx=\"16\" cy=\"16\" r=\"3\" fill=\"{stroke}\" opacity=\"{strokeOpacity}\" />"
+  },
+  "mac-pro": {
+    "id": "mac-pro",
+    "label": "Mac Pro",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(0.25, 0.25)\">\n      <path d=\"M3 3L11 20L14 13.5L20.5 10.5L3 3Z\" fill=\"#FFFFFF\" fill-opacity=\"{fillOpacity}\" stroke=\"#1E1E1E\" stroke-width=\"{strokeWidth || 1.5}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  },
+  "cyberpunk": {
+    "id": "cyberpunk",
+    "label": "Cyberpunk",
+    "viewBox": "0 0 32 32",
+    "width": 32,
+    "height": 32,
+    "hotspotX": 16,
+    "hotspotY": 16,
+    "isCenterHotspot": true,
+    "svg": "<circle cx=\"16\" cy=\"16\" r=\"12\" stroke=\"{fill}\" stroke-width=\"{strokeWidth || 2}\" fill=\"none\" stroke-dasharray=\"4 2\" />\n      <line x1=\"16\" y1=\"2\" x2=\"16\" y2=\"8\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <line x1=\"16\" y1=\"24\" x2=\"16\" y2=\"30\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <line x1=\"2\" y1=\"16\" x2=\"8\" y2=\"16\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <line x1=\"24\" y1=\"16\" x2=\"30\" y2=\"16\" stroke=\"{stroke}\" stroke-width=\"2\" />\n      <circle cx=\"16\" cy=\"16\" r=\"3\" fill=\"{fill}\" />"
+  },
+  "minimal-dot": {
+    "id": "minimal-dot",
+    "label": "Minimal Dot",
+    "viewBox": "0 0 20 20",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 10,
+    "hotspotY": 10,
+    "isCenterHotspot": true,
+    "svg": "<circle cx=\"10\" cy=\"10\" r=\"7\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" />"
+  },
+  "hand-pointer": {
+    "id": "hand-pointer",
+    "label": "Hand Pointer",
+    "viewBox": "0 0 24 24",
+    "width": 28,
+    "height": 28,
+    "hotspotX": 0,
+    "hotspotY": 0,
+    "isCenterHotspot": false,
+    "svg": "<g transform=\"translate(-0.11, 0.15)\">\n      <path d=\"M10 11V4.5C10 3.67 9.33 3 8.5 3C7.67 3 7 3.67 7 4.5V12.79L5.44 11.23C4.85 10.64 3.9 10.64 3.31 11.23C2.72 11.82 2.72 12.77 3.31 13.36L8.5 18.55C9.88 19.93 11.75 20.7 13.7 20.7H16.5C19.26 20.7 21.5 18.46 21.5 15.7V11.5C21.5 10.67 20.83 10 20 10C19.17 10 18.5 10.67 18.5 11.5V10C18.5 9.17 17.83 8.5 17 8.5C16.17 8.5 15.5 9.17 15.5 10V9.5C15.5 8.67 14.83 8 14 8C13.17 8 12.5 8.67 12.5 9.5V11\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+  }
+}

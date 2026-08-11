@@ -12,13 +12,14 @@ import type {
   ZoomTarget,
 } from "@recordforge/contracts"
 import {
+  createCursorEngine,
   cursorSettingsForEffect,
   findCursorEffectAtTime,
   fitCursorPoint,
-  findCursorEventAtTime,
-  smoothCursorPosition,
   timelineToCursorSourceTime,
   zoomTargetForCursorPoint,
+  type CursorEngine,
+  type CursorFrame,
 } from "@recordforge/cursor-core"
 import { findManualZoomAtTime, resolveZoomTransform, type ZoomTransform } from "./composition"
 import { findTimelineClipAt, timelineToSource } from "./time-mapping"
@@ -66,6 +67,8 @@ export interface CursorLayer {
   settings: CursorSettings
   /** Cursor position in source canvas coordinates, before any zoom transform. */
   sourcePoint: { x: number; y: number } | null
+  /** Canonical cursor frame produced by the engine, if available. */
+  frame: CursorFrame | null
 }
 
 export interface PreviewComposition {
@@ -80,6 +83,7 @@ export interface PreviewComposition {
 
 export interface PreviewCompositionOptions {
   cursorTelemetry?: CursorTelemetryFile | null
+  cursorEngine?: CursorEngine | null
 }
 
 function isActiveClip(clip: TimelineClip, timeMs: number): boolean {
@@ -101,15 +105,20 @@ function resolveFollowCursorTarget(
   segment: ManualZoomSegment,
   state: TimelineState,
   timeMs: number,
-  telemetry: CursorTelemetryFile | null | undefined,
+  cursorEngine: CursorEngine | null | undefined,
 ): ZoomTarget | undefined {
-  if (segment.mode !== "follow-cursor" || !telemetry) return undefined
+  if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
   const sourceTimeMs = timelineToCursorSourceTime(state, timeMs)
   if (sourceTimeMs === null) return undefined
-  const lookup = findCursorEventAtTime(telemetry, sourceTimeMs)
-  if (!lookup) return undefined
-  const smoothed = smoothCursorPosition(telemetry, lookup.index, state.canvas.cursorSettings)
-  const fitted = fitCursorPoint(smoothed, telemetry, state.canvas.width, state.canvas.height)
+  const frame = cursorEngine.evaluate(sourceTimeMs, state.canvas.cursorSettings)
+  if (!frame.visible) return undefined
+  const fitted = fitCursorPoint(
+    { x: frame.sourceX, y: frame.sourceY },
+    cursorEngine.telemetry,
+    state.canvas.width,
+    state.canvas.height,
+  )
+  if (!fitted.visible) return undefined
   const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, segment.target.width))
   return zoomTargetForCursorPoint({ x: fitted.x, y: fitted.y }, state.canvas, desiredScale)
 }
@@ -129,11 +138,15 @@ export function resolvePreviewComposition(
 ): PreviewComposition {
   const canvas = { width: state.canvas.width, height: state.canvas.height }
 
+  const cursorEngine =
+    options.cursorEngine ??
+    (options.cursorTelemetry ? createCursorEngine(options.cursorTelemetry) : null)
+
   const screenClip = findTimelineClipAt(state, "screen", timeMs)
   const screenSourceMs = screenClip ? timelineToSource(screenClip, timeMs) : null
   const activeZoom = findManualZoomAtTime(state, timeMs)
   const followTarget = activeZoom
-    ? resolveFollowCursorTarget(activeZoom, state, timeMs, options.cursorTelemetry)
+    ? resolveFollowCursorTarget(activeZoom, state, timeMs, cursorEngine)
     : undefined
   const zoomTransform = activeZoom
     ? resolveZoomTransform(activeZoom, timeMs, state.canvas, { target: followTarget })
@@ -183,13 +196,19 @@ export function resolvePreviewComposition(
   const cursorSettings = cursorSettingsForEffect(state.canvas.cursorSettings, cursorEffect)
 
   let cursorSourcePoint: { x: number; y: number } | null = null
-  if (cursorSourceTimeMs !== null && options.cursorTelemetry) {
-    const lookup = findCursorEventAtTime(options.cursorTelemetry, cursorSourceTimeMs)
-    if (lookup) {
-      const smoothed = smoothCursorPosition(options.cursorTelemetry, lookup.index, cursorSettings)
-      const fitted = fitCursorPoint(smoothed, options.cursorTelemetry, canvas.width, canvas.height)
+  let cursorFrame: CursorFrame | null = null
+  if (cursorSourceTimeMs !== null && cursorEngine) {
+    const frame = cursorEngine.evaluate(cursorSourceTimeMs, cursorSettings)
+    if (frame.visible) {
+      const fitted = fitCursorPoint(
+        { x: frame.sourceX, y: frame.sourceY },
+        cursorEngine.telemetry,
+        canvas.width,
+        canvas.height,
+      )
       if (fitted.visible) {
         cursorSourcePoint = { x: fitted.x, y: fitted.y }
+        cursorFrame = frame
       }
     }
   }
@@ -203,6 +222,7 @@ export function resolvePreviewComposition(
     sourceTimeMs: cursorSourceTimeMs,
     settings: cursorSettings,
     sourcePoint: cursorSourcePoint,
+    frame: cursorFrame,
   }
 
   return {
