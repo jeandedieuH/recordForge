@@ -372,6 +372,10 @@ export const renderSegmentSchema = z.object({
   sourceOutMs: z.number().int().min(0),
   outputStartMs: z.number().int().min(0),
   outputEndMs: z.number().int().min(0),
+  // Native source dimensions, when known, so the export can fit the recorded
+  // video precisely instead of guessing from the padded content area.
+  sourceWidth: z.number().int().positive().optional(),
+  sourceHeight: z.number().int().positive().optional(),
 })
 
 export type RenderSegment = z.infer<typeof renderSegmentSchema>

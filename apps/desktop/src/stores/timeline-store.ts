@@ -903,6 +903,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       projectId: currentProject.id,
       settings: currentProject.exportSettings,
       captionMode: currentProject.exportSettings.captionMode,
+      assets: currentProject.assets,
     })
     if (!plan.ok) {
       set({ error: plan.error.message })

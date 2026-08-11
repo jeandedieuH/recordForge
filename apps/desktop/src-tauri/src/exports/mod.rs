@@ -27,6 +27,8 @@ pub struct RenderSegment {
     pub source_out_ms: u64,
     pub output_start_ms: u64,
     pub output_end_ms: u64,
+    pub source_width: Option<u32>,
+    pub source_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -464,6 +466,43 @@ pub fn run_render_plan(
     Ok(())
 }
 
+/// Returns a source size shared by every screen segment, or `None` when the
+/// segments are missing dimensions or have mixed source sizes.
+fn common_screen_source(segments: &[RenderSegment]) -> Option<(u32, u32)> {
+    let mut common: Option<(u32, u32)> = None;
+    for segment in segments {
+        let (width, height) = (segment.source_width?, segment.source_height?);
+        match common {
+            None => common = Some((width, height)),
+            Some((w, h)) if w == width && h == height => {}
+            _ => return None,
+        }
+    }
+    common
+}
+
+/// Computes the fitted recorded video screen (x, y, w, h) in full canvas
+/// coordinates, falling back to the padded content area when no source size
+/// is available.
+fn video_screen_rect(
+    canvas: &cursor::RenderCanvas,
+    source: Option<(u32, u32)>,
+) -> (f64, f64, f64, f64) {
+    let padding = canvas.padding as f64;
+    let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
+    let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
+    let (source_w, source_h) = match source {
+        Some((w, h)) => (w as f64, h as f64),
+        None => (content_width, content_height),
+    };
+    let fit_scale = (content_width / source_w).min(content_height / source_h);
+    let fit_width = (source_w * fit_scale).floor();
+    let fit_height = (source_h * fit_scale).floor();
+    let x = (padding + (content_width - fit_width) / 2.0).floor();
+    let y = (padding + (content_height - fit_height) / 2.0).floor();
+    (x, y, fit_width, fit_height)
+}
+
 /// Compose screen, manual zoom, camera overlays, canvas framing, and semantic
 /// audio tracks in one FFmpeg graph. Keeping the graph here makes the export
 /// path authoritative for every control exposed by the Phase 6 inspector.
@@ -524,6 +563,10 @@ fn render_timeline_composition(
         .height
         .saturating_sub(canvas.padding.saturating_mul(2))
         .max(1);
+    let (screen_x, screen_y, screen_w, screen_h) =
+        video_screen_rect(canvas, common_screen_source(&plan.segments));
+    let crop_x = ((content_width as f64 - screen_w) / 2.0).floor();
+    let crop_y = ((content_height as f64 - screen_h) / 2.0).floor();
     let background = safe_filter_color(&canvas.background);
     let mut filters = Vec::new();
     let mut video_labels = Vec::new();
@@ -585,20 +628,22 @@ fn render_timeline_composition(
         format!("[{label}]")
     };
 
+    // Crop the fitted recorded video out of the padded content area, then pad
+    // it to the full canvas so radius and shadow are applied to the actual
+    // video layer rather than the padded content box.
     let mut canvas_filter = format!(
-        "{video_input}scale={content_width}:{content_height}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color={background},setsar=1",
+        "{video_input}crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},pad={}:{}:(ow-iw)/2:(oh-ih)/2:color={background},setsar=1",
         canvas.width, canvas.height
     );
     if canvas.border_radius > 0 {
         let (red, green, blue) = hex_rgb(&background);
-        // Round the recorded video screen (the centered content area), not the full canvas.
         let radius = (canvas.border_radius as f64)
-            .min(content_width as f64 / 2.0)
-            .min(content_height as f64 / 2.0);
-        let left = canvas.padding as f64 + radius;
-        let right = canvas.width as f64 - canvas.padding as f64 - radius;
-        let top = canvas.padding as f64 + radius;
-        let bottom = canvas.height as f64 - canvas.padding as f64 - radius;
+            .min(screen_w / 2.0)
+            .min(screen_h / 2.0);
+        let left = screen_x + radius;
+        let right = screen_x + screen_w - radius;
+        let top = screen_y + radius;
+        let bottom = screen_y + screen_h - radius;
         let mask = format!(
             "(((X<{left})*(Y<{top})*(hypot(X-{left},Y-{top})>{radius})+(X>{right})*(Y<{top})*(hypot(X-{right},Y-{top})>{radius})+(X<{left})*(Y>{bottom})*(hypot(X-{left},Y-{bottom})>{radius})+(X>{right})*(Y>{bottom})*(hypot(X-{right},Y-{bottom})>{radius}))>0)"
         );
@@ -611,10 +656,10 @@ fn render_timeline_composition(
         let shadow_blur = canvas.shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
         canvas_filter.push_str(&format!(
             ",drawbox=x={}:y={}:w={}:h={}:color={shadow_color}@0.3:t={shadow_blur:.2}",
-            (canvas.padding as f64 + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0),
-            (canvas.padding as f64 + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0),
-            content_width,
-            content_height,
+            (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0),
+            (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0),
+            screen_w,
+            screen_h,
         ));
     }
     let base_label = "canvas_base";
@@ -842,6 +887,8 @@ fn render_timeline_composition(
             source_out_ms: duration_ms,
             output_start_ms: 0,
             output_end_ms: duration_ms,
+            source_width: None,
+            source_height: None,
         };
         let segments = if track.segments.is_empty() {
             vec![fallback]
@@ -1012,6 +1059,8 @@ fn render_timeline_with_audio(
             source_out_ms: duration_ms,
             output_start_ms: 0,
             output_end_ms: duration_ms,
+            source_width: None,
+            source_height: None,
         };
         let segments = if track.segments.is_empty() {
             vec![fallback_segment]
@@ -2162,6 +2211,8 @@ mod tests {
                     source_out_ms: 1_000,
                     output_start_ms: 0,
                     output_end_ms: 1_000,
+                    source_width: None,
+                    source_height: None,
                 },
                 RenderSegment {
                     asset_id: "asset-screen".into(),
@@ -2174,6 +2225,8 @@ mod tests {
                     source_out_ms: 4_000,
                     output_start_ms: 2_000,
                     output_end_ms: 3_000,
+                    source_width: None,
+                    source_height: None,
                 },
             ],
             gaps: vec![RenderPlanGap {

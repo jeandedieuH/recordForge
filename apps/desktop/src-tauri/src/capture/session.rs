@@ -57,6 +57,7 @@ struct SegmentCaptures {
     screen: FfmpegCapture,
     audio: Vec<ActiveAudioCapture>,
     webcam: Option<FfmpegCapture>,
+    webcam_failed: bool,
 }
 
 fn cursor_asset_metadata(
@@ -299,6 +300,7 @@ impl Recorder {
             session.webcam_segments_started += 1;
         }
         session.webcam_capture = captures.webcam;
+        session.webcam_capture_failed |= captures.webcam_failed;
         let bounds = session.config.source.bounds;
         let capture_bounds = super::cursor::CursorCaptureBounds {
             x: bounds.x,
@@ -427,33 +429,63 @@ impl Recorder {
             });
         }
 
-        let webcam = if config.capture_webcam {
-            let device = config.webcam_device_id.as_ref().ok_or_else(|| {
-                crate::errors::InternalError::Capture("webcam device is missing".into())
-            })?;
-            if !super::webcam::validate_webcam_device(&ffmpeg, device)?.available {
-                return Err(crate::errors::InternalError::Capture(
-                    "selected webcam is no longer available".into(),
-                )
-                .into());
+        let mut webcam = None;
+        let mut webcam_failed = false;
+        if config.capture_webcam {
+            if let Some(device) = config.webcam_device_id.as_ref() {
+                match super::webcam::validate_webcam_device(&ffmpeg, device) {
+                    Ok(capabilities) if capabilities.available => {
+                        let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
+                        match FfmpegCapture::start_webcam(
+                            &ffmpeg,
+                            device,
+                            profile,
+                            &webcam_output.to_string_lossy(),
+                            None,
+                        ) {
+                            Ok(capture) => webcam = Some(capture),
+                            Err(error) => {
+                                webcam_failed = true;
+                                tracing::warn!(
+                                    error = %error,
+                                    device,
+                                    "failed to start webcam sidecar; continuing without camera"
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        webcam_failed = true;
+                        tracing::warn!(
+                            device,
+                            "selected webcam is no longer available; continuing without camera"
+                        );
+                    }
+                    Err(error) => {
+                        webcam_failed = true;
+                        tracing::warn!(
+                            error = %error,
+                            device,
+                            "failed to validate webcam device; continuing without camera"
+                        );
+                    }
+                }
+            } else {
+                // `RecordingConfig::validate` should already enforce this, but
+                // guard against the camera becoming detached between config
+                // validation and start.
+                webcam_failed = true;
+                tracing::warn!(
+                    "webcam capture requested but device id missing; continuing without camera"
+                );
             }
-
-            let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
-            Some(FfmpegCapture::start_webcam(
-                &ffmpeg,
-                device,
-                profile,
-                &webcam_output.to_string_lossy(),
-                None,
-            )?)
-        } else {
-            None
-        };
+        }
 
         Ok(SegmentCaptures {
             screen,
             audio,
             webcam,
+            webcam_failed,
         })
     }
 
@@ -758,6 +790,7 @@ impl Recorder {
             session.webcam_segments_started += 1;
         }
         session.webcam_capture = captures.webcam;
+        session.webcam_capture_failed |= captures.webcam_failed;
         let bounds = session.config.source.bounds;
         let capture_bounds = super::cursor::CursorCaptureBounds {
             x: bounds.x,
@@ -1158,5 +1191,52 @@ mod tests {
             RecorderState::Idle
         );
         assert!(!temp_dir.path().join(session_id).exists());
+    }
+
+    #[test]
+    fn recording_starts_when_webcam_device_is_unavailable() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let db = Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().expect("create in-memory database"),
+        ));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("target/debug/ffmpeg.exe");
+        let ffprobe = manifest_dir.join("target/debug/ffprobe.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+
+        let recorder = Recorder::new(ffmpeg, ffprobe, temp_dir.path().to_path_buf(), db);
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "region".into(),
+                id: "region-0".into(),
+                name: "Region".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 320,
+                    height: 240,
+                },
+            },
+            profile: "low-impact".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: true,
+            webcam_device_id: Some("Nonexistent Camera".into()),
+            microphone_device_id: None,
+            system_audio_device_id: None,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare session");
+
+        // The screen should start even though the requested webcam does not exist.
+        recorder
+            .start_prepared(&session_id)
+            .expect("start recording even when webcam is unavailable");
+
+        let status = recorder.status().expect("read recording status");
+        assert_eq!(status.state, RecorderState::Recording);
     }
 }

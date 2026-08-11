@@ -963,6 +963,8 @@ mod tests {
             source_out_ms: 1_000,
             output_start_ms: 0,
             output_end_ms: 1_000,
+            source_width: None,
+            source_height: None,
         }]
     }
 

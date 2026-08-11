@@ -1,6 +1,7 @@
 import type {
   AppError,
   ExportRange,
+  ProjectAsset,
   ProjectExportSettings,
   RenderPlan,
   RenderPlanAudio,
@@ -62,16 +63,33 @@ function windowTimeRange(
   return { startMs: start - (range?.startMs ?? 0), endMs: end - (range?.startMs ?? 0) }
 }
 
+function assetForClip(
+  assets: ProjectAsset[] | undefined,
+  assetId: string,
+): ProjectAsset | undefined {
+  return assets?.find((asset) => asset.id === assetId)
+}
+
 function toSegments(
   clips: TimelineClip[],
   range: ExportRange | undefined,
   includeAudioSettings = false,
+  assets?: ProjectAsset[],
 ): RenderSegment[] {
   return sortClips(clips)
     .map((clip) => {
       const window = windowClip(clip, range)
       if (!window) return null
       const durationMs = window.outputEndMs - window.outputStartMs
+      const asset = assetForClip(assets, clip.assetId)
+      const sourceWidth =
+        asset && typeof asset.width === "number" && asset.width > 0
+          ? asset.width
+          : undefined
+      const sourceHeight =
+        asset && typeof asset.height === "number" && asset.height > 0
+          ? asset.height
+          : undefined
       return {
         assetId: clip.assetId,
         ...("streamIndex" in clip && clip.streamIndex !== undefined
@@ -89,6 +107,9 @@ function toSegments(
         speed: clip.speed,
         outputStartMs: window.outputStartMs,
         outputEndMs: window.outputEndMs,
+        // Native source dimensions let the export fit the video precisely.
+        ...(sourceWidth !== undefined ? { sourceWidth } : {}),
+        ...(sourceHeight !== undefined ? { sourceHeight } : {}),
       }
     })
     .filter((segment): segment is RenderSegment => segment !== null)
@@ -313,6 +334,7 @@ export interface BuildRenderPlanInput {
   captionMode?: RenderCaptionMode
   settings?: ProjectExportSettings
   range?: ExportRange
+  assets?: ProjectAsset[]
 }
 
 // Build a render plan from timeline metadata only. Rust resolves project assets
@@ -353,7 +375,7 @@ export function buildRenderPlan(
     }
   }
 
-  const segments = toSegments(screenTrack.clips, range)
+  const segments = toSegments(screenTrack.clips, range, false, input.assets)
   if (segments.length === 0) {
     return {
       ok: false,
