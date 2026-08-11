@@ -38,7 +38,7 @@ pub fn resolve_cursor_asset(id: &str) -> Option<&'static CursorAsset> {
 /// Resolve a shape id (usually from telemetry) to a canonical asset id.
 ///
 /// The map contains two kinds of lookups:
-///   * direct asset ids (`modern-neon`, `shape-arrow`, etc.) pass through;
+///   * direct asset ids (`recorded-system`, `shape-arrow`, etc.) pass through;
 ///   * recorded system `kind` strings (`arrow`, `hand`, etc.) are mapped to the
 ///     generic shape asset for that kind;
 ///   * V2 `shapeId` hashes are looked up in the provided `shapes` metadata to
@@ -74,9 +74,9 @@ pub fn resolve_cursor_shape_id(shape_id: &str, shapes: &[CursorShapeInfo]) -> St
     shape_id.to_string()
 }
 
-/// Resolve an asset id, falling back to a default arrow cursor.
+/// Resolve an asset id, falling back to the recorded-system arrow cursor.
 pub fn resolve_cursor_asset_or_default(id: &str) -> &'static CursorAsset {
     resolve_cursor_asset(id)
-        .or_else(|| resolve_cursor_asset("default"))
-        .expect("default cursor asset must exist in the manifest")
+        .or_else(|| resolve_cursor_asset("recorded-system"))
+        .expect("recorded-system cursor asset must exist in the manifest")
 }

@@ -17,7 +17,7 @@ const minimalProject = {
     borderRadius: 0,
     shadow: false,
     cursorSettings: {
-      preset: "modern-neon",
+      preset: "recorded-system",
       scale: 1,
       fillColor: "#3b82f6",
       fillOpacity: 1,

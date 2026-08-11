@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn rasterized_cursor_uses_asset_hotspot_and_fill_color() {
         let mut settings = CursorSettings::default();
-        settings.preset = "modern-neon".into();
+        settings.preset = "recorded-system".into();
         settings.fill_color = "#ff0000".into();
         settings.stroke_color = "#ffffff".into();
         settings.shadow_enabled = false;
@@ -918,7 +918,7 @@ mod tests {
         let mut found = false;
         for index in (0..frame.len()).step_by(4) {
             let pixel = &frame[index..index + 4];
-            // The modern-neon arrow is filled with the configured red.
+            // The recorded cursor arrow is filled with the configured red.
             if pixel[3] > 200 && pixel[0] > 200 && pixel[1] < 50 && pixel[2] < 50 {
                 found = true;
                 break;

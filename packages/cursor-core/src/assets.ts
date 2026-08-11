@@ -12,7 +12,7 @@ export interface CursorAsset {
   viewBox: string
   width: number
   height: number
-  /** Hotspot in source asset coordinates. */
+  /** Hotspot in 24x24 view box units. The overlay converts to CSS pixels. */
   hotspotX: number
   hotspotY: number
   /** When true the cursor should be centered on its point rather than offset by the hotspot. */
@@ -21,13 +21,11 @@ export interface CursorAsset {
   svg: string
 }
 
-// Four curated cursor styles plus a Recorded/System style that resolves to the
-// actual captured cursor shape when V2 telemetry is available.
+// The editor only supports the Recorded/System style, which resolves to the
+// actual captured cursor shape when V2 telemetry is available. A small set of
+// generic shape silhouettes (arrow, hand, ibeam, etc.) are kept so recorded
+// cursors without embedded shape bitmaps still render correctly.
 export type CursorAssetId =
-  | "default"
-  | "modern-neon"
-  | "sleek-dark"
-  | "mac-pro"
   | "recorded-system"
   | "shape-arrow"
   | "shape-hand"
@@ -55,67 +53,28 @@ const SVG_TOKENS = {
 // Preset SVGs are authored in a 24x24 view box. Their `hotspotX`/`hotspotY`
 // represent the active point within that view box.
 const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
-  default: {
-    viewBox: "0 0 24 24",
-    width: 28,
-    height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
-    isCenterHotspot: false,
-    svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-    </g>`,
-  },
-  "modern-neon": {
-    viewBox: "0 0 24 24",
-    width: 28,
-    height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
-    isCenterHotspot: false,
-    svg: `<g transform="translate(0.25, 0.25)">
-      <path d="M3 3L10.5 20.5L13.8 13.8L20.5 10.5L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-      <circle cx="4" cy="4" r="2" fill="{stroke}" opacity="{strokeOpacity}" />
-    </g>`,
-  },
-  "sleek-dark": {
-    viewBox: "0 0 24 24",
-    width: 28,
-    height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
-    isCenterHotspot: false,
-    svg: `<path d="M3 3L10 21L13.5 13.5L21 10L3 3Z" fill="#121212" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{Math.max(2, strokeWidth)}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />`,
-  },
-  "mac-pro": {
-    viewBox: "0 0 24 24",
-    width: 28,
-    height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
-    isCenterHotspot: false,
-    svg: `<g transform="translate(0.25, 0.25)">
-      <path d="M3 3L11 20L14 13.5L20.5 10.5L3 3Z" fill="#FFFFFF" fill-opacity="{fillOpacity}" stroke="#1E1E1E" stroke-width="{strokeWidth || 1.5}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
-    </g>`,
-  },
+  // Recorded/System fallback: a generic arrow with the active point at the
+  // arrow tip. The recorded shape builder aligns this point with the captured
+  // hotspot, so the drawn cursor touches exactly where the user clicked.
   "recorded-system": {
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
-    hotspotX: 0,
-    hotspotY: 0,
+    hotspotX: 3,
+    hotspotY: 3,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+      <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
     </g>`,
   },
-  // Generic recorded-shape SVGs. The active point is marked by hotspotX/Y.
+  // Generic recorded-shape SVGs. The active point is marked by hotspotX/Y and
+  // is drawn at that coordinate in the 24x24 view box.
   "shape-arrow": {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 0,
-    hotspotY: 0,
+    hotspotX: 3,
+    hotspotY: 3,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -125,8 +84,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 0,
-    hotspotY: 0,
+    hotspotX: 10,
+    hotspotY: 5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M8 20 C6 20 4 18 4 15 L4 11 C4 10 5 9 6 9 C7 9 8 10 8 11 L8 14 L8 7 C8 6 9 5 10 5 C11 5 12 6 12 7 L12 14 L12 9 C12 8 13 7 14 7 C15 7 16 8 16 9 L16 14 L16 11 C16 10 17 9 18 9 C19 9 20 10 20 11 L20 15 C20 18 18 20 16 20 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -174,8 +133,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 0,
-    hotspotY: 0,
+    hotspotX: 3,
+    hotspotY: 3,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -285,10 +244,6 @@ export const CURSOR_ASSET_MANIFEST: Record<CursorAssetId, CursorAsset> = Object.
 
 function labelForAssetId(id: CursorAssetId): string {
   const labels: Record<CursorAssetId, string> = {
-    default: "Classic Arrow",
-    "modern-neon": "Modern Neon",
-    "sleek-dark": "Sleek Dark",
-    "mac-pro": "Mark Pro",
     "recorded-system": "Recorded / System",
     "shape-arrow": "Arrow",
     "shape-hand": "Hand",
@@ -353,8 +308,11 @@ function buildRecordedShapeAsset(shape: CursorShapeInfo): ResolvedCursorAsset | 
     viewBox: "0 0 24 24",
     width: shape.width,
     height: shape.height,
-    hotspotX: shape.hotspotX,
-    hotspotY: shape.hotspotY,
+    // Store the hotspot in 24x24 view box units so the overlay can convert it
+    // to CSS pixels using width/24 * cursorScale. This keeps the drawn active
+    // point (arrow tip, finger tip, etc.) exactly at the source coordinate.
+    hotspotX: targetHotspotX,
+    hotspotY: targetHotspotY,
     isCenterHotspot: false,
     effectiveId: shape.shapeId,
     svg:
@@ -371,12 +329,13 @@ export function resolveCursorAsset(
   options: ResolveCursorAssetOptions = {},
 ): ResolvedCursorAsset {
   const manifest = CURSOR_ASSET_MANIFEST
-  const fallback = (manifest[preset as CursorAssetId] ?? manifest.default) as CursorAsset
+  const fallback = (manifest[preset as CursorAssetId] ?? manifest["recorded-system"]) as CursorAsset
 
   // Recorded/System always attempts to render the captured shape, then falls
   // back to the generic recorded-system arrow when no shape info is available.
   if (preset === "recorded-system") {
-    if (shapeId && options.shapes) {
+    const honorShape = options.shapeMode !== "preset"
+    if (honorShape && shapeId && options.shapes) {
       const shape = options.shapes.find((s) => s.shapeId === shapeId)
       if (shape) {
         const recorded = buildRecordedShapeAsset(shape)
@@ -384,7 +343,7 @@ export function resolveCursorAsset(
       }
     }
 
-    if (shapeId) {
+    if (honorShape && shapeId) {
       const directAsset = manifest[shapeId as CursorAssetId]
       if (directAsset) return { effectiveId: shapeId, ...directAsset }
 

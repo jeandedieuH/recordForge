@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react"
 import type {
   CaptionClip,
   ClipTransform,
+  ManualZoomSegment,
   MaskRect,
   MediaMetadata,
   TimelineSelection,
@@ -98,6 +99,18 @@ export interface TimelineInteraction {
   updateZoomTarget: (
     segmentId: string,
     update: Parameters<typeof createUpdateZoomSegmentCommand>[1],
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
+  moveZoomSegment: (
+    segment: ManualZoomSegment,
+    startMs: number,
+    endMs: number,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
+  resizeZoomSegment: (
+    segment: ManualZoomSegment,
+    startMs: number,
+    endMs: number,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   cancel: () => void
@@ -584,6 +597,30 @@ export function useTimelineInteraction(): TimelineInteraction {
 
     updateZoomTarget(segmentId, update, options) {
       handleDraftOrCommit({ kind: "zoom", segmentId, update }, options?.phase ?? "commit")
+    },
+
+    moveZoomSegment(segment, startMs, endMs, options) {
+      if (segment.locked) return
+      handleDraftOrCommit(
+        {
+          kind: "zoom",
+          segmentId: segment.id,
+          update: { startMs: Math.round(startMs), endMs: Math.round(endMs) },
+        },
+        options?.phase ?? "commit",
+      )
+    },
+
+    resizeZoomSegment(segment, startMs, endMs, options) {
+      if (segment.locked) return
+      handleDraftOrCommit(
+        {
+          kind: "zoom",
+          segmentId: segment.id,
+          update: { startMs: Math.round(startMs), endMs: Math.round(endMs) },
+        },
+        options?.phase ?? "commit",
+      )
     },
 
     cancel,

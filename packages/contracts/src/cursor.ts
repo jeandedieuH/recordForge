@@ -4,15 +4,21 @@ import { boundsSchema } from "./recording"
 // V2 cursor telemetry is the single source of truth for preview, export,
 // recovery, and capture. V1 schemas have been removed.
 
-// The editor and export support four curated cursor styles plus a
-// Recorded/System option that renders the actual captured cursor shape.
-export const cursorIconPresetSchema = z.enum([
-  "default",
-  "modern-neon",
-  "sleek-dark",
-  "mac-pro",
-  "recorded-system",
-])
+// The editor and export only support the Recorded/System cursor style.
+// Legacy curated presets are migrated to "recorded-system" during project load.
+const MIGRATED_CURSOR_PRESETS: Record<string, "recorded-system" | undefined> = {
+  "recorded-system": "recorded-system",
+  default: "recorded-system",
+  "modern-neon": "recorded-system",
+  "sleek-dark": "recorded-system",
+  "mac-pro": "recorded-system",
+}
+
+export const cursorIconPresetSchema = z.preprocess(
+  (value) =>
+    typeof value === "string" ? (MIGRATED_CURSOR_PRESETS[value] ?? "recorded-system") : value,
+  z.enum(["recorded-system"]),
+)
 
 export type CursorIconPreset = z.infer<typeof cursorIconPresetSchema>
 
@@ -50,7 +56,7 @@ export type CursorButtonEventV2 = z.infer<typeof cursorButtonEventV2Schema>
 
 export const cursorSettingsSchema = z.object({
   enabled: z.boolean().default(true),
-  preset: cursorIconPresetSchema.default("modern-neon"),
+  preset: cursorIconPresetSchema.default("recorded-system"),
   scale: z.number().min(0.2).max(5.0).default(1.0),
   fillColor: z.string().default("#3b82f6"),
   fillOpacity: z.number().min(0).max(1).default(1.0),

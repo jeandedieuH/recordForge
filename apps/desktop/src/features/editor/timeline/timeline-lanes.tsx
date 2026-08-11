@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import type {
   CursorSmoothing,
+  ManualZoomSegment,
   TimelineClip,
   TimelineMarker,
   TimelineState,
@@ -23,6 +24,7 @@ import {
   Video,
   Volume2,
   VolumeX,
+  ZoomIn,
   type LucideIcon,
 } from "lucide-react"
 import {
@@ -52,6 +54,7 @@ import {
   type ThumbnailManifest,
 } from "../media/derivative-resources"
 import { ThumbnailStrip, WaveformStrip } from "./timeline-derivatives"
+import { ZoomTrackRow } from "./zoom-track"
 
 const RULER_HEIGHT = 32
 const MARKER_LANE_HEIGHT = 28
@@ -99,6 +102,18 @@ interface TimelineLanesProps {
   ) => void
   onSelectMarker: (marker: TimelineMarker) => void
   onSelectZoom: (segmentId: string) => void
+  onMoveZoomSegment: (
+    segment: ManualZoomSegment,
+    startMs: number,
+    endMs: number,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
+  onResizeZoomSegment: (
+    segment: ManualZoomSegment,
+    startMs: number,
+    endMs: number,
+    options?: { phase?: "draft" | "commit" | "cancel" },
+  ) => void
   onDeleteSelection: (ripple: boolean) => void
   onToggleTrackMuted: (track: TimelineTrack) => void
   onToggleTrackSolo: (track: TimelineTrack) => void
@@ -119,6 +134,7 @@ function getTrackIcon(track: TimelineTrack): LucideIcon {
   if (track.kind === "cursor") return MousePointer2
   if (track.kind === "captions") return Captions
   if (track.kind === "effects") return ShieldAlert
+  if (track.kind === "zoom") return ZoomIn
   return AudioLines
 }
 
@@ -203,6 +219,8 @@ export function TimelineLanes({
   onDeleteClip,
   onCursorRangeAction,
   onZoomSegmentAction,
+  onMoveZoomSegment,
+  onResizeZoomSegment,
 }: TimelineLanesProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -374,7 +392,10 @@ export function TimelineLanes({
                 <TrackHeader
                   key={track.id}
                   track={track}
-                  selected={track.clips.some((clip) => selectedClipIds.has(clip.id))}
+                  selected={
+                    track.clips.some((clip) => selectedClipIds.has(clip.id)) ||
+                    (track.kind === "zoom" && selectedZoomId !== null)
+                  }
                   collapsed={view.collapsedTrackIds.includes(track.id)}
                   height={virtualTrack.size}
                   top={virtualTrack.start - scrollMargin}
@@ -574,6 +595,30 @@ export function TimelineLanes({
 
           {visibleTrackRows.map(({ track, virtualTrack }) => {
             if (!track) return null
+            if (track.kind === "zoom") {
+              return (
+                <ZoomTrackRow
+                  key={track.id}
+                  timeline={timeline}
+                  track={track}
+                  top={virtualTrack.start}
+                  height={virtualTrack.size}
+                  visibleStartMs={visibleStartMs}
+                  visibleEndMs={visibleEndMs}
+                  pixelsPerMs={pixelsPerMs}
+                  selectedZoomId={selectedZoomId}
+                  snapEnabled={view.snapEnabled}
+                  snapThresholdMs={view.snapThresholdMs}
+                  playheadMs={view.playheadMs}
+                  cursorClickTimesMs={cursorClickTimesMs}
+                  getTimelineTime={timelineTimeFromClientX}
+                  onSelectZoom={onSelectZoom}
+                  onZoomSegmentAction={onZoomSegmentAction}
+                  onMoveZoomSegment={onMoveZoomSegment}
+                  onResizeZoomSegment={onResizeZoomSegment}
+                />
+              )
+            }
             return (
               <TimelineTrackRow
                 key={track.id}
@@ -655,7 +700,8 @@ function TrackHeader({
               track.kind === "audio" && !track.name.toLowerCase().includes("system"),
             "text-track-system":
               track.kind === "audio" && track.name.toLowerCase().includes("system"),
-            "text-primary": track.kind === "cursor" || track.kind === "captions",
+            "text-primary":
+              track.kind === "cursor" || track.kind === "captions" || track.kind === "zoom",
             "text-warning": track.kind === "effects",
           })}
           aria-hidden
@@ -830,6 +876,8 @@ interface ClipGesture {
   mode: "move" | "trim-start" | "trim-end"
   initialClientX: number
   initialTimelineMs: number
+  initialClipStartMs: number
+  initialClipEndMs: number
   moved: boolean
 }
 
@@ -921,6 +969,8 @@ function TimelineClipItem({
       mode,
       initialClientX: event.clientX,
       initialTimelineMs: getTimelineTime(event.clientX),
+      initialClipStartMs: clip.startMs,
+      initialClipEndMs: clip.startMs + clip.durationMs,
       moved: false,
     }
   }
@@ -938,15 +988,19 @@ function TimelineClipItem({
     const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
 
     if (gesture.mode === "move") {
-      const rawStartMs = Math.max(0, Math.round(clip.startMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, snap)
+      const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
+      const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
+      const snapped = snapClipStart(rawStartMs, duration, clipTargets, snap)
       onSnapGuide(snapped.snapped ? snapped.target : null)
       onMoveClip(clip, track, snapped.timeMs, { phase: "draft" })
       return
     }
 
     const edge = gesture.mode === "trim-start" ? "start" : "end"
-    const rawEdgeTimeMs = Math.max(0, Math.round(clip.startMs + deltaMs))
+    const rawEdgeTimeMs =
+      edge === "start"
+        ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
+        : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
     const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
     onSnapGuide(snapped.snapped ? snapped.target : null)
     onTrimClip(clip, track, edge, snapped.timeMs, { phase: "draft" })
@@ -965,10 +1019,10 @@ function TimelineClipItem({
     if (wasCancelled || !didMove) {
       onSnapGuide(null)
       if (gesture.mode === "move") {
-        onMoveClip(clip, track, clip.startMs, { phase: "cancel" })
+        onMoveClip(clip, track, gesture.initialClipStartMs, { phase: "cancel" })
       } else {
         const edge = gesture.mode === "trim-start" ? "start" : "end"
-        const edgeTimeMs = edge === "start" ? clip.startMs : clip.startMs + clip.durationMs
+        const edgeTimeMs = edge === "start" ? gesture.initialClipStartMs : gesture.initialClipEndMs
         onTrimClip(clip, track, edge, edgeTimeMs, { phase: "cancel" })
       }
       return
@@ -979,15 +1033,19 @@ function TimelineClipItem({
     const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
 
     if (gesture.mode === "move") {
-      const rawStartMs = Math.max(0, Math.round(clip.startMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, clip.durationMs, clipTargets, snap)
+      const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
+      const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
+      const snapped = snapClipStart(rawStartMs, duration, clipTargets, snap)
       onSnapGuide(null)
       onMoveClip(clip, track, snapped.timeMs, { phase: "commit" })
       return
     }
 
     const edge = gesture.mode === "trim-start" ? "start" : "end"
-    const rawEdgeTimeMs = Math.max(0, Math.round(clip.startMs + deltaMs))
+    const rawEdgeTimeMs =
+      edge === "start"
+        ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
+        : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
     const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
     onSnapGuide(null)
     onTrimClip(clip, track, edge, snapped.timeMs, { phase: "commit" })

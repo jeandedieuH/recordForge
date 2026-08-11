@@ -140,7 +140,7 @@ function makeState(): TimelineState {
             sourceInMs: 0,
             sourceOutMs: 0,
             speed: 1,
-            presetId: "modern-neon",
+            presetId: "recorded-system",
             scale: 1,
             smoothing: "smooth",
             settings: {},
@@ -256,7 +256,7 @@ describe("resolvePreviewComposition", () => {
     expect(comp.cursor.active).toBe(true)
     expect(comp.cursor.sourceTimeMs).toBe(2_000)
     expect(comp.cursor.sourcePoint).not.toBeNull()
-    expect(comp.cursor.settings.preset).toBe("modern-neon")
+    expect(comp.cursor.settings.preset).toBe("recorded-system")
   })
 
   it("deactivates cursor when no screen clip is active", () => {

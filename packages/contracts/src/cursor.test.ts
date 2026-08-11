@@ -4,7 +4,7 @@ import { cursorEffectClipSchema } from "./timeline"
 
 describe("cursor contracts", () => {
   it("keeps the custom cursor enabled by default", () => {
-    expect(defaultCursorSettings.preset).toBe("modern-neon")
+    expect(defaultCursorSettings.preset).toBe("recorded-system")
     expect(defaultCursorSettings.hideNativeCursor).toBe(true)
     expect(defaultCursorSettings.shapeMode).toBe("optimized")
   })
@@ -79,12 +79,12 @@ describe("cursor contracts", () => {
       assetId: "asset-cursor-events",
       startMs: 0,
       durationMs: 9_000,
-      presetId: "modern-neon",
+      presetId: "recorded-system",
       scale: 1.2,
       smoothing: "smooth",
       locked: false,
     })
-    expect(range).toMatchObject({ durationMs: 9_000, presetId: "modern-neon" })
+    expect(range).toMatchObject({ durationMs: 9_000, presetId: "recorded-system" })
     expect(range.sourceOutMs).toBe(0)
   })
 

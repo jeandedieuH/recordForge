@@ -1,58 +1,14 @@
 {
-  "default": {
-    "id": "default",
-    "label": "Classic Arrow",
-    "viewBox": "0 0 24 24",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
-    "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
-  },
-  "modern-neon": {
-    "id": "modern-neon",
-    "label": "Modern Neon",
-    "viewBox": "0 0 24 24",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
-    "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.25, 0.25)\">\n      <path d=\"M3 3L10.5 20.5L13.8 13.8L20.5 10.5L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n      <circle cx=\"4\" cy=\"4\" r=\"2\" fill=\"{stroke}\" opacity=\"{strokeOpacity}\" />\n    </g>"
-  },
-  "sleek-dark": {
-    "id": "sleek-dark",
-    "label": "Sleek Dark",
-    "viewBox": "0 0 24 24",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
-    "isCenterHotspot": false,
-    "svg": "<path d=\"M3 3L10 21L13.5 13.5L21 10L3 3Z\" fill=\"#121212\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{Math.max(2, strokeWidth)}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />"
-  },
-  "mac-pro": {
-    "id": "mac-pro",
-    "label": "Mark Pro",
-    "viewBox": "0 0 24 24",
-    "width": 28,
-    "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
-    "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.25, 0.25)\">\n      <path d=\"M3 3L11 20L14 13.5L20.5 10.5L3 3Z\" fill=\"#FFFFFF\" fill-opacity=\"{fillOpacity}\" stroke=\"#1E1E1E\" stroke-width=\"{strokeWidth || 1.5}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
-  },
   "recorded-system": {
     "id": "recorded-system",
     "label": "Recorded / System",
     "viewBox": "0 0 24 24",
     "width": 28,
     "height": 28,
-    "hotspotX": 0,
-    "hotspotY": 0,
+    "hotspotX": 3,
+    "hotspotY": 3,
     "isCenterHotspot": false,
-    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10.07 19.97L12.58 12.58L19.97 10.07L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
+    "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10 19L13 12L20 10L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
   },
   "shape-arrow": {
     "id": "shape-arrow",
@@ -60,8 +16,8 @@
     "viewBox": "0 0 24 24",
     "width": 24,
     "height": 24,
-    "hotspotX": 0,
-    "hotspotY": 0,
+    "hotspotX": 3,
+    "hotspotY": 3,
     "isCenterHotspot": false,
     "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10 19L13 12L20 10L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
   },
@@ -71,8 +27,8 @@
     "viewBox": "0 0 24 24",
     "width": 24,
     "height": 24,
-    "hotspotX": 0,
-    "hotspotY": 0,
+    "hotspotX": 10,
+    "hotspotY": 5,
     "isCenterHotspot": false,
     "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M8 20 C6 20 4 18 4 15 L4 11 C4 10 5 9 6 9 C7 9 8 10 8 11 L8 14 L8 7 C8 6 9 5 10 5 C11 5 12 6 12 7 L12 14 L12 9 C12 8 13 7 14 7 C15 7 16 8 16 9 L16 14 L16 11 C16 10 17 9 18 9 C19 9 20 10 20 11 L20 15 C20 18 18 20 16 20 Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n    </g>"
   },
@@ -115,8 +71,8 @@
     "viewBox": "0 0 24 24",
     "width": 24,
     "height": 24,
-    "hotspotX": 0,
-    "hotspotY": 0,
+    "hotspotX": 3,
+    "hotspotY": 3,
     "isCenterHotspot": false,
     "svg": "<g transform=\"translate(0.5, 0.5)\">\n      <path d=\"M3 3L10 19L13 12L20 10L3 3Z\" fill=\"{fill}\" fill-opacity=\"{fillOpacity}\" stroke=\"{stroke}\" stroke-width=\"{strokeWidth}\" stroke-opacity=\"{strokeOpacity}\" stroke-linejoin=\"round\" />\n      <text x=\"14\" y=\"14\" font-size=\"8\" fill=\"{stroke}\" font-family=\"sans-serif\" font-weight=\"bold\">?</text>\n    </g>"
   },

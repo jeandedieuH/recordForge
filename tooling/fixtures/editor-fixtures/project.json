@@ -179,7 +179,7 @@
           "startMs": 0,
           "durationMs": 9000,
           "assetId": "asset-cursor-events",
-          "presetId": "modern-neon",
+          "presetId": "recorded-system",
           "scale": 1.2,
           "smoothing": "smooth",
           "locked": false

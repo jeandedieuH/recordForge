@@ -169,8 +169,8 @@ export function CustomCursorOverlay({
         <div
           className="pointer-events-none absolute"
           style={{
-            left: posX - asset.hotspotX * cursorScale,
-            top: posY - asset.hotspotY * cursorScale,
+            left: posX - asset.hotspotX * (asset.width / 24) * cursorScale,
+            top: posY - asset.hotspotY * (asset.height / 24) * cursorScale,
             transform: asset.isCenterHotspot
               ? `translate(-50%, -50%) scale(${cursorScale})`
               : `scale(${cursorScale})`,

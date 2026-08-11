@@ -107,7 +107,7 @@ describe("Phase 8 cursor/zoom workflow polish", () => {
     const added = executeCommand(
       engine,
       createAddCursorRangeCommand("cursor-events:recording", 1_000, 3_000, {
-        presetId: "sleek-dark",
+        presetId: "recorded-system",
         scale: 1.5,
         smoothing: "off",
         settings: { fillColor: "#ff0000", strokeColor: "#00ff00" },

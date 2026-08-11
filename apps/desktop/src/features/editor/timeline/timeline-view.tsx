@@ -1302,6 +1302,8 @@ export function TimelineView({
           onTrimClip={interaction.trimClip}
           onSelectMarker={selectMarker}
           onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
+          onMoveZoomSegment={interaction.moveZoomSegment}
+          onResizeZoomSegment={interaction.resizeZoomSegment}
           onDeleteSelection={deleteSelected}
           onDuplicateClip={duplicateClip}
           onSplitClip={splitClip}

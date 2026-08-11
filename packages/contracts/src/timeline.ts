@@ -62,7 +62,7 @@ export const smartZoomSettingsSchema = z.object({
   safeEdgePadding: z.number().min(0).max(1_000).default(32),
   targetScale: z.number().min(1.05).max(4).default(1.5),
   includeClicks: z.boolean().default(true),
-  includeDwells: z.boolean().default(true),
+  includeDwells: z.boolean().default(false),
 })
 
 export type SmartZoomSettings = z.infer<typeof smartZoomSettingsSchema>
@@ -231,7 +231,7 @@ export const cursorEffectClipSchema = z.object({
   sourceInMs: z.number().int().min(0).default(0),
   sourceOutMs: z.number().int().min(0).default(0),
   speed: z.number().positive().default(1),
-  presetId: cursorIconPresetSchema.default("modern-neon"),
+  presetId: cursorIconPresetSchema.default("recorded-system"),
   scale: z.number().min(0.2).max(5).default(1),
   smoothing: cursorSmoothingSchema.default("smooth"),
   settings: cursorEffectSettingsSchema.default({}),
@@ -261,6 +261,7 @@ export const timelineTrackKindSchema = z.enum([
   "captions",
   "cursor",
   "effects",
+  "zoom",
 ])
 
 export type TimelineTrackKind = z.infer<typeof timelineTrackKindSchema>
@@ -466,7 +467,7 @@ export const renderPlanCursorEffectSchema = z.object({
   startMs: z.number().int().min(0),
   endMs: z.number().int().positive(),
   enabled: z.boolean().default(true),
-  presetId: cursorIconPresetSchema.default("modern-neon"),
+  presetId: cursorIconPresetSchema.default("recorded-system"),
   scale: z.number().min(0.2).max(5).default(1),
   smoothing: cursorSmoothingSchema.default("smooth"),
   settings: cursorEffectSettingsSchema.default({}),

@@ -83,6 +83,7 @@ describe("smart zoom telemetry analysis", () => {
     const suggestions = generateSmartZoomSuggestions(telemetry, canvas, {
       preset: "product-demo",
       minDwellMs: 500,
+      includeDwells: true,
     })
 
     expect(suggestions.length).toBeGreaterThan(0)

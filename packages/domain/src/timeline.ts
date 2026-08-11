@@ -143,6 +143,11 @@ export function ensureCursorEffectTrack(
   return { ...state, tracks: [...state.tracks, cursorTrack] }
 }
 
+export function ensureZoomTrack(state: TimelineState): TimelineState {
+  if (state.tracks.some((track) => track.kind === "zoom")) return state
+  return { ...state, tracks: [...state.tracks, makeTrack("zoom", "Zoom", [])] }
+}
+
 function audioStreamRole(stream: MediaStream | undefined, index: number): AudioRole {
   const title = stream?.title?.toLowerCase() ?? ""
   if (title.includes("microphone") || title.includes("mic")) return "microphone"
@@ -300,6 +305,7 @@ export function trackKindDisplayName(kind: TimelineTrackKind): string {
     captions: "Captions",
     cursor: "Cursor",
     effects: "Effects",
+    zoom: "Zoom",
   }
   return names[kind]
 }
@@ -406,9 +412,11 @@ export function createProjectFromRecording(
   // Bootstrap projects register semantic stream assets while keeping every
   // asset path relative to the recording session for safe export resolution.
   const screenAsset = createScreenAsset(recording, metadata)
-  const timeline = cursorTelemetryAsset
-    ? ensureCursorEffectTrack(baseTimeline, cursorTelemetryAsset.id)
-    : baseTimeline
+  const timeline = ensureZoomTrack(
+    cursorTelemetryAsset
+      ? ensureCursorEffectTrack(baseTimeline, cursorTelemetryAsset.id)
+      : baseTimeline,
+  )
   const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const cameraStreams = recording.webcamPath
@@ -489,7 +497,8 @@ export function projectToTimeline(project: Project): TimelineState {
     updatedAt: project.updatedAt,
   }
   const cursorAsset = project.assets.find((asset) => asset.role === "cursor_events")
-  return cursorAsset ? ensureCursorEffectTrack(timeline, cursorAsset.id) : timeline
+  const withCursor = cursorAsset ? ensureCursorEffectTrack(timeline, cursorAsset.id) : timeline
+  return ensureZoomTrack(withCursor)
 }
 
 // Merge an updated timeline back into an existing project without losing assets,

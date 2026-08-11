@@ -66,7 +66,7 @@ function makeState(): TimelineState {
             sourceInMs: 0,
             sourceOutMs: 0,
             speed: 1,
-            presetId: "modern-neon",
+            presetId: "recorded-system",
             scale: 1,
             smoothing: "smooth",
             settings: {},
@@ -116,7 +116,7 @@ describe("Phase 5 cursor range commands", () => {
     const updated = executeCommand(
       createEngine(makeState()),
       createUpdateCursorRangeCommand("cursor-range", {
-        presetId: "sleek-dark",
+        presetId: "recorded-system",
         scale: 1.8,
         locked: true,
       }),
@@ -124,7 +124,7 @@ describe("Phase 5 cursor range commands", () => {
     expect(updated.ok).toBe(true)
     if (!updated.ok) return
     expect(cursorRanges(updated.value.history.present)[0]).toMatchObject({
-      presetId: "sleek-dark",
+      presetId: "recorded-system",
       scale: 1.8,
       locked: true,
     })

@@ -468,7 +468,7 @@ fn cursor_effect_value(asset: &ProjectAsset, duration_ms: u64, canvas: &Value) -
     let preset = canvas_settings
         .get("preset")
         .cloned()
-        .unwrap_or_else(|| Value::String("modern-neon".into()));
+        .unwrap_or_else(|| Value::String("recorded-system".into()));
     let scale = canvas_settings
         .get("scale")
         .cloned()
@@ -763,7 +763,7 @@ pub fn create_project(
             "borderRadius": 0,
             "shadow": false,
             "cursorSettings": {
-                "preset": "modern-neon",
+                "preset": "recorded-system",
                 "scale": 1.0,
                 "fillColor": "#3b82f6",
                 "fillOpacity": 1.0,

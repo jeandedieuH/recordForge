@@ -339,7 +339,7 @@ function makeDenseState(durationMs: number): {
             sourceInMs: 0,
             sourceOutMs: 0,
             speed: 1,
-            presetId: "modern-neon",
+            presetId: "recorded-system",
             scale: 1,
             smoothing: "smooth",
             settings: {},

@@ -101,7 +101,7 @@ describe("cursor-core", () => {
       speed: 1,
       enabled: false,
       locked: true,
-      presetId: "sleek-dark",
+      presetId: "recorded-system",
       scale: 1.5,
       smoothing: "off" as const,
       settings: { clickFeedback: "spotlight" as const },
@@ -110,7 +110,6 @@ describe("cursor-core", () => {
     const keys = labels.map((label) => label.key)
     expect(keys).toContain("locked")
     expect(keys).toContain("hidden")
-    expect(keys).toContain("preset")
     expect(keys).toContain("scale")
     expect(keys).toContain("smoothing")
     expect(keys).toContain("click")
@@ -136,31 +135,31 @@ describe("cursor-core", () => {
     expect(cursorRangeOverrideLabels(range, defaultCursorSettings)).toHaveLength(0)
   })
 
-  it("falls back to the chosen preset for recorded system cursor shapes", () => {
-    const asset = resolveCursorAsset("hand", "modern-neon", { shapeMode: "optimized" })
-    expect(asset.id).toBe("modern-neon")
-    expect(asset.effectiveId).toBe("modern-neon")
+  it("maps a known recorded shape id to the generic shape asset", () => {
+    const asset = resolveCursorAsset("hand", "recorded-system", { shapeMode: "optimized" })
+    expect(asset.id).toBe("shape-hand")
+    expect(asset.effectiveId).toBe("shape-hand")
   })
 
-  it("falls back to the chosen preset when the recorded shape is unknown", () => {
-    const asset = resolveCursorAsset("unknown-shape", "sleek-dark", { shapeMode: "optimized" })
-    expect(asset.id).toBe("sleek-dark")
-    expect(asset.effectiveId).toBe("sleek-dark")
+  it("falls back to the recorded system arrow for unknown shape ids", () => {
+    const asset = resolveCursorAsset("unknown-shape", "recorded-system", { shapeMode: "optimized" })
+    expect(asset.id).toBe("recorded-system")
+    expect(asset.effectiveId).toBe("recorded-system")
   })
 
-  it("honors the recorded shape mode only for literal manifest ids", () => {
-    const asset = resolveCursorAsset("modern-neon", "default", { shapeMode: "recorded" })
-    expect(asset.id).toBe("modern-neon")
-    expect(asset.effectiveId).toBe("modern-neon")
+  it("honors literal manifest ids in recorded shape mode", () => {
+    const asset = resolveCursorAsset("shape-arrow", "recorded-system", { shapeMode: "recorded" })
+    expect(asset.id).toBe("shape-arrow")
+    expect(asset.effectiveId).toBe("shape-arrow")
 
-    const fallback = resolveCursorAsset("hand", "default", { shapeMode: "recorded" })
-    expect(fallback.id).toBe("default")
+    const fallback = resolveCursorAsset("hand", "recorded-system", { shapeMode: "recorded" })
+    expect(fallback.id).toBe("shape-hand")
   })
 
-  it("uses the preset exclusively when shape mode is preset", () => {
-    const asset = resolveCursorAsset("hand", "mac-pro", { shapeMode: "preset" })
-    expect(asset.id).toBe("mac-pro")
-    expect(asset.effectiveId).toBe("mac-pro")
+  it("uses the recorded system preset asset when shape mode is preset", () => {
+    const asset = resolveCursorAsset("hand", "recorded-system", { shapeMode: "preset" })
+    expect(asset.id).toBe("recorded-system")
+    expect(asset.effectiveId).toBe("recorded-system")
   })
 
   it("resolves the recorded system style to a shape-specific asset", () => {

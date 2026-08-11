@@ -407,7 +407,7 @@ impl Default for CursorSettings {
         Self {
             enabled: true,
             shape_mode: "optimized".into(),
-            preset: "modern-neon".into(),
+            preset: "recorded-system".into(),
             scale: 1.0,
             fill_color: "#3b82f6".into(),
             fill_opacity: 1.0,

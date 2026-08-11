@@ -65,14 +65,10 @@ interface CursorInspectorProps {
   presetsEnabled?: boolean
 }
 
-// The editor only supports four curated cursor styles. New presets are ignored
-// by the Zod schema, so the UI just renders the allowed choices.
+// The editor only supports the recorded cursor style. Legacy presets are
+// migrated to "recorded-system" when the project is loaded.
 const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
   { id: "recorded-system", label: "Recorded / System", desc: "Use the captured system cursor" },
-  { id: "modern-neon", label: "Modern Neon", desc: "Luminous pointer arrow" },
-  { id: "sleek-dark", label: "Sleek Dark", desc: "Stealth dark pointer" },
-  { id: "mac-pro", label: "Mark Pro", desc: "Classic white rounded pointer" },
-  { id: "default", label: "Classic Arrow", desc: "Standard screen arrow" },
 ]
 
 const CURSOR_PRESETS_KEY = "cursorPresets"
@@ -84,7 +80,7 @@ export function CursorInspector({
   resetLabel = "Reset",
   presetsEnabled = true,
 }: CursorInspectorProps) {
-  const activePreset = settings.preset ?? "modern-neon"
+  const activePreset = settings.preset ?? "recorded-system"
   const scale = settings.scale ?? 1.0
   const [savedPresets, setSavedPresets] = useState<Record<string, CursorSettings>>({})
   const [presetName, setPresetName] = useState("")

@@ -1748,7 +1748,7 @@ function applyAddCursorRange(
     sourceInMs: 0,
     sourceOutMs: 0,
     speed: 1,
-    presetId: command.presetId ?? settings.preset ?? "modern-neon",
+    presetId: command.presetId ?? settings.preset ?? "recorded-system",
     scale: command.scale ?? settings.scale ?? 1,
     smoothing: command.smoothing ?? (settings.smoothMovement === false ? "off" : "smooth"),
     settings,
