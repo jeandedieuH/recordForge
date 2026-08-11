@@ -17,6 +17,8 @@ interface CustomCursorOverlayProps {
   offsetX?: number
   offsetY?: number
   zoomTransform?: string
+  /** Radius for clipping the overlay to the video screen. */
+  borderRadius?: number | string
 }
 
 function fitSourcePoint(
@@ -37,6 +39,7 @@ export function CustomCursorOverlay({
   offsetX = 0,
   offsetY = 0,
   zoomTransform,
+  borderRadius,
 }: CustomCursorOverlayProps) {
   const instanceId = useId()
   const spotlightMaskId = `spotlight-mask-${instanceId.replace(/:/g, "")}`
@@ -99,6 +102,7 @@ export function CustomCursorOverlay({
         top: offsetY,
         width: containerWidth,
         height: containerHeight,
+        borderRadius,
         transform: zoomTransform,
         transformOrigin: "center",
       }}

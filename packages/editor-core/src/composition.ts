@@ -133,11 +133,12 @@ export function canvasShadowStyle(
     TimelineCanvas,
     "shadow" | "shadowColor" | "shadowBlur" | "shadowOffsetX" | "shadowOffsetY"
   >,
+  scale: number = 1,
 ): string | undefined {
   if (!canvas.shadow) return undefined
   const color = canvas.shadowColor ?? DEFAULT_SHADOW_COLOR
-  const blur = Math.max(0, canvas.shadowBlur ?? DEFAULT_SHADOW_BLUR)
-  const offsetX = canvas.shadowOffsetX ?? 0
-  const offsetY = canvas.shadowOffsetY ?? 8
+  const blur = Math.max(0, (canvas.shadowBlur ?? DEFAULT_SHADOW_BLUR) * scale)
+  const offsetX = (canvas.shadowOffsetX ?? 0) * scale
+  const offsetY = (canvas.shadowOffsetY ?? 8) * scale
   return `${offsetX}px ${offsetY}px ${blur}px ${color}`
 }

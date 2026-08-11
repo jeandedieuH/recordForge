@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import {
   type CursorSmoothing,
@@ -115,6 +115,7 @@ interface VideoBounds {
   top: number
   width: number
   height: number
+  scale: number
 }
 
 function isPreparingJob(job: MediaJob | null): boolean {
@@ -218,6 +219,7 @@ export function TimelineView({
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const monitorRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLDivElement>(null)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
   const [tool, setTool] = useState<"select" | "split">("select")
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
@@ -340,25 +342,47 @@ export function TimelineView({
     thumbnailResource.retry()
   }, [thumbnailResource.retry])
   const updateVideoBounds = useCallback(() => {
-    const monitor = monitorRef.current
+    const canvas = canvasRef.current
     const video = videoRef.current
-    if (!monitor || !video) {
+    if (!canvas) {
       setVideoBounds(null)
       return
     }
 
-    const monitorRect = monitor.getBoundingClientRect()
-    const videoRect = video.getBoundingClientRect()
-    if (videoRect.width <= 0 || videoRect.height <= 0) {
+    const canvasRect = canvas.getBoundingClientRect()
+    const canvasWidth = canvas.clientWidth
+    const canvasHeight = canvas.clientHeight
+    if (canvasWidth <= 0 || canvasHeight <= 0) {
       setVideoBounds(null)
       return
     }
+
+    const width = Math.max(1, timeline?.canvas.width ?? 1)
+    const height = Math.max(1, timeline?.canvas.height ?? 1)
+    const padding = timeline?.canvas.padding ?? 0
+
+    // The canvas wrapper is the produced background screen. Padding insets the
+    // recorded video screen from that background. Scale using the full canvas
+    // so the padding stays proportional as the preview is resized.
+    const canvasScale = canvasWidth / width
+
+    // The recorded video screen is the largest video-aspect rectangle that still
+    // fits inside the padded area. This avoids double-letterboxing (green bars
+    // inside the video screen) and keeps the green background only around it.
+    const maxScreenWidth = Math.max(1, (width - padding * 2) * canvasScale)
+    const maxScreenHeight = Math.max(1, (height - padding * 2) * canvasScale)
+    const sourceWidth = video && video.videoWidth > 0 ? video.videoWidth : width
+    const sourceHeight = video && video.videoHeight > 0 ? video.videoHeight : height
+    const screenScale = Math.min(maxScreenWidth / sourceWidth, maxScreenHeight / sourceHeight)
+    const screenWidth = sourceWidth * screenScale
+    const screenHeight = sourceHeight * screenScale
 
     const nextBounds = {
-      left: videoRect.left - monitorRect.left,
-      top: videoRect.top - monitorRect.top,
-      width: videoRect.width,
-      height: videoRect.height,
+      left: (canvasRect.width - screenWidth) / 2,
+      top: (canvasRect.height - screenHeight) / 2,
+      width: screenWidth,
+      height: screenHeight,
+      scale: canvasScale,
     }
     setVideoBounds((previous) => {
       if (
@@ -366,13 +390,44 @@ export function TimelineView({
         previous.left === nextBounds.left &&
         previous.top === nextBounds.top &&
         previous.width === nextBounds.width &&
-        previous.height === nextBounds.height
+        previous.height === nextBounds.height &&
+        previous.scale === nextBounds.scale
       ) {
         return previous
       }
       return nextBounds
     })
-  }, [])
+  }, [timeline?.canvas.width, timeline?.canvas.height, timeline?.canvas.padding])
+
+  const canvasStyle = useMemo<React.CSSProperties>(() => {
+    if (!timeline) return {}
+    const width = Math.max(1, timeline.canvas.width)
+    const height = Math.max(1, timeline.canvas.height)
+    return {
+      // Fit the background screen inside the monitor while preserving its aspect ratio.
+      width: `min(100cqw, calc(100cqh * ${width / height}))`,
+      aspectRatio: `${width} / ${height}`,
+      backgroundColor: timeline.canvas.background,
+    }
+  }, [timeline?.canvas.width, timeline?.canvas.height, timeline?.canvas.background])
+
+  const screenStyle = useMemo<React.CSSProperties>(() => {
+    if (!timeline || !videoBounds) {
+      return { position: "absolute", inset: 0, overflow: "hidden" }
+    }
+
+    return {
+      position: "absolute",
+      left: videoBounds.left,
+      top: videoBounds.top,
+      width: videoBounds.width,
+      height: videoBounds.height,
+      // Corners and shadow belong to the recorded video screen, not the background.
+      borderRadius: timeline.canvas.borderRadius * videoBounds.scale,
+      boxShadow: canvasShadowStyle(timeline.canvas, videoBounds.scale),
+      overflow: "hidden",
+    }
+  }, [videoBounds, timeline?.canvas])
 
   const handleClockBoundary = useCallback(
     (boundary: PlaybackBoundary) => {
@@ -403,13 +458,11 @@ export function TimelineView({
     setVideoBounds(null)
   }, [mediaUrl])
 
-  useEffect(() => {
-    const monitor = monitorRef.current
-    const video = videoRef.current
-    if (!monitor || !video || !mediaUrl) return
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !mediaUrl) return
     const observer = new ResizeObserver(updateVideoBounds)
-    observer.observe(monitor)
-    observer.observe(video)
+    observer.observe(canvas)
     updateVideoBounds()
     return () => observer.disconnect()
   }, [mediaUrl, updateVideoBounds])
@@ -955,52 +1008,55 @@ export function TimelineView({
 
           <div
             ref={monitorRef}
-            className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-3 shadow-e2"
+            className="@container-size relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-3 shadow-e2"
           >
             <div
-              className="relative flex min-h-0 w-full max-w-full max-h-full items-center justify-center overflow-hidden"
-              style={{
-                aspectRatio: `${timeline.canvas.width} / ${timeline.canvas.height}`,
-                backgroundColor: timeline.canvas.background,
-                padding: timeline.canvas.padding,
-                borderRadius: timeline.canvas.borderRadius,
-                boxShadow: canvasShadowStyle(timeline.canvas),
-              }}
+              ref={canvasRef}
+              className="relative flex items-center justify-center overflow-hidden"
+              // Use the monitor as a size container so the canvas can be the
+              // largest 16:9 box that still fits entirely inside the monitor,
+              // avoiding the previous `w-full` + `max-h-full` issue that made
+              // the preview stretch too wide when the monitor was wide and short.
+              style={canvasStyle}
             >
               {mediaUrl && !mediaError ? (
-                <video
-                  key={mediaUrl}
-                  ref={videoRef}
-                  src={mediaUrl}
-                  className="size-full rounded-lg object-contain"
-                  style={
-                    zoomTransformStyle
-                      ? {
-                          transform: zoomTransformStyle,
-                          transformOrigin: "center",
-                        }
-                      : undefined
-                  }
-                  muted={isPreviewMuted}
-                  playsInline
-                  onClick={togglePlay}
-                  onError={() => {
-                    setVideoBounds(null)
-                    if (isUsingProxy && originalPath) {
-                      setUseOriginalMedia(true)
-                      setMediaError(false)
-                      return
+                // The recorded video screen sits on top of the background and is
+                // inset by the canvas padding. Its border radius, shadow, and
+                // overflow are applied here so the video and cursor are clipped together.
+                <div style={screenStyle} onClick={togglePlay}>
+                  <video
+                    key={mediaUrl}
+                    ref={videoRef}
+                    src={mediaUrl}
+                    className="size-full object-contain"
+                    style={
+                      zoomTransformStyle
+                        ? {
+                            transform: zoomTransformStyle,
+                            transformOrigin: "center",
+                          }
+                        : undefined
                     }
-                    setMediaError(true)
-                  }}
-                  onLoadedMetadata={() => {
-                    updateVideoBounds()
-                  }}
-                  onLoadedData={() => {
-                    setMediaError(false)
-                    updateVideoBounds()
-                  }}
-                />
+                    muted={isPreviewMuted}
+                    playsInline
+                    onError={() => {
+                      setVideoBounds(null)
+                      if (isUsingProxy && originalPath) {
+                        setUseOriginalMedia(true)
+                        setMediaError(false)
+                        return
+                      }
+                      setMediaError(true)
+                    }}
+                    onLoadedMetadata={() => {
+                      updateVideoBounds()
+                    }}
+                    onLoadedData={() => {
+                      setMediaError(false)
+                      updateVideoBounds()
+                    }}
+                  />
+                </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 text-center">
                   <div className="flex size-16 items-center justify-center rounded-2xl bg-surface-dim text-primary/50">
@@ -1069,6 +1125,7 @@ export function TimelineView({
                   containerHeight={videoBounds.height}
                   offsetX={videoBounds.left}
                   offsetY={videoBounds.top}
+                  borderRadius={screenStyle.borderRadius as number | string | undefined}
                   zoomTransform={zoomTransformStyle}
                 />
               ) : null}
