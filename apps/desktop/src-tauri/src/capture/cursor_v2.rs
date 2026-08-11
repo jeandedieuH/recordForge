@@ -1144,6 +1144,7 @@ fn capture_cursor_shape(
     _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
 ) -> Option<CursorShapeInfo> {
+    use windows::Win32::Graphics::Gdi::{GetObjectW, BITMAP};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorInfo, GetIconInfo, CURSORINFO, ICONINFO,
     };
@@ -1159,12 +1160,31 @@ fn capture_cursor_shape(
     // SAFETY: `GetIconInfo` fills the provided struct and returns a bool.
     unsafe { GetIconInfo(hcursor.into(), &mut icon_info) }.ok()?;
 
-    let width = icon_info.xHotspot * 2; // best-effort size from hotspot
-    let height = icon_info.yHotspot * 2;
-    let (width, height) = if width == 0 || height == 0 {
-        (32, 32) // conservative fallback for standard cursors
+    // Query the mask bitmap to get the real cursor dimensions. For monochrome
+    // cursors the mask height is doubled (AND mask on top, XOR mask below).
+    let mut bitmap = BITMAP::default();
+    let (width, height) = if !icon_info.hbmMask.is_invalid() {
+        // SAFETY: hbmMask is a valid bitmap handle returned by GetIconInfo.
+        let written = unsafe {
+            GetObjectW(
+                icon_info.hbmMask.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bitmap as *mut _ as *mut _),
+            )
+        };
+        if written > 0 {
+            let actual_height = if icon_info.hbmColor.is_invalid() {
+                // Monochrome cursor: mask contains two stacked bitmaps.
+                bitmap.bmHeight / 2
+            } else {
+                bitmap.bmHeight
+            };
+            (bitmap.bmWidth as u32, actual_height as u32)
+        } else {
+            (32, 32)
+        }
     } else {
-        (width, height)
+        (32, 32)
     };
 
     // Clean up the bitmap handles returned by GetIconInfo to avoid GDI leaks.
@@ -1178,23 +1198,25 @@ fn capture_cursor_shape(
         }
     }
 
-    let shape_id = format!(
-        "{}x{}-{}-{}-{:?}",
-        width, height, icon_info.xHotspot, icon_info.yHotspot, hcursor.0
-    );
+    let hotspot_x = icon_info.xHotspot as i32;
+    let hotspot_y = icon_info.yHotspot as i32;
 
-    // Map the system cursor to a human-readable kind for the evaluator.
-    let kind = guess_cursor_kind(
-        width,
-        height,
-        icon_info.xHotspot as i32,
-        icon_info.yHotspot as i32,
+    // Try to identify the system cursor by its cached handle first; fall back
+    // to geometry-based heuristics for custom cursors.
+    let kind = classify_cursor_kind(hcursor, width, height, hotspot_x, hotspot_y);
+
+    // Use the real dimensions and hotspot for the shape ID so distinct cursor
+    // silhouettes are tracked separately. Cast the handle to a usize for a
+    // stable in-process identifier.
+    let shape_id = format!(
+        "{}x{}-{}-{}-{}",
+        width, height, hotspot_x, hotspot_y, hcursor.0 as usize
     );
 
     Some(CursorShapeInfo {
         shape_id,
-        hotspot_x: icon_info.xHotspot as i32,
-        hotspot_y: icon_info.yHotspot as i32,
+        hotspot_x,
+        hotspot_y,
         width,
         height,
         kind,
@@ -1209,11 +1231,105 @@ fn capture_cursor_shape(
     None
 }
 
-/// Best-effort cursor kind from icon dimensions and hotspot. The evaluator will
-/// still prefer shape-specific assets when available; this is a fallback label.
-fn guess_cursor_kind(_width: u32, _height: u32, _hotspot_x: i32, _hotspot_y: i32) -> String {
-    // A future implementation can compare the mask/color bitmaps to known
-    // system-cursor silhouettes (I-beam, hand, crosshair, etc.).
+/// On Windows, compare the current cursor handle against the cached system
+/// cursor handles loaded with `LoadCursorW`. This is the most reliable way to
+/// identify standard system cursors without parsing bitmaps.
+#[cfg(target_os = "windows")]
+fn classify_cursor_kind(
+    hcursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
+    width: u32,
+    height: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+) -> String {
+    let current = hcursor.0 as usize;
+    for (system, kind) in system_cursor_kinds() {
+        if current == *system {
+            return (*kind).into();
+        }
+    }
+    classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y)
+}
+
+#[cfg(target_os = "windows")]
+fn system_cursor_kinds() -> &'static [(usize, &'static str)] {
+    use std::sync::OnceLock;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        LoadCursorW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
+        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_UPARROW, IDC_WAIT,
+    };
+
+    static CURSORS: OnceLock<Vec<(usize, &'static str)>> = OnceLock::new();
+    CURSORS.get_or_init(|| {
+        let ids: &[(windows::core::PCWSTR, &str)] = &[
+            (IDC_ARROW, "arrow"),
+            (IDC_HAND, "hand"),
+            (IDC_IBEAM, "ibeam"),
+            (IDC_CROSS, "crosshair"),
+            (IDC_WAIT, "wait"),
+            (IDC_HELP, "help"),
+            (IDC_SIZEALL, "move"),
+            (IDC_SIZENWSE, "resize-diagonal-1"),
+            (IDC_SIZENESW, "resize-diagonal-2"),
+            (IDC_SIZEWE, "resize-horizontal"),
+            (IDC_SIZENS, "resize-vertical"),
+            (IDC_UPARROW, "arrow"),
+            (IDC_NO, "unavailable"),
+        ];
+        ids.iter()
+            .filter_map(|(id, kind)| {
+                // SAFETY: loading a system cursor by ID is a safe Win32 call.
+                unsafe { LoadCursorW(None, *id) }
+                    .ok()
+                    .map(|handle| (handle.0 as usize, *kind))
+            })
+            .collect()
+    })
+}
+
+/// Geometry-based fallback for cursors that are not standard system cursors.
+#[cfg(target_os = "windows")]
+fn classify_cursor_kind_by_geometry(
+    width: u32,
+    height: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+) -> String {
+    if width == 0 || height == 0 {
+        return "arrow".into();
+    }
+    let center_x = width as f64 / 2.0;
+    let center_y = height as f64 / 2.0;
+    let distance_from_center =
+        ((hotspot_x as f64 - center_x).abs()).max((hotspot_y as f64 - center_y).abs());
+    let aspect = width as f64 / height as f64;
+    let size = width.max(height) as i32;
+
+    if aspect < 0.5 {
+        return "ibeam".into();
+    }
+    if aspect > 2.5 {
+        return "resize-horizontal".into();
+    }
+
+    if distance_from_center < 4.0 {
+        if size >= 28 {
+            return "crosshair".into();
+        }
+        return "wait".into();
+    }
+
+    // Hotspot in the upper-left quadrant usually indicates an arrow or hand.
+    let near_top_left =
+        hotspot_x < (width as i32 / 3).max(2) && hotspot_y < (height as i32 / 3).max(2);
+    if near_top_left {
+        let is_squareish = (width as i32 - height as i32).abs() <= 4;
+        if is_squareish && size >= 24 {
+            return "hand".into();
+        }
+        return "arrow".into();
+    }
+
     "arrow".into()
 }
 

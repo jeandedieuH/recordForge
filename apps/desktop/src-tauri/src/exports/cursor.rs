@@ -288,7 +288,18 @@ impl CursorRenderer {
         let alpha = 0.75 * click.intensity;
 
         match self.settings.click_feedback.as_str() {
-            "pulse" | "spotlight" => fill_circle(
+            "spotlight" => fill_radial_glow(
+                frame,
+                self.canvas_width,
+                self.canvas_height,
+                x,
+                y,
+                radius,
+                radius * 0.8,
+                color,
+                alpha,
+            ),
+            "pulse" => fill_circle(
                 frame,
                 self.canvas_width,
                 self.canvas_height,
@@ -698,6 +709,53 @@ fn fill_circle(
     }
 }
 
+/// Approximate a CSS `box-shadow` style radial glow around a solid disc.
+/// `core_radius` is the filled-disc radius; `glow_radius` controls how far the
+/// blurred halo extends. Alpha falls from the supplied `alpha` at the disc edge
+/// to 0 at the outer edge.
+#[allow(clippy::too_many_arguments)]
+fn fill_radial_glow(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    cx: f64,
+    cy: f64,
+    core_radius: f64,
+    glow_radius: f64,
+    color: Rgba,
+    alpha: f64,
+) {
+    let outer = core_radius + glow_radius.max(0.0);
+    let min_x = (cx - outer).floor().max(0.0) as u32;
+    let max_x = (cx + outer).ceil().min(width as f64) as u32;
+    let min_y = (cy - outer).floor().max(0.0) as u32;
+    let max_y = (cy + outer).ceil().min(height as f64) as u32;
+    let outer_squared = outer * outer;
+    let core_squared = core_radius * core_radius;
+    let alpha = alpha.clamp(0.0, 1.0) as f32;
+
+    for py in min_y..max_y {
+        for px in min_x..max_x {
+            let dx = px as f64 - cx;
+            let dy = py as f64 - cy;
+            let distance_squared = dx * dx + dy * dy;
+            if distance_squared > outer_squared {
+                continue;
+            }
+
+            let pixel_color = if distance_squared <= core_squared {
+                color.with_alpha(alpha as f64)
+            } else {
+                let distance = distance_squared.sqrt();
+                let t = ((distance - core_radius) / glow_radius.max(f64::EPSILON)).clamp(0.0, 1.0);
+                let glow_alpha = alpha * ((1.0 - t * t) as f32) * 0.5;
+                color.with_alpha(glow_alpha as f64)
+            };
+            blend_pixel(frame, width, px as i32, py as i32, pixel_color);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_ring(
     frame: &mut [u8],
@@ -756,6 +814,7 @@ mod tests {
                     button_event: "none".into(),
                     visible: true,
                     shape_id: None,
+                    shape_changed: false,
                 },
                 CursorTelemetryEvent {
                     t_ms: 100,
@@ -766,6 +825,7 @@ mod tests {
                     button_event: "down".into(),
                     visible: true,
                     shape_id: None,
+                    shape_changed: false,
                 },
             ],
         )
@@ -846,6 +906,50 @@ mod tests {
         assert!(
             found,
             "expected a solid red cursor pixel in the rendered frame"
+        );
+    }
+
+    #[test]
+    fn spotlight_click_effect_draws_a_radial_glow_beyond_the_core() {
+        let mut settings = CursorSettings::default();
+        settings.click_feedback = "spotlight".into();
+        settings.click_color = "#00ff00".into();
+        settings.click_size = 40.0;
+
+        let mut renderer = CursorRenderer::new(
+            settings,
+            telemetry(),
+            &segments(),
+            &test_canvas(100, 100, 0),
+        )
+        .expect("valid cursor renderer");
+        let mut frame = vec![0; 100 * 100 * 4];
+        // The second telemetry sample is a left-click at (40, 50) and time 100,
+        // which is the start of the click effect (progress 0, full intensity).
+        renderer.render_frame(100, &mut frame);
+
+        let mut core_pixel_count = 0;
+        let mut glow_pixel_count = 0;
+        for py in 0..100u32 {
+            for px in 0..100u32 {
+                let dx = px as f64 - 40.0;
+                let dy = py as f64 - 50.0;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let index = (py as usize * 100 + px as usize) * 4;
+                let pixel = &frame[index..index + 4];
+                if pixel[3] > 10 && pixel[1] > 100 {
+                    if distance <= 5.0 {
+                        core_pixel_count += 1;
+                    } else if distance <= 12.0 {
+                        glow_pixel_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(core_pixel_count > 0, "expected a solid spotlight core");
+        assert!(
+            glow_pixel_count > 0,
+            "expected a spotlight glow outside the core"
         );
     }
 

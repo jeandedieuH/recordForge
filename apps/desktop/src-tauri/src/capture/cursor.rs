@@ -31,6 +31,8 @@ pub struct CursorTelemetryEvent {
     pub visible: bool,
     #[serde(default)]
     pub shape_id: Option<String>,
+    #[serde(default)]
+    pub shape_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +187,7 @@ impl CursorTracker {
                     button_event: button_event.to_string(),
                     visible: is_visible,
                     shape_id: None,
+                    shape_changed: false,
                 });
 
                 // Checkpointing makes cursor metadata recoverable even when the
@@ -297,6 +300,15 @@ fn capture_mouse_state() -> (f64, f64, bool, &'static str, bool) {
 /// the V1 evaluator produces the same source position as the V2 evaluator.
 pub fn v2_to_v1_telemetry(v2: &CursorTelemetryFileV2) -> CursorTelemetryFile {
     let meta = &v2.metadata;
+    // Build a quick lookup from captured shape ID to its metadata so we can map
+    // the recorded kind to a shared cursor asset ID.
+    let shape_by_id: std::collections::HashMap<&str, &super::cursor_v2::CursorShapeInfo> = meta
+        .shapes
+        .iter()
+        .map(|shape| (shape.shape_id.as_str(), shape))
+        .collect();
+
+    let mut previous_shape_id: Option<String> = None;
     let events: Vec<CursorTelemetryEvent> = v2
         .events
         .iter()
@@ -323,6 +335,17 @@ pub fn v2_to_v1_telemetry(v2: &CursorTelemetryFileV2) -> CursorTelemetryFile {
             } else {
                 "none"
             };
+
+            let mapped_shape_id = shape_by_id
+                .get(event.shape_id.as_str())
+                .and_then(|shape| cursor_shape_kind_to_asset_id(&shape.kind))
+                .map(String::from)
+                .unwrap_or_else(|| event.shape_id.clone());
+            let shape_changed = previous_shape_id
+                .as_ref()
+                .is_some_and(|previous| previous != &mapped_shape_id);
+            previous_shape_id = Some(mapped_shape_id.clone());
+
             CursorTelemetryEvent {
                 t_ms: event.t_ms,
                 x,
@@ -331,7 +354,8 @@ pub fn v2_to_v1_telemetry(v2: &CursorTelemetryFileV2) -> CursorTelemetryFile {
                 button: button.into(),
                 button_event: button_event.into(),
                 visible: event.visible,
-                shape_id: Some(event.shape_id.clone()),
+                shape_id: Some(mapped_shape_id),
+                shape_changed,
             }
         })
         .collect();
@@ -373,6 +397,21 @@ pub fn v2_to_v1_telemetry(v2: &CursorTelemetryFileV2) -> CursorTelemetryFile {
     }
 }
 
+/// Map a captured cursor kind to a shared cursor asset ID. Returns `None` for
+/// kinds that should fall back to the user-selected preset (e.g. the default
+/// arrow) or that have no matching asset yet.
+fn cursor_shape_kind_to_asset_id(kind: &str) -> Option<&'static str> {
+    match kind {
+        "hand" => Some("hand-pointer"),
+        "ibeam" => Some("minimal-dot"),
+        "crosshair" => Some("cyberpunk"),
+        "wait" | "help" => Some("high-contrast"),
+        "move" | "resize-diagonal-1" | "resize-diagonal-2" => Some("mac-pro"),
+        "resize-horizontal" | "resize-vertical" | "unavailable" => Some("high-contrast"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +438,7 @@ mod tests {
                 button_event: "none".into(),
                 visible: true,
                 shape_id: None,
+                shape_changed: false,
             }],
         );
         let path = work_dir.path().join("cursor_telemetry.json");
@@ -419,6 +459,82 @@ mod tests {
         assert_eq!(button_event_for_sample("left", "left", true), "held");
         assert_eq!(button_event_for_sample("left", "none", false), "up");
         assert_eq!(button_event_for_sample("none", "none", false), "none");
+    }
+
+    #[test]
+    fn v2_to_v1_telemetry_maps_hand_shape_to_hand_pointer_asset() {
+        use super::{
+            CursorCaptureBounds, CursorTelemetryEventV2, CursorTelemetryFileV2,
+            CursorTelemetryMetadata,
+        };
+        use crate::capture::cursor_v2::{CursorButtonState, CursorShapeInfo};
+
+        let mut metadata = CursorTelemetryMetadata::new(
+            "recording".into(),
+            100,
+            100,
+            CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        );
+        metadata.shapes = vec![
+            CursorShapeInfo {
+                shape_id: "hand-shape".into(),
+                hotspot_x: 0,
+                hotspot_y: 0,
+                width: 32,
+                height: 32,
+                kind: "hand".into(),
+            },
+            CursorShapeInfo {
+                shape_id: "arrow-shape".into(),
+                hotspot_x: 0,
+                hotspot_y: 0,
+                width: 32,
+                height: 32,
+                kind: "arrow".into(),
+            },
+        ];
+
+        let v2 = CursorTelemetryFileV2 {
+            metadata,
+            events: vec![
+                CursorTelemetryEventV2 {
+                    t_ms: 0,
+                    raw_x: 10,
+                    raw_y: 20,
+                    source_x: 10.0,
+                    source_y: 20.0,
+                    buttons: CursorButtonState::default(),
+                    button_event: "none".into(),
+                    visible: true,
+                    shape_id: "hand-shape".into(),
+                    shape_changed: false,
+                },
+                CursorTelemetryEventV2 {
+                    t_ms: 16,
+                    raw_x: 12,
+                    raw_y: 22,
+                    source_x: 12.0,
+                    source_y: 22.0,
+                    buttons: CursorButtonState::default(),
+                    button_event: "none".into(),
+                    visible: true,
+                    shape_id: "arrow-shape".into(),
+                    shape_changed: false,
+                },
+            ],
+        };
+
+        let v1 = v2_to_v1_telemetry(&v2);
+        assert_eq!(v1.events.len(), 2);
+        assert_eq!(v1.events[0].shape_id.as_deref(), Some("hand-pointer"));
+        assert!(!v1.events[0].shape_changed);
+        assert_eq!(v1.events[1].shape_id.as_deref(), Some("arrow-shape"));
+        assert!(v1.events[1].shape_changed);
     }
 
     #[test]
