@@ -481,26 +481,42 @@ fn common_screen_source(segments: &[RenderSegment]) -> Option<(u32, u32)> {
     common
 }
 
-/// Computes the fitted recorded video screen (x, y, w, h) in full canvas
-/// coordinates, falling back to the padded content area when no source size
-/// is available.
 fn video_screen_rect(
     canvas: &cursor::RenderCanvas,
     source: Option<(u32, u32)>,
+    is_side_by_side: bool,
 ) -> (f64, f64, f64, f64) {
     let padding = canvas.padding as f64;
     let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
     let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
-    let (source_w, source_h) = match source {
-        Some((w, h)) => (w as f64, h as f64),
-        None => (content_width, content_height),
-    };
-    let fit_scale = (content_width / source_w).min(content_height / source_h);
-    let fit_width = (source_w * fit_scale).floor();
-    let fit_height = (source_h * fit_scale).floor();
-    let x = (padding + (content_width - fit_width) / 2.0).floor();
-    let y = (padding + (content_height - fit_height) / 2.0).floor();
-    (x, y, fit_width, fit_height)
+    if is_side_by_side {
+        let target_w = (content_width * 0.68).round().max(1.0);
+        let target_h = ((target_w / canvas.width as f64) * canvas.height as f64)
+            .round()
+            .max(1.0);
+        let (source_w, source_h) = match source {
+            Some((w, h)) => (w as f64, h as f64),
+            None => (target_w, target_h),
+        };
+        let fit_scale = (target_w / source_w).min(target_h / source_h);
+        let fit_width = (source_w * fit_scale).floor();
+        let fit_height = (source_h * fit_scale).floor();
+        let x = (padding + (target_w - fit_width) / 2.0).floor();
+        let y = (padding + (content_height - target_h) / 2.0 + (target_h - fit_height) / 2.0)
+            .floor();
+        (x, y, fit_width, fit_height)
+    } else {
+        let (source_w, source_h) = match source {
+            Some((w, h)) => (w as f64, h as f64),
+            None => (content_width, content_height),
+        };
+        let fit_scale = (content_width / source_w).min(content_height / source_h);
+        let fit_width = (source_w * fit_scale).floor();
+        let fit_height = (source_h * fit_scale).floor();
+        let x = (padding + (content_width - fit_width) / 2.0).floor();
+        let y = (padding + (content_height - fit_height) / 2.0).floor();
+        (x, y, fit_width, fit_height)
+    }
 }
 
 /// Compose screen, manual zoom, camera overlays, canvas framing, and semantic
@@ -563,10 +579,30 @@ fn render_timeline_composition(
         .height
         .saturating_sub(canvas.padding.saturating_mul(2))
         .max(1);
+    let is_side_by_side = plan.overlays.iter().any(|overlay| {
+        if !overlay.visible {
+            return false;
+        }
+        let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
+        let target_camera_x = (canvas.padding as f64)
+            + (usable_w * 0.68).round()
+            + (usable_w * 0.02).round();
+        (overlay.x - target_camera_x).abs() <= 2.0
+    });
     let (screen_x, screen_y, screen_w, screen_h) =
-        video_screen_rect(canvas, common_screen_source(&plan.segments));
-    let crop_x = ((content_width as f64 - screen_w) / 2.0).floor();
-    let crop_y = ((content_height as f64 - screen_h) / 2.0).floor();
+        video_screen_rect(canvas, common_screen_source(&plan.segments), is_side_by_side);
+    let (segment_w, segment_h) = if is_side_by_side {
+        (
+            (content_width as f64 * 0.68).round().max(1.0) as u32,
+            ((content_width as f64 * 0.68 / canvas.width as f64) * canvas.height as f64)
+                .round()
+                .max(1.0) as u32,
+        )
+    } else {
+        (content_width, content_height)
+    };
+    let crop_x = ((segment_w as f64 - screen_w) / 2.0).floor();
+    let crop_y = ((segment_h as f64 - screen_h) / 2.0).floor();
     let background = safe_filter_color(&canvas.background);
     let mut filters = Vec::new();
     let mut video_labels = Vec::new();
@@ -578,7 +614,7 @@ fn render_timeline_composition(
         if segment.output_start_ms > cursor_ms {
             let gap_label = format!("gap{index}");
             filters.push(format!(
-                "color=c={background}:s={content_width}x{content_height}:r={}:d={}[{gap_label}]",
+                "color=c={background}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
                 canvas.fps,
                 seconds(segment.output_start_ms - cursor_ms),
             ));
@@ -599,7 +635,7 @@ fn render_timeline_composition(
             filter.push_str(&format!(",setpts=PTS/{:.6}", segment.speed));
         }
         filter.push_str(&format!(
-            ",scale={content_width}:{content_height}:force_original_aspect_ratio=decrease,pad={content_width}:{content_height}:(ow-iw)/2:(oh-ih)/2:color={background},fps={}:setsar=1[{label}]",
+            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={background},fps={}:setsar=1[{label}]",
             canvas.fps,
         ));
         filters.push(filter);
@@ -609,7 +645,7 @@ fn render_timeline_composition(
     if cursor_ms < plan.duration_ms {
         let gap_label = "gap_trailing";
         filters.push(format!(
-            "color=c={background}:s={content_width}x{content_height}:r={}:d={}[{gap_label}]",
+            "color=c={background}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
             canvas.fps,
             seconds(plan.duration_ms - cursor_ms),
         ));
@@ -632,7 +668,7 @@ fn render_timeline_composition(
     // it to the full canvas so radius and shadow are applied to the actual
     // video layer rather than the padded content box.
     let mut canvas_filter = format!(
-        "{video_input}crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},pad={}:{}:(ow-iw)/2:(oh-ih)/2:color={background},setsar=1",
+        "{video_input}crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},pad={}:{}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1",
         canvas.width, canvas.height
     );
     if canvas.border_radius > 0 {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { CameraClip, ClipTransform, MediaVideoTrackOutput } from "@recordforge/contracts"
 import { cn } from "@recordforge/ui"
 import { toAssetUrl } from "../media/derivative-resources"
@@ -55,6 +55,9 @@ export function CameraPreview({
 }: CameraPreviewProps) {
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({})
   const gestureRef = useRef<CameraGesture | null>(null)
+  const [loadedDimensions, setLoadedDimensions] = useState<
+    Record<string, { width: number; height: number }>
+  >({})
   const outputsByStream = useMemo(
     () => new Map(outputs.map((output) => [output.streamIndex, output])),
     [outputs],
@@ -157,8 +160,9 @@ export function CameraPreview({
         const radius =
           transform.shape === "circle" ? "50%" : transform.shape === "rounded" ? "12%" : 0
         const crop = transform.crop
-        const sourceWidth = output?.width ?? canvasWidth
-        const sourceHeight = output?.height ?? canvasHeight
+        const natural = loadedDimensions[clip.id]
+        const sourceWidth = output?.width ?? natural?.width ?? crop?.width ?? canvasWidth
+        const sourceHeight = output?.height ?? natural?.height ?? crop?.height ?? canvasHeight
         const cropWidth = crop?.width ?? sourceWidth
         const cropHeight = crop?.height ?? sourceHeight
         const cropLeft = crop ? -(crop.x / cropWidth) * 100 : 0
@@ -233,12 +237,37 @@ export function CameraPreview({
               muted
               playsInline
               preload="auto"
-              className="absolute object-fill pointer-events-none"
+              className={cn(
+                "pointer-events-none absolute max-h-none max-w-none",
+                crop ? "object-fill" : "object-cover",
+              )}
               style={{
                 left: `${cropLeft}%`,
                 top: `${cropTop}%`,
                 width: `${cropVideoWidth}%`,
                 height: `${cropVideoHeight}%`,
+              }}
+              onLoadedMetadata={(event) => {
+                const target = event.currentTarget
+                if (target.videoWidth > 0 && target.videoHeight > 0) {
+                  setLoadedDimensions((previous) => {
+                    const current = previous[clip.id]
+                    if (
+                      current &&
+                      current.width === target.videoWidth &&
+                      current.height === target.videoHeight
+                    ) {
+                      return previous
+                    }
+                    return {
+                      ...previous,
+                      [clip.id]: {
+                        width: target.videoWidth,
+                        height: target.videoHeight,
+                      },
+                    }
+                  })
+                }
               }}
             />
           </div>

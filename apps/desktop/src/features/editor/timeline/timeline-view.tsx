@@ -339,6 +339,17 @@ export function TimelineView({
     setThumbnailSpriteError(false)
     thumbnailResource.retry()
   }, [thumbnailResource.retry])
+
+  const isSideBySideAtPlayhead = useMemo(() => {
+    return cameraClips.some(
+      (clip) =>
+        clip.transform.preset === "side-by-side" &&
+        clip.transform.visible !== false &&
+        view.playheadMs >= clip.startMs &&
+        view.playheadMs < clip.startMs + clip.durationMs,
+    )
+  }, [cameraClips, view.playheadMs])
+
   const updateVideoBounds = useCallback(() => {
     const canvas = canvasRef.current
     const video = videoRef.current
@@ -363,6 +374,47 @@ export function TimelineView({
     // recorded video screen from that background. Scale using the full canvas
     // so the padding stays proportional as the preview is resized.
     const canvasScale = canvasWidth / width
+
+    if (isSideBySideAtPlayhead) {
+      const usableWidth = width - padding * 2
+      const usableHeight = height - padding * 2
+      const targetScreenWidth = Math.round(usableWidth * 0.68)
+      const targetScreenHeight = Math.round((targetScreenWidth / width) * height)
+      const sourceWidth = video && video.videoWidth > 0 ? video.videoWidth : width
+      const sourceHeight = video && video.videoHeight > 0 ? video.videoHeight : height
+      const screenScale = Math.min(
+        (targetScreenWidth * canvasScale) / sourceWidth,
+        (targetScreenHeight * canvasScale) / sourceHeight,
+      )
+      const screenWidth = sourceWidth * screenScale
+      const screenHeight = sourceHeight * screenScale
+      const screenLeft = padding * canvasScale + (targetScreenWidth * canvasScale - screenWidth) / 2
+      const screenTop =
+        (padding + (usableHeight - targetScreenHeight) / 2) * canvasScale +
+        (targetScreenHeight * canvasScale - screenHeight) / 2
+
+      const nextBounds = {
+        left: screenLeft,
+        top: screenTop,
+        width: screenWidth,
+        height: screenHeight,
+        scale: canvasScale * (targetScreenWidth / width),
+      }
+      setVideoBounds((previous) => {
+        if (
+          previous &&
+          previous.left === nextBounds.left &&
+          previous.top === nextBounds.top &&
+          previous.width === nextBounds.width &&
+          previous.height === nextBounds.height &&
+          previous.scale === nextBounds.scale
+        ) {
+          return previous
+        }
+        return nextBounds
+      })
+      return
+    }
 
     // The recorded video screen is the largest video-aspect rectangle that still
     // fits inside the padded area. This avoids double-letterboxing (green bars
@@ -395,7 +447,12 @@ export function TimelineView({
       }
       return nextBounds
     })
-  }, [timeline?.canvas.width, timeline?.canvas.height, timeline?.canvas.padding])
+  }, [
+    isSideBySideAtPlayhead,
+    timeline?.canvas.width,
+    timeline?.canvas.height,
+    timeline?.canvas.padding,
+  ])
 
   const canvasStyle = useMemo<React.CSSProperties>(() => {
     if (!timeline) return {}
