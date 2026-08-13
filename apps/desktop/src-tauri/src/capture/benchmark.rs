@@ -86,7 +86,16 @@ pub fn run_benchmark(
         }
     }
 
-    let recommendation = choose_recommendation(&profiles, &results);
+    let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).ok();
+    let cpu = cpu_cores.map(|c| {
+        if c == 1 {
+            "1 Core".to_string()
+        } else {
+            format!("{c} Cores")
+        }
+    });
+
+    let recommendation = choose_recommendation(&profiles, &results, cpu_cores.unwrap_or(4));
 
     Ok(BenchmarkReport {
         id,
@@ -94,13 +103,14 @@ pub fn run_benchmark(
         platform: BenchmarkPlatform {
             os,
             ffmpeg_version,
-            cpu: None,
+            cpu,
             memory_mb: None,
         },
         results,
         recommendation,
     })
 }
+
 
 fn os_info() -> String {
     if cfg!(windows) {
@@ -249,7 +259,32 @@ fn parse_last_stats(stderr: &str) -> StatsSnapshot {
 fn choose_recommendation(
     profiles: &[RecordingProfile],
     results: &[EncoderBenchmarkResult],
+    cpu_cores: usize,
 ) -> BenchmarkRecommendation {
+    // If running on a low-end CPU with 2 or fewer cores, recommend Low Impact to ensure low CPU usage.
+    if cpu_cores <= 2 {
+        let low_impact = profiles
+            .iter()
+            .find(|p| p.id == "low-impact")
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| "low-impact".into());
+
+        let best_encoder = results
+            .iter()
+            .filter(|r| r.profile_id == "low-impact" && r.error.is_none())
+            .max_by(|a, b| a.speed.partial_cmp(&b.speed).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|r| r.encoder_id.clone())
+            .unwrap_or_else(|| "libx264".into());
+
+        return BenchmarkRecommendation {
+            profile_id: low_impact,
+            encoder_id: best_encoder,
+            reason: format!(
+                "Low-spec hardware detected ({cpu_cores} CPU cores). 'Low Impact' profile (720p/480p) is recommended for low CPU usage and zero frame drops."
+            ),
+        };
+    }
+
     // Prefer the encoder with the highest speed, then libx264, then any available.
     let mut sorted = results.to_vec();
     sorted.sort_by(|a, b| {
@@ -290,3 +325,4 @@ fn choose_recommendation(
         reason: "fallback to libx264; no encoders succeeded during benchmark".into(),
     }
 }
+

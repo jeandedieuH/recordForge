@@ -24,6 +24,7 @@ pub struct Recorder {
     // filter. Probed once at construction so display capture can fall back to
     // gdigrab on builds without D3D11 capture support.
     ddagrab_available: bool,
+    available_encoders: Vec<String>,
     current: Mutex<Option<ActiveSession>>,
 }
 
@@ -140,16 +141,30 @@ impl Recorder {
         // filter (a common cause of instant capture failures on Windows).
         let ddagrab_available =
             super::media::ffmpeg_has_filter(&ffmpeg_path.to_string_lossy(), "ddagrab");
-        info!(ddagrab_available, "recorder initialized");
+        let available_encoders = super::encoder::detect_encoders(&ffmpeg_path.to_string_lossy())
+            .map(|list| {
+                list.into_iter()
+                    .filter(|e| e.available)
+                    .map(|e| e.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|_| vec!["libx264".into()]);
+        info!(
+            ddagrab_available,
+            ?available_encoders,
+            "recorder initialized"
+        );
         Self {
             ffmpeg_path,
             ffprobe_path,
             sessions_dir,
             db,
             ddagrab_available,
+            available_encoders,
             current: Mutex::new(None),
         }
     }
+
 
     /// Discover or verify the FFmpeg binary path.
     ///
@@ -380,10 +395,20 @@ impl Recorder {
     ) -> crate::errors::Result<SegmentCaptures> {
         let ffmpeg = self.ffmpeg_path.to_string_lossy();
         let screen_output = work_dir.join(format!("seg_{:03}.mp4", index));
+        let encoder = super::encoder::select_best_encoder(
+            &self.available_encoders,
+            &profile.encoder_priority,
+        );
+        info!(
+            %encoder,
+            profile = %profile.id,
+            "selected video encoder for recording segment"
+        );
         let screen = FfmpegCapture::start(
             &ffmpeg,
             config,
             profile,
+            &encoder,
             &screen_output.to_string_lossy(),
             index,
             Some(manifest),
@@ -444,6 +469,7 @@ impl Recorder {
                                 &ffmpeg,
                                 device,
                                 profile,
+                                &encoder,
                                 &webcam_output.to_string_lossy(),
                                 None,
                             ) {
@@ -1230,6 +1256,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an active desktop display session for gdigrab"]
     fn recording_starts_when_webcam_device_is_unavailable() {
         let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
         let db = Arc::new(Mutex::new(

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
-import { ToastViewport, TooltipProvider, cn } from "@recordforge/ui"
+import { ToastViewport, TooltipProvider, cn, useToast } from "@recordforge/ui"
 import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
 import { NewRecordingModal } from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { toErrorMessage } from "../lib/errors"
+import { getDiagnosticsReport } from "../lib/recorder"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
 import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
@@ -25,6 +26,7 @@ const VIEW_TITLES: Record<View, string> = {
 }
 
 export function AppShell() {
+  const { toast } = useToast()
   const [activeView, setActiveView] = useState<View>("library")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isNewRecordingOpen, setIsNewRecordingOpen] = useState(false)
@@ -34,6 +36,7 @@ export function AppShell() {
   const closeEditor = useEditorStore((state) => state.close)
   const loadTheme = useThemeStore((state) => state.load)
   const startRecording = useRecorderStore((state) => state.start)
+  const setSelectedProfileId = useRecorderStore((state) => state.setSelectedProfileId)
   const completedRecordingId = useRecorderStore((state) => state.completedRecordingId)
   const queuePreparation = useRecorderStore((state) => state.queuePreparation)
   const clearCompletedRecording = useRecorderStore((state) => state.clearCompletedRecording)
@@ -71,6 +74,42 @@ export function AppShell() {
       if (value === "true") setSidebarCollapsed(true)
     })
   }, [])
+
+  // Check hardware specs on first launch and recommend Low Impact profile for low-end machines (<= 2 cores).
+  useEffect(() => {
+    if (!isTauri()) return
+
+    async function checkHardware() {
+      try {
+        const checked = await getSetting("hardwareCheckDone")
+        if (checked === "true") return
+
+        const diagnostics = await getDiagnosticsReport()
+        const cpuStr = diagnostics?.platform?.cpu ?? ""
+        const coreMatch = cpuStr.match(/(\d+)\s*(?:logical\s*)?cores?/i)
+        const cores = coreMatch ? parseInt(coreMatch[1], 10) : (navigator.hardwareConcurrency ?? 4)
+
+        if (cores <= 2) {
+          setSelectedProfileId("low-impact")
+          toast({
+            title: "Low-Spec Hardware Detected",
+            description: `Detected ${cores} CPU core${cores === 1 ? "" : "s"}. The "Low Impact" (720p/480p) recording profile was automatically selected to minimize CPU usage and prevent dropped frames.`,
+            variant: "info",
+            action: {
+              label: "Settings",
+              onClick: () => setActiveView("settings"),
+            },
+          })
+        }
+        await setSetting("hardwareCheckDone", "true")
+      } catch (err) {
+        console.warn("Initial hardware check failed:", err)
+      }
+    }
+
+    void checkHardware()
+  }, [setSelectedProfileId, toast])
+
 
   // Open the editor view when a recording is opened from the library.
   useEffect(() => {

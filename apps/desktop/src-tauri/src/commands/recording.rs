@@ -513,11 +513,20 @@ pub fn get_diagnostics_report(state: State<'_, AppState>) -> Result<DiagnosticsR
     let audio_devices = capture::enumerate_audio_devices(&ffmpeg)?;
     let video_devices = capture::enumerate_video_devices(&ffmpeg)?;
 
+    let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).ok();
+    let cpu = cpu_cores.map(|c| {
+        if c == 1 {
+            "1 Core".to_string()
+        } else {
+            format!("{c} Cores")
+        }
+    });
+
     Ok(DiagnosticsReport {
         platform: PlatformInfo {
             os: diagnostic_os(),
             ffmpeg_version,
-            cpu: None,
+            cpu,
             memory_mb: None,
         },
         encoders,
@@ -525,6 +534,7 @@ pub fn get_diagnostics_report(state: State<'_, AppState>) -> Result<DiagnosticsR
         video_devices,
     })
 }
+
 
 #[tauri::command]
 #[instrument]

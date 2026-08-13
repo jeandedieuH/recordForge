@@ -50,12 +50,20 @@ impl FfmpegCapture {
         ffmpeg_path: &str,
         config: &RecordingConfig,
         profile: &RecordingProfile,
+        encoder: &str,
         output: &str,
         fragment_index: u32,
         manifest: Option<Arc<Mutex<RecordingManifest>>>,
         ddagrab_available: bool,
     ) -> crate::errors::Result<Self> {
-        let command = build_screen_command(ffmpeg_path, config, profile, output, ddagrab_available);
+        let command = build_screen_command(
+            ffmpeg_path,
+            config,
+            profile,
+            encoder,
+            output,
+            ddagrab_available,
+        );
         run(command, output, fragment_index, manifest)
     }
 
@@ -74,12 +82,14 @@ impl FfmpegCapture {
         ffmpeg_path: &str,
         device: &str,
         profile: &RecordingProfile,
+        encoder: &str,
         output: &str,
         manifest: Option<Arc<Mutex<RecordingManifest>>>,
     ) -> crate::errors::Result<Self> {
-        let command = build_webcam_command(ffmpeg_path, device, profile, output);
+        let command = build_webcam_command(ffmpeg_path, device, profile, encoder, output);
         run(command, output, 0, manifest)
     }
+
 
     /// Elapsed milliseconds since this capture was started.
     pub fn elapsed_ms(&self) -> u64 {
@@ -224,6 +234,7 @@ fn build_screen_command(
     ffmpeg_path: &str,
     config: &RecordingConfig,
     profile: &RecordingProfile,
+    encoder: &str,
     output: &str,
     ddagrab_available: bool,
 ) -> Command {
@@ -248,7 +259,7 @@ fn build_screen_command(
         .args(["-filter_complex", &video_filter])
         .args(["-map", "[vout]"]);
 
-    add_video_encoder(&mut command, profile);
+    add_video_encoder(&mut command, profile, encoder, false);
 
     command.args([
         "-movflags",
@@ -264,6 +275,7 @@ fn build_webcam_command(
     ffmpeg_path: &str,
     device: &str,
     profile: &RecordingProfile,
+    encoder: &str,
     output: &str,
 ) -> Command {
     let mut command = Command::new(ffmpeg_path);
@@ -277,9 +289,9 @@ fn build_webcam_command(
         "-f",
         "dshow",
         "-thread_queue_size",
-        "512",
+        "256",
         "-rtbufsize",
-        "100M",
+        "50M",
         // DirectShow device timestamps are not guaranteed to share the same
         // clock as WASAPI or the screen capture. Wall-clock timestamps keep the
         // webcam on the same timeline as the other capture sources.
@@ -291,17 +303,24 @@ fn build_webcam_command(
         &format!("video={}", device),
     ]);
 
-    // Keep the webcam's aspect ratio and fit it inside the profile bounds. Using
-    // `force_divisible_by=2` avoids odd dimensions that libx264/yuv420p reject.
+    // Decouple webcam resolution from screen profile to keep CPU usage low on low-end machines.
+    // In recordForge, camera overlays are rendered as picture-in-picture bubbles (or side-by-side)
+    // on the canvas. 720p or 480p provides crisp visual density while using 50-70% less encoder CPU than 1080p.
+    let (max_cam_w, max_cam_h) = match profile.id.as_str() {
+        "low-impact" => (854, 480),
+        "camera-only" => (profile.width, profile.height),
+        _ => (1280, 720),
+    };
+
     let filter = format!(
         "[0:v]scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2[vout]",
-        profile.width, profile.height
+        max_cam_w, max_cam_h
     );
     command
         .args(["-filter_complex", &filter])
         .args(["-map", "[vout]"]);
 
-    add_video_encoder(&mut command, profile);
+    add_video_encoder(&mut command, profile, encoder, true);
     command.args([
         "-movflags",
         "+frag_keyframe+empty_moov+default_base_moof+faststart",
@@ -378,31 +397,80 @@ fn build_video_filter(
     }
 }
 
-fn add_video_encoder(command: &mut Command, profile: &RecordingProfile) {
-    // For the spike we always use the first available/prioritized encoder.
-    let encoder = profile
-        .encoder_priority
-        .first()
-        .map(String::as_str)
-        .unwrap_or("libx264");
+fn add_video_encoder(
+    command: &mut Command,
+    profile: &RecordingProfile,
+    encoder: &str,
+    is_webcam: bool,
+) {
     command.arg("-c:v").arg(encoder);
-
     command.args(["-pix_fmt", "yuv420p", "-r", &profile.fps.to_string()]);
 
-    if let Some(crf) = profile.crf {
-        if encoder == "libx264" || encoder == "libx265" {
-            command.args(["-preset", "ultrafast", "-crf", &crf.to_string()]);
-        } else if encoder.starts_with("h264_") || encoder.starts_with("hevc_") {
-            // Hardware encoders generally do not support crf; use bitrate fallback.
+    let default_bitrate = if is_webcam {
+        if profile.id == "low-impact" { 1500 } else { 2000 }
+    } else {
+        profile.video_bitrate_kbps.unwrap_or(4000)
+    };
+
+    match encoder {
+        "h264_nvenc" => {
             command.args([
-                "-b:v",
-                &format!("{}k", profile.video_bitrate_kbps.unwrap_or(5000)),
+                "-preset", "p1",
+                "-tune", "ll",
+                "-b:v", &format!("{default_bitrate}k"),
             ]);
         }
-    } else if let Some(kbps) = profile.video_bitrate_kbps {
-        command.args(["-b:v", &format!("{}k", kbps)]);
+        "h264_qsv" => {
+            command.args([
+                "-preset", "veryfast",
+                "-look_ahead", "0",
+                "-b:v", &format!("{default_bitrate}k"),
+            ]);
+        }
+        "h264_amf" => {
+            command.args([
+                "-quality", "speed",
+                "-rc", "cbr",
+                "-b:v", &format!("{default_bitrate}k"),
+            ]);
+        }
+        "h264_mf" => {
+            command.args([
+                "-rate_control", "cbr",
+                "-b:v", &format!("{default_bitrate}k"),
+            ]);
+        }
+        "libx264" | "libx265" => {
+            // Constrain threads to 2 to prevent severe thread thrashing on 2-4 core machines when screen + webcam run concurrently.
+            // -tune zerolatency and disabling lookaheads eliminate latency buffers and memory/CPU churn.
+            command.args([
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-threads", "2",
+            ]);
+            if encoder == "libx264" {
+                command.args([
+                    "-x264-params",
+                    "no-scenecut=1:rc-lookahead=0:sync-lookahead=0:bframes=0",
+                ]);
+            }
+            if let Some(crf) = profile.crf {
+                let target_crf = if is_webcam && crf < 26 { 26 } else { crf };
+                command.args(["-crf", &target_crf.to_string()]);
+            } else {
+                command.args(["-b:v", &format!("{default_bitrate}k")]);
+            }
+        }
+        _ => {
+            if let Some(crf) = profile.crf {
+                command.args(["-preset", "ultrafast", "-crf", &crf.to_string()]);
+            } else {
+                command.args(["-b:v", &format!("{default_bitrate}k")]);
+            }
+        }
     }
 }
+
 
 fn run(
     mut command: Command,
@@ -651,10 +719,33 @@ mod tests {
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
         };
-        let command = build_webcam_command("ffmpeg", "USB Camera", &profile, "webcam.mp4");
+        let command =
+            build_webcam_command("ffmpeg", "USB Camera", &profile, "libx264", "webcam.mp4");
         let debug = format!("{command:?}");
 
         assert!(debug.contains("-use_video_device_timestamps"));
         assert!(debug.contains("\"0\""));
     }
+
+    #[test]
+    fn webcam_capture_caps_resolution_for_low_impact() {
+        let profile = RecordingProfile {
+            id: "low-impact".into(),
+            label: "Low Impact".into(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            video_bitrate_kbps: Some(2500),
+            crf: Some(28),
+            encoder_priority: vec!["libx264".into()],
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        };
+        let command =
+            build_webcam_command("ffmpeg", "USB Camera", &profile, "libx264", "webcam.mp4");
+        let debug = format!("{command:?}");
+
+        assert!(debug.contains("854:480"));
+    }
 }
+

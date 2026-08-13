@@ -107,12 +107,22 @@ impl RecordingConfig {
     }
 }
 
+fn default_encoder_priority() -> Vec<String> {
+    vec![
+        "h264_nvenc".into(),
+        "h264_qsv".into(),
+        "h264_amf".into(),
+        "h264_mf".into(),
+        "libx264".into(),
+    ]
+}
+
 /// Built-in profiles tuned for low-end Windows 10 hardware.
 ///
-/// - `low-impact`: 720p30, ultrafast x264, low CPU cost.
-/// - `balanced`: 1080p30, veryfast x264, reasonable quality.
-/// - `smooth-demo`: 1080p30, ultrafast x264, prioritize low drops.
-/// - `high-quality`: 1080p30, medium x264, higher CPU cost.
+/// - `low-impact`: 720p30, ultrafast x264/hardware, low CPU cost.
+/// - `balanced`: 1080p30, reasonable quality.
+/// - `smooth-demo`: 1080p30, prioritize low drops.
+/// - `high-quality`: 1080p30, higher fidelity.
 /// - `camera-only`: 1080p30 placeholder; handled separately in later phases.
 pub fn builtin_profiles() -> Vec<RecordingProfile> {
     vec![
@@ -122,9 +132,9 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             width: 1280,
             height: 720,
             fps: 30,
-            video_bitrate_kbps: None,
+            video_bitrate_kbps: Some(2500),
             crf: Some(28),
-            encoder_priority: vec!["libx264".into()],
+            encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
         },
@@ -134,9 +144,9 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             width: 1920,
             height: 1080,
             fps: 30,
-            video_bitrate_kbps: None,
+            video_bitrate_kbps: Some(4000),
             crf: Some(23),
-            encoder_priority: vec!["libx264".into()],
+            encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
         },
@@ -146,9 +156,9 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             width: 1920,
             height: 1080,
             fps: 30,
-            video_bitrate_kbps: None,
+            video_bitrate_kbps: Some(3500),
             crf: Some(28),
-            encoder_priority: vec!["libx264".into()],
+            encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
         },
@@ -158,9 +168,9 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             width: 1920,
             height: 1080,
             fps: 30,
-            video_bitrate_kbps: None,
+            video_bitrate_kbps: Some(6000),
             crf: Some(18),
-            encoder_priority: vec!["libx264".into()],
+            encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 192,
         },
@@ -170,11 +180,12 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             width: 1920,
             height: 1080,
             fps: 30,
-            video_bitrate_kbps: None,
+            video_bitrate_kbps: Some(4000),
             crf: Some(23),
-            encoder_priority: vec!["libx264".into()],
+            encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
         },
     ]
 }
+

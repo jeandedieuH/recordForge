@@ -140,3 +140,17 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
 
     Ok(info)
 }
+
+/// Select the highest-priority encoder from `priority` that is present in `available`.
+/// Falls back to the first priority item or `"libx264"` if no candidate matches.
+pub fn select_best_encoder(available: &[String], priority: &[String]) -> String {
+    for candidate in priority {
+        if available.iter().any(|a| a == candidate) {
+            return candidate.clone();
+        }
+    }
+    priority
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "libx264".to_string())
+}
