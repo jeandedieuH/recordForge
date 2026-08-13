@@ -2,6 +2,7 @@
 // No React or DOM dependencies here.
 
 export * from "@recordforge/domain"
+export * from "./camera-presets"
 export * from "./command-records"
 export * from "./time-mapping"
 export * from "./history"

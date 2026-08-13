@@ -89,6 +89,16 @@ export const timelineCanvasSchema = z.object({
 
 export type TimelineCanvas = z.infer<typeof timelineCanvasSchema>
 
+// Defined camera placement presets. These make it easy to switch between common
+// picture-in-picture layouts without manual coordinate entry.
+export const cameraPlacementPresetSchema = z.enum([
+  "camera-only",
+  "vertical-pip",
+  "circle-pip",
+  "side-by-side",
+])
+export type CameraPlacementPreset = z.infer<typeof cameraPlacementPresetSchema>
+
 // Visual transform for a picture-in-picture camera clip. Crop coordinates are
 // expressed in source pixels, while x/y/width/height are canvas pixels.
 export const clipTransformSchema = z.object({
@@ -108,6 +118,8 @@ export const clipTransformSchema = z.object({
   shadowBlur: z.number().min(0).optional(),
   shadowOffsetX: z.number().optional(),
   shadowOffsetY: z.number().optional(),
+  preset: cameraPlacementPresetSchema.optional(),
+  locked: z.boolean().optional(),
 })
 
 export type ClipTransform = z.infer<typeof clipTransformSchema>

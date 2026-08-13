@@ -86,6 +86,7 @@
   --shadow-e1: 0 1px 2px rgb(0 0 0 / 0.35);
   --shadow-e2: 0 8px 24px rgb(0 0 0 / 0.45);
   --shadow-e3: 0 16px 48px rgb(0 0 0 / 0.55);
+  --color-pip-shadow: rgb(0 0 0 / 0.45);
 
   /* Motion — 120–280ms ease-out; animate transform + opacity only */
   --duration-fast: 120ms;

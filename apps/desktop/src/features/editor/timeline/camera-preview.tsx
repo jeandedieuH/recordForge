@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react"
 import type { CameraClip, ClipTransform, MediaVideoTrackOutput } from "@recordforge/contracts"
+import { cn } from "@recordforge/ui"
 import { toAssetUrl } from "../media/derivative-resources"
 
 interface CameraPreviewProps {
@@ -28,6 +29,14 @@ interface CameraGesture {
 
 function isClipActive(clip: CameraClip, playheadMs: number): boolean {
   return playheadMs >= clip.startMs && playheadMs < clip.startMs + clip.durationMs
+}
+
+// Apply the user-controlled border opacity to a solid color. This keeps the
+// color picker showing an opaque swatch while the preview respects opacity.
+function mixBorderColor(color: string | undefined, opacity: number | undefined): string {
+  const source = color ?? "var(--color-foreground)"
+  const alpha = Math.max(0, Math.min(1, opacity ?? 1))
+  return `color-mix(in srgb, ${source} ${Math.round(alpha * 100)}%, transparent)`
 }
 
 /**
@@ -66,7 +75,7 @@ export function CameraPreview({
   }, [clips, isPlaying, outputsByStream, playheadMs, playbackRate])
 
   function beginDrag(event: React.PointerEvent<HTMLDivElement>, clip: CameraClip) {
-    if (!onUpdateTransform || event.button !== 0) return
+    if (!onUpdateTransform || event.button !== 0 || clip.transform.locked) return
     event.stopPropagation()
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -93,10 +102,12 @@ export function CameraPreview({
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && !gesture.moved) return
     gesture.moved = true
     event.preventDefault()
-    const next = {
+    const next: ClipTransform = {
       ...gesture.transform,
       x: gesture.transform.x + dx,
       y: gesture.transform.y + dy,
+      preset: undefined,
+      locked: false,
     }
     onUpdateTransform(gesture.clipId, next, { phase: "draft" })
   }
@@ -124,10 +135,12 @@ export function CameraPreview({
     const dy =
       ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
       canvasHeight
-    const next = {
+    const next: ClipTransform = {
       ...gesture.transform,
       x: gesture.transform.x + dx,
       y: gesture.transform.y + dy,
+      preset: undefined,
+      locked: false,
     }
     onUpdateTransform(gesture.clipId, next, { phase: "commit" })
   }
@@ -140,6 +153,7 @@ export function CameraPreview({
         const transform = clip.transform
         if (!source || transform.visible === false) return null
         const isActive = isClipActive(clip, playheadMs)
+        const isLocked = transform.locked === true
         const radius =
           transform.shape === "circle" ? "50%" : transform.shape === "rounded" ? "12%" : 0
         const crop = transform.crop
@@ -151,13 +165,19 @@ export function CameraPreview({
         const cropTop = crop ? -(crop.y / cropHeight) * 100 : 0
         const cropVideoWidth = crop ? (sourceWidth / cropWidth) * 100 : 100
         const cropVideoHeight = crop ? (sourceHeight / cropHeight) * 100 : 100
+        const borderColor = mixBorderColor(transform.borderColor, transform.borderOpacity)
         return (
           <div
             key={clip.id}
             role="button"
-            tabIndex={isActive ? 0 : -1}
-            aria-label="Camera preview"
-            className="absolute z-10 overflow-hidden"
+            tabIndex={isActive && !isLocked ? 0 : -1}
+            aria-label={isLocked ? "Camera overlay, locked" : "Camera overlay, drag to move"}
+            aria-disabled={isLocked}
+            className={cn(
+              "absolute z-10 overflow-hidden",
+              !isLocked && onUpdateTransform && isActive && "cursor-grab active:cursor-grabbing",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
+            )}
             style={{
               left: `${(transform.x / canvasWidth) * 100}%`,
               top: `${(transform.y / canvasHeight) * 100}%`,
@@ -166,16 +186,15 @@ export function CameraPreview({
               opacity: isActive ? transform.opacity : 0,
               borderRadius: radius,
               border: transform.borderWidth
-                ? `${transform.borderWidth}px solid ${transform.borderColor ?? "currentColor"}`
+                ? `${transform.borderWidth}px solid ${borderColor}`
                 : undefined,
-              borderColor: transform.borderColor,
               boxShadow: transform.shadowEnabled
-                ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "black"}`
+                ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "var(--color-pip-shadow)"}`
                 : undefined,
-              pointerEvents: onUpdateTransform && isActive ? "auto" : "none",
+              pointerEvents: onUpdateTransform && isActive && !isLocked ? "auto" : "none",
             }}
             onKeyDown={(event) => {
-              if (!onUpdateTransform || gestureRef.current) return
+              if (!onUpdateTransform || isLocked || gestureRef.current) return
               const step = event.shiftKey ? 10 : 1
               const delta =
                 event.key === "ArrowLeft"
@@ -195,6 +214,8 @@ export function CameraPreview({
                   ...transform,
                   x: transform.x + delta.x,
                   y: transform.y + delta.y,
+                  preset: undefined,
+                  locked: false,
                 },
                 { phase: "commit" },
               )
@@ -212,7 +233,7 @@ export function CameraPreview({
               muted
               playsInline
               preload="auto"
-              className="absolute object-fill"
+              className="absolute object-fill pointer-events-none"
               style={{
                 left: `${cropLeft}%`,
                 top: `${cropTop}%`,
