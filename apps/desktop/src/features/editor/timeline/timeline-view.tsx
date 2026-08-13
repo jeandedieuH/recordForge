@@ -52,7 +52,6 @@ import {
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
-  CheckCircle2,
   Flag,
   Monitor,
   MousePointer2,
@@ -212,7 +211,6 @@ export function TimelineView({
   const setSnapThreshold = useTimelineStore((state) => state.setSnapThreshold)
   const toggleTrackCollapsed = useTimelineStore((state) => state.toggleTrackCollapsed)
   const setTrackHeight = useTimelineStore((state) => state.setTrackHeight)
-  const setPreviewQuality = useTimelineStore((state) => state.setPreviewQuality)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const clearError = useTimelineStore((state) => state.clearError)
   const missingAssets = useEditorStore((state) => state.missingAssets)
@@ -934,8 +932,6 @@ export function TimelineView({
   const pixelsPerMs = Math.max(0.0004 * view.zoom, 0.01)
   const timelineWidth = Math.max(720, Math.ceil(view.durationMs * pixelsPerMs))
   const tickInterval = getVisibleTickInterval(pixelsPerMs)
-  const isThumbnailError = thumbnailResource.status === "error" || thumbnailSpriteError
-  const thumbnailStatus = isThumbnailError ? "error" : thumbnailResource.status
   const effectiveThumbnailResource = thumbnailSpriteError
     ? {
         status: "error" as const,
@@ -1178,30 +1174,6 @@ export function TimelineView({
             <div className="min-w-28 text-center font-mono text-xs font-semibold tabular-nums text-muted-foreground">
               {formatTime(view.playheadMs)} / {formatTime(view.durationMs)}
             </div>
-            <NativeSelect
-              aria-label="Playback speed"
-              value={String(view.playbackRate)}
-              onChange={(event) => setPlaybackRate(Number(event.target.value))}
-              className="w-20"
-            >
-              {[0.25, 0.5, 1, 1.5, 2, 4].map((rate) => (
-                <option key={rate} value={rate}>
-                  {rate}×
-                </option>
-              ))}
-            </NativeSelect>
-            <NativeSelect
-              aria-label="Preview quality"
-              value={view.previewQuality}
-              onChange={(event) =>
-                setPreviewQuality(event.target.value as "quality" | "performance" | "power")
-              }
-              className="w-28"
-            >
-              <option value="quality">Quality</option>
-              <option value="performance">Performance</option>
-              <option value="power">Power saving</option>
-            </NativeSelect>
           </div>
         </div>
       </div>
@@ -1303,12 +1275,18 @@ export function TimelineView({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <DerivativeState label="Thumbnails" status={thumbnailStatus} onRetry={retryThumbnail} />
-            <DerivativeState
-              label="Waveform"
-              status={waveformResources.status}
-              onRetry={waveformResources.retry}
-            />
+            <NativeSelect
+              aria-label="Playback speed"
+              value={String(view.playbackRate)}
+              onChange={(event) => setPlaybackRate(Number(event.target.value))}
+              className="h-7 w-20 pl-2 pr-7 text-xs"
+            >
+              {[0.25, 0.5, 1, 1.5, 2, 4].map((rate) => (
+                <option key={rate} value={rate}>
+                  {rate}×
+                </option>
+              ))}
+            </NativeSelect>
             <div className="hidden items-center gap-1 border-l border-border pl-2 sm:flex">
               <IconButton
                 label="Zoom out"
@@ -1392,42 +1370,5 @@ export function TimelineView({
         </div>
       ) : null}
     </div>
-  )
-}
-
-function DerivativeState({
-  label,
-  status,
-  onRetry,
-}: {
-  label: string
-  status: "loading" | "missing" | "content" | "error"
-  onRetry: () => void
-}) {
-  if (status === "loading") {
-    return (
-      <Skeleton className="h-6 w-24 rounded-full" aria-label={`Loading ${label.toLowerCase()}`} />
-    )
-  }
-  if (status === "error") {
-    return (
-      <Button variant="ghost" size="sm" className="h-6 text-[10px] text-warning" onClick={onRetry}>
-        <AlertCircle data-icon="inline-start" />
-        Retry {label.toLowerCase()}
-      </Button>
-    )
-  }
-  if (status === "missing") {
-    return (
-      <span className="text-[10px] text-subtle-foreground">
-        No {label.toLowerCase()} derivative
-      </span>
-    )
-  }
-  return (
-    <span className="flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-1 text-[10px] text-success">
-      <CheckCircle2 className="size-3" aria-hidden />
-      {label} ready
-    </span>
   )
 }

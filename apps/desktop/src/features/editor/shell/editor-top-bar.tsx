@@ -27,9 +27,8 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
   const saveError = useEditorStore((state) => state.saveError)
   const isDirty = useEditorStore((state) => state.isDirty)
 
-  const [previewQuality, setPreviewQuality] = useState<"quality" | "performance" | "power-saving">(
-    "quality",
-  )
+  const previewQuality = useTimelineStore((state) => state.view.previewQuality)
+  const setPreviewQuality = useTimelineStore((state) => state.setPreviewQuality)
   const [jobsOpen, setJobsOpen] = useState(false)
 
   const undoLabel = useMemo(() => (engine ? getUndoLabel(engine) : null), [engine])
@@ -104,13 +103,13 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
             aria-label="Preview quality"
             value={previewQuality}
             onChange={(event) =>
-              setPreviewQuality(event.target.value as "quality" | "performance" | "power-saving")
+              setPreviewQuality(event.target.value as "quality" | "performance" | "power")
             }
             className="w-36"
           >
             <option value="quality">Quality</option>
             <option value="performance">Performance</option>
-            <option value="power-saving">Power Saving</option>
+            <option value="power">Power Saving</option>
           </NativeSelect>
         </div>
 
