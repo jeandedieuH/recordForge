@@ -189,6 +189,8 @@ describe("cursor-core", () => {
       target: { x: 0, y: 0, width: 100, height: 100 },
       scale: 1,
       easing: "ease-in-out" as const,
+      transitionInMs: 400,
+      transitionOutMs: 400,
       enabled: true,
       locked: true,
       mode: "auto" as const,

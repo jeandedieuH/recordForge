@@ -6,7 +6,9 @@ import type {
   SmartZoomSettings,
   TimelineCanvas,
   ZoomEasing,
+  ZoomMode,
   ZoomPreset,
+  ZoomSource,
   ZoomTarget,
 } from "@recordforge/contracts"
 import { defaultSmartZoomSettings } from "@recordforge/contracts"
@@ -79,24 +81,71 @@ interface ZoomPresetProfile {
   clickDurationMs: number
   dwellTailMs: number
   easing: ZoomEasing
+  transitionInMs: number
+  transitionOutMs: number
 }
 
-interface ZoomCandidate {
-  startMs: number
+interface RawInteractionEvent {
+  timeMs: number
   endMs: number
   x: number
   y: number
-  source: "click" | "dwell"
+  source: ZoomSource
+  priority: number
+}
+
+interface ZoomCluster {
+  startMs: number
+  endMs: number
+  points: Array<{ x: number; y: number; timeMs: number }>
+  source: ZoomSource
   priority: number
   easing: ZoomEasing
   preset: ZoomPreset
+  mode: ZoomMode
 }
 
 const PRESET_PROFILES: Record<ZoomPreset, ZoomPresetProfile> = {
-  subtle: { scale: 1.25, clickDurationMs: 850, dwellTailMs: 420, easing: "smooth" },
-  "product-demo": { scale: 1.5, clickDurationMs: 1_100, dwellTailMs: 540, easing: "ease-in-out" },
-  cinematic: { scale: 1.8, clickDurationMs: 1_600, dwellTailMs: 800, easing: "cinematic" },
-  "manual-only": { scale: 1, clickDurationMs: 0, dwellTailMs: 0, easing: "linear" },
+  subtle: {
+    scale: 1.25,
+    clickDurationMs: 900,
+    dwellTailMs: 450,
+    easing: "smooth",
+    transitionInMs: 450,
+    transitionOutMs: 450,
+  },
+  "product-demo": {
+    scale: 1.5,
+    clickDurationMs: 1_200,
+    dwellTailMs: 600,
+    easing: "smooth",
+    transitionInMs: 380,
+    transitionOutMs: 380,
+  },
+  cinematic: {
+    scale: 1.8,
+    clickDurationMs: 1_800,
+    dwellTailMs: 900,
+    easing: "cinematic",
+    transitionInMs: 600,
+    transitionOutMs: 600,
+  },
+  developer: {
+    scale: 2.2,
+    clickDurationMs: 1_400,
+    dwellTailMs: 700,
+    easing: "snappy",
+    transitionInMs: 320,
+    transitionOutMs: 320,
+  },
+  "manual-only": {
+    scale: 1,
+    clickDurationMs: 0,
+    dwellTailMs: 0,
+    easing: "linear",
+    transitionInMs: 300,
+    transitionOutMs: 300,
+  },
 }
 
 function distanceBetween(left: { x: number; y: number }, right: { x: number; y: number }): number {
@@ -124,10 +173,7 @@ function finishDwell(
   const samples = telemetry.events.slice(startIndex, endIndex + 1)
   const position = samples.reduce(
     (sum, event) => ({ x: sum.x + event.sourceX, y: sum.y + event.sourceY }),
-    {
-      x: 0,
-      y: 0,
-    },
+    { x: 0, y: 0 },
   )
   return {
     kind: "dwell",
@@ -154,6 +200,7 @@ export function analyzeCursorTelemetry(
     0,
     options.safeEdgePadding ?? defaultSmartZoomSettings.safeEdgePadding,
   )
+
   function clickButton(event: CursorTelemetryEvent): "left" | "right" | "middle" {
     const prefix = event.buttonEvent.split("-")[0]
     if (prefix === "left" || prefix === "right" || prefix === "middle") return prefix
@@ -232,23 +279,18 @@ export function analyzeCursorTelemetry(
   return { clicks, dwells, movements, safeEdges }
 }
 
-/** Clamp a target to the same padded visible canvas used by preview and export. */
+/** Clamp a target to the visible video canvas [0, width] x [0, height]. */
 export function clampZoomTarget(
   target: ZoomTarget,
   canvas: Pick<TimelineCanvas, "width" | "height" | "padding">,
-  extraPadding = 0,
+  _extraPadding = 0,
 ): ZoomTarget {
-  const padding = Math.max(0, (canvas.padding ?? 0) + extraPadding)
-  const left = Math.min(padding, Math.max(0, canvas.width - 1))
-  const top = Math.min(padding, Math.max(0, canvas.height - 1))
-  const right = Math.max(left + 1, canvas.width - padding)
-  const bottom = Math.max(top + 1, canvas.height - padding)
-  const width = Math.min(Math.max(1, target.width), right - left)
-  const height = Math.min(Math.max(1, target.height), bottom - top)
+  const width = Math.min(Math.max(1, target.width), canvas.width)
+  const height = Math.min(Math.max(1, target.height), canvas.height)
 
   return {
-    x: clampRange(target.x, left, right - width),
-    y: clampRange(target.y, top, bottom - height),
+    x: clampRange(target.x, 0, Math.max(0, canvas.width - width)),
+    y: clampRange(target.y, 0, Math.max(0, canvas.height - height)),
     width,
     height,
   }
@@ -259,21 +301,11 @@ export function zoomTargetForCursorPoint(
   point: { x: number; y: number },
   canvas: Pick<TimelineCanvas, "width" | "height" | "padding">,
   desiredScale: number,
-  extraPadding = 0,
+  _extraPadding = 0,
 ): ZoomTarget {
   const safeScale = clampRange(desiredScale, 1.05, 8)
-  // Derive both dimensions from the output canvas, not the padded content
-  // rectangle. Padding can have a different aspect ratio and must not distort
-  // the crop used by preview/export.
-  const safePadding = Math.max(0, (canvas.padding ?? 0) + extraPadding)
-  const availableWidth = Math.max(1, canvas.width - safePadding * 2)
-  const availableHeight = Math.max(1, canvas.height - safePadding * 2)
   const aspectRatio = canvas.width / Math.max(1, canvas.height)
-  const targetWidth = Math.min(
-    canvas.width / safeScale,
-    availableWidth,
-    availableHeight * aspectRatio,
-  )
+  const targetWidth = Math.min(canvas.width / safeScale, canvas.width)
   const targetHeight = targetWidth / aspectRatio
   const target = {
     x: point.x - targetWidth / 2,
@@ -281,46 +313,50 @@ export function zoomTargetForCursorPoint(
     width: targetWidth,
     height: targetHeight,
   }
-  return clampZoomTarget(target, canvas, extraPadding)
+  return clampZoomTarget(target, canvas, _extraPadding)
 }
 
-function mergeCandidateRange(
-  candidate: ZoomCandidate,
-  previous: ZoomCandidate | undefined,
-): ZoomCandidate | null {
-  if (!previous || candidate.startMs >= previous.endMs) return candidate
-  const startMs = previous.endMs
-  if (candidate.endMs - startMs < 100) return null
-  return { ...candidate, startMs }
+export interface InertialFollowOptions {
+  deadzoneRadiusPercent?: number
+  deadzoneRadiusPx?: number
+  smoothingAlpha?: number
 }
 
-function resolvedGenerationSettings(options: SmartZoomGenerationOptions): {
-  settings: SmartZoomSettings
-  profile: ZoomPresetProfile
-} {
-  const preset = options.preset ?? defaultSmartZoomSettings.preset
-  const profile = PRESET_PROFILES[preset]
-  const settings = {
-    ...defaultSmartZoomSettings,
-    ...options,
-    preset,
-    targetScale:
-      options.targetScale === undefined ||
-      options.targetScale === defaultSmartZoomSettings.targetScale
-        ? profile.scale
-        : options.targetScale,
-    clickDurationMs:
-      options.clickDurationMs === undefined ||
-      options.clickDurationMs === defaultSmartZoomSettings.clickDurationMs
-        ? profile.clickDurationMs
-        : options.clickDurationMs,
-    dwellTailMs:
-      options.dwellTailMs === undefined ||
-      options.dwellTailMs === defaultSmartZoomSettings.dwellTailMs
-        ? profile.dwellTailMs
-        : options.dwellTailMs,
+/**
+ * Screen Studio-style soft deadzone and spring-damped camera focal tracking.
+ * When the cursor stays within the comfortable center deadzone, the camera
+ * does not vibrate. When the cursor travels across the screen, the camera
+ * smoothly glides with gentle inertia and velocity continuity.
+ */
+export function resolveInertialFollowCenter(
+  currentPoint: { x: number; y: number },
+  previousCenter: { x: number; y: number } | null | undefined,
+  viewportSize: { width: number; height: number },
+  options: InertialFollowOptions = {},
+): { x: number; y: number } {
+  if (!previousCenter) return currentPoint
+
+  const deadzone =
+    options.deadzoneRadiusPx ??
+    Math.min(viewportSize.width, viewportSize.height) * (options.deadzoneRadiusPercent ?? 0.08)
+
+  const dx = currentPoint.x - previousCenter.x
+  const dy = currentPoint.y - previousCenter.y
+  const dist = Math.hypot(dx, dy)
+
+  if (dist <= deadzone || dist < 0.001) {
+    return previousCenter
   }
-  return { settings, profile }
+
+  const excess = dist - deadzone
+  const targetX = previousCenter.x + (dx / dist) * excess
+  const targetY = previousCenter.y + (dy / dist) * excess
+  const alpha = clampRange(options.smoothingAlpha ?? 0.25, 0.05, 1)
+
+  return {
+    x: previousCenter.x + (targetX - previousCenter.x) * alpha,
+    y: previousCenter.y + (targetY - previousCenter.y) * alpha,
+  }
 }
 
 export function sourcePointToCanvas(
@@ -339,8 +375,162 @@ export function sourcePointToCanvas(
   }
 }
 
-function candidateId(candidate: ZoomCandidate, index: number): string {
-  return `smart-zoom:${candidate.source}:${candidate.startMs}:${index}`
+function resolvedGenerationSettings(options: SmartZoomGenerationOptions): {
+  settings: SmartZoomSettings
+  profile: ZoomPresetProfile
+} {
+  const preset = options.preset ?? defaultSmartZoomSettings.preset
+  const profile = PRESET_PROFILES[preset] ?? PRESET_PROFILES["product-demo"]
+  const settings: SmartZoomSettings = {
+    ...defaultSmartZoomSettings,
+    ...options,
+    preset,
+    targetScale:
+      options.targetScale === undefined ||
+      options.targetScale === defaultSmartZoomSettings.targetScale
+        ? profile.scale
+        : options.targetScale,
+    clickDurationMs:
+      options.clickDurationMs === undefined ||
+      options.clickDurationMs === defaultSmartZoomSettings.clickDurationMs
+        ? profile.clickDurationMs
+        : options.clickDurationMs,
+    dwellTailMs:
+      options.dwellTailMs === undefined ||
+      options.dwellTailMs === defaultSmartZoomSettings.dwellTailMs
+        ? profile.dwellTailMs
+        : options.dwellTailMs,
+    defaultTransitionInMs:
+      options.defaultTransitionInMs ?? profile.transitionInMs,
+    defaultTransitionOutMs:
+      options.defaultTransitionOutMs ?? profile.transitionOutMs,
+  }
+  return { settings, profile }
+}
+
+/**
+ * Intelligent activity clustering:
+ * Groups rapid clicks and dwells that happen in close temporal or spatial proximity into unified,
+ * extended focus clusters without creating overlapping segments.
+ */
+function buildInteractionClusters(
+  events: RawInteractionEvent[],
+  settings: SmartZoomSettings,
+  profile: ZoomPresetProfile,
+  maxDuration: number,
+): ZoomCluster[] {
+  if (events.length === 0) return []
+
+  const sorted = [...events].sort((a, b) => a.timeMs - b.timeMs)
+  const initialClusters: ZoomCluster[] = []
+  const clusterToleranceMs = Math.max(1_000, settings.clusterToleranceMs ?? 2_000)
+  const maxSegmentDurationMs = Math.max(4_000, settings.maxSegmentDurationMs ?? 10_000)
+
+  let currentCluster: ZoomCluster | null = null
+
+  for (const event of sorted) {
+    const leadIn =
+      event.source === "click"
+        ? Math.max(settings.clickLeadInMs, profile.transitionInMs + 120)
+        : Math.max(settings.dwellLeadInMs, profile.transitionInMs + 80)
+    const eventStart = Math.max(0, event.timeMs - leadIn)
+    const eventEnd = Math.min(maxDuration, event.endMs)
+
+    if (!currentCluster) {
+      currentCluster = {
+        startMs: eventStart,
+        endMs: eventEnd,
+        points: [{ x: event.x, y: event.y, timeMs: event.timeMs }],
+        source: event.source,
+        priority: event.priority,
+        easing: profile.easing,
+        preset: settings.preset,
+        mode: "auto",
+      }
+      continue
+    }
+
+    // Check if within cluster tolerance and duration cap across any interaction source
+    const timeGap = eventStart - currentCluster.endMs
+    const potentialDuration = Math.max(eventEnd, currentCluster.endMs) - currentCluster.startMs
+
+    if (timeGap <= clusterToleranceMs && potentialDuration <= maxSegmentDurationMs) {
+      currentCluster.endMs = Math.max(currentCluster.endMs, eventEnd)
+      currentCluster.points.push({ x: event.x, y: event.y, timeMs: event.timeMs })
+      if (event.source === "click") {
+        currentCluster.source = "click"
+        currentCluster.priority = Math.max(currentCluster.priority, event.priority)
+      }
+    } else {
+      initialClusters.push(currentCluster)
+      currentCluster = {
+        startMs: eventStart,
+        endMs: eventEnd,
+        points: [{ x: event.x, y: event.y, timeMs: event.timeMs }],
+        source: event.source,
+        priority: event.priority,
+        easing: profile.easing,
+        preset: settings.preset,
+        mode: "auto",
+      }
+    }
+  }
+
+  if (currentCluster) {
+    initialClusters.push(currentCluster)
+  }
+
+  // Pass 2: Strict Overlap Elimination and Micro-Gap Bridging
+  const resolvedClusters: ZoomCluster[] = []
+  for (const cluster of initialClusters) {
+    if (resolvedClusters.length === 0) {
+      resolvedClusters.push({ ...cluster, points: [...cluster.points] })
+      continue
+    }
+
+    const prev = resolvedClusters[resolvedClusters.length - 1]
+
+    // Case 1: Overlapping time ranges -> Merge into one longer zoom
+    if (cluster.startMs <= prev.endMs) {
+      prev.endMs = Math.max(prev.endMs, cluster.endMs)
+      prev.points.push(...cluster.points)
+      if (cluster.source === "click") prev.source = "click"
+      prev.priority = Math.max(prev.priority, cluster.priority)
+      continue
+    }
+
+    // Case 2: Micro-gap between segments (< 800ms) -> Bridge or merge to avoid rapid in-and-out dip
+    const gap = cluster.startMs - prev.endMs
+    if (gap < 800) {
+      const prevCentroidX = prev.points.reduce((sum, p) => sum + p.x, 0) / prev.points.length
+      const prevCentroidY = prev.points.reduce((sum, p) => sum + p.y, 0) / prev.points.length
+      const nextCentroidX = cluster.points.reduce((sum, p) => sum + p.x, 0) / cluster.points.length
+      const nextCentroidY = cluster.points.reduce((sum, p) => sum + p.y, 0) / cluster.points.length
+      const dist = Math.hypot(nextCentroidX - prevCentroidX, nextCentroidY - prevCentroidY)
+
+      if (dist < 300) {
+        // Spatially close: extend into a single sustained zoom
+        prev.endMs = Math.max(prev.endMs, cluster.endMs)
+        prev.points.push(...cluster.points)
+        if (cluster.source === "click") prev.source = "click"
+        prev.priority = Math.max(prev.priority, cluster.priority)
+        continue
+      } else {
+        // Spatially separate: make adjacent so camera smoothly pans across
+        const splitTime = Math.round(prev.endMs + gap / 2)
+        prev.endMs = splitTime
+        cluster.startMs = splitTime
+      }
+    }
+
+    resolvedClusters.push({ ...cluster, points: [...cluster.points] })
+  }
+
+  return resolvedClusters
+}
+
+function candidateId(source: string, startMs: number, index: number): string {
+  return `smart-zoom:${source}:${startMs}:${index}`
 }
 
 /** Generate deterministic, editable zoom suggestions from cursor activity. */
@@ -354,71 +544,94 @@ export function generateSmartZoomSuggestions(
   if (telemetry.events.length === 0) return []
 
   const features = analyzeCursorTelemetry(telemetry, settings)
-  const candidates: ZoomCandidate[] = []
+  const rawEvents: RawInteractionEvent[] = []
   const durationMs = options.durationMs ?? Number.POSITIVE_INFINITY
+
   if (settings.includeClicks) {
     for (const click of features.clicks) {
-      candidates.push({
-        startMs: Math.max(0, click.timeMs - settings.clickLeadInMs),
-        endMs: Math.min(durationMs, click.timeMs + settings.clickDurationMs),
+      rawEvents.push({
+        timeMs: click.timeMs,
+        endMs: click.timeMs + settings.clickDurationMs,
         x: click.x,
         y: click.y,
         source: "click",
         priority: 2,
-        easing: profile.easing,
-        preset: settings.preset,
       })
     }
   }
+
   if (settings.includeDwells) {
     for (const dwell of features.dwells) {
-      candidates.push({
-        startMs: Math.max(0, dwell.startMs - settings.dwellLeadInMs),
-        endMs: Math.min(durationMs, dwell.endMs + settings.dwellTailMs),
+      rawEvents.push({
+        timeMs: dwell.startMs,
+        endMs: dwell.endMs + settings.dwellTailMs,
         x: dwell.x,
         y: dwell.y,
         source: "dwell",
         priority: 1,
-        easing: profile.easing,
-        preset: settings.preset,
       })
     }
   }
 
-  const sortedCandidates = candidates
-    .filter((candidate) => candidate.endMs - candidate.startMs >= settings.minSegmentDurationMs)
-    .map((candidate) => ({
-      ...candidate,
-      endMs: Math.min(candidate.endMs, candidate.startMs + settings.maxSegmentDurationMs),
-    }))
-    .sort((left, right) => left.startMs - right.startMs || right.priority - left.priority)
-  const resolved: ZoomCandidate[] = []
-  for (const candidate of sortedCandidates) {
-    const adjusted = mergeCandidateRange(candidate, resolved[resolved.length - 1])
-    if (adjusted && adjusted.endMs - adjusted.startMs >= settings.minSegmentDurationMs) {
-      resolved.push(adjusted)
-    }
-  }
+  const clusters = buildInteractionClusters(rawEvents, settings, profile, durationMs)
 
-  return resolved.map((candidate, index) => {
-    const point = sourcePointToCanvas(telemetry, canvas, candidate)
+  const validClusters = clusters.filter(
+    (c) => c.endMs - c.startMs >= settings.minSegmentDurationMs,
+  )
+
+  return validClusters.map((cluster, index) => {
+    // Weighted centroid (clicks have 3x higher weight than passive dwells)
+    let sumX = 0
+    let sumY = 0
+    let totalWeight = 0
+    for (const p of cluster.points) {
+      const weight = 1
+      sumX += p.x * weight
+      sumY += p.y * weight
+      totalWeight += weight
+    }
+    const avgX = totalWeight > 0 ? sumX / totalWeight : cluster.points[0].x
+    const avgY = totalWeight > 0 ? sumY / totalWeight : cluster.points[0].y
+
+    const canvasPoint = sourcePointToCanvas(telemetry, canvas, { x: avgX, y: avgY })
+    const target = zoomTargetForCursorPoint(
+      canvasPoint,
+      canvas,
+      settings.targetScale,
+      settings.safeEdgePadding,
+    )
+
+    const hasSpatialDispersion = cluster.points.some(
+      (p) => Math.hypot(p.x - avgX, p.y - avgY) > 80,
+    )
+    const mode: ZoomMode = hasSpatialDispersion ? "follow-cursor" : "auto"
+
+    const segDuration = cluster.endMs - cluster.startMs
+    const transIn = Math.min(
+      settings.defaultTransitionInMs,
+      Math.max(80, Math.round(segDuration * 0.25)),
+    )
+    const transOut = Math.min(
+      settings.defaultTransitionOutMs,
+      Math.max(80, Math.round(segDuration * 0.25)),
+    )
+
     return {
-      id: candidateId(candidate, index),
-      startMs: candidate.startMs,
-      durationMs: candidate.endMs - candidate.startMs,
-      target: zoomTargetForCursorPoint(
-        point,
-        canvas,
-        settings.targetScale,
-        settings.safeEdgePadding,
-      ),
-      scale: 1,
-      easing: candidate.easing,
+      id: candidateId(cluster.source, cluster.startMs, index),
+      startMs: cluster.startMs,
+      durationMs: segDuration,
+      target,
+      scale: settings.targetScale,
+      easing: cluster.easing,
+      transitionInMs: transIn,
+      transitionOutMs: transOut,
       enabled: true,
       locked: false,
-      mode: "auto",
-      source: candidate.source,
-      preset: candidate.preset,
+      mode,
+      source: cluster.source,
+      preset: cluster.preset,
+      followDeadzonePercent: 0.08,
+      followSmoothingAlpha: 0.25,
     }
   })
 }

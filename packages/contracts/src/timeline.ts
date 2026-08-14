@@ -27,6 +27,7 @@ export const zoomEasingSchema = z.enum([
   "smooth",
   "cinematic",
   "snappy",
+  "spring",
 ])
 export type ZoomEasing = z.infer<typeof zoomEasingSchema>
 
@@ -38,31 +39,39 @@ export const zoomTargetSchema = z.object({
 })
 export type ZoomTarget = z.infer<typeof zoomTargetSchema>
 
-export const zoomModeSchema = z.enum(["auto", "manual", "follow-cursor"])
+export const zoomModeSchema = z.enum(["auto", "manual", "static", "follow-cursor", "smooth-pan"])
 export type ZoomMode = z.infer<typeof zoomModeSchema>
 
-export const zoomSourceSchema = z.enum(["click", "dwell", "movement", "manual", "follow"])
+export const zoomSourceSchema = z.enum(["click", "dwell", "movement", "manual", "follow", "cluster"])
 export type ZoomSource = z.infer<typeof zoomSourceSchema>
 
-export const zoomPresetSchema = z.enum(["subtle", "product-demo", "cinematic", "manual-only"])
+export const zoomPresetSchema = z.enum([
+  "subtle",
+  "product-demo",
+  "cinematic",
+  "developer",
+  "manual-only",
+])
 export type ZoomPreset = z.infer<typeof zoomPresetSchema>
 
-// Smart zoom settings are optional in project files so older projects remain
-// readable while a regeneration keeps the selected preset and thresholds durable.
+// Smart zoom settings for AI/deterministic suggestion generation from telemetry.
 export const smartZoomSettingsSchema = z.object({
   preset: zoomPresetSchema.default("product-demo"),
   minDwellMs: z.number().int().min(100).max(10_000).default(700),
   dwellTolerancePx: z.number().min(0).max(500).default(12),
-  clickLeadInMs: z.number().int().min(0).max(5_000).default(220),
-  clickDurationMs: z.number().int().min(100).max(10_000).default(1_100),
-  dwellLeadInMs: z.number().int().min(0).max(5_000).default(160),
-  dwellTailMs: z.number().int().min(0).max(10_000).default(540),
-  minSegmentDurationMs: z.number().int().min(100).max(10_000).default(500),
-  maxSegmentDurationMs: z.number().int().min(100).max(20_000).default(2_400),
+  clickLeadInMs: z.number().int().min(0).max(5_000).default(500),
+  clickDurationMs: z.number().int().min(100).max(10_000).default(1_400),
+  dwellLeadInMs: z.number().int().min(0).max(5_000).default(350),
+  dwellTailMs: z.number().int().min(0).max(10_000).default(700),
+  minSegmentDurationMs: z.number().int().min(100).max(10_000).default(600),
+  maxSegmentDurationMs: z.number().int().min(100).max(30_000).default(10_000),
+  clusterToleranceMs: z.number().int().min(100).max(10_000).default(2_000),
   safeEdgePadding: z.number().min(0).max(1_000).default(32),
   targetScale: z.number().min(1.05).max(4).default(1.5),
   includeClicks: z.boolean().default(true),
   includeDwells: z.boolean().default(false),
+  defaultTransitionInMs: z.number().int().min(0).max(5_000).default(380),
+  defaultTransitionOutMs: z.number().int().min(0).max(5_000).default(380),
 })
 
 export type SmartZoomSettings = z.infer<typeof smartZoomSettingsSchema>
@@ -133,13 +142,18 @@ export const manualZoomSegmentSchema = z.object({
   startMs: z.number().int().min(0),
   durationMs: z.number().int().min(1),
   target: zoomTargetSchema,
-  scale: z.number().min(1).max(8).default(1),
-  easing: zoomEasingSchema.default("ease-in-out"),
+  scale: z.number().min(1).max(8).default(1.5),
+  easing: zoomEasingSchema.default("smooth"),
+  transitionInMs: z.number().int().min(0).max(10_000).optional(),
+  transitionOutMs: z.number().int().min(0).max(10_000).optional(),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
   mode: zoomModeSchema.optional(),
   source: zoomSourceSchema.optional(),
   preset: zoomPresetSchema.optional(),
+  followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
+  followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  label: z.string().optional(),
 })
 
 export type ManualZoomSegment = z.infer<typeof manualZoomSegmentSchema>
@@ -465,12 +479,17 @@ export const renderPlanZoomSegmentSchema = z.object({
   startMs: z.number().int().min(0),
   endMs: z.number().int().positive(),
   target: zoomTargetSchema,
-  scale: z.number().min(1).max(8).default(1),
-  easing: zoomEasingSchema.default("ease-in-out"),
+  scale: z.number().min(1).max(8).default(1.5),
+  easing: zoomEasingSchema.default("smooth"),
+  transitionInMs: z.number().int().min(0).max(10_000).default(400),
+  transitionOutMs: z.number().int().min(0).max(10_000).default(400),
   enabled: z.boolean().default(true),
   mode: zoomModeSchema.optional(),
   source: zoomSourceSchema.optional(),
   preset: zoomPresetSchema.optional(),
+  followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
+  followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  label: z.string().optional(),
 })
 
 export type RenderPlanZoomSegment = z.infer<typeof renderPlanZoomSegmentSchema>

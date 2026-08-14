@@ -87,10 +87,10 @@ function makeState(): TimelineState {
 }
 
 describe("Phase 6 composition and editing", () => {
-  it("clamps zoom targets to the padded canvas safe area", () => {
+  it("clamps zoom targets to the video canvas safe area", () => {
     expect(
       clampZoomTarget({ x: -100, y: -50, width: 4_000, height: 2_000 }, makeState().canvas),
-    ).toEqual({ x: 48, y: 48, width: 1824, height: 984 })
+    ).toEqual({ x: 0, y: 0, width: 1920, height: 1080 })
   })
 
   it("resolves an eased zoom transform from the full canvas to its target", () => {
@@ -106,11 +106,15 @@ describe("Phase 6 composition and editing", () => {
       locked: false,
     }
     const start = resolveZoomTransform(segment, 1_000, state.canvas)
+    const hold = resolveZoomTransform(segment, 2_000, state.canvas)
     const end = resolveZoomTransform(segment, 3_000, state.canvas)
+
     expect(start).toMatchObject({ progress: 0, scale: 1 })
-    expect(end.progress).toBe(1)
-    expect(end.crop).toEqual({ x: 480, y: 270, width: 960, height: 540 })
-    expect(end.scale).toBe(2)
+    expect(hold.progress).toBe(1)
+    expect(hold.crop).toEqual({ x: 480, y: 270, width: 960, height: 540 })
+    expect(hold.scale).toBe(2)
+    expect(end.progress).toBe(0)
+    expect(end.scale).toBe(1)
   })
 
   it("supports add, split, lock, and undo for manual zoom ranges", () => {

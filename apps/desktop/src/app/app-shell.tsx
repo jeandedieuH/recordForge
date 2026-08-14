@@ -110,7 +110,6 @@ export function AppShell() {
     void checkHardware()
   }, [setSelectedProfileId, toast])
 
-
   // Open the editor view when a recording is opened from the library.
   useEffect(() => {
     if (editorRecordingId) {

@@ -104,7 +104,7 @@ export function CustomCursorOverlay({
         height: containerHeight,
         borderRadius,
         transform: zoomTransform,
-        transformOrigin: "center",
+        transformOrigin: "0 0",
       }}
     >
       {/* Spotlight mode background mask */}

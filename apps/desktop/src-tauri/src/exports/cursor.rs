@@ -276,20 +276,39 @@ impl CursorRenderer {
             return (x, y);
         };
         let duration = (segment.end_ms - segment.start_ms).max(1) as f64;
-        let progress =
-            ((output_ms.saturating_sub(segment.start_ms) as f64) / duration).clamp(0.0, 1.0);
+        let mut trans_in = (segment.transition_in_ms as f64).clamp(10.0, duration);
+        let mut trans_out = (segment.transition_out_ms as f64).clamp(10.0, duration);
+        if trans_in + trans_out > duration {
+            trans_in = duration / 2.0;
+            trans_out = duration - trans_in;
+        }
+
+        let elapsed = output_ms.saturating_sub(segment.start_ms) as f64;
+        let progress = if elapsed <= 0.0 {
+            0.0
+        } else if elapsed < trans_in {
+            (elapsed / trans_in.max(1.0)).clamp(0.0, 1.0)
+        } else if elapsed <= duration - trans_out {
+            1.0
+        } else if elapsed <= duration {
+            ((duration - elapsed) / trans_out.max(1.0)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
         let eased = match segment.easing.as_str() {
             "linear" => progress,
             "ease-in" => progress * progress,
             "ease-out" => 1.0 - (1.0 - progress).powi(2),
-            "snappy" => {
-                if progress < 0.5 {
-                    4.0 * progress.powi(3)
-                } else {
-                    1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
-                }
-            }
+            "snappy" => 1.0 - (1.0 - progress).powi(3),
             "cinematic" => progress * progress * (3.0 - 2.0 * progress),
+            "smooth" => {
+                progress * progress * progress * (progress * (progress * 6.0 - 15.0) + 10.0)
+            }
+            "spring" => {
+                let p = 0.4;
+                (2.0f64.powf(-10.0 * progress) * (((progress - p / 4.0) * (2.0 * std::f64::consts::PI)) / p).sin() + 1.0).clamp(0.0, 1.5)
+            }
             _ => {
                 if progress < 0.5 {
                     2.0 * progress * progress
@@ -309,10 +328,18 @@ impl CursorRenderer {
         );
         let full_w = self.canvas_width as f64;
         let full_h = self.canvas_height as f64;
-        let crop_x = target.x * eased;
-        let crop_y = target.y * eased;
+        let full_cx = full_w / 2.0;
+        let full_cy = full_h / 2.0;
+        let target_cx = target.x + target.width / 2.0;
+        let target_cy = target.y + target.height / 2.0;
+
+        let cur_cx = full_cx + (target_cx - full_cx) * eased;
+        let cur_cy = full_cy + (target_cy - full_cy) * eased;
         let crop_width = full_w + (target.width - full_w) * eased;
         let crop_height = full_h + (target.height - full_h) * eased;
+        let crop_x = (cur_cx - crop_width / 2.0).clamp(0.0, full_w - crop_width);
+        let crop_y = (cur_cy - crop_height / 2.0).clamp(0.0, full_h - crop_height);
+
         (
             ((x - crop_x) * full_w / crop_width).clamp(0.0, full_w),
             ((y - crop_y) * full_h / crop_height).clamp(0.0, full_h),
@@ -1132,10 +1159,15 @@ mod tests {
             },
             scale: 2.0,
             easing: "linear".into(),
+            transition_in_ms: 300,
+            transition_out_ms: 300,
             enabled: true,
             mode: "manual".into(),
             source: "manual".into(),
             preset: "manual-only".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
         };
         let renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),
@@ -1146,9 +1178,8 @@ mod tests {
         )
         .expect("valid cursor renderer");
 
-        // At the last frame before the segment ends, progress is 0.999 for a linear
-        // easing, so the result is within rounding distance of 150.
-        let (x, y) = renderer.apply_zoom(999, 120.0, 120.0);
+        // In the 3-phase lifecycle, 500ms is in the sustained hold phase (progress 1.0)
+        let (x, y) = renderer.apply_zoom(500, 120.0, 120.0);
         assert!((x - 150.0).abs() < 0.1, "expected ~150.0, got {x}");
         assert!((y - 150.0).abs() < 0.1, "expected ~150.0, got {y}");
 

@@ -1,12 +1,19 @@
 import { useEffect, useState } from "react"
-import { cursorSettingsForEffect, generateSmartZoomSuggestions } from "@recordforge/cursor-core"
+import {
+  cursorSettingsForEffect,
+  generateSmartZoomSuggestions,
+  getCursorPointAtTimelineTime,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
 import type {
   ClipTransform,
   CursorSettings,
+  CursorTelemetryFile,
   MediaMetadata,
   ManualZoomSegment,
   TimelineClip,
   TimelineMarker,
+  TimelineState,
   TimelineTrack,
 } from "@recordforge/contracts"
 import {
@@ -301,6 +308,8 @@ export function ClipInspector({
           ) : null}
         </div>
         <ZoomInspector
+          timelineState={timelineState}
+          cursorTelemetry={cursorTelemetry}
           segments={timelineState?.zoomSegments ?? []}
           selectedSegment={selectedZoom}
           timelineDuration={timelineState ? getTotalDuration(timelineState) : 0}
@@ -314,7 +323,16 @@ export function ClipInspector({
           }
           onAdd={(startMs, endMs, target) => {
             const segmentId = crypto.randomUUID()
-            execute(createAddZoomSegmentCommand(startMs, endMs, target, { segmentId }))
+            execute(
+              createAddZoomSegmentCommand(startMs, endMs, target, {
+                segmentId,
+                scale: 1,
+                easing: "smooth",
+                mode: "follow-cursor",
+                source: "manual",
+                preset: timelineState?.smartZoomSettings?.preset ?? "product-demo",
+              }),
+            )
             useTimelineStore.getState().setSelection({ kind: "zoom", segmentId })
           }}
           onUpdate={(segmentId, update) =>
@@ -839,6 +857,8 @@ export function ClipInspector({
 // Manual zoom ranges share the same command engine as media edits, so every
 // inspector change is undoable and the persisted project stays authoritative.
 function ZoomInspector({
+  timelineState,
+  cursorTelemetry,
   segments,
   selectedSegment,
   timelineDuration,
@@ -853,6 +873,8 @@ function ZoomInspector({
   onRegenerate,
   onPresetChange,
 }: {
+  timelineState: TimelineState | null | undefined
+  cursorTelemetry: CursorTelemetryFile | null | undefined
   segments: ManualZoomSegment[]
   selectedSegment: ManualZoomSegment | null
   timelineDuration: number
@@ -870,7 +892,7 @@ function ZoomInspector({
   onRegenerate: () => void
   onPresetChange: (preset: NonNullable<ManualZoomSegment["preset"]>) => void
 }) {
-  const defaultEnd = Math.min(timelineDuration || playheadMs + 1_000, playheadMs + 1_000)
+  const defaultEnd = Math.min(timelineDuration || playheadMs + 1_500, playheadMs + 1_500)
   return (
     <div className="flex flex-col gap-3 border-b border-border pb-4">
       <div className="flex items-center justify-between gap-2">
@@ -882,14 +904,26 @@ function ZoomInspector({
           size="sm"
           className="h-7 text-[10px]"
           disabled={defaultEnd <= playheadMs}
-          onClick={() =>
-            onAdd(playheadMs, defaultEnd, {
-              x: 0,
-              y: 0,
-              width: 640,
-              height: 360,
-            })
-          }
+          onClick={() => {
+            const cursorPoint = getCursorPointAtTimelineTime(
+              timelineState,
+              playheadMs,
+              cursorTelemetry,
+            )
+            const centerPoint = cursorPoint ?? {
+              x: (timelineState?.canvas.width ?? 1920) / 2,
+              y: (timelineState?.canvas.height ?? 1080) / 2,
+            }
+            const targetScale =
+              smartZoomPreset === "subtle" ? 1.25 : smartZoomPreset === "cinematic" ? 1.8 : 1.5
+            const target = zoomTargetForCursorPoint(
+              centerPoint,
+              timelineState?.canvas ?? { width: 1920, height: 1080, padding: 0 },
+              targetScale,
+              timelineState?.canvas.padding ?? 0,
+            )
+            onAdd(playheadMs, defaultEnd, target)
+          }}
         >
           Add manual
         </Button>
@@ -1009,27 +1043,46 @@ function ZoomInspector({
               onChange={(value) => onUpdate(selectedSegment.id, { scale: value })}
             />
           </div>
-          <label className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
-            <span>Easing</span>
-            <select
-              aria-label="Zoom easing"
-              value={selectedSegment.easing}
-              onChange={(event) =>
-                onUpdate(selectedSegment.id, {
-                  easing: event.target.value as ManualZoomSegment["easing"],
-                })
-              }
-              className="h-7 rounded border border-border bg-surface px-1 text-[11px] text-foreground"
-            >
-              <option value="linear">Linear</option>
-              <option value="ease-in">Ease in</option>
-              <option value="ease-out">Ease out</option>
-              <option value="ease-in-out">Ease in/out</option>
-              <option value="smooth">Smooth</option>
-              <option value="cinematic">Cinematic</option>
-              <option value="snappy">Snappy</option>
-            </select>
-          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+              <span>Mode</span>
+              <select
+                aria-label="Zoom mode"
+                value={selectedSegment.mode ?? "follow-cursor"}
+                onChange={(event) =>
+                  onUpdate(selectedSegment.id, {
+                    mode: event.target.value as ManualZoomSegment["mode"],
+                  })
+                }
+                className="h-7 rounded border border-border bg-surface px-1 text-[11px] text-foreground"
+              >
+                <option value="follow-cursor">Follow cursor</option>
+                <option value="auto">Auto tracking</option>
+                <option value="manual">Fixed frame</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+              <span>Easing</span>
+              <select
+                aria-label="Zoom easing"
+                value={selectedSegment.easing}
+                onChange={(event) =>
+                  onUpdate(selectedSegment.id, {
+                    easing: event.target.value as ManualZoomSegment["easing"],
+                  })
+                }
+                className="h-7 rounded border border-border bg-surface px-1 text-[11px] text-foreground"
+              >
+                <option value="smooth">Smooth</option>
+                <option value="cinematic">Cinematic</option>
+                <option value="ease-in-out">Ease in/out</option>
+                <option value="snappy">Snappy</option>
+                <option value="ease-in">Ease in</option>
+                <option value="ease-out">Ease out</option>
+                <option value="linear">Linear</option>
+              </select>
+            </label>
+          </div>
           <div className="flex gap-2">
             <Button
               variant="outline"

@@ -154,6 +154,10 @@ pub struct RenderPlanZoomSegment {
     pub scale: f64,
     #[serde(default = "default_zoom_easing")]
     pub easing: String,
+    #[serde(default = "default_transition_ms")]
+    pub transition_in_ms: u64,
+    #[serde(default = "default_transition_ms")]
+    pub transition_out_ms: u64,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_zoom_mode")]
@@ -162,6 +166,12 @@ pub struct RenderPlanZoomSegment {
     pub source: String,
     #[serde(default = "default_zoom_preset")]
     pub preset: String,
+    #[serde(default)]
+    pub follow_deadzone_percent: Option<f64>,
+    #[serde(default)]
+    pub follow_smoothing_alpha: Option<f64>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -217,16 +227,20 @@ fn default_overlay_shape() -> String {
     "rectangle".into()
 }
 
+fn default_transition_ms() -> u64 {
+    400
+}
+
 fn default_zoom_scale() -> f64 {
-    1.0
+    1.5
 }
 
 fn default_zoom_easing() -> String {
-    "ease-in-out".into()
+    "smooth".into()
 }
 
 fn default_zoom_mode() -> String {
-    "manual".into()
+    "static".into()
 }
 
 fn default_zoom_source() -> String {
@@ -234,7 +248,7 @@ fn default_zoom_source() -> String {
 }
 
 fn default_zoom_preset() -> String {
-    "manual-only".into()
+    "product-demo".into()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1889,10 +1903,10 @@ fn zoom_easing_expression(progress: &str, easing: &str) -> String {
         "linear" => progress.to_string(),
         "ease-in" => format!("({progress})*({progress})"),
         "ease-out" => format!("1-(1-({progress}))*(1-({progress}))"),
-        "snappy" => {
-            format!("if(lte(({progress}),0.5),4*pow(({progress}),3),1-pow(-2*({progress})+2,3)/2)")
-        }
+        "snappy" => format!("1-pow(1-({progress}),3)"),
         "cinematic" => format!("({progress})*({progress})*(3-2*({progress}))"),
+        "smooth" => format!("pow({progress},3)*(({progress})*(({progress})*6-15)+10)"),
+        "spring" => format!("(pow(2,-10*({progress}))*sin((({progress})-0.1)*15.708)+1)"),
         _ => format!(
             "if(lte(({progress}),0.5),2*({progress})*({progress}),1-pow(-2*({progress})+2,2)/2)"
         ),
@@ -1949,11 +1963,6 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         "height" => canvas.height as f64,
         _ => 0.0,
     };
-    let start = if axis == "x" || axis == "y" {
-        0.0
-    } else {
-        full
-    };
     let mut expression = format!("{full:.3}");
     for segment in plan
         .zoom_segments
@@ -1964,6 +1973,18 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         if segment.end_ms <= segment.start_ms {
             continue;
         }
+        let duration_s = (segment.end_ms - segment.start_ms) as f64 / 1000.0;
+        let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.010, duration_s);
+        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.010, duration_s);
+        if trans_in_s + trans_out_s > duration_s {
+            trans_in_s = duration_s / 2.0;
+            trans_out_s = duration_s - trans_in_s;
+        }
+        let start_s = segment.start_ms as f64 / 1000.0;
+        let end_s = segment.end_ms as f64 / 1000.0;
+        let in_end_s = start_s + trans_in_s;
+        let out_start_s = end_s - trans_out_s;
+
         let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
         let target_value = match axis {
             "width" => target.width,
@@ -1972,21 +1993,43 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
             "y" => target.y,
             _ => full,
         };
-        let progress = format!(
-            "((t-{:.3})/{:.3})",
-            segment.start_ms as f64 / 1000.0,
-            (segment.end_ms - segment.start_ms) as f64 / 1000.0
-        );
-        let eased = zoom_easing_expression(&progress, &segment.easing);
-        let interpolated = if axis == "x" || axis == "y" {
-            format!("({start:.3})+(({target_value:.3})-({start:.3}))*({eased})")
+
+        let progress_in = format!("((t-{start_s:.3})/{trans_in_s:.3})");
+        let eased_in = zoom_easing_expression(&progress_in, &segment.easing);
+        let interpolated_in = if axis == "x" || axis == "y" {
+            let center_full = if axis == "x" { canvas.width as f64 / 2.0 } else { canvas.height as f64 / 2.0 };
+            let center_target = if axis == "x" { target.x + target.width / 2.0 } else { target.y + target.height / 2.0 };
+            let dim_full = if axis == "x" { canvas.width as f64 } else { canvas.height as f64 };
+            let dim_target = if axis == "x" { target.width } else { target.height };
+            let center_eased = format!("({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_in})");
+            let dim_eased = format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_in})");
+            format!("({center_eased})-({dim_eased})/2")
         } else {
-            format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased})")
+            format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased_in})")
         };
+
+        let progress_out = format!("(({end_s:.3}-t)/{trans_out_s:.3})");
+        let eased_out = zoom_easing_expression(&progress_out, &segment.easing);
+        let interpolated_out = if axis == "x" || axis == "y" {
+            let center_full = if axis == "x" { canvas.width as f64 / 2.0 } else { canvas.height as f64 / 2.0 };
+            let center_target = if axis == "x" { target.x + target.width / 2.0 } else { target.y + target.height / 2.0 };
+            let dim_full = if axis == "x" { canvas.width as f64 } else { canvas.height as f64 };
+            let dim_target = if axis == "x" { target.width } else { target.height };
+            let center_eased = format!("({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_out})");
+            let dim_eased = format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_out})");
+            format!("({center_eased})-({dim_eased})/2")
+        } else {
+            format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased_out})")
+        };
+
+        let val_hold = format!("{target_value:.3}");
+
+        let segment_expr = format!(
+            "if(lt(t,{in_end_s:.3}),{interpolated_in},if(lte(t,{out_start_s:.3}),{val_hold},{interpolated_out}))"
+        );
+
         expression = format!(
-            "if(gte(t,{:.3})*lt(t,{:.3}),{interpolated},{expression})",
-            segment.start_ms as f64 / 1000.0,
-            segment.end_ms as f64 / 1000.0
+            "if(gte(t,{start_s:.3})*lt(t,{end_s:.3}),{segment_expr},{expression})"
         );
     }
     expression
@@ -2322,10 +2365,15 @@ mod tests {
                     },
                     scale: 1.0,
                     easing: "cinematic".into(),
+                    transition_in_ms: 300,
+                    transition_out_ms: 300,
                     enabled: true,
                     mode: "auto".into(),
                     source: "click".into(),
                     preset: "product-demo".into(),
+                    follow_deadzone_percent: None,
+                    follow_smoothing_alpha: None,
+                    label: None,
                 }],
                 ..valid_plan()
             },
@@ -2356,10 +2404,15 @@ mod tests {
                     },
                     scale: 1.0,
                     easing: "linear".into(),
+                    transition_in_ms: 300,
+                    transition_out_ms: 300,
                     enabled: true,
                     mode: "auto".into(),
                     source: "click".into(),
                     preset: "product-demo".into(),
+                    follow_deadzone_percent: None,
+                    follow_smoothing_alpha: None,
+                    label: None,
                 }],
                 ..valid_plan()
             },

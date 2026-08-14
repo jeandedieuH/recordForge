@@ -367,9 +367,14 @@ export const addZoomSegmentCommandSchema = commandMetaSchema.extend({
   target: zoomTargetSchema,
   scale: z.number().min(1).max(8).optional(),
   easing: zoomEasingSchema.optional(),
+  transitionInMs: z.number().int().min(0).max(10_000).optional(),
+  transitionOutMs: z.number().int().min(0).max(10_000).optional(),
   mode: zoomModeSchema.optional(),
   source: zoomSourceSchema.optional(),
   preset: zoomPresetSchema.optional(),
+  followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
+  followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  label: z.string().optional(),
 })
 
 export type AddZoomSegmentCommand = z.infer<typeof addZoomSegmentCommandSchema>
@@ -382,11 +387,16 @@ export const updateZoomSegmentCommandSchema = commandMetaSchema.extend({
   target: zoomTargetSchema.partial().optional(),
   scale: z.number().min(1).max(8).optional(),
   easing: zoomEasingSchema.optional(),
+  transitionInMs: z.number().int().min(0).max(10_000).optional(),
+  transitionOutMs: z.number().int().min(0).max(10_000).optional(),
   enabled: z.boolean().optional(),
   locked: z.boolean().optional(),
   mode: zoomModeSchema.optional(),
   source: zoomSourceSchema.optional(),
   preset: zoomPresetSchema.optional(),
+  followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
+  followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  label: z.string().optional(),
 })
 
 export type UpdateZoomSegmentCommand = z.infer<typeof updateZoomSegmentCommandSchema>

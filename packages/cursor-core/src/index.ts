@@ -213,6 +213,50 @@ export function timelineToCursorSourceTime(
   return clip.sourceInMs + (timelineMs - clip.startMs) * clip.speed
 }
 
+/**
+ * Evaluate the fitted cursor position in canvas coordinates at a given timeline timestamp.
+ * Returns null if no active screen clip exists, no telemetry is present, or cursor is hidden.
+ */
+export function getCursorPointAtTimelineTime(
+  state: TimelineState | null | undefined,
+  timelineMs: number,
+  telemetry: CursorTelemetryFile | null | undefined,
+  cursorEngine?: {
+    evaluate: (
+      timeMs: number,
+      settings: CursorSettings,
+    ) => { sourceX: number; sourceY: number; visible: boolean }
+  } | null,
+): { x: number; y: number } | null {
+  if (!state || !telemetry) return null
+  const sourceTimeMs = timelineToCursorSourceTime(state, timelineMs)
+  if (sourceTimeMs === null) return null
+
+  if (cursorEngine) {
+    const frame = cursorEngine.evaluate(sourceTimeMs, state.canvas.cursorSettings)
+    if (!frame.visible) return null
+    const fitted = fitCursorPoint(
+      { x: frame.sourceX, y: frame.sourceY },
+      telemetry,
+      state.canvas.width,
+      state.canvas.height,
+    )
+    if (!fitted.visible) return null
+    return { x: fitted.x, y: fitted.y }
+  }
+
+  const lookup = findCursorEventAtTime(telemetry, sourceTimeMs)
+  if (!lookup || !lookup.event.visible) return null
+  const fitted = fitCursorPoint(
+    { x: lookup.event.sourceX, y: lookup.event.sourceY },
+    telemetry,
+    state.canvas.width,
+    state.canvas.height,
+  )
+  if (!fitted.visible) return null
+  return { x: fitted.x, y: fitted.y }
+}
+
 export function findCursorEffectAtTime(
   state: TimelineState,
   timelineMs: number,
@@ -331,6 +375,12 @@ export function zoomSegmentBadges(segment: ManualZoomSegment): ZoomSegmentBadge[
   const badges: ZoomSegmentBadge[] = []
   if (segment.locked) badges.push({ key: "locked", label: "Locked", variant: "secondary" })
 
+  if (segment.mode === "follow-cursor") {
+    badges.push({ key: "mode", label: "Follow cursor", variant: "default" })
+  } else if (segment.mode === "smooth-pan") {
+    badges.push({ key: "mode", label: "Pan", variant: "default" })
+  }
+
   if (segment.mode === "auto") {
     badges.push({
       key: "source",
@@ -339,15 +389,21 @@ export function zoomSegmentBadges(segment: ManualZoomSegment): ZoomSegmentBadge[
           ? "From click"
           : segment.source === "dwell"
             ? "From dwell"
-            : "Auto",
+            : segment.source === "cluster"
+              ? "Action cluster"
+              : "Auto",
       variant: "default",
     })
-  } else {
+  } else if (segment.mode !== "follow-cursor" && segment.mode !== "smooth-pan") {
     badges.push({ key: "source", label: "Manual", variant: "outline" })
   }
 
   if (segment.preset && segment.preset !== "manual-only") {
     badges.push({ key: "preset", label: segment.preset, variant: "secondary" })
+  }
+
+  if (segment.label) {
+    badges.push({ key: "label", label: segment.label, variant: "outline" })
   }
 
   return badges

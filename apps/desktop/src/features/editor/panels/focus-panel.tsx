@@ -1,6 +1,10 @@
 import { useMemo, useState } from "react"
 import type { ManualZoomSegment, ZoomPreset } from "@recordforge/contracts"
-import { zoomSegmentBadges } from "@recordforge/cursor-core"
+import {
+  getCursorPointAtTimelineTime,
+  zoomSegmentBadges,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
 import {
   createAddZoomSegmentCommand,
   createDeleteZoomSegmentCommand,
@@ -53,21 +57,48 @@ export function FocusPanel() {
   function addManual() {
     if (!timeline) return
     const startMs = playheadMs
-    const defaultEnd = Math.min(timelineDuration || startMs + 1_000, startMs + 1_000)
+    const defaultEnd = Math.min(timelineDuration || startMs + 1_500, startMs + 1_500)
     if (defaultEnd <= startMs) return
     const segmentId = crypto.randomUUID()
-    const rect = {
-      x: 0,
-      y: 0,
-      width: 640,
-      height: 360,
+
+    // 1) Evaluate cursor position at playhead to navigate to where cursor is
+    const cursorPoint = getCursorPointAtTimelineTime(timeline, startMs, cursorTelemetry)
+    const centerPoint = cursorPoint ?? {
+      x: timeline.canvas.width / 2,
+      y: timeline.canvas.height / 2,
     }
+
+    const targetScale =
+      preset === "subtle"
+        ? 1.25
+        : preset === "cinematic"
+          ? 1.8
+          : preset === "developer"
+            ? 2.2
+            : 1.5
+    const target = zoomTargetForCursorPoint(
+      centerPoint,
+      timeline.canvas,
+      targetScale,
+    )
+
+    const easing =
+      preset === "cinematic"
+        ? "cinematic"
+        : preset === "developer"
+          ? "snappy"
+          : "smooth"
+    const transitionInMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
+    const transitionOutMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
+
     execute(
-      createAddZoomSegmentCommand(startMs, defaultEnd, rect, {
+      createAddZoomSegmentCommand(startMs, defaultEnd, target, {
         segmentId,
-        scale: 1.5,
-        easing: "ease-in-out",
-        mode: "manual",
+        scale: targetScale,
+        easing,
+        transitionInMs,
+        transitionOutMs,
+        mode: "follow-cursor",
         source: "manual",
         preset,
       }),
@@ -126,22 +157,22 @@ export function FocusPanel() {
 
       <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-2.5">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-foreground">Smart zoom</span>
+          <span className="text-xs font-semibold text-foreground">Smart Zoom</span>
           <NativeSelect
             aria-label="Smart zoom preset"
             value={preset}
             onChange={(event) => onPresetChange(event.target.value as ZoomPreset)}
-            className="w-32"
+            className="w-36"
           >
-            <option value="subtle">Subtle</option>
-            <option value="product-demo">Product demo</option>
+            <option value="product-demo">Product Demo</option>
+            <option value="developer">Developer (Code)</option>
             <option value="cinematic">Cinematic</option>
-            <option value="manual-only">Manual only</option>
+            <option value="subtle">Subtle</option>
+            <option value="manual-only">Manual Only</option>
           </NativeSelect>
         </div>
         <p className="text-[10px] leading-relaxed text-subtle-foreground">
-          Suggestions focus on clicks and sustained cursor attention. Manual and locked ranges are
-          preserved.
+          Intelligent action clustering groups rapid clicks and code interactions into smooth, unified focus frames.
         </p>
         {cursorTelemetryStatus === "unavailable" ? (
           <p

@@ -21,7 +21,12 @@ import {
   type CursorEngine,
   type CursorFrame,
 } from "@recordforge/cursor-core"
-import { findManualZoomAtTime, resolveZoomTransform, type ZoomTransform } from "./composition"
+import {
+  findManualZoomAtTime,
+  findPreviousZoomSegment,
+  resolveZoomTransform,
+  type ZoomTransform,
+} from "./composition"
 import { findTimelineClipAt, timelineToSource } from "./time-mapping"
 
 export type { ZoomTransform }
@@ -107,7 +112,7 @@ function resolveFollowCursorTarget(
   timeMs: number,
   cursorEngine: CursorEngine | null | undefined,
 ): ZoomTarget | undefined {
-  if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
+  if (segment.mode === "static" || segment.mode === "manual" || !cursorEngine) return undefined
   const sourceTimeMs = timelineToCursorSourceTime(state, timeMs)
   if (sourceTimeMs === null) return undefined
   const frame = cursorEngine.evaluate(sourceTimeMs, state.canvas.cursorSettings)
@@ -119,6 +124,7 @@ function resolveFollowCursorTarget(
     state.canvas.height,
   )
   if (!fitted.visible) return undefined
+
   const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, segment.target.width))
   return zoomTargetForCursorPoint({ x: fitted.x, y: fitted.y }, state.canvas, desiredScale)
 }
@@ -148,8 +154,15 @@ export function resolvePreviewComposition(
   const followTarget = activeZoom
     ? resolveFollowCursorTarget(activeZoom, state, timeMs, cursorEngine)
     : undefined
+
+  const previousZoom = activeZoom ? findPreviousZoomSegment(state, activeZoom) : null
+
   const zoomTransform = activeZoom
-    ? resolveZoomTransform(activeZoom, timeMs, state.canvas, { target: followTarget })
+    ? resolveZoomTransform(activeZoom, timeMs, state.canvas, {
+        target: followTarget,
+        fromTarget: previousZoom?.target,
+        fromScale: previousZoom?.scale,
+      })
     : null
 
   const cameras: CameraLayer[] = state.tracks
@@ -245,12 +258,13 @@ export function resolvePreviewComposition(
 /**
  * Convert a zoom transform into the same CSS transform string used by the
  * preview video and the cursor overlay so they share one geometry.
+ * Uses standard top-left origin (0 0) with scale and crop translation.
  */
 export function zoomTransformToCss(
   transform: ZoomTransform,
   canvas: { width: number; height: number },
 ): string {
-  const translateX = (transform.translateX / Math.max(1, canvas.width)) * 100
-  const translateY = (transform.translateY / Math.max(1, canvas.height)) * 100
-  return `translate(${translateX}%, ${translateY}%) scale(${transform.scale})`
+  const cropXPercent = (transform.crop.x / Math.max(1, canvas.width)) * 100
+  const cropYPercent = (transform.crop.y / Math.max(1, canvas.height)) * 100
+  return `scale(${transform.scale}) translate(-${cropXPercent}%, -${cropYPercent}%)`
 }

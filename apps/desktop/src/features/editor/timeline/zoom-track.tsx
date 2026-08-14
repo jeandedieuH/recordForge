@@ -285,6 +285,9 @@ function ZoomSegmentItem({
     "bg-primary/70",
   )
 
+  const transInWidth = Math.min(width / 2, (segment.transitionInMs ?? 400) * pixelsPerMs)
+  const transOutWidth = Math.min(width / 2, (segment.transitionOutMs ?? 400) * pixelsPerMs)
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -295,8 +298,8 @@ function ZoomSegmentItem({
           aria-label={`Zoom segment from ${formatZoomTime(segment.startMs)} to ${formatZoomTime(segment.startMs + segment.durationMs)}`}
           aria-pressed={selected}
           className={cn(
-            "absolute flex items-center overflow-hidden rounded-md border border-primary/50 bg-primary/15 px-2 text-left text-[11px] transition-colors hover:bg-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-            selected && "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
+            "group absolute flex items-center overflow-hidden rounded-md border border-primary/50 bg-primary/15 px-2 text-left text-[11px] transition-all hover:bg-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            selected && "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-md",
             track.locked && "cursor-not-allowed opacity-60",
             segment.locked && "opacity-60",
           )}
@@ -317,8 +320,23 @@ function ZoomSegmentItem({
             }
             onSelectZoom(segment.id)
           }}
-          title={`${segment.scale.toFixed(1)}× · ${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)}`}
+          title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× · ${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)}`}
         >
+          {/* Visual Transition In Ramp Indicator */}
+          <div
+            className="pointer-events-none absolute bottom-0 left-0 top-0 bg-linear-to-r from-primary/30 to-transparent"
+            style={{ width: `${transInWidth}px` }}
+            aria-hidden
+          />
+
+          {/* Visual Transition Out Ramp Indicator */}
+          <div
+            className="pointer-events-none absolute bottom-0 right-0 top-0 bg-linear-to-l from-primary/30 to-transparent"
+            style={{ width: `${transOutWidth}px` }}
+            aria-hidden
+          />
+
+          {/* Trim / Resize Handles */}
           <button
             type="button"
             className={cn(handleClass, "left-0")}
@@ -328,7 +346,17 @@ function ZoomSegmentItem({
           />
           <ZoomIn className="mr-1.5 size-3 shrink-0 text-primary" aria-hidden />
           <span className="relative z-10 truncate font-medium text-foreground">
+            {segment.label ? (
+              <span className="mr-1 text-primary">{segment.label}</span>
+            ) : null}
             {segment.scale.toFixed(1)}×
+            {segment.mode === "follow-cursor" ? (
+              <span className="ml-1 rounded bg-primary/20 px-1 py-0.5 text-[9px] font-medium text-primary">follow</span>
+            ) : segment.mode === "smooth-pan" ? (
+              <span className="ml-1 rounded bg-primary/20 px-1 py-0.5 text-[9px] font-medium text-primary">pan</span>
+            ) : segment.mode === "auto" ? (
+              <span className="ml-1 text-[9px] font-normal text-primary/80">auto</span>
+            ) : null}
           </span>
           <button
             type="button"

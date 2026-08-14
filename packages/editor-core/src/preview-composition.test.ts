@@ -222,9 +222,15 @@ describe("resolvePreviewComposition", () => {
     expect(comp.screen.zoomTransform?.progress).toBe(0)
     expect(comp.screen.zoomTransform?.scale).toBe(1)
 
+    // At 5_000ms (within the 4_000ms-6_000ms zoom segment), it is in the sustained hold phase
     const mid = resolvePreviewComposition(makeState(), 5_000)
-    expect(mid.screen.zoomTransform?.progress).toBe(0.5)
+    expect(mid.screen.zoomTransform?.progress).toBe(1)
     expect(mid.screen.zoomTransform?.scale).toBeGreaterThan(1)
+
+    // At 4_225ms (halfway through the 450ms lead-in transition), progress is ramping up
+    const leadIn = resolvePreviewComposition(makeState(), 4_225)
+    expect(leadIn.screen.zoomTransform?.progress).toBeGreaterThan(0)
+    expect(leadIn.screen.zoomTransform?.progress).toBeLessThan(1)
   })
 
   it("marks inactive layers outside their clip ranges", () => {

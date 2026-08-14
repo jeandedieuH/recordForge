@@ -1855,18 +1855,25 @@ function applyAddZoomSegment(
   state: TimelineState,
   command: AddZoomSegmentCommand,
 ): CommandResult<TimelineState> {
+  const duration = command.endMs - command.startMs
+  const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
   const segment: ManualZoomSegment = {
     id: command.segmentId ?? `zoom:${command.startMs}:${command.endMs}`,
     startMs: command.startMs,
-    durationMs: command.endMs - command.startMs,
+    durationMs: duration,
     target: clampZoomTarget(command.target, state.canvas),
-    scale: command.scale ?? 1,
-    easing: command.easing ?? "ease-in-out",
+    scale: command.scale ?? 1.5,
+    easing: command.easing ?? "smooth",
+    transitionInMs: command.transitionInMs ?? defaultTrans,
+    transitionOutMs: command.transitionOutMs ?? defaultTrans,
     enabled: true,
     locked: false,
-    mode: command.mode ?? "manual",
+    mode: command.mode ?? "static",
     source: command.source ?? "manual",
-    preset: command.preset ?? "manual-only",
+    preset: command.preset ?? "product-demo",
+    followDeadzonePercent: command.followDeadzonePercent,
+    followSmoothingAlpha: command.followSmoothingAlpha,
+    label: command.label,
   }
   const segments = [...getManualZoomSegments(state), segment]
   const valid = validateZoomSegments(segments)
@@ -1894,7 +1901,9 @@ function applyUpdateZoomSegment(
     command.enabled === undefined &&
     command.mode === undefined &&
     command.source === undefined &&
-    command.preset === undefined
+    command.preset === undefined &&
+    command.transitionInMs === undefined &&
+    command.transitionOutMs === undefined
   const hasManualEdit =
     !onlyUnlock &&
     (command.startMs !== undefined ||
@@ -1902,7 +1911,9 @@ function applyUpdateZoomSegment(
       command.target !== undefined ||
       command.scale !== undefined ||
       command.easing !== undefined ||
-      command.enabled !== undefined)
+      command.enabled !== undefined ||
+      command.transitionInMs !== undefined ||
+      command.transitionOutMs !== undefined)
   const next: ManualZoomSegment = {
     ...current,
     startMs,
@@ -1912,11 +1923,16 @@ function applyUpdateZoomSegment(
       : current.target,
     scale: command.scale ?? current.scale,
     easing: command.easing ?? current.easing,
+    transitionInMs: command.transitionInMs ?? current.transitionInMs,
+    transitionOutMs: command.transitionOutMs ?? current.transitionOutMs,
     enabled: command.enabled ?? current.enabled,
     locked: command.locked ?? current.locked,
-    mode: command.mode ?? (hasManualEdit ? "manual" : current.mode),
-    source: command.source ?? (hasManualEdit ? "manual" : current.source),
+    mode: command.mode ?? (hasManualEdit && current.mode === "auto" ? "manual" : current.mode),
+    source: command.source ?? (hasManualEdit && current.source !== "manual" ? "manual" : current.source),
     preset: command.preset ?? (hasManualEdit ? "manual-only" : current.preset),
+    followDeadzonePercent: command.followDeadzonePercent ?? current.followDeadzonePercent,
+    followSmoothingAlpha: command.followSmoothingAlpha ?? current.followSmoothingAlpha,
+    label: command.label ?? current.label,
   }
   const segments = getManualZoomSegments(state).map((segment) =>
     segment.id === command.segmentId ? next : segment,
@@ -2372,9 +2388,14 @@ export function createAddZoomSegmentCommand(
     segmentId?: string
     scale?: number
     easing?: ManualZoomSegment["easing"]
+    transitionInMs?: number
+    transitionOutMs?: number
     mode?: ManualZoomSegment["mode"]
     source?: ManualZoomSegment["source"]
     preset?: ManualZoomSegment["preset"]
+    followDeadzonePercent?: number
+    followSmoothingAlpha?: number
+    label?: string
   } = {},
 ): CommandRecord {
   return {
@@ -2386,9 +2407,14 @@ export function createAddZoomSegmentCommand(
     target,
     scale: options.scale,
     easing: options.easing,
+    transitionInMs: options.transitionInMs,
+    transitionOutMs: options.transitionOutMs,
     mode: options.mode,
     source: options.source,
     preset: options.preset,
+    followDeadzonePercent: options.followDeadzonePercent,
+    followSmoothingAlpha: options.followSmoothingAlpha,
+    label: options.label,
   }
 }
 
@@ -2400,11 +2426,16 @@ export function createUpdateZoomSegmentCommand(
     target?: Partial<ManualZoomSegment["target"]>
     scale?: number
     easing?: ManualZoomSegment["easing"]
+    transitionInMs?: number
+    transitionOutMs?: number
     enabled?: boolean
     locked?: boolean
     mode?: ManualZoomSegment["mode"]
     source?: ManualZoomSegment["source"]
     preset?: ManualZoomSegment["preset"]
+    followDeadzonePercent?: number
+    followSmoothingAlpha?: number
+    label?: string
   },
 ): CommandRecord {
   return {

@@ -45,6 +45,7 @@ import {
 } from "@recordforge/editor-core"
 import {
   findCursorEventAtTime,
+  getCursorPointAtTimelineTime,
   isCursorClickEdge,
   sourcePointToCanvas,
   zoomTargetForCursorPoint,
@@ -86,6 +87,7 @@ import { AudioTrackPreview } from "./audio-track-preview"
 import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
+import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
 import {
   TimelineLanes,
   getVisibleTickInterval,
@@ -291,6 +293,17 @@ export function TimelineView({
         : undefined,
     [composition, timeline?.canvas],
   )
+  const selectedZoomSegment = useMemo(() => {
+    if (!view.selection || view.selection.kind !== "zoom" || !timeline) return null
+    const zoomSelection = view.selection
+    return (timeline.zoomSegments ?? []).find((s) => s.id === zoomSelection.segmentId) ?? null
+  }, [view.selection, timeline])
+  const cursorPointAtPlayhead = useMemo(() => {
+    if (composition?.cursor.sourcePoint) {
+      return composition.cursor.sourcePoint
+    }
+    return getCursorPointAtTimelineTime(timeline, view.playheadMs, cursorTelemetry, cursorEngine)
+  }, [composition?.cursor.sourcePoint, timeline, view.playheadMs, cursorTelemetry, cursorEngine])
   const cursorClickTimesMs = useMemo(() => {
     if (!timeline) return []
     const screenAssetId = timeline.tracks.find((track) => track.kind === "screen")?.clips[0]
@@ -1086,7 +1099,7 @@ export function TimelineView({
                       zoomTransformStyle
                         ? {
                             transform: zoomTransformStyle,
-                            transformOrigin: "center",
+                            transformOrigin: "0 0",
                           }
                         : undefined
                     }
@@ -1180,6 +1193,28 @@ export function TimelineView({
                   offsetY={videoBounds.top}
                   borderRadius={screenStyle.borderRadius as number | string | undefined}
                   zoomTransform={zoomTransformStyle}
+                />
+              ) : null}
+
+              {mediaUrl &&
+              !mediaError &&
+              videoBounds &&
+              selectedZoomSegment ? (
+                <ZoomCanvasOverlay
+                  segment={selectedZoomSegment}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  containerWidth={videoBounds.width}
+                  containerHeight={videoBounds.height}
+                  offsetX={videoBounds.left}
+                  offsetY={videoBounds.top}
+                  cursorPointAtPlayhead={cursorPointAtPlayhead}
+                  onUpdateTarget={(target, options) =>
+                    interaction.updateZoomTarget(selectedZoomSegment.id, { target }, options)
+                  }
+                  onUpdateSegment={(update, options) =>
+                    interaction.updateZoomTarget(selectedZoomSegment.id, update, options)
+                  }
                 />
               ) : null}
             </div>

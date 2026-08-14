@@ -240,18 +240,25 @@ function toZoomSegments(
     .flatMap((segment) => {
       const window = windowTimeRange(segment.startMs, segment.startMs + segment.durationMs, range)
       if (!window) return []
+      const duration = window.endMs - window.startMs
+      const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
       return [
         {
           id: segment.id,
           startMs: window.startMs,
           endMs: window.endMs,
           target: clampZoomTarget(segment.target, state.canvas),
-          scale: segment.scale,
-          easing: segment.easing,
+          scale: segment.scale ?? 1.5,
+          easing: segment.easing ?? "smooth",
+          transitionInMs: segment.transitionInMs ?? defaultTrans,
+          transitionOutMs: segment.transitionOutMs ?? defaultTrans,
           enabled: segment.enabled,
           mode: segment.mode,
           source: segment.source,
           preset: segment.preset,
+          followDeadzonePercent: segment.followDeadzonePercent,
+          followSmoothingAlpha: segment.followSmoothingAlpha,
+          label: segment.label,
         },
       ]
     })
