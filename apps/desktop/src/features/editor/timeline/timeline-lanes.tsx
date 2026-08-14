@@ -9,59 +9,30 @@ import type {
   TimelineTrack,
   TimelineViewState,
 } from "@recordforge/contracts"
-import {
-  AudioLines,
-  Captions,
-  ChevronDown,
-  ChevronUp,
-  Headphones,
-  Lock,
-  LockOpen,
-  Monitor,
-  MousePointer2,
-  Rows3,
-  ShieldAlert,
-  Video,
-  Volume2,
-  VolumeX,
-  ZoomIn,
-  type LucideIcon,
-} from "lucide-react"
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuRadioGroup,
-  ContextMenuRadioItem,
-  ContextMenuSeparator,
-  ContextMenuSub,
-  ContextMenuSubContent,
-  ContextMenuSubTrigger,
-  ContextMenuTrigger,
-  IconButton,
-  cn,
-} from "@recordforge/ui"
-import {
-  buildSnapTargets,
-  snapClipStart,
-  snapTrimEdge,
-  type SnapTarget,
-} from "@recordforge/editor-core"
-import {
-  toAssetUrl,
-  type DerivativeResource,
-  type WaveformResources,
-  type ThumbnailManifest,
+import { buildSnapTargets, type SnapTarget } from "@recordforge/editor-core"
+import { Scissors } from "lucide-react"
+import type {
+  DerivativeResource,
+  ThumbnailManifest,
+  VideoTrackThumbnailResources,
+  WaveformResources,
 } from "../media/derivative-resources"
-import { ThumbnailStrip, WaveformStrip } from "./timeline-derivatives"
+import { toAssetUrl } from "../media/derivative-resources"
+import { TimelineClipItem } from "./timeline-clip-item"
+import { TimelineMarquee } from "./timeline-marquee"
+import { TimelinePlayhead } from "./timeline-playhead"
+import {
+  TimelineRuler,
+  getVisibleTickInterval,
+} from "./timeline-ruler"
+import { TimelineTrackHeader } from "./timeline-track-header"
+import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
 
-const RULER_HEIGHT = 32
-const MARKER_LANE_HEIGHT = 28
+const RULER_TOTAL_HEIGHT = 52
 const TRACK_ROW_HEIGHT = 56
 const COLLAPSED_TRACK_HEIGHT = 32
 const VIRTUAL_OVERSCAN = 4
-const TICK_INTERVALS = [1_000, 5_000, 10_000, 30_000, 60_000]
 
 export interface CursorRangeAction {
   kind: "toggle-enabled" | "set-smoothing" | "toggle-lock"
@@ -74,18 +45,23 @@ export interface ZoomSegmentAction {
   segmentId: string
 }
 
-interface TimelineLanesProps {
+export interface TimelineLanesProps {
   timeline: TimelineState
   view: TimelineViewState
-  timelineWidth: number
-  pixelsPerMs: number
-  tickInterval: number
+  tool?: TimelineTool
+  timelineWidth?: number
+  pixelsPerMs?: number
+  tickInterval?: number
   cursorClickTimesMs?: number[]
   thumbnailResource: DerivativeResource<ThumbnailManifest>
+  videoThumbnailResources?: VideoTrackThumbnailResources
   waveformResources: WaveformResources
   onSeek: (ms: number) => void
+  onPause?: () => void
   onSetScroll: (ms: number) => void
+  onSetZoom?: (zoom: number) => void
   onSelectClip: (clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) => void
+  onSelectMultipleClips?: (clipIds: string[], primaryClipId: string, trackId: string) => void
   onSelectRange: (startMs: number, endMs: number) => void
   onMoveClip: (
     clip: TimelineClip,
@@ -101,6 +77,8 @@ interface TimelineLanesProps {
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   onSelectMarker: (marker: TimelineMarker) => void
+  onDeleteMarker?: (markerId: string) => void
+  onAddMarkerAtTime?: (timeMs: number) => void
   onSelectZoom: (segmentId: string) => void
   onMoveZoomSegment: (
     segment: ManualZoomSegment,
@@ -128,58 +106,6 @@ interface TimelineLanesProps {
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
 }
 
-function getTrackIcon(track: TimelineTrack): LucideIcon {
-  if (track.kind === "screen") return Monitor
-  if (track.kind === "camera") return Video
-  if (track.kind === "cursor") return MousePointer2
-  if (track.kind === "captions") return Captions
-  if (track.kind === "effects") return ShieldAlert
-  if (track.kind === "zoom") return ZoomIn
-  return AudioLines
-}
-
-function getTrackAccent(track: TimelineTrack): string {
-  if (track.kind === "screen") return "screen"
-  if (track.kind === "camera") return "camera"
-  if (track.kind === "cursor") return "cursor"
-  if (track.kind === "captions") return "captions"
-  if (track.kind === "effects") return "effects"
-  if (track.name.toLowerCase().includes("system")) return "system"
-  return "mic"
-}
-
-function getClipClass(track: TimelineTrack): string {
-  const accent = getTrackAccent(track)
-  return (
-    {
-      screen: "border-track-screen/70 bg-track-screen/20 hover:bg-track-screen/30",
-      camera: "border-track-webcam/70 bg-track-webcam/20 hover:bg-track-webcam/30",
-      mic: "border-track-mic/70 bg-track-mic/20 hover:bg-track-mic/30",
-      system: "border-track-system/70 bg-track-system/20 hover:bg-track-system/30",
-      cursor: "border-primary/70 bg-primary/15 hover:bg-primary/25",
-      captions: "border-primary/70 bg-primary/15 hover:bg-primary/25",
-      effects: "border-warning/70 bg-warning/15 hover:bg-warning/25",
-    }[accent] ?? "border-border bg-surface"
-  )
-}
-
-function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
-  if (clip.kind === "screen") return "Screen capture"
-  if (clip.kind === "camera") return "Camera capture"
-  if (clip.kind === "cursor-effect") return `${clip.presetId} cursor effect`
-  if (clip.kind === "caption") return clip.text
-  if (clip.kind === "mask") return `${clip.mode} privacy mask`
-  return track.name
-}
-
-function getVisibleTickInterval(pixelsPerMs: number): number {
-  const minimumSpacing = 72
-  return (
-    TICK_INTERVALS.find((interval) => interval * pixelsPerMs >= minimumSpacing) ??
-    TICK_INTERVALS[TICK_INTERVALS.length - 1]
-  )
-}
-
 function clipIntersectsWindow(clip: TimelineClip, startMs: number, endMs: number): boolean {
   const clipEndMs = clip.startMs + clip.durationMs
   return clipEndMs >= startMs && clip.startMs <= endMs
@@ -193,19 +119,26 @@ function getTrackHeight(track: TimelineTrack, view: TimelineViewState): number {
 export function TimelineLanes({
   timeline,
   view,
-  timelineWidth,
-  pixelsPerMs,
-  tickInterval,
+  tool = "select",
+  timelineWidth: propTimelineWidth,
+  pixelsPerMs: propPixelsPerMs,
+  tickInterval: propTickInterval,
   cursorClickTimesMs = [],
   thumbnailResource,
+  videoThumbnailResources,
   waveformResources,
   onSeek,
+  onPause,
   onSetScroll,
+  onSetZoom,
   onSelectClip,
+  onSelectMultipleClips,
   onSelectRange,
   onMoveClip,
   onTrimClip,
   onSelectMarker,
+  onDeleteMarker,
+  onAddMarkerAtTime,
   onSelectZoom,
   onDeleteSelection,
   onToggleTrackMuted,
@@ -227,20 +160,64 @@ export function TimelineLanes({
   const [scrollLeft, setScrollLeft] = useState(0)
   const [viewportWidth, setViewportWidth] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
-  const selectedClipIds = new Set(view.selection?.kind === "clip" ? view.selection.clipIds : [])
-  const selectedMarkerId = view.selection?.kind === "marker" ? view.selection.markerId : null
-  const selectedZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
-  const scrollMargin = RULER_HEIGHT + MARKER_LANE_HEIGHT
-  const [draftRange, setDraftRange] = useState<{ startMs: number; endMs: number } | null>(null)
-  const rangePointerRef = useRef<{
+
+  const [marquee, setMarquee] = useState<{ startMs: number; endMs: number } | null>(null)
+  const [razorHoverMs, setRazorHoverMs] = useState<number | null>(null)
+  const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
+
+  const marqueePointerRef = useRef<{
     pointerId: number
     startMs: number
     moved: boolean
   } | null>(null)
-  const suppressClickRef = useRef(false)
 
-  // The ruler and marker lane occupy the virtualizer's scroll margin, so a
-  // 60-minute project only mounts rows and clips in the visible viewport.
+  const selectedClipIds = new Set(view.selection?.kind === "clip" ? view.selection.clipIds : [])
+  const selectedMarkerId = view.selection?.kind === "marker" ? view.selection.markerId : null
+  const selectedZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
+
+  const scrollMargin = RULER_TOTAL_HEIGHT
+
+  // ResizeObserver for viewport dimensions
+  useEffect(() => {
+    const element = scrollRef.current
+    if (!element) return
+    const updateDimensions = () => {
+      setViewportWidth(element.clientWidth)
+      setViewportHeight(element.clientHeight)
+    }
+    updateDimensions()
+    const observer = new ResizeObserver(updateDimensions)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  // Base scale: fits full duration into available viewport width (or fallback 800px)
+  const basePixelsPerMs = useMemo(() => {
+    const effectiveWidth = Math.max(200, viewportWidth || 800)
+    return view.durationMs > 0 ? effectiveWidth / view.durationMs : 0.05
+  }, [viewportWidth, view.durationMs])
+
+  // Zoom scale: 0% = fit available viewport width, 100% = max frame-level zoom
+  const computedPixelsPerMs = useMemo(() => {
+    const zoomPercent = Math.max(0, Math.min(100, view.zoom))
+    if (zoomPercent === 0) return basePixelsPerMs
+    const maxMultiplier = Math.max(25, 0.5 / Math.max(0.0001, basePixelsPerMs))
+    const multiplier = Math.pow(maxMultiplier, zoomPercent / 100)
+    return basePixelsPerMs * multiplier
+  }, [basePixelsPerMs, view.zoom])
+
+  const pixelsPerMs = propPixelsPerMs ?? computedPixelsPerMs
+
+  const computedTimelineWidth = useMemo(() => {
+    const effectiveWidth = Math.max(200, viewportWidth)
+    if (view.zoom === 0) return effectiveWidth
+    return Math.max(effectiveWidth, Math.ceil(view.durationMs * pixelsPerMs))
+  }, [viewportWidth, view.durationMs, pixelsPerMs, view.zoom])
+
+  const timelineWidth = propTimelineWidth ?? computedTimelineWidth
+
+  const tickInterval = propTickInterval ?? getVisibleTickInterval(pixelsPerMs)
+
   const trackVirtualizer = useVirtualizer({
     count: timeline.tracks.length,
     getScrollElement: () => scrollRef.current,
@@ -253,42 +230,47 @@ export function TimelineLanes({
     scrollMargin,
   })
 
-  useEffect(() => {
-    const element = scrollRef.current
-    if (!element) return
-    const observer = new ResizeObserver(() => {
-      setViewportWidth(element.clientWidth)
-      setViewportHeight(element.clientHeight)
-    })
-    observer.observe(element)
-    setViewportWidth(element.clientWidth)
-    setViewportHeight(element.clientHeight)
-    return () => observer.disconnect()
-  }, [])
-
+  // Synchronize horizontal scroll position from store
   useEffect(() => {
     const element = scrollRef.current
     if (!element) return
     const nextScrollLeft = view.scrollMs * pixelsPerMs
-    if (Math.abs(element.scrollLeft - nextScrollLeft) > 1) element.scrollLeft = nextScrollLeft
+    if (Math.abs(element.scrollLeft - nextScrollLeft) > 2) {
+      element.scrollLeft = nextScrollLeft
+      setScrollLeft(nextScrollLeft)
+    }
   }, [pixelsPerMs, view.scrollMs])
 
-  const visibleStartMs = Math.max(0, scrollLeft / pixelsPerMs - 1_000 / Math.max(view.zoom, 1))
+  // Auto-scroll timeline during playback when playhead moves past visible boundary
+  useEffect(() => {
+    if (!view.isPlaying) return
+    const element = scrollRef.current
+    if (!element || viewportWidth <= 0) return
+
+    const playheadPx = view.playheadMs * pixelsPerMs
+    const currentScrollLeft = element.scrollLeft
+    const rightEdge = currentScrollLeft + viewportWidth
+
+    // If playhead moves past the right viewport boundary, page forward cleanly
+    if (playheadPx >= rightEdge - 30) {
+      const nextScroll = Math.max(0, playheadPx - 60)
+      element.scrollLeft = nextScroll
+      setScrollLeft(nextScroll)
+      onSetScroll(nextScroll / pixelsPerMs)
+    } else if (playheadPx < currentScrollLeft) {
+      // If playhead has looped or jumped before current view, reset view to playhead
+      const nextScroll = Math.max(0, playheadPx - 60)
+      element.scrollLeft = nextScroll
+      setScrollLeft(nextScroll)
+      onSetScroll(nextScroll / pixelsPerMs)
+    }
+  }, [view.isPlaying, view.playheadMs, pixelsPerMs, viewportWidth, onSetScroll])
+
+  const visibleStartMs = Math.max(0, scrollLeft / pixelsPerMs - 2_000)
   const visibleEndMs = Math.min(
     view.durationMs,
-    visibleStartMs + Math.max(viewportWidth / pixelsPerMs, 1_000) + 2_000 / Math.max(view.zoom, 1),
+    visibleStartMs + Math.max(viewportWidth / pixelsPerMs, 1_000) + 4_000,
   )
-  const visibleTicks = useMemo(() => {
-    const firstTick = Math.max(0, Math.floor(visibleStartMs / tickInterval) - 1)
-    const lastTick = Math.min(
-      Math.ceil(view.durationMs / tickInterval),
-      Math.ceil(visibleEndMs / tickInterval) + 1,
-    )
-    return Array.from({ length: Math.max(0, lastTick - firstTick + 1) }, (_, index) => {
-      const timeMs = Math.min((firstTick + index) * tickInterval, view.durationMs)
-      return { timeMs, left: timeMs * pixelsPerMs }
-    })
-  }, [pixelsPerMs, tickInterval, view.durationMs, visibleEndMs, visibleStartMs])
 
   const estimatedTrackHeight = timeline.tracks.reduce(
     (total, track) => total + getTrackHeight(track, view),
@@ -315,81 +297,176 @@ export function TimelineLanes({
     if (!element) return 0
     const bounds = element.getBoundingClientRect()
     const position = Math.max(0, clientX - bounds.left + element.scrollLeft)
-    return Math.min(view.durationMs, position / pixelsPerMs)
+    return Math.min(view.durationMs, Math.max(0, position / pixelsPerMs))
   }
 
-  function seekFromPointer(event: React.MouseEvent<HTMLDivElement>) {
-    onSeek(timelineTimeFromClientX(event.clientX))
+  // Wheel handling: Ctrl+Wheel for zoom centered on cursor; Shift+Wheel for pan
+  function handleWheel(e: React.WheelEvent<HTMLDivElement>) {
+    if (e.ctrlKey || e.metaKey) {
+      // Zoom centered on cursor position
+      e.preventDefault()
+      e.stopPropagation()
+      if (!onSetZoom) return
+
+      const delta = -e.deltaY * 0.05
+      const newZoom = Math.max(0, Math.min(100, Math.round(view.zoom + delta)))
+      if (newZoom === view.zoom) return
+
+      const cursorTimeMs = timelineTimeFromClientX(e.clientX)
+      onSetZoom(newZoom)
+
+      // Keep cursor position stable after zoom
+      requestAnimationFrame(() => {
+        const element = scrollRef.current
+        if (!element) return
+        const bounds = element.getBoundingClientRect()
+        const mouseX = e.clientX - bounds.left
+
+        const effectiveWidth = Math.max(200, element.clientWidth)
+        const base = view.durationMs > 0 ? effectiveWidth / view.durationMs : 0.05
+        const maxMult = Math.max(25, 0.5 / Math.max(0.0001, base))
+        const mult = newZoom === 0 ? 1 : Math.pow(maxMult, newZoom / 100)
+        const nextPixelsPerMs = base * mult
+
+        const targetScrollLeft = Math.max(0, cursorTimeMs * nextPixelsPerMs - mouseX)
+        element.scrollLeft = targetScrollLeft
+      })
+      return
+    }
+
+    if (e.shiftKey) {
+      // Horizontal pan
+      e.preventDefault()
+      const element = scrollRef.current
+      if (element) {
+        element.scrollLeft += e.deltaY || e.deltaX
+      }
+    }
   }
 
-  function isTimelineInteractiveTarget(target: EventTarget | null): boolean {
+  function isInteractiveTarget(target: EventTarget | null): boolean {
     return (
       target instanceof Element &&
-      Boolean(target.closest("[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom]"))
+      Boolean(target.closest("[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill]"))
     )
   }
 
-  function handleTimelinePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || isTimelineInteractiveTarget(event.target)) return
-    const startMs = timelineTimeFromClientX(event.clientX)
-    rangePointerRef.current = { pointerId: event.pointerId, startMs, moved: false }
-    event.currentTarget.setPointerCapture(event.pointerId)
-  }
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0 || isInteractiveTarget(e.target)) return
+    const startMs = timelineTimeFromClientX(e.clientX)
 
-  function handleTimelinePointerMove(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = rangePointerRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const endMs = timelineTimeFromClientX(event.clientX)
-    if (Math.abs(endMs - gesture.startMs) < 1) return
-    gesture.moved = true
-    setDraftRange({
-      startMs: Math.min(gesture.startMs, endMs),
-      endMs: Math.max(gesture.startMs, endMs),
-    })
-    event.preventDefault()
-  }
+    // Immediately seek playhead to clicked timestamp on empty space
+    onSeek(startMs)
 
-  function finishTimelinePointer(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = rangePointerRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const endMs = timelineTimeFromClientX(event.clientX)
-    if (gesture.moved) {
-      const startMs = Math.min(gesture.startMs, endMs)
-      const rangeEndMs = Math.max(gesture.startMs, endMs)
-      if (rangeEndMs - startMs >= 1) onSelectRange(startMs, rangeEndMs)
-      suppressClickRef.current = true
+    if (tool === "split") {
+      return
     }
-    rangePointerRef.current = null
-    setDraftRange(null)
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
+
+    // Set up marquee in case user drags
+    marqueePointerRef.current = { pointerId: e.pointerId, startMs, moved: false }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (tool === "split") {
+      const currentMs = timelineTimeFromClientX(e.clientX)
+      setRazorHoverMs(currentMs)
+    }
+
+    const gesture = marqueePointerRef.current
+    if (!gesture || gesture.pointerId !== e.pointerId) return
+
+    const currentMs = timelineTimeFromClientX(e.clientX)
+    if (Math.abs(currentMs - gesture.startMs) < 40 && !gesture.moved) return
+    gesture.moved = true
+    setMarquee({
+      startMs: Math.min(gesture.startMs, currentMs),
+      endMs: Math.max(gesture.startMs, currentMs),
+    })
+    e.preventDefault()
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    const gesture = marqueePointerRef.current
+    if (!gesture || gesture.pointerId !== e.pointerId) return
+
+    if (gesture.moved) {
+      const endMs = timelineTimeFromClientX(e.clientX)
+      const minMs = Math.min(gesture.startMs, endMs)
+      const maxMs = Math.max(gesture.startMs, endMs)
+
+      if (tool === "range") {
+        onSelectRange(minMs, maxMs)
+      } else {
+        // Select all clips intersecting the marquee
+        const matchingClipIds: string[] = []
+        let primaryClip: { id: string; trackId: string } | null = null
+
+        for (const track of timeline.tracks) {
+          for (const clip of track.clips) {
+            if (clip.startMs <= maxMs && clip.startMs + clip.durationMs >= minMs) {
+              matchingClipIds.push(clip.id)
+              if (!primaryClip) primaryClip = { id: clip.id, trackId: track.id }
+            }
+          }
+        }
+
+        if (matchingClipIds.length > 0 && primaryClip && onSelectMultipleClips) {
+          onSelectMultipleClips(matchingClipIds, primaryClip.id, primaryClip.trackId)
+        }
+      }
+    }
+
+    marqueePointerRef.current = null
+    setMarquee(null)
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
     }
   }
 
   const thumbnailData = thumbnailResource.status === "content" ? thumbnailResource.data : null
   const spriteUrl = thumbnailData ? toAssetUrl(thumbnailData.spritePath) : null
+  const snapTargets = useMemo(
+    () => buildSnapTargets(timeline, { playheadMs: view.playheadMs, cursorClickTimesMs }),
+    [timeline, view.playheadMs, cursorClickTimesMs],
+  )
+
+  const onSnapGuideCallback = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
 
   return (
-    <div className="flex min-h-0 flex-1 border-t border-border" aria-label="Timeline editor">
-      <div className="w-52 shrink-0 overflow-hidden border-r border-border bg-surface">
-        <div className="flex h-8 items-center border-b border-border px-3 text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">
-          Tracks
+    <div
+      className="flex min-h-0 flex-1 select-none overflow-hidden"
+      aria-label="Timeline editor tracks"
+      onWheel={handleWheel}
+    >
+      {/* Left Column: Track Headers */}
+      <div className="w-56 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20">
+        {/* Top Header Placeholder corresponding to Ruler Height */}
+        <div className="flex h-13 flex-col justify-center border-b border-border/80 bg-surface-dim/95 px-3">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+            Tracks & Layers
+          </span>
+          <span className="text-[9px] text-subtle-foreground font-mono">
+            {timeline.tracks.length} active tracks
+          </span>
         </div>
-        <div className="flex h-7 items-center border-b border-border px-3 text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">
-          Markers
-        </div>
+
+        {/* Scrollable Track Header Cards */}
         <div
           className="relative overflow-hidden"
           style={{ height: `${Math.max(0, viewportHeight - scrollMargin)}px` }}
         >
           <div
             className="relative"
-            style={{ height: `${totalTrackHeight}px`, transform: `translateY(${-scrollTop}px)` }}
+            style={{
+              height: `${totalTrackHeight}px`,
+              transform: `translateY(${-scrollTop}px)`,
+            }}
           >
             {visibleTrackRows.map(({ track, virtualTrack }) => {
               if (!track) return null
               return (
-                <TrackHeader
+                <TimelineTrackHeader
                   key={track.id}
                   track={track}
                   selected={
@@ -411,33 +488,34 @@ export function TimelineLanes({
         </div>
       </div>
 
+      {/* Right Column: Scrollable Ruler & Tracks Area */}
       <div
         ref={scrollRef}
         className="min-w-0 flex-1 overflow-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
         onScroll={handleScroll}
-        onPointerDown={handleTimelinePointerDown}
-        onPointerMove={handleTimelinePointerMove}
-        onPointerUp={finishTimelinePointer}
-        onPointerCancel={finishTimelinePointer}
-        onClick={(event) => {
-          if (suppressClickRef.current) {
-            suppressClickRef.current = false
-            return
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onPointerLeave={() => setRazorHoverMs(null)}
+        onKeyDown={(e) => {
+          if (e.key === "Delete" || e.key === "Backspace") {
+            e.preventDefault()
+            onDeleteSelection(e.shiftKey)
           }
-          seekFromPointer(event)
         }}
         tabIndex={0}
         role="region"
-        aria-label="Timeline tracks and playhead"
-        aria-keyshortcuts="Space S M Delete Shift+Delete Home End ArrowLeft ArrowRight J K L"
+        aria-label="Timeline lanes and playhead"
       >
         <div
-          className="relative"
+          className="relative bg-surface-dim/40"
           style={{
             width: `${timelineWidth}px`,
             height: `${Math.max(contentHeight, viewportHeight)}px`,
           }}
         >
+          {/* Preload sprite image */}
           {spriteUrl ? (
             <img
               src={spriteUrl}
@@ -447,154 +525,80 @@ export function TimelineLanes({
               onError={onSpriteError}
             />
           ) : null}
-          <div className="sticky top-0 z-30 h-8 border-b border-border bg-surface-dim/95 backdrop-blur">
-            {visibleTicks.map(({ timeMs, left }) => (
-              <span
-                key={timeMs}
-                className="absolute bottom-1 -translate-x-1/2 font-mono text-[10px] tabular-nums text-subtle-foreground"
-                style={{ left: `${left}px` }}
-              >
-                {formatTimelineTime(timeMs)}
-              </span>
-            ))}
-          </div>
 
-          <div className="sticky top-8 z-30 h-7 border-b border-border bg-surface-dim/95 backdrop-blur">
-            {timeline.markers
-              .filter((marker) => marker.timeMs >= visibleStartMs && marker.timeMs <= visibleEndMs)
-              .map((marker) => (
-                <button
-                  key={marker.id}
-                  type="button"
-                  data-timeline-marker
-                  className={cn(
-                    "absolute top-1 flex h-5 max-w-32 -translate-x-1/2 items-center gap-1 truncate rounded px-1.5 text-[10px] font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                    selectedMarkerId === marker.id ? "bg-primary/30" : "bg-overlay/90",
-                  )}
-                  style={{ left: `${marker.timeMs * pixelsPerMs}px` }}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onSelectMarker(marker)
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Delete" && event.key !== "Backspace") return
-                    event.preventDefault()
-                    event.stopPropagation()
-                    onDeleteSelection(event.shiftKey)
-                  }}
-                  title={`${marker.label} · ${formatTimelineTime(marker.timeMs)}`}
-                >
-                  <span
-                    className="size-1.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: marker.color }}
-                  />
-                  <span className="truncate">{marker.label}</span>
-                </button>
-              ))}
-            {timeline.zoomSegments
-              ?.filter(
-                (segment) =>
-                  segment.startMs <= visibleEndMs &&
-                  segment.startMs + segment.durationMs >= visibleStartMs,
-              )
-              .map((segment) => (
-                <ContextMenu key={segment.id}>
-                  <ContextMenuTrigger asChild>
-                    <button
-                      type="button"
-                      data-timeline-zoom
-                      aria-label={`Zoom segment from ${formatTimelineTime(segment.startMs)} to ${formatTimelineTime(segment.startMs + segment.durationMs)}`}
-                      className={cn(
-                        "absolute bottom-0 h-1.5 translate-x-0 rounded-full bg-primary/70 outline-none focus-visible:ring-2 focus-visible:ring-primary",
-                        selectedZoomId === segment.id && "bg-primary ring-1 ring-primary",
-                        segment.locked && "bg-muted-foreground/60",
-                      )}
-                      style={{
-                        left: `${segment.startMs * pixelsPerMs}px`,
-                        width: `${Math.max(4, segment.durationMs * pixelsPerMs)}px`,
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onSelectZoom(segment.id)
-                      }}
-                    />
-                  </ContextMenuTrigger>
-                  <ContextMenuContent>
-                    <ContextMenuItem onSelect={() => onSelectZoom(segment.id)}>
-                      Edit target
-                    </ContextMenuItem>
-                    <ContextMenuItem
-                      onSelect={() =>
-                        onZoomSegmentAction?.({
-                          kind: "regenerate-from-click",
-                          segmentId: segment.id,
-                        })
-                      }
-                    >
-                      Regenerate from click
-                    </ContextMenuItem>
-                    <ContextMenuItem
-                      onSelect={() =>
-                        onZoomSegmentAction?.({
-                          kind: "toggle-lock",
-                          segmentId: segment.id,
-                        })
-                      }
-                    >
-                      {segment.locked ? "Unlock" : "Lock"}
-                    </ContextMenuItem>
-                    <ContextMenuSeparator />
-                    <ContextMenuItem
-                      onSelect={() =>
-                        onZoomSegmentAction?.({
-                          kind: "split",
-                          segmentId: segment.id,
-                        })
-                      }
-                      disabled={segment.locked}
-                    >
-                      Split
-                    </ContextMenuItem>
-                    <ContextMenuItem
-                      onSelect={() =>
-                        onZoomSegmentAction?.({
-                          kind: "delete",
-                          segmentId: segment.id,
-                        })
-                      }
-                      disabled={segment.locked}
-                    >
-                      Delete
-                    </ContextMenuItem>
-                  </ContextMenuContent>
-                </ContextMenu>
-              ))}
-          </div>
+          {/* Sticky Time Ruler & Markers Lane */}
+          <TimelineRuler
+            timelineWidth={timelineWidth}
+            pixelsPerMs={pixelsPerMs}
+            visibleStartMs={visibleStartMs}
+            visibleEndMs={visibleEndMs}
+            durationMs={view.durationMs}
+            tickInterval={tickInterval}
+            markers={timeline.markers}
+            selectedMarkerId={selectedMarkerId}
+            zoomSegments={timeline.zoomSegments}
+            selectedZoomId={selectedZoomId}
+            isPlaying={view.isPlaying}
+            getTimelineTime={timelineTimeFromClientX}
+            onSeek={onSeek}
+            onPause={onPause}
+            onSelectMarker={onSelectMarker}
+            onDeleteMarker={onDeleteMarker ?? (() => {})}
+            onAddMarkerAtTime={onAddMarkerAtTime ?? (() => {})}
+            onSelectZoom={onSelectZoom}
+          />
 
-          <div
-            className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-primary shadow-e2"
-            style={{ left: `${view.playheadMs * pixelsPerMs}px` }}
-          >
-            <div className="absolute -left-1.5 top-8 size-3 rotate-45 rounded-xs bg-primary" />
-          </div>
-
+          {/* Range Selection / Marquee Overlay */}
           {(() => {
-            const range = draftRange ?? (view.selection?.kind === "range" ? view.selection : null)
+            const range = marquee ?? (view.selection?.kind === "range" ? view.selection : null)
             if (!range) return null
             return (
-              <div
-                className="pointer-events-none absolute bottom-0 top-8 z-10 rounded-sm border border-primary/60 bg-primary/15"
-                aria-label={`Selected range from ${formatTimelineTime(range.startMs)} to ${formatTimelineTime(range.endMs)}`}
-                style={{
-                  left: `${range.startMs * pixelsPerMs}px`,
-                  width: `${Math.max(1, (range.endMs - range.startMs) * pixelsPerMs)}px`,
-                }}
+              <TimelineMarquee
+                startMs={range.startMs}
+                endMs={range.endMs}
+                pixelsPerMs={pixelsPerMs}
+                top={scrollMargin}
               />
             )
           })()}
 
+          {/* Magnetic Snapping Guide Line */}
+          {snapGuide ? (
+            <div
+              className="pointer-events-none absolute inset-y-0 z-30 w-px bg-primary shadow-[0_0_8px_rgba(9,77,178,0.9)]"
+              style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
+              aria-hidden
+            />
+          ) : null}
+
+          {/* Razor Tool Hover Indicator */}
+          {tool === "split" && razorHoverMs !== null ? (
+            <div
+              className="pointer-events-none absolute inset-y-0 z-30 flex flex-col items-center -translate-x-1/2"
+              style={{ left: `${razorHoverMs * pixelsPerMs}px` }}
+            >
+              <div className="rounded bg-destructive p-1 text-white shadow-e2">
+                <Scissors className="size-3" />
+              </div>
+              <div className="h-full w-px bg-destructive shadow-[0_0_6px_rgba(239,68,68,0.8)]" />
+            </div>
+          ) : null}
+
+          {/* Playhead Needle */}
+          <TimelinePlayhead
+            playheadMs={view.playheadMs}
+            pixelsPerMs={pixelsPerMs}
+            timelineHeight={contentHeight}
+            isPlaying={view.isPlaying}
+            getTimelineTime={timelineTimeFromClientX}
+            onSeek={onSeek}
+            onPause={onPause}
+          />
+
+          {/* Virtualized Track Rows */}
           {visibleTrackRows.map(({ track, virtualTrack }) => {
             if (!track) return null
+
             if (track.kind === "zoom") {
               return (
                 <ZoomTrackRow
@@ -619,624 +623,73 @@ export function TimelineLanes({
                 />
               )
             }
+
+            const visibleClips = track.clips.filter((clip) =>
+              clipIntersectsWindow(clip, visibleStartMs, visibleEndMs),
+            )
+
+            const isCameraTrack = track.kind === "camera"
+            const isScreenTrack = track.kind === "screen"
+
+            let trackThumbnailData: ThumbnailManifest | null = null
+            let trackSpriteUrl: string | null = null
+
+            if (isScreenTrack) {
+              trackThumbnailData = thumbnailData
+              trackSpriteUrl = spriteUrl
+            } else if (isCameraTrack && videoThumbnailResources) {
+              const cameraStreamThumb = Array.from(
+                videoThumbnailResources.byStream.values(),
+              ).find((r) => r.status === "content")
+              if (cameraStreamThumb && cameraStreamThumb.status === "content") {
+                trackThumbnailData = cameraStreamThumb.data
+                trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath)
+              }
+            }
+
             return (
-              <TimelineTrackRow
+              <div
                 key={track.id}
-                track={track}
-                top={virtualTrack.start}
-                height={virtualTrack.size}
-                visibleStartMs={visibleStartMs}
-                visibleEndMs={visibleEndMs}
-                pixelsPerMs={pixelsPerMs}
-                selectedClipIds={selectedClipIds}
-                frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
-                collapsed={view.collapsedTrackIds.includes(track.id)}
-                thumbnailManifest={thumbnailData}
-                spriteUrl={spriteUrl}
-                waveformResources={waveformResources}
-                onSelectClip={onSelectClip}
-                onMoveClip={onMoveClip}
-                onTrimClip={onTrimClip}
-                getTimelineTime={timelineTimeFromClientX}
-                snapTargets={buildSnapTargets(timeline, {
-                  excludeClipId: undefined,
-                  playheadMs: view.playheadMs,
-                  cursorClickTimesMs,
-                })}
-                snapEnabled={view.snapEnabled}
-                snapThresholdMs={view.snapThresholdMs}
-                onSpriteError={onSpriteError}
-                onDuplicateClip={onDuplicateClip}
-                onSplitClip={onSplitClip}
-                onDeleteClip={onDeleteClip}
-                onCursorRangeAction={onCursorRangeAction}
-              />
+                className="absolute inset-x-0 flex items-center border-b border-border/70"
+                style={{ top: virtualTrack.start, height: virtualTrack.size }}
+              >
+                {visibleClips.map((clip) => (
+                  <TimelineClipItem
+                    key={clip.id}
+                    clip={clip}
+                    track={track}
+                    height={virtualTrack.size}
+                    pixelsPerMs={pixelsPerMs}
+                    selected={selectedClipIds.has(clip.id)}
+                    frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
+                    collapsed={view.collapsedTrackIds.includes(track.id)}
+                    thumbnailManifest={trackThumbnailData}
+                    spriteUrl={trackSpriteUrl}
+                    visibleStartMs={visibleStartMs}
+                    visibleEndMs={visibleEndMs}
+                    waveformResources={waveformResources}
+                    snapTargets={snapTargets}
+                    snapEnabled={view.snapEnabled}
+                    snapThresholdMs={view.snapThresholdMs}
+                    onSelectClip={onSelectClip}
+                    onMoveClip={onMoveClip}
+                    onTrimClip={onTrimClip}
+                    getTimelineTime={timelineTimeFromClientX}
+                    onSnapGuide={onSnapGuideCallback}
+                    onSpriteError={onSpriteError}
+                    onDuplicateClip={onDuplicateClip}
+                    onSplitClip={onSplitClip}
+                    onDeleteClip={onDeleteClip}
+                    onCursorRangeAction={onCursorRangeAction}
+                  />
+                ))}
+              </div>
             )
           })}
         </div>
       </div>
     </div>
   )
-}
-
-function TrackHeader({
-  track,
-  selected,
-  collapsed,
-  height,
-  top,
-  onToggleTrackMuted,
-  onToggleTrackSolo,
-  onToggleTrackLocked,
-  onToggleTrackCollapsed,
-  onCycleTrackHeight,
-}: {
-  track: TimelineTrack
-  selected: boolean
-  collapsed: boolean
-  height: number
-  top: number
-  onToggleTrackMuted: (track: TimelineTrack) => void
-  onToggleTrackSolo: (track: TimelineTrack) => void
-  onToggleTrackLocked: (track: TimelineTrack) => void
-  onToggleTrackCollapsed: (track: TimelineTrack) => void
-  onCycleTrackHeight: (track: TimelineTrack) => void
-}) {
-  const TrackIcon = getTrackIcon(track)
-  return (
-    <div
-      className={cn(
-        "absolute inset-x-0 flex items-center justify-between border-b border-border px-3",
-        selected && "bg-overlay/40",
-      )}
-      style={{ transform: `translateY(${top}px)`, height }}
-    >
-      <div className="flex min-w-0 items-center gap-2">
-        <TrackIcon
-          className={cn("size-4 shrink-0", {
-            "text-track-screen": track.kind === "screen",
-            "text-track-webcam": track.kind === "camera",
-            "text-track-mic":
-              track.kind === "audio" && !track.name.toLowerCase().includes("system"),
-            "text-track-system":
-              track.kind === "audio" && track.name.toLowerCase().includes("system"),
-            "text-primary":
-              track.kind === "cursor" || track.kind === "captions" || track.kind === "zoom",
-            "text-warning": track.kind === "effects",
-          })}
-          aria-hidden
-        />
-        <span className="truncate text-xs font-medium text-muted-foreground">{track.name}</span>
-      </div>
-      <div className="flex shrink-0 items-center gap-0.5">
-        <IconButton
-          label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
-          tooltipSide="top"
-          className="size-7"
-          onClick={() => onToggleTrackMuted(track)}
-        >
-          {track.muted ? <VolumeX /> : <Volume2 />}
-        </IconButton>
-        <IconButton
-          label={track.solo ? `Unsolo ${track.name}` : `Solo ${track.name}`}
-          tooltipSide="top"
-          className={cn("size-7", track.solo && "bg-primary/20 text-primary")}
-          onClick={() => onToggleTrackSolo(track)}
-        >
-          <Headphones />
-        </IconButton>
-        <IconButton
-          label={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`}
-          tooltipSide="top"
-          className="size-7"
-          onClick={() => onToggleTrackLocked(track)}
-        >
-          {track.locked ? <Lock /> : <LockOpen />}
-        </IconButton>
-        <IconButton
-          label={collapsed ? `Expand ${track.name}` : `Collapse ${track.name}`}
-          tooltipSide="top"
-          className="size-7"
-          onClick={() => onToggleTrackCollapsed(track)}
-        >
-          {collapsed ? <ChevronDown /> : <ChevronUp />}
-        </IconButton>
-        <IconButton
-          label={`Change ${track.name} height`}
-          tooltipSide="top"
-          className="size-7"
-          onClick={() => onCycleTrackHeight(track)}
-        >
-          <Rows3 />
-        </IconButton>
-      </div>
-    </div>
-  )
-}
-
-function TimelineTrackRow({
-  track,
-  top,
-  height,
-  visibleStartMs,
-  visibleEndMs,
-  pixelsPerMs,
-  selectedClipIds,
-  frameMs,
-  collapsed,
-  thumbnailManifest,
-  spriteUrl,
-  waveformResources,
-  onSelectClip,
-  onMoveClip,
-  onTrimClip,
-  getTimelineTime,
-  snapTargets,
-  snapEnabled,
-  snapThresholdMs,
-  onSpriteError,
-  onDuplicateClip,
-  onSplitClip,
-  onDeleteClip,
-  onCursorRangeAction,
-}: {
-  track: TimelineTrack
-  top: number
-  height: number
-  visibleStartMs: number
-  visibleEndMs: number
-  pixelsPerMs: number
-  selectedClipIds: Set<string>
-  frameMs: number
-  collapsed: boolean
-  thumbnailManifest: ThumbnailManifest | null
-  spriteUrl: string | null
-  waveformResources: WaveformResources
-  onSelectClip: (clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) => void
-  onMoveClip: (
-    clip: TimelineClip,
-    track: TimelineTrack,
-    newStartMs: number,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-  onTrimClip: (
-    clip: TimelineClip,
-    track: TimelineTrack,
-    edge: "start" | "end",
-    edgeTimeMs: number,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-  getTimelineTime: (clientX: number) => number
-  snapTargets: ReturnType<typeof buildSnapTargets>
-  snapEnabled: boolean
-  snapThresholdMs: number
-  onSpriteError: () => void
-  onDuplicateClip: (clip: TimelineClip) => void
-  onSplitClip: (clip: TimelineClip) => void
-  onDeleteClip: (clip: TimelineClip) => void
-  onCursorRangeAction?: (action: CursorRangeAction) => void
-}) {
-  const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
-  const onSnapGuide = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
-  const visibleClips = track.clips.filter((clip) =>
-    clipIntersectsWindow(clip, visibleStartMs, visibleEndMs),
-  )
-
-  return (
-    <div
-      className={cn(
-        "absolute inset-x-0 flex items-center border-b border-border",
-        track.muted && "bg-surface-dim/20",
-      )}
-      style={{ top, height }}
-    >
-      {snapGuide ? (
-        <div
-          className="pointer-events-none absolute inset-y-0 z-10 w-px bg-primary/60"
-          style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
-          aria-hidden
-        />
-      ) : null}
-      {visibleClips.map((clip) => (
-        <TimelineClipItem
-          key={clip.id}
-          clip={clip}
-          track={track}
-          height={height}
-          pixelsPerMs={pixelsPerMs}
-          selected={selectedClipIds.has(clip.id)}
-          frameMs={frameMs}
-          collapsed={collapsed}
-          thumbnailManifest={thumbnailManifest}
-          spriteUrl={spriteUrl}
-          visibleStartMs={visibleStartMs}
-          visibleEndMs={visibleEndMs}
-          waveformResources={waveformResources}
-          onSelectClip={onSelectClip}
-          onMoveClip={onMoveClip}
-          onTrimClip={onTrimClip}
-          getTimelineTime={getTimelineTime}
-          snapTargets={snapTargets}
-          snapEnabled={snapEnabled}
-          snapThresholdMs={snapThresholdMs}
-          onSnapGuide={onSnapGuide}
-          onSpriteError={onSpriteError}
-          onDuplicateClip={onDuplicateClip}
-          onSplitClip={onSplitClip}
-          onDeleteClip={onDeleteClip}
-          onCursorRangeAction={onCursorRangeAction}
-        />
-      ))}
-    </div>
-  )
-}
-
-interface ClipGesture {
-  pointerId: number
-  mode: "move" | "trim-start" | "trim-end"
-  initialClientX: number
-  initialTimelineMs: number
-  initialClipStartMs: number
-  initialClipEndMs: number
-  moved: boolean
-}
-
-function TimelineClipItem({
-  clip,
-  track,
-  height,
-  pixelsPerMs,
-  selected,
-  frameMs,
-  collapsed,
-  thumbnailManifest,
-  spriteUrl,
-  visibleStartMs,
-  visibleEndMs,
-  waveformResources,
-  onSelectClip,
-  onMoveClip,
-  onTrimClip,
-  getTimelineTime,
-  snapTargets,
-  snapEnabled,
-  snapThresholdMs,
-  onSnapGuide,
-  onSpriteError,
-  onDuplicateClip,
-  onSplitClip,
-  onDeleteClip,
-  onCursorRangeAction,
-}: {
-  clip: TimelineClip
-  track: TimelineTrack
-  height: number
-  pixelsPerMs: number
-  selected: boolean
-  frameMs: number
-  collapsed: boolean
-  thumbnailManifest: ThumbnailManifest | null
-  spriteUrl: string | null
-  visibleStartMs: number
-  visibleEndMs: number
-  waveformResources: WaveformResources
-  onSelectClip: (clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) => void
-  onMoveClip: (
-    clip: TimelineClip,
-    track: TimelineTrack,
-    newStartMs: number,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-  onTrimClip: (
-    clip: TimelineClip,
-    track: TimelineTrack,
-    edge: "start" | "end",
-    edgeTimeMs: number,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-  getTimelineTime: (clientX: number) => number
-  snapTargets: ReturnType<typeof buildSnapTargets>
-  snapEnabled: boolean
-  snapThresholdMs: number
-  onSnapGuide: (target: SnapTarget | null) => void
-  onSpriteError: () => void
-  onDuplicateClip: (clip: TimelineClip) => void
-  onSplitClip: (clip: TimelineClip) => void
-  onDeleteClip: (clip: TimelineClip) => void
-  onCursorRangeAction?: (action: CursorRangeAction) => void
-}) {
-  const gestureRef = useRef<ClipGesture | null>(null)
-  const suppressClickRef = useRef(false)
-  const waveformResource =
-    clip.kind === "audio" ? waveformResources.byStream.get(clip.streamIndex ?? -1) : undefined
-  const waveformData = waveformResource?.status === "content" ? waveformResource.data : null
-  const clipTargets = snapTargets.filter((target) => !target.id.startsWith(`${clip.id}:`))
-  const clipHeight = collapsed ? 24 : Math.max(32, Math.min(height - 16, 40))
-  const cursorRange = clip.kind === "cursor-effect" ? clip : null
-
-  function beginGesture(
-    event: React.PointerEvent<HTMLDivElement | HTMLButtonElement>,
-    mode: ClipGesture["mode"],
-  ) {
-    if (event.button !== 0 || track.locked || (clip.kind === "cursor-effect" && clip.locked)) return
-    event.stopPropagation()
-    event.preventDefault()
-    const target = event.currentTarget.closest("[data-timeline-clip]")
-    if (!(target instanceof HTMLElement)) return
-    target.setPointerCapture(event.pointerId)
-    gestureRef.current = {
-      pointerId: event.pointerId,
-      mode,
-      initialClientX: event.clientX,
-      initialTimelineMs: getTimelineTime(event.clientX),
-      initialClipStartMs: clip.startMs,
-      initialClipEndMs: clip.startMs + clip.durationMs,
-      moved: false,
-    }
-  }
-
-  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const currentMs = getTimelineTime(event.clientX)
-    const deltaMs = currentMs - gesture.initialTimelineMs
-    if (Math.abs(event.clientX - gesture.initialClientX) < 3 && !gesture.moved) return
-    gesture.moved = true
-    suppressClickRef.current = true
-    event.preventDefault()
-
-    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
-
-    if (gesture.mode === "move") {
-      const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
-      const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, clipTargets, snap)
-      onSnapGuide(snapped.snapped ? snapped.target : null)
-      onMoveClip(clip, track, snapped.timeMs, { phase: "draft" })
-      return
-    }
-
-    const edge = gesture.mode === "trim-start" ? "start" : "end"
-    const rawEdgeTimeMs =
-      edge === "start"
-        ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-        : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
-    onSnapGuide(snapped.snapped ? snapped.target : null)
-    onTrimClip(clip, track, edge, snapped.timeMs, { phase: "draft" })
-  }
-
-  function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const wasCancelled = event.type === "pointercancel"
-    const didMove = gesture.moved
-    gestureRef.current = null
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
-    }
-
-    if (wasCancelled || !didMove) {
-      onSnapGuide(null)
-      if (gesture.mode === "move") {
-        onMoveClip(clip, track, gesture.initialClipStartMs, { phase: "cancel" })
-      } else {
-        const edge = gesture.mode === "trim-start" ? "start" : "end"
-        const edgeTimeMs = edge === "start" ? gesture.initialClipStartMs : gesture.initialClipEndMs
-        onTrimClip(clip, track, edge, edgeTimeMs, { phase: "cancel" })
-      }
-      return
-    }
-
-    const currentMs = getTimelineTime(event.clientX)
-    const deltaMs = currentMs - gesture.initialTimelineMs
-    const snap = { enabled: snapEnabled && !event.altKey, thresholdMs: snapThresholdMs }
-
-    if (gesture.mode === "move") {
-      const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
-      const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, clipTargets, snap)
-      onSnapGuide(null)
-      onMoveClip(clip, track, snapped.timeMs, { phase: "commit" })
-      return
-    }
-
-    const edge = gesture.mode === "trim-start" ? "start" : "end"
-    const rawEdgeTimeMs =
-      edge === "start"
-        ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-        : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
-    onSnapGuide(null)
-    onTrimClip(clip, track, edge, snapped.timeMs, { phase: "commit" })
-  }
-
-  const handleClass = cn(
-    "absolute inset-y-0 z-20 w-2 cursor-ew-resize rounded-sm opacity-0 transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-    "bg-primary/70",
-  )
-
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        <div
-          role="button"
-          tabIndex={0}
-          data-timeline-clip
-          aria-label={`${getClipLabel(clip, track)} from ${formatTimelineTime(clip.startMs)} to ${formatTimelineTime(clip.startMs + clip.durationMs)}`}
-          aria-pressed={selected}
-          aria-keyshortcuts="Enter Space ArrowLeft ArrowRight"
-          className={cn(
-            "absolute flex min-w-10 items-center overflow-hidden rounded-md border px-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-            getClipClass(track),
-            selected && "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim",
-            track.muted && "opacity-45",
-            track.locked && "cursor-not-allowed opacity-60",
-            collapsed ? "h-6" : "h-9",
-          )}
-          style={{
-            left: `${clip.startMs * pixelsPerMs}px`,
-            width: `${Math.max(clip.durationMs * pixelsPerMs, 40)}px`,
-            height: `${clipHeight}px`,
-          }}
-          onPointerDown={(event) => beginGesture(event, "move")}
-          onPointerMove={handlePointerMove}
-          onPointerUp={finishGesture}
-          onPointerCancel={finishGesture}
-          onClick={(event) => {
-            event.stopPropagation()
-            if (suppressClickRef.current) {
-              suppressClickRef.current = false
-              return
-            }
-            onSelectClip(clip, track, event)
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault()
-              event.stopPropagation()
-              event.currentTarget.click()
-              return
-            }
-            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
-            const direction = event.key === "ArrowLeft" ? -1 : 1
-            if (event.altKey) {
-              event.preventDefault()
-              event.stopPropagation()
-              const edge = event.shiftKey
-                ? direction === -1
-                  ? "end"
-                  : "start"
-                : direction === -1
-                  ? "start"
-                  : "end"
-              const edgeTimeMs =
-                edge === "start"
-                  ? clip.startMs + direction * frameMs
-                  : clip.startMs + clip.durationMs + direction * frameMs
-              onTrimClip(clip, track, edge, edgeTimeMs, { phase: "commit" })
-              return
-            }
-            if (event.ctrlKey || event.metaKey) {
-              event.preventDefault()
-              event.stopPropagation()
-              const nextStartMs = Math.max(
-                0,
-                clip.startMs + direction * (event.shiftKey ? 1_000 : frameMs),
-              )
-              onMoveClip(clip, track, nextStartMs, { phase: "commit" })
-            }
-          }}
-          title={`${getClipLabel(clip, track)} · ${formatTimelineTime(clip.durationMs)}`}
-        >
-          <button
-            type="button"
-            className={cn(handleClass, "left-0")}
-            aria-label={`Trim start of ${getClipLabel(clip, track)}`}
-            onPointerDown={(event) => beginGesture(event, "trim-start")}
-            onClick={(event) => event.stopPropagation()}
-          />
-          {thumbnailManifest && spriteUrl ? (
-            <ThumbnailStrip
-              clip={clip}
-              manifest={thumbnailManifest}
-              spriteUrl={spriteUrl}
-              pixelsPerMs={pixelsPerMs}
-              visibleStartMs={visibleStartMs}
-              visibleEndMs={visibleEndMs}
-              onSpriteError={onSpriteError}
-            />
-          ) : null}
-          {waveformData ? (
-            <WaveformStrip
-              clip={clip}
-              data={waveformData}
-              pixelsPerMs={pixelsPerMs}
-              visibleStartMs={visibleStartMs}
-              visibleEndMs={visibleEndMs}
-            />
-          ) : null}
-          <span className="relative z-10 truncate font-medium text-foreground">
-            {getClipLabel(clip, track)}
-          </span>
-          {clip.kind === "audio" && !waveformData ? (
-            <span
-              className="relative z-10 ml-2 flex shrink-0 items-end gap-px opacity-70"
-              aria-hidden
-            >
-              {Array.from({ length: 8 }, (_, index) => (
-                <span
-                  key={index}
-                  className="w-px bg-current"
-                  style={{ height: `${6 + ((index * 7) % 10)}px` }}
-                />
-              ))}
-            </span>
-          ) : null}
-          <button
-            type="button"
-            className={cn(handleClass, "right-0")}
-            aria-label={`Trim end of ${getClipLabel(clip, track)}`}
-            onPointerDown={(event) => beginGesture(event, "trim-end")}
-            onClick={(event) => event.stopPropagation()}
-          />
-        </div>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        {cursorRange && onCursorRangeAction ? (
-          <>
-            <ContextMenuItem
-              onSelect={() =>
-                onCursorRangeAction({ kind: "toggle-enabled", rangeId: cursorRange.id })
-              }
-            >
-              {cursorRange.enabled ? "Hide cursor" : "Show cursor"}
-            </ContextMenuItem>
-            <ContextMenuSub>
-              <ContextMenuSubTrigger>Smoothing</ContextMenuSubTrigger>
-              <ContextMenuSubContent>
-                <ContextMenuRadioGroup
-                  value={cursorRange.smoothing}
-                  onValueChange={(value) =>
-                    onCursorRangeAction({
-                      kind: "set-smoothing",
-                      rangeId: cursorRange.id,
-                      smoothing: value as CursorSmoothing,
-                    })
-                  }
-                >
-                  <ContextMenuRadioItem value="smooth">Smooth</ContextMenuRadioItem>
-                  <ContextMenuRadioItem value="off">Precise</ContextMenuRadioItem>
-                </ContextMenuRadioGroup>
-              </ContextMenuSubContent>
-            </ContextMenuSub>
-            <ContextMenuItem
-              onSelect={() => onCursorRangeAction({ kind: "toggle-lock", rangeId: cursorRange.id })}
-            >
-              {cursorRange.locked ? "Unlock range" : "Lock range"}
-            </ContextMenuItem>
-            <ContextMenuSeparator />
-          </>
-        ) : null}
-        <ContextMenuItem onSelect={() => onDuplicateClip(clip)}>Duplicate</ContextMenuItem>
-        <ContextMenuItem onSelect={() => onSplitClip(clip)}>Split at playhead</ContextMenuItem>
-        <ContextMenuItem
-          onSelect={() => onDeleteClip(clip)}
-          disabled={cursorRange ? cursorRange.locked : false}
-        >
-          Delete
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
-  )
-}
-
-function formatTimelineTime(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  const millis = Math.floor((ms % 1000) / 10)
-  return `${minutes}:${seconds.toString().padStart(2, "0")}.${millis.toString().padStart(2, "0")}`
 }
 
 export { getVisibleTickInterval }

@@ -85,3 +85,21 @@ export type recordForgeProject = z.infer<typeof projectSchema>
 
 // `Project` is the preferred alias for the durable project type.
 export type Project = recordForgeProject
+
+// Lightweight project summary for project browsing and management in the UI.
+export const projectSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  recordingId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  durationMs: z.number().int().min(0).default(0),
+  thumbnailPath: z.string().nullish(),
+  trackCount: z.number().int().min(0).default(0),
+  clipCount: z.number().int().min(0).default(0),
+  width: z.number().int().min(0).nullish(),
+  height: z.number().int().min(0).nullish(),
+  fps: z.number().min(0).nullish(),
+})
+
+export type ProjectSummary = z.infer<typeof projectSummarySchema>

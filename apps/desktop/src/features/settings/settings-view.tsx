@@ -12,8 +12,8 @@ import {
   Sun,
   Volume2,
 } from "lucide-react"
-import type { RecordingConfig } from "@recordforge/contracts"
-import { defaultCursorSettings } from "@recordforge/contracts"
+import type { CursorSettings, RecordingConfig } from "@recordforge/contracts"
+import { cursorSettingsSchema, defaultCursorSettings } from "@recordforge/contracts"
 import {
   Button,
   Input,
@@ -40,17 +40,47 @@ export function SettingsView() {
   const [savePath, setSavePath] = useState("C:\\Users\\User\\Videos\\recordForge")
   const [countdownSec, setCountdownSec] = useState("3")
   const [startMinimized, setStartMinimized] = useState(false)
+  const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
 
   useEffect(() => {
-    if (!isTauri()) return
-    void Promise.all([getSetting("countdownSeconds"), getSetting("startMinimized")]).then(
-      ([countdown, minimized]) => {
-        if (countdown === "0" || countdown === "3" || countdown === "5") {
-          setCountdownSec(countdown)
-        }
+    async function load() {
+      let countdown: string | null = null
+      let minimized: string | null = null
+      let cursorRaw: string | null = null
+
+      if (isTauri()) {
+        const results = await Promise.all([
+          getSetting("countdownSeconds").catch(() => null),
+          getSetting("startMinimized").catch(() => null),
+          getSetting("defaultCursorSettings").catch(() => null),
+        ])
+        countdown = results[0]
+        minimized = results[1]
+        cursorRaw = results[2]
+      }
+
+      if (!cursorRaw) {
+        cursorRaw = localStorage.getItem("recordforge:defaultCursorSettings")
+      }
+
+      if (countdown === "0" || countdown === "3" || countdown === "5") {
+        setCountdownSec(countdown)
+      }
+      if (minimized !== null) {
         setStartMinimized(minimized === "true")
-      },
-    )
+      }
+      if (cursorRaw) {
+        try {
+          const parsed = cursorSettingsSchema.safeParse(JSON.parse(cursorRaw))
+          if (parsed.success) {
+            setCursorSettings(parsed.data)
+          }
+        } catch {
+          // Keep defaults if parsing fails
+        }
+      }
+    }
+    void load()
   }, [])
 
   function handleCountdownChange(value: string) {
@@ -61,6 +91,29 @@ export function SettingsView() {
   function handleStartMinimizedChange(value: boolean) {
     setStartMinimized(value)
     if (isTauri()) void setSetting("startMinimized", String(value))
+  }
+
+  function handleCursorChange(updated: Partial<CursorSettings>) {
+    const next = { ...cursorSettings, ...updated }
+    setCursorSettings(next)
+    const json = JSON.stringify(next)
+    try {
+      localStorage.setItem("recordforge:defaultCursorSettings", json)
+    } catch {
+      // Ignore localStorage errors
+    }
+    if (isTauri()) void setSetting("defaultCursorSettings", json)
+  }
+
+  function handleCursorReset() {
+    setCursorSettings(defaultCursorSettings)
+    const json = JSON.stringify(defaultCursorSettings)
+    try {
+      localStorage.setItem("recordforge:defaultCursorSettings", json)
+    } catch {
+      // Ignore localStorage errors
+    }
+    if (isTauri()) void setSetting("defaultCursorSettings", json)
   }
 
   return (
@@ -342,11 +395,12 @@ export function SettingsView() {
 
       {/* Tab: Custom Cursor */}
       {activeTab === "cursor" ? (
-        <div className="max-w-xl rounded-2xl border border-border bg-surface p-5 shadow-e1">
+        <div className="max-w-2xl rounded-2xl border border-border bg-surface p-6 shadow-e1">
           <CursorInspector
-            settings={defaultCursorSettings}
-            onChange={() => {}}
-            presetsEnabled={false}
+            settings={cursorSettings}
+            onChange={handleCursorChange}
+            onReset={handleCursorReset}
+            presetsEnabled={true}
           />
         </div>
       ) : null}

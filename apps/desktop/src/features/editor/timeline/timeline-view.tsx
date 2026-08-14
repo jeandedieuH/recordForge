@@ -41,7 +41,6 @@ import {
   zoomTransformToCss,
   type PlaybackBoundary,
   canvasShadowStyle,
-  formatTime,
 } from "@recordforge/editor-core"
 import {
   findCursorEventAtTime,
@@ -53,26 +52,13 @@ import {
 import { isTimelineAudioMuted } from "@recordforge/media-core"
 import {
   AlertCircle,
-  Flag,
   Monitor,
-  MousePointer2,
-  Pause,
-  Play,
-  Scissors,
-  ShieldAlert,
-  SkipBack,
-  SkipForward,
-  ZoomIn,
-  ZoomOut,
 } from "lucide-react"
 import {
   Button,
   EmptyState,
-  IconButton,
-  NativeSelect,
   Progress,
   Skeleton,
-  Slider,
   cn,
 } from "@recordforge/ui"
 import { isTauri } from "../../../lib/settings"
@@ -82,6 +68,7 @@ import type {
   DerivativeResource,
   WaveformResources,
   ThumbnailManifest,
+  VideoTrackThumbnailResources,
 } from "../media/derivative-resources"
 import { AudioTrackPreview } from "./audio-track-preview"
 import { CaptionPreview } from "./caption-preview"
@@ -90,10 +77,10 @@ import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
 import {
   TimelineLanes,
-  getVisibleTickInterval,
   type CursorRangeAction,
   type ZoomSegmentAction,
 } from "./timeline-lanes"
+import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
 import { CustomCursorOverlay } from "../cursor"
@@ -103,6 +90,7 @@ import { useResizableDimension } from "../shell/use-resizable-dimension"
 interface TimelineViewProps {
   recordingId: string
   thumbnailResource: DerivativeResource<ThumbnailManifest> & { retry: () => void }
+  videoThumbnailResources?: VideoTrackThumbnailResources
   waveformResources: WaveformResources
 }
 
@@ -179,6 +167,7 @@ function EditorErrorState({
 export function TimelineView({
   recordingId,
   thumbnailResource,
+  videoThumbnailResources,
   waveformResources,
 }: TimelineViewProps) {
   const engine = useTimelineStore((state) => state.engine)
@@ -221,23 +210,19 @@ export function TimelineView({
   const monitorRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
-  const [tool, setTool] = useState<"select" | "split">("select")
+  const [tool, setTool] = useState<TimelineTool>("select")
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
 
   const [timelineHeight, setTimelineHeight] = useResizableDimension({
-    defaultValue: 320,
-    min: 160,
-    max: 520,
+    defaultValue: 340,
+    min: 180,
+    max: 560,
     storageKey: "recordforge:editor:timelineHeight",
   })
 
-  // Phase 2: pointer/keyboard editing gestures use draft/commit/cancel semantics.
   const interaction = useTimelineInteraction()
-
-  // Phase 1: project loading is owned by EditorSession, not by the timeline view.
-  // The view uses the already-loaded session state.
 
   const selectedClip = useMemo<SelectedClip | null>(() => {
     const selection = view.selection
@@ -383,9 +368,6 @@ export function TimelineView({
     const height = Math.max(1, timeline?.canvas.height ?? 1)
     const padding = timeline?.canvas.padding ?? 0
 
-    // The canvas wrapper is the produced background screen. Padding insets the
-    // recorded video screen from that background. Scale using the full canvas
-    // so the padding stays proportional as the preview is resized.
     const canvasScale = canvasWidth / width
 
     if (isSideBySideAtPlayhead) {
@@ -429,9 +411,6 @@ export function TimelineView({
       return
     }
 
-    // The recorded video screen is the largest video-aspect rectangle that still
-    // fits inside the padded area. This avoids double-letterboxing (green bars
-    // inside the video screen) and keeps the green background only around it.
     const maxScreenWidth = Math.max(1, (width - padding * 2) * canvasScale)
     const maxScreenHeight = Math.max(1, (height - padding * 2) * canvasScale)
     const sourceWidth = video && video.videoWidth > 0 ? video.videoWidth : width
@@ -472,7 +451,6 @@ export function TimelineView({
     const width = Math.max(1, timeline.canvas.width)
     const height = Math.max(1, timeline.canvas.height)
     return {
-      // Fit the background screen inside the monitor while preserving its aspect ratio.
       width: `min(100cqw, calc(100cqh * ${width / height}))`,
       aspectRatio: `${width} / ${height}`,
       backgroundColor: timeline.canvas.background,
@@ -490,7 +468,6 @@ export function TimelineView({
       top: videoBounds.top,
       width: videoBounds.width,
       height: videoBounds.height,
-      // Corners and shadow belong to the recorded video screen, not the background.
       borderRadius: timeline.canvas.borderRadius * videoBounds.scale,
       boxShadow: canvasShadowStyle(timeline.canvas, videoBounds.scale),
       overflow: "hidden",
@@ -535,12 +512,22 @@ export function TimelineView({
     return () => observer.disconnect()
   }, [mediaUrl, updateVideoBounds])
 
+  const frameMs = Math.max(1, Math.round(1000 / Math.max(1, timeline?.canvas.fps ?? 30)))
+
+  function stepFrame(direction: -1 | 1) {
+    seek(Math.max(0, Math.min(view.durationMs, view.playheadMs + direction * frameMs)))
+  }
+
+  function zoomToFit() {
+    setZoom(0)
+    setScroll(0)
+  }
+
   const handleTimelineKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement | null
       if (target?.closest("input, textarea, select, button")) return
       const key = event.key.toLowerCase()
-      const frameMs = Math.max(1, Math.round(1000 / Math.max(1, timeline?.canvas.fps ?? 30)))
       const hasModifier = event.ctrlKey || event.metaKey
 
       if (event.code === "Space") {
@@ -559,6 +546,21 @@ export function TimelineView({
       } else if (hasModifier && key === "d") {
         event.preventDefault()
         duplicateSelected()
+      } else if (hasModifier && (key === "=" || key === "+")) {
+        event.preventDefault()
+        setZoom(Math.min(100, Math.round(view.zoom + 10)))
+      } else if (hasModifier && (key === "-" || key === "_")) {
+        event.preventDefault()
+        setZoom(Math.max(0, Math.round(view.zoom - 10)))
+      } else if (event.shiftKey && key === "z") {
+        event.preventDefault()
+        zoomToFit()
+      } else if (key === "v") {
+        setTool("select")
+      } else if (key === "c") {
+        setTool("split")
+      } else if (key === "r") {
+        setTool("range")
       } else if (key === "s") {
         event.preventDefault()
         splitSelected()
@@ -610,6 +612,7 @@ export function TimelineView({
       addMarker,
       deleteSelected,
       duplicateSelected,
+      frameMs,
       nudgeSelected,
       pause,
       play,
@@ -619,17 +622,36 @@ export function TimelineView({
       selectedClip,
       setPlaybackRate,
       splitSelected,
-      timeline?.canvas.fps,
       togglePlay,
       trimSelected,
       undo,
       view.durationMs,
       view.playheadMs,
+      zoomToFit,
     ],
   )
 
   function splitSelected() {
-    if (!selectedClip || selectedClip.track.locked) return
+    if (!selectedClip || selectedClip.track.locked) {
+      // If no clip is explicitly selected, attempt to split the top clip at playhead
+      if (timeline) {
+        for (const track of timeline.tracks) {
+          if (track.locked) continue
+          const clipAtPlayhead = track.clips.find(
+            (c) => view.playheadMs > c.startMs && view.playheadMs < c.startMs + c.durationMs,
+          )
+          if (clipAtPlayhead) {
+            execute(
+              clipAtPlayhead.kind === "cursor-effect"
+                ? createSplitCursorRangeCommand(clipAtPlayhead.id, view.playheadMs)
+                : createSplitClipCommand(clipAtPlayhead.id, view.playheadMs),
+            )
+            return
+          }
+        }
+      }
+      return
+    }
     if (selectedClip.clip.kind === "cursor-effect") {
       execute(createSplitCursorRangeCommand(selectedClip.clip.id, view.playheadMs))
       return
@@ -935,6 +957,10 @@ export function TimelineView({
     seek(clip.startMs)
   }
 
+  function selectMultipleClips(clipIds: string[], primaryClipId: string, trackId: string) {
+    setSelection({ kind: "clip", primaryClipId, clipIds, trackId })
+  }
+
   function selectRange(startMs: number, endMs: number) {
     if (endMs <= startMs) return
     setSelection({ kind: "range", startMs: Math.round(startMs), endMs: Math.round(endMs) })
@@ -945,6 +971,19 @@ export function TimelineView({
     seek(marker.timeMs)
   }
 
+  function deleteMarker(markerId: string) {
+    execute(createDeleteMarkerCommand(markerId))
+    if (view.selection?.kind === "marker" && view.selection.markerId === markerId) {
+      setSelection(null)
+    }
+  }
+
+  function addMarkerAtTime(timeMs: number) {
+    execute(
+      createAddMarkerCommand(timeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`),
+    )
+  }
+
   function cycleTrackHeight(track: TimelineTrack) {
     const currentHeight = view.trackHeights[track.id] ?? 56
     const nextHeight = currentHeight >= 88 ? 56 : currentHeight + 16
@@ -952,9 +991,7 @@ export function TimelineView({
   }
 
   function addMarker() {
-    execute(
-      createAddMarkerCommand(view.playheadMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`),
-    )
+    addMarkerAtTime(view.playheadMs)
   }
 
   function addMask(mode: MaskClip["mode"]) {
@@ -963,8 +1000,6 @@ export function TimelineView({
       ?.assetId
     if (!screenAssetId) return
     const selectedRange = view.selection?.kind === "range" ? view.selection : null
-    // playheadMs and selection bounds can be fractional (video currentTime / mouse input).
-    // The project schema requires integer millisecond fields, so round before creating the clip.
     const startMs = Math.round(selectedRange?.startMs ?? view.playheadMs)
     const endMs = Math.round(selectedRange?.endMs ?? Math.min(view.durationMs, startMs + 2_000))
     if (endMs <= startMs) return
@@ -984,10 +1019,6 @@ export function TimelineView({
     setSelection({ kind: "clip", primaryClipId: mask.id, clipIds: [mask.id], trackId: track.id })
   }
 
-  function adjustZoom(delta: number) {
-    setZoom(Math.max(10, Math.min(200, view.zoom + delta)))
-  }
-
   if (isLoading) return <TimelineLoadingState />
   if (!timeline || !recording) {
     return (
@@ -999,9 +1030,6 @@ export function TimelineView({
     )
   }
 
-  const pixelsPerMs = Math.max(0.0004 * view.zoom, 0.01)
-  const timelineWidth = Math.max(720, Math.ceil(view.durationMs * pixelsPerMs))
-  const tickInterval = getVisibleTickInterval(pixelsPerMs)
   const effectiveThumbnailResource = thumbnailSpriteError
     ? {
         status: "error" as const,
@@ -1015,11 +1043,12 @@ export function TimelineView({
       className="flex h-full min-h-160 flex-col overflow-hidden bg-background text-foreground select-none"
       onKeyDown={handleTimelineKeyDown}
     >
+      {/* Top Section: Monitor Canvas Preview */}
       <div className="flex min-h-0 flex-1 border-b border-border">
-        <div className="flex min-w-0 flex-1 flex-col bg-background p-5">
+        <div className="flex min-w-0 flex-1 flex-col bg-background p-4">
           {error ? (
             <div
-              className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-foreground"
+              className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-foreground"
               role="alert"
             >
               <span className="flex min-w-0 items-center gap-2">
@@ -1034,7 +1063,7 @@ export function TimelineView({
 
           {draftError ? (
             <div
-              className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-foreground"
+              className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-foreground"
               role="status"
             >
               <span className="flex min-w-0 items-center gap-2">
@@ -1046,25 +1075,22 @@ export function TimelineView({
 
           {isPreparing ? (
             <div
-              className="mb-3 space-y-2 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
+              className="mb-2 space-y-1.5 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground"
               role="status"
             >
               <div className="flex items-center justify-between gap-3">
                 <span>Preparing the preview proxy in the background</span>
-                <span className="tnum shrink-0 font-mono text-subtle-foreground">
+                <span className="shrink-0 font-mono text-subtle-foreground">
                   {Math.round((activeJob?.progress ?? 0) * 100)}%
                 </span>
               </div>
               <Progress value={activeJob?.progress ?? 0} />
-              <p className="text-subtle-foreground">
-                The original source remains available while preparation runs.
-              </p>
             </div>
           ) : null}
 
           {isPreparationFailed ? (
             <div
-              className="mb-3 flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-foreground"
+              className="mb-2 flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-foreground"
               role="status"
             >
               <AlertCircle className="size-4 shrink-0 text-warning" aria-hidden />
@@ -1074,27 +1100,20 @@ export function TimelineView({
 
           <div
             ref={monitorRef}
-            className="@container-size relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-3 shadow-e2"
+            className="@container-size relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-2 shadow-e2"
           >
             <div
               ref={canvasRef}
               className="relative flex items-center justify-center overflow-hidden"
-              // Use the monitor as a size container so the canvas can be the
-              // largest 16:9 box that still fits entirely inside the monitor,
-              // avoiding the previous `w-full` + `max-h-full` issue that made
-              // the preview stretch too wide when the monitor was wide and short.
               style={canvasStyle}
             >
               {mediaUrl && !mediaError ? (
-                // The recorded video screen sits on top of the background and is
-                // inset by the canvas padding. Its border radius, shadow, and
-                // overflow are applied here so the video and cursor are clipped together.
                 <div style={screenStyle} onClick={togglePlay}>
                   <video
                     key={mediaUrl}
                     ref={videoRef}
                     src={mediaUrl}
-                    className="size-full object-contain"
+                    className="size-full object-contain cursor-pointer"
                     style={
                       zoomTransformStyle
                         ? {
@@ -1227,14 +1246,15 @@ export function TimelineView({
               playbackRate={view.playbackRate}
             />
 
-            <div className="pointer-events-none absolute left-5 top-5 flex items-center gap-1.5 rounded-full border border-border bg-background/80 px-2.5 py-1 text-[10px] text-muted-foreground backdrop-blur">
+            {/* Media status badge */}
+            <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full border border-border/80 bg-background/80 px-2.5 py-1 text-[10px] text-muted-foreground backdrop-blur shadow-e1">
               <span
                 className={cn(
                   "size-1.5 rounded-full",
                   mediaUrl && !mediaError ? "bg-success" : "bg-warning",
                 )}
               />
-              <span>
+              <span className="font-medium tracking-wide">
                 {mediaUrl && !mediaError
                   ? isUsingProxy
                     ? "PROXY PREVIEW"
@@ -1243,191 +1263,65 @@ export function TimelineView({
               </span>
             </div>
           </div>
-
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
-            <IconButton label="Go to start" shortcut="Home" onClick={() => seek(0)}>
-              <SkipBack />
-            </IconButton>
-            <Button
-              size="icon"
-              className="size-10 rounded-full shadow-e2"
-              onClick={togglePlay}
-              aria-label={view.isPlaying ? "Pause preview" : "Play preview"}
-            >
-              {view.isPlaying ? (
-                <Pause data-icon="inline-start" />
-              ) : (
-                <Play data-icon="inline-start" />
-              )}
-            </Button>
-            <IconButton label="Go to end" shortcut="End" onClick={() => seek(view.durationMs)}>
-              <SkipForward />
-            </IconButton>
-            <div className="min-w-28 text-center font-mono text-xs font-semibold tabular-nums text-muted-foreground">
-              {formatTime(view.playheadMs)} / {formatTime(view.durationMs)}
-            </div>
-          </div>
         </div>
       </div>
 
       <ResizableHandle
         direction="vertical"
         value={timelineHeight}
-        min={160}
-        max={520}
+        min={180}
+        max={560}
         onChange={setTimelineHeight}
-        className="bg-surface-dim"
+        className="bg-surface-dim hover:bg-primary/40 transition-colors"
       />
 
+      {/* Bottom Section: Integrated Toolbar & Timeline Lanes */}
       <div className="flex shrink-0 flex-col bg-surface-dim" style={{ height: timelineHeight }}>
-        <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border px-4 py-1.5">
-          <div className="flex items-center gap-1">
-            <div
-              className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1"
-              role="toolbar"
-              aria-label="Timeline tools"
-            >
-              <IconButton
-                label="Selection tool"
-                tooltipSide="top"
-                className={cn("size-7", tool === "select" && "bg-overlay text-foreground")}
-                onClick={() => setTool("select")}
-              >
-                <MousePointer2 />
-              </IconButton>
-              <IconButton
-                label="Split tool"
-                shortcut="S"
-                tooltipSide="top"
-                className={cn("size-7", tool === "split" && "bg-overlay text-foreground")}
-                onClick={() => setTool("split")}
-              >
-                <Scissors />
-              </IconButton>
-            </div>
-            <Button
-              variant={view.snapEnabled ? "secondary" : "ghost"}
-              size="sm"
-              aria-pressed={view.snapEnabled}
-              onClick={() => setSnapEnabled(!view.snapEnabled)}
-              title={view.snapEnabled ? "Disable timeline snapping" : "Enable timeline snapping"}
-            >
-              Snap {view.snapEnabled ? "on" : "off"}
-            </Button>
-            <NativeSelect
-              aria-label="Snap threshold"
-              value={String(view.snapThresholdMs)}
-              onChange={(event) => setSnapThreshold(Number(event.target.value))}
-              className="hidden w-24 md:block"
-            >
-              {[60, 120, 240, 480].map((thresholdMs) => (
-                <option key={thresholdMs} value={thresholdMs}>
-                  Snap {thresholdMs}ms
-                </option>
-              ))}
-            </NativeSelect>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={addMarker}
-              title="Add a marker at the playhead"
-            >
-              <Flag data-icon="inline-start" />
-              <span className="hidden md:inline">Add marker</span>
-            </Button>
-            <div
-              className="hidden items-center gap-1 border-l border-border pl-2 md:flex"
-              aria-label="Privacy masks"
-            >
-              <ShieldAlert className="size-3.5 text-warning" aria-hidden />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-[11px]"
-                onClick={() => addMask("blur")}
-              >
-                Blur
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-[11px]"
-                onClick={() => addMask("pixelate")}
-              >
-                Pixelate
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-[11px]"
-                onClick={() => addMask("redact")}
-              >
-                Redact
-              </Button>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <NativeSelect
-              aria-label="Playback speed"
-              value={String(view.playbackRate)}
-              onChange={(event) => setPlaybackRate(Number(event.target.value))}
-              className="h-7 w-20 pl-2 pr-7 text-xs"
-            >
-              {[0.25, 0.5, 1, 1.5, 2, 4].map((rate) => (
-                <option key={rate} value={rate}>
-                  {rate}×
-                </option>
-              ))}
-            </NativeSelect>
-            <div className="hidden items-center gap-1 border-l border-border pl-2 sm:flex">
-              <IconButton
-                label="Zoom out"
-                tooltipSide="top"
-                className="size-7"
-                onClick={() => adjustZoom(-10)}
-              >
-                <ZoomOut />
-              </IconButton>
-              <Slider
-                value={[view.zoom]}
-                min={10}
-                max={200}
-                step={10}
-                aria-label="Timeline zoom"
-                className="w-24"
-                onValueChange={(value) => setZoom(value[0] ?? view.zoom)}
-              />
-              <IconButton
-                label="Zoom in"
-                tooltipSide="top"
-                className="size-7"
-                onClick={() => adjustZoom(10)}
-              >
-                <ZoomIn />
-              </IconButton>
-              <span className="w-9 text-right font-mono text-[10px] tabular-nums text-subtle-foreground">
-                {view.zoom}%
-              </span>
-            </div>
-          </div>
-        </div>
+        <TimelineToolbar
+          tool={tool}
+          onSelectTool={setTool}
+          snapEnabled={view.snapEnabled}
+          snapThresholdMs={view.snapThresholdMs}
+          onToggleSnap={(enabled) => setSnapEnabled(enabled)}
+          onChangeSnapThreshold={(threshold) => setSnapThreshold(threshold)}
+          playheadMs={view.playheadMs}
+          durationMs={view.durationMs}
+          isPlaying={view.isPlaying}
+          playbackRate={view.playbackRate}
+          zoom={view.zoom}
+          canRippleDelete={Boolean(view.selection)}
+          onTogglePlay={togglePlay}
+          onSeek={seek}
+          onStepFrame={stepFrame}
+          onSetPlaybackRate={setPlaybackRate}
+          onSetZoom={setZoom}
+          onZoomToFit={zoomToFit}
+          onAddMarker={addMarker}
+          onAddMask={addMask}
+          onSplitAtPlayhead={splitSelected}
+          onRippleDeleteSelected={() => deleteSelected(true)}
+        />
 
         <TimelineLanes
           timeline={timeline}
           view={view}
-          timelineWidth={timelineWidth}
-          pixelsPerMs={pixelsPerMs}
-          tickInterval={tickInterval}
+          tool={tool}
           cursorClickTimesMs={cursorClickTimesMs}
           thumbnailResource={effectiveThumbnailResource}
+          videoThumbnailResources={videoThumbnailResources}
           waveformResources={waveformResources}
           onSeek={seek}
+          onPause={pause}
           onSetScroll={setScroll}
+          onSetZoom={setZoom}
           onSelectClip={selectClip}
+          onSelectMultipleClips={selectMultipleClips}
           onSelectRange={selectRange}
           onMoveClip={interaction.moveClip}
           onTrimClip={interaction.trimClip}
           onSelectMarker={selectMarker}
+          onDeleteMarker={deleteMarker}
+          onAddMarkerAtTime={addMarkerAtTime}
           onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
           onMoveZoomSegment={interaction.moveZoomSegment}
           onResizeZoomSegment={interaction.resizeZoomSegment}

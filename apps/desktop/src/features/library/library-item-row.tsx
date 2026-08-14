@@ -18,6 +18,7 @@ import {
 } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration, formatFileSize } from "../../lib/format"
+import { toAssetUrl } from "../editor/media/derivative-resources"
 
 interface LibraryItemRowProps {
   recording: LibraryRecording
@@ -44,11 +45,15 @@ export function LibraryItemRow({
 }: LibraryItemRowProps) {
   const [newTag, setNewTag] = useState("")
   const [showTagInput, setShowTagInput] = useState(false)
+  const [imageError, setImageError] = useState(false)
 
   const isAudio =
     recording.tags.includes("audio") ||
     recording.name.toLowerCase().includes("voiceover") ||
     recording.name.toLowerCase().includes("audio")
+
+  const thumbnailSrc =
+    !imageError && recording.thumbnailPath ? toAssetUrl(recording.thumbnailPath) : null
 
   function handleAddTag() {
     const tag = newTag.trim()
@@ -62,9 +67,17 @@ export function LibraryItemRow({
     <div className="group flex flex-col gap-3 rounded-xl border border-border bg-surface p-3.5 transition-all duration-200 hover:border-border-strong hover:shadow-md sm:flex-row sm:items-center sm:justify-between">
       {/* Thumbnail + Details */}
       <div className="flex flex-1 items-center gap-3.5 min-w-0">
-        <div className="flex h-14 w-20 shrink-0 items-center justify-center rounded-lg bg-surface-dim border border-border/60 text-muted-foreground overflow-hidden">
+        <div className="relative flex h-14 w-20 shrink-0 items-center justify-center rounded-lg bg-surface-dim border border-border/60 text-muted-foreground overflow-hidden">
           {isAudio ? (
             <Music className="size-6 text-subtle-foreground" />
+          ) : thumbnailSrc ? (
+            <img
+              src={thumbnailSrc}
+              alt={recording.name}
+              onError={() => setImageError(true)}
+              className="h-full w-full object-cover"
+              loading="lazy"
+            />
           ) : (
             <Video className="size-6 text-subtle-foreground" aria-hidden />
           )}

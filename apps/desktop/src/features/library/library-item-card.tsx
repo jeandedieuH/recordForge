@@ -1,11 +1,15 @@
+import { useState } from "react"
 import {
   CloudCheck,
-  Music,
+  Download,
+  Film,
+  FolderOpen as FolderIcon,
   MoreVertical,
+  Music,
   Play,
   Scissors,
+  Sparkles,
   Trash2,
-  FolderOpen as FolderIcon,
 } from "lucide-react"
 import {
   DropdownMenu,
@@ -15,6 +19,7 @@ import {
 } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration } from "../../lib/format"
+import { toAssetUrl } from "../editor/media/derivative-resources"
 
 interface LibraryItemCardProps {
   recording: LibraryRecording
@@ -37,6 +42,7 @@ export function LibraryItemCard({
   onPrepare,
   onOpenEditor,
 }: LibraryItemCardProps) {
+  const [imageError, setImageError] = useState(false)
   const isAudio =
     recording.tags.includes("audio") ||
     recording.name.toLowerCase().includes("voiceover") ||
@@ -46,6 +52,9 @@ export function LibraryItemCard({
     recording.tags.includes("s3") ||
     recording.tags.includes("gdrive")
 
+  const thumbnailSrc =
+    !imageError && recording.thumbnailPath ? toAssetUrl(recording.thumbnailPath) : null
+
   return (
     <div className="group relative flex flex-col overflow-hidden rounded-xl border border-border bg-surface transition-all duration-200 hover:border-border-strong hover:shadow-xl">
       {/* Thumbnail Container */}
@@ -54,11 +63,20 @@ export function LibraryItemCard({
           <div className="flex h-full w-full items-center justify-center bg-surface-dim text-muted-foreground">
             <Music className="size-10 text-subtle-foreground" />
           </div>
+        ) : thumbnailSrc ? (
+          <img
+            src={thumbnailSrc}
+            alt={recording.name}
+            onError={() => setImageError(true)}
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+            loading="lazy"
+          />
         ) : (
           <div className="relative flex h-full w-full items-center justify-center bg-linear-to-br from-surface to-background p-4 text-muted-foreground">
             {/* Tech preview background grid pattern */}
             <div className="absolute inset-0 opacity-15 bg-[radial-gradient(var(--color-primary)_1px,transparent_1px)] bg-size-[12px_12px]" />
             <div className="z-10 flex flex-col items-center gap-1.5 rounded-lg border border-border bg-surface/80 px-4 py-2 text-center backdrop-blur">
+              <Film className="size-5 text-primary/70" />
               <span className="text-xs font-semibold text-foreground truncate max-w-45">
                 {recording.name}
               </span>
@@ -81,6 +99,7 @@ export function LibraryItemCard({
             onClick={() => onOpenEditor(recording)}
             className="flex size-10 items-center justify-center rounded-full bg-primary text-white transition-transform hover:scale-105"
             title="Open in Editor"
+            aria-label="Open in Editor"
           >
             <Play className="size-5 ml-0.5 fill-white" />
           </button>
@@ -107,6 +126,7 @@ export function LibraryItemCard({
               <button
                 type="button"
                 className="rounded p-1 text-muted-foreground hover:bg-overlay hover:text-foreground"
+                aria-label="More recording options"
               >
                 <MoreVertical className="size-4" />
               </button>
@@ -116,18 +136,22 @@ export function LibraryItemCard({
               className="border-border-strong bg-surface text-foreground"
             >
               <DropdownMenuItem onClick={() => onOpenEditor(recording)}>
-                <Scissors className="mr-2 size-4" /> Open Editor
+                <Scissors className="mr-2 size-4 text-primary" /> Open Editor
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onReveal(recording.id)}>
-                <FolderIcon className="mr-2 size-4" /> Reveal File
+                <FolderIcon className="mr-2 size-4 text-subtle-foreground" /> Reveal File
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onTrim(recording)}>Trim</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onExport(recording)}>Export MP4</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onTrim(recording)}>
+                <Scissors className="mr-2 size-4 text-subtle-foreground" /> Quick Trim
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onExport(recording)}>
+                <Download className="mr-2 size-4 text-subtle-foreground" /> Export MP4
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onPrepare(recording)}>
-                Prepare Media
+                <Sparkles className="mr-2 size-4 text-sky-400" /> Prepare Media
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onDelete(recording.id)} className="text-red-400">
-                <Trash2 className="mr-2 size-4" /> Delete
+              <DropdownMenuItem onClick={() => onDelete(recording.id)} className="text-red-400 focus:text-red-400 focus:bg-red-950/30">
+                <Trash2 className="mr-2 size-4" /> Delete Recording
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

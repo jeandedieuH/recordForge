@@ -117,14 +117,15 @@ export function WaveformStrip({
     const barWidth =
       ((Math.min(step, peakEnd - index) / data.peaks.length) * data.durationMs * pixelsPerMs) /
       Math.max(clip.speed, 0.001)
+    const peakPercent = Math.max(6, Math.min(90, Math.round(peak * 90)))
     bars.push(
       <span
         key={index}
-        className="absolute bottom-1 top-1 min-w-px rounded-full bg-current opacity-75"
+        className="absolute top-1/2 -translate-y-1/2 min-w-px rounded-full bg-current opacity-85"
         style={{
           left: `${(barTimelineMs - clip.startMs) * pixelsPerMs}px`,
           width: `${Math.max(1, barWidth)}px`,
-          height: `${Math.max(8, Math.min(100, Math.round(peak * 100)))}%`,
+          height: `${peakPercent}%`,
         }}
       />,
     )

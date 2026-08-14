@@ -145,6 +145,8 @@ export const mediaVideoTrackOutputSchema = z.object({
   videoPath: z.string(),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
+  thumbnailDir: z.string().nullish(),
+  thumbnailManifestPath: z.string().nullish(),
 })
 
 export type MediaVideoTrackOutput = z.infer<typeof mediaVideoTrackOutputSchema>

@@ -259,6 +259,184 @@ fn get_db(state: &AppState) -> Result<std::sync::MutexGuard<'_, rusqlite::Connec
         .map_err(|_| InternalError::Storage("database mutex poisoned".to_string()).into())
 }
 
+/// Lightweight project summary for project browsing and management in the UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub recording_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub duration_ms: u64,
+    pub thumbnail_path: Option<String>,
+    pub track_count: usize,
+    pub clip_count: usize,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<f64>,
+}
+
+/// List all projects indexed in SQLite or found on disk in session work directories.
+#[tauri::command]
+#[instrument]
+pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>> {
+    let db = get_db(&state)?;
+    let records = database::projects::list_projects(&db, None)?;
+    let mut summaries = Vec::new();
+    let mut indexed_rec_ids = std::collections::HashSet::new();
+
+    for record in records {
+        indexed_rec_ids.insert(record.recording_id.clone());
+        if let Ok(project) = serde_json::from_str::<ProjectFile>(&record.project_json) {
+            let recording = get_recording(&db, &record.recording_id).ok();
+            let thumbnail_path = recording.as_ref().and_then(|r| r.thumbnail_path.clone());
+            let track_count = project.tracks.as_array().map(|t| t.len()).unwrap_or(0);
+            let clip_count = project
+                .tracks
+                .as_array()
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .filter_map(|t| t.get("clips")?.as_array())
+                        .map(|c| c.len())
+                        .sum()
+                })
+                .unwrap_or(0);
+            let duration_ms = project
+                .tracks
+                .as_array()
+                .and_then(|tracks| {
+                    tracks
+                        .iter()
+                        .filter_map(|t| t.get("clips")?.as_array())
+                        .flatten()
+                        .filter_map(|clip| {
+                            let start = clip.get("startMs")?.as_u64()?;
+                            let dur = clip.get("durationMs")?.as_u64()?;
+                            Some(start + dur)
+                        })
+                        .max()
+                })
+                .unwrap_or_else(|| recording.as_ref().map_or(0, |r| r.duration_ms));
+
+            let width = project
+                .canvas
+                .get("width")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let height = project
+                .canvas
+                .get("height")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let fps = project.canvas.get("fps").and_then(|v| v.as_f64());
+
+            summaries.push(ProjectSummary {
+                id: record.id,
+                name: record.name,
+                recording_id: record.recording_id,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                duration_ms,
+                thumbnail_path,
+                track_count,
+                clip_count,
+                width,
+                height,
+                fps,
+            });
+        }
+    }
+
+    // Check for any unindexed project.json files in recording session directories
+    if let Ok(recordings) = database::library::list_recordings(&db) {
+        for rec in recordings {
+            if !indexed_rec_ids.contains(&rec.id) {
+                let project_dir = project_dir_for_recording(&rec);
+                if project_path(&project_dir).is_file() {
+                    if let Ok(Some(loaded)) = load_project(&project_dir, &state.path_policy) {
+                        let project = loaded.project;
+                        let track_count = project.tracks.as_array().map(|t| t.len()).unwrap_or(0);
+                        let clip_count = project
+                            .tracks
+                            .as_array()
+                            .map(|tracks| {
+                                tracks
+                                    .iter()
+                                    .filter_map(|t| t.get("clips")?.as_array())
+                                    .map(|c| c.len())
+                                    .sum()
+                            })
+                            .unwrap_or(0);
+                        let duration_ms = project
+                            .tracks
+                            .as_array()
+                            .and_then(|tracks| {
+                                tracks
+                                    .iter()
+                                    .filter_map(|t| t.get("clips")?.as_array())
+                                    .flatten()
+                                    .filter_map(|clip| {
+                                        let start = clip.get("startMs")?.as_u64()?;
+                                        let dur = clip.get("durationMs")?.as_u64()?;
+                                        Some(start + dur)
+                                    })
+                                    .max()
+                            })
+                            .unwrap_or(rec.duration_ms);
+
+                        let width = project
+                            .canvas
+                            .get("width")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32);
+                        let height = project
+                            .canvas
+                            .get("height")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32);
+                        let fps = project.canvas.get("fps").and_then(|v| v.as_f64());
+
+                        let _ = upsert_project(
+                            &db,
+                            &ProjectRecord {
+                                id: project.id.clone(),
+                                name: project.name.clone(),
+                                recording_id: project.recording_id.clone(),
+                                created_at: project.created_at.clone(),
+                                updated_at: project.updated_at.clone(),
+                                project_json: serde_json::to_string(&project).unwrap_or_default(),
+                            },
+                        );
+
+                        indexed_rec_ids.insert(rec.id.clone());
+                        summaries.push(ProjectSummary {
+                            id: project.id,
+                            name: project.name,
+                            recording_id: project.recording_id,
+                            created_at: project.created_at,
+                            updated_at: project.updated_at,
+                            duration_ms,
+                            thumbnail_path: rec.thumbnail_path.clone(),
+                            track_count,
+                            clip_count,
+                            width,
+                            height,
+                            fps,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by updated_at descending
+    summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    Ok(summaries)
+}
+
 fn index_project(state: &AppState, project: &ProjectFile) -> Result<()> {
     let db = get_db(state)?;
     upsert_project(

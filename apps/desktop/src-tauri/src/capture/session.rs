@@ -998,11 +998,28 @@ impl Recorder {
 
         final_stats.duration_ms = total.max(metadata.duration_ms);
         final_stats.output_size_bytes = output_size;
+
+        let poster_path = session.work_dir.join("poster.jpg");
+        let poster_path_str = if crate::media::thumbnails::generate_poster_frame(
+            &self.ffmpeg_path.to_string_lossy(),
+            &output,
+            &poster_path,
+        )
+        .is_ok()
+        {
+            Some(poster_path.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
         let manifest_clone = {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             manifest.set_output_path(output.to_string_lossy());
+            if let Some(poster) = &poster_path_str {
+                manifest.set_thumbnail_path(poster);
+            }
             manifest.set_total_recorded_ms(final_stats.duration_ms);
             manifest.set_stats(final_stats.clone());
             manifest.write()?;

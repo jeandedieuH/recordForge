@@ -1,13 +1,14 @@
 import { create } from "zustand"
-import type {
-  ExportPreset,
-  ExportRange,
-  LibraryRecording,
-  MediaJob,
-  CursorTelemetryFile,
-  MediaMetadata,
-  recordForgeProject,
-  TimelineViewState,
+import {
+  cursorSettingsSchema,
+  type ExportPreset,
+  type ExportRange,
+  type LibraryRecording,
+  type MediaJob,
+  type CursorTelemetryFile,
+  type MediaMetadata,
+  type recordForgeProject,
+  type TimelineViewState,
 } from "@recordforge/contracts"
 import {
   createEngine,
@@ -44,7 +45,7 @@ import {
 } from "@recordforge/cursor-core"
 import { listRecordings } from "../lib/library"
 import { toErrorMessage } from "../lib/errors"
-import { isTauri } from "../lib/settings"
+import { getSetting, isTauri } from "../lib/settings"
 import {
   cancelMediaJob,
   getMediaJob,
@@ -248,7 +249,7 @@ function selectPreparationJob(jobs: MediaJob[]): MediaJob | null {
 export const useTimelineStore = create<TimelineStore>((set, get) => ({
   engine: null,
   view: {
-    zoom: 50,
+    zoom: 0,
     scrollMs: 0,
     playheadMs: 0,
     isPlaying: false,
@@ -313,10 +314,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         throw new Error(`Recording ${recordingId} not found`)
       }
 
-      const [metadata, jobs, initialCursorTelemetry] = await Promise.all([
+      const [metadata, jobs, initialCursorTelemetry, defaultCursorRaw] = await Promise.all([
         getMediaMetadata(recordingId),
         listMediaJobs(recordingId),
         isTauri() ? getCursorTelemetry(recordingId).catch(() => null) : Promise.resolve(null),
+        isTauri() ? getSetting("defaultCursorSettings").catch(() => null) : Promise.resolve(null),
       ])
 
       const meta = metadata ?? fallbackMetadata(recording)
@@ -359,6 +361,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         missingAssets = loaded.missingAssets
       } else {
         project = createProjectFromRecording(recording, meta, recording.name)
+        if (defaultCursorRaw) {
+          try {
+            const parsed = cursorSettingsSchema.safeParse(JSON.parse(defaultCursorRaw))
+            if (parsed.success) {
+              project.canvas.cursorSettings = parsed.data
+            }
+          } catch {
+            // Keep defaults if parse fails
+          }
+        }
         project = await createProject(project)
       }
 
@@ -723,7 +735,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   setZoom: (zoom) => {
     const { view } = get()
-    const clamped = Math.max(1, Math.min(zoom, 500))
+    const clamped = Math.max(0, Math.min(zoom, 100))
     set({ view: { ...view, zoom: clamped } })
   },
 

@@ -5,6 +5,7 @@ import { MousePointer2, Save, Sliders, Trash2 } from "lucide-react"
 import { getSetting, isTauri, setSetting } from "../../../lib/settings"
 import {
   Button,
+  ColorPicker,
   IconButton,
   Input,
   Label,
@@ -91,7 +92,10 @@ export function CursorInspector({
     if (!presetsEnabled) return
     async function load() {
       try {
-        const raw = isTauri() ? await getSetting(CURSOR_PRESETS_KEY) : null
+        let raw = isTauri() ? await getSetting(CURSOR_PRESETS_KEY) : null
+        if (!raw) {
+          raw = localStorage.getItem(`recordforge:${CURSOR_PRESETS_KEY}`)
+        }
         if (!raw) return
         const parsed = JSON.parse(raw) as unknown
         if (typeof parsed !== "object" || parsed === null) return
@@ -113,9 +117,15 @@ export function CursorInspector({
 
   async function persistPresets(next: Record<string, CursorSettings>) {
     setSavedPresets(next)
+    const json = JSON.stringify(next)
+    try {
+      localStorage.setItem(`recordforge:${CURSOR_PRESETS_KEY}`, json)
+    } catch {
+      // Ignore localStorage errors
+    }
     if (isTauri()) {
       try {
-        await setSetting(CURSOR_PRESETS_KEY, JSON.stringify(next))
+        await setSetting(CURSOR_PRESETS_KEY, json)
       } catch {
         // Settings may be unavailable during tests/dev.
       }
@@ -126,6 +136,7 @@ export function CursorInspector({
     const name = presetName.trim()
     if (!name) return
     const next = { ...savedPresets, [name]: { ...settings } }
+    setSelectedPreset(name)
     void persistPresets(next)
     setPresetName("")
   }
@@ -441,30 +452,26 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
             <span className="text-[10px] text-muted-foreground">Fill Color</span>
-            <div className="flex items-center gap-2">
-              <input
-                type="color"
-                value={settings.fillColor ?? "#3b82f6"}
-                onChange={(e) => onChange({ fillColor: e.target.value })}
-                className="size-7 cursor-pointer rounded-lg border border-border bg-transparent"
-                aria-label="Fill color"
-              />
-              <span className="font-mono text-[11px]">{settings.fillColor ?? "#3b82f6"}</span>
-            </div>
+            <ColorPicker
+              aria-label="Fill color"
+              size="sm"
+              value={settings.fillColor ?? "#3b82f6"}
+              onChange={(fillColor) => onChange({ fillColor })}
+              className="w-full"
+              triggerClassName="w-full justify-between"
+            />
           </div>
 
           <div className="space-y-1">
             <span className="text-[10px] text-muted-foreground">Stroke Color</span>
-            <div className="flex items-center gap-2">
-              <input
-                type="color"
-                value={settings.strokeColor ?? "#ffffff"}
-                onChange={(e) => onChange({ strokeColor: e.target.value })}
-                className="size-7 cursor-pointer rounded-lg border border-border bg-transparent"
-                aria-label="Stroke color"
-              />
-              <span className="font-mono text-[11px]">{settings.strokeColor ?? "#ffffff"}</span>
-            </div>
+            <ColorPicker
+              aria-label="Stroke color"
+              size="sm"
+              value={settings.strokeColor ?? "#ffffff"}
+              onChange={(strokeColor) => onChange({ strokeColor })}
+              className="w-full"
+              triggerClassName="w-full justify-between"
+            />
           </div>
         </div>
 
@@ -515,12 +522,11 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
           <div className="space-y-3 pt-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">Shadow Color</span>
-              <input
-                type="color"
-                value={settings.shadowColor ?? "#000000"}
-                onChange={(e) => onChange({ shadowColor: e.target.value })}
-                className="size-6 cursor-pointer rounded border border-border bg-transparent"
+              <ColorPicker
                 aria-label="Shadow color"
+                size="sm"
+                value={settings.shadowColor ?? "#000000"}
+                onChange={(shadowColor) => onChange({ shadowColor })}
               />
             </div>
             <div className="space-y-1">
@@ -565,12 +571,11 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
 
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-muted-foreground">Ring / Glow Color</span>
-              <input
-                type="color"
-                value={settings.clickColor ?? "#60a5fa"}
-                onChange={(e) => onChange({ clickColor: e.target.value })}
-                className="size-6 cursor-pointer rounded border border-border bg-transparent"
+              <ColorPicker
                 aria-label="Click effect color"
+                size="sm"
+                value={settings.clickColor ?? "#60a5fa"}
+                onChange={(clickColor) => onChange({ clickColor })}
               />
             </div>
 

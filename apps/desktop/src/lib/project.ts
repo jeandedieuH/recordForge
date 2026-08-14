@@ -1,5 +1,10 @@
 import { z } from "zod"
-import { projectSchema, type recordForgeProject } from "@recordforge/contracts"
+import {
+  projectSchema,
+  projectSummarySchema,
+  type ProjectSummary,
+  type recordForgeProject,
+} from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 
 export type SaveStatus = "idle" | "saving" | "saved" | "error"
@@ -13,6 +18,10 @@ const projectLoadResultSchema = z.object({
   project: projectSchema,
   missingAssets: z.array(z.string()),
 })
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  return invokeValidated("list_projects", undefined, z.array(projectSummarySchema))
+}
 
 export async function loadProject(recordingId: string): Promise<ProjectLoadResult | null> {
   return invokeValidated(

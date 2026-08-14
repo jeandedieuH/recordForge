@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useMemo, useRef, useState } from "react"
 import type { ManualZoomSegment, TimelineState, TimelineTrack } from "@recordforge/contracts"
 import {
   buildSnapTargets,
@@ -14,7 +14,7 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import { ZoomIn } from "lucide-react"
+import { Lock, Sparkles, ZoomIn } from "lucide-react"
 
 interface ZoomSegmentAction {
   kind: "toggle-lock" | "split" | "delete" | "regenerate-from-click"
@@ -61,7 +61,7 @@ interface SegmentGesture {
   moved: boolean
 }
 
-export function ZoomTrackRow({
+export const ZoomTrackRow = memo(function ZoomTrackRow({
   timeline,
   track,
   top,
@@ -92,7 +92,8 @@ export function ZoomTrackRow({
     () =>
       (timeline.zoomSegments ?? []).filter(
         (segment) =>
-          segment.startMs <= visibleEndMs && segment.startMs + segment.durationMs >= visibleStartMs,
+          segment.startMs <= visibleEndMs + 2_000 &&
+          segment.startMs + segment.durationMs >= visibleStartMs - 2_000,
       ),
     [timeline.zoomSegments, visibleStartMs, visibleEndMs],
   )
@@ -100,14 +101,14 @@ export function ZoomTrackRow({
   return (
     <div
       className={cn(
-        "absolute inset-x-0 flex items-center border-b border-border",
-        track.muted && "bg-surface-dim/20",
+        "absolute inset-x-0 flex items-center border-b border-border/80 transition-colors",
+        track.muted && "bg-surface-dim/20 opacity-40",
       )}
       style={{ top, height }}
     >
       {snapGuide ? (
         <div
-          className="pointer-events-none absolute inset-y-0 z-10 w-px bg-primary/60"
+          className="pointer-events-none absolute inset-y-0 z-20 w-px bg-primary shadow-[0_0_8px_rgba(9,77,178,0.8)]"
           style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
           aria-hidden
         />
@@ -133,7 +134,7 @@ export function ZoomTrackRow({
       ))}
     </div>
   )
-}
+})
 
 interface ZoomSegmentItemProps {
   segment: ManualZoomSegment
@@ -180,9 +181,11 @@ function ZoomSegmentItem({
 }: ZoomSegmentItemProps) {
   const gestureRef = useRef<SegmentGesture | null>(null)
   const suppressClickRef = useRef(false)
+  const [gestureDelta, setGestureDelta] = useState<{ mode: string; text: string } | null>(null)
+
   const left = segment.startMs * pixelsPerMs
   const width = Math.max(8, segment.durationMs * pixelsPerMs)
-  const barHeight = Math.max(28, Math.min(height - 16, 38))
+  const barHeight = Math.max(30, Math.min(height - 14, 40))
 
   function beginGesture(event: React.PointerEvent<HTMLElement>, mode: SegmentGesture["mode"]) {
     if (event.button !== 0 || track.locked || segment.locked) return
@@ -219,6 +222,10 @@ function ZoomSegmentItem({
       const rawStartMs = Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
       const snapped = snapClipStart(rawStartMs, duration, snapTargets, snap)
       onSnapGuide(snapped.snapped ? snapped.target : null)
+      setGestureDelta({
+        mode: "Move",
+        text: `${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s`,
+      })
       onMoveZoomSegment(segment, snapped.timeMs, snapped.timeMs + duration, { phase: "draft" })
       return
     }
@@ -234,6 +241,11 @@ function ZoomSegmentItem({
       edge === "start" ? Math.min(snapped.timeMs, gesture.initialEndMs - 1) : gesture.initialStartMs
     const nextEndMs =
       edge === "start" ? gesture.initialEndMs : Math.max(snapped.timeMs, gesture.initialStartMs + 1)
+
+    setGestureDelta({
+      mode: edge === "start" ? "Resize In" : "Resize Out",
+      text: `${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s`,
+    })
     onResizeZoomSegment(segment, nextStartMs, nextEndMs, { phase: "draft" })
   }
 
@@ -243,6 +255,7 @@ function ZoomSegmentItem({
     const wasCancelled = event.type === "pointercancel"
     const didMove = gesture.moved
     gestureRef.current = null
+    setGestureDelta(null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
@@ -280,11 +293,6 @@ function ZoomSegmentItem({
     onResizeZoomSegment(segment, nextStartMs, nextEndMs, { phase: "commit" })
   }
 
-  const handleClass = cn(
-    "absolute inset-y-0 z-20 w-2 cursor-ew-resize rounded-sm opacity-0 transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-    "bg-primary/70",
-  )
-
   const transInWidth = Math.min(width / 2, (segment.transitionInMs ?? 400) * pixelsPerMs)
   const transOutWidth = Math.min(width / 2, (segment.transitionOutMs ?? 400) * pixelsPerMs)
 
@@ -295,13 +303,14 @@ function ZoomSegmentItem({
           role="button"
           tabIndex={0}
           data-timeline-zoom
-          aria-label={`Zoom segment from ${formatZoomTime(segment.startMs)} to ${formatZoomTime(segment.startMs + segment.durationMs)}`}
+          aria-label={`Zoom segment ${segment.scale.toFixed(1)}x`}
           aria-pressed={selected}
           className={cn(
-            "group absolute flex items-center overflow-hidden rounded-md border border-primary/50 bg-primary/15 px-2 text-left text-[11px] transition-all hover:bg-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-            selected && "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-md",
-            track.locked && "cursor-not-allowed opacity-60",
-            segment.locked && "opacity-60",
+            "group/zoom absolute flex items-center overflow-hidden rounded-lg border border-primary/70 bg-linear-to-b from-primary/30 to-primary/15 px-2 text-left text-[11px] transition-all duration-fast select-none cursor-grab active:cursor-grabbing hover:from-primary/40 hover:to-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            selected
+              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-[0_0_12px_rgba(9,77,178,0.45)] z-20"
+              : "z-10",
+            (track.locked || segment.locked) && "cursor-not-allowed opacity-60",
           )}
           style={{
             left: `${left}px`,
@@ -320,51 +329,78 @@ function ZoomSegmentItem({
             }
             onSelectZoom(segment.id)
           }}
-          title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× · ${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)}`}
+          title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× (${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)})`}
         >
-          {/* Visual Transition In Ramp Indicator */}
+          {/* Start Resize Handle */}
+          {!segment.locked && !track.locked ? (
+            <div
+              className="absolute left-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/zoom:opacity-100 hover:w-3.5 hover:bg-primary/30"
+              onPointerDown={(e) => beginGesture(e, "resize-start")}
+              onClick={(e) => e.stopPropagation()}
+              title="Resize transition in"
+            >
+              <div className="h-4 w-1 rounded-full bg-primary shadow-xs" />
+            </div>
+          ) : null}
+
+          {/* Visual Transition In Ramp */}
           <div
-            className="pointer-events-none absolute bottom-0 left-0 top-0 bg-linear-to-r from-primary/30 to-transparent"
+            className="pointer-events-none absolute bottom-0 left-0 top-0 bg-linear-to-r from-primary/40 to-transparent"
             style={{ width: `${transInWidth}px` }}
             aria-hidden
           />
 
-          {/* Visual Transition Out Ramp Indicator */}
+          {/* Visual Transition Out Ramp */}
           <div
-            className="pointer-events-none absolute bottom-0 right-0 top-0 bg-linear-to-l from-primary/30 to-transparent"
+            className="pointer-events-none absolute bottom-0 right-0 top-0 bg-linear-to-l from-primary/40 to-transparent"
             style={{ width: `${transOutWidth}px` }}
             aria-hidden
           />
 
-          {/* Trim / Resize Handles */}
-          <button
-            type="button"
-            className={cn(handleClass, "left-0")}
-            aria-label={`Resize start of zoom segment`}
-            onPointerDown={(event) => beginGesture(event, "resize-start")}
-            onClick={(event) => event.stopPropagation()}
-          />
-          <ZoomIn className="mr-1.5 size-3 shrink-0 text-primary" aria-hidden />
-          <span className="relative z-10 truncate font-medium text-foreground">
-            {segment.label ? (
-              <span className="mr-1 text-primary">{segment.label}</span>
-            ) : null}
-            {segment.scale.toFixed(1)}×
+          {/* Segment Details */}
+          <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-1">
+            <ZoomIn className="size-3 shrink-0 text-primary" aria-hidden />
+            <span className="truncate font-semibold text-[11px] text-foreground">
+              {segment.label ? `${segment.label} ` : ""}
+              {segment.scale.toFixed(1)}×
+            </span>
             {segment.mode === "follow-cursor" ? (
-              <span className="ml-1 rounded bg-primary/20 px-1 py-0.5 text-[9px] font-medium text-primary">follow</span>
+              <span className="rounded bg-primary/20 px-1 py-0.5 font-mono text-[9px] font-medium text-primary">
+                follow
+              </span>
             ) : segment.mode === "smooth-pan" ? (
-              <span className="ml-1 rounded bg-primary/20 px-1 py-0.5 text-[9px] font-medium text-primary">pan</span>
+              <span className="rounded bg-primary/20 px-1 py-0.5 font-mono text-[9px] font-medium text-primary">
+                pan
+              </span>
             ) : segment.mode === "auto" ? (
-              <span className="ml-1 text-[9px] font-normal text-primary/80">auto</span>
+              <span className="flex items-center gap-0.5 text-[9px] font-medium text-primary/80">
+                <Sparkles className="size-2.5" /> auto
+              </span>
             ) : null}
-          </span>
-          <button
-            type="button"
-            className={cn(handleClass, "right-0")}
-            aria-label={`Resize end of zoom segment`}
-            onPointerDown={(event) => beginGesture(event, "resize-end")}
-            onClick={(event) => event.stopPropagation()}
-          />
+            {segment.locked ? (
+              <Lock className="size-2.5 shrink-0 text-warning opacity-80" aria-hidden />
+            ) : null}
+          </div>
+
+          {/* End Resize Handle */}
+          {!segment.locked && !track.locked ? (
+            <div
+              className="absolute right-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/zoom:opacity-100 hover:w-3.5 hover:bg-primary/30"
+              onPointerDown={(e) => beginGesture(e, "resize-end")}
+              onClick={(e) => e.stopPropagation()}
+              title="Resize transition out"
+            >
+              <div className="h-4 w-1 rounded-full bg-primary shadow-xs" />
+            </div>
+          ) : null}
+
+          {/* Live Drag/Trim Feedback Tooltip */}
+          {gestureDelta ? (
+            <div className="absolute -top-7 left-1/2 -translate-x-1/2 z-50 rounded-md border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] font-semibold text-foreground shadow-e2 whitespace-nowrap">
+              <span className="text-primary mr-1">{gestureDelta.mode}:</span>
+              {gestureDelta.text}
+            </div>
+          ) : null}
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
@@ -397,6 +433,7 @@ function ZoomSegmentItem({
           Split
         </ContextMenuItem>
         <ContextMenuItem
+          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
           onSelect={() => onZoomSegmentAction?.({ kind: "delete", segmentId: segment.id })}
           disabled={segment.locked}
         >

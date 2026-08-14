@@ -1,7 +1,7 @@
 import type { CanvasAspectRatio } from "@recordforge/contracts"
 import { createUpdateCanvasCommand } from "@recordforge/editor-core"
 import { LayoutTemplate } from "lucide-react"
-import { Button, Input, NativeSelect, Switch } from "@recordforge/ui"
+import { Button, ColorPicker, Input, NativeSelect, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
 const ASPECT_RATIOS: { value: CanvasAspectRatio; label: string }[] = [
@@ -80,21 +80,14 @@ export function LayoutPanel() {
         </NativeSelect>
       </label>
 
-      <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+      <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
         <span>Background</span>
-        <div className="flex items-center gap-2">
-          <Input
-            aria-label="Canvas background"
-            type="color"
-            value={canvas.background}
-            onChange={(event) =>
-              execute(createUpdateCanvasCommand({ background: event.target.value }))
-            }
-            className="h-8 w-12 p-1"
-          />
-          <span className="font-mono text-[11px]">{canvas.background}</span>
-        </div>
-      </label>
+        <ColorPicker
+          aria-label="Canvas background"
+          value={canvas.background}
+          onChange={(background) => execute(createUpdateCanvasCommand({ background }))}
+        />
+      </div>
 
       <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
         <span>Canvas shadow</span>

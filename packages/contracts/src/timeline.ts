@@ -337,7 +337,7 @@ export type TimelineState = z.infer<typeof timelineStateSchema>
 
 // UI-only view state (zoom, scroll, playhead). Not persisted in the project file.
 export const timelineViewStateSchema = z.object({
-  zoom: z.number().min(0.0001),
+  zoom: z.number().min(0).default(0),
   scrollMs: z.number().default(0),
   playheadMs: z.number().default(0),
   isPlaying: z.boolean().default(false),

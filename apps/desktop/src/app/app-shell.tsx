@@ -4,6 +4,7 @@ import { ToastViewport, TooltipProvider, cn, useToast } from "@recordforge/ui"
 import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
+import { ProjectsView } from "../features/projects"
 import { NewRecordingModal } from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { toErrorMessage } from "../lib/errors"
@@ -222,10 +223,13 @@ export function AppShell() {
             ) : null}
             {activeView === "library" ? <LibraryView /> : null}
             {activeView === "projects" ? (
-              <div className="p-8 text-center text-subtle-foreground">
-                <h3 className="font-serif text-lg font-bold text-foreground mb-2">Projects View</h3>
-                <p className="text-sm">Manage your recording projects and series.</p>
-              </div>
+              <ProjectsView
+                onOpenProject={(recId) => {
+                  openEditor(recId)
+                  setActiveView("editor")
+                }}
+                onNavigateToLibrary={() => setActiveView("library")}
+              />
             ) : null}
             {activeView === "storage" ? (
               <div className="p-8 text-center text-subtle-foreground">

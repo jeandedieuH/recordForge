@@ -166,7 +166,7 @@ fn insert_recording_with_status(
             output_path,
             manifest.webcam_path.clone(),
             manifest.work_dir.clone(),
-            None::<String>,
+            manifest.thumbnail_path.clone(),
             markers_json,
         ],
     )
@@ -193,7 +193,7 @@ fn insert_recording_with_status(
         output_path: manifest.output_path.clone(),
         webcam_path: manifest.webcam_path.clone(),
         work_dir: manifest.work_dir.clone(),
-        thumbnail_path: None,
+        thumbnail_path: manifest.thumbnail_path.clone(),
         markers: manifest.markers.clone(),
     })
 }

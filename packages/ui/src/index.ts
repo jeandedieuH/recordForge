@@ -9,6 +9,13 @@ export { IconButton, type IconButtonProps } from "./components/actions/icon-butt
 export { ToggleGroup, ToggleGroupItem } from "./components/actions/toggle-group"
 
 // Forms
+export {
+  ColorPicker,
+  ColorSwatch,
+  DEFAULT_COLOR_PRESETS,
+  type ColorPickerProps,
+  type ColorSwatchProps,
+} from "./components/forms/color-picker"
 export { Input, type InputProps } from "./components/forms/input"
 export { Label } from "./components/forms/label"
 export { NativeSelect } from "./components/forms/native-select"

@@ -106,6 +106,10 @@ pub struct MediaVideoTrackOutput {
     pub width: Option<i32>,
     #[serde(default)]
     pub height: Option<i32>,
+    #[serde(default)]
+    pub thumbnail_dir: Option<String>,
+    #[serde(default)]
+    pub thumbnail_manifest_path: Option<String>,
 }
 
 /// Output files produced by a media job.

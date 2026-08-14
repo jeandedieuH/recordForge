@@ -97,6 +97,7 @@ pub fn run() {
             commands::media::delete_derivatives,
             commands::media::estimate_prepare_disk_space,
             commands::projects::load_project_for_recording,
+            commands::projects::list_projects,
             commands::projects::save_project,
             commands::projects::create_project,
             commands::projects::create_bootstrap_project,

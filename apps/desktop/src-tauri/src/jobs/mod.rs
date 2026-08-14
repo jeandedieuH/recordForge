@@ -723,12 +723,37 @@ impl Worker {
                 .ok_or_else(|| {
                     InternalError::Media("standalone webcam has no video stream".into())
                 })?;
+
+            let webcam_thumb_dir = derivative_dir(&work_dir, "thumbnails_webcam");
+            let (webcam_thumb_dir_str, webcam_thumb_manifest_str) = match generate_thumbnails(
+                &self.ffmpeg_path.to_string_lossy(),
+                &standalone_webcam_path,
+                &webcam_thumb_dir,
+                &webcam_metadata,
+                self.options.thumbnail_interval_sec,
+            ) {
+                Ok((sprite, manifest)) => {
+                    let _ = self.record_derivative(&sprite.to_string_lossy(), "thumbnail");
+                    let _ = self.record_derivative(&manifest.to_string_lossy(), "thumbnail");
+                    (
+                        Some(webcam_thumb_dir.to_string_lossy().to_string()),
+                        Some(manifest.to_string_lossy().to_string()),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("failed to generate webcam thumbnail sprite: {e}");
+                    (None, None)
+                }
+            };
+
             outputs.video_tracks.push(MediaVideoTrackOutput {
                 stream_index: standalone_video_stream_index(&metadata),
                 title: "Webcam".into(),
                 video_path: standalone_webcam_path.to_string_lossy().to_string(),
                 width: stream.width,
                 height: stream.height,
+                thumbnail_dir: webcam_thumb_dir_str,
+                thumbnail_manifest_path: webcam_thumb_manifest_str,
             });
         } else {
             let secondary_video_streams = metadata
@@ -761,12 +786,49 @@ impl Worker {
                         }
                     }
                     self.record_derivative(&video_path.to_string_lossy(), "video")?;
+
+                    let stream_thumb_dir =
+                        derivative_dir(&work_dir, &format!("thumbnails_stream_{}", stream.index));
+                    let stream_metadata = probe_media(
+                        &self.ffprobe_path.to_string_lossy(),
+                        &video_path,
+                        &self.options.recording_id,
+                    )
+                    .unwrap_or_else(|_| metadata.clone());
+
+                    let (stream_thumb_dir_str, stream_thumb_manifest_str) = match generate_thumbnails(
+                        &self.ffmpeg_path.to_string_lossy(),
+                        &video_path,
+                        &stream_thumb_dir,
+                        &stream_metadata,
+                        self.options.thumbnail_interval_sec,
+                    ) {
+                        Ok((sprite, manifest)) => {
+                            let _ = self.record_derivative(&sprite.to_string_lossy(), "thumbnail");
+                            let _ =
+                                self.record_derivative(&manifest.to_string_lossy(), "thumbnail");
+                            (
+                                Some(stream_thumb_dir.to_string_lossy().to_string()),
+                                Some(manifest.to_string_lossy().to_string()),
+                            )
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to generate stream {} thumbnail sprite: {e}",
+                                stream.index
+                            );
+                            (None, None)
+                        }
+                    };
+
                     outputs.video_tracks.push(MediaVideoTrackOutput {
                         stream_index: stream.index,
                         title,
                         video_path: video_path.to_string_lossy().to_string(),
                         width: stream.width,
                         height: stream.height,
+                        thumbnail_dir: stream_thumb_dir_str,
+                        thumbnail_manifest_path: stream_thumb_manifest_str,
                     });
                 }
             }

@@ -1,6 +1,6 @@
 import type { MaskClip, MediaMetadata } from "@recordforge/contracts"
 import { Sparkles } from "lucide-react"
-import { NativeSelect, Switch } from "@recordforge/ui"
+import { ColorPicker, NativeSelect, Switch } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { InspectorSection, NumberField } from "./fields"
@@ -79,6 +79,17 @@ export function MaskClipInspector({
               min={2}
               onChange={(value) => updateMask({ pixelSize: Math.round(value) })}
             />
+          ) : null}
+          {clip.mode === "redact" ? (
+            <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+              <span>Redact color</span>
+              <ColorPicker
+                aria-label="Redact color"
+                size="sm"
+                value={clip.redactColor ?? "#000000"}
+                onChange={(redactColor) => updateMask({ redactColor })}
+              />
+            </div>
           ) : null}
           <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
             <span>Enabled in preview and export</span>

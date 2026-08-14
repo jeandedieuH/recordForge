@@ -10,6 +10,9 @@ const ALLOWED_KEYS: &[&str] = &[
     "countdownSeconds",
     "startMinimized",
     "sidebarCollapsed",
+    "hardwareCheckDone",
+    "cursorPresets",
+    "defaultCursorSettings",
 ];
 
 pub fn validate_key(key: &str) -> Result<()> {

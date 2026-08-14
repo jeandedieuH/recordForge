@@ -138,3 +138,68 @@ pub fn generate_thumbnails(
 
     Ok((sprite_path, manifest_path))
 }
+
+/// Generate a single poster frame image from a video file.
+#[instrument(skip(ffmpeg_path, input, output_image))]
+pub fn generate_poster_frame(
+    ffmpeg_path: &str,
+    input: &Path,
+    output_image: &Path,
+) -> Result<PathBuf> {
+    if let Some(parent) = output_image.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| InternalError::Storage(format!("create poster dir: {e}")))?;
+    }
+
+    if !input.is_file() {
+        return Err(InternalError::Media("input video does not exist".into()).into());
+    }
+
+    // Try extracting at 0.5s first; fallback to 0.0s if needed
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .arg("-y")
+        .arg("-ss")
+        .arg("0.5")
+        .arg("-i")
+        .arg(input)
+        .args(["-vf", "scale=480:-2:force_original_aspect_ratio=decrease"])
+        .arg("-vframes")
+        .arg("1")
+        .arg("-q:v")
+        .arg("2")
+        .arg(output_image);
+
+    let output = command
+        .output()
+        .map_err(|e| InternalError::Media(format!("poster extraction run: {e}")))?;
+
+    if !output.status.success() || !output_image.is_file() {
+        // Fallback: extract first frame at 0.0s
+        let mut fallback = Command::new(ffmpeg_path);
+        fallback
+            .arg("-y")
+            .arg("-ss")
+            .arg("0.0")
+            .arg("-i")
+            .arg(input)
+            .args(["-vf", "scale=480:-2:force_original_aspect_ratio=decrease"])
+            .arg("-vframes")
+            .arg("1")
+            .arg("-q:v")
+            .arg("2")
+            .arg(output_image);
+
+        let fallback_output = fallback
+            .output()
+            .map_err(|e| InternalError::Media(format!("poster fallback run: {e}")))?;
+
+        if !fallback_output.status.success() || !output_image.is_file() {
+            let stderr = String::from_utf8_lossy(&fallback_output.stderr);
+            return Err(InternalError::Media(format!("poster extraction failed: {stderr}")).into());
+        }
+    }
+
+    Ok(output_image.to_path_buf())
+}
+

@@ -132,6 +132,8 @@ pub struct RecordingManifest {
     pub work_dir: String,
     pub output_path: Option<String>,
     #[serde(default)]
+    pub thumbnail_path: Option<String>,
+    #[serde(default)]
     pub webcam_path: Option<String>,
     #[serde(default)]
     pub webcam_fragments: Vec<RecordingWebcamFragment>,
@@ -163,6 +165,7 @@ impl RecordingManifest {
             profile_name: profile_name.into(),
             work_dir: work_dir.into(),
             output_path: None,
+            thumbnail_path: None,
             webcam_path: None,
             webcam_fragments: Vec::new(),
             fragments: Vec::new(),
@@ -221,6 +224,11 @@ impl RecordingManifest {
 
     pub fn set_output_path(&mut self, path: impl Into<String>) {
         self.output_path = Some(path.into());
+        self.touch();
+    }
+
+    pub fn set_thumbnail_path(&mut self, path: impl Into<String>) {
+        self.thumbnail_path = Some(path.into());
         self.touch();
     }
 

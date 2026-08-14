@@ -7,7 +7,7 @@ import type {
 import { buildCameraPresetTransform } from "@recordforge/editor-core"
 import { useEffect, useMemo } from "react"
 import { AlignLeft, AlignRight, Maximize2, Sparkles } from "lucide-react"
-import { Input, Slider, Switch } from "@recordforge/ui"
+import { ColorPicker, Slider, Switch } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { InspectorSection, NumberField, PresetButton } from "./fields"
@@ -280,16 +280,14 @@ export function CameraClipInspector({
             />
           </div>
 
-          <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+          <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
             <span>Border color</span>
-            <Input
+            <ColorPicker
               aria-label="Camera border color"
-              type="color"
               value={clip.transform.borderColor ?? "#ffffff"}
-              onChange={(event) => updateTransform({ borderColor: event.target.value })}
-              className="h-8 w-12 p-1"
+              onChange={(borderColor) => updateTransform({ borderColor })}
             />
-          </label>
+          </div>
 
           <div className="grid grid-cols-3 gap-2">
             <PresetButton
