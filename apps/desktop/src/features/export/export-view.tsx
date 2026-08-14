@@ -71,10 +71,28 @@ const PRESETS: Array<{
     details: "H.264 · efficient",
   },
   {
+    id: "smooth-60fps",
+    label: "Smooth 60 fps",
+    description: "High framerate for fluid motion",
+    details: "H.264 · 60 fps · fluid",
+  },
+  {
     id: "high-quality",
     label: "High quality",
     description: "More detail for final delivery",
     details: "H.264 · CRF 18 · AAC 192k",
+  },
+  {
+    id: "ultra-4k",
+    label: "Ultra 4K",
+    description: "Crisp 3840×2160 UHD output",
+    details: "H.264/HEVC · 4K · pristine",
+  },
+  {
+    id: "ultra-4k-60",
+    label: "Ultra 4K 60 fps",
+    description: "Ultimate high-framerate UHD presentation",
+    details: "H.264/HEVC · 4K60 · broadcast",
   },
   {
     id: "vertical",

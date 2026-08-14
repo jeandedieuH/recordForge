@@ -58,7 +58,11 @@ function getTrackAccentColor(track: TimelineTrack): {
     return { border: "border-l-primary", text: "text-primary", bg: "bg-primary/10" }
   }
   if (track.kind === "captions") {
-    return { border: "border-l-track-captions", text: "text-track-captions", bg: "bg-track-captions/10" }
+    return {
+      border: "border-l-track-captions",
+      text: "text-track-captions",
+      bg: "bg-track-captions/10",
+    }
   }
   if (track.kind === "effects") {
     return { border: "border-l-warning", text: "text-warning", bg: "bg-warning/10" }
@@ -123,7 +127,9 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
           tooltipSide="top"
           className={cn(
             "size-6 rounded",
-            track.muted ? "bg-destructive/20 text-destructive" : "text-muted-foreground hover:text-foreground",
+            track.muted
+              ? "bg-destructive/20 text-destructive"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => onToggleTrackMuted(track)}
         >
@@ -136,7 +142,9 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
           tooltipSide="top"
           className={cn(
             "size-6 rounded",
-            track.solo ? "bg-primary/20 text-primary font-bold shadow-xs" : "text-muted-foreground hover:text-foreground",
+            track.solo
+              ? "bg-primary/20 text-primary font-bold shadow-xs"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => onToggleTrackSolo(track)}
         >
@@ -149,7 +157,9 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
           tooltipSide="top"
           className={cn(
             "size-6 rounded",
-            track.locked ? "bg-warning/20 text-warning" : "text-muted-foreground hover:text-foreground",
+            track.locked
+              ? "bg-warning/20 text-warning"
+              : "text-muted-foreground hover:text-foreground",
           )}
           onClick={() => onToggleTrackLocked(track)}
         >

@@ -42,7 +42,14 @@ export type ZoomTarget = z.infer<typeof zoomTargetSchema>
 export const zoomModeSchema = z.enum(["auto", "manual", "static", "follow-cursor", "smooth-pan"])
 export type ZoomMode = z.infer<typeof zoomModeSchema>
 
-export const zoomSourceSchema = z.enum(["click", "dwell", "movement", "manual", "follow", "cluster"])
+export const zoomSourceSchema = z.enum([
+  "click",
+  "dwell",
+  "movement",
+  "manual",
+  "follow",
+  "cluster",
+])
 export type ZoomSource = z.infer<typeof zoomSourceSchema>
 
 export const zoomPresetSchema = z.enum([
@@ -358,6 +365,9 @@ export const exportPresetSchema = z.enum([
   "fast-share",
   "balanced",
   "high-quality",
+  "smooth-60fps",
+  "ultra-4k",
+  "ultra-4k-60",
   "vertical",
   "square",
   "selected-range",

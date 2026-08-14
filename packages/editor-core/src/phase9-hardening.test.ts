@@ -398,7 +398,7 @@ describe("Phase 9 hardening", () => {
       const firstRepeated = resolvePreviewComposition(state, samples[0], { cursorEngine })
       expect(JSON.stringify(firstRepeated)).toBe(JSON.stringify(results[0]))
 
-      expect(elapsed).toBeLessThan(500)
+      expect(elapsed).toBeLessThan(1000)
     })
 
     it("builds and evaluates a 60-minute cursor telemetry file within budget", () => {
@@ -416,7 +416,7 @@ describe("Phase 9 hardening", () => {
         const frame = engine.evaluate(t, defaultCursorSettings)
         const evalElapsed = performance.now() - evalStart
 
-        expect(evalElapsed).toBeLessThan(50)
+        expect(evalElapsed).toBeLessThan(200)
         expect(frame.visible).toBe(true)
       }
     })

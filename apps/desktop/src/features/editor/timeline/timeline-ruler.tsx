@@ -39,7 +39,9 @@ export function formatTimelineTime(ms: number): string {
 }
 
 export function getVisibleTickInterval(pixelsPerMs: number): number {
-  const TICK_INTERVALS = [100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 120_000, 300_000]
+  const TICK_INTERVALS = [
+    100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 120_000, 300_000,
+  ]
   const minimumSpacing = 80
   return (
     TICK_INTERVALS.find((interval) => interval * pixelsPerMs >= minimumSpacing) ??
@@ -185,7 +187,10 @@ export const TimelineRuler = memo(function TimelineRuler({
       <div className="relative h-6 overflow-hidden bg-surface-container-low/50">
         {/* Render Markers */}
         {markers
-          .filter((marker) => marker.timeMs >= visibleStartMs - 5_000 && marker.timeMs <= visibleEndMs + 5_000)
+          .filter(
+            (marker) =>
+              marker.timeMs >= visibleStartMs - 5_000 && marker.timeMs <= visibleEndMs + 5_000,
+          )
           .map((marker) => (
             <ContextMenu key={marker.id}>
               <ContextMenuTrigger asChild>

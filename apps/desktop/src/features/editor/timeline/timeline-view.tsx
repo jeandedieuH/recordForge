@@ -50,17 +50,8 @@ import {
   zoomTargetForCursorPoint,
 } from "@recordforge/cursor-core"
 import { isTimelineAudioMuted } from "@recordforge/media-core"
-import {
-  AlertCircle,
-  Monitor,
-} from "lucide-react"
-import {
-  Button,
-  EmptyState,
-  Progress,
-  Skeleton,
-  cn,
-} from "@recordforge/ui"
+import { AlertCircle, Monitor } from "lucide-react"
+import { Button, EmptyState, Progress, Skeleton, cn } from "@recordforge/ui"
 import { isTauri } from "../../../lib/settings"
 import { useEditorStore } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
@@ -75,11 +66,7 @@ import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
-import {
-  TimelineLanes,
-  type CursorRangeAction,
-  type ZoomSegmentAction,
-} from "./timeline-lanes"
+import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
@@ -979,9 +966,7 @@ export function TimelineView({
   }
 
   function addMarkerAtTime(timeMs: number) {
-    execute(
-      createAddMarkerCommand(timeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`),
-    )
+    execute(createAddMarkerCommand(timeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`))
   }
 
   function cycleTrackHeight(track: TimelineTrack) {
@@ -1215,10 +1200,7 @@ export function TimelineView({
                 />
               ) : null}
 
-              {mediaUrl &&
-              !mediaError &&
-              videoBounds &&
-              selectedZoomSegment ? (
+              {mediaUrl && !mediaError && videoBounds && selectedZoomSegment ? (
                 <ZoomCanvasOverlay
                   segment={selectedZoomSegment}
                   canvasWidth={timeline.canvas.width}

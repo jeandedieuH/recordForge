@@ -1,9 +1,5 @@
 import { memo, useRef, useState } from "react"
-import type {
-  CursorSmoothing,
-  TimelineClip,
-  TimelineTrack,
-} from "@recordforge/contracts"
+import type { CursorSmoothing, TimelineClip, TimelineTrack } from "@recordforge/contracts"
 import {
   AudioLines,
   Captions,
@@ -31,15 +27,8 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import {
-  snapClipStart,
-  snapTrimEdge,
-  type SnapTarget,
-} from "@recordforge/editor-core"
-import type {
-  ThumbnailManifest,
-  WaveformResources,
-} from "../media/derivative-resources"
+import { snapClipStart, snapTrimEdge, type SnapTarget } from "@recordforge/editor-core"
+import type { ThumbnailManifest, WaveformResources } from "../media/derivative-resources"
 import { ThumbnailStrip, WaveformStrip } from "./timeline-derivatives"
 import type { CursorRangeAction } from "./timeline-lanes"
 
@@ -109,48 +98,55 @@ function getClipTheme(track: TimelineTrack): {
 } {
   if (track.kind === "screen") {
     return {
-      cardClass: "border-track-screen/70 bg-gradient-to-b from-track-screen/25 to-track-screen/10 hover:from-track-screen/35 hover:to-track-screen/15 shadow-track-screen/10",
+      cardClass:
+        "border-track-screen/70 bg-gradient-to-b from-track-screen/25 to-track-screen/10 hover:from-track-screen/35 hover:to-track-screen/15 shadow-track-screen/10",
       accentBorder: "border-track-screen",
       handleGlow: "bg-track-screen text-black",
     }
   }
   if (track.kind === "camera") {
     return {
-      cardClass: "border-track-webcam/70 bg-gradient-to-b from-track-webcam/25 to-track-webcam/10 hover:from-track-webcam/35 hover:to-track-webcam/15 shadow-track-webcam/10",
+      cardClass:
+        "border-track-webcam/70 bg-gradient-to-b from-track-webcam/25 to-track-webcam/10 hover:from-track-webcam/35 hover:to-track-webcam/15 shadow-track-webcam/10",
       accentBorder: "border-track-webcam",
       handleGlow: "bg-track-webcam text-black",
     }
   }
   if (track.kind === "cursor") {
     return {
-      cardClass: "border-primary/70 bg-gradient-to-b from-primary/25 to-primary/10 hover:from-primary/35 hover:to-primary/15 shadow-primary/10",
+      cardClass:
+        "border-primary/70 bg-gradient-to-b from-primary/25 to-primary/10 hover:from-primary/35 hover:to-primary/15 shadow-primary/10",
       accentBorder: "border-primary",
       handleGlow: "bg-primary text-white",
     }
   }
   if (track.kind === "captions") {
     return {
-      cardClass: "border-track-captions/70 bg-gradient-to-b from-track-captions/25 to-track-captions/10 hover:from-track-captions/35 hover:to-track-captions/15 shadow-track-captions/10",
+      cardClass:
+        "border-track-captions/70 bg-gradient-to-b from-track-captions/25 to-track-captions/10 hover:from-track-captions/35 hover:to-track-captions/15 shadow-track-captions/10",
       accentBorder: "border-track-captions",
       handleGlow: "bg-track-captions text-black",
     }
   }
   if (track.kind === "effects") {
     return {
-      cardClass: "border-warning/70 bg-gradient-to-b from-warning/25 to-warning/10 hover:from-warning/35 hover:to-warning/15 shadow-warning/10",
+      cardClass:
+        "border-warning/70 bg-gradient-to-b from-warning/25 to-warning/10 hover:from-warning/35 hover:to-warning/15 shadow-warning/10",
       accentBorder: "border-warning",
       handleGlow: "bg-warning text-black",
     }
   }
   if (track.name.toLowerCase().includes("system")) {
     return {
-      cardClass: "border-track-system/70 bg-gradient-to-b from-track-system/25 to-track-system/10 hover:from-track-system/35 hover:to-track-system/15 shadow-track-system/10",
+      cardClass:
+        "border-track-system/70 bg-gradient-to-b from-track-system/25 to-track-system/10 hover:from-track-system/35 hover:to-track-system/15 shadow-track-system/10",
       accentBorder: "border-track-system",
       handleGlow: "bg-track-system text-black",
     }
   }
   return {
-    cardClass: "border-track-mic/70 bg-gradient-to-b from-track-mic/25 to-track-mic/10 hover:from-track-mic/35 hover:to-track-mic/15 shadow-track-mic/10",
+    cardClass:
+      "border-track-mic/70 bg-gradient-to-b from-track-mic/25 to-track-mic/10 hover:from-track-mic/35 hover:to-track-mic/15 shadow-track-mic/10",
     accentBorder: "border-track-mic",
     handleGlow: "bg-track-mic text-black",
   }
@@ -211,10 +207,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const ClipIcon = getClipIcon(clip, track)
   const theme = getClipTheme(track)
 
-  function beginGesture(
-    event: React.PointerEvent<HTMLElement>,
-    mode: ClipGesture["mode"],
-  ) {
+  function beginGesture(event: React.PointerEvent<HTMLElement>, mode: ClipGesture["mode"]) {
     if (event.button !== 0 || isLocked) return
     event.stopPropagation()
     event.preventDefault()

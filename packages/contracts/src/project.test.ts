@@ -144,6 +144,12 @@ describe("project contract", () => {
       container: "mp4",
       captionMode: "burn-in",
     })
+
+    expect(projectExportSettingsSchema.parse({ preset: "smooth-60fps" }).preset).toBe(
+      "smooth-60fps",
+    )
+    expect(projectExportSettingsSchema.parse({ preset: "ultra-4k" }).preset).toBe("ultra-4k")
+    expect(projectExportSettingsSchema.parse({ preset: "ultra-4k-60" }).preset).toBe("ultra-4k-60")
   })
 
   it("requires project-scoped render plans and keeps media paths out of the DTO", () => {

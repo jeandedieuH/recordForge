@@ -441,12 +441,17 @@ fn add_video_encoder(
             ]);
         }
         "libx264" | "libx265" => {
-            // Constrain threads to 2 to prevent severe thread thrashing on 2-4 core machines when screen + webcam run concurrently.
-            // -tune zerolatency and disabling lookaheads eliminate latency buffers and memory/CPU churn.
+            // Allocate 4 threads for 4K / 60fps capture to prevent encoder bottleneck on powerful machines,
+            // while keeping 2 threads for standard/webcam captures to prevent thrashing on low-end machines.
+            let threads = if !is_webcam && (profile.width >= 3840 || profile.fps >= 60) {
+                "4"
+            } else {
+                "2"
+            };
             command.args([
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-threads", "2",
+                "-threads", threads,
             ]);
             if encoder == "libx264" {
                 command.args([

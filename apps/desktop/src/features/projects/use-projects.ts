@@ -1,11 +1,6 @@
 import { create } from "zustand"
 import type { ProjectSummary } from "@recordforge/contracts"
-import {
-  deleteProject,
-  duplicateProject,
-  listProjects,
-  renameProject,
-} from "../../lib/project"
+import { deleteProject, duplicateProject, listProjects, renameProject } from "../../lib/project"
 import { revealRecording } from "../../lib/library"
 import { toErrorMessage } from "../../lib/errors"
 

@@ -2,14 +2,7 @@ import { useCallback, useRef, useState } from "react"
 import type { ManualZoomSegment, ZoomMode, ZoomTarget } from "@recordforge/contracts"
 import { clampZoomTarget, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import { Button, cn } from "@recordforge/ui"
-import {
-  Crosshair,
-  Lock,
-  MousePointer,
-  Move,
-  Unlock,
-  ZoomIn,
-} from "lucide-react"
+import { Crosshair, Lock, MousePointer, Move, Unlock, ZoomIn } from "lucide-react"
 
 export interface ZoomCanvasOverlayProps {
   segment: ManualZoomSegment | null
@@ -123,9 +116,17 @@ export function ZoomCanvasOverlay({
         let newX = initial.x
         let newY = initial.y
 
-        if (state.handle === "right" || state.handle === "top-right" || state.handle === "bottom-right") {
+        if (
+          state.handle === "right" ||
+          state.handle === "top-right" ||
+          state.handle === "bottom-right"
+        ) {
           newWidth = Math.max(100, initial.width + deltaCanvasX)
-        } else if (state.handle === "left" || state.handle === "top-left" || state.handle === "bottom-left") {
+        } else if (
+          state.handle === "left" ||
+          state.handle === "top-left" ||
+          state.handle === "bottom-left"
+        ) {
           const clampedDelta = Math.min(deltaCanvasX, initial.width - 100)
           newWidth = initial.width - clampedDelta
           newX = initial.x + clampedDelta
@@ -146,7 +147,11 @@ export function ZoomCanvasOverlay({
         }
       }
 
-      const clamped = clampZoomTarget(nextTarget, { width: canvasWidth, height: canvasHeight, padding: 0 })
+      const clamped = clampZoomTarget(nextTarget, {
+        width: canvasWidth,
+        height: canvasHeight,
+        padding: 0,
+      })
       onUpdateTarget(clamped, { phase: "draft" })
     },
     [canvasHeight, canvasWidth, onUpdateTarget, scaleX, scaleY, segment],
@@ -333,7 +338,10 @@ export function ZoomCanvasOverlay({
             />
             <button
               type="button"
-              className={cn(handleBaseClass, "-bottom-1.5 left-1/2 -translate-x-1/2 cursor-ns-resize")}
+              className={cn(
+                handleBaseClass,
+                "-bottom-1.5 left-1/2 -translate-x-1/2 cursor-ns-resize",
+              )}
               onPointerDown={(e) => handlePointerDown(e, "bottom")}
               aria-label="Resize bottom"
             />
@@ -345,7 +353,10 @@ export function ZoomCanvasOverlay({
             />
             <button
               type="button"
-              className={cn(handleBaseClass, "-right-1.5 top-1/2 -translate-y-1/2 cursor-ew-resize")}
+              className={cn(
+                handleBaseClass,
+                "-right-1.5 top-1/2 -translate-y-1/2 cursor-ew-resize",
+              )}
               onPointerDown={(e) => handlePointerDown(e, "right")}
               aria-label="Resize right"
             />
@@ -437,7 +448,11 @@ export function ZoomCanvasOverlay({
               onClick={toggleLock}
               title={segment.locked ? "Unlock zoom segment" : "Lock zoom segment"}
             >
-              {segment.locked ? <Lock className="size-3" aria-hidden /> : <Unlock className="size-3 text-subtle-foreground" aria-hidden />}
+              {segment.locked ? (
+                <Lock className="size-3" aria-hidden />
+              ) : (
+                <Unlock className="size-3 text-subtle-foreground" aria-hidden />
+              )}
             </Button>
           </div>
         </div>

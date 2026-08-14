@@ -323,22 +323,37 @@ export function SettingsView() {
               </p>
             </div>
 
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {[
                 {
                   id: "low-impact",
                   name: "Low Impact",
-                  desc: "Best for gaming & low-spec PCs. 720p @ 30fps",
+                  desc: "Best for battery & low-spec PCs. 720p @ 30fps",
                 },
                 {
                   id: "balanced",
                   name: "Balanced",
-                  desc: "Optimal balance of quality & filesize. 1080p @ 30fps",
+                  desc: "Recommended quality & size. 1080p @ 30fps",
+                },
+                {
+                  id: "smooth-60fps",
+                  name: "Smooth 60 FPS",
+                  desc: "Fluid motion for UI & gaming. 1080p @ 60fps",
+                },
+                {
+                  id: "ultra-4k",
+                  name: "Ultra 4K",
+                  desc: "Crisp presentation for high-DPI. 4K @ 30fps",
+                },
+                {
+                  id: "ultra-4k-60",
+                  name: "Ultra 4K 60 FPS",
+                  desc: "Ultimate fidelity for powerful PCs. 4K @ 60fps",
                 },
                 {
                   id: "high-quality",
                   name: "Maximum Quality",
-                  desc: "Higher quality capture for editing. 1080p @ 30fps",
+                  desc: "High bitrate master capture. 1080p @ 30fps",
                 },
               ].map((p) => (
                 <button

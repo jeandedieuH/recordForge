@@ -160,7 +160,9 @@ export function ProjectCard({
               <DropdownMenuItem onClick={() => setIsRenaming(true)}>
                 <Pencil className="mr-2 size-4 text-subtle-foreground" /> Rename
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onDuplicate(project.recordingId, `${project.name} (Copy)`)}>
+              <DropdownMenuItem
+                onClick={() => onDuplicate(project.recordingId, `${project.name} (Copy)`)}
+              >
                 <Copy className="mr-2 size-4 text-subtle-foreground" /> Duplicate
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onReveal(project.recordingId)}>
@@ -181,7 +183,8 @@ export function ProjectCard({
           <div className="inline-flex items-center gap-1 rounded border border-border bg-surface-container-high px-2 py-0.5 text-[10px] font-mono font-medium text-subtle-foreground">
             <Layers className="size-3" />
             <span>
-              {project.trackCount} {project.trackCount === 1 ? "track" : "tracks"} · {project.clipCount} {project.clipCount === 1 ? "clip" : "clips"}
+              {project.trackCount} {project.trackCount === 1 ? "track" : "tracks"} ·{" "}
+              {project.clipCount} {project.clipCount === 1 ? "clip" : "clips"}
             </span>
           </div>
         </div>

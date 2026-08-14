@@ -106,6 +106,24 @@ describe("recording contracts", () => {
     }
 
     expect(recordingConfigSchema.parse(config)).toEqual(config)
+
+    const config60fps = {
+      ...config,
+      profile: "smooth-60fps" as const,
+    }
+    expect(recordingConfigSchema.parse(config60fps)).toEqual(config60fps)
+
+    const config4k = {
+      ...config,
+      profile: "ultra-4k" as const,
+    }
+    expect(recordingConfigSchema.parse(config4k)).toEqual(config4k)
+
+    const config4k60 = {
+      ...config,
+      profile: "ultra-4k-60" as const,
+    }
+    expect(recordingConfigSchema.parse(config4k60)).toEqual(config4k60)
   })
 
   it("validates a recording profile", () => {

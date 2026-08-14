@@ -150,7 +150,10 @@ export function LibraryItemCard({
               <DropdownMenuItem onClick={() => onPrepare(recording)}>
                 <Sparkles className="mr-2 size-4 text-sky-400" /> Prepare Media
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onDelete(recording.id)} className="text-red-400 focus:text-red-400 focus:bg-red-950/30">
+              <DropdownMenuItem
+                onClick={() => onDelete(recording.id)}
+                className="text-red-400 focus:text-red-400 focus:bg-red-950/30"
+              >
                 <Trash2 className="mr-2 size-4" /> Delete Recording
               </DropdownMenuItem>
             </DropdownMenuContent>

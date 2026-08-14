@@ -110,7 +110,8 @@ export function ProjectRow({
             <span>·</span>
             <span className="inline-flex items-center gap-1">
               <Layers className="size-3" />
-              {project.trackCount} {project.trackCount === 1 ? "track" : "tracks"} · {project.clipCount} {project.clipCount === 1 ? "clip" : "clips"}
+              {project.trackCount} {project.trackCount === 1 ? "track" : "tracks"} ·{" "}
+              {project.clipCount} {project.clipCount === 1 ? "clip" : "clips"}
             </span>
             {project.width && project.height ? (
               <>
@@ -153,7 +154,9 @@ export function ProjectRow({
             <DropdownMenuItem onClick={() => setIsRenaming(true)}>
               <Pencil className="mr-2 size-4 text-subtle-foreground" /> Rename
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onDuplicate(project.recordingId, `${project.name} (Copy)`)}>
+            <DropdownMenuItem
+              onClick={() => onDuplicate(project.recordingId, `${project.name} (Copy)`)}
+            >
               <Copy className="mr-2 size-4 text-subtle-foreground" /> Duplicate
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onReveal(project.recordingId)}>

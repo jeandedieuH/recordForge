@@ -117,12 +117,15 @@ fn default_encoder_priority() -> Vec<String> {
     ]
 }
 
-/// Built-in profiles tuned for low-end Windows 10 hardware.
+/// Built-in profiles tuned for low-end to high-performance Windows hardware.
 ///
 /// - `low-impact`: 720p30, ultrafast x264/hardware, low CPU cost.
 /// - `balanced`: 1080p30, reasonable quality.
-/// - `smooth-demo`: 1080p30, prioritize low drops.
-/// - `high-quality`: 1080p30, higher fidelity.
+/// - `smooth-demo`: 1080p60, prioritize fluid 60fps screen capture.
+/// - `smooth-60fps`: 1080p60, high quality 60fps for animations & games.
+/// - `high-quality`: 1080p30, higher fidelity master recording.
+/// - `ultra-4k`: 2160p30 (3840x2160), crisp 4K UHD presentation.
+/// - `ultra-4k-60`: 2160p60 (3840x2160), pristine 4K UHD at 60fps for powerful workstations.
 /// - `camera-only`: 1080p30 placeholder; handled separately in later phases.
 pub fn builtin_profiles() -> Vec<RecordingProfile> {
     vec![
@@ -155,9 +158,21 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             label: "Smooth Demo".into(),
             width: 1920,
             height: 1080,
-            fps: 30,
-            video_bitrate_kbps: Some(3500),
-            crf: Some(28),
+            fps: 60,
+            video_bitrate_kbps: Some(5000),
+            crf: Some(24),
+            encoder_priority: default_encoder_priority(),
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        },
+        RecordingProfile {
+            id: "smooth-60fps".into(),
+            label: "Smooth 60 FPS".into(),
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            video_bitrate_kbps: Some(6000),
+            crf: Some(20),
             encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
@@ -168,7 +183,31 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             width: 1920,
             height: 1080,
             fps: 30,
-            video_bitrate_kbps: Some(6000),
+            video_bitrate_kbps: Some(8000),
+            crf: Some(18),
+            encoder_priority: default_encoder_priority(),
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 192,
+        },
+        RecordingProfile {
+            id: "ultra-4k".into(),
+            label: "Ultra 4K".into(),
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            video_bitrate_kbps: Some(12000),
+            crf: Some(18),
+            encoder_priority: default_encoder_priority(),
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 192,
+        },
+        RecordingProfile {
+            id: "ultra-4k-60".into(),
+            label: "Ultra 4K 60 FPS".into(),
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            video_bitrate_kbps: Some(20000),
             crf: Some(18),
             encoder_priority: default_encoder_priority(),
             audio_codec: "aac".into(),
@@ -188,4 +227,29 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builtin_profiles_includes_60fps_and_4k() {
+        let profiles = builtin_profiles();
+        let smooth_60 = profiles.iter().find(|p| p.id == "smooth-60fps").expect("smooth-60fps profile");
+        assert_eq!(smooth_60.fps, 60);
+        assert_eq!(smooth_60.width, 1920);
+        assert_eq!(smooth_60.height, 1080);
+
+        let ultra_4k = profiles.iter().find(|p| p.id == "ultra-4k").expect("ultra-4k profile");
+        assert_eq!(ultra_4k.width, 3840);
+        assert_eq!(ultra_4k.height, 2160);
+        assert_eq!(ultra_4k.fps, 30);
+
+        let ultra_4k_60 = profiles.iter().find(|p| p.id == "ultra-4k-60").expect("ultra-4k-60 profile");
+        assert_eq!(ultra_4k_60.width, 3840);
+        assert_eq!(ultra_4k_60.height, 2160);
+        assert_eq!(ultra_4k_60.fps, 60);
+    }
+}
+
 

@@ -1622,6 +1622,9 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
             | "fast-share"
             | "balanced"
             | "high-quality"
+            | "smooth-60fps"
+            | "ultra-4k"
+            | "ultra-4k-60"
             | "vertical"
             | "square"
             | "selected-range"
@@ -1675,8 +1678,15 @@ fn append_video_encoding_args(command: &mut Command, settings: &ExportSettings, 
     let (preset, crf) = match settings.preset.as_str() {
         "fast-share" => ("ultrafast", "23"),
         "high-quality" => ("slow", "18"),
+        "smooth-60fps" => ("veryfast", "20"),
+        "ultra-4k" => ("medium", "18"),
+        "ultra-4k-60" => ("medium", "18"),
         "vertical" | "square" => ("veryfast", "20"),
         _ => ("veryfast", "20"),
+    };
+    let target_fps = match settings.preset.as_str() {
+        "smooth-60fps" | "ultra-4k-60" => 60.max(fps),
+        _ => fps,
     };
     command
         .arg("-c:v")
@@ -1686,12 +1696,15 @@ fn append_video_encoding_args(command: &mut Command, settings: &ExportSettings, 
         .arg("-crf")
         .arg(crf)
         .arg("-r")
-        .arg(fps.to_string())
+        .arg(target_fps.to_string())
         .args(["-pix_fmt", "yuv420p"]);
 }
 
 fn audio_bitrate(settings: &ExportSettings) -> &'static str {
-    if settings.preset == "high-quality" {
+    if matches!(
+        settings.preset.as_str(),
+        "high-quality" | "ultra-4k" | "ultra-4k-60"
+    ) {
         "192k"
     } else {
         "128k"
@@ -2467,5 +2480,28 @@ mod tests {
         cleanup_export_files(&output);
 
         assert!(!cursor_partial.exists());
+    }
+
+    #[test]
+    fn validates_60fps_and_4k_export_presets() {
+        let plan = valid_plan();
+        for preset in ["smooth-60fps", "ultra-4k", "ultra-4k-60"] {
+            let settings = ExportSettings {
+                preset: preset.into(),
+                codec: "h264".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                range: None,
+            };
+            assert!(validate_export_settings(&settings, &plan).is_ok());
+        }
+        let settings_4k = ExportSettings {
+            preset: "ultra-4k".into(),
+            codec: "h264".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            range: None,
+        };
+        assert_eq!(audio_bitrate(&settings_4k), "192k");
     }
 }

@@ -77,7 +77,16 @@ export type VideoDevice = z.infer<typeof videoDeviceSchema>
 
 export const recordingConfigSchema = z.object({
   source: captureSourceSchema,
-  profile: z.enum(["low-impact", "balanced", "smooth-demo", "high-quality", "camera-only"]),
+  profile: z.enum([
+    "low-impact",
+    "balanced",
+    "smooth-demo",
+    "high-quality",
+    "smooth-60fps",
+    "ultra-4k",
+    "ultra-4k-60",
+    "camera-only",
+  ]),
   captureMicrophone: z.boolean(),
   captureSystemAudio: z.boolean(),
   captureWebcam: z.boolean(),

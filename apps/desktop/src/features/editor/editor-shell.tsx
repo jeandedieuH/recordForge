@@ -2,7 +2,11 @@ import { useEffect, useState } from "react"
 import { X } from "lucide-react"
 import { Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
 import { useTimelineStore } from "../../stores/timeline-store"
-import { useThumbnailManifest, useVideoTrackThumbnailResources, useWaveformResources } from "./media/derivative-resources"
+import {
+  useThumbnailManifest,
+  useVideoTrackThumbnailResources,
+  useWaveformResources,
+} from "./media/derivative-resources"
 import { TimelineView } from "./timeline"
 import { InspectorShell } from "./inspector/inspector-shell"
 import { ActivePanel } from "./shell/active-panel"
@@ -62,7 +66,9 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const view = useTimelineStore((state) => state.view)
 
   const thumbnailResource = useThumbnailManifest(activeJob?.outputs?.thumbnailManifestPath ?? null)
-  const videoThumbnailResources = useVideoTrackThumbnailResources(activeJob?.outputs?.videoTracks ?? [])
+  const videoThumbnailResources = useVideoTrackThumbnailResources(
+    activeJob?.outputs?.videoTracks ?? [],
+  )
   const waveformResources = useWaveformResources(activeJob?.outputs?.audioTracks ?? [])
 
   // Persist the active task whenever it changes.

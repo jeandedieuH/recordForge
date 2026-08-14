@@ -168,11 +168,14 @@ export function TimelineToolbar({
               size="sm"
               className={cn(
                 "h-7 gap-1.5 px-2 text-xs font-medium transition-all duration-fast",
-                snapEnabled && "border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20",
+                snapEnabled &&
+                  "border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20",
               )}
               aria-label="Timeline snapping settings"
             >
-              <Magnet className={cn("size-3.5", snapEnabled ? "text-primary" : "text-muted-foreground")} />
+              <Magnet
+                className={cn("size-3.5", snapEnabled ? "text-primary" : "text-muted-foreground")}
+              />
               <span className="hidden sm:inline">Snap</span>
               <span className="font-mono text-[10px] opacity-75">{snapThresholdMs}ms</span>
             </Button>
@@ -190,7 +193,9 @@ export function TimelineToolbar({
               <div className="space-y-1.5 pt-1">
                 <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>Snap Tolerance</span>
-                  <span className="font-mono font-medium text-foreground">{snapThresholdMs} ms</span>
+                  <span className="font-mono font-medium text-foreground">
+                    {snapThresholdMs} ms
+                  </span>
                 </div>
                 <div className="grid grid-cols-4 gap-1">
                   {[60, 120, 240, 480].map((threshold) => (
@@ -210,7 +215,11 @@ export function TimelineToolbar({
                 </div>
               </div>
               <p className="text-[10px] text-subtle-foreground">
-                Hold <kbd className="rounded border border-border bg-surface px-1 py-0.5 font-mono text-[9px]">Alt</kbd> while dragging to bypass snap temporarily.
+                Hold{" "}
+                <kbd className="rounded border border-border bg-surface px-1 py-0.5 font-mono text-[9px]">
+                  Alt
+                </kbd>{" "}
+                while dragging to bypass snap temporarily.
               </p>
             </div>
           </PopoverContent>
@@ -307,7 +316,9 @@ export function TimelineToolbar({
           size="icon"
           className={cn(
             "size-8 rounded-full shadow-e2 transition-transform active:scale-95",
-            isPlaying ? "bg-primary text-white hover:bg-primary-hover" : "bg-primary text-white hover:bg-primary-hover",
+            isPlaying
+              ? "bg-primary text-white hover:bg-primary-hover"
+              : "bg-primary text-white hover:bg-primary-hover",
           )}
           onClick={onTogglePlay}
           aria-label={isPlaying ? "Pause preview (Space)" : "Play preview (Space)"}
@@ -344,7 +355,9 @@ export function TimelineToolbar({
           className="flex items-center gap-1 rounded-md border border-border/80 bg-surface/90 px-2 py-0.5 font-mono text-xs shadow-xs"
           title="Current playhead position / Total duration"
         >
-          <span className="font-semibold tabular-nums text-foreground">{formatTime(playheadMs)}</span>
+          <span className="font-semibold tabular-nums text-foreground">
+            {formatTime(playheadMs)}
+          </span>
           <span className="text-subtle-foreground">/</span>
           <span className="tabular-nums text-muted-foreground">{formatTime(durationMs)}</span>
         </div>

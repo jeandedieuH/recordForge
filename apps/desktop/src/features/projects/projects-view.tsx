@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react"
 import { LayoutGrid, List, Plus, Search, Layers } from "lucide-react"
-import { Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@recordforge/ui"
+import {
+  Button,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@recordforge/ui"
 import type { ProjectSummary } from "@recordforge/contracts"
 import { ProjectCard } from "./project-card"
 import { ProjectRow } from "./project-row"
@@ -20,13 +28,9 @@ function sortProjects(projects: ProjectSummary[], sort: ProjectSort) {
   const copy = [...projects]
   switch (sort) {
     case "updated":
-      return copy.sort(
-        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-      )
+      return copy.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
     case "newest":
-      return copy.sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      )
+      return copy.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     case "name":
       return copy.sort((a, b) => a.name.localeCompare(b.name))
     case "duration":
@@ -147,10 +151,7 @@ export function ProjectsView({ onOpenProject, onNavigateToLibrary }: ProjectsVie
               : "Open any recording from your Library to create an editable timeline project."}
           </p>
           {onNavigateToLibrary && !store.search ? (
-            <Button
-              onClick={onNavigateToLibrary}
-              className="mt-4 h-8 px-4 text-xs font-semibold"
-            >
+            <Button onClick={onNavigateToLibrary} className="mt-4 h-8 px-4 text-xs font-semibold">
               <Plus className="mr-1.5 size-3.5" /> Go to Library
             </Button>
           ) : null}

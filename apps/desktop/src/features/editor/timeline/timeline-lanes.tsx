@@ -21,10 +21,7 @@ import { toAssetUrl } from "../media/derivative-resources"
 import { TimelineClipItem } from "./timeline-clip-item"
 import { TimelineMarquee } from "./timeline-marquee"
 import { TimelinePlayhead } from "./timeline-playhead"
-import {
-  TimelineRuler,
-  getVisibleTickInterval,
-} from "./timeline-ruler"
+import { TimelineRuler, getVisibleTickInterval } from "./timeline-ruler"
 import { TimelineTrackHeader } from "./timeline-track-header"
 import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
@@ -347,7 +344,11 @@ export function TimelineLanes({
   function isInteractiveTarget(target: EventTarget | null): boolean {
     return (
       target instanceof Element &&
-      Boolean(target.closest("[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill]"))
+      Boolean(
+        target.closest(
+          "[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill]",
+        ),
+      )
     )
   }
 
@@ -638,9 +639,9 @@ export function TimelineLanes({
               trackThumbnailData = thumbnailData
               trackSpriteUrl = spriteUrl
             } else if (isCameraTrack && videoThumbnailResources) {
-              const cameraStreamThumb = Array.from(
-                videoThumbnailResources.byStream.values(),
-              ).find((r) => r.status === "content")
+              const cameraStreamThumb = Array.from(videoThumbnailResources.byStream.values()).find(
+                (r) => r.status === "content",
+              )
               if (cameraStreamThumb && cameraStreamThumb.status === "content") {
                 trackThumbnailData = cameraStreamThumb.data
                 trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath)

@@ -69,25 +69,11 @@ export function FocusPanel() {
     }
 
     const targetScale =
-      preset === "subtle"
-        ? 1.25
-        : preset === "cinematic"
-          ? 1.8
-          : preset === "developer"
-            ? 2.2
-            : 1.5
-    const target = zoomTargetForCursorPoint(
-      centerPoint,
-      timeline.canvas,
-      targetScale,
-    )
+      preset === "subtle" ? 1.25 : preset === "cinematic" ? 1.8 : preset === "developer" ? 2.2 : 1.5
+    const target = zoomTargetForCursorPoint(centerPoint, timeline.canvas, targetScale)
 
     const easing =
-      preset === "cinematic"
-        ? "cinematic"
-        : preset === "developer"
-          ? "snappy"
-          : "smooth"
+      preset === "cinematic" ? "cinematic" : preset === "developer" ? "snappy" : "smooth"
     const transitionInMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
     const transitionOutMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
 
@@ -172,7 +158,8 @@ export function FocusPanel() {
           </NativeSelect>
         </div>
         <p className="text-[10px] leading-relaxed text-subtle-foreground">
-          Intelligent action clustering groups rapid clicks and code interactions into smooth, unified focus frames.
+          Intelligent action clustering groups rapid clicks and code interactions into smooth,
+          unified focus frames.
         </p>
         {cursorTelemetryStatus === "unavailable" ? (
           <p

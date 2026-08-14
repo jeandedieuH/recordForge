@@ -1,6 +1,10 @@
 import { useState } from "react"
 import type { ManualZoomSegment, ZoomEasing, ZoomMode } from "@recordforge/contracts"
-import { clampZoomTarget, zoomSegmentBadges, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
+import {
+  clampZoomTarget,
+  zoomSegmentBadges,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
 import {
   createDeleteZoomSegmentCommand,
   createSplitZoomSegmentCommand,
@@ -102,7 +106,11 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
             className="h-7 px-2 text-xs"
             title={segment.locked ? "Unlock segment" : "Lock segment"}
           >
-            {segment.locked ? <Lock className="size-3.5" aria-hidden /> : <Unlock className="size-3.5 text-subtle-foreground" aria-hidden />}
+            {segment.locked ? (
+              <Lock className="size-3.5" aria-hidden />
+            ) : (
+              <Unlock className="size-3.5 text-subtle-foreground" aria-hidden />
+            )}
           </Button>
           <Button variant="ghost" size="sm" onClick={onClear} className="h-7 text-xs">
             Done
@@ -270,9 +278,7 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           <NativeSelect
             aria-label="Camera tracking mode"
             value={segment.mode ?? "static"}
-            onChange={(event) =>
-              handleUpdate({ mode: event.target.value as ZoomMode })
-            }
+            onChange={(event) => handleUpdate({ mode: event.target.value as ZoomMode })}
             disabled={segment.locked}
             className="w-36"
           >
@@ -288,9 +294,7 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           <NativeSelect
             aria-label="Zoom easing"
             value={segment.easing ?? "smooth"}
-            onChange={(event) =>
-              handleUpdate({ easing: event.target.value as ZoomEasing })
-            }
+            onChange={(event) => handleUpdate({ easing: event.target.value as ZoomEasing })}
             disabled={segment.locked}
             className="w-36"
           >
@@ -440,4 +444,3 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
     </div>
   )
 }
-
