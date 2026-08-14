@@ -19,7 +19,62 @@ beforeAll(() => {
 
 function loadFixture(name: string): CursorTelemetryFile {
   const path = resolve(__dirname, "../../../tooling/fixtures/cursor-fixtures", name)
-  return normalizeCursorTelemetry(JSON.parse(readFileSync(path, "utf-8")))
+  const raw = JSON.parse(readFileSync(path, "utf-8"))
+  const events = (raw.events ?? []).map((e: any) => {
+    const rawButtonEvent = e.buttonEvent ?? (e.clicked ? `${e.button ?? "left"}-down` : "none")
+    const buttonEvent =
+      rawButtonEvent === "down"
+        ? `${e.button ?? "left"}-down`
+        : rawButtonEvent === "up"
+          ? `${e.button ?? "left"}-up`
+          : rawButtonEvent === "held"
+            ? `${e.button ?? "left"}-held`
+            : rawButtonEvent
+    const buttons = e.buttons ?? {
+      left: e.button === "left" && (e.clicked || buttonEvent !== "none"),
+      right: e.button === "right" && (e.clicked || buttonEvent !== "none"),
+      middle: e.button === "middle" && (e.clicked || buttonEvent !== "none"),
+      x1: false,
+      x2: false,
+    }
+
+    return {
+      tMs: e.tMs ?? e.t_ms ?? 0,
+      rawX: e.rawX ?? e.x ?? 0,
+      rawY: e.rawY ?? e.y ?? 0,
+      sourceX: e.sourceX ?? e.x ?? 0,
+      sourceY: e.sourceY ?? e.y ?? 0,
+      buttons,
+      buttonEvent,
+      visible: e.visible ?? true,
+      shapeId: e.shapeId ?? "default",
+      shapeChanged: e.shapeChanged ?? false,
+    }
+  })
+
+  return normalizeCursorTelemetry({
+    schemaVersion: 2,
+    assetId: raw.assetId ?? `cursor-events:${raw.recordingId ?? "recording"}`,
+    recordingId: raw.recordingId ?? "recording",
+    sourceWidth: raw.sourceWidth ?? 1920,
+    sourceHeight: raw.sourceHeight ?? 1080,
+    sampleRateHz: raw.sampleRateHz ?? 60,
+    captureBounds: raw.captureBounds ?? {
+      x: 0,
+      y: 0,
+      width: raw.sourceWidth ?? 1920,
+      height: raw.sourceHeight ?? 1080,
+    },
+    coordinateTransform: raw.coordinateTransform ?? {
+      a00: 1,
+      a01: 0,
+      a10: 0,
+      a11: 1,
+      b0: 0,
+      b1: 0,
+    },
+    events,
+  })
 }
 
 interface WasmEngine {
@@ -62,8 +117,7 @@ function framesAreEqual(
   }
 }
 
-// Skipped until the V1 cursor fixtures are migrated to V2.
-describe.skip("cursor engine cross-language parity", () => {
+describe("cursor engine cross-language parity", () => {
   it("wasm and typescript produce identical source positions for the 100dpi fixture", () => {
     const telemetry = loadFixture("cursor-v1-100dpi-10s.json")
     const tsEngine = createCursorEngine(telemetry)

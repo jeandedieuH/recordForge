@@ -174,6 +174,56 @@ describe("cursor engine", () => {
     expect(later.activeClicks.length).toBe(0)
   })
 
+  it("anchors the cursor position exactly at click events without phase lag offset", () => {
+    const clickTelemetry = normalizeCursorTelemetry({
+      recordingId: "click-test",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      sampleRateHz: 60,
+      events: [
+        v2Event(0, 0, 0, "none"),
+        v2Event(100, 350, 200, "left-down", true),
+        v2Event(200, 600, 400, "none"),
+      ],
+    })
+    const engine = createCursorEngine(clickTelemetry)
+    const settings = { ...defaultCursorSettings, smoothMovement: true, smoothFactor: 0.15 }
+
+    // At exactly t = 100ms (the click event), the evaluated position MUST equal the click coordinate
+    const atClick = engine.evaluate(100, settings)
+    expect(atClick.sourceX).toBeCloseTo(350, 2)
+    expect(atClick.sourceY).toBeCloseTo(200, 2)
+    expect(atClick.activeClicks.length).toBe(1)
+    expect(atClick.activeClicks[0].sourceX).toBeCloseTo(350, 2)
+    expect(atClick.activeClicks[0].sourceY).toBeCloseTo(200, 2)
+  })
+
+  it("produces zero-phase symmetric deceleration when stopping", () => {
+    const motionTelemetry = normalizeCursorTelemetry({
+      recordingId: "motion-test",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      sampleRateHz: 60,
+      events: [
+        v2Event(0, 0, 0, "none"),
+        v2Event(50, 50, 0, "none"),
+        v2Event(100, 100, 0, "none"),
+        v2Event(150, 100, 0, "none"),
+        v2Event(200, 100, 0, "none"),
+      ],
+    })
+    const engine = createCursorEngine(motionTelemetry)
+    const settings = { ...defaultCursorSettings, smoothMovement: true, smoothFactor: 0.25 }
+
+    // At t = 100ms when mouse reaches 100.0 and stops, zero-phase smoothing is responsive
+    const atStop = engine.evaluate(100, settings)
+    expect(atStop.sourceX).toBeGreaterThan(85)
+
+    // At t = 50ms midpoint, position should be centered ~50.0
+    const atMid = engine.evaluate(50, settings)
+    expect(Math.abs(atMid.sourceX - 50)).toBeLessThan(10)
+  })
+
   it("fits the source point to a target canvas consistently", () => {
     const engine = createCursorEngine(telemetry)
     const frame = engine.evaluate(100, defaultCursorSettings)
@@ -183,3 +233,4 @@ describe("cursor engine", () => {
     expect(fitted.y).toBeGreaterThanOrEqual(0)
   })
 })
+

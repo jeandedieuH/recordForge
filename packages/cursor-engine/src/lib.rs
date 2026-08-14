@@ -534,6 +534,7 @@ struct PreparedEvent {
     shape_id: String,
     speed_px_per_sec: f64,
     last_motion_ms: u64,
+    is_click_edge: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -551,6 +552,7 @@ pub struct CursorEngine {
     prepared: Vec<PreparedEvent>,
     times: Vec<u64>,
     segment_start_index: Vec<usize>,
+    segment_end_index: Vec<usize>,
     clicks: Vec<ClickEntry>,
 }
 
@@ -564,21 +566,21 @@ impl CursorEngine {
         }
 
         let telemetry = telemetry.normalize();
-        let mut prepared = Vec::with_capacity(telemetry.events.len());
-        let mut times = Vec::with_capacity(telemetry.events.len());
-        let mut segment_start_index = Vec::with_capacity(telemetry.events.len());
+        let count = telemetry.events.len();
+        let mut prepared = Vec::with_capacity(count);
+        let mut times = Vec::with_capacity(count);
+        let mut segment_start_index = Vec::with_capacity(count);
         let mut clicks = Vec::new();
 
-        let expected_interval_ms = 1000.0 / telemetry.sample_rate_hz;
-        // The gap threshold is the larger of a multiple of the expected sample
-        // interval and an absolute floor. This must stay in sync with the
-        // TypeScript engine and the wasm-engine options wrapper.
+        let expected_interval_ms = 1000.0 / telemetry.sample_rate_hz.max(1.0);
         let gap_threshold_ms = (options.gap_threshold_multiplier * expected_interval_ms)
             .max(options.min_gap_threshold_ms);
 
         for (index, event) in telemetry.events.iter().enumerate() {
             let (source_x, source_y) = event.source();
             let shape_id = event.shape_id.clone().unwrap_or_default();
+            let is_click_edge = event.is_click_down();
+            let click_button = event.click_button();
 
             let (denoised_x, denoised_y) = if index > 0 {
                 let previous: &PreparedEvent = &prepared[index - 1];
@@ -586,8 +588,20 @@ impl CursorEngine {
                 let dx = source_x - previous.denoised_x;
                 let dy = source_y - previous.denoised_y;
                 let displacement = (dx * dx + dy * dy).sqrt();
-                if dt < expected_interval_ms * 2.0 && displacement < options.jitter_threshold_px {
-                    (previous.denoised_x, previous.denoised_y)
+
+                if is_click_edge || event.shape_changed {
+                    // Click events and shape changes are exact physical anchors
+                    (source_x, source_y)
+                } else if dt < expected_interval_ms * 2.5
+                    && displacement < options.jitter_threshold_px
+                    && options.jitter_threshold_px > 0.0
+                {
+                    // Continuous quadratic attenuation below jitter threshold (no staircasing)
+                    let factor = (displacement / options.jitter_threshold_px).powi(2);
+                    (
+                        previous.denoised_x + dx * factor,
+                        previous.denoised_y + dy * factor,
+                    )
                 } else {
                     (source_x, source_y)
                 }
@@ -620,9 +634,6 @@ impl CursorEngine {
                     segment_start_index[index - 1]
                 }
             };
-
-            let is_click_edge = event.is_click_down();
-            let click_button = event.click_button();
 
             let is_motion = if index == 0 {
                 true
@@ -659,9 +670,21 @@ impl CursorEngine {
                 shape_id,
                 speed_px_per_sec,
                 last_motion_ms,
+                is_click_edge,
             });
             times.push(event.t_ms);
             segment_start_index.push(segment_start);
+        }
+
+        let mut segment_end_index = vec![0; count];
+        let mut current_start = 0;
+        for i in 0..count {
+            if i == count - 1 || segment_start_index[i + 1] != segment_start_index[i] {
+                for j in current_start..=i {
+                    segment_end_index[j] = i;
+                }
+                current_start = i + 1;
+            }
         }
 
         Ok(Self {
@@ -670,6 +693,7 @@ impl CursorEngine {
             prepared,
             times,
             segment_start_index,
+            segment_end_index,
             clicks,
         })
     }
@@ -692,36 +716,7 @@ impl CursorEngine {
         let index = self.find_event_index(time_ms);
         let event = &self.prepared[index];
 
-        // Determine next index for interpolation, unless we are in a gap or at the end.
-        let mut next_index = index + 1;
-        if next_index >= self.prepared.len()
-            || (self.prepared[next_index].t_ms.saturating_sub(event.t_ms)) as f64
-                > self.gap_threshold_ms()
-        {
-            next_index = index;
-        }
-
-        let t0 = event.t_ms as f64;
-        let t1 = if next_index == index {
-            t0
-        } else {
-            self.prepared[next_index].t_ms as f64
-        };
-        let fraction = if t1 == t0 {
-            0.0
-        } else {
-            ((time_ms - t0) / (t1 - t0)).clamp(0.0, 1.0)
-        };
-
-        let p0 = self.smooth_position(index, settings);
-        let p1 = if next_index == index {
-            p0
-        } else {
-            self.smooth_position(next_index, settings)
-        };
-
-        let source_x = p0.x + (p1.x - p0.x) * fraction;
-        let source_y = p0.y + (p1.y - p0.y) * fraction;
+        let (source_x, source_y) = self.evaluate_spline_position(index, time_ms, settings);
 
         let idle_duration = (time_ms - event.last_motion_ms as f64).max(0.0);
         let is_idle = settings.auto_hide_idle
@@ -756,6 +751,148 @@ impl CursorEngine {
         }
     }
 
+    fn evaluate_spline_position(
+        &self,
+        index: usize,
+        time_ms: f64,
+        settings: &CursorSettings,
+    ) -> (f64, f64) {
+        let seg_start = self.segment_start_index[index];
+        let seg_end = self.segment_end_index[index];
+
+        if seg_start == seg_end {
+            return (
+                self.prepared[seg_start].denoised_x,
+                self.prepared[seg_start].denoised_y,
+            );
+        }
+
+        let alpha_base = if settings.smooth_movement {
+            settings.smooth_factor.clamp(0.05, 1.0)
+        } else {
+            1.0
+        };
+
+        let seg_len = seg_end - seg_start + 1;
+        let expected_interval_ms = 1000.0 / self.telemetry.sample_rate_hz.max(1.0);
+
+        // Forward pass of zero-phase bidirectional smoothing
+        let mut forward_x = Vec::with_capacity(seg_len);
+        let mut forward_y = Vec::with_capacity(seg_len);
+
+        for i in seg_start..=seg_end {
+            let ev = &self.prepared[i];
+            let x = ev.denoised_x;
+            let y = ev.denoised_y;
+
+            if i == seg_start || ev.is_click_edge || alpha_base >= 1.0 {
+                forward_x.push(x);
+                forward_y.push(y);
+            } else {
+                let prev_fx = forward_x.last().copied().unwrap_or(x);
+                let prev_fy = forward_y.last().copied().unwrap_or(y);
+                let dt = (ev.t_ms.saturating_sub(self.prepared[i - 1].t_ms) as f64).max(1.0);
+                let speed_factor = ev.speed_px_per_sec / self.options.adaptive_speed_ref_px_per_sec;
+                let sample_alpha = (alpha_base * (1.0 + speed_factor)).clamp(0.05, 1.0);
+                let rate = (dt / expected_interval_ms).clamp(0.1, 5.0);
+                let lambda = (1.0 - (1.0 - sample_alpha).powf(rate)).clamp(0.05, 1.0);
+
+                forward_x.push(prev_fx + (x - prev_fx) * lambda);
+                forward_y.push(prev_fy + (y - prev_fy) * lambda);
+            }
+        }
+
+        // Backward pass of zero-phase bidirectional smoothing
+        let mut smoothed_x = vec![0.0; seg_len];
+        let mut smoothed_y = vec![0.0; seg_len];
+
+        for rel_i in (0..seg_len).rev() {
+            let abs_i = seg_start + rel_i;
+            let ev = &self.prepared[abs_i];
+            let fx = forward_x[rel_i];
+            let fy = forward_y[rel_i];
+
+            if rel_i == seg_len - 1 || ev.is_click_edge || alpha_base >= 1.0 {
+                smoothed_x[rel_i] = fx;
+                smoothed_y[rel_i] = fy;
+            } else {
+                let next_bx = smoothed_x[rel_i + 1];
+                let next_by = smoothed_y[rel_i + 1];
+                let dt = (self.prepared[abs_i + 1].t_ms.saturating_sub(ev.t_ms) as f64).max(1.0);
+                let speed_factor = ev.speed_px_per_sec / self.options.adaptive_speed_ref_px_per_sec;
+                let sample_alpha = (alpha_base * (1.0 + speed_factor)).clamp(0.05, 1.0);
+                let rate = (dt / expected_interval_ms).clamp(0.1, 5.0);
+                let lambda = (1.0 - (1.0 - sample_alpha).powf(rate)).clamp(0.05, 1.0);
+
+                smoothed_x[rel_i] = next_bx + (fx - next_bx) * lambda;
+                smoothed_y[rel_i] = next_by + (fy - next_by) * lambda;
+            }
+        }
+
+        // Centripetal Catmull-Rom Spline Interpolation between index and index+1:
+        let k = index;
+        let k_rel = k - seg_start;
+        let t0 = self.prepared[k].t_ms as f64;
+
+        if k == seg_end || time_ms <= t0 {
+            return (smoothed_x[k_rel], smoothed_y[k_rel]);
+        }
+
+        let k1 = k + 1;
+        let k1_rel = k1 - seg_start;
+        let t1 = self.prepared[k1].t_ms as f64;
+
+        let u = if t1 <= t0 {
+            0.0
+        } else {
+            ((time_ms - t0) / (t1 - t0)).clamp(0.0, 1.0)
+        };
+
+        let p1_x = smoothed_x[k_rel];
+        let p1_y = smoothed_y[k_rel];
+        let p2_x = smoothed_x[k1_rel];
+        let p2_y = smoothed_y[k1_rel];
+
+        let p0_x = if k_rel > 0 {
+            smoothed_x[k_rel - 1]
+        } else {
+            p1_x - (p2_x - p1_x)
+        };
+        let p0_y = if k_rel > 0 {
+            smoothed_y[k_rel - 1]
+        } else {
+            p1_y - (p2_y - p1_y)
+        };
+
+        let p3_x = if k1_rel + 1 < seg_len {
+            smoothed_x[k1_rel + 1]
+        } else {
+            p2_x + (p2_x - p1_x)
+        };
+        let p3_y = if k1_rel + 1 < seg_len {
+            smoothed_y[k1_rel + 1]
+        } else {
+            p2_y + (p2_y - p1_y)
+        };
+
+        let u2 = u * u;
+        let u3 = u2 * u;
+
+        let interp_x = 0.5
+            * ((2.0 * p1_x)
+                + (-p0_x + p2_x) * u
+                + (2.0 * p0_x - 5.0 * p1_x + 4.0 * p2_x - p3_x) * u2
+                + (-p0_x + 3.0 * p1_x - 3.0 * p2_x + p3_x) * u3);
+
+        let interp_y = 0.5
+            * ((2.0 * p1_y)
+                + (-p0_y + p2_y) * u
+                + (2.0 * p0_y - 5.0 * p1_y + 4.0 * p2_y - p3_y) * u2
+                + (-p0_y + 3.0 * p1_y - 3.0 * p2_y + p3_y) * u3);
+
+        (interp_x, interp_y)
+    }
+
     pub fn fit(
         &self,
         source_x: f64,
@@ -787,12 +924,6 @@ impl CursorEngine {
         &self.telemetry
     }
 
-    fn gap_threshold_ms(&self) -> f64 {
-        let expected_interval_ms = 1000.0 / self.telemetry.sample_rate_hz;
-        (self.options.gap_threshold_multiplier * expected_interval_ms)
-            .max(self.options.min_gap_threshold_ms)
-    }
-
     fn find_event_index(&self, time_ms: f64) -> usize {
         if time_ms <= self.times[0] as f64 {
             return 0;
@@ -815,50 +946,7 @@ impl CursorEngine {
         low
     }
 
-    fn smooth_position(&self, index: usize, settings: &CursorSettings) -> CursorPoint {
-        let alpha_base = if settings.smooth_movement {
-            settings.smooth_factor.clamp(0.05, 1.0)
-        } else {
-            1.0
-        };
 
-        if alpha_base >= 1.0 {
-            return CursorPoint {
-                x: self.prepared[index].denoised_x,
-                y: self.prepared[index].denoised_y,
-            };
-        }
-
-        let segment_start = self.segment_start_index[index];
-        let start = segment_start.max(index.saturating_sub(self.options.smoothing_window_size - 1));
-
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut total_weight = 0.0;
-
-        for i in start..=index {
-            let lag = (index - i) as i32;
-            let speed_factor =
-                self.prepared[i].speed_px_per_sec / self.options.adaptive_speed_ref_px_per_sec;
-            let sample_alpha = (alpha_base * (1.0 + speed_factor)).clamp(0.05, 1.0);
-            let weight = (1.0 - sample_alpha).powi(lag);
-            sum_x += self.prepared[i].denoised_x * weight;
-            sum_y += self.prepared[i].denoised_y * weight;
-            total_weight += weight;
-        }
-
-        if total_weight > 0.0 {
-            CursorPoint {
-                x: sum_x / total_weight,
-                y: sum_y / total_weight,
-            }
-        } else {
-            CursorPoint {
-                x: self.prepared[index].denoised_x,
-                y: self.prepared[index].denoised_y,
-            }
-        }
-    }
 
     fn active_clicks(&self, time_ms: f64, settings: &CursorSettings) -> Vec<CursorClickEffect> {
         if settings.click_feedback == "none" || settings.click_duration_ms <= 0.0 {
@@ -1149,24 +1237,102 @@ mod tests {
     }
 
     #[test]
-    fn evaluates_v1_left_click_fixture() {
-        let manifest = std::env!("CARGO_MANIFEST_DIR");
-        let path = std::path::Path::new(manifest)
-            .join("../../tooling/fixtures/cursor-fixtures/cursor-v1-left-clicks-10s.json");
-        let json = std::fs::read_to_string(&path).expect("fixture should be readable");
-        let telemetry: CursorTelemetryFile =
-            serde_json::from_str(&json).expect("fixture should parse");
-        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default())
-            .expect("fixture should produce a valid engine");
+    fn anchors_click_position_exactly() {
+        let telemetry = make_telemetry(vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 0.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 350.0,
+                y: 200.0,
+                visible: true,
+                clicked: true,
+                button: Some("left".into()),
+                button_event: Some("left-down".into()),
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 200,
+                x: 600.0,
+                y: 400.0,
+                visible: true,
+                ..Default::default()
+            },
+        ]);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings {
+            smooth_movement: true,
+            smooth_factor: 0.15,
+            ..Default::default()
+        };
 
-        // At the start the cursor should be visible at the origin.
-        let start = engine.evaluate(0.0, &CursorSettings::default());
-        assert!(start.visible);
+        // At exactly t = 100ms (the click event), the evaluated position MUST equal the click coordinate
+        let at_click = engine.evaluate(100.0, &settings);
+        assert!((at_click.source_x - 350.0).abs() < 0.001);
+        assert!((at_click.source_y - 200.0).abs() < 0.001);
+        assert_eq!(at_click.active_clicks.len(), 1);
+        assert!((at_click.active_clicks[0].source_x - 350.0).abs() < 0.001);
+        assert!((at_click.active_clicks[0].source_y - 200.0).abs() < 0.001);
+    }
 
-        // A visible frame should always be produced at any sampled time.
-        for t in [500.0, 2_500.0, 5_000.0, 9_000.0] {
-            let frame = engine.evaluate(t, &CursorSettings::default());
-            assert!(frame.source_x >= 0.0 && frame.source_y >= 0.0);
-        }
+    #[test]
+    fn zero_phase_symmetric_motion() {
+        let telemetry = make_telemetry(vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 0.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 50,
+                x: 50.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 100.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 150,
+                x: 100.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 200,
+                x: 100.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+        ]);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings {
+            smooth_movement: true,
+            smooth_factor: 0.25,
+            ..Default::default()
+        };
+
+        // At t = 100ms when mouse reaches 100.0 and stops, the zero-phase position should be close to 100.0
+        let at_stop = engine.evaluate(100.0, &settings);
+        assert!(at_stop.source_x > 85.0);
+
+        // At t = 50ms midpoint, position should be centered ~50.0
+        let at_mid = engine.evaluate(50.0, &settings);
+        assert!((at_mid.source_x - 50.0).abs() < 10.0);
     }
 }
+

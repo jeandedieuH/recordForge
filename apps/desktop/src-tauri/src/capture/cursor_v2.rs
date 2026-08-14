@@ -32,12 +32,37 @@ const V1_SCHEMA_VERSION: u32 = 1;
 /// ~216,000 events; an entry every 1024 events produces ~211 index entries.
 const INDEX_STRIDE: usize = 1024;
 
-/// Target sample interval for 60 Hz capture. The actual interval may drift
-/// slightly; each event carries an authoritative session-clock timestamp.
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(16);
+/// Target sample interval for ~120 Hz capture. The actual interval is timed
+/// using high-resolution multimedia timers; each event carries an authoritative
+/// session-clock timestamp.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Default click effect window in milliseconds. Kept in V2 for consumer parity.
 const DEFAULT_CLICK_WINDOW_MS: u64 = 350;
+
+#[cfg(target_os = "windows")]
+struct HighResolutionTimerGuard;
+
+#[cfg(target_os = "windows")]
+impl HighResolutionTimerGuard {
+    fn new() -> Self {
+        use windows::Win32::Media::timeBeginPeriod;
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for HighResolutionTimerGuard {
+    fn drop(&mut self) {
+        use windows::Win32::Media::timeEndPeriod;
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // V2 data types
@@ -346,7 +371,7 @@ impl CursorTelemetryMetadata {
             topology: None,
             shapes: Vec::new(),
             timebase: CursorTelemetryTimebase::default(),
-            sample_rate_hz: 60,
+            sample_rate_hz: 120,
             click_window_ms: DEFAULT_CLICK_WINDOW_MS,
             health: CursorTelemetryHealth::Healthy,
             event_count: 0,
@@ -891,6 +916,9 @@ impl CursorTrackerV2 {
         let stop_signal_clone = stop_signal.clone();
 
         let handle = thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            let _timer_guard = HighResolutionTimerGuard::new();
+
             let existing = read_any_telemetry(&work_dir);
 
             let (mut metadata, mut events, mut previous_buttons, mut previous_shape_id) =
