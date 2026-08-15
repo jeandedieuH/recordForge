@@ -7,7 +7,7 @@
 
 use crate::errors::Result;
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{
@@ -387,11 +387,20 @@ impl WasapiCaptureSession {
     /// This removes tail samples captured while FFmpeg flushes and adds silence
     /// when a driver stopped returning packets before the video ended.
     pub fn align_to_duration(&self, duration: Duration) -> Result<u64> {
+        self.align_to_timeline(Duration::ZERO, duration)
+    }
+
+    /// Align the track to the segment's rendered video timeline. `head_trim`
+    /// removes the startup window before the first captured video frame (where
+    /// the worker wrote leading silence); `duration` is the video stream's
+    /// actual length, and the track is padded or trimmed to match it.
+    pub fn align_to_timeline(&self, head_trim: Duration, duration: Duration) -> Result<u64> {
         align_wav_to_duration(
             &self.output_path,
             self.sample_rate,
             self.channels,
             self.sample_format,
+            head_trim,
             duration,
         )
         .map_err(|error| {
@@ -745,11 +754,50 @@ fn append_silence_until(
     Ok(())
 }
 
+/// Drop `head_frames` frames from the front of the WAV payload in place by
+/// moving the remaining bytes over them. The chunked copy keeps memory use
+/// bounded for long recordings.
+fn trim_wav_head(
+    file: &mut std::fs::File,
+    current_bytes: &mut u64,
+    head_frames: u64,
+    block_align: usize,
+) -> std::io::Result<()> {
+    let head_bytes = head_frames.saturating_mul(block_align as u64);
+    if head_bytes == 0 {
+        return Ok(());
+    }
+    if head_bytes >= *current_bytes {
+        file.set_len(WAV_HEADER_SIZE)?;
+        *current_bytes = 0;
+        return Ok(());
+    }
+
+    let mut buffer = vec![0u8; 64 * 1024];
+    let data_start = WAV_HEADER_SIZE as u64;
+    let mut read_pos = data_start + head_bytes;
+    let mut write_pos = data_start;
+    let end = data_start + *current_bytes;
+    while read_pos < end {
+        let chunk = buffer.len().min((end - read_pos) as usize);
+        file.seek(SeekFrom::Start(read_pos))?;
+        file.read_exact(&mut buffer[..chunk])?;
+        file.seek(SeekFrom::Start(write_pos))?;
+        file.write_all(&buffer[..chunk])?;
+        read_pos += chunk as u64;
+        write_pos += chunk as u64;
+    }
+    file.set_len(data_start + (*current_bytes - head_bytes))?;
+    *current_bytes -= head_bytes;
+    Ok(())
+}
+
 fn align_wav_to_duration(
     path: &Path,
     sample_rate: u32,
     channels: u16,
     sample_format: WasapiSampleFormat,
+    head_trim: Duration,
     duration: Duration,
 ) -> std::io::Result<u64> {
     if sample_rate == 0 || channels == 0 {
@@ -796,6 +844,14 @@ fn align_wav_to_duration(
             "WAV payload is not aligned to a complete audio frame",
         ));
     }
+
+    let mut current_bytes = current_bytes;
+    trim_wav_head(
+        &mut file,
+        &mut current_bytes,
+        frames_for_duration(head_trim, sample_rate),
+        block_align,
+    )?;
 
     if target_bytes < current_bytes {
         file.set_len(WAV_HEADER_SIZE + target_bytes)?;
@@ -963,12 +1019,63 @@ mod tests {
             100,
             1,
             WasapiSampleFormat::Pcm16,
+            Duration::ZERO,
             Duration::from_secs(1),
         )
         .expect("align WAV to video duration");
 
         let metadata = std::fs::metadata(&path).expect("read aligned WAV metadata");
         assert_eq!(metadata.len(), WAV_HEADER_SIZE + 100 * 2);
+    }
+
+    #[test]
+    fn aligns_wav_head_trim_to_video_startup_gap() {
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("head-trimmed.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open temporary WAV");
+        write_wav_header(&mut file, 100, 1, WasapiSampleFormat::Pcm16).expect("write WAV header");
+        // 1.5 seconds: [0, 0.5) is startup silence, then a marker frame followed
+        // by content. Trimming the startup window must keep the marker at
+        // position zero and pad the tail out to the 2-second video length.
+        file.write_all(&[0u8; 2 * 50])
+            .expect("write startup silence");
+        file.write_all(&[7u8; 2]).expect("write marker frame");
+        file.write_all(&[1u8; 2 * 99]).expect("write audio frames");
+        finalize_wav(&mut file, 2 * 150).expect("finalize WAV");
+        drop(file);
+
+        align_wav_to_duration(
+            &path,
+            100,
+            1,
+            WasapiSampleFormat::Pcm16,
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+        )
+        .expect("align WAV with head trim");
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .expect("reopen trimmed WAV");
+        let metadata = file.metadata().expect("read trimmed WAV metadata");
+        assert_eq!(metadata.len(), WAV_HEADER_SIZE + 2 * 200);
+        file.seek(SeekFrom::Start(WAV_HEADER_SIZE))
+            .expect("seek to data");
+        let mut first = [0u8; 2];
+        file.read_exact(&mut first).expect("read first frame");
+        assert_eq!(first, [7u8; 2]);
+        file.seek(SeekFrom::Start(WAV_HEADER_SIZE + 2 * 199))
+            .expect("seek to last frame");
+        let mut tail = [0u8; 2];
+        file.read_exact(&mut tail).expect("read padded silence");
+        assert_eq!(tail, [0u8; 2]);
     }
 
     #[test]
@@ -992,6 +1099,7 @@ mod tests {
             100,
             1,
             WasapiSampleFormat::Pcm16,
+            Duration::ZERO,
             Duration::from_secs(1),
         )
         .expect("pad idle capture to video duration");

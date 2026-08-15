@@ -872,6 +872,32 @@ pub fn read_any_telemetry(work_dir: &Path) -> Option<CursorTelemetryFileV2> {
     Some(migrate_v1_to_v2(v1))
 }
 
+/// Shift every telemetry timestamp earlier by `shift_ms`, dropping events that
+/// fall before zero. The tracker clocks events against the segment's wall-clock
+/// origin (process spawn), but the video stream only starts at FFmpeg's first
+/// captured frame — `shift_ms` is that startup gap, so afterwards telemetry
+/// time matches video time.
+pub fn shift_telemetry_clock(work_dir: &Path, shift_ms: u64) -> Result<(), String> {
+    if shift_ms == 0 {
+        return Ok(());
+    }
+    let Some(mut telemetry) = read_any_telemetry(work_dir) else {
+        return Ok(());
+    };
+    let before = telemetry.events.len();
+    telemetry.events.retain(|event| event.t_ms >= shift_ms);
+    for event in &mut telemetry.events {
+        event.t_ms -= shift_ms;
+    }
+    if telemetry.events.len() != before {
+        info!(
+            dropped = before - telemetry.events.len(),
+            "dropped cursor events that predate the first video frame"
+        );
+    }
+    write_v2_telemetry(work_dir, &telemetry).map(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // Capture
 // ---------------------------------------------------------------------------
@@ -1645,6 +1671,58 @@ mod tests {
         assert_eq!(read.events.len(), 2);
         assert_eq!(read.events[1].button_event, "left-down");
         assert!((read.events[1].source_y - 220.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn shift_clock_moves_events_and_drops_pre_video_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let metadata = CursorTelemetryMetadata::new(
+            "rec".into(),
+            1920,
+            1080,
+            CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        let event = |t_ms: u64| CursorTelemetryEventV2 {
+            t_ms,
+            raw_x: 100,
+            raw_y: 200,
+            source_x: 100.0,
+            source_y: 200.0,
+            buttons: CursorButtonState::default(),
+            button_event: "none".into(),
+            visible: true,
+            shape_id: "arrow".into(),
+            shape_changed: false,
+        };
+        let telemetry = CursorTelemetryFileV2 {
+            metadata,
+            events: vec![event(100), event(400), event(900)],
+        };
+        write_v2_telemetry(dir.path(), &telemetry).expect("write");
+
+        shift_telemetry_clock(dir.path(), 400).expect("shift");
+
+        let shifted = read_v2_telemetry(dir.path()).expect("read");
+        assert_eq!(
+            shifted
+                .events
+                .iter()
+                .map(|event| event.t_ms)
+                .collect::<Vec<_>>(),
+            vec![0, 500]
+        );
+        assert_eq!(shifted.metadata.event_count, 2);
+        assert!(shifted.metadata.index.iter().all(|entry| entry.t_ms <= 500));
+
+        // A zero shift is a no-op and must not touch the files.
+        shift_telemetry_clock(dir.path(), 0).expect("zero shift");
+        let reread = read_v2_telemetry(dir.path()).expect("reread");
+        assert_eq!(reread.events.len(), 2);
     }
 
     #[test]

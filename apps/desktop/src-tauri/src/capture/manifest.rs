@@ -60,6 +60,11 @@ pub struct RecordingStats {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub duration_ms: u64,
+    /// Wall-clock span from timeline origin to the instant the quit signal was
+    /// sent. Unlike `duration_ms` (measured at process exit) this excludes the
+    /// encoder flush and trailer write, so it tracks the captured frames.
+    #[serde(default)]
+    pub quit_span_ms: u64,
     #[serde(default)]
     pub output_size_bytes: u64,
 }

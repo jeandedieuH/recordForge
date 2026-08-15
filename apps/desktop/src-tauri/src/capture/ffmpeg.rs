@@ -106,6 +106,12 @@ impl FfmpegCapture {
     /// Send a graceful stop signal ("q\n") to FFmpeg and wait for it to exit.
     #[instrument]
     pub fn stop(&mut self) -> crate::errors::Result<RecordingStats> {
+        // The quit timestamp anchors the capture window: FFmpeg stops grabbing
+        // frames as soon as it processes 'q', so the wall clock at this instant
+        // (unlike process exit, which trails by the flush and trailer write)
+        // matches the last captured frame closely enough to compute the video
+        // startup gap at finalize time.
+        let quit_at = Instant::now();
         // Send 'q' followed by a newline to request a clean shutdown.
         if let Some(stdin) = self.stdin.as_mut() {
             if let Err(e) = stdin.write_all(b"q\n") {
@@ -151,6 +157,9 @@ impl FfmpegCapture {
 
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         stats.duration_ms = duration_ms;
+        stats.quit_span_ms = quit_at
+            .saturating_duration_since(self.start_time)
+            .as_millis() as u64;
 
         let output_size = std::fs::metadata(&self.output_path)
             .map(|meta| meta.len())

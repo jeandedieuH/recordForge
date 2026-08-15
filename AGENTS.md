@@ -157,7 +157,7 @@ Download FFmpeg/FFprobe sidecar binaries (pinned to v9.0):
 bun run setup:ffmpeg
 ```
 
-Regenerate app icons from the branding master SVG (`branding/forge-mark.svg`):
+Regenerate app icons from the branding master SVG (`branding/icon.svg`):
 
 ```bash
 bun run --cwd tooling/scripts icons

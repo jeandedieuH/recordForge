@@ -129,6 +129,56 @@ fn signed_start_offset_ms(a: std::time::Instant, b: std::time::Instant) -> i64 {
     }
 }
 
+/// The segment's rendered video timeline. FFmpeg only starts producing frames
+/// several hundred milliseconds after spawn (input and encoder init), while
+/// the audio workers and cursor tracker clock against the spawn instant. Every
+/// wall-clock stream is therefore aligned to the video at finalize time:
+/// `head_trim` is dropped from the front of each track and the timeline length
+/// becomes the video stream's actual duration.
+#[derive(Debug, Clone, Copy)]
+struct SegmentTimeline {
+    head_trim: Duration,
+    duration: Duration,
+}
+
+impl SegmentTimeline {
+    fn head_trim_ms(&self) -> u64 {
+        self.head_trim.as_millis().min(u64::MAX as u128) as u64
+    }
+}
+
+/// Largest plausible startup gap between process spawn and the first captured
+/// frame. Larger deltas indicate a probe or clock anomaly; alignment falls
+/// back to the wall clock instead of shifting tracks by a bogus amount.
+const MAX_VIDEO_STARTUP_GAP_MS: u64 = 5_000;
+
+/// Compute the alignment math from the measured clocks. Pure so the clamping
+/// rules stay testable: a missing probe keeps the legacy wall-clock behavior,
+/// and an implausible gap is rejected rather than applied.
+fn compute_segment_timeline(
+    wall_span_ms: u64,
+    fallback_wall_ms: u64,
+    probed_video_ms: Option<u64>,
+) -> SegmentTimeline {
+    let Some(video_ms) = probed_video_ms.filter(|value| *value > 0) else {
+        return SegmentTimeline {
+            head_trim: Duration::ZERO,
+            duration: Duration::from_millis(fallback_wall_ms),
+        };
+    };
+    let head_trim_ms = wall_span_ms.saturating_sub(video_ms);
+    if head_trim_ms > MAX_VIDEO_STARTUP_GAP_MS {
+        return SegmentTimeline {
+            head_trim: Duration::ZERO,
+            duration: Duration::from_millis(fallback_wall_ms),
+        };
+    }
+    SegmentTimeline {
+        head_trim: Duration::from_millis(head_trim_ms),
+        duration: Duration::from_millis(video_ms),
+    }
+}
+
 impl Recorder {
     pub fn new(
         ffmpeg_path: PathBuf,
@@ -553,7 +603,7 @@ impl Recorder {
         screen: &FfmpegCapture,
         audio_captures: &mut Vec<ActiveAudioCapture>,
         profile: &RecordingProfile,
-        duration: Duration,
+        timeline: SegmentTimeline,
     ) {
         if audio_captures.is_empty() {
             return;
@@ -572,7 +622,10 @@ impl Recorder {
                 continue;
             }
 
-            let bytes_written = match audio_capture.session.align_to_duration(duration) {
+            let bytes_written = match audio_capture
+                .session
+                .align_to_timeline(timeline.head_trim, timeline.duration)
+            {
                 Ok(bytes_written) => bytes_written,
                 Err(error) => {
                     tracing::warn!(
@@ -618,7 +671,7 @@ impl Recorder {
             &muxed_path,
             &profile.audio_codec,
             profile.audio_bitrate_kbps,
-            duration,
+            timeline.duration,
         ) {
             tracing::warn!(error = ?error, "failed to mux native WASAPI tracks; keeping video fragment");
             return;
@@ -649,13 +702,16 @@ impl Recorder {
         &self,
         session: &mut ActiveSession,
         screen: &FfmpegCapture,
-        duration: Duration,
+        timeline: SegmentTimeline,
     ) {
         let Some(mut webcam) = session.webcam_capture.take() else {
             return;
         };
         let path = webcam.output_path().to_path_buf();
-        let offset_ms = signed_start_offset_ms(webcam.started_at(), screen.started_at());
+        // The webcam's wall-clock offset is relative to the screen process
+        // spawn; shift it onto the video timeline like every other track.
+        let offset_ms = signed_start_offset_ms(webcam.started_at(), screen.started_at())
+            .saturating_sub(timeline.head_trim_ms() as i64);
         let index = session.segment_index;
         if let Err(error) = webcam.stop() {
             session.webcam_capture_failed = true;
@@ -673,7 +729,7 @@ impl Recorder {
         };
         session.webcam_segments.push(media::WebcamSegmentInput {
             path: path.clone(),
-            duration,
+            duration: timeline.duration,
             offset_ms,
         });
 
@@ -681,7 +737,7 @@ impl Recorder {
             manifest.add_webcam_fragment(RecordingWebcamFragment {
                 index,
                 file_name,
-                duration_ms: duration.as_millis().min(u64::MAX as u128) as u64,
+                duration_ms: timeline.duration.as_millis().min(u64::MAX as u128) as u64,
                 offset_ms,
                 validated: true,
             });
@@ -775,17 +831,20 @@ impl Recorder {
             }
         };
 
-        let duration = Duration::from_millis(stats.duration_ms);
-        self.stop_webcam_segment(session, &screen, duration);
+        let timeline = self.segment_timeline(&screen, &stats);
+        let mut stats = stats;
+        stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
+        self.stop_webcam_segment(session, &screen, timeline);
         self.finalize_audio_tracks(
             &screen,
             &mut session.audio_captures,
             &session.profile,
-            duration,
+            timeline,
         );
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
+            self.shift_cursor_clock(&session.work_dir, timeline.head_trim);
         }
 
         let total = session.total_recorded_ms + stats.duration_ms;
@@ -889,6 +948,10 @@ impl Recorder {
             .as_mut()
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
 
+        let mut timeline = SegmentTimeline {
+            head_trim: Duration::ZERO,
+            duration: Duration::ZERO,
+        };
         let mut final_stats = if let Some(mut screen) = session.screen_capture.take() {
             let stats = match screen.stop() {
                 Ok(stats) => stats,
@@ -909,13 +972,15 @@ impl Recorder {
                     return Err(error);
                 }
             };
-            let duration = Duration::from_millis(stats.duration_ms);
-            self.stop_webcam_segment(session, &screen, duration);
+            timeline = self.segment_timeline(&screen, &stats);
+            let mut stats = stats;
+            stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
+            self.stop_webcam_segment(session, &screen, timeline);
             self.finalize_audio_tracks(
                 &screen,
                 &mut session.audio_captures,
                 &session.profile,
-                duration,
+                timeline,
             );
             stats
         } else {
@@ -931,6 +996,7 @@ impl Recorder {
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
+            self.shift_cursor_clock(&session.work_dir, timeline.head_trim);
         }
 
         let total = session.total_recorded_ms + final_stats.duration_ms;
@@ -1095,6 +1161,54 @@ impl Recorder {
             .unwrap_or(false)
     }
 
+    /// Probe the fragment's real video stream length. The probed value is the
+    /// authority for timeline alignment; the wall clock is only a fallback.
+    fn probe_video_duration_ms(&self, path: &Path) -> Option<u64> {
+        crate::media::probe::probe_media(
+            &self.ffprobe_path.to_string_lossy(),
+            path,
+            "capture-alignment",
+        )
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .streams
+                .iter()
+                .find(|stream| stream.kind == "video")
+                .and_then(|stream| stream.duration_ms)
+        })
+    }
+
+    fn segment_timeline(&self, screen: &FfmpegCapture, stats: &RecordingStats) -> SegmentTimeline {
+        // Prefer the quit-instant span: process exit trails the last captured
+        // frame by the encoder flush, which would inflate the startup gap.
+        let wall_span_ms = if stats.quit_span_ms > 0 {
+            stats.quit_span_ms
+        } else {
+            stats.duration_ms
+        };
+        let probed = self.probe_video_duration_ms(screen.output_path());
+        let timeline = compute_segment_timeline(wall_span_ms, stats.duration_ms, probed);
+        info!(
+            wall_span_ms,
+            probed_video_ms = probed.unwrap_or(0),
+            head_trim_ms = timeline.head_trim_ms(),
+            duration_ms = timeline.duration.as_millis() as u64,
+            "aligned segment tracks to video timeline"
+        );
+        timeline
+    }
+
+    fn shift_cursor_clock(&self, work_dir: &Path, head_trim: Duration) {
+        let head_trim_ms = head_trim.as_millis().min(u64::MAX as u128) as u64;
+        if head_trim_ms == 0 {
+            return;
+        }
+        if let Err(error) = super::cursor_v2::shift_telemetry_clock(work_dir, head_trim_ms) {
+            tracing::warn!(%error, "failed to align cursor telemetry to video timeline");
+        }
+    }
+
     /// Insert a marker at the current playback position.
     #[instrument(skip(self))]
     pub fn insert_marker(&self, label: String) -> crate::errors::Result<RecordingMarker> {
@@ -1221,6 +1335,39 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn segment_timeline_trims_the_video_startup_gap() {
+        let timeline = compute_segment_timeline(265_040, 265_061, Some(264_550));
+        assert_eq!(timeline.head_trim_ms(), 490);
+        assert_eq!(timeline.duration, Duration::from_millis(264_550));
+    }
+
+    #[test]
+    fn segment_timeline_falls_back_to_wall_clock_without_a_probe() {
+        let timeline = compute_segment_timeline(265_040, 265_061, None);
+        assert_eq!(timeline.head_trim_ms(), 0);
+        assert_eq!(timeline.duration, Duration::from_millis(265_061));
+
+        let zero_probe = compute_segment_timeline(265_040, 265_061, Some(0));
+        assert_eq!(zero_probe.head_trim_ms(), 0);
+        assert_eq!(zero_probe.duration, Duration::from_millis(265_061));
+    }
+
+    #[test]
+    fn segment_timeline_rejects_implausible_gaps_and_negative_trims() {
+        // A probe far shorter than any plausible startup window is a clock or
+        // probe anomaly; the wall clock must win instead of a giant trim.
+        let implausible = compute_segment_timeline(265_040, 265_061, Some(1_000));
+        assert_eq!(implausible.head_trim_ms(), 0);
+        assert_eq!(implausible.duration, Duration::from_millis(265_061));
+
+        // CFR frame duplication can make the probed video slightly longer than
+        // the wall span; the trim clamps to zero and the video length wins.
+        let longer_video = compute_segment_timeline(265_040, 265_061, Some(265_100));
+        assert_eq!(longer_video.head_trim_ms(), 0);
+        assert_eq!(longer_video.duration, Duration::from_millis(265_100));
+    }
+
+    #[test]
     fn cancel_prepared_session_removes_pending_capture_and_work_dir() {
         let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
         let db = Arc::new(Mutex::new(
@@ -1317,6 +1464,80 @@ mod tests {
 
         let status = recorder.status().expect("read recording status");
         assert_eq!(status.state, RecorderState::Recording);
+    }
+
+    #[test]
+    fn stopped_session_aligns_container_duration_to_video_stream() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+
+        let recorder = Recorder::new(
+            ffmpeg.clone(),
+            ffprobe.clone(),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "region".into(),
+                id: "region-0".into(),
+                name: "Region".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 320,
+                    height: 240,
+                },
+            },
+            profile: "low-impact".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start recording");
+        std::thread::sleep(Duration::from_secs(3));
+        recorder.stop().expect("stop recording");
+
+        let work_dir = temp_dir.path().join(&session_id);
+        let output = work_dir.join("output.mp4");
+        assert!(output.exists(), "final output must exist");
+
+        let metadata =
+            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), &output, "alignment-test")
+                .expect("probe final output");
+        let video_ms = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .and_then(|stream| stream.duration_ms)
+            .expect("video stream duration");
+        // With no audio tracks the container duration equals the video stream;
+        // both must match the timeline total recorded in the manifest.
+        assert!(metadata.duration_ms.abs_diff(video_ms) <= 20);
+        let manifest =
+            RecordingManifest::read(work_dir.join("session.json")).expect("load session manifest");
+        assert!(
+            (manifest.total_recorded_ms as i64 - video_ms as i64).abs() <= 200,
+            "totalRecordedMs {} should match the video stream {}",
+            manifest.total_recorded_ms,
+            video_ms
+        );
     }
 
     #[test]
