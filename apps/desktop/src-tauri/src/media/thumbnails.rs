@@ -202,4 +202,3 @@ pub fn generate_poster_frame(
 
     Ok(output_image.to_path_buf())
 }
-

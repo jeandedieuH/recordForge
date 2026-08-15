@@ -152,14 +152,15 @@ function loadProject(name: string): Project {
   return projectSchema.parse(migrateFixtureProject(raw)) as Project
 }
 
-function loadTimeline(name: string): TimelineState {
-  return projectToTimeline(loadProject(name))
+function loadTimeline(name: string): { state: TimelineState; project: Project } {
+  const project = loadProject(name)
+  return { state: projectToTimeline(project), project }
 }
 
 describe("Phase 9 golden render plan", () => {
   it("builds a plan for the standard project fixture", () => {
-    const state = loadTimeline("project.json")
-    const plan = buildRenderPlan({ state, projectId: state.id })
+    const { state, project } = loadTimeline("project.json")
+    const plan = buildRenderPlan({ state, projectId: state.id, assets: project.assets })
 
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
@@ -174,8 +175,8 @@ describe("Phase 9 golden render plan", () => {
   })
 
   it("builds a plan for the no-cursor fixture with no cursor effects", () => {
-    const state = loadTimeline("project-no-cursor.json")
-    const plan = buildRenderPlan({ state, projectId: state.id })
+    const { state, project } = loadTimeline("project-no-cursor.json")
+    const plan = buildRenderPlan({ state, projectId: state.id, assets: project.assets })
 
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
@@ -186,10 +187,11 @@ describe("Phase 9 golden render plan", () => {
   })
 
   it("builds a selected-range plan for the long fixture", () => {
-    const state = loadTimeline("project-long.json")
+    const { state, project } = loadTimeline("project-long.json")
     const plan = buildRenderPlan({
       state,
       projectId: state.id,
+      assets: project.assets,
       range: { startMs: 60_000, endMs: 120_000 },
     })
 

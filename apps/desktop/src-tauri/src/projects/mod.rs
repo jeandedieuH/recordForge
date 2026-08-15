@@ -370,27 +370,10 @@ fn telemetry_asset_from_file(
     Ok(Some((asset, duration_ms)))
 }
 
-fn timeline_duration(value: &Value) -> u64 {
-    value
-        .as_array()
-        .into_iter()
-        .flat_map(|tracks| tracks.iter())
-        .flat_map(|track| {
-            track
-                .get("clips")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(|clip| Some(clip.get("startMs")?.as_u64()? + clip.get("durationMs")?.as_u64()?))
-        .max()
-        .unwrap_or(1)
-}
-
-/// Register cursor telemetry in the project asset registry and migrate the
-/// legacy global cursor settings into a full-duration cursor range.
+/// Register cursor telemetry in the project asset registry.
 pub fn ensure_cursor_asset(project: &mut ProjectFile, project_dir: &Path) -> Result<bool> {
-    let Some((asset, duration_ms)) = telemetry_asset_from_file(project_dir, &project.recording_id)?
+    let Some((asset, _duration_ms)) =
+        telemetry_asset_from_file(project_dir, &project.recording_id)?
     else {
         return Ok(false);
     };
@@ -414,94 +397,16 @@ pub fn ensure_cursor_asset(project: &mut ProjectFile, project_dir: &Path) -> Res
         changed = true;
     }
 
-    let duration_ms = timeline_duration(&project.tracks).max(duration_ms);
-    let canvas = project.canvas.clone();
     let tracks = project
         .tracks
         .as_array_mut()
         .ok_or_else(|| InternalError::Project("project tracks must be an array".into()))?;
-    let cursor_track = tracks
-        .iter_mut()
-        .find(|track| track.get("kind").and_then(Value::as_str) == Some("cursor"));
-    if let Some(track) = cursor_track {
-        let clips = track
-            .get_mut("clips")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| InternalError::Project("cursor track clips must be an array".into()))?;
-        if clips.is_empty() {
-            clips.push(cursor_effect_value(&asset, duration_ms, &canvas));
-            changed = true;
-        } else {
-            for clip in clips {
-                if clip.get("kind").and_then(Value::as_str) != Some("cursor-effect") {
-                    continue;
-                }
-                if clip.get("assetId").and_then(Value::as_str) != Some(asset.id.as_str()) {
-                    if let Some(object) = clip.as_object_mut() {
-                        object.insert("assetId".into(), Value::String(asset.id.clone()));
-                        changed = true;
-                    }
-                }
-            }
-        }
-    } else {
-        tracks.push(serde_json::json!({
-            "id": format!("track:cursor:{}", project.recording_id),
-            "kind": "cursor",
-            "name": "Cursor",
-            "muted": false,
-            "locked": false,
-            "solo": false,
-            "volume": 1,
-            "clips": [cursor_effect_value(&asset, duration_ms, &canvas)],
-        }));
+    let before_len = tracks.len();
+    tracks.retain(|track| track.get("kind").and_then(Value::as_str) != Some("cursor"));
+    if tracks.len() != before_len {
         changed = true;
     }
     Ok(changed)
-}
-
-fn cursor_effect_value(asset: &ProjectAsset, duration_ms: u64, canvas: &Value) -> Value {
-    let canvas_settings = canvas
-        .get("cursorSettings")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let preset = canvas_settings
-        .get("preset")
-        .cloned()
-        .unwrap_or_else(|| Value::String("recorded-system".into()));
-    let scale = canvas_settings
-        .get("scale")
-        .cloned()
-        .unwrap_or_else(|| Value::from(1.0));
-    let smoothing = if canvas_settings
-        .get("smoothMovement")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
-        "smooth"
-    } else {
-        "off"
-    };
-    let enabled = canvas_settings
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    serde_json::json!({
-        "id": format!("cursor-effect:{}", asset.id),
-        "kind": "cursor-effect",
-        "assetId": asset.id,
-        "startMs": 0,
-        "durationMs": duration_ms,
-        "sourceInMs": 0,
-        "sourceOutMs": 0,
-        "speed": 1,
-        "presetId": preset,
-        "scale": scale,
-        "smoothing": smoothing,
-        "settings": canvas_settings,
-        "enabled": enabled,
-        "locked": false,
-    })
 }
 
 /// Load a project from the recording's work directory.
@@ -1037,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_asset_is_registered_and_migrated_to_a_range() {
+    fn test_cursor_asset_is_registered() {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("project");
         let (recording, metadata) = make_test_recording(&project_dir);
@@ -1069,7 +974,7 @@ mod tests {
             .expect("cursor asset");
         assert_eq!(cursor_asset.id, "cursor-events:rec-1");
         let tracks = project.tracks.as_array().expect("tracks");
-        assert!(tracks
+        assert!(!tracks
             .iter()
             .any(|track| { track.get("kind").and_then(Value::as_str) == Some("cursor") }));
     }

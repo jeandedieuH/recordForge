@@ -796,30 +796,32 @@ impl Worker {
                     )
                     .unwrap_or_else(|_| metadata.clone());
 
-                    let (stream_thumb_dir_str, stream_thumb_manifest_str) = match generate_thumbnails(
-                        &self.ffmpeg_path.to_string_lossy(),
-                        &video_path,
-                        &stream_thumb_dir,
-                        &stream_metadata,
-                        self.options.thumbnail_interval_sec,
-                    ) {
-                        Ok((sprite, manifest)) => {
-                            let _ = self.record_derivative(&sprite.to_string_lossy(), "thumbnail");
-                            let _ =
-                                self.record_derivative(&manifest.to_string_lossy(), "thumbnail");
-                            (
-                                Some(stream_thumb_dir.to_string_lossy().to_string()),
-                                Some(manifest.to_string_lossy().to_string()),
-                            )
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "failed to generate stream {} thumbnail sprite: {e}",
-                                stream.index
-                            );
-                            (None, None)
-                        }
-                    };
+                    let (stream_thumb_dir_str, stream_thumb_manifest_str) =
+                        match generate_thumbnails(
+                            &self.ffmpeg_path.to_string_lossy(),
+                            &video_path,
+                            &stream_thumb_dir,
+                            &stream_metadata,
+                            self.options.thumbnail_interval_sec,
+                        ) {
+                            Ok((sprite, manifest)) => {
+                                let _ =
+                                    self.record_derivative(&sprite.to_string_lossy(), "thumbnail");
+                                let _ = self
+                                    .record_derivative(&manifest.to_string_lossy(), "thumbnail");
+                                (
+                                    Some(stream_thumb_dir.to_string_lossy().to_string()),
+                                    Some(manifest.to_string_lossy().to_string()),
+                                )
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "failed to generate stream {} thumbnail sprite: {e}",
+                                    stream.index
+                                );
+                                (None, None)
+                            }
+                        };
 
                     outputs.video_tracks.push(MediaVideoTrackOutput {
                         stream_index: stream.index,

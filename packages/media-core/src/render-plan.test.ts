@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
+import { defaultCursorSettings, type ProjectAsset, type TimelineState } from "@recordforge/domain"
 import { buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
 
 function makeTimeline(clipCount = 1): TimelineState {
@@ -272,6 +272,42 @@ describe("render-plan", () => {
         presetId: "recorded-system",
         smoothing: "strong",
         settings: { rightClickEnabled: false },
+      }),
+    ])
+  })
+
+  it("derives cursor effect from canvas settings and assets when no cursor track exists", () => {
+    const state = makeTimeline()
+    state.canvas.cursorSettings = {
+      ...defaultCursorSettings,
+      preset: "recorded-system",
+      scale: 1.25,
+      smoothMovement: true,
+      enabled: true,
+    }
+    const assets: ProjectAsset[] = [
+      {
+        id: "cursor-events:rec-1",
+        role: "cursor_events",
+        path: "cursor_telemetry.json",
+        status: "available",
+        durationMs: 60_000,
+        hasAudio: false,
+      },
+    ]
+
+    const plan = buildRenderPlan({ state, projectId: "project-1", assets })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.cursorEffects).toEqual([
+      expect.objectContaining({
+        id: "cursor-effect:cursor-events:rec-1",
+        assetId: "cursor-events:rec-1",
+        startMs: 0,
+        endMs: 20_000,
+        presetId: "recorded-system",
+        scale: 1.25,
+        smoothing: "smooth",
       }),
     ])
   })

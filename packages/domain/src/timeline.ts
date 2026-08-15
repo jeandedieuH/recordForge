@@ -412,11 +412,7 @@ export function createProjectFromRecording(
   // Bootstrap projects register semantic stream assets while keeping every
   // asset path relative to the recording session for safe export resolution.
   const screenAsset = createScreenAsset(recording, metadata)
-  const timeline = ensureZoomTrack(
-    cursorTelemetryAsset
-      ? ensureCursorEffectTrack(baseTimeline, cursorTelemetryAsset.id)
-      : baseTimeline,
-  )
+  const timeline = ensureZoomTrack(baseTimeline)
   const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const cameraStreams = recording.webcamPath
@@ -489,16 +485,14 @@ export function projectToTimeline(project: Project): TimelineState {
     name: project.name,
     recordingId: project.recordingId,
     canvas: project.canvas,
-    tracks: project.tracks,
+    tracks: project.tracks.filter((track) => track.kind !== "cursor"),
     markers: project.markers,
     zoomSegments: project.zoomSegments ?? [],
     smartZoomSettings: project.smartZoomSettings ?? defaultSmartZoomSettings,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   }
-  const cursorAsset = project.assets.find((asset) => asset.role === "cursor_events")
-  const withCursor = cursorAsset ? ensureCursorEffectTrack(timeline, cursorAsset.id) : timeline
-  return ensureZoomTrack(withCursor)
+  return ensureZoomTrack(timeline)
 }
 
 // Merge an updated timeline back into an existing project without losing assets,

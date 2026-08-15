@@ -129,6 +129,22 @@ function normalizePreset(preset: ExportPreset | undefined): ExportPreset {
   return preset === "default-mp4" || !preset ? "balanced" : preset
 }
 
+// Internal pipeline stage slugs surfaced by the backend job; mapped here so
+// users see a label instead of an identifier like "cursor".
+const STAGE_LABELS: Record<string, string> = {
+  queued: "Preparing export",
+  "resolving-assets": "Resolving assets",
+  rendering: "Rendering timeline",
+  cursor: "Rendering cursor",
+  captions: "Writing captions",
+  validating: "Validating output",
+}
+
+function stageLabel(stage: string | null | undefined): string {
+  if (!stage) return "Preparing export"
+  return STAGE_LABELS[stage] ?? stage
+}
+
 export function ExportView({
   projectName = "Recording",
   canvas,
@@ -263,7 +279,7 @@ export function ExportView({
             aria-live="polite"
           >
             <div className="mb-2 flex items-center justify-between text-sm">
-              <span className="font-semibold">{exportJob?.stage ?? "Preparing export"}</span>
+              <span className="font-semibold">{stageLabel(exportJob?.stage)}</span>
               <span className="font-mono text-subtle-foreground">{progress}%</span>
             </div>
             <Progress value={progress} aria-label={`Export progress ${progress}%`} />

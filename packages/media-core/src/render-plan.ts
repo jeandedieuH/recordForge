@@ -268,32 +268,60 @@ function toZoomSegments(
 function toCursorEffects(
   state: TimelineState,
   range: ExportRange | undefined,
+  assets?: ProjectAsset[],
 ): RenderPlanCursorEffect[] {
   const track = state.tracks.find((candidate) => candidate.kind === "cursor")
-  if (!track) return []
-  return track.clips
-    .filter(
-      (clip): clip is Extract<TimelineClip, { kind: "cursor-effect" }> =>
-        clip.kind === "cursor-effect" && clip.enabled,
-    )
-    .flatMap((clip) => {
-      const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
-      if (!window) return []
-      return [
-        {
-          id: clip.id,
-          assetId: clip.assetId,
-          startMs: window.startMs,
-          endMs: window.endMs,
-          enabled: clip.enabled,
-          presetId: clip.presetId,
-          scale: clip.scale,
-          smoothing: clip.smoothing,
-          settings: clip.settings,
-        },
-      ]
-    })
-    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+  if (track && track.clips.length > 0) {
+    return track.clips
+      .filter(
+        (clip): clip is Extract<TimelineClip, { kind: "cursor-effect" }> =>
+          clip.kind === "cursor-effect" && clip.enabled,
+      )
+      .flatMap((clip) => {
+        const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
+        if (!window) return []
+        return [
+          {
+            id: clip.id,
+            assetId: clip.assetId,
+            startMs: window.startMs,
+            endMs: window.endMs,
+            enabled: clip.enabled,
+            presetId: clip.presetId,
+            scale: clip.scale,
+            smoothing: clip.smoothing,
+            settings: clip.settings,
+          },
+        ]
+      })
+      .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+  }
+
+  const cursorAsset = assets?.find((asset) => asset.role === "cursor_events")
+  const settings = state.canvas.cursorSettings
+  if (cursorAsset && (settings?.enabled ?? true)) {
+    const screenTrack = state.tracks.find((candidate) => candidate.kind === "screen")
+    const durationMs = screenTrack
+      ? screenTrack.clips.reduce((max, c) => Math.max(max, c.startMs + c.durationMs), 0)
+      : 0
+    const window = windowTimeRange(0, durationMs, range)
+    if (!window) return []
+    return [
+      {
+        id: `cursor-effect:${cursorAsset.id}`,
+        assetId: cursorAsset.id,
+        startMs: window.startMs,
+        endMs: window.endMs,
+        enabled: true,
+        presetId: settings?.preset ?? "recorded-system",
+        scale: settings?.scale ?? 1,
+        smoothing: settings?.smoothMovement ? "smooth" : "off",
+        settings: settings ?? {},
+      },
+    ]
+  }
+
+  return []
 }
 
 export function isTimelineAudioMuted(state: TimelineState): boolean {
@@ -392,7 +420,7 @@ export function buildRenderPlan(
   const cameraTrack = state.tracks.find((track) => track.kind === "camera")
   const audioTracks = buildAudioTracks(state, range)
   const zoomSegments = toZoomSegments(state, range)
-  const cursorEffects = toCursorEffects(state, range)
+  const cursorEffects = toCursorEffects(state, range, input.assets)
   const captions = toCaptions(state, range)
   const masks = toMasks(state, range)
   const screenDurationMs = segments.reduce(

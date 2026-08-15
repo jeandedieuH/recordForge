@@ -90,7 +90,6 @@ impl FfmpegCapture {
         run(command, output, 0, manifest)
     }
 
-
     /// Elapsed milliseconds since this capture was started.
     pub fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
@@ -407,7 +406,11 @@ fn add_video_encoder(
     command.args(["-pix_fmt", "yuv420p", "-r", &profile.fps.to_string()]);
 
     let default_bitrate = if is_webcam {
-        if profile.id == "low-impact" { 1500 } else { 2000 }
+        if profile.id == "low-impact" {
+            1500
+        } else {
+            2000
+        }
     } else {
         profile.video_bitrate_kbps.unwrap_or(4000)
     };
@@ -415,29 +418,40 @@ fn add_video_encoder(
     match encoder {
         "h264_nvenc" => {
             command.args([
-                "-preset", "p1",
-                "-tune", "ll",
-                "-b:v", &format!("{default_bitrate}k"),
+                "-preset",
+                "p1",
+                "-tune",
+                "ll",
+                "-b:v",
+                &format!("{default_bitrate}k"),
             ]);
         }
         "h264_qsv" => {
             command.args([
-                "-preset", "veryfast",
-                "-look_ahead", "0",
-                "-b:v", &format!("{default_bitrate}k"),
+                "-preset",
+                "veryfast",
+                "-look_ahead",
+                "0",
+                "-b:v",
+                &format!("{default_bitrate}k"),
             ]);
         }
         "h264_amf" => {
             command.args([
-                "-quality", "speed",
-                "-rc", "cbr",
-                "-b:v", &format!("{default_bitrate}k"),
+                "-quality",
+                "speed",
+                "-rc",
+                "cbr",
+                "-b:v",
+                &format!("{default_bitrate}k"),
             ]);
         }
         "h264_mf" => {
             command.args([
-                "-rate_control", "cbr",
-                "-b:v", &format!("{default_bitrate}k"),
+                "-rate_control",
+                "cbr",
+                "-b:v",
+                &format!("{default_bitrate}k"),
             ]);
         }
         "libx264" | "libx265" => {
@@ -449,9 +463,12 @@ fn add_video_encoder(
                 "2"
             };
             command.args([
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-threads", threads,
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-threads",
+                threads,
             ]);
             if encoder == "libx264" {
                 command.args([
@@ -475,7 +492,6 @@ fn add_video_encoder(
         }
     }
 }
-
 
 fn run(
     mut command: Command,
@@ -753,4 +769,3 @@ mod tests {
         assert!(debug.contains("854:480"));
     }
 }
-

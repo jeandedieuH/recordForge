@@ -235,21 +235,28 @@ mod tests {
     #[test]
     fn test_builtin_profiles_includes_60fps_and_4k() {
         let profiles = builtin_profiles();
-        let smooth_60 = profiles.iter().find(|p| p.id == "smooth-60fps").expect("smooth-60fps profile");
+        let smooth_60 = profiles
+            .iter()
+            .find(|p| p.id == "smooth-60fps")
+            .expect("smooth-60fps profile");
         assert_eq!(smooth_60.fps, 60);
         assert_eq!(smooth_60.width, 1920);
         assert_eq!(smooth_60.height, 1080);
 
-        let ultra_4k = profiles.iter().find(|p| p.id == "ultra-4k").expect("ultra-4k profile");
+        let ultra_4k = profiles
+            .iter()
+            .find(|p| p.id == "ultra-4k")
+            .expect("ultra-4k profile");
         assert_eq!(ultra_4k.width, 3840);
         assert_eq!(ultra_4k.height, 2160);
         assert_eq!(ultra_4k.fps, 30);
 
-        let ultra_4k_60 = profiles.iter().find(|p| p.id == "ultra-4k-60").expect("ultra-4k-60 profile");
+        let ultra_4k_60 = profiles
+            .iter()
+            .find(|p| p.id == "ultra-4k-60")
+            .expect("ultra-4k-60 profile");
         assert_eq!(ultra_4k_60.width, 3840);
         assert_eq!(ultra_4k_60.height, 2160);
         assert_eq!(ultra_4k_60.fps, 60);
     }
 }
-
-

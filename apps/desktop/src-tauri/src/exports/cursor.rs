@@ -307,7 +307,10 @@ impl CursorRenderer {
             }
             "spring" => {
                 let p = 0.4;
-                (2.0f64.powf(-10.0 * progress) * (((progress - p / 4.0) * (2.0 * std::f64::consts::PI)) / p).sin() + 1.0).clamp(0.0, 1.5)
+                (2.0f64.powf(-10.0 * progress)
+                    * (((progress - p / 4.0) * (2.0 * std::f64::consts::PI)) / p).sin()
+                    + 1.0)
+                    .clamp(0.0, 1.5)
             }
             _ => {
                 if progress < 0.5 {

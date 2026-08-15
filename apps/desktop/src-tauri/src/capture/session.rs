@@ -165,7 +165,6 @@ impl Recorder {
         }
     }
 
-
     /// Discover or verify the FFmpeg binary path.
     ///
     /// Prefer calling `media::resolve_executable_with_resource_dir` directly

@@ -111,7 +111,6 @@ pub fn run_benchmark(
     })
 }
 
-
 fn os_info() -> String {
     if cfg!(windows) {
         "windows".into()
@@ -272,7 +271,11 @@ fn choose_recommendation(
         let best_encoder = results
             .iter()
             .filter(|r| r.profile_id == "low-impact" && r.error.is_none())
-            .max_by(|a, b| a.speed.partial_cmp(&b.speed).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.speed
+                    .partial_cmp(&b.speed)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|r| r.encoder_id.clone())
             .unwrap_or_else(|| "libx264".into());
 
@@ -325,4 +328,3 @@ fn choose_recommendation(
         reason: "fallback to libx264; no encoders succeeded during benchmark".into(),
     }
 }
-

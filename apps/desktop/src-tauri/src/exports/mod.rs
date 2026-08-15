@@ -516,8 +516,8 @@ fn video_screen_rect(
         let fit_width = (source_w * fit_scale).floor();
         let fit_height = (source_h * fit_scale).floor();
         let x = (padding + (target_w - fit_width) / 2.0).floor();
-        let y = (padding + (content_height - target_h) / 2.0 + (target_h - fit_height) / 2.0)
-            .floor();
+        let y =
+            (padding + (content_height - target_h) / 2.0 + (target_h - fit_height) / 2.0).floor();
         (x, y, fit_width, fit_height)
     } else {
         let (source_w, source_h) = match source {
@@ -598,13 +598,15 @@ fn render_timeline_composition(
             return false;
         }
         let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
-        let target_camera_x = (canvas.padding as f64)
-            + (usable_w * 0.68).round()
-            + (usable_w * 0.02).round();
+        let target_camera_x =
+            (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
         (overlay.x - target_camera_x).abs() <= 2.0
     });
-    let (screen_x, screen_y, screen_w, screen_h) =
-        video_screen_rect(canvas, common_screen_source(&plan.segments), is_side_by_side);
+    let (screen_x, screen_y, screen_w, screen_h) = video_screen_rect(
+        canvas,
+        common_screen_source(&plan.segments),
+        is_side_by_side,
+    );
     let (segment_w, segment_h) = if is_side_by_side {
         (
             (content_width as f64 * 0.68).round().max(1.0) as u32,
@@ -649,7 +651,7 @@ fn render_timeline_composition(
             filter.push_str(&format!(",setpts=PTS/{:.6}", segment.speed));
         }
         filter.push_str(&format!(
-            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={background},fps={}:setsar=1[{label}]",
+            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={background},fps={},setsar=1[{label}]",
             canvas.fps,
         ));
         filters.push(filter);
@@ -678,11 +680,18 @@ fn render_timeline_composition(
         format!("[{label}]")
     };
 
+    // Pin the video to the plan duration: recordings can end their video
+    // stream slightly before the audio (encoder tail lag), which trims would
+    // otherwise silently shorten. tpad clones the last frame across any
+    // shortfall and trim caps the stream at the exact planned duration.
+    // Filters are pull-based, so the oversized stop_duration only materializes
+    // frames up to the trim cutoff.
+    let plan_duration = seconds(plan.duration_ms);
     // Crop the fitted recorded video out of the padded content area, then pad
     // it to the full canvas so radius and shadow are applied to the actual
     // video layer rather than the padded content box.
     let mut canvas_filter = format!(
-        "{video_input}crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},pad={}:{}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1",
+        "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},pad={}:{}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1",
         canvas.width, canvas.height
     );
     if canvas.border_radius > 0 {
@@ -1352,6 +1361,11 @@ fn apply_cursor_overlay(
         .take()
         .ok_or_else(|| InternalError::Media("cursor overlay stdin unavailable".into()))?;
     let mut frame = vec![0; frame_size];
+    // The overlay graph uses shortest=1, so FFmpeg stops reading stdin as soon
+    // as the composed video ends. Feeding ceil(duration*fps) frames can exceed
+    // that by one frame; a closed pipe here means the consumer finished, and
+    // the exit-status check below decides whether the render actually failed.
+    let mut consumer_finished_early = false;
     for frame_index in 0..frame_count {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = child.kill();
@@ -1368,6 +1382,10 @@ fn apply_cursor_overlay(
             renderer.render_frame(output_ms, &mut frame);
         }
         if let Err(error) = stdin.write_all(&frame) {
+            if is_pipe_closed(&error) {
+                consumer_finished_early = true;
+                break;
+            }
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_file(&partial_path);
@@ -1383,8 +1401,13 @@ fn apply_cursor_overlay(
     })?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&partial_path);
-        warn!("cursor overlay process failed; stderr is intentionally redacted");
-        return Err(InternalError::Media("cursor overlay render failed".into()).into());
+        let detail =
+            ffmpeg_failure_detail(&output.stderr).unwrap_or_else(|| "no diagnostic output".into());
+        warn!(detail = %detail, "cursor overlay process failed");
+        return Err(InternalError::Media(format!("cursor overlay render failed: {detail}")).into());
+    }
+    if consumer_finished_early {
+        info!("cursor overlay consumer closed the frame pipe before the planned frame count");
     }
 
     crate::capture::disk::atomic_replace(&partial_path, output_path)?;
@@ -1732,13 +1755,54 @@ fn atempo_filter(speed: f64) -> String {
     }
 }
 
+/// True when a stdin write failed because the reader already exited. Windows
+/// reports this as ERROR_BROKEN_PIPE (109) or ERROR_NO_DATA (232).
+fn is_pipe_closed(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::BrokenPipe
+        || matches!(error.raw_os_error(), Some(109) | Some(232))
+}
+
+/// Scrub filesystem paths out of an FFmpeg diagnostic line. Media paths must
+/// never reach logs or user-facing errors, but the surrounding reason (for
+/// example "Invalid argument" or "No such file or directory") is safe to keep.
+fn redact_paths(line: &str) -> String {
+    line.split_whitespace()
+        .map(|token| {
+            let cleaned = token.trim_matches(|c| c == '\'' || c == '"' || c == ',' || c == ')');
+            let looks_like_path = cleaned.contains(":\\")
+                || cleaned.contains(":/")
+                || cleaned.starts_with('\\')
+                || (cleaned.starts_with('/') && cleaned.len() > 1);
+            if looks_like_path {
+                "<path>"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extract the most actionable FFmpeg error detail from raw stderr with all
+/// paths redacted, falling back to a generic message when stderr is empty.
+fn ffmpeg_failure_detail(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(redact_paths)
+        .last()
+        .map(|line| line.chars().take(300).collect::<String>())
+        .filter(|line| !line.is_empty())
+}
+
 fn run_ffmpeg_command(
     command: &mut Command,
     cancel: &std::sync::atomic::AtomicBool,
     partial_path: &Path,
     stage: &str,
 ) -> Result<()> {
-    command.stdout(Stdio::null()).stderr(Stdio::null());
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|error| InternalError::Media(format!("start {stage}: {error}")))?;
@@ -1755,11 +1819,18 @@ fn run_ffmpeg_command(
                     return Ok(());
                 }
                 let _ = std::fs::remove_file(partial_path);
-                warn!(
-                    stage,
-                    "ffmpeg export process failed; stderr is intentionally redacted"
-                );
-                return Err(InternalError::Media(format!("{stage} failed")).into());
+                let detail = child
+                    .stderr
+                    .take()
+                    .and_then(|mut stderr| {
+                        use std::io::Read;
+                        let mut raw = Vec::new();
+                        stderr.read_to_end(&mut raw).ok()?;
+                        ffmpeg_failure_detail(&raw)
+                    })
+                    .unwrap_or_else(|| "no diagnostic output".into());
+                warn!(stage, detail = %detail, "ffmpeg export process failed");
+                return Err(InternalError::Media(format!("{stage} failed: {detail}")).into());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(error) => {
@@ -1782,7 +1853,11 @@ fn validate_export_output(
         crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)?;
     let duration_delta = metadata.duration_ms.abs_diff(plan.duration_ms);
     if duration_delta > 150 {
-        return Err(InternalError::Media("export duration failed validation".into()).into());
+        return Err(InternalError::Media(format!(
+            "export duration failed validation (expected {} ms, rendered {} ms)",
+            plan.duration_ms, metadata.duration_ms
+        ))
+        .into());
     }
     let video = metadata
         .streams
@@ -2010,12 +2085,31 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         let progress_in = format!("((t-{start_s:.3})/{trans_in_s:.3})");
         let eased_in = zoom_easing_expression(&progress_in, &segment.easing);
         let interpolated_in = if axis == "x" || axis == "y" {
-            let center_full = if axis == "x" { canvas.width as f64 / 2.0 } else { canvas.height as f64 / 2.0 };
-            let center_target = if axis == "x" { target.x + target.width / 2.0 } else { target.y + target.height / 2.0 };
-            let dim_full = if axis == "x" { canvas.width as f64 } else { canvas.height as f64 };
-            let dim_target = if axis == "x" { target.width } else { target.height };
-            let center_eased = format!("({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_in})");
-            let dim_eased = format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_in})");
+            let center_full = if axis == "x" {
+                canvas.width as f64 / 2.0
+            } else {
+                canvas.height as f64 / 2.0
+            };
+            let center_target = if axis == "x" {
+                target.x + target.width / 2.0
+            } else {
+                target.y + target.height / 2.0
+            };
+            let dim_full = if axis == "x" {
+                canvas.width as f64
+            } else {
+                canvas.height as f64
+            };
+            let dim_target = if axis == "x" {
+                target.width
+            } else {
+                target.height
+            };
+            let center_eased = format!(
+                "({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_in})"
+            );
+            let dim_eased =
+                format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_in})");
             format!("({center_eased})-({dim_eased})/2")
         } else {
             format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased_in})")
@@ -2024,12 +2118,31 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         let progress_out = format!("(({end_s:.3}-t)/{trans_out_s:.3})");
         let eased_out = zoom_easing_expression(&progress_out, &segment.easing);
         let interpolated_out = if axis == "x" || axis == "y" {
-            let center_full = if axis == "x" { canvas.width as f64 / 2.0 } else { canvas.height as f64 / 2.0 };
-            let center_target = if axis == "x" { target.x + target.width / 2.0 } else { target.y + target.height / 2.0 };
-            let dim_full = if axis == "x" { canvas.width as f64 } else { canvas.height as f64 };
-            let dim_target = if axis == "x" { target.width } else { target.height };
-            let center_eased = format!("({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_out})");
-            let dim_eased = format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_out})");
+            let center_full = if axis == "x" {
+                canvas.width as f64 / 2.0
+            } else {
+                canvas.height as f64 / 2.0
+            };
+            let center_target = if axis == "x" {
+                target.x + target.width / 2.0
+            } else {
+                target.y + target.height / 2.0
+            };
+            let dim_full = if axis == "x" {
+                canvas.width as f64
+            } else {
+                canvas.height as f64
+            };
+            let dim_target = if axis == "x" {
+                target.width
+            } else {
+                target.height
+            };
+            let center_eased = format!(
+                "({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_out})"
+            );
+            let dim_eased =
+                format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_out})");
             format!("({center_eased})-({dim_eased})/2")
         } else {
             format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased_out})")
@@ -2041,9 +2154,8 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
             "if(lt(t,{in_end_s:.3}),{interpolated_in},if(lte(t,{out_start_s:.3}),{val_hold},{interpolated_out}))"
         );
 
-        expression = format!(
-            "if(gte(t,{start_s:.3})*lt(t,{end_s:.3}),{segment_expr},{expression})"
-        );
+        expression =
+            format!("if(gte(t,{start_s:.3})*lt(t,{end_s:.3}),{segment_expr},{expression})");
     }
     expression
 }
@@ -2286,6 +2398,37 @@ fn emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_pipe_closed_matches_broken_pipe_errors() {
+        assert!(is_pipe_closed(&std::io::Error::from_raw_os_error(109)));
+        assert!(is_pipe_closed(&std::io::Error::from_raw_os_error(232)));
+        assert!(is_pipe_closed(&std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe
+        )));
+        assert!(!is_pipe_closed(&std::io::Error::from_raw_os_error(5)));
+    }
+
+    #[test]
+    fn redact_paths_scrubs_windows_and_posix_paths() {
+        let line =
+            "No such file or directory: 'C:\\Users\\me\\Videos\\rec.mp4' (read from /tmp/out)";
+        assert_eq!(
+            redact_paths(line),
+            "No such file or directory: <path> (read from <path>"
+        );
+        assert_eq!(redact_paths("Invalid argument"), "Invalid argument");
+    }
+
+    #[test]
+    fn ffmpeg_failure_detail_returns_last_redacted_line() {
+        let stderr = b"first line\n[mpeg4] something broke\n";
+        assert_eq!(
+            ffmpeg_failure_detail(stderr).as_deref(),
+            Some("[mpeg4] something broke")
+        );
+        assert_eq!(ffmpeg_failure_detail(b"\n \n"), None);
+    }
 
     fn valid_plan() -> RenderPlan {
         RenderPlan {

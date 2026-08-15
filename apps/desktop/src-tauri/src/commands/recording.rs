@@ -535,7 +535,6 @@ pub fn get_diagnostics_report(state: State<'_, AppState>) -> Result<DiagnosticsR
     })
 }
 
-
 #[tauri::command]
 #[instrument]
 pub fn scan_recovery_sessions(state: State<'_, AppState>) -> Result<Vec<RecoveryScanResult>> {
