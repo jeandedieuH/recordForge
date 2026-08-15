@@ -1,4 +1,5 @@
 import type {
+  AnnotationClip,
   AppError,
   AudioClip,
   CaptionClip,
@@ -6,9 +7,11 @@ import type {
   CameraClip,
   ClipTransform,
   CursorEffectClip,
+  ImageClip,
   ManualZoomSegment,
   MaskClip,
   MaskRect,
+  TextClip,
   TimelineClip,
   TimelineCanvas,
   TimelineState,
@@ -25,25 +28,30 @@ import {
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
+  AddAnnotationClipCommand,
   AddCaptionClipCommand,
-  AddMaskClipCommand,
   AddCursorRangeCommand,
-  AddZoomSegmentCommand,
+  AddExternalAudioClipCommand,
+  AddImageClipCommand,
+  AddMaskClipCommand,
   AddMarkerCommand,
+  AddTextClipCommand,
   AddTrackCommand,
+  AddZoomSegmentCommand,
   CommandRecord,
   DeleteClipCommand,
   DeleteClipsCommand,
-  DuplicateClipCommand,
-  DuplicateClipsCommand,
   DeleteCursorRangeCommand,
-  DeleteZoomSegmentCommand,
   DeleteMarkerCommand,
   DeleteRangeCommand,
-  RegenerateZoomSuggestionsCommand,
   DeleteTrackCommand,
+  DeleteZoomSegmentCommand,
+  DuplicateClipCommand,
+  DuplicateClipsCommand,
+  ImportCaptionCuesCommand,
   MoveClipCommand,
   MoveClipsCommand,
+  RegenerateZoomSuggestionsCommand,
   ResizeCursorRangeCommand,
   ResizeZoomSegmentCommand,
   RippleDeleteClipCommand,
@@ -54,18 +62,20 @@ import type {
   SplitZoomSegmentCommand,
   TrimClipCommand,
   TrimTimelineEndsCommand,
+  UpdateAnnotationClipCommand,
   UpdateCanvasCommand,
-  UpdateSmartZoomSettingsCommand,
-  UpdateClipAudioCommand,
   UpdateCaptionClipCommand,
-  UpdateMaskClipCommand,
-  ImportCaptionCuesCommand,
-  UpdateCursorRangeCommand,
-  UpdateZoomSegmentCommand,
+  UpdateClipAudioCommand,
   UpdateClipTransformCommand,
+  UpdateCursorRangeCommand,
   UpdateCursorSettingsCommand,
+  UpdateImageClipCommand,
   UpdateMarkerCommand,
+  UpdateMaskClipCommand,
+  UpdateSmartZoomSettingsCommand,
+  UpdateTextClipCommand,
   UpdateTrackCommand,
+  UpdateZoomSegmentCommand,
 } from "./command-records"
 import type { CommandResult } from "./history"
 
@@ -569,6 +579,20 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "add-annotation-clip":
+    case "add-text-clip":
+    case "add-image-clip":
+    case "add-external-audio-clip":
+      return { ok: true, value: undefined }
+    case "update-annotation-clip":
+    case "update-text-clip":
+    case "update-image-clip": {
+      const found = findClip(state, command.clipId)
+      if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+      const trackResult = checkTrackLocked(found.track)
+      if (!trackResult.ok) return trackResult
+      return { ok: true, value: undefined }
+    }
     default:
       return { ok: false, error: editorError("unknown_command", "Unknown command kind") }
   }
@@ -632,6 +656,20 @@ export function applyCommand(
       return applyAddMaskClip(state, command)
     case "update-mask-clip":
       return applyUpdateMaskClip(state, command)
+    case "add-annotation-clip":
+      return applyAddAnnotationClip(state, command)
+    case "update-annotation-clip":
+      return applyUpdateAnnotationClip(state, command)
+    case "add-text-clip":
+      return applyAddTextClip(state, command)
+    case "update-text-clip":
+      return applyUpdateTextClip(state, command)
+    case "add-image-clip":
+      return applyAddImageClip(state, command)
+    case "update-image-clip":
+      return applyUpdateImageClip(state, command)
+    case "add-external-audio-clip":
+      return applyAddExternalAudioClip(state, command)
     case "update-canvas":
       return applyUpdateCanvas(state, command)
     case "update-smart-zoom-settings":
@@ -1656,6 +1694,199 @@ function applyUpdateMaskClip(
   return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
+function applyAddAnnotationClip(
+  state: TimelineState,
+  command: AddAnnotationClipCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((t) => t.kind === "annotations")
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? `track:annotations:${Date.now()}`,
+    kind: "annotations",
+    name: "Annotations",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, command.clip] }
+  const tracks = existingTrack
+    ? state.tracks.map((t) => (t.id === track.id ? nextTrack : t))
+    : [...state.tracks, nextTrack]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyUpdateAnnotationClip(
+  state: TimelineState,
+  command: UpdateAnnotationClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  if (found.track.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+    }
+  }
+  if (found.clip.kind !== "annotation") {
+    return { ok: false, error: editorError("invalid_clip", "Clip is not an annotation") }
+  }
+  const next: AnnotationClip = {
+    ...found.clip,
+    ...command.update,
+  }
+  return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
+}
+
+function applyAddTextClip(
+  state: TimelineState,
+  command: AddTextClipCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((t) => t.kind === "titles")
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? `track:titles:${Date.now()}`,
+    kind: "titles",
+    name: "Titles & Text",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, command.clip] }
+  const tracks = existingTrack
+    ? state.tracks.map((t) => (t.id === track.id ? nextTrack : t))
+    : [...state.tracks, nextTrack]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyUpdateTextClip(
+  state: TimelineState,
+  command: UpdateTextClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  if (found.track.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+    }
+  }
+  if (found.clip.kind !== "text") {
+    return { ok: false, error: editorError("invalid_clip", "Clip is not a text clip") }
+  }
+  const next: TextClip = {
+    ...found.clip,
+    ...command.update,
+  }
+  return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
+}
+
+function applyAddImageClip(
+  state: TimelineState,
+  command: AddImageClipCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((t) => t.kind === "graphics")
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? `track:graphics:${Date.now()}`,
+    kind: "graphics",
+    name: "Graphics & Overlays",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, command.clip] }
+  const tracks = existingTrack
+    ? state.tracks.map((t) => (t.id === track.id ? nextTrack : t))
+    : [...state.tracks, nextTrack]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyUpdateImageClip(
+  state: TimelineState,
+  command: UpdateImageClipCommand,
+): CommandResult<TimelineState> {
+  const found = findClip(state, command.clipId)
+  if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+  if (found.track.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+    }
+  }
+  if (found.clip.kind !== "image") {
+    return { ok: false, error: editorError("invalid_clip", "Clip is not an image clip") }
+  }
+  const next: ImageClip = {
+    ...found.clip,
+    ...command.update,
+  }
+  return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
+}
+
+function applyAddExternalAudioClip(
+  state: TimelineState,
+  command: AddExternalAudioClipCommand,
+): CommandResult<TimelineState> {
+  const existingTrack = command.trackId ? findTrack(state, command.trackId) : null
+  const track: TimelineTrack = existingTrack ?? {
+    id: command.trackId ?? `track:audio:${Date.now()}`,
+    kind: "audio",
+    name: command.trackName ?? "Audio Track",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const clipId = command.clipId ?? `audio:${command.assetId}:${command.startMs}`
+  const audioClip: AudioClip = {
+    id: clipId,
+    assetId: command.assetId,
+    kind: "audio",
+    role: command.role ?? "music",
+    startMs: command.startMs,
+    durationMs: command.durationMs,
+    sourceInMs: command.sourceInMs,
+    sourceOutMs: command.sourceOutMs,
+    speed: 1,
+    volume: command.volume ?? 1,
+    fadeInMs: 0,
+    fadeOutMs: 0,
+  }
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, audioClip] }
+  const trackResult = sortAndValidateTrack(
+    existingTrack ? updateTrackInState(state, track.id, nextTrack) : state,
+    track.id,
+  )
+  const tracks = existingTrack
+    ? state.tracks.map((t) =>
+        t.id === track.id ? (trackResult.ok ? trackResult.value : nextTrack) : t,
+      )
+    : [...state.tracks, nextTrack]
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
 function applyUpdateCanvas(
   state: TimelineState,
   command: UpdateCanvasCommand,
@@ -1928,7 +2159,8 @@ function applyUpdateZoomSegment(
     enabled: command.enabled ?? current.enabled,
     locked: command.locked ?? current.locked,
     mode: command.mode ?? (hasManualEdit && current.mode === "auto" ? "manual" : current.mode),
-    source: command.source ?? (hasManualEdit && current.source !== "manual" ? "manual" : current.source),
+    source:
+      command.source ?? (hasManualEdit && current.source !== "manual" ? "manual" : current.source),
     preset: command.preset ?? (hasManualEdit ? "manual-only" : current.preset),
     followDeadzonePercent: command.followDeadzonePercent ?? current.followDeadzonePercent,
     followSmoothingAlpha: command.followSmoothingAlpha ?? current.followSmoothingAlpha,
@@ -2645,6 +2877,120 @@ export function createUpdateMaskClipCommand(
     ...update,
     coalesce: update.rect !== undefined,
     coalesceKey: update.rect !== undefined ? `mask:${clipId}` : undefined,
+  }
+}
+
+export function createAddAnnotationClipCommand(
+  clip: AnnotationClip,
+  trackId?: string,
+): CommandRecord {
+  return {
+    kind: "add-annotation-clip",
+    name: "Add annotation",
+    clip,
+    trackId,
+  }
+}
+
+export function createUpdateAnnotationClipCommand(
+  clipId: string,
+  update: Partial<AnnotationClip>,
+): CommandRecord {
+  return {
+    kind: "update-annotation-clip",
+    name: "Update annotation",
+    clipId,
+    update,
+    coalesce:
+      update.x !== undefined ||
+      update.y !== undefined ||
+      update.width !== undefined ||
+      update.height !== undefined,
+    coalesceKey: `annotation:${clipId}`,
+  }
+}
+
+export function createAddTextClipCommand(clip: TextClip, trackId?: string): CommandRecord {
+  return {
+    kind: "add-text-clip",
+    name: "Add title / text",
+    clip,
+    trackId,
+  }
+}
+
+export function createUpdateTextClipCommand(
+  clipId: string,
+  update: Partial<TextClip>,
+): CommandRecord {
+  return {
+    kind: "update-text-clip",
+    name: "Update title / text",
+    clipId,
+    update,
+    coalesce:
+      update.x !== undefined ||
+      update.y !== undefined ||
+      update.width !== undefined ||
+      update.height !== undefined,
+    coalesceKey: `text:${clipId}`,
+  }
+}
+
+export function createAddImageClipCommand(clip: ImageClip, trackId?: string): CommandRecord {
+  return {
+    kind: "add-image-clip",
+    name: "Add image / graphic",
+    clip,
+    trackId,
+  }
+}
+
+export function createUpdateImageClipCommand(
+  clipId: string,
+  update: Partial<ImageClip>,
+): CommandRecord {
+  return {
+    kind: "update-image-clip",
+    name: "Update image / graphic",
+    clipId,
+    update,
+    coalesce:
+      update.x !== undefined ||
+      update.y !== undefined ||
+      update.width !== undefined ||
+      update.height !== undefined,
+    coalesceKey: `image:${clipId}`,
+  }
+}
+
+export function createAddExternalAudioClipCommand(
+  assetId: string,
+  startMs: number,
+  durationMs: number,
+  options?: {
+    sourceInMs?: number
+    sourceOutMs?: number
+    volume?: number
+    role?: AudioClip["role"]
+    trackName?: string
+    trackId?: string
+    clipId?: string
+  },
+): CommandRecord {
+  return {
+    kind: "add-external-audio-clip",
+    name: "Add audio track",
+    assetId,
+    startMs,
+    durationMs,
+    sourceInMs: options?.sourceInMs ?? 0,
+    sourceOutMs: options?.sourceOutMs ?? durationMs,
+    volume: options?.volume ?? 1,
+    role: options?.role ?? "music",
+    trackName: options?.trackName,
+    trackId: options?.trackId,
+    clipId: options?.clipId,
   }
 }
 

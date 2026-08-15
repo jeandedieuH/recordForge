@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { Crop, Mic, Monitor, MonitorUp, Video, Volume2 } from "lucide-react"
+import { listen } from "@tauri-apps/api/event"
+import { Crop, Mic, Monitor, MonitorUp, Pencil, Video, Volume2, X } from "lucide-react"
 import {
   AudioLevelMeter,
   Button,
@@ -11,8 +12,12 @@ import {
   SelectTrigger,
   SelectValue,
   Switch,
+  useToast,
 } from "@recordforge/ui"
-import type { RecordingConfig } from "@recordforge/contracts"
+import type { Bounds, RecordingConfig } from "@recordforge/contracts"
+import { boundsSchema } from "@recordforge/contracts"
+import { openRegionPicker } from "../../lib/recorder"
+import { toErrorMessage } from "../../lib/errors"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { WebcamPreview } from "./webcam-preview"
 
@@ -29,6 +34,7 @@ export function NewRecordingModal({
   onStart,
   onNavigateToSettings,
 }: NewRecordingModalProps) {
+  const { toast } = useToast()
   const {
     sources,
     audioDevices,
@@ -57,6 +63,41 @@ export function NewRecordingModal({
   )
   const [audioLevel, setAudioLevel] = useState(0.45)
 
+  // The region picker is a separate fullscreen Tauri window; its selection
+  // arrives as a `region-selected` event in absolute physical coordinates.
+  useEffect(() => {
+    if (!open) return
+    let unlisten: (() => void) | undefined
+    let active = true
+
+    listen<{ bounds: unknown }>("region-selected", (event) => {
+      const parsed = boundsSchema.safeParse(event.payload?.bounds)
+      if (!parsed.success) return
+      const bounds: Bounds = parsed.data
+      setSelectedSource({
+        kind: "region",
+        id: `region-${crypto.randomUUID()}`,
+        name: `Region ${bounds.width}×${bounds.height}`,
+        bounds,
+      })
+      setSelectedSourceType("region")
+    }).then((fn) => {
+      if (active) unlisten = fn
+      else fn()
+    })
+
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [open, setSelectedSource])
+
+  function handleOpenRegionPicker() {
+    openRegionPicker().catch((error) => {
+      toast({ title: "Could not open the region picker", description: toErrorMessage(error) })
+    })
+  }
+
   // Load sources, devices, and profiles when the modal opens
   useEffect(() => {
     if (open) {
@@ -81,6 +122,13 @@ export function NewRecordingModal({
       if (defaultSource) setSelectedSource(defaultSource)
     }
   }, [open, selectedSource, sources, displaySources, setSelectedSource])
+
+  // Reflect a previously saved region selection when reopening the modal
+  useEffect(() => {
+    if (open && selectedSource?.kind === "region") {
+      setSelectedSourceType("region")
+    }
+  }, [open, selectedSource])
 
   // Dynamic audio meter effect when microphone is active
   useEffect(() => {
@@ -138,9 +186,13 @@ export function NewRecordingModal({
       const window = windowSources[0] || sources.find((s) => s.kind === "window")
       if (window) setSelectedSource(window)
     }
+    // "region" keeps the current source; the user must draw a region first.
   }
 
+  const regionSource = selectedSource?.kind === "region" ? selectedSource : null
+
   function handleStartRecording() {
+    if (selectedSourceType === "region" && !regionSource) return
     if (!selectedSource && sources.length > 0) {
       setSelectedSource(sources[0])
     }
@@ -245,9 +297,10 @@ export function NewRecordingModal({
                   <div className="relative z-10 flex flex-col items-center gap-2 rounded-md border border-border-strong bg-surface/90 px-4 py-2 text-xs font-medium text-foreground backdrop-blur text-center max-w-[85%]">
                     <span className="truncate">
                       {selectedSourceType === "region"
-                        ? `Custom Region (${selectedDisplayResolution})`
-                        : selectedSource?.name || "Display 1"}{" "}
-                      ({selectedDisplayResolution})
+                        ? regionSource
+                          ? regionSource.name
+                          : "No region selected yet"
+                        : `${selectedSource?.name || "Display 1"} (${selectedDisplayResolution})`}
                     </span>
                   </div>
                 </div>
@@ -298,6 +351,55 @@ export function NewRecordingModal({
                     <p className="text-[11px] text-subtle-foreground mt-1">
                       No open windows detected.
                     </p>
+                  )
+                ) : null}
+
+                {selectedSourceType === "region" ? (
+                  regionSource ? (
+                    <div className="mt-1 flex items-center gap-2 rounded-lg border border-primary/50 bg-primary/10 px-3 py-2">
+                      <Crop className="size-4 shrink-0 text-primary" aria-hidden />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold text-foreground">
+                          {regionSource.bounds.width}×{regionSource.bounds.height} region selected
+                        </div>
+                        <div className="truncate font-mono text-[10px] text-subtle-foreground">
+                          at x={regionSource.bounds.x}, y={regionSource.bounds.y} (physical px)
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleOpenRegionPicker}
+                        className="h-7 cursor-pointer gap-1 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                      >
+                        <Pencil className="size-3" aria-hidden />
+                        Redraw
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const display =
+                            displaySources[0] || sources.find((s) => s.kind === "display")
+                          if (display) {
+                            setSelectedSource(display)
+                            setSelectedSourceType("screen")
+                          }
+                        }}
+                        className="h-7 cursor-pointer px-2 text-muted-foreground hover:text-foreground"
+                        aria-label="Clear region selection"
+                      >
+                        <X className="size-3.5" aria-hidden />
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      onClick={handleOpenRegionPicker}
+                      className="mt-1 flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-border-strong bg-surface-dim px-3 py-3 text-xs font-semibold text-foreground shadow-none transition-all hover:bg-overlay"
+                    >
+                      <Crop className="size-4 text-primary" aria-hidden />
+                      <span>Select Area on Screen</span>
+                    </Button>
                   )
                 ) : null}
               </div>
@@ -502,7 +604,8 @@ export function NewRecordingModal({
 
             <Button
               onClick={handleStartRecording}
-              className="flex items-center gap-3 rounded-lg bg-recording px-5 py-2 text-xs font-semibold text-white shadow-lg transition-all hover:bg-recording-hover cursor-pointer"
+              disabled={selectedSourceType === "region" && !regionSource}
+              className="flex items-center gap-3 rounded-lg bg-recording px-5 py-2 text-xs font-semibold text-white shadow-lg transition-all hover:bg-recording-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <span className="size-2 rounded-full bg-white animate-pulse" />
               <span>Start Recording</span>

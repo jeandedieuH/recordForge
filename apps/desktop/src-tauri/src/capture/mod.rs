@@ -11,6 +11,7 @@ pub mod ffmpeg;
 pub mod manifest;
 pub mod media;
 pub mod metrics;
+pub mod outputs;
 pub mod recovery;
 pub mod session;
 pub mod source;

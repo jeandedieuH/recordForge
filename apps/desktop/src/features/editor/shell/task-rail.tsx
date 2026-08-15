@@ -6,14 +6,25 @@ import {
   LayoutTemplate,
   Library,
   MousePointer2,
+  Shapes,
   Shield,
+  Type,
   Volume2,
   ZoomIn,
 } from "lucide-react"
 import { cn } from "@recordforge/ui"
 
 export type EditorTask =
-  "media" | "focus" | "cursor" | "captions" | "layout" | "audio" | "privacy" | "export"
+  | "media"
+  | "titles"
+  | "annotations"
+  | "focus"
+  | "cursor"
+  | "captions"
+  | "layout"
+  | "audio"
+  | "privacy"
+  | "export"
 
 interface TaskDefinition {
   value: EditorTask
@@ -23,6 +34,8 @@ interface TaskDefinition {
 
 export const EDITOR_TASKS: TaskDefinition[] = [
   { value: "media", label: "Media", icon: Library },
+  { value: "titles", label: "Titles", icon: Type },
+  { value: "annotations", label: "Shapes", icon: Shapes },
   { value: "focus", label: "Focus", icon: ZoomIn },
   { value: "cursor", label: "Cursor", icon: MousePointer2 },
   { value: "captions", label: "Captions", icon: Captions },

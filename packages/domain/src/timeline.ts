@@ -306,6 +306,10 @@ export function trackKindDisplayName(kind: TimelineTrackKind): string {
     cursor: "Cursor",
     effects: "Effects",
     zoom: "Zoom",
+    annotations: "Annotations",
+    titles: "Titles & Text",
+    graphics: "Graphics & Overlays",
+    overlay: "Overlay",
   }
   return names[kind]
 }

@@ -10,7 +10,7 @@ use tracing::{info, instrument};
 use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::manifest::{RecordingFragment, RecordingManifest, RecordingStats};
-use super::source::CaptureSource;
+use super::source::{Bounds, CaptureSource};
 
 /// Manages a running FFmpeg capture process.
 pub struct FfmpegCapture {
@@ -253,16 +253,34 @@ fn build_screen_command(
         .stderr(Stdio::piped())
         .arg("-y");
 
-    // Use ddagrab for display capture only when the filter is present in this
-    // FFmpeg build; otherwise fall back to gdigrab (see add_screen_video_input).
-    let use_ddagrab = config.source.kind == "display" && ddagrab_available;
+    // ddagrab captures a specific DXGI output, and its offset/video_size are
+    // interpreted in that output's own coordinate space. Displays and regions
+    // are described in absolute virtual-screen coordinates, so they must be
+    // mapped onto the containing output before reaching FFmpeg. When the
+    // mapping fails (exotic GPU topology, non-Windows), fall back to gdigrab,
+    // which understands absolute desktop coordinates natively.
+    let ddagrab_target = if ddagrab_available {
+        let target = super::outputs::resolve_output_target(
+            &super::outputs::enumerate_dxgi_outputs(),
+            config.source.bounds,
+        );
+        if target.is_none() {
+            tracing::warn!(
+                bounds = ?config.source.bounds,
+                "no DXGI output matched the capture bounds; falling back to gdigrab"
+            );
+        }
+        target
+    } else {
+        None
+    };
 
     // Audio is captured by native WASAPI workers and muxed after the video
     // fragment is finalized. Keeping this FFmpeg process video-only prevents a
     // DirectShow audio failure from taking down the screen capture.
-    add_screen_video_input(&mut command, &config.source, profile, use_ddagrab);
+    add_screen_video_input(&mut command, &config.source, profile, ddagrab_target);
 
-    let video_filter = build_video_filter(&config.source, profile, use_ddagrab);
+    let video_filter = build_video_filter(&config.source, profile, ddagrab_target.is_some());
     command
         .args(["-filter_complex", &video_filter])
         .args(["-map", "[vout]"]);
@@ -343,21 +361,28 @@ fn add_screen_video_input(
     command: &mut Command,
     source: &CaptureSource,
     profile: &RecordingProfile,
-    use_ddagrab: bool,
+    ddagrab_target: Option<super::outputs::DxgiOutputEntry>,
 ) {
     let bounds = source.bounds;
 
-    if source.kind == "display" && use_ddagrab {
-        // Desktop Duplication API via the lavfi ddagrab filter.
+    if let Some(target) = ddagrab_target {
+        // Desktop Duplication API via the lavfi ddagrab filter, cropped to the
+        // capture rect in the output's own coordinate space.
         // draw_mouse=0 keeps raw capture clean so custom overlay cursor renders cleanly.
+        let (offset_x, offset_y, width, height) =
+            super::outputs::output_relative_region(target, bounds);
         let ddagrab = format!(
-            "ddagrab=draw_mouse=0:framerate={}:video_size={}x{}:offset_x={}:offset_y={}",
-            profile.fps, bounds.width, bounds.height, bounds.x, bounds.y
+            "ddagrab=draw_mouse=0:framerate={}:output_idx={}:offset_x={}:offset_y={}:video_size={}x{}",
+            profile.fps, target.output_idx, offset_x, offset_y, width, height
         );
         command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
     } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
-        // GDI captures the selected rectangle directly.
+        // GDI captures the selected rectangle directly. The sidecar FFmpeg
+        // binary is DPI-unaware, so Windows virtualizes its GDI coordinates by
+        // the system DPI: physical desktop pixels must be divided by the system
+        // scale before being handed to gdigrab (a no-op at 100% scaling).
         // -draw_mouse 0 hides the native mouse cursor so software custom cursor overlay can be customized post-recording.
+        let logical = gdigrab_logical_bounds(bounds, system_dpi());
         command.args([
             "-f",
             "gdigrab",
@@ -368,11 +393,11 @@ fn add_screen_video_input(
             "-framerate",
             &profile.fps.to_string(),
             "-video_size",
-            &format!("{}x{}", bounds.width, bounds.height),
+            &format!("{}x{}", logical.width, logical.height),
             "-offset_x",
-            &bounds.x.to_string(),
+            &logical.x.to_string(),
             "-offset_y",
-            &bounds.y.to_string(),
+            &logical.y.to_string(),
             "-i",
             "desktop",
         ]);
@@ -387,6 +412,34 @@ fn add_screen_video_input(
     }
 }
 
+/// Convert physical desktop bounds to the coordinate space a DPI-unaware
+/// gdigrab process sees. Pure so the rounding stays testable.
+fn gdigrab_logical_bounds(bounds: Bounds, system_dpi: u32) -> Bounds {
+    const DEFAULT_DPI: u32 = 96;
+    if system_dpi == 0 || system_dpi == DEFAULT_DPI {
+        return bounds;
+    }
+    let scale = system_dpi as f64 / DEFAULT_DPI as f64;
+    Bounds {
+        x: (bounds.x as f64 / scale).round() as i32,
+        y: (bounds.y as f64 / scale).round() as i32,
+        width: ((bounds.width as f64 / scale).round() as i32).max(2),
+        height: ((bounds.height as f64 / scale).round() as i32).max(2),
+    }
+}
+
+/// System DPI used to virtualize GDI coordinates for the DPI-unaware FFmpeg
+/// sidecar process. Defaults to 96 (100%) when the API is unavailable.
+#[cfg(windows)]
+fn system_dpi() -> u32 {
+    unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() }
+}
+
+#[cfg(not(windows))]
+fn system_dpi() -> u32 {
+    96
+}
+
 fn build_video_filter(
     source: &CaptureSource,
     profile: &RecordingProfile,
@@ -396,7 +449,7 @@ fn build_video_filter(
         .bounds
         .build_aspect_fit_filter(profile.width, profile.height);
 
-    if source.kind == "display" && use_ddagrab {
+    if use_ddagrab {
         // ddagrab emits D3D11 hardware frames; download to system memory as
         // bgra before aspect-preserving scale and letterboxing (fixes P0.5).
         format!("[0:v]hwdownload,format=bgra,{fit_filter}[vout]")
@@ -734,10 +787,40 @@ fn extract_final_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::outputs::DxgiOutputEntry;
+    use crate::capture::source::Bounds;
 
-    #[test]
-    fn webcam_capture_uses_wall_clock_device_timestamps() {
-        let profile = RecordingProfile {
+    fn test_profile() -> RecordingProfile {
+        RecordingProfile {
+            id: "balanced".into(),
+            label: "Balanced".into(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            video_bitrate_kbps: None,
+            crf: Some(23),
+            encoder_priority: vec!["libx264".into()],
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        }
+    }
+
+    fn region_source(x: i32, y: i32, w: i32, h: i32) -> CaptureSource {
+        CaptureSource {
+            kind: "region".into(),
+            id: "region-0".into(),
+            name: "Region".into(),
+            bounds: Bounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+        }
+    }
+
+    fn webcam_profile() -> RecordingProfile {
+        RecordingProfile {
             id: "test".into(),
             label: "Test".into(),
             width: 1280,
@@ -748,7 +831,106 @@ mod tests {
             encoder_priority: vec!["libx264".into()],
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
+        }
+    }
+
+    #[test]
+    fn ddagrab_input_uses_output_relative_coordinates() {
+        let source = region_source(2120, 120, 640, 480);
+        let output = DxgiOutputEntry {
+            output_idx: 2,
+            bounds: Bounds {
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
         };
+
+        let mut command = Command::new("ffmpeg");
+        add_screen_video_input(&mut command, &source, &test_profile(), Some(output));
+        let debug = format!("{command:?}");
+
+        // The capture rect must be translated into the output's own space.
+        assert!(debug.contains("ddagrab=draw_mouse=0:framerate=30:output_idx=2:offset_x=200:offset_y=120:video_size=640x480"));
+    }
+
+    #[test]
+    fn ddagrab_display_capture_targets_containing_output() {
+        let source = CaptureSource {
+            kind: "display".into(),
+            id: "display-1".into(),
+            name: "Display 2".into(),
+            bounds: Bounds {
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+        };
+        let output = DxgiOutputEntry {
+            output_idx: 2,
+            bounds: Bounds {
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+        };
+
+        let mut command = Command::new("ffmpeg");
+        add_screen_video_input(&mut command, &source, &test_profile(), Some(output));
+        let debug = format!("{command:?}");
+
+        assert!(debug.contains("output_idx=2"));
+        assert!(debug.contains("offset_x=0:offset_y=0:video_size=2560x1440"));
+    }
+
+    #[test]
+    fn gdigrab_fallback_uses_dpi_virtualized_coordinates() {
+        let source = region_source(100, 200, 800, 600);
+
+        let mut command = Command::new("ffmpeg");
+        add_screen_video_input(&mut command, &source, &test_profile(), None);
+        let debug = format!("{command:?}");
+
+        assert!(debug.contains("\"gdigrab\""));
+        assert!(debug.contains("\"desktop\""));
+    }
+
+    #[test]
+    fn gdigrab_logical_bounds_scales_by_system_dpi() {
+        let physical = Bounds {
+            x: 1500,
+            y: -750,
+            width: 2400,
+            height: 1600,
+        };
+
+        // 100% scaling: identity.
+        assert_eq!(gdigrab_logical_bounds(physical, 96), physical);
+
+        // 150% scaling (DPI 144): physical pixels shrink to logical.
+        let logical = gdigrab_logical_bounds(physical, 144);
+        assert_eq!(logical.x, 1000);
+        assert_eq!(logical.y, -500);
+        assert_eq!(logical.width, 1600);
+        assert_eq!(logical.height, 1067);
+    }
+
+    #[test]
+    fn ddagrab_filter_downloads_hardware_frames() {
+        let source = region_source(0, 0, 800, 600);
+        let filter = build_video_filter(&source, &test_profile(), true);
+        assert!(filter.starts_with("[0:v]hwdownload,format=bgra,"));
+
+        let gdigrab_filter = build_video_filter(&source, &test_profile(), false);
+        assert!(gdigrab_filter.starts_with("[0:v]scale="));
+    }
+
+    #[test]
+    fn webcam_capture_uses_wall_clock_device_timestamps() {
+        let profile = webcam_profile();
         let command =
             build_webcam_command("ffmpeg", "USB Camera", &profile, "libx264", "webcam.mp4");
         let debug = format!("{command:?}");

@@ -1,6 +1,11 @@
 import { useEffect } from "react"
 import { AppShell } from "./app/app-shell"
-import { CaptureBoundaryOverlay, CountdownWindow, FloatingControls } from "./features/recorder"
+import {
+  CaptureBoundaryOverlay,
+  CountdownWindow,
+  FloatingControls,
+  RegionPickerWindow,
+} from "./features/recorder"
 import { useRecorderPolling, useRecorderStatusEvents } from "./hooks/use-recorder"
 import { useRecorderStore } from "./stores/recorder-store"
 
@@ -27,18 +32,22 @@ function App() {
   const isFloating = params.get("floating") === "1"
   const isBoundary = params.get("boundary") === "1"
   const isCountdown = params.get("countdown") === "1"
+  const isRegionPicker = params.get("region") === "1"
   useEffect(() => {
     const root = document.documentElement
     if (isFloating) root.dataset.floating = "true"
     if (isBoundary) root.dataset.boundary = "true"
+    if (isRegionPicker) root.dataset.regionPicker = "true"
     return () => {
       delete root.dataset.floating
       delete root.dataset.boundary
+      delete root.dataset.regionPicker
     }
-  }, [isBoundary, isFloating])
+  }, [isBoundary, isFloating, isRegionPicker])
 
   if (isCountdown) return <CountdownWindow />
   if (isBoundary) return <BoundaryWindow />
+  if (isRegionPicker) return <RegionPickerWindow />
   return isFloating ? <FloatingControls /> : <AppShell />
 }
 

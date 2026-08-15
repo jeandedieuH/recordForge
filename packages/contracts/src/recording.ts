@@ -121,6 +121,13 @@ export const recordingStatusSchema = z.object({
   stoppedAt: z.string().datetime({ offset: true }).nullish(),
   durationMs: z.number().int().min(0).default(0),
   recordedMs: z.number().int().min(0).default(0),
+  // Human-facing metadata for control surfaces (floating toolbar, tray).
+  // Defaults keep older payloads valid.
+  sourceKind: z.string().default(""),
+  sourceName: z.string().default(""),
+  microphoneActive: z.boolean().default(false),
+  systemAudioActive: z.boolean().default(false),
+  webcamActive: z.boolean().default(false),
   error: z.string().nullish(),
 })
 

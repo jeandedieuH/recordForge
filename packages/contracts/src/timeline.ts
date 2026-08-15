@@ -274,6 +274,186 @@ export const cursorEffectClipSchema = z.object({
 
 export type CursorEffectClip = z.infer<typeof cursorEffectClipSchema>
 
+// Annotation clip: on-canvas shapes, arrows, lines, callouts, spotlights, and badges.
+export const annotationTypeSchema = z.enum([
+  "rectangle",
+  "rounded-rect",
+  "circle",
+  "arrow",
+  "line",
+  "callout",
+  "spotlight",
+  "badge",
+])
+export type AnnotationType = z.infer<typeof annotationTypeSchema>
+
+export const annotationStrokeStyleSchema = z.enum(["solid", "dashed", "dotted"])
+export type AnnotationStrokeStyle = z.infer<typeof annotationStrokeStyleSchema>
+
+export const annotationHeadSchema = z.enum(["none", "arrow", "circle", "diamond"])
+export type AnnotationHead = z.infer<typeof annotationHeadSchema>
+
+export const annotationAnimationSchema = z.enum([
+  "none",
+  "fade",
+  "scale-up",
+  "draw",
+  "slide-up",
+  "scale-down",
+  "slide-down",
+])
+export type AnnotationAnimation = z.infer<typeof annotationAnimationSchema>
+
+export const annotationClipSchema = timelineClipBaseSchema.extend({
+  kind: z.literal("annotation"),
+  annotationType: annotationTypeSchema.default("rectangle"),
+  x: z.number().default(0),
+  y: z.number().default(0),
+  width: z.number().min(0).default(240),
+  height: z.number().min(0).default(140),
+  endX: z.number().optional(),
+  endY: z.number().optional(),
+  strokeColor: z.string().default("#38bdf8"),
+  strokeWidth: z.number().min(0).max(64).default(4),
+  strokeStyle: annotationStrokeStyleSchema.default("solid"),
+  fillColor: z.string().default("#38bdf8"),
+  fillOpacity: z.number().min(0).max(1).default(0),
+  cornerRadius: z.number().min(0).max(100).default(8),
+  arrowEndHead: annotationHeadSchema.default("arrow"),
+  arrowStartHead: annotationHeadSchema.default("none"),
+  shadowEnabled: z.boolean().default(false),
+  shadowColor: z.string().default("rgba(0, 0, 0, 0.5)"),
+  shadowBlur: z.number().min(0).max(100).default(8),
+  text: z.string().optional(),
+  textColor: z.string().default("#ffffff"),
+  fontSize: z.number().min(8).max(120).default(16),
+  animationIn: annotationAnimationSchema.default("fade"),
+  animationOut: annotationAnimationSchema.default("fade"),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+})
+
+export type AnnotationClip = z.infer<typeof annotationClipSchema>
+
+// Text / Title preset categories and backdrop styling options.
+export const titlePresetCategorySchema = z.enum([
+  "title",
+  "lower-third",
+  "callout",
+  "badge",
+  "minimal",
+])
+export type TitlePresetCategory = z.infer<typeof titlePresetCategorySchema>
+
+export const textBackdropStyleSchema = z.enum([
+  "none",
+  "solid",
+  "glass",
+  "accent-bar",
+  "pill",
+  "gradient",
+  "outline",
+])
+export type TextBackdropStyle = z.infer<typeof textBackdropStyleSchema>
+
+export const textFontFamilySchema = z.enum(["sans", "serif", "mono", "heading", "inter", "outfit"])
+export type TextFontFamily = z.infer<typeof textFontFamilySchema>
+
+const FONT_WEIGHT_MAP: Record<string, string> = {
+  normal: "400",
+  regular: "400",
+  medium: "500",
+  semibold: "600",
+  bold: "700",
+  extrabold: "800",
+  black: "900",
+}
+
+export const textFontWeightSchema = z.preprocess((val) => {
+  if (typeof val === "string") {
+    const lower = val.toLowerCase()
+    if (FONT_WEIGHT_MAP[lower]) return FONT_WEIGHT_MAP[lower]
+  }
+  return val
+}, z.enum(["400", "500", "600", "700", "800", "900"]))
+export type TextFontWeight = z.infer<typeof textFontWeightSchema>
+
+export const textAlignmentSchema = z.enum(["left", "center", "right"])
+export type TextAlignment = z.infer<typeof textAlignmentSchema>
+
+export const textAnimationSchema = z.enum([
+  "none",
+  "fade",
+  "slide-up",
+  "typewriter",
+  "zoom-punch",
+  "expand-bar",
+  "slide-down",
+])
+export type TextAnimation = z.infer<typeof textAnimationSchema>
+
+export const textClipSchema = timelineClipBaseSchema.extend({
+  kind: z.literal("text"),
+  presetId: z.string().default("title-modern"),
+  category: titlePresetCategorySchema.default("title"),
+  primaryText: z.string().min(1).default("Title Text"),
+  secondaryText: z.string().optional(),
+  tagText: z.string().optional(),
+  x: z.number().default(60),
+  y: z.number().default(60),
+  width: z.number().min(20).default(460),
+  height: z.number().min(20).default(160),
+  alignment: textAlignmentSchema.default("left"),
+  fontFamily: textFontFamilySchema.default("sans"),
+  fontSize: z.number().min(8).max(200).default(36),
+  fontWeight: textFontWeightSchema.default("700"),
+  textColor: z.string().default("#ffffff"),
+  secondaryTextColor: z.string().default("#94a3b8"),
+  accentColor: z.string().default("#38bdf8"),
+  backdropStyle: textBackdropStyleSchema.default("none"),
+  backdropColor: z.string().default("#0f172a"),
+  backdropOpacity: z.number().min(0).max(1).default(0.8),
+  backdropBlur: z.number().min(0).max(64).default(12),
+  backdropBorderRadius: z.number().min(0).max(100).default(8),
+  backdropPaddingX: z.number().min(0).max(200).default(24),
+  backdropPaddingY: z.number().min(0).max(200).default(16),
+  shadowEnabled: z.boolean().default(false),
+  shadowColor: z.string().default("rgba(0, 0, 0, 0.5)"),
+  shadowBlur: z.number().min(0).max(100).default(10),
+  animationIn: textAnimationSchema.default("fade"),
+  animationOut: textAnimationSchema.default("fade"),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+})
+
+export type TextClip = z.infer<typeof textClipSchema>
+
+// External image / graphic overlay clip.
+export const imageFitSchema = z.enum(["contain", "cover", "fill"])
+export type ImageFit = z.infer<typeof imageFitSchema>
+
+export const imageClipSchema = timelineClipBaseSchema.extend({
+  kind: z.literal("image"),
+  x: z.number().default(60),
+  y: z.number().default(60),
+  width: z.number().min(10).default(320),
+  height: z.number().min(10).default(200),
+  opacity: z.number().min(0).max(1).default(1),
+  borderRadius: z.number().min(0).max(200).default(0),
+  borderWidth: z.number().min(0).max(64).default(0),
+  borderColor: z.string().default("#ffffff"),
+  shadowEnabled: z.boolean().default(false),
+  shadowColor: z.string().default("rgba(0, 0, 0, 0.5)"),
+  shadowBlur: z.number().min(0).max(100).default(10),
+  fit: imageFitSchema.default("contain"),
+  animationIn: z.enum(["none", "fade", "scale-up", "slide-up"]).default("fade"),
+  animationOut: z.enum(["none", "fade", "scale-down"]).default("fade"),
+  enabled: z.boolean().default(true),
+  locked: z.boolean().default(false),
+})
+
+export type ImageClip = z.infer<typeof imageClipSchema>
+
 // Discriminated union of all clip kinds.
 export const timelineClipSchema = z.discriminatedUnion("kind", [
   screenClipSchema,
@@ -282,6 +462,9 @@ export const timelineClipSchema = z.discriminatedUnion("kind", [
   captionClipSchema,
   maskClipSchema,
   cursorEffectClipSchema,
+  annotationClipSchema,
+  textClipSchema,
+  imageClipSchema,
 ])
 
 export type TimelineClip = z.infer<typeof timelineClipSchema>
@@ -295,6 +478,10 @@ export const timelineTrackKindSchema = z.enum([
   "cursor",
   "effects",
   "zoom",
+  "annotations",
+  "titles",
+  "graphics",
+  "overlay",
 ])
 
 export type TimelineTrackKind = z.infer<typeof timelineTrackKindSchema>
@@ -526,6 +713,99 @@ export const renderPlanCursorEffectSchema = z.object({
 
 export type RenderPlanCursorEffect = z.infer<typeof renderPlanCursorEffectSchema>
 
+export const renderPlanAnnotationSchema = z.object({
+  id: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  annotationType: annotationTypeSchema,
+  x: z.number(),
+  y: z.number(),
+  width: z.number().min(0),
+  height: z.number().min(0),
+  endX: z.number().optional(),
+  endY: z.number().optional(),
+  strokeColor: z.string(),
+  strokeWidth: z.number().min(0),
+  strokeStyle: annotationStrokeStyleSchema,
+  fillColor: z.string(),
+  fillOpacity: z.number().min(0).max(1),
+  cornerRadius: z.number().min(0),
+  arrowEndHead: annotationHeadSchema,
+  arrowStartHead: annotationHeadSchema,
+  shadowEnabled: z.boolean(),
+  shadowColor: z.string(),
+  shadowBlur: z.number().min(0),
+  text: z.string().optional(),
+  textColor: z.string(),
+  fontSize: z.number().min(8),
+  animationIn: annotationAnimationSchema,
+  animationOut: annotationAnimationSchema,
+  enabled: z.boolean().default(true),
+})
+
+export type RenderPlanAnnotation = z.infer<typeof renderPlanAnnotationSchema>
+
+export const renderPlanTextSchema = z.object({
+  id: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  presetId: z.string(),
+  category: titlePresetCategorySchema,
+  primaryText: z.string().min(1),
+  secondaryText: z.string().optional(),
+  tagText: z.string().optional(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().min(20),
+  height: z.number().min(20),
+  alignment: textAlignmentSchema,
+  fontFamily: textFontFamilySchema,
+  fontSize: z.number().min(8),
+  fontWeight: textFontWeightSchema,
+  textColor: z.string(),
+  secondaryTextColor: z.string(),
+  accentColor: z.string(),
+  backdropStyle: textBackdropStyleSchema,
+  backdropColor: z.string(),
+  backdropOpacity: z.number().min(0).max(1),
+  backdropBlur: z.number().min(0),
+  backdropBorderRadius: z.number().min(0),
+  backdropPaddingX: z.number().min(0),
+  backdropPaddingY: z.number().min(0),
+  shadowEnabled: z.boolean(),
+  shadowColor: z.string(),
+  shadowBlur: z.number().min(0),
+  animationIn: textAnimationSchema,
+  animationOut: textAnimationSchema,
+  enabled: z.boolean().default(true),
+})
+
+export type RenderPlanText = z.infer<typeof renderPlanTextSchema>
+
+export const renderPlanImageSchema = z.object({
+  id: z.string(),
+  assetId: z.string(),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().min(10),
+  height: z.number().min(10),
+  opacity: z.number().min(0).max(1),
+  borderRadius: z.number().min(0),
+  borderWidth: z.number().min(0),
+  borderColor: z.string(),
+  shadowEnabled: z.boolean(),
+  shadowColor: z.string(),
+  shadowBlur: z.number().min(0),
+  fit: imageFitSchema,
+  animationIn: z.enum(["none", "fade", "scale-up", "slide-up"]),
+  animationOut: z.enum(["none", "fade", "scale-down"]),
+  enabled: z.boolean().default(true),
+})
+
+export type RenderPlanImage = z.infer<typeof renderPlanImageSchema>
+
 // Render plan produced by media-core from a saved project timeline.
 export const renderPlanSchema = z
   .object({
@@ -543,6 +823,9 @@ export const renderPlanSchema = z
     masks: z.array(renderPlanMaskSchema).default([]),
     zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
     cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
+    annotations: z.array(renderPlanAnnotationSchema).default([]),
+    texts: z.array(renderPlanTextSchema).default([]),
+    images: z.array(renderPlanImageSchema).default([]),
   })
   .superRefine((plan, context) => {
     let cursorMs = 0

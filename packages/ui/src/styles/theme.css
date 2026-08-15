@@ -61,6 +61,9 @@
   --color-track-mic: #34d399; /* Emerald */
   --color-track-system: #f472b6; /* Pink */
   --color-track-captions: #facc15; /* Yellow */
+  --color-track-annotation: #e879f9; /* Fuchsia */
+  --color-track-title: #f59e0b; /* Amber / Gold */
+  --color-track-graphic: #22d3ee; /* Neon Cyan */
 
   /* Typography — Professional Trust system (DESIGN.md) */
   --font-serif: "Noto Serif", Georgia, serif;

@@ -233,4 +233,3 @@ describe("cursor engine", () => {
     expect(fitted.y).toBeGreaterThanOrEqual(0)
   })
 })
-

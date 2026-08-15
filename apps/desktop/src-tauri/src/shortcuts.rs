@@ -133,9 +133,6 @@ fn toggle_pause_resume(app: &tauri::AppHandle) -> Result<()> {
 
 fn insert_marker(app: &tauri::AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-    guard.insert_marker("shortcut marker".into()).map(|_| ())
+    crate::commands::recording::insert_marker_broadcast(app, &state, "shortcut marker".into())
+        .map(|_| ())
 }

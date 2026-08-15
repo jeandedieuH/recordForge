@@ -1,11 +1,14 @@
 import type {
+  AnnotationClip,
   CameraClip,
   CaptionClip,
   CursorSettings,
   CursorTelemetryFile,
+  ImageClip,
   ManualZoomSegment,
   MaskClip,
   MaskRect,
+  TextClip,
   TimelineCanvas,
   TimelineClip,
   TimelineState,
@@ -66,6 +69,21 @@ export interface CaptionLayer {
   safeAreaMargin: number
 }
 
+export interface AnnotationLayer {
+  clip: AnnotationClip
+  active: boolean
+}
+
+export interface TextLayer {
+  clip: TextClip
+  active: boolean
+}
+
+export interface ImageLayer {
+  clip: ImageClip
+  active: boolean
+}
+
 export interface CursorLayer {
   active: boolean
   sourceTimeMs: number | null
@@ -83,6 +101,9 @@ export interface PreviewComposition {
   cameras: CameraLayer[]
   masks: MaskLayer[]
   captions: CaptionLayer[]
+  annotations: AnnotationLayer[]
+  texts: TextLayer[]
+  images: ImageLayer[]
   cursor: CursorLayer
 }
 
@@ -204,6 +225,39 @@ export function resolvePreviewComposition(
         })),
     )
 
+  const annotations: AnnotationLayer[] = state.tracks
+    .filter((track) => !track.muted)
+    .flatMap((track) =>
+      track.clips
+        .filter((clip): clip is AnnotationClip => clip.kind === "annotation")
+        .map((clip) => ({
+          clip,
+          active: clip.enabled !== false && isActiveClip(clip, timeMs),
+        })),
+    )
+
+  const texts: TextLayer[] = state.tracks
+    .filter((track) => !track.muted)
+    .flatMap((track) =>
+      track.clips
+        .filter((clip): clip is TextClip => clip.kind === "text")
+        .map((clip) => ({
+          clip,
+          active: clip.enabled !== false && isActiveClip(clip, timeMs),
+        })),
+    )
+
+  const images: ImageLayer[] = state.tracks
+    .filter((track) => !track.muted)
+    .flatMap((track) =>
+      track.clips
+        .filter((clip): clip is ImageClip => clip.kind === "image")
+        .map((clip) => ({
+          clip,
+          active: clip.enabled !== false && isActiveClip(clip, timeMs),
+        })),
+    )
+
   const cursorEffect = findCursorEffectAtTime(state, timeMs)
   const cursorSourceTimeMs = timelineToCursorSourceTime(state, timeMs)
   const cursorSettings = cursorSettingsForEffect(state.canvas.cursorSettings, cursorEffect)
@@ -251,6 +305,9 @@ export function resolvePreviewComposition(
     cameras,
     masks,
     captions,
+    annotations,
+    texts,
+    images,
     cursor,
   }
 }

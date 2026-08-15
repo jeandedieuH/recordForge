@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type ManualZoomSegment, type TimelineCanvas, type TimelineState } from "@recordforge/contracts"
+import {
+  defaultCursorSettings,
+  type ManualZoomSegment,
+  type TimelineCanvas,
+  type TimelineState,
+} from "@recordforge/contracts"
 import { zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import {
   createAddZoomSegmentCommand,
@@ -115,12 +120,10 @@ describe("Modern Zoom System", () => {
       }
 
       // During Seg 2 transition in (3100ms to 3500ms), camera starts from seg1 target (not center 1.0x)
-      const transformAtStartOfSeg2 = resolveZoomTransform(
-        seg2,
-        3100,
-        canvas,
-        { fromTarget: seg1.target, fromScale: seg1.scale },
-      )
+      const transformAtStartOfSeg2 = resolveZoomTransform(seg2, 3100, canvas, {
+        fromTarget: seg1.target,
+        fromScale: seg1.scale,
+      })
 
       expect(transformAtStartOfSeg2).not.toBeNull()
       if (!transformAtStartOfSeg2) return

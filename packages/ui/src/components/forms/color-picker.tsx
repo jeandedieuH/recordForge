@@ -1,13 +1,6 @@
 import * as PopoverPrimitive from "@radix-ui/react-popover"
 import { Check, Copy, Pipette } from "lucide-react"
-import {
-  type ComponentProps,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react"
+import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "../../lib/cn"
 
 // --- Pure Color Conversion Utilities ---
@@ -62,7 +55,9 @@ export function parseColorToRgb(input: string): RgbColor {
   }
 
   // rgb(r, g, b) or rgba(r, g, b, a)
-  const rgbMatch = trimmed.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/)
+  const rgbMatch = trimmed.match(
+    /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/,
+  )
   if (rgbMatch) {
     const r = Math.min(255, Math.max(0, parseFloat(rgbMatch[1])))
     const g = Math.min(255, Math.max(0, parseFloat(rgbMatch[2])))
@@ -151,7 +146,9 @@ export function rgbToHex({ r, g, b, a }: RgbColor, includeAlpha = false): string
   const hexB = Math.round(b).toString(16).padStart(2, "0")
 
   if (includeAlpha && a < 0.999) {
-    const hexA = Math.round(a * 255).toString(16).padStart(2, "0")
+    const hexA = Math.round(a * 255)
+      .toString(16)
+      .padStart(2, "0")
     return `#${hexR}${hexG}${hexB}${hexA}`
   }
 
@@ -194,9 +191,7 @@ function getStoredRecentColors(): string[] {
 
 function saveRecentColor(color: string) {
   try {
-    const existing = getStoredRecentColors().filter(
-      (c) => c.toLowerCase() !== color.toLowerCase(),
-    )
+    const existing = getStoredRecentColors().filter((c) => c.toLowerCase() !== color.toLowerCase())
     const updated = [color, ...existing].slice(0, MAX_RECENT_COLORS)
     localStorage.setItem(RECENT_COLORS_STORAGE_KEY, JSON.stringify(updated))
   } catch {
@@ -311,9 +306,7 @@ export function ColorPicker({
 
   // Internal state for smooth drag interactions
   const [internalHsv, setInternalHsv] = useState<HsvColor>(currentHsv)
-  const [hexInput, setHexInput] = useState(() =>
-    formatHexDisplay(rgbToHex(currentRgb, allowAlpha)),
-  )
+  const [hexInput, setHexInput] = useState(() => formatHexDisplay(rgbToHex(currentRgb, allowAlpha)))
 
   // Sync internal state when controlled value prop updates
   useEffect(() => {
@@ -757,8 +750,7 @@ export function ColorPicker({
                   </span>
                   <div className="grid grid-cols-6 gap-1.5">
                     {presets.map((preset) => {
-                      const isActive =
-                        preset.toLowerCase() === activeHex.toLowerCase()
+                      const isActive = preset.toLowerCase() === activeHex.toLowerCase()
                       return (
                         <button
                           key={preset}
@@ -770,10 +762,7 @@ export function ColorPicker({
                             isActive && "border-white ring-2 ring-accent shadow-sm",
                           )}
                         >
-                          <span
-                            className="block size-full"
-                            style={{ backgroundColor: preset }}
-                          />
+                          <span className="block size-full" style={{ backgroundColor: preset }} />
                         </button>
                       )
                     })}
@@ -800,10 +789,7 @@ export function ColorPicker({
                             "border-white ring-1 ring-accent",
                         )}
                       >
-                        <span
-                          className="block size-full"
-                          style={{ backgroundColor: recent }}
-                        />
+                        <span className="block size-full" style={{ backgroundColor: recent }} />
                       </button>
                     ))}
                   </div>

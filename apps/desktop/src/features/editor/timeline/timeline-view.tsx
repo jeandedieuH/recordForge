@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import {
+  type AnnotationClip,
   type CursorSmoothing,
+  type ImageClip,
   type ManualZoomSegment,
   type MaskClip,
   type MediaJob,
   type MediaVideoTrackOutput,
+  type TextClip,
   type TimelineClip,
   type TimelineMarker,
   type TimelineTrack,
 } from "@recordforge/contracts"
 import {
+  createAddAnnotationClipCommand,
   createAddMaskClipCommand,
   createAddMarkerCommand,
   createDeleteClipCommand,
@@ -31,7 +35,10 @@ import {
   createSplitCursorRangeCommand,
   createSplitZoomSegmentCommand,
   createTrimClipCommand,
+  createUpdateAnnotationClipCommand,
   createUpdateCursorRangeCommand,
+  createUpdateImageClipCommand,
+  createUpdateTextClipCommand,
   createUpdateTrackCommand,
   createUpdateZoomSegmentCommand,
   findClip,
@@ -66,6 +73,9 @@ import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
+import { AnnotationCanvasOverlay } from "../canvas/annotation-canvas-overlay"
+import { TextCanvasOverlay } from "../canvas/text-canvas-overlay"
+import { ImageCanvasOverlay } from "../canvas/image-canvas-overlay"
 import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
 import { useTimelineInteraction } from "./use-timeline-interaction"
@@ -315,6 +325,32 @@ export function TimelineView({
           track.clips.filter(
             (clip): clip is Extract<TimelineClip, { kind: "caption" }> => clip.kind === "caption",
           ),
+        ) ?? [],
+    [timeline],
+  )
+  const annotationClips = useMemo(
+    () =>
+      timeline?.tracks
+        .filter((track) => !track.muted)
+        .flatMap((track) =>
+          track.clips.filter((clip): clip is AnnotationClip => clip.kind === "annotation"),
+        ) ?? [],
+    [timeline],
+  )
+  const textClips = useMemo(
+    () =>
+      timeline?.tracks
+        .filter((track) => !track.muted)
+        .flatMap((track) => track.clips.filter((clip): clip is TextClip => clip.kind === "text")) ??
+      [],
+    [timeline],
+  )
+  const imageClips = useMemo(
+    () =>
+      timeline?.tracks
+        .filter((track) => !track.muted)
+        .flatMap((track) =>
+          track.clips.filter((clip): clip is ImageClip => clip.kind === "image"),
         ) ?? [],
     [timeline],
   )
@@ -1215,6 +1251,83 @@ export function TimelineView({
                   }
                   onUpdateSegment={(update, options) =>
                     interaction.updateZoomTarget(selectedZoomSegment.id, update, options)
+                  }
+                />
+              ) : null}
+
+              {annotationClips.length > 0 ? (
+                <AnnotationCanvasOverlay
+                  clips={annotationClips}
+                  playheadMs={view.playheadMs}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  selectedClipId={
+                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                  }
+                  onSelectClip={(clip) =>
+                    setSelection({
+                      kind: "clip",
+                      clipIds: [clip.id],
+                      primaryClipId: clip.id,
+                    })
+                  }
+                  onUpdateClip={(clipId, update) =>
+                    execute(createUpdateAnnotationClipCommand(clipId, update))
+                  }
+                  onCreateClip={(clip) => {
+                    const track = timeline.tracks.find((t) => t.kind === "annotations")
+                    const ok = execute(createAddAnnotationClipCommand(clip, track?.id))
+                    if (ok) {
+                      setSelection({
+                        kind: "clip",
+                        clipIds: [clip.id],
+                        primaryClipId: clip.id,
+                      })
+                    }
+                  }}
+                />
+              ) : null}
+
+              {textClips.length > 0 ? (
+                <TextCanvasOverlay
+                  clips={textClips}
+                  playheadMs={view.playheadMs}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  selectedClipId={
+                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                  }
+                  onSelectClip={(clip) =>
+                    setSelection({
+                      kind: "clip",
+                      clipIds: [clip.id],
+                      primaryClipId: clip.id,
+                    })
+                  }
+                  onUpdateClip={(clipId, update) =>
+                    execute(createUpdateTextClipCommand(clipId, update))
+                  }
+                />
+              ) : null}
+
+              {imageClips.length > 0 ? (
+                <ImageCanvasOverlay
+                  clips={imageClips}
+                  playheadMs={view.playheadMs}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
+                  selectedClipId={
+                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                  }
+                  onSelectClip={(clip) =>
+                    setSelection({
+                      kind: "clip",
+                      clipIds: [clip.id],
+                      primaryClipId: clip.id,
+                    })
+                  }
+                  onUpdateClip={(clipId, update) =>
+                    execute(createUpdateImageClipCommand(clipId, update))
                   }
                 />
               ) : null}

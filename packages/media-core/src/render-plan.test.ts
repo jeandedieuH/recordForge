@@ -544,4 +544,151 @@ describe("render-plan", () => {
     expect(plan.ok).toBe(false)
     if (!plan.ok) expect(plan.error.code).toBe("missing_project_id")
   })
+
+  it("builds a complete render plan with annotations, titles, image overlays, and audio tracks", () => {
+    const state = makeTimeline()
+    state.tracks.push(
+      {
+        id: "annotations-track",
+        kind: "annotations",
+        name: "Annotations",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "ann-1",
+            assetId: "synth:ann-1",
+            kind: "annotation",
+            annotationType: "rounded-rect",
+            startMs: 1_000,
+            durationMs: 4_000,
+            sourceInMs: 0,
+            sourceOutMs: 4_000,
+            speed: 1,
+            x: 100,
+            y: 150,
+            width: 300,
+            height: 200,
+            strokeColor: "#e879f9",
+            strokeWidth: 4,
+            strokeStyle: "solid",
+            fillColor: "#e879f9",
+            fillOpacity: 0.2,
+            cornerRadius: 16,
+            arrowStartHead: "none",
+            arrowEndHead: "arrow",
+            textColor: "#ffffff",
+            fontSize: 16,
+            animationIn: "fade",
+            animationOut: "fade",
+            shadowEnabled: true,
+            shadowColor: "rgba(0,0,0,0.5)",
+            shadowBlur: 8,
+            enabled: true,
+            locked: false,
+          },
+        ],
+      },
+      {
+        id: "titles-track",
+        kind: "titles",
+        name: "Titles",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "title-1",
+            assetId: "synth:title-1",
+            kind: "text",
+            presetId: "cyberpunk-neon",
+            category: "title",
+            primaryText: "Welcome to recordForge",
+            secondaryText: "Next-gen Screen Recording",
+            tagText: "PRO",
+            startMs: 2_000,
+            durationMs: 5_000,
+            sourceInMs: 0,
+            sourceOutMs: 5_000,
+            speed: 1,
+            x: 120,
+            y: 80,
+            width: 600,
+            height: 180,
+            alignment: "left",
+            fontFamily: "sans",
+            fontSize: 32,
+            fontWeight: "700",
+            textColor: "#ffffff",
+            secondaryTextColor: "#94a3b8",
+            accentColor: "#f59e0b",
+            backdropStyle: "glass",
+            backdropColor: "#0f172a",
+            backdropOpacity: 0.8,
+            backdropBlur: 16,
+            backdropBorderRadius: 16,
+            backdropPaddingX: 24,
+            backdropPaddingY: 16,
+            shadowEnabled: true,
+            shadowColor: "rgba(0,0,0,0.4)",
+            shadowBlur: 16,
+            animationIn: "fade",
+            animationOut: "fade",
+            enabled: true,
+            locked: false,
+          },
+        ],
+      },
+      {
+        id: "graphics-track",
+        kind: "graphics",
+        name: "Graphics",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "img-1",
+            assetId: "logo-1",
+            kind: "image",
+            startMs: 500,
+            durationMs: 8_000,
+            sourceInMs: 0,
+            sourceOutMs: 8_000,
+            speed: 1,
+            x: 40,
+            y: 40,
+            width: 160,
+            height: 160,
+            opacity: 1,
+            borderRadius: 8,
+            borderWidth: 0,
+            borderColor: "#ffffff",
+            shadowEnabled: true,
+            shadowColor: "rgba(0,0,0,0.3)",
+            shadowBlur: 10,
+            fit: "contain",
+            animationIn: "fade",
+            animationOut: "fade",
+            enabled: true,
+            locked: false,
+          },
+        ],
+      },
+    )
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.annotations).toHaveLength(1)
+    expect(plan.value.annotations[0].annotationType).toBe("rounded-rect")
+    expect(plan.value.texts).toHaveLength(1)
+    expect(plan.value.texts[0].presetId).toBe("cyberpunk-neon")
+    expect(plan.value.images).toHaveLength(1)
+    expect(plan.value.images[0].assetId).toBe("logo-1")
+  })
 })

@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-  formatHexDisplay,
-  hsvToRgb,
-  parseColorToRgb,
-  rgbToHex,
-  rgbToHsv,
-} from "./color-picker"
+import { formatHexDisplay, hsvToRgb, parseColorToRgb, rgbToHex, rgbToHsv } from "./color-picker"
 
 describe("Color utilities", () => {
   it("parses 6-digit hex color correctly", () => {

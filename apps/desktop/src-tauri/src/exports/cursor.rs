@@ -669,7 +669,7 @@ fn parse_hex_color(value: &str, fallback: &str) -> String {
 
 /// tiny-skia / resvg store pixels as premultiplied RGBA. The export frame uses
 /// straight-alpha RGBA, so convert once when the cursor asset is cached.
-fn unpremultiply_rgba(data: &mut [u8]) {
+pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
     for pixel in data.chunks_exact_mut(4) {
         let alpha = pixel[3];
         if alpha > 0 && alpha < 255 {

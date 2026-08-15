@@ -5,13 +5,17 @@ import {
   Captions,
   ChevronDown,
   ChevronUp,
+  FileImage,
   Headphones,
   Lock,
   LockOpen,
   Monitor,
   MousePointer2,
+  Music,
   Rows3,
+  Shapes,
   ShieldAlert,
+  Type,
   Video,
   Volume2,
   VolumeX,
@@ -40,6 +44,10 @@ function getTrackIcon(track: TimelineTrack): LucideIcon {
   if (track.kind === "captions") return Captions
   if (track.kind === "effects") return ShieldAlert
   if (track.kind === "zoom") return ZoomIn
+  if (track.kind === "annotations") return Shapes
+  if (track.kind === "titles") return Type
+  if (track.kind === "graphics" || track.kind === "overlay") return FileImage
+  if (track.name.toLowerCase().includes("music")) return Music
   return AudioLines
 }
 
@@ -48,6 +56,15 @@ function getTrackAccentColor(track: TimelineTrack): {
   text: string
   bg: string
 } {
+  if (track.kind === "annotations") {
+    return { border: "border-l-fuchsia-500", text: "text-fuchsia-400", bg: "bg-fuchsia-500/15" }
+  }
+  if (track.kind === "titles") {
+    return { border: "border-l-amber-500", text: "text-amber-400", bg: "bg-amber-500/15" }
+  }
+  if (track.kind === "graphics" || track.kind === "overlay") {
+    return { border: "border-l-cyan-500", text: "text-cyan-400", bg: "bg-cyan-500/15" }
+  }
   if (track.kind === "screen") {
     return { border: "border-l-track-screen", text: "text-track-screen", bg: "bg-track-screen/10" }
   }

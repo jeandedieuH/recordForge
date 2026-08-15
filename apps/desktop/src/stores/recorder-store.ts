@@ -15,6 +15,7 @@ import type {
 import {
   deleteRecoverySession,
   detectHardwareEncoders,
+  discardRecording,
   getDiagnosticsReport,
   getRecordingStatus,
   insertMarker,
@@ -37,7 +38,7 @@ import { getSetting, isTauri } from "../lib/settings"
 // Transport action currently in flight. Used for granular per-button pending
 // feedback (e.g. "Stopping..." on Stop while FFmpeg flushes) instead of a single
 // global `isLoading` that blocks every transport button at once.
-export type TransportAction = "start" | "pause" | "resume" | "stop"
+export type TransportAction = "start" | "pause" | "resume" | "stop" | "discard"
 
 async function queueMediaPreparation(recordingId: string): Promise<boolean> {
   try {
@@ -88,8 +89,13 @@ interface RecorderStore {
   clearCompletedRecording: () => void
   // Directly replace the recorder status. Used by the `recorder-status` Tauri
   // event listener so global-shortcut and tray actions update the UI instantly
-  // without an extra `recording_status` IPC round-trip.
+  // without an extra `recording_status` IPC round-trip. Markers reset when the
+  // session changes so long-lived windows (floating toolbar) don't carry a
+  // stale count into the next recording.
   setStatus: (status: RecordingStatus) => void
+  // Append a marker broadcast by the Rust `recorder-marker` event. Deduplicates
+  // by id because the invoking window also appends locally after its IPC call.
+  appendMarker: (marker: RecordingMarker) => void
   setCompletedRecordingId: (recordingId: string) => void
   queuePreparation: (recordingId: string) => Promise<boolean>
 
@@ -107,6 +113,7 @@ interface RecorderStore {
   pause: () => Promise<void>
   resume: () => Promise<void>
   stop: () => Promise<void>
+  discard: () => Promise<void>
   addMarker: (label: string) => Promise<void>
   recover: (sessionId: string) => Promise<void>
   deleteRecovery: (sessionId: string) => Promise<void>
@@ -144,7 +151,18 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   clearError: () => set({ error: null }),
   clearSaveMessage: () => set({ saveMessage: null }),
   clearCompletedRecording: () => set({ completedRecordingId: null }),
-  setStatus: (status) => set({ status, error: null }),
+  setStatus: (status) =>
+    set((prev) => ({
+      status,
+      error: null,
+      markers: status.sessionId !== prev.status?.sessionId ? [] : prev.markers,
+    })),
+  appendMarker: (marker) =>
+    set((prev) =>
+      prev.markers.some((existing) => existing.id === marker.id)
+        ? prev
+        : { markers: [...prev.markers, marker] },
+    ),
   setCompletedRecordingId: (recordingId) => set({ completedRecordingId: recordingId }),
   queuePreparation: async (recordingId) => {
     const started = await queueMediaPreparation(recordingId)
@@ -344,10 +362,31 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
 
   addMarker: async (label) => {
     try {
-      const marker = await insertMarker(label)
-      set({ markers: [...get().markers, marker] })
+      await insertMarker(label)
+      // The Rust `recorder-marker` event appends this marker in every window
+      // (including this one, deduplicated by id); no local append is needed.
     } catch (error) {
       set({ error: toErrorMessage(error) })
+    }
+  },
+
+  discard: async () => {
+    // Discard deletes the session outright; surface the wait on the trigger
+    // while FFmpeg workers are torn down and files are removed.
+    set({ isLoading: true, pendingAction: "discard", error: null })
+    try {
+      await discardRecording()
+      const status = await getRecordingStatus()
+      set({
+        status,
+        isLoading: false,
+        pendingAction: null,
+        markers: [],
+        completedRecordingId: null,
+        saveMessage: "Recording discarded. Nothing was saved.",
+      })
+    } catch (error) {
+      set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
     }
   },
 

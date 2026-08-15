@@ -6,11 +6,15 @@ import {
   Library,
   LayoutTemplate,
   MousePointer2,
+  Shapes,
+  Type,
   Volume2,
   ZoomIn,
 } from "lucide-react"
 import type { EditorTask } from "./task-rail"
 import { MediaPanel } from "../panels/media-panel"
+import { TitlesPanel } from "../panels/titles-panel"
+import { AnnotationsPanel } from "../panels/annotations-panel"
 import { FocusPanel } from "../panels/focus-panel"
 import { CursorPanel } from "../panels/cursor-panel"
 import { CaptionsPanel } from "../panels/captions-panel"
@@ -23,10 +27,17 @@ import type {
   ThumbnailManifest,
   WaveformResources,
 } from "../media/derivative-resources"
-import type { LibraryRecording, MediaMetadata, TimelineState } from "@recordforge/contracts"
+import type {
+  AnnotationType,
+  LibraryRecording,
+  MediaMetadata,
+  TimelineState,
+} from "@recordforge/contracts"
 
 export const TASK_ICONS: Record<EditorTask, LucideIcon> = {
   media: Library,
+  titles: Type,
+  annotations: Shapes,
   focus: ZoomIn,
   cursor: MousePointer2,
   captions: Captions,
@@ -43,6 +54,8 @@ interface ActivePanelProps {
   metadata: MediaMetadata | null
   thumbnailResource: DerivativeResource<ThumbnailManifest> & { retry: () => void }
   waveformResources: WaveformResources
+  drawMode?: boolean
+  onToggleDrawMode?: (enabled: boolean, type: AnnotationType, color: string) => void
   onOpenExport?: () => void
 }
 
@@ -53,6 +66,8 @@ export function ActivePanel({
   metadata,
   thumbnailResource,
   waveformResources,
+  drawMode,
+  onToggleDrawMode,
   onOpenExport,
 }: ActivePanelProps) {
   switch (activeTask) {
@@ -66,6 +81,10 @@ export function ActivePanel({
           waveformResources={waveformResources}
         />
       )
+    case "titles":
+      return <TitlesPanel />
+    case "annotations":
+      return <AnnotationsPanel drawMode={drawMode} onToggleDrawMode={onToggleDrawMode} />
     case "focus":
       return <FocusPanel />
     case "cursor":

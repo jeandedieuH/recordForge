@@ -1,6 +1,19 @@
 import { useMemo, type ReactNode } from "react"
-import type { CursorEffectClip, MediaMetadata } from "@recordforge/contracts"
-import { findClip, findMarker, getManualZoomSegments } from "@recordforge/editor-core"
+import type {
+  AnnotationClip,
+  CursorEffectClip,
+  ImageClip,
+  MediaMetadata,
+  TextClip,
+} from "@recordforge/contracts"
+import {
+  findClip,
+  findMarker,
+  getManualZoomSegments,
+  createUpdateAnnotationClipCommand,
+  createUpdateTextClipCommand,
+  createUpdateImageClipCommand,
+} from "@recordforge/editor-core"
 import { Monitor } from "lucide-react"
 import { Button } from "@recordforge/ui"
 import { InspectorSection } from "./fields"
@@ -14,6 +27,9 @@ import { CameraClipInspector } from "./camera-clip-inspector"
 import { CaptionClipInspector } from "./caption-clip-inspector"
 import { AudioClipInspector } from "./audio-clip-inspector"
 import { MaskClipInspector } from "./mask-clip-inspector"
+import { AnnotationClipInspector } from "./annotation-clip-inspector"
+import { TextClipInspector } from "./text-clip-inspector"
+import { ImageClipInspector } from "./image-clip-inspector"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 
 interface InspectorShellProps {
@@ -185,6 +201,54 @@ function buildContent(
             track={track}
             metadata={metadata}
             selectedClipCount={selectedClipCount}
+          />
+        ),
+      }
+    }
+
+    if (clip.kind === "annotation") {
+      return {
+        title: `${clip.annotationType} annotation`,
+        canClear: true,
+        content: (
+          <AnnotationClipInspector
+            clip={clip as AnnotationClip}
+            onChange={(update) => {
+              const state = useTimelineStore.getState()
+              state.execute(createUpdateAnnotationClipCommand(clip.id, update))
+            }}
+          />
+        ),
+      }
+    }
+
+    if (clip.kind === "text") {
+      return {
+        title: (clip as TextClip).primaryText || "Title",
+        canClear: true,
+        content: (
+          <TextClipInspector
+            clip={clip as TextClip}
+            onChange={(update) => {
+              const state = useTimelineStore.getState()
+              state.execute(createUpdateTextClipCommand(clip.id, update))
+            }}
+          />
+        ),
+      }
+    }
+
+    if (clip.kind === "image") {
+      return {
+        title: "Image graphic",
+        canClear: true,
+        content: (
+          <ImageClipInspector
+            clip={clip as ImageClip}
+            onChange={(update) => {
+              const state = useTimelineStore.getState()
+              state.execute(createUpdateImageClipCommand(clip.id, update))
+            }}
           />
         ),
       }

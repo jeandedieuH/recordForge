@@ -400,10 +400,8 @@ function resolvedGenerationSettings(options: SmartZoomGenerationOptions): {
       options.dwellTailMs === defaultSmartZoomSettings.dwellTailMs
         ? profile.dwellTailMs
         : options.dwellTailMs,
-    defaultTransitionInMs:
-      options.defaultTransitionInMs ?? profile.transitionInMs,
-    defaultTransitionOutMs:
-      options.defaultTransitionOutMs ?? profile.transitionOutMs,
+    defaultTransitionInMs: options.defaultTransitionInMs ?? profile.transitionInMs,
+    defaultTransitionOutMs: options.defaultTransitionOutMs ?? profile.transitionOutMs,
   }
   return { settings, profile }
 }
@@ -575,9 +573,7 @@ export function generateSmartZoomSuggestions(
 
   const clusters = buildInteractionClusters(rawEvents, settings, profile, durationMs)
 
-  const validClusters = clusters.filter(
-    (c) => c.endMs - c.startMs >= settings.minSegmentDurationMs,
-  )
+  const validClusters = clusters.filter((c) => c.endMs - c.startMs >= settings.minSegmentDurationMs)
 
   return validClusters.map((cluster, index) => {
     // Weighted centroid (clicks have 3x higher weight than passive dwells)
@@ -601,9 +597,7 @@ export function generateSmartZoomSuggestions(
       settings.safeEdgePadding,
     )
 
-    const hasSpatialDispersion = cluster.points.some(
-      (p) => Math.hypot(p.x - avgX, p.y - avgY) > 80,
-    )
+    const hasSpatialDispersion = cluster.points.some((p) => Math.hypot(p.x - avgX, p.y - avgY) > 80)
     const mode: ZoomMode = hasSpatialDispersion ? "follow-cursor" : "auto"
 
     const segDuration = cluster.endMs - cluster.startMs

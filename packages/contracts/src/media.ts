@@ -15,6 +15,9 @@ export const projectAssetRoleSchema = z.enum([
   "cursor_events",
   "caption",
   "image",
+  "graphic",
+  "audio_track",
+  "b_roll",
 ])
 export type ProjectAssetRole = z.infer<typeof projectAssetRoleSchema>
 

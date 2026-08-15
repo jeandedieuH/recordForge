@@ -297,7 +297,11 @@ export function createCursorEngine(
     return low
   }
 
-  function evaluateSplinePosition(index: number, timeMs: number, settings: CursorSettings): CursorPoint {
+  function evaluateSplinePosition(
+    index: number,
+    timeMs: number,
+    settings: CursorSettings,
+  ): CursorPoint {
     const segStart = segmentStartIndex[index]
     const segEnd = segmentEndIndex[index]
 

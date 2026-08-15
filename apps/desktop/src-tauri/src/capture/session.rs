@@ -152,6 +152,23 @@ impl SegmentTimeline {
 /// back to the wall clock instead of shifting tracks by a bogus amount.
 const MAX_VIDEO_STARTUP_GAP_MS: u64 = 5_000;
 
+/// Re-read a window source's current bounds from its HWND and update the
+/// session config when the window moved since it was enumerated. No-op for
+/// display/region sources and when the window no longer exists (in which case
+/// the last known bounds keep recording the original rectangle).
+fn refresh_window_source_bounds(session: &mut ActiveSession) {
+    if let Some(bounds) = super::source::refresh_window_bounds(&session.config.source) {
+        if bounds != session.config.source.bounds {
+            tracing::info!(
+                old = ?session.config.source.bounds,
+                new = ?bounds,
+                "window capture target moved; using refreshed frame bounds"
+            );
+            session.config.source.bounds = bounds;
+        }
+    }
+}
+
 /// Compute the alignment math from the measured clocks. Pure so the clamping
 /// rules stay testable: a missing probe keeps the legacy wall-clock behavior,
 /// and an implausible gap is rejected rather than applied.
@@ -344,6 +361,9 @@ impl Recorder {
             .into());
         }
 
+        // Window targets are re-acquired at segment start so a window that
+        // moved since enumeration is captured at its current position.
+        refresh_window_source_bounds(session);
         let captures = match self.start_segment(
             0,
             &session.work_dir,
@@ -855,15 +875,28 @@ impl Recorder {
 
         let total = session.total_recorded_ms + stats.duration_ms;
         session.total_recorded_ms = total;
-        let _ = self.validated_segments(session)?;
+        // The segment is already stopped and finalized on disk; validation and
+        // manifest persistence from here on must not fail the pause. Returning
+        // an error now would leave the session marked Recording with no live
+        // capture, which neither pause nor resume could recover from.
+        if let Err(error) = self.validated_segments(session) {
+            tracing::warn!(error = ?error, "failed to validate segments while pausing");
+        }
         {
-            let mut manifest = session.manifest.lock().map_err(|_| {
-                crate::errors::InternalError::Capture("manifest mutex poisoned".into())
-            })?;
+            let Ok(mut manifest) = session.manifest.lock() else {
+                // Mutex poisoning means a thread panicked while holding the
+                // manifest; the session can no longer be trusted.
+                return Err(crate::errors::InternalError::Capture(
+                    "manifest mutex poisoned".into(),
+                )
+                .into());
+            };
             manifest.set_total_recorded_ms(total);
             manifest.set_state(RecorderState::Paused);
             manifest.set_stats(stats);
-            manifest.write()?;
+            if let Err(error) = manifest.write() {
+                tracing::error!(error = ?error, "failed to persist paused recording state");
+            }
         }
 
         self.status_from_session(session)
@@ -898,6 +931,9 @@ impl Recorder {
         }
 
         let next_index = session.segment_index + 1;
+        // Same re-acquisition as the initial start: follow a window that was
+        // moved or resized while the recording was paused.
+        refresh_window_source_bounds(session);
         let captures = self.start_segment(
             next_index,
             &session.work_dir,
@@ -944,6 +980,56 @@ impl Recorder {
         self.status_from_session(session)
     }
 
+    /// Abort the active recording without saving anything and delete the whole
+    /// session working directory (fragments, audio, webcam, cursor telemetry).
+    ///
+    /// Unlike `stop`, no finalization happens: captures are torn down, the
+    /// recorder returns to Idle, and the session leaves no recovery trace.
+    /// Fails only when the working directory could not be removed; the recorder
+    /// is still cleared in that case so it cannot wedge.
+    #[instrument(skip(self))]
+    pub fn discard(&self) -> crate::errors::Result<()> {
+        let mut guard = self
+            .current
+            .lock()
+            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
+
+        // Teardown mirrors the error paths of stop(): every worker is told to
+        // quit, but results are only logged — we are deleting the outputs.
+        if let Some(mut screen) = session.screen_capture.take() {
+            if let Err(error) = screen.stop() {
+                tracing::debug!(error = %error, "screen capture stop reported an error during discard");
+            }
+        }
+        self.stop_audio_captures(&mut session.audio_captures);
+        if let Some(mut webcam) = session.webcam_capture.take() {
+            if let Err(error) = webcam.stop() {
+                tracing::debug!(error = %error, "webcam stop reported an error during discard");
+            }
+        }
+        if let Some(mut tracker) = session.cursor_tracker.take() {
+            tracker.stop();
+        }
+
+        let work_dir = session.work_dir.clone();
+        guard.take();
+        drop(guard);
+
+        match std::fs::remove_dir_all(&work_dir) {
+            Ok(()) => {
+                info!(work_dir = %work_dir.display(), "discarded recording session");
+                Ok(())
+            }
+            Err(error) => Err(crate::errors::InternalError::Storage(format!(
+                "delete discarded session data: {error}"
+            ))
+            .into()),
+        }
+    }
+
     #[instrument(skip(self))]
     pub fn stop(&self) -> crate::errors::Result<RecordingStats> {
         let mut guard = self
@@ -958,7 +1044,7 @@ impl Recorder {
             head_trim: Duration::ZERO,
             duration: Duration::ZERO,
         };
-        let mut final_stats = if let Some(mut screen) = session.screen_capture.take() {
+        let final_stats = if let Some(mut screen) = session.screen_capture.take() {
             let stats = match screen.stop() {
                 Ok(stats) => stats,
                 Err(error) => {
@@ -1005,7 +1091,38 @@ impl Recorder {
             self.shift_cursor_clock(&session.work_dir, timeline.head_trim);
         }
 
-        let total = session.total_recorded_ms + final_stats.duration_ms;
+        session.total_recorded_ms += final_stats.duration_ms;
+        match self.finalize_session(session, final_stats) {
+            Ok(stats) => {
+                guard.take();
+                Ok(stats)
+            }
+            Err(error) => {
+                // Finalization failed (disk full, corrupt fragment, probe
+                // failure, …). The fragments and manifest stay on disk so the
+                // recovery flow can salvage them, but the live recorder must
+                // not stay wedged holding a dead session.
+                tracing::error!(error = ?error, "recording finalization failed");
+                if let Ok(mut manifest) = session.manifest.lock() {
+                    manifest.set_state(RecorderState::Failed);
+                    if let Err(write_error) = manifest.write() {
+                        tracing::error!(error = ?write_error, "failed to persist failed state");
+                    }
+                }
+                guard.take();
+                Err(error)
+            }
+        }
+    }
+
+    /// Concatenate validated segments, publish the output, and register the
+    /// recording in the library. On success the manifest is marked Completed.
+    fn finalize_session(
+        &self,
+        session: &mut ActiveSession,
+        mut final_stats: RecordingStats,
+    ) -> crate::errors::Result<RecordingStats> {
+        let total = session.total_recorded_ms;
         let webcam_output = self.finalize_webcam_asset(session);
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
@@ -1115,7 +1232,6 @@ impl Recorder {
             manifest.write()?;
         }
 
-        guard.take();
         Ok(final_stats)
     }
 
@@ -1283,6 +1399,11 @@ impl Recorder {
                 stopped_at: None,
                 duration_ms: 0,
                 recorded_ms: 0,
+                source_kind: String::new(),
+                source_name: String::new(),
+                microphone_active: false,
+                system_audio_active: false,
+                webcam_active: false,
                 error: None,
             })
         }
@@ -1315,6 +1436,11 @@ impl Recorder {
             stopped_at: None,
             duration_ms: wall_ms,
             recorded_ms,
+            source_kind: session.config.source.kind.clone(),
+            source_name: session.config.source.name.clone(),
+            microphone_active: session.config.capture_microphone,
+            system_audio_active: session.config.capture_system_audio,
+            webcam_active: session.config.capture_webcam,
             error: None,
         })
     }
@@ -1330,6 +1456,17 @@ pub struct RecordingStatus {
     pub stopped_at: Option<String>,
     pub duration_ms: u64,
     pub recorded_ms: u64,
+    /// Human-facing metadata for control surfaces (floating toolbar, tray).
+    #[serde(default)]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_name: String,
+    #[serde(default)]
+    pub microphone_active: bool,
+    #[serde(default)]
+    pub system_audio_active: bool,
+    #[serde(default)]
+    pub webcam_active: bool,
     pub error: Option<String>,
 }
 
@@ -1371,6 +1508,69 @@ mod tests {
         let longer_video = compute_segment_timeline(265_040, 265_061, Some(265_100));
         assert_eq!(longer_video.head_trim_ms(), 0);
         assert_eq!(longer_video.duration, Duration::from_millis(265_100));
+    }
+
+    #[test]
+    fn discard_removes_session_and_returns_recorder_to_idle() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let db = Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().expect("create in-memory database"),
+        ));
+        let recorder = Recorder::new(
+            PathBuf::from("ffmpeg-not-installed"),
+            PathBuf::from("ffprobe-not-installed"),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "display".into(),
+                id: "display-0".into(),
+                name: "Display 1".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "low-impact".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+        };
+
+        let session_id = recorder.prepare(config.clone()).expect("prepare session");
+        assert!(temp_dir.path().join(&session_id).exists());
+
+        recorder.discard().expect("discard prepared session");
+
+        let status = recorder.status().expect("read idle status");
+        assert_eq!(status.state, RecorderState::Idle);
+        assert!(!temp_dir.path().join(&session_id).exists());
+
+        // The recorder must immediately accept a new session after a discard.
+        recorder
+            .prepare(config)
+            .expect("recorder accepts a new session after discard");
+    }
+
+    #[test]
+    fn discard_without_active_session_fails() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let db = Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().expect("create in-memory database"),
+        ));
+        let recorder = Recorder::new(
+            PathBuf::from("ffmpeg-not-installed"),
+            PathBuf::from("ffprobe-not-installed"),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        assert!(recorder.discard().is_err());
     }
 
     #[test]

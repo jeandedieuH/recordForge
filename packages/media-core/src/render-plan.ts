@@ -4,12 +4,15 @@ import type {
   ProjectAsset,
   ProjectExportSettings,
   RenderPlan,
+  RenderPlanAnnotation,
   RenderPlanAudio,
   RenderPlanCaption,
   RenderPlanCursorEffect,
+  RenderPlanImage,
   RenderPlanMask,
   RenderCaptionMode,
   RenderPlanOverlay,
+  RenderPlanText,
   RenderPlanZoomSegment,
   RenderSegment,
   TimelineClip,
@@ -231,6 +234,150 @@ function toMasks(state: TimelineState, range: ExportRange | undefined): RenderPl
     )
 }
 
+function toAnnotations(
+  state: TimelineState,
+  range: ExportRange | undefined,
+): RenderPlanAnnotation[] {
+  return state.tracks
+    .filter((track) => !track.muted)
+    .flatMap((track) =>
+      sortClips(track.clips)
+        .filter(
+          (clip): clip is Extract<TimelineClip, { kind: "annotation" }> =>
+            clip.kind === "annotation" && clip.enabled !== false,
+        )
+        .flatMap((clip) => {
+          const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
+          if (!window) return []
+          return [
+            {
+              id: clip.id,
+              startMs: window.startMs,
+              endMs: window.endMs,
+              annotationType: clip.annotationType,
+              x: clip.x,
+              y: clip.y,
+              width: clip.width,
+              height: clip.height,
+              endX: clip.endX,
+              endY: clip.endY,
+              strokeColor: clip.strokeColor,
+              strokeWidth: clip.strokeWidth,
+              strokeStyle: clip.strokeStyle,
+              fillColor: clip.fillColor,
+              fillOpacity: clip.fillOpacity,
+              cornerRadius: clip.cornerRadius,
+              arrowEndHead: clip.arrowEndHead,
+              arrowStartHead: clip.arrowStartHead,
+              shadowEnabled: clip.shadowEnabled,
+              shadowColor: clip.shadowColor,
+              shadowBlur: clip.shadowBlur,
+              text: clip.text,
+              textColor: clip.textColor,
+              fontSize: clip.fontSize,
+              animationIn: clip.animationIn,
+              animationOut: clip.animationOut,
+              enabled: clip.enabled !== false,
+            },
+          ]
+        }),
+    )
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+}
+
+function toTexts(state: TimelineState, range: ExportRange | undefined): RenderPlanText[] {
+  return state.tracks
+    .filter((track) => !track.muted)
+    .flatMap((track) =>
+      sortClips(track.clips)
+        .filter(
+          (clip): clip is Extract<TimelineClip, { kind: "text" }> =>
+            clip.kind === "text" && clip.enabled !== false,
+        )
+        .flatMap((clip) => {
+          const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
+          if (!window) return []
+          return [
+            {
+              id: clip.id,
+              startMs: window.startMs,
+              endMs: window.endMs,
+              presetId: clip.presetId,
+              category: clip.category,
+              primaryText: clip.primaryText,
+              secondaryText: clip.secondaryText,
+              tagText: clip.tagText,
+              x: clip.x,
+              y: clip.y,
+              width: clip.width,
+              height: clip.height,
+              alignment: clip.alignment,
+              fontFamily: clip.fontFamily,
+              fontSize: clip.fontSize,
+              fontWeight: clip.fontWeight,
+              textColor: clip.textColor,
+              secondaryTextColor: clip.secondaryTextColor,
+              accentColor: clip.accentColor,
+              backdropStyle: clip.backdropStyle,
+              backdropColor: clip.backdropColor,
+              backdropOpacity: clip.backdropOpacity,
+              backdropBlur: clip.backdropBlur,
+              backdropBorderRadius: clip.backdropBorderRadius,
+              backdropPaddingX: clip.backdropPaddingX,
+              backdropPaddingY: clip.backdropPaddingY,
+              shadowEnabled: clip.shadowEnabled,
+              shadowColor: clip.shadowColor,
+              shadowBlur: clip.shadowBlur,
+              animationIn: clip.animationIn,
+              animationOut: clip.animationOut,
+              enabled: clip.enabled !== false,
+            },
+          ]
+        }),
+    )
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+}
+
+function toImages(state: TimelineState, range: ExportRange | undefined): RenderPlanImage[] {
+  return state.tracks
+    .filter((track) => !track.muted)
+    .flatMap((track) =>
+      sortClips(track.clips)
+        .filter(
+          (clip): clip is Extract<TimelineClip, { kind: "image" }> =>
+            clip.kind === "image" && clip.enabled !== false,
+        )
+        .flatMap((clip) => {
+          const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
+          if (!window) return []
+          return [
+            {
+              id: clip.id,
+              assetId: clip.assetId,
+              startMs: window.startMs,
+              endMs: window.endMs,
+              x: clip.x,
+              y: clip.y,
+              width: clip.width,
+              height: clip.height,
+              opacity: clip.opacity,
+              borderRadius: clip.borderRadius,
+              borderWidth: clip.borderWidth,
+              borderColor: clip.borderColor,
+              shadowEnabled: clip.shadowEnabled,
+              shadowColor: clip.shadowColor,
+              shadowBlur: clip.shadowBlur,
+              fit: clip.fit,
+              animationIn: clip.animationIn,
+              animationOut: clip.animationOut,
+              enabled: clip.enabled !== false,
+            },
+          ]
+        }),
+    )
+    .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+}
+
 function toZoomSegments(
   state: TimelineState,
   range: ExportRange | undefined,
@@ -423,6 +570,9 @@ export function buildRenderPlan(
   const cursorEffects = toCursorEffects(state, range, input.assets)
   const captions = toCaptions(state, range)
   const masks = toMasks(state, range)
+  const annotations = toAnnotations(state, range)
+  const texts = toTexts(state, range)
+  const images = toImages(state, range)
   const screenDurationMs = segments.reduce(
     (duration, segment) => Math.max(duration, segment.outputEndMs),
     0,
@@ -485,6 +635,9 @@ export function buildRenderPlan(
       masks,
       zoomSegments,
       cursorEffects,
+      annotations,
+      texts,
+      images,
     },
   }
 }

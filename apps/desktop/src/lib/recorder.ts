@@ -86,6 +86,10 @@ export async function stopRecording(): Promise<RecordingStats> {
   return invokeValidated("stop_recording", undefined, recordingStatsSchema)
 }
 
+export async function discardRecording(): Promise<void> {
+  return invokeValidated<void>("discard_recording")
+}
+
 export async function getRecordingStatus(): Promise<RecordingStatus> {
   return invokeValidated("recording_status", undefined, recordingStatusSchema)
 }
@@ -120,6 +124,18 @@ export async function runBenchmark(): Promise<BenchmarkReport> {
 
 export async function openFloatingControls(): Promise<void> {
   return invokeValidated<void>("open_floating_controls")
+}
+
+export async function openRegionPicker(): Promise<void> {
+  return invokeValidated<void>("open_region_picker")
+}
+
+export async function cancelRegionPicker(): Promise<void> {
+  return invokeValidated<void>("cancel_region_picker")
+}
+
+export async function showMainWindow(): Promise<void> {
+  return invokeValidated<void>("show_main_window")
 }
 
 export async function openBoundaryOverlay(): Promise<void> {

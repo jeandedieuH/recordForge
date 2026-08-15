@@ -1,6 +1,10 @@
 import { useEffect } from "react"
 import { listen } from "@tauri-apps/api/event"
-import { recordingCompletedSchema, recordingStatusSchema } from "@recordforge/contracts"
+import {
+  recordingCompletedSchema,
+  recordingMarkerSchema,
+  recordingStatusSchema,
+} from "@recordforge/contracts"
 import { useRecorderStore } from "../stores/recorder-store"
 
 // Re-export the recorder Zustand store so the rest of the app can subscribe
@@ -29,50 +33,59 @@ export function useRecorderPolling(intervalMs = 1000) {
   }, [refreshStatus, intervalMs])
 }
 
-// Subscribe to the Rust `recorder-status` event so state changes triggered
-// outside the React UI (global shortcuts, tray menu) and the separate floating
-// window update the main window instantly, without waiting for the 1s poll.
+// Subscribe to the Rust `recorder-status` and `recorder-marker` events so state
+// changes triggered outside the React UI (global shortcuts, tray menu) and the
+// separate floating window update the main window instantly, without waiting
+// for the 1s poll. Markers are broadcast on insertion so every surface shows a
+// live count regardless of which input path created them.
 //
 // Mount this once near the root of each window that shows recorder state.
 export function useRecorderStatusEvents() {
   const setStatus = useRecorderStore((s) => s.setStatus)
   const setCompletedRecordingId = useRecorderStore((s) => s.setCompletedRecordingId)
+  const appendMarker = useRecorderStore((s) => s.appendMarker)
   const refreshStatus = useRecorderStore((s) => s.refreshStatus)
 
   useEffect(() => {
     // `listen` returns an unlisten function; the Tauri event payload is wrapped
     // in an `event.payload` field.
-    let unlisten: (() => void) | undefined
-    let unlistenCompleted: (() => void) | undefined
+    const unlisteners: Array<() => void> = []
     let active = true
+    const track = (promise: Promise<() => void>) => {
+      void promise.then((fn) => {
+        if (active) {
+          unlisteners.push(fn)
+        } else {
+          fn()
+        }
+      })
+    }
 
-    listen<unknown>("recorder-status", (event) => {
-      const parsed = recordingStatusSchema.safeParse(event.payload)
-      if (parsed.success) setStatus(parsed.data)
-      else void refreshStatus()
-    }).then((fn) => {
-      if (active) {
-        unlisten = fn
-      } else {
-        fn()
-      }
-    })
+    track(
+      listen<unknown>("recorder-status", (event) => {
+        const parsed = recordingStatusSchema.safeParse(event.payload)
+        if (parsed.success) setStatus(parsed.data)
+        else void refreshStatus()
+      }),
+    )
 
-    listen<unknown>("recording-completed", (event) => {
-      const parsed = recordingCompletedSchema.safeParse(event.payload)
-      if (parsed.success) setCompletedRecordingId(parsed.data.recordingId)
-    }).then((fn) => {
-      if (active) {
-        unlistenCompleted = fn
-      } else {
-        fn()
-      }
-    })
+    track(
+      listen<unknown>("recorder-marker", (event) => {
+        const parsed = recordingMarkerSchema.safeParse(event.payload)
+        if (parsed.success) appendMarker(parsed.data)
+      }),
+    )
+
+    track(
+      listen<unknown>("recording-completed", (event) => {
+        const parsed = recordingCompletedSchema.safeParse(event.payload)
+        if (parsed.success) setCompletedRecordingId(parsed.data.recordingId)
+      }),
+    )
 
     return () => {
       active = false
-      unlisten?.()
-      unlistenCompleted?.()
+      for (const unlisten of unlisteners) unlisten()
     }
-  }, [refreshStatus, setCompletedRecordingId, setStatus])
+  }, [refreshStatus, setCompletedRecordingId, setStatus, appendMarker])
 }

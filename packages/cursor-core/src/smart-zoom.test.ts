@@ -91,12 +91,8 @@ describe("smart zoom telemetry analysis", () => {
       expect(segment.locked).toBe(false)
       expect(segment.target.x).toBeGreaterThanOrEqual(0)
       expect(segment.target.y).toBeGreaterThanOrEqual(0)
-      expect(segment.target.x + segment.target.width).toBeLessThanOrEqual(
-        canvas.width + 0.001,
-      )
-      expect(segment.target.y + segment.target.height).toBeLessThanOrEqual(
-        canvas.height + 0.001,
-      )
+      expect(segment.target.x + segment.target.width).toBeLessThanOrEqual(canvas.width + 0.001)
+      expect(segment.target.y + segment.target.height).toBeLessThanOrEqual(canvas.height + 0.001)
       expect(segment.target.width / segment.target.height).toBeCloseTo(
         canvas.width / canvas.height,
         5,

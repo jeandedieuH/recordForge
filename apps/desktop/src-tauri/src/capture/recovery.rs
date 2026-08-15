@@ -134,9 +134,48 @@ pub fn recover_session(
     }
 
     let mut manifest = RecordingManifest::read(&manifest_path)?;
+
+    // A completed session is already in the library. Re-running recovery would
+    // concatenate the fragments again and insert a duplicate row, so reject
+    // stale client retries outright.
+    if manifest.state == RecorderState::Completed {
+        return Err(
+            crate::errors::InternalError::Storage("session is already recovered".into()).into(),
+        );
+    }
+
     manifest.set_state(RecorderState::Recovering);
     manifest.write()?;
 
+    let finalize = recover_session_inner(work_dir, &mut manifest, ffmpeg_path, ffprobe_path, conn);
+
+    match finalize {
+        Ok(recording) => Ok(recording),
+        Err(error) => {
+            // Mark the manifest failed so the recovery UI stops offering an
+            // unrecoverable session and the user can delete it. Files are left
+            // untouched; a future FFmpeg/ffprobe fix could still salvage them.
+            // Storage/permission errors keep the Recovering state because a
+            // retry may legitimately succeed once the underlying issue clears.
+            if matches!(
+                error.category,
+                crate::errors::ErrorCategory::Media | crate::errors::ErrorCategory::Capture
+            ) {
+                manifest.set_state(RecorderState::Failed);
+                manifest.write()?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn recover_session_inner(
+    work_dir: &Path,
+    manifest: &mut RecordingManifest,
+    ffmpeg_path: &str,
+    ffprobe_path: &str,
+    conn: &mut rusqlite::Connection,
+) -> crate::errors::Result<crate::database::library::LibraryRecording> {
     let output = work_dir.join("output.mp4");
     let mut output_size = std::fs::metadata(&output)
         .map(|metadata| metadata.len())
@@ -144,7 +183,7 @@ pub fn recover_session(
     let output_is_valid = output_size > 1024 && validate_media_file(ffprobe_path, &output);
 
     if !output_is_valid {
-        let segment_files = recovery_segments(work_dir, &manifest)
+        let segment_files = recovery_segments(work_dir, manifest)
             .into_iter()
             .filter(|path| validate_media_file(ffprobe_path, path))
             .collect::<Vec<_>>();
@@ -181,7 +220,7 @@ pub fn recover_session(
         .into());
     }
 
-    if let Some(webcam_path) = recover_webcam_asset(work_dir, &manifest, ffmpeg_path, ffprobe_path)?
+    if let Some(webcam_path) = recover_webcam_asset(work_dir, manifest, ffmpeg_path, ffprobe_path)?
     {
         manifest.set_webcam_path(webcam_path.to_string_lossy());
     }
@@ -189,7 +228,7 @@ pub fn recover_session(
     manifest.set_state(RecorderState::Finalizing);
     manifest.write()?;
     let recording =
-        crate::database::library::insert_recovered_recording(conn, &manifest, output_size)?;
+        crate::database::library::insert_recovered_recording(conn, manifest, output_size)?;
     manifest.set_state(RecorderState::Completed);
     manifest.write()?;
 
@@ -386,4 +425,47 @@ fn output_size_valid(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.len() > 1024)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::source::{Bounds, CaptureSource};
+
+    fn completed_manifest(work_dir: &Path) {
+        let source = CaptureSource {
+            kind: "display".into(),
+            id: "display-0".into(),
+            name: "Display 1".into(),
+            bounds: Bounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        };
+        let mut manifest = RecordingManifest::new(
+            "11111111-1111-4111-8111-111111111111",
+            work_dir.to_string_lossy(),
+            source,
+            "balanced",
+        );
+        manifest.set_state(RecorderState::Completed);
+        manifest.write().expect("write completed manifest");
+    }
+
+    // Re-running recovery on a completed session must fail fast instead of
+    // inserting a duplicate library row.
+    #[test]
+    fn recover_session_rejects_already_completed_manifest() {
+        let temp_dir = tempfile::tempdir().expect("create temp sessions dir");
+        let work_dir = temp_dir.path().join("11111111-1111-4111-8111-111111111111");
+        std::fs::create_dir_all(&work_dir).expect("create work dir");
+        completed_manifest(&work_dir);
+
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        let result = recover_session(&work_dir, "ffmpeg", "ffprobe", &mut conn);
+        let error = result.expect_err("completed session must be rejected");
+        assert!(error.message.contains("already recovered"));
+    }
 }

@@ -10,9 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, instrument, warn};
 
+mod annotations;
 mod captions;
 mod cursor;
 mod encoding;
+
+pub use annotations::{RenderPlanAnnotation, RenderPlanImage, RenderPlanText};
 
 /// A single trimmed segment in the final export.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,6 +70,12 @@ pub struct RenderPlan {
     // `Some(empty)` means the current editor intentionally has no audio tracks.
     #[serde(default)]
     pub audio_tracks: Option<Vec<RenderPlanAudio>>,
+    #[serde(default)]
+    pub annotations: Vec<RenderPlanAnnotation>,
+    #[serde(default)]
+    pub texts: Vec<RenderPlanText>,
+    #[serde(default)]
+    pub images: Vec<RenderPlanImage>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -995,14 +1004,16 @@ fn render_timeline_composition(
         current_label = next_label;
     }
 
-    // The cursor layer rides on top of every other video filter — the renderer
-    // already accounts for zoom, fitting, and the camera layout when it maps
-    // telemetry into canvas coordinates.
+    // The overlay layer (cursor telemetry, vector annotations, styled text presets, graphics)
+    // rides on top of every other video filter in a single rawvideo stream.
     let cursor_renderers = build_cursor_renderers(plan, project_id, asset_paths, canvas)?;
+    let has_annotations = !plan.annotations.is_empty();
+    let has_texts = !plan.texts.is_empty();
+    let has_images = !plan.images.is_empty();
     let mut cursor_plan = None;
-    if !cursor_renderers.is_empty() {
+    if !cursor_renderers.is_empty() || has_annotations || has_texts || has_images {
         let cursor_input_index = input_assets.len();
-        let cursor_label = "with_cursor";
+        let cursor_label = "with_overlay";
         filters.push(format!(
             "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=auto[{cursor_label}]"
         ));
@@ -1011,6 +1022,9 @@ fn render_timeline_composition(
             canvas,
             plan.duration_ms,
             cursor_renderers,
+            plan.annotations.clone(),
+            plan.texts.clone(),
+            plan.images.clone(),
         )?);
     }
 
@@ -1241,23 +1255,30 @@ fn build_cursor_renderers(
     Ok(renderers)
 }
 
-/// Preallocated state for streaming the cursor layer into FFmpeg's stdin.
+/// Preallocated state for streaming the combined overlay layer (cursor, annotations, text) into FFmpeg's stdin.
+#[allow(dead_code)]
 struct CursorFramePlan {
     fps: u32,
+    width: u32,
+    height: u32,
     frame_count: u64,
-    frame: Vec<u8>,
+    pixmap: resvg::tiny_skia::Pixmap,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
+    annotations: Vec<RenderPlanAnnotation>,
+    texts: Vec<RenderPlanText>,
+    images: Vec<RenderPlanImage>,
 }
 
 fn prepare_cursor_frame_plan(
     canvas: &cursor::RenderCanvas,
     duration_ms: u64,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
+    annotations: Vec<RenderPlanAnnotation>,
+    texts: Vec<RenderPlanText>,
+    images: Vec<RenderPlanImage>,
 ) -> Result<CursorFramePlan> {
-    let frame_size = (canvas.width as usize)
-        .checked_mul(canvas.height as usize)
-        .and_then(|size| size.checked_mul(4))
-        .ok_or_else(|| InternalError::Media("cursor overlay frame is too large".into()))?;
+    let pixmap = resvg::tiny_skia::Pixmap::new(canvas.width, canvas.height)
+        .ok_or_else(|| InternalError::Media("overlay frame is too large".into()))?;
     let frame_count = duration_ms
         .saturating_mul(canvas.fps as u64)
         .saturating_add(999)
@@ -1266,13 +1287,18 @@ fn prepare_cursor_frame_plan(
         .max(1);
     Ok(CursorFramePlan {
         fps: canvas.fps,
+        width: canvas.width,
+        height: canvas.height,
         frame_count,
-        frame: vec![0; frame_size],
+        pixmap,
         renderers,
+        annotations,
+        texts,
+        images,
     })
 }
 
-/// Stream every cursor frame into FFmpeg's stdin.
+/// Stream every composited overlay frame into FFmpeg's stdin.
 ///
 /// The overlay graph uses shortest=1, so FFmpeg stops reading stdin as soon as
 /// the composed video ends. Feeding ceil(duration*fps) frames can exceed that
@@ -1288,20 +1314,42 @@ fn feed_cursor_frames(
             return Err(InternalError::Media("export cancelled".into()).into());
         }
         let output_ms = frame_index.saturating_mul(1000) / cursor.fps as u64;
-        cursor.frame.fill(0);
+        cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
+
+        // 1. Render active vector annotations onto the pixmap
+        for ann in &cursor.annotations {
+            if output_ms >= ann.start_ms && output_ms < ann.end_ms {
+                let svg = annotations::build_annotation_svg(ann, cursor.width, cursor.height, output_ms);
+                let _ = annotations::render_svg_to_pixmap(&svg, &mut cursor.pixmap);
+            }
+        }
+
+        // 2. Render active styled text / title presets onto the pixmap
+        for text in &cursor.texts {
+            if output_ms >= text.start_ms && output_ms < text.end_ms {
+                let svg = annotations::build_text_preset_svg(text, cursor.width, cursor.height, output_ms);
+                let _ = annotations::render_svg_to_pixmap(&svg, &mut cursor.pixmap);
+            }
+        }
+
+        // 3. Render cursor telemetry (if active at timestamp)
         if let Some((_, _, renderer)) = cursor
             .renderers
             .iter_mut()
             .find(|(start_ms, end_ms, _)| output_ms >= *start_ms && output_ms < *end_ms)
         {
-            renderer.render_frame(output_ms, &mut cursor.frame);
+            renderer.render_frame(output_ms, cursor.pixmap.data_mut());
         }
-        if let Err(error) = stdin.write_all(&cursor.frame) {
+
+        let mut data = cursor.pixmap.data().to_vec();
+        cursor::unpremultiply_rgba(&mut data);
+
+        if let Err(error) = stdin.write_all(&data) {
             if is_pipe_closed(&error) {
                 return Ok(());
             }
             return Err(
-                InternalError::Media(format!("write cursor overlay frame: {error}")).into(),
+                InternalError::Media(format!("write overlay frame: {error}")).into(),
             );
         }
     }
@@ -1387,6 +1435,10 @@ fn collect_input_assets(
             return Err(InternalError::Storage("cursor effect asset is not a file".into()).into());
         }
     }
+
+    asset_ids.retain(|id| {
+        !id.starts_with("synth:") && !id.starts_with("synthetic:") && !id.starts_with("color:")
+    });
 
     asset_ids
         .into_iter()
@@ -1659,7 +1711,7 @@ fn ffmpeg_failure_detail(stderr: &[u8]) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(redact_paths)
-        .last()
+        .next_back()
         .map(|line| line.chars().take(300).collect::<String>())
         .filter(|line| !line.is_empty())
 }
@@ -2422,6 +2474,9 @@ mod tests {
             }),
             audio: None,
             audio_tracks: Some(Vec::new()),
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
         }
     }
 

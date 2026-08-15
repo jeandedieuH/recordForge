@@ -443,19 +443,46 @@ pub fn resume_recording(
 #[tauri::command]
 #[instrument]
 pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
-    let session_id = {
+    // A pending countdown has captured nothing yet: stopping cancels the
+    // pending start instead of running finalization over an empty session
+    // (which would fail with "no valid recording segments").
+    let countdown_session = {
         let guard = state
             .recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.status()?.session_id
+        let status = guard.status()?;
+        if status.state == capture::manifest::RecorderState::Countdown {
+            Some(status.session_id)
+        } else {
+            None
+        }
     };
-    let result = {
+    if let Some(session_id) = countdown_session {
+        let cancel_result = {
+            let guard = state
+                .recorder
+                .lock()
+                .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+            guard.cancel_prepared(&session_id)
+        };
+        FloatingWindow::hide(&app);
+        BoundaryWindow::hide(&app);
+        CountdownWindow::hide(&app);
+        if let Err(error) = MainWindow::restore(&app) {
+            tracing::error!(error = ?error, "failed to restore main window after cancel");
+        }
+        emit_current_status(&app, &state);
+        return cancel_result.map(|_| RecordingStats::default());
+    }
+
+    let (session_id, result) = {
         let guard = state
             .recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.stop()
+        let session_id = guard.status()?.session_id;
+        (session_id, guard.stop())
     };
     if result.is_ok() {
         if let Ok(db) = state.db.lock() {
@@ -494,12 +521,62 @@ pub fn recording_status(state: State<'_, AppState>) -> Result<RecordingStatus> {
 
 #[tauri::command]
 #[instrument]
-pub fn insert_marker(label: String, state: State<'_, AppState>) -> Result<RecordingMarker> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.insert_marker(label)
+pub fn insert_marker(
+    label: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingMarker> {
+    insert_marker_broadcast(&app, &state, label)
+}
+
+/// Insert a marker and broadcast it to every window so all surfaces show a
+/// live count regardless of the input path (button, global shortcut, tray).
+pub(crate) fn insert_marker_broadcast(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    label: String,
+) -> Result<RecordingMarker> {
+    let marker = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.insert_marker(label)?
+    };
+    if let Err(error) = crate::events::emit_recorder_marker(app, &marker) {
+        tracing::warn!(error = ?error, "failed to emit recorder marker event");
+    }
+    Ok(marker)
+}
+
+/// Discard the active recording without saving: stops all captures, deletes
+/// the session working directory, and hides the recording windows.
+///
+/// Security review (ADR 011): the command takes no arguments — it can only
+/// ever affect the single in-memory active session's directory under the
+/// app-managed sessions root, so React cannot aim it at arbitrary paths.
+#[tauri::command]
+#[instrument]
+pub fn discard_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
+    let result = {
+        let guard = state
+            .recorder
+            .lock()
+            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
+        guard.discard()
+    };
+    if let Err(error) = &result {
+        tracing::error!(error = ?error, "failed to delete discarded session data");
+    }
+
+    FloatingWindow::hide(&app);
+    BoundaryWindow::hide(&app);
+    CountdownWindow::hide(&app);
+    if let Err(error) = MainWindow::restore(&app) {
+        tracing::error!(error = ?error, "failed to restore main window after discard");
+    }
+    emit_current_status(&app, &state);
+    result
 }
 
 #[tauri::command]
@@ -592,7 +669,7 @@ pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecordin
         let needs_thumb = rec
             .thumbnail_path
             .as_deref()
-            .map_or(true, |p| !Path::new(p).is_file());
+            .is_none_or(|p| !Path::new(p).is_file());
         if needs_thumb {
             if let Some(output_str) = &rec.output_path {
                 let output_path = Path::new(output_str);
@@ -845,6 +922,29 @@ pub fn export_recording(options: ExportOptions, state: State<'_, AppState>) -> R
 #[instrument]
 pub async fn open_floating_controls(app: tauri::AppHandle) -> Result<()> {
     crate::window::FloatingWindow::open_or_focus(&app)
+}
+
+/// Open the fullscreen region selection window on the monitor under the cursor.
+/// The selection is broadcast back via the `region-selected` event.
+#[tauri::command]
+#[instrument]
+pub async fn open_region_picker(app: tauri::AppHandle) -> Result<()> {
+    crate::window::RegionPickerWindow::open(&app)
+}
+
+/// Close the region selection window without applying a selection.
+#[tauri::command]
+#[instrument]
+pub fn cancel_region_picker(app: tauri::AppHandle) -> Result<()> {
+    crate::window::RegionPickerWindow::close(&app);
+    Ok(())
+}
+
+/// Restore and focus the main application window (from the floating toolbar).
+#[tauri::command]
+#[instrument]
+pub fn show_main_window(app: tauri::AppHandle) -> Result<()> {
+    MainWindow::restore(&app)
 }
 
 /// Hide the floating transport controls window.

@@ -774,7 +774,7 @@ fn trim_wav_head(
     }
 
     let mut buffer = vec![0u8; 64 * 1024];
-    let data_start = WAV_HEADER_SIZE as u64;
+    let data_start = WAV_HEADER_SIZE;
     let mut read_pos = data_start + head_bytes;
     let mut write_pos = data_start;
     let end = data_start + *current_bytes;

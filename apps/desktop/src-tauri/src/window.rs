@@ -3,7 +3,7 @@ use tauri::{LogicalPosition, LogicalSize, Manager, Position, Size};
 use crate::capture::source::Bounds;
 use crate::errors::{InternalError, Result};
 
-const FLOATING_WINDOW_WIDTH: f64 = 520.0;
+const FLOATING_WINDOW_WIDTH: f64 = 620.0;
 const FLOATING_WINDOW_HEIGHT: f64 = 88.0;
 const FLOATING_WINDOW_BOTTOM_MARGIN: f64 = 28.0;
 
@@ -195,9 +195,132 @@ impl BoundaryWindow {
     }
 }
 
+/// Fullscreen region selection window. It covers a single monitor so the
+/// frontend can convert CSS-pixel selections into absolute physical desktop
+/// coordinates (window origin + devicePixelRatio) for gdigrab/ddagrab.
+pub struct RegionPickerWindow;
+
+impl RegionPickerWindow {
+    /// Open the region picker on the monitor that currently holds the cursor,
+    /// falling back to the primary monitor.
+    pub fn open(app: &tauri::AppHandle) -> Result<()> {
+        if let Some(window) = app.get_webview_window("region-picker") {
+            tracing::info!("region picker already exists, focusing it");
+            let _ = window.show();
+            let _ = window.set_focus();
+            return Ok(());
+        }
+
+        let monitor_bounds = monitor_under_cursor().or_else(|| primary_monitor_bounds(app));
+        let Some(bounds) = monitor_bounds else {
+            return Err(
+                InternalError::Unknown("no monitor available for region picker".into()).into(),
+            );
+        };
+
+        let (position, size) = logical_capture_rect(app, bounds);
+        let logical_position = match position {
+            Position::Logical(position) => position,
+            Position::Physical(position) => position.to_logical(1.0),
+        };
+        let logical_size = match size {
+            Size::Logical(size) => size,
+            Size::Physical(size) => size.to_logical(1.0),
+        };
+
+        tracing::info!(?bounds, "creating region picker window over monitor");
+
+        tauri::WebviewWindowBuilder::new(
+            app,
+            "region-picker",
+            tauri::WebviewUrl::App("index.html?region=1".into()),
+        )
+        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'region-picker';")
+        .title("recordForge Select Region")
+        .inner_size(logical_size.width, logical_size.height)
+        .position(logical_position.x, logical_position.y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .content_protected(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .fullscreen(false)
+        .build()
+        .map_err(|error| {
+            InternalError::Unknown(format!("create region picker window: {error:?}"))
+        })?;
+        Ok(())
+    }
+
+    pub fn close(app: &tauri::AppHandle) {
+        if let Some(window) = app.get_webview_window("region-picker") {
+            let _ = window.close();
+        }
+    }
+}
+
+/// Physical desktop rect of the monitor under the cursor, if any.
+#[cfg(windows)]
+fn monitor_under_cursor() -> Option<Bounds> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return None;
+    }
+
+    let monitor: HMONITOR = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return None;
+    }
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return None;
+    }
+
+    let RECT {
+        left,
+        top,
+        right,
+        bottom,
+    } = info.rcMonitor;
+    Some(Bounds {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
+}
+
+#[cfg(not(windows))]
+fn monitor_under_cursor() -> Option<Bounds> {
+    None
+}
+
+fn primary_monitor_bounds(app: &tauri::AppHandle) -> Option<Bounds> {
+    let monitor = app.primary_monitor().ok()??;
+    let position = monitor.position();
+    let size = monitor.size();
+    Some(Bounds {
+        x: position.x,
+        y: position.y,
+        width: size.width as i32,
+        height: size.height as i32,
+    })
+}
+
 /// Dedicated countdown window shown while the main application is minimized.
 pub struct CountdownWindow;
-
 impl CountdownWindow {
     pub fn open_or_focus(
         app: &tauri::AppHandle,

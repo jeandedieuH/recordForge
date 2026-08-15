@@ -4,12 +4,16 @@ import {
   AudioLines,
   Captions,
   Copy,
+  FileImage,
   Lock,
   Monitor,
   MousePointer2,
+  Music,
   Scissors,
+  Shapes,
   ShieldAlert,
   Trash2,
+  Type,
   Video,
   Volume2,
   type LucideIcon,
@@ -87,15 +91,46 @@ function getClipIcon(clip: TimelineClip, track: TimelineTrack): LucideIcon {
   if (clip.kind === "cursor-effect") return MousePointer2
   if (clip.kind === "caption") return Captions
   if (clip.kind === "mask") return ShieldAlert
+  if (clip.kind === "annotation") return Shapes
+  if (clip.kind === "text") return Type
+  if (clip.kind === "image") return FileImage
+  if (clip.kind === "audio" && clip.role === "music") return Music
   if (track.kind === "audio") return Volume2
   return AudioLines
 }
 
-function getClipTheme(track: TimelineTrack): {
+function getClipTheme(
+  clip: TimelineClip,
+  track: TimelineTrack,
+): {
   cardClass: string
   accentBorder: string
   handleGlow: string
 } {
+  if (clip.kind === "annotation" || track.kind === "annotations") {
+    return {
+      cardClass:
+        "border-fuchsia-500/70 bg-gradient-to-b from-fuchsia-500/25 to-fuchsia-500/10 hover:from-fuchsia-500/35 hover:to-fuchsia-500/15 shadow-fuchsia-500/10",
+      accentBorder: "border-fuchsia-500",
+      handleGlow: "bg-fuchsia-500 text-black",
+    }
+  }
+  if (clip.kind === "text" || track.kind === "titles") {
+    return {
+      cardClass:
+        "border-amber-500/70 bg-gradient-to-b from-amber-500/25 to-amber-500/10 hover:from-amber-500/35 hover:to-amber-500/15 shadow-amber-500/10",
+      accentBorder: "border-amber-500",
+      handleGlow: "bg-amber-500 text-black",
+    }
+  }
+  if (clip.kind === "image" || track.kind === "graphics") {
+    return {
+      cardClass:
+        "border-cyan-500/70 bg-gradient-to-b from-cyan-500/25 to-cyan-500/10 hover:from-cyan-500/35 hover:to-cyan-500/15 shadow-cyan-500/10",
+      accentBorder: "border-cyan-500",
+      handleGlow: "bg-cyan-500 text-black",
+    }
+  }
   if (track.kind === "screen") {
     return {
       cardClass:
@@ -158,6 +193,11 @@ function getClipLabel(clip: TimelineClip, track: TimelineTrack): string {
   if (clip.kind === "cursor-effect") return `${clip.presetId} cursor`
   if (clip.kind === "caption") return clip.text
   if (clip.kind === "mask") return `${clip.mode} mask`
+  if (clip.kind === "annotation")
+    return clip.text ? `${clip.annotationType} (${clip.text})` : `${clip.annotationType} shape`
+  if (clip.kind === "text") return clip.primaryText || "Title"
+  if (clip.kind === "image") return "Graphic overlay"
+  if (clip.kind === "audio" && clip.role === "music") return "Music Track"
   return track.name
 }
 
@@ -205,7 +245,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const isLocked = track.locked || (cursorRange ? cursorRange.locked : false)
 
   const ClipIcon = getClipIcon(clip, track)
-  const theme = getClipTheme(track)
+  const theme = getClipTheme(clip, track)
 
   function beginGesture(event: React.PointerEvent<HTMLElement>, mode: ClipGesture["mode"]) {
     if (event.button !== 0 || isLocked) return

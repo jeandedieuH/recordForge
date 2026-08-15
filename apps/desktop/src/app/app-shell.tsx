@@ -1,6 +1,20 @@
 import { useEffect, useMemo, useState } from "react"
+import { listen } from "@tauri-apps/api/event"
 import { save } from "@tauri-apps/plugin-dialog"
-import { ToastViewport, TooltipProvider, cn, useToast } from "@recordforge/ui"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  ToastViewport,
+  TooltipProvider,
+  cn,
+  useToast,
+} from "@recordforge/ui"
 import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
@@ -31,6 +45,9 @@ export function AppShell() {
   const [activeView, setActiveView] = useState<View>("library")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isNewRecordingOpen, setIsNewRecordingOpen] = useState(false)
+  // Opened by the Rust `request-discard-confirmation` event (tray menu): the
+  // destructive action itself runs only after the user confirms here.
+  const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false)
 
   const editorRecordingId = useEditorStore((state) => state.recordingId)
   const openEditor = useEditorStore((state) => state.open)
@@ -43,6 +60,8 @@ export function AppShell() {
   const clearCompletedRecording = useRecorderStore((state) => state.clearCompletedRecording)
   const saveMessage = useRecorderStore((state) => state.saveMessage)
   const clearSaveMessage = useRecorderStore((state) => state.clearSaveMessage)
+  const discardRecording = useRecorderStore((state) => state.discard)
+  const pendingAction = useRecorderStore((state) => state.pendingAction)
   const timelineRecording = useTimelineStore((state) => state.recording)
   const timelineCanvas = useTimelineStore((state) => state.engine?.history.present.canvas)
   const timelineDurationMs = useTimelineStore((state) => state.view.durationMs)
@@ -65,6 +84,7 @@ export function AppShell() {
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
   const detectedEncoders = useRecorderStore((state) => state.encoders)
   const loadEncoders = useRecorderStore((state) => state.loadEncoders)
+  const loadRecovery = useRecorderStore((state) => state.loadRecovery)
 
   // Mirror the Rust hardware priority (NVENC, QSV, AMF, Media Foundation) when
   // surfacing which encoder the Auto export preference would use.
@@ -84,6 +104,50 @@ export function AppShell() {
     if (!isTauri()) return
     void loadEncoders()
   }, [loadEncoders])
+
+  // Scan for interrupted sessions once at startup so a force-quit recording is
+  // surfaced immediately, not only when the user happens to open the Library.
+  useEffect(() => {
+    if (!isTauri()) return
+    let cancelled = false
+    void loadRecovery().then(() => {
+      if (cancelled) return
+      const recoverable = useRecorderStore
+        .getState()
+        .recovery.filter((session) => session.isRecoverable)
+      if (recoverable.length > 0) {
+        toast({
+          title:
+            recoverable.length === 1
+              ? "Interrupted recording found"
+              : `${recoverable.length} interrupted recordings found`,
+          description: "Recover or delete them from the Library.",
+        })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [loadRecovery, toast])
+
+  // The tray's "Discard Recording…" entry routes here: Rust restores this
+  // window and emits `request-discard-confirmation`; the destructive command
+  // only runs after the user confirms in the dialog below (ADR 011).
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | undefined
+    let active = true
+    listen("request-discard-confirmation", () => {
+      setIsDiscardConfirmOpen(true)
+    }).then((fn) => {
+      if (active) unlisten = fn
+      else fn()
+    })
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
 
   // Load persisted theme/transparency preferences once at startup.
   useEffect(() => {
@@ -300,6 +364,36 @@ export function AppShell() {
           onStart={handleStartRecording}
           onNavigateToSettings={() => setActiveView("settings")}
         />
+
+        {/* Tray-initiated discard confirmation (destructive, ADR 011) */}
+        <AlertDialog open={isDiscardConfirmOpen} onOpenChange={setIsDiscardConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Discard this recording?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Everything captured so far — video, audio, camera, and markers — will be permanently
+                deleted. Nothing will be saved to the library. This cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={pendingAction === "discard"}>
+                Keep recording
+              </AlertDialogCancel>
+              <AlertDialogAction
+                disabled={pendingAction === "discard"}
+                onClick={(event) => {
+                  // Keep the dialog open until the discard IPC settles so the
+                  // outcome (idle status or error toast) is visible.
+                  event.preventDefault()
+                  void discardRecording().then(() => setIsDiscardConfirmOpen(false))
+                }}
+                className="bg-recording text-white hover:bg-recording-hover"
+              >
+                {pendingAction === "discard" ? "Discarding…" : "Delete everything"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
       <ToastViewport />
     </TooltipProvider>

@@ -1,10 +1,13 @@
 import { z } from "zod"
 import {
+  annotationClipSchema,
+  audioRoleSchema,
   captionCueSchema,
   captionPlacementSchema,
   captionStylePresetSchema,
   clipTransformSchema,
   cursorEffectSettingsSchema,
+  imageClipSchema,
   maskColorSchema,
   maskModeSchema,
   maskRectSchema,
@@ -13,6 +16,7 @@ import {
   cursorSmoothingSchema,
   manualZoomSegmentSchema,
   smartZoomSettingsSchema,
+  textClipSchema,
   timelineCanvasSchema,
   timelineTrackKindSchema,
   trackUpdateSchema,
@@ -444,6 +448,70 @@ export const trimTimelineEndsCommandSchema = commandMetaSchema.extend({
 
 export type TrimTimelineEndsCommand = z.infer<typeof trimTimelineEndsCommandSchema>
 
+export const addAnnotationClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-annotation-clip"),
+  trackId: z.string().optional(),
+  clip: annotationClipSchema,
+})
+
+export type AddAnnotationClipCommand = z.infer<typeof addAnnotationClipCommandSchema>
+
+export const updateAnnotationClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-annotation-clip"),
+  clipId: z.string(),
+  update: annotationClipSchema.partial(),
+})
+
+export type UpdateAnnotationClipCommand = z.infer<typeof updateAnnotationClipCommandSchema>
+
+export const addTextClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-text-clip"),
+  trackId: z.string().optional(),
+  clip: textClipSchema,
+})
+
+export type AddTextClipCommand = z.infer<typeof addTextClipCommandSchema>
+
+export const updateTextClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-text-clip"),
+  clipId: z.string(),
+  update: textClipSchema.partial(),
+})
+
+export type UpdateTextClipCommand = z.infer<typeof updateTextClipCommandSchema>
+
+export const addImageClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-image-clip"),
+  trackId: z.string().optional(),
+  clip: imageClipSchema,
+})
+
+export type AddImageClipCommand = z.infer<typeof addImageClipCommandSchema>
+
+export const updateImageClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-image-clip"),
+  clipId: z.string(),
+  update: imageClipSchema.partial(),
+})
+
+export type UpdateImageClipCommand = z.infer<typeof updateImageClipCommandSchema>
+
+export const addExternalAudioClipCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("add-external-audio-clip"),
+  trackId: z.string().optional(),
+  clipId: z.string().optional(),
+  assetId: z.string(),
+  startMs: z.number().int().min(0),
+  durationMs: z.number().int().positive(),
+  sourceInMs: z.number().int().min(0).default(0),
+  sourceOutMs: z.number().int().positive(),
+  volume: z.number().min(0).max(2).optional(),
+  role: audioRoleSchema.optional(),
+  trackName: z.string().optional(),
+})
+
+export type AddExternalAudioClipCommand = z.infer<typeof addExternalAudioClipCommandSchema>
+
 export const commandRecordSchema = z.discriminatedUnion("kind", [
   addMarkerCommandSchema,
   updateMarkerCommandSchema,
@@ -485,6 +553,13 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   deleteZoomSegmentCommandSchema,
   regenerateZoomSuggestionsCommandSchema,
   trimTimelineEndsCommandSchema,
+  addAnnotationClipCommandSchema,
+  updateAnnotationClipCommandSchema,
+  addTextClipCommandSchema,
+  updateTextClipCommandSchema,
+  addImageClipCommandSchema,
+  updateImageClipCommandSchema,
+  addExternalAudioClipCommandSchema,
 ])
 
 export type CommandRecord = z.infer<typeof commandRecordSchema>

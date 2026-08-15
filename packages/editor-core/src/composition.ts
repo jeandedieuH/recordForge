@@ -109,8 +109,13 @@ export function findPreviousZoomSegment(
   maxBridgeGapMs = 500,
 ): ManualZoomSegment | null {
   const segments = getManualZoomSegments(state)
-    .filter((s) => s.enabled && s.id !== currentSegment.id && s.startMs + s.durationMs <= currentSegment.startMs)
-    .sort((a, b) => (b.startMs + b.durationMs) - (a.startMs + a.durationMs))
+    .filter(
+      (s) =>
+        s.enabled &&
+        s.id !== currentSegment.id &&
+        s.startMs + s.durationMs <= currentSegment.startMs,
+    )
+    .sort((a, b) => b.startMs + b.durationMs - (a.startMs + a.durationMs))
 
   const prev = segments[0] ?? null
   if (!prev) return null
@@ -146,8 +151,14 @@ export function resolveZoomTransform(
   const target = clampZoomTarget(options.target ?? segment.target, canvas)
   const duration = Math.max(1, segment.durationMs)
 
-  const declaredIn = options.transitionInMs ?? segment.transitionInMs ?? Math.min(450, Math.max(60, Math.round(duration * 0.3)))
-  const declaredOut = options.transitionOutMs ?? segment.transitionOutMs ?? Math.min(450, Math.max(60, Math.round(duration * 0.3)))
+  const declaredIn =
+    options.transitionInMs ??
+    segment.transitionInMs ??
+    Math.min(450, Math.max(60, Math.round(duration * 0.3)))
+  const declaredOut =
+    options.transitionOutMs ??
+    segment.transitionOutMs ??
+    Math.min(450, Math.max(60, Math.round(duration * 0.3)))
 
   let transitionInMs = Math.min(duration, declaredIn)
   let transitionOutMs = Math.min(duration, declaredOut)

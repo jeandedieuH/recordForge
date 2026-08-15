@@ -3,6 +3,8 @@
 
 export * from "@recordforge/domain"
 export * from "./camera-presets"
+export * from "./text-presets"
+export * from "./annotation-presets"
 export * from "./command-records"
 export * from "./time-mapping"
 export * from "./history"

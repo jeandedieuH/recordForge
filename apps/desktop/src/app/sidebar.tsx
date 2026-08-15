@@ -98,22 +98,16 @@ export function Sidebar({
       )}
     >
       {/* Brand Header */}
-      <div className={cn("mb-6 px-2 flex items-center", collapsed ? "justify-center px-0" : "gap-3")}>
+      <div
+        className={cn("mb-6 px-2 flex items-center", collapsed ? "justify-center px-0" : "gap-3")}
+      >
         {!collapsed ? (
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-col">
             <img
-              src="/icon.svg"
+              src="/logo.png"
               alt="recordForge icon"
-              className="size-8 shrink-0 object-contain select-none"
+              className="w-40 shrink-0 object-contain select-none"
             />
-            <div className="flex flex-col">
-              <h1 className="font-serif text-lg font-bold tracking-tight text-foreground leading-tight">
-                RecordForge
-              </h1>
-              <span className="text-[10px] font-mono text-sidebar-text uppercase tracking-wider">
-                Local-first
-              </span>
-            </div>
           </div>
         ) : (
           <Tooltip>
