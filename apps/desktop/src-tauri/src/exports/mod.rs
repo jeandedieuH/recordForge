@@ -12,6 +12,7 @@ use tracing::{info, instrument, warn};
 
 mod captions;
 mod cursor;
+mod encoding;
 
 /// A single trimmed segment in the final export.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -283,6 +284,8 @@ pub struct ExportSettings {
     pub preset: String,
     #[serde(default = "default_export_codec")]
     pub codec: String,
+    #[serde(default = "default_export_encoder")]
+    pub encoder: String,
     #[serde(default = "default_export_container")]
     pub container: String,
     #[serde(default = "default_caption_mode")]
@@ -297,6 +300,10 @@ fn default_export_preset() -> String {
 
 fn default_export_codec() -> String {
     "h264".into()
+}
+
+fn default_export_encoder() -> String {
+    "auto".into()
 }
 
 fn default_export_container() -> String {
@@ -327,7 +334,8 @@ pub struct RenderPlanCursorEffect {
     app,
     cancel,
     output_path,
-    settings
+    settings,
+    available_encoders
 ))]
 pub fn run_render_plan(
     job_id: &str,
@@ -340,6 +348,7 @@ pub fn run_render_plan(
     db: Arc<Mutex<rusqlite::Connection>>,
     app: &tauri::AppHandle,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    available_encoders: &[String],
 ) -> Result<()> {
     plan.validate()?;
     if plan.project_id != project_id {
@@ -400,6 +409,42 @@ pub fn run_render_plan(
         return Err(InternalError::Media("export cancelled".into()).into());
     }
 
+    // The startup probe covers h264 hardware encoders only (shared with the
+    // capture path), so hevc exports verify the vendor's hevc variant with a
+    // one-second test encode before committing the job to it.
+    let ffmpeg = ffmpeg_path.to_string_lossy().to_string();
+    let encoder = encoding::resolve_export_encoder(
+        &settings.encoder,
+        &settings.codec,
+        available_encoders,
+        |candidate| crate::capture::encoder::probe_encoder(&ffmpeg, candidate.hevc_id()),
+    );
+    info!(
+        project_id = %project_id,
+        encoder = encoder.display_name(),
+        "selected export encoder"
+    );
+
+    // Composition owns 0.15..0.80 of the job; FFmpeg reports elapsed time.
+    let progress_reporter = {
+        let db = Arc::clone(&db);
+        let app_handle = app.clone();
+        let job = job_id.to_string();
+        let last_emit = Arc::new(Mutex::new(None::<std::time::Instant>));
+        move |ratio: f64| {
+            let mut last = last_emit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.is_some_and(|value| value.elapsed() < Duration::from_millis(250)) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+            drop(last);
+            let progress = 0.15 + ratio.clamp(0.0, 1.0) * 0.65;
+            let _ = update_progress(&db, &app_handle, &job, progress, "rendering", None);
+        }
+    };
+
     update_progress(
         &db,
         app,
@@ -408,37 +453,59 @@ pub fn run_render_plan(
         "rendering",
         Some("compositing timeline tracks"),
     )?;
-    render_timeline_composition(
-        &ffmpeg_path.to_string_lossy(),
+    let composition = render_timeline_composition(
+        &ffmpeg,
         &partial_path,
         &plan,
         project_id,
         &asset_paths,
         &settings,
+        encoder,
         cancel.clone(),
-    )?;
+        &progress_reporter,
+    );
+    // A hardware encoder can fail to initialize even after a passing probe
+    // (driver capabilities differ by resolution and pixel format), so retry
+    // once on software instead of failing the export outright. Cancelled jobs
+    // propagate unchanged.
+    if let Err(error) = composition {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed)
+            || encoder == encoding::ExportEncoder::Software
+        {
+            cleanup_export_files(output_path);
+            return Err(error);
+        }
+        warn!(
+            project_id = %project_id,
+            encoder = encoder.display_name(),
+            error = %error,
+            "hardware export encoder failed; retrying with software"
+        );
+        update_progress(
+            &db,
+            app,
+            job_id,
+            0.15,
+            "rendering",
+            Some("retrying with the software encoder"),
+        )?;
+        render_timeline_composition(
+            &ffmpeg,
+            &partial_path,
+            &plan,
+            project_id,
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            cancel.clone(),
+            &progress_reporter,
+        )?;
+    }
 
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
     }
-
-    update_progress(
-        &db,
-        app,
-        job_id,
-        0.72,
-        "cursor",
-        Some("rendering cursor effects"),
-    )?;
-    apply_cursor_overlay(
-        &ffmpeg_path.to_string_lossy(),
-        &partial_path,
-        &plan,
-        project_id,
-        &asset_paths,
-        cancel.clone(),
-    )?;
 
     if plan.caption_mode == "sidecar" {
         update_progress(
@@ -533,9 +600,12 @@ fn video_screen_rect(
     }
 }
 
-/// Compose screen, manual zoom, camera overlays, canvas framing, and semantic
-/// audio tracks in one FFmpeg graph. Keeping the graph here makes the export
-/// path authoritative for every control exposed by the Phase 6 inspector.
+/// Compose screen, manual zoom, camera overlays, canvas framing, cursor
+/// telemetry, and semantic audio tracks in one FFmpeg graph. The cursor layer
+/// is generated frame by frame in Rust and streamed over stdin as a rawvideo
+/// input, so the whole export is a single encode. Keeping the graph here makes
+/// the export path authoritative for every control exposed by the editor.
+#[allow(clippy::too_many_arguments)]
 fn render_timeline_composition(
     ffmpeg_path: &str,
     output_path: &Path,
@@ -543,7 +613,9 @@ fn render_timeline_composition(
     project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
     settings: &ExportSettings,
+    encoder: encoding::ExportEncoder,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    on_progress: &(dyn Fn(f64) + Sync),
 ) -> Result<()> {
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
@@ -923,6 +995,25 @@ fn render_timeline_composition(
         current_label = next_label;
     }
 
+    // The cursor layer rides on top of every other video filter — the renderer
+    // already accounts for zoom, fitting, and the camera layout when it maps
+    // telemetry into canvas coordinates.
+    let cursor_renderers = build_cursor_renderers(plan, project_id, asset_paths, canvas)?;
+    let mut cursor_plan = None;
+    if !cursor_renderers.is_empty() {
+        let cursor_input_index = input_assets.len();
+        let cursor_label = "with_cursor";
+        filters.push(format!(
+            "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=auto[{cursor_label}]"
+        ));
+        current_label = cursor_label.to_string();
+        cursor_plan = Some(prepare_cursor_frame_plan(
+            canvas,
+            plan.duration_ms,
+            cursor_renderers,
+        )?);
+    }
+
     let audio_tracks = plan
         .audio_tracks
         .as_ref()
@@ -1025,9 +1116,22 @@ fn render_timeline_composition(
     let mut command = Command::new(ffmpeg_path);
     command
         .arg("-y")
-        .args(["-hide_banner", "-loglevel", "error"]);
+        .args(["-hide_banner", "-loglevel", "error"])
+        // Machine-readable progress blocks on stderr; the runner parses
+        // `out_time=` from them and keeps them out of failure diagnostics.
+        .args(["-progress", "pipe:2"]);
     for (_, asset_path) in &input_assets {
         command.arg("-i").arg(asset_path);
+    }
+    if cursor_plan.is_some() {
+        // The generated cursor layer is a transparent RGBA stream fed frame by
+        // frame through stdin; frame timestamps come from the declared rate.
+        command
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
+            .args(["-s", &format!("{}x{}", canvas.width, canvas.height)])
+            .args(["-r", &canvas.fps.to_string()])
+            .arg("-i")
+            .arg("-");
     }
     command
         .args(["-filter_complex", &filters.join(";")])
@@ -1037,7 +1141,14 @@ fn render_timeline_composition(
     } else {
         command.args(["-map", "[aout]"]);
     }
-    append_video_encoding_args(&mut command, settings, canvas.fps);
+    encoding::append_export_video_args(
+        &mut command,
+        settings,
+        encoder,
+        canvas.fps,
+        canvas.width,
+        canvas.height,
+    );
     if !audio_labels.is_empty() {
         command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
     }
@@ -1046,201 +1157,32 @@ fn render_timeline_composition(
         .args(["-movflags", "+faststart"])
         .arg(output_path);
 
-    run_ffmpeg_command(&mut command, &cancel, output_path, "timeline composition")
+    run_export_ffmpeg(
+        &mut command,
+        &cancel,
+        output_path,
+        "timeline composition",
+        Some(plan.duration_ms),
+        cursor_plan,
+        Some(on_progress),
+    )
 }
 
-#[allow(dead_code)]
-fn render_timeline_with_audio(
-    ffmpeg_path: &str,
-    source_path: &Path,
-    output_path: &Path,
-    plan: &RenderPlan,
-    recording_id: &str,
-) -> Result<()> {
-    if plan.segments.is_empty() {
-        return Err(InternalError::Media("timeline has no video segments".into()).into());
-    }
-
-    let duration_ms = plan
-        .segments
-        .iter()
-        .map(|segment| segment.output_end_ms)
-        .max()
-        .unwrap_or(plan.duration_ms)
-        .max(1);
-    let mut filters = Vec::new();
-    let video_count = plan.segments.len();
-
-    for (index, segment) in plan.segments.iter().enumerate() {
-        validate_segment(segment, recording_id)?;
-        let input = input_stream_at(0, segment.stream_index, false)?;
-        let output_label = if video_count == 1 {
-            "vout".to_string()
-        } else {
-            format!("v{index}")
-        };
-        filters.push(format!(
-            "{input}trim=start={}:end={},setpts=PTS-STARTPTS[{output_label}]",
-            seconds(segment.source_in_ms),
-            seconds(segment.source_out_ms),
-        ));
-    }
-
-    if video_count > 1 {
-        let inputs = (0..video_count)
-            .map(|index| format!("[v{index}]"))
-            .collect::<Vec<_>>()
-            .join("");
-        filters.push(format!("{inputs}concat=n={video_count}:v=1:a=0[vout]"));
-    }
-
-    let audio_tracks = plan
-        .audio_tracks
-        .as_ref()
-        .map(|tracks| tracks.iter().collect::<Vec<_>>())
-        .unwrap_or_else(|| plan.audio.iter().collect::<Vec<_>>());
-    let mut audio_labels = Vec::new();
-    let mut audio_segment_count = 0usize;
-
-    for track in audio_tracks {
-        if track.muted {
-            continue;
-        }
-        validate_asset(&track.asset_id)?;
-        let fallback_segment = RenderSegment {
-            asset_id: track.asset_id.clone(),
-            stream_index: track.stream_index,
-            volume: Some(track.volume),
-            fade_in_ms: None,
-            fade_out_ms: None,
-            speed: 1.0,
-            source_in_ms: 0,
-            source_out_ms: duration_ms,
-            output_start_ms: 0,
-            output_end_ms: duration_ms,
-            source_width: None,
-            source_height: None,
-        };
-        let segments = if track.segments.is_empty() {
-            vec![fallback_segment]
-        } else {
-            track.segments.clone()
-        };
-
-        for segment in segments {
-            validate_segment(&segment, recording_id)?;
-            let volume = segment.volume.unwrap_or(track.volume);
-            if !volume.is_finite() || !(0.0..=2.0).contains(&volume) {
-                return Err(InternalError::Media(
-                    "audio volume is outside the supported range".into(),
-                )
-                .into());
-            }
-            let input = input_stream_at(0, segment.stream_index.or(track.stream_index), true)?;
-            let label = format!("a{audio_segment_count}");
-            let mut filter = format!(
-                "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS,volume={volume:.4}",
-                seconds(segment.source_in_ms),
-                seconds(segment.source_out_ms),
-            );
-            if segment.output_start_ms > 0 {
-                filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
-            }
-            filter.push_str(&format!(",apad=pad_dur={}[{label}]", seconds(duration_ms)));
-            filters.push(filter);
-            audio_labels.push(format!("[{label}]"));
-            audio_segment_count += 1;
-        }
-    }
-
-    if audio_labels.len() == 1 {
-        filters.push(format!(
-            "{}atrim=duration={}[aout]",
-            audio_labels[0],
-            seconds(duration_ms)
-        ));
-    } else if !audio_labels.is_empty() {
-        filters.push(format!(
-            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
-            audio_labels.join(""),
-            audio_labels.len(),
-            seconds(duration_ms),
-        ));
-    }
-
-    let partial_path = partial_output_path(output_path);
-    let mut command = Command::new(ffmpeg_path);
-    command
-        .arg("-y")
-        .args(["-hide_banner", "-loglevel", "error"])
-        .arg("-i")
-        .arg(source_path)
-        .args(["-filter_complex", &filters.join(";")])
-        .args(["-map", "[vout]"]);
-
-    if audio_labels.is_empty() {
-        command.arg("-an");
-    } else {
-        command.args(["-map", "[aout]"]);
-    }
-
-    command.args([
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-    ]);
-    if !audio_labels.is_empty() {
-        command.args(["-c:a", "aac", "-b:a", "128k"]);
-    }
-    command
-        .arg("-shortest")
-        .args(["-movflags", "+faststart"])
-        .arg(&partial_path);
-
-    let output = command
-        .output()
-        .map_err(|error| InternalError::Media(format!("timeline render run: {error}")))?;
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&partial_path);
-        warn!("timeline render process failed; stderr is intentionally redacted");
-        return Err(InternalError::Media("timeline render failed".into()).into());
-    }
-
-    crate::capture::disk::atomic_replace(&partial_path, output_path)?;
-    Ok(())
-}
-
-fn apply_cursor_overlay(
-    ffmpeg_path: &str,
-    output_path: &Path,
+/// Build one cursor renderer per enabled effect. Renderers are pure functions
+/// of the output timestamp and the plan — they never read rendered video, which
+/// is what allows the cursor layer to be composited in the same FFmpeg pass.
+fn build_cursor_renderers(
     plan: &RenderPlan,
     project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
-    let canvas = match plan.canvas.as_ref() {
-        Some(canvas) => canvas,
-        None => return Ok(()),
-    };
-    // Capture removes the OS cursor before recording, so every export with
-    // telemetry must render the configured replacement cursor.
-    if canvas.width == 0
-        || canvas.height == 0
-        || canvas.fps == 0
-        || canvas.width > 7_680
-        || canvas.height > 4_320
-        || canvas.fps > 240
-    {
-        return Err(
-            InternalError::Media("cursor render canvas dimensions are unsupported".into()).into(),
-        );
-    }
-
-    let effects = plan.cursor_effects.clone();
-
+    canvas: &cursor::RenderCanvas,
+) -> Result<Vec<(u64, u64, cursor::CursorRenderer)>> {
     let mut renderers = Vec::new();
-    for effect in effects {
-        if !effect.enabled || effect.end_ms <= effect.start_ms {
-            continue;
-        }
+    for effect in plan
+        .cursor_effects
+        .iter()
+        .filter(|effect| effect.enabled && effect.end_ms > effect.start_ms)
+    {
         let telemetry_path = asset_paths.get(&effect.asset_id).ok_or_else(|| {
             InternalError::Permissions("cursor effect references a missing asset".into())
         })?;
@@ -1282,7 +1224,7 @@ fn apply_cursor_overlay(
         if telemetry.events.is_empty() {
             continue;
         }
-        let settings = cursor_settings_for_effect(&canvas.cursor_settings, &effect);
+        let settings = cursor_settings_for_effect(&canvas.cursor_settings, effect);
         let renderer = cursor::CursorRenderer::new_with_zoom(
             settings,
             telemetry,
@@ -1295,122 +1237,74 @@ fn apply_cursor_overlay(
     }
     if renderers.is_empty() {
         tracing::warn!(%project_id, "cursor telemetry is unavailable; exporting without a cursor overlay");
-        return Ok(());
     }
+    Ok(renderers)
+}
+
+/// Preallocated state for streaming the cursor layer into FFmpeg's stdin.
+struct CursorFramePlan {
+    fps: u32,
+    frame_count: u64,
+    frame: Vec<u8>,
+    renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
+}
+
+fn prepare_cursor_frame_plan(
+    canvas: &cursor::RenderCanvas,
+    duration_ms: u64,
+    renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
+) -> Result<CursorFramePlan> {
     let frame_size = (canvas.width as usize)
         .checked_mul(canvas.height as usize)
         .and_then(|size| size.checked_mul(4))
         .ok_or_else(|| InternalError::Media("cursor overlay frame is too large".into()))?;
-    let frame_count = plan
-        .duration_ms
+    let frame_count = duration_ms
         .saturating_mul(canvas.fps as u64)
         .saturating_add(999)
         .checked_div(1000)
         .unwrap_or(1)
         .max(1);
-    let partial_path = cursor_partial_output_path(output_path);
-    let mut command = Command::new(ffmpeg_path);
-    command
-        .arg("-y")
-        .args(["-hide_banner", "-loglevel", "error"])
-        .arg("-i")
-        .arg(output_path)
-        .args([
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &format!("{}x{}", canvas.width, canvas.height),
-            "-r",
-            &canvas.fps.to_string(),
-            "-i",
-            "-",
-        ])
-        .args([
-            "-filter_complex",
-            "[0:v][1:v]overlay=shortest=1:format=auto[vout]",
-            "-map",
-            "[vout]",
-            "-map",
-            "0:a?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "copy",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(&partial_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    Ok(CursorFramePlan {
+        fps: canvas.fps,
+        frame_count,
+        frame: vec![0; frame_size],
+        renderers,
+    })
+}
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| InternalError::Media(format!("start cursor overlay render: {error}")))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| InternalError::Media("cursor overlay stdin unavailable".into()))?;
-    let mut frame = vec![0; frame_size];
-    // The overlay graph uses shortest=1, so FFmpeg stops reading stdin as soon
-    // as the composed video ends. Feeding ceil(duration*fps) frames can exceed
-    // that by one frame; a closed pipe here means the consumer finished, and
-    // the exit-status check below decides whether the render actually failed.
-    let mut consumer_finished_early = false;
-    for frame_index in 0..frame_count {
+/// Stream every cursor frame into FFmpeg's stdin.
+///
+/// The overlay graph uses shortest=1, so FFmpeg stops reading stdin as soon as
+/// the composed video ends. Feeding ceil(duration*fps) frames can exceed that
+/// by one frame; a closed pipe here means the consumer finished, and the
+/// exit-status check in the runner decides whether the render actually failed.
+fn feed_cursor_frames(
+    stdin: &mut std::process::ChildStdin,
+    cursor: &mut CursorFramePlan,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    for frame_index in 0..cursor.frame_count {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = std::fs::remove_file(&partial_path);
             return Err(InternalError::Media("export cancelled".into()).into());
         }
-        let output_ms = frame_index.saturating_mul(1000) / canvas.fps as u64;
-        frame.fill(0);
-        if let Some((_, _, renderer)) = renderers
+        let output_ms = frame_index.saturating_mul(1000) / cursor.fps as u64;
+        cursor.frame.fill(0);
+        if let Some((_, _, renderer)) = cursor
+            .renderers
             .iter_mut()
             .find(|(start_ms, end_ms, _)| output_ms >= *start_ms && output_ms < *end_ms)
         {
-            renderer.render_frame(output_ms, &mut frame);
+            renderer.render_frame(output_ms, &mut cursor.frame);
         }
-        if let Err(error) = stdin.write_all(&frame) {
+        if let Err(error) = stdin.write_all(&cursor.frame) {
             if is_pipe_closed(&error) {
-                consumer_finished_early = true;
-                break;
+                return Ok(());
             }
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = std::fs::remove_file(&partial_path);
             return Err(
                 InternalError::Media(format!("write cursor overlay frame: {error}")).into(),
             );
         }
     }
-    drop(stdin);
-
-    let output = child.wait_with_output().map_err(|error| {
-        InternalError::Media(format!("wait for cursor overlay render: {error}"))
-    })?;
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&partial_path);
-        let detail =
-            ffmpeg_failure_detail(&output.stderr).unwrap_or_else(|| "no diagnostic output".into());
-        warn!(detail = %detail, "cursor overlay process failed");
-        return Err(InternalError::Media(format!("cursor overlay render failed: {detail}")).into());
-    }
-    if consumer_finished_early {
-        info!("cursor overlay consumer closed the frame pipe before the planned frame count");
-    }
-
-    crate::capture::disk::atomic_replace(&partial_path, output_path)?;
     Ok(())
 }
 
@@ -1445,7 +1339,9 @@ fn cursor_settings_for_effect(
     serde_json::from_value(value).unwrap_or_else(|_| base.clone())
 }
 
-pub(crate) fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
+/// Legacy intermediate path from the retired two-pass cursor render, kept only
+/// so cleanup removes files left behind by older app versions.
+fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
     let stem = output_path
         .file_stem()
         .map(|value| value.to_string_lossy())
@@ -1639,6 +1535,9 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
     if settings.container != "mp4" || !matches!(settings.codec.as_str(), "h264" | "hevc") {
         return Err(InternalError::Media("export codec or container is unsupported".into()).into());
     }
+    if !matches!(settings.encoder.as_str(), "auto" | "software") {
+        return Err(InternalError::Media("export encoder preference is unsupported".into()).into());
+    }
     if !matches!(
         settings.preset.as_str(),
         "default-mp4"
@@ -1690,37 +1589,6 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
         );
     }
     Ok(())
-}
-
-fn append_video_encoding_args(command: &mut Command, settings: &ExportSettings, fps: u32) {
-    let codec = if settings.codec == "hevc" {
-        "libx265"
-    } else {
-        "libx264"
-    };
-    let (preset, crf) = match settings.preset.as_str() {
-        "fast-share" => ("ultrafast", "23"),
-        "high-quality" => ("slow", "18"),
-        "smooth-60fps" => ("veryfast", "20"),
-        "ultra-4k" => ("medium", "18"),
-        "ultra-4k-60" => ("medium", "18"),
-        "vertical" | "square" => ("veryfast", "20"),
-        _ => ("veryfast", "20"),
-    };
-    let target_fps = match settings.preset.as_str() {
-        "smooth-60fps" | "ultra-4k-60" => 60.max(fps),
-        _ => fps,
-    };
-    command
-        .arg("-c:v")
-        .arg(codec)
-        .arg("-preset")
-        .arg(preset)
-        .arg("-crf")
-        .arg(crf)
-        .arg("-r")
-        .arg(target_fps.to_string())
-        .args(["-pix_fmt", "yuv420p"]);
 }
 
 fn audio_bitrate(settings: &ExportSettings) -> &'static str {
@@ -1796,51 +1664,123 @@ fn ffmpeg_failure_detail(stderr: &[u8]) -> Option<String> {
         .filter(|line| !line.is_empty())
 }
 
-fn run_ffmpeg_command(
+/// True when a stderr line belongs to a `-progress` block rather than a
+/// diagnostic message.
+fn is_progress_line(line: &str) -> bool {
+    const PROGRESS_KEYS: [&str; 10] = [
+        "frame=",
+        "fps=",
+        "stream_",
+        "bitrate=",
+        "total_size=",
+        "out_time",
+        "dup_frames=",
+        "drop_frames=",
+        "speed=",
+        "progress=",
+    ];
+    PROGRESS_KEYS.iter().any(|key| line.starts_with(key))
+}
+
+/// Run one FFmpeg export command.
+///
+/// Stderr is drained on a dedicated thread because `-progress pipe:2` emits a
+/// continuous block stream that would otherwise fill the pipe and deadlock the
+/// child; progress lines are reported through `on_progress` (as a 0..1 ratio
+/// against `expected_duration_ms`) and excluded from the failure buffer.
+/// `cursor` optionally supplies a generated RGBA layer streamed over stdin.
+#[allow(clippy::too_many_arguments)]
+fn run_export_ffmpeg(
     command: &mut Command,
-    cancel: &std::sync::atomic::AtomicBool,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
     partial_path: &Path,
     stage: &str,
+    expected_duration_ms: Option<u64>,
+    mut cursor: Option<CursorFramePlan>,
+    on_progress: Option<&(dyn Fn(f64) + Sync)>,
 ) -> Result<()> {
     command.stdout(Stdio::null()).stderr(Stdio::piped());
+    if cursor.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .spawn()
         .map_err(|error| InternalError::Media(format!("start {stage}: {error}")))?;
-    loop {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| InternalError::Media(format!("{stage} stderr unavailable")))?;
+
+    // A scoped thread lets the drain borrow the progress callback while
+    // guaranteeing it is joined before this function returns.
+    std::thread::scope(|scope| -> Result<()> {
+        let diagnostics = scope.spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stderr);
+            let mut diagnostic = Vec::new();
+            for line in reader.lines().map_while(|result| result.ok()) {
+                let trimmed = line.trim_end();
+                if is_progress_line(trimmed) {
+                    if let (Some(report), Some(duration_ms)) = (on_progress, expected_duration_ms) {
+                        if let Some(time_ms) = crate::media::parse_ffmpeg_time(trimmed) {
+                            if duration_ms > 0 {
+                                report((time_ms as f64 / duration_ms as f64).clamp(0.0, 1.0));
+                            }
+                        }
+                    }
+                } else if !trimmed.is_empty() {
+                    diagnostic.extend_from_slice(trimmed.as_bytes());
+                    diagnostic.push(b'\n');
+                }
+            }
+            diagnostic
+        });
+
+        let fed = match cursor.as_mut() {
+            Some(cursor_plan) => match child.stdin.take() {
+                Some(mut stdin) => feed_cursor_frames(&mut stdin, cursor_plan, cancel),
+                None => Err(InternalError::Media("cursor overlay stdin unavailable".into()).into()),
+            },
+            None => Ok(()),
+        };
+        if let Err(error) = fed {
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_file(partial_path);
-            return Err(InternalError::Media("export cancelled".into()).into());
+            return Err(error);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return Ok(());
-                }
-                let _ = std::fs::remove_file(partial_path);
-                let detail = child
-                    .stderr
-                    .take()
-                    .and_then(|mut stderr| {
-                        use std::io::Read;
-                        let mut raw = Vec::new();
-                        stderr.read_to_end(&mut raw).ok()?;
-                        ffmpeg_failure_detail(&raw)
-                    })
-                    .unwrap_or_else(|| "no diagnostic output".into());
-                warn!(stage, detail = %detail, "ffmpeg export process failed");
-                return Err(InternalError::Media(format!("{stage} failed: {detail}")).into());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(error) => {
+        drop(child.stdin.take());
+
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = std::fs::remove_file(partial_path);
-                return Err(InternalError::Media(format!("wait for {stage}: {error}")).into());
+                return Err(InternalError::Media("export cancelled".into()).into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let diagnostic = diagnostics.join().unwrap_or_default();
+                    if status.success() {
+                        return Ok(());
+                    }
+                    let _ = std::fs::remove_file(partial_path);
+                    let detail = ffmpeg_failure_detail(&diagnostic)
+                        .unwrap_or_else(|| "no diagnostic output".into());
+                    warn!(stage, detail = %detail, "ffmpeg export process failed");
+                    return Err(InternalError::Media(format!("{stage} failed: {detail}")).into());
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(partial_path);
+                    return Err(InternalError::Media(format!("wait for {stage}: {error}")).into());
+                }
             }
         }
-    }
+    })
 }
 
 fn validate_export_output(
@@ -2632,6 +2572,7 @@ mod tests {
             let settings = ExportSettings {
                 preset: preset.into(),
                 codec: "h264".into(),
+                encoder: "auto".into(),
                 container: "mp4".into(),
                 caption_mode: "burn-in".into(),
                 range: None,
@@ -2641,10 +2582,48 @@ mod tests {
         let settings_4k = ExportSettings {
             preset: "ultra-4k".into(),
             codec: "h264".into(),
+            encoder: "software".into(),
             container: "mp4".into(),
             caption_mode: "burn-in".into(),
             range: None,
         };
         assert_eq!(audio_bitrate(&settings_4k), "192k");
+    }
+
+    #[test]
+    fn validates_encoder_preference_and_defaults_missing_fields() {
+        let plan = valid_plan();
+        let mut settings = ExportSettings {
+            preset: "default-mp4".into(),
+            codec: "h264".into(),
+            encoder: "nvenc".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            range: None,
+        };
+        assert!(validate_export_settings(&settings, &plan).is_err());
+        settings.encoder = "auto".into();
+        assert!(validate_export_settings(&settings, &plan).is_ok());
+
+        // Settings persisted by older app versions deserialize with the auto
+        // encoder preference applied.
+        let legacy = serde_json::json!({
+            "preset": "default-mp4",
+            "codec": "h264",
+            "container": "mp4",
+            "captionMode": "burn-in"
+        });
+        let parsed: ExportSettings = serde_json::from_value(legacy).expect("legacy settings");
+        assert_eq!(parsed.encoder, "auto");
+    }
+
+    #[test]
+    fn progress_lines_are_recognized_and_parsed() {
+        assert!(is_progress_line("out_time=00:00:01.500000"));
+        assert!(is_progress_line("progress=continue"));
+        assert!(!is_progress_line("[libx264] something failed"));
+        assert!(!is_progress_line(
+            "C:/recordings/demo.mp4: Invalid argument"
+        ));
     }
 }

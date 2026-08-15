@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
 import { ToastViewport, TooltipProvider, cn, useToast } from "@recordforge/ui"
 import { EditorSession, EditorView } from "../features/editor"
@@ -53,6 +53,7 @@ export function AppShell() {
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
   const setExportCodec = useTimelineStore((state) => state.setExportCodec)
+  const setExportEncoder = useTimelineStore((state) => state.setExportEncoder)
   const setExportRange = useTimelineStore((state) => state.setExportRange)
   const cancelExport = useTimelineStore((state) => state.cancelExport)
   const retryExport = useTimelineStore((state) => state.retryExport)
@@ -62,6 +63,27 @@ export function AppShell() {
   const timelineError = useTimelineStore((state) => state.error)
   const clearTimelineError = useTimelineStore((state) => state.clearError)
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
+  const detectedEncoders = useRecorderStore((state) => state.encoders)
+  const loadEncoders = useRecorderStore((state) => state.loadEncoders)
+
+  // Mirror the Rust hardware priority (NVENC, QSV, AMF, Media Foundation) when
+  // surfacing which encoder the Auto export preference would use.
+  const hardwareEncoderName = useMemo(() => {
+    const priority = ["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"]
+    const available = new Set(
+      detectedEncoders.filter((encoder) => encoder.available).map((encoder) => encoder.id),
+    )
+    const best = priority.find((id) => available.has(id))
+    if (!best) return null
+    return detectedEncoders.find((encoder) => encoder.id === best)?.name ?? null
+  }, [detectedEncoders])
+
+  // Load the detected encoder list once so the export view can advertise
+  // hardware availability.
+  useEffect(() => {
+    if (!isTauri()) return
+    void loadEncoders()
+  }, [loadEncoders])
 
   // Load persisted theme/transparency preferences once at startup.
   useEffect(() => {
@@ -254,6 +276,8 @@ export function AppShell() {
                 onCaptionModeChange={setCaptionMode}
                 onPresetChange={setExportPreset}
                 onCodecChange={setExportCodec}
+                onEncoderChange={setExportEncoder}
+                hardwareEncoderName={hardwareEncoderName}
                 onRangeChange={setExportRange}
                 exportJob={activeExportJob}
                 error={timelineError}

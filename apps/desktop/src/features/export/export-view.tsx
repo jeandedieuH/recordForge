@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import type {
+  ExportEncoderPreference,
   ExportPreset,
   ExportRange,
   MediaJob,
@@ -41,6 +42,9 @@ interface ExportViewProps {
   onCaptionModeChange?: (mode: RenderCaptionMode) => void
   onPresetChange?: (preset: ExportPreset) => void
   onCodecChange?: (codec: "h264" | "hevc") => void
+  onEncoderChange?: (encoder: ExportEncoderPreference) => void
+  /** Display name of the detected hardware encoder, or null when none was found. */
+  hardwareEncoderName?: string | null
   onRangeChange?: (range: ExportRange | undefined) => void
   exportJob?: MediaJob | null
   error?: string | null
@@ -154,6 +158,8 @@ export function ExportView({
   onCaptionModeChange,
   onPresetChange,
   onCodecChange,
+  onEncoderChange,
+  hardwareEncoderName = null,
   onRangeChange,
   exportJob = null,
   error = null,
@@ -417,6 +423,31 @@ export function ExportView({
                     <SelectItem value="hevc">H.265 (HEVC)</SelectItem>
                   </SelectContent>
                 </Select>
+              </label>
+              <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                Encoder
+                <Select
+                  value={exportSettings?.encoder ?? "auto"}
+                  onValueChange={(value) => onEncoderChange?.(value as ExportEncoderPreference)}
+                  disabled={isRunning}
+                >
+                  <SelectTrigger
+                    aria-label="Export encoder"
+                    className="border-border bg-background text-xs text-foreground"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (hardware when available)</SelectItem>
+                    <SelectItem value="software">Software (x264/x265)</SelectItem>
+                  </SelectContent>
+                </Select>
+                {hardwareEncoderName ? (
+                  <span className="flex items-center gap-1.5 text-[11px] text-subtle-foreground">
+                    <Zap className="size-3 text-track-screen" aria-hidden />
+                    {hardwareEncoderName} detected and will be used by Auto
+                  </span>
+                ) : null}
               </label>
               <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
                 Caption delivery

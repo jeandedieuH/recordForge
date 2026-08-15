@@ -1,6 +1,7 @@
 import { create } from "zustand"
 import {
   cursorSettingsSchema,
+  type ExportEncoderPreference,
   type ExportPreset,
   type ExportRange,
   type LibraryRecording,
@@ -118,6 +119,7 @@ interface TimelineStore {
   setCaptionMode: (mode: RenderCaptionMode) => void
   setExportPreset: (preset: ExportPreset) => void
   setExportCodec: (codec: "h264" | "hevc") => void
+  setExportEncoder: (encoder: ExportEncoderPreference) => void
   setExportRange: (range: ExportRange | undefined) => void
   cancelExport: () => Promise<void>
   retryExport: () => Promise<void>
@@ -818,6 +820,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = {
       ...project,
       exportSettings: { ...project.exportSettings, codec },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setExportEncoder: (encoder) => {
+    const project = get().project
+    if (!project || project.exportSettings.encoder === encoder) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, encoder },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)

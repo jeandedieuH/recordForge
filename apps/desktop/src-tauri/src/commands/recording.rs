@@ -61,6 +61,9 @@ pub fn init(app: &tauri::App) -> Result<()> {
         sessions_dir.clone(),
         Arc::clone(&db),
     );
+    // The recorder probed encoders at construction; share the result with the
+    // media jobs so export and proxy pick hardware encoders without re-probing.
+    let available_encoders = recorder.available_encoders().to_vec();
 
     let job_manager = JobManager::new(
         app.handle().clone(),
@@ -68,6 +71,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         ffmpeg_path.clone(),
         ffprobe_path.clone(),
         path_policy.clone(),
+        available_encoders,
     );
 
     // Resume any pending or interrupted jobs from a previous run.

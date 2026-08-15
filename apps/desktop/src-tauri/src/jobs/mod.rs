@@ -63,6 +63,9 @@ pub struct JobManager {
     ffmpeg_path: PathBuf,
     ffprobe_path: PathBuf,
     path_policy: PathPolicy,
+    // Encoder ids probed once at startup and shared with the capture path, so
+    // export and proxy jobs pick hardware encoders without re-probing.
+    available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
     start_lock: Arc<Mutex<()>>,
@@ -75,6 +78,7 @@ impl JobManager {
         ffmpeg_path: PathBuf,
         ffprobe_path: PathBuf,
         path_policy: PathPolicy,
+        available_encoders: Vec<String>,
     ) -> Self {
         Self {
             app,
@@ -82,6 +86,7 @@ impl JobManager {
             ffmpeg_path,
             ffprobe_path,
             path_policy,
+            available_encoders,
             active_tokens: Arc::new(Mutex::new(HashMap::new())),
             worker_lock: Arc::new(Mutex::new(())),
             start_lock: Arc::new(Mutex::new(())),
@@ -127,6 +132,7 @@ impl JobManager {
             db: Arc::clone(&self.db),
             ffmpeg_path: self.ffmpeg_path.clone(),
             ffprobe_path: self.ffprobe_path.clone(),
+            available_encoders: self.available_encoders.clone(),
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
             job_id: job.id.clone(),
@@ -293,6 +299,7 @@ impl JobManager {
             db: Arc::clone(&self.db),
             ffmpeg_path: self.ffmpeg_path.clone(),
             ffprobe_path: self.ffprobe_path.clone(),
+            available_encoders: self.available_encoders.clone(),
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
             job_id: job.id,
@@ -414,6 +421,7 @@ impl JobManager {
                 db: Arc::clone(&self.db),
                 ffmpeg_path: self.ffmpeg_path.clone(),
                 ffprobe_path: self.ffprobe_path.clone(),
+                available_encoders: self.available_encoders.clone(),
                 active_tokens: Arc::clone(&self.active_tokens),
                 worker_lock: Arc::clone(&self.worker_lock),
                 job_id: job.id.clone(),
@@ -442,6 +450,7 @@ struct ExportWorker {
     db: Arc<Mutex<rusqlite::Connection>>,
     ffmpeg_path: PathBuf,
     ffprobe_path: PathBuf,
+    available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
     job_id: String,
@@ -477,6 +486,7 @@ impl ExportWorker {
             Arc::clone(&self.db),
             &self.app,
             cancel.clone(),
+            &self.available_encoders,
         );
 
         if cancel.load(Ordering::Relaxed) {
@@ -569,6 +579,7 @@ struct Worker {
     db: Arc<Mutex<rusqlite::Connection>>,
     ffmpeg_path: PathBuf,
     ffprobe_path: PathBuf,
+    available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
     job_id: String,
@@ -680,12 +691,20 @@ impl Worker {
                     }
                 };
 
+                // Reuse the startup encoder probe (shared with capture) so
+                // proxies encode on the GPU when the machine has one.
+                let proxy_encoder = crate::capture::encoder::select_best_encoder(
+                    &self.available_encoders,
+                    &crate::capture::config::default_encoder_priority(),
+                );
+
                 match generate_proxy(
                     &self.ffmpeg_path.to_string_lossy(),
                     &input_path,
                     &proxy_path,
                     &metadata,
                     self.options.proxy_height,
+                    &proxy_encoder,
                     cancel_for_proxy,
                     progress,
                 ) {

@@ -74,6 +74,13 @@ struct ProbeResult {
     supports_cqp: bool,
 }
 
+/// Verify a single encoder id can initialize with a one-second test encode.
+/// Used outside the startup probe for encoder variants (for example hevc
+/// hardware encoders) that are not part of `PROBED_ENCODERS`.
+pub fn probe_encoder(ffmpeg_path: &str, encoder: &str) -> bool {
+    probe_single_encoder(ffmpeg_path, encoder).is_ok()
+}
+
 /// Run a one-second test encode to verify the encoder exists and can be initialized.
 ///
 /// The source is a 320x240 synthetic color video so the test is deterministic

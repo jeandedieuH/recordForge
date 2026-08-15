@@ -141,6 +141,7 @@ describe("project contract", () => {
     expect(parsed).toEqual({
       preset: "default-mp4",
       codec: "h264",
+      encoder: "auto",
       container: "mp4",
       captionMode: "burn-in",
     })

@@ -107,7 +107,9 @@ impl RecordingConfig {
     }
 }
 
-fn default_encoder_priority() -> Vec<String> {
+/// Encoder preference shared by recording, export, and proxy jobs: use any
+/// detected hardware encoder before falling back to software x264.
+pub fn default_encoder_priority() -> Vec<String> {
     vec![
         "h264_nvenc".into(),
         "h264_qsv".into(),

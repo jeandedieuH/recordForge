@@ -215,6 +215,12 @@ impl Recorder {
         }
     }
 
+    /// Encoder ids that passed the startup probe. Shared with the export and
+    /// proxy media jobs so they reuse the same detection instead of re-probing.
+    pub fn available_encoders(&self) -> &[String] {
+        &self.available_encoders
+    }
+
     /// Discover or verify the FFmpeg binary path.
     ///
     /// Prefer calling `media::resolve_executable_with_resource_dir` directly

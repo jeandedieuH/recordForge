@@ -381,9 +381,15 @@ export const exportRangeSchema = z.object({
 export type ExportRange = z.infer<typeof exportRangeSchema>
 
 // Export settings are sent with the job so Rust renders the settings shown by the UI.
+// `encoder` selects hardware acceleration: auto prefers the best detected
+// hardware encoder (NVENC/QSV/AMF/Media Foundation) and falls back to software.
+export const exportEncoderSchema = z.enum(["auto", "software"])
+export type ExportEncoderPreference = z.infer<typeof exportEncoderSchema>
+
 export const exportSettingsSchema = z.object({
   preset: exportPresetSchema.default("default-mp4"),
   codec: z.enum(["h264", "hevc"]).default("h264"),
+  encoder: exportEncoderSchema.default("auto"),
   container: z.literal("mp4").default("mp4"),
   captionMode: renderCaptionModeSchema.default("burn-in"),
   range: exportRangeSchema.nullish(),
