@@ -1319,7 +1319,8 @@ fn feed_cursor_frames(
         // 1. Render active vector annotations onto the pixmap
         for ann in &cursor.annotations {
             if output_ms >= ann.start_ms && output_ms < ann.end_ms {
-                let svg = annotations::build_annotation_svg(ann, cursor.width, cursor.height, output_ms);
+                let svg =
+                    annotations::build_annotation_svg(ann, cursor.width, cursor.height, output_ms);
                 let _ = annotations::render_svg_to_pixmap(&svg, &mut cursor.pixmap);
             }
         }
@@ -1327,7 +1328,12 @@ fn feed_cursor_frames(
         // 2. Render active styled text / title presets onto the pixmap
         for text in &cursor.texts {
             if output_ms >= text.start_ms && output_ms < text.end_ms {
-                let svg = annotations::build_text_preset_svg(text, cursor.width, cursor.height, output_ms);
+                let svg = annotations::build_text_preset_svg(
+                    text,
+                    cursor.width,
+                    cursor.height,
+                    output_ms,
+                );
                 let _ = annotations::render_svg_to_pixmap(&svg, &mut cursor.pixmap);
             }
         }
@@ -1348,9 +1354,7 @@ fn feed_cursor_frames(
             if is_pipe_closed(&error) {
                 return Ok(());
             }
-            return Err(
-                InternalError::Media(format!("write overlay frame: {error}")).into(),
-            );
+            return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
         }
     }
     Ok(())

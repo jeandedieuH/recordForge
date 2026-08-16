@@ -704,7 +704,15 @@ mod tests {
 
     #[test]
     fn test_build_annotation_shapes_all() {
-        let shapes = ["rectangle", "circle", "arrow", "line", "callout", "spotlight", "badge"];
+        let shapes = [
+            "rectangle",
+            "circle",
+            "arrow",
+            "line",
+            "callout",
+            "spotlight",
+            "badge",
+        ];
         for shape in shapes {
             let ann = RenderPlanAnnotation {
                 id: format!("{shape}-1"),

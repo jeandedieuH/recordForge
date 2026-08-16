@@ -148,11 +148,7 @@ pub fn refresh_tray_menu(app: &tauri::AppHandle) {
                 }
             }
             None => {
-                let base_icon = tauri::image::Image::new(
-                    base.rgba(),
-                    base.width(),
-                    base.height(),
-                );
+                let base_icon = tauri::image::Image::new(base.rgba(), base.width(), base.height());
                 if let Err(error) = tray.set_icon(Some(base_icon)) {
                     tracing::warn!(error = ?error, "failed to reset tray icon");
                 }
@@ -472,18 +468,33 @@ mod tests {
 
     #[test]
     fn tooltip_names_each_live_state() {
-        assert_eq!(tray_tooltip(RecorderState::Recording), "recordForge — Recording");
+        assert_eq!(
+            tray_tooltip(RecorderState::Recording),
+            "recordForge — Recording"
+        );
         assert_eq!(tray_tooltip(RecorderState::Paused), "recordForge — Paused");
-        assert_eq!(tray_tooltip(RecorderState::Countdown), "recordForge — Starting…");
-        assert_eq!(tray_tooltip(RecorderState::Finalizing), "recordForge — Saving…");
+        assert_eq!(
+            tray_tooltip(RecorderState::Countdown),
+            "recordForge — Starting…"
+        );
+        assert_eq!(
+            tray_tooltip(RecorderState::Finalizing),
+            "recordForge — Saving…"
+        );
         assert_eq!(tray_tooltip(RecorderState::Idle), "recordForge");
         assert_eq!(tray_tooltip(RecorderState::Completed), "recordForge");
     }
 
     #[test]
     fn badge_marks_recording_and_pause_only() {
-        assert_eq!(tray_badge_color(RecorderState::Recording), Some([239, 68, 68]));
-        assert_eq!(tray_badge_color(RecorderState::Paused), Some([245, 158, 11]));
+        assert_eq!(
+            tray_badge_color(RecorderState::Recording),
+            Some([239, 68, 68])
+        );
+        assert_eq!(
+            tray_badge_color(RecorderState::Paused),
+            Some([245, 158, 11])
+        );
         assert_eq!(tray_badge_color(RecorderState::Idle), None);
         assert_eq!(tray_badge_color(RecorderState::Countdown), None);
         assert_eq!(tray_badge_color(RecorderState::Completed), None);
@@ -506,9 +517,9 @@ mod tests {
         assert_eq!(rgba[center + 3], 255);
 
         // Far corner is outside the badge and must be byte-identical.
-        let far = ((0 * 32 + 0) * 4) as usize;
+        let far = 0; // pixel (0, 0)
         assert_eq!(&rgba[far..far + 4], &original[far..far + 4]);
-        let far_top_right = ((0 * 32 + 31) * 4) as usize;
+        let far_top_right = 31 * 4; // pixel (31, 0)
         assert_eq!(
             &rgba[far_top_right..far_top_right + 4],
             &original[far_top_right..far_top_right + 4]
@@ -522,7 +533,8 @@ mod tests {
         paint_status_badge(&mut rgba, 16, 16, amber);
         // Radius clamps to >= 2, so the corner region must contain badge pixels.
         assert!(
-            rgba.chunks_exact(4).any(|px| px[0] == amber[0] && px[1] == amber[1] && px[2] == amber[2]),
+            rgba.chunks_exact(4)
+                .any(|px| px[0] == amber[0] && px[1] == amber[1] && px[2] == amber[2]),
             "expected at least one fully-covered amber pixel"
         );
     }
