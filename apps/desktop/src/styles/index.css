@@ -34,13 +34,19 @@ html[data-mica="true"] body {
   background-color: transparent;
 }
 
-/* Floating controls & screen boundary transparent canvas */
+/* Floating controls, boundary, countdown & region-picker transparent canvas */
 html[data-floating="true"],
 html[data-floating="true"] body,
 html[data-floating="true"] #root,
 html[data-boundary="true"],
 html[data-boundary="true"] body,
-html[data-boundary="true"] #root {
+html[data-boundary="true"] #root,
+html[data-countdown="true"],
+html[data-countdown="true"] body,
+html[data-countdown="true"] #root,
+html[data-region-picker="true"],
+html[data-region-picker="true"] body,
+html[data-region-picker="true"] #root {
   background: transparent !important;
   background-color: transparent !important;
   overflow: hidden !important;

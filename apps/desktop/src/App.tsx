@@ -37,13 +37,15 @@ function App() {
     const root = document.documentElement
     if (isFloating) root.dataset.floating = "true"
     if (isBoundary) root.dataset.boundary = "true"
+    if (isCountdown) root.dataset.countdown = "true"
     if (isRegionPicker) root.dataset.regionPicker = "true"
     return () => {
       delete root.dataset.floating
       delete root.dataset.boundary
+      delete root.dataset.countdown
       delete root.dataset.regionPicker
     }
-  }, [isBoundary, isFloating, isRegionPicker])
+  }, [isBoundary, isCountdown, isFloating, isRegionPicker])
 
   if (isCountdown) return <CountdownWindow />
   if (isBoundary) return <BoundaryWindow />

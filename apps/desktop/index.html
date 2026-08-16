@@ -11,6 +11,15 @@
       rel="stylesheet"
     />
     <title>RecordForge</title>
+    <script>
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        if (params.get("floating") === "1") document.documentElement.dataset.floating = "true";
+        if (params.get("boundary") === "1") document.documentElement.dataset.boundary = "true";
+        if (params.get("countdown") === "1") document.documentElement.dataset.countdown = "true";
+        if (params.get("region") === "1") document.documentElement.dataset.regionPicker = "true";
+      })();
+    </script>
   </head>
 
   <body>
