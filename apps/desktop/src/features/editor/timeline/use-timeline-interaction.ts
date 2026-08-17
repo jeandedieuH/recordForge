@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import type {
+  AppError,
   CaptionClip,
   ClipTransform,
   ManualZoomSegment,
@@ -9,7 +10,6 @@ import type {
   TimelineState,
   TimelineTrack,
 } from "@recordforge/contracts"
-import type { AppError } from "@recordforge/domain"
 import {
   createInteractionTransaction,
   createMoveClipCommand,

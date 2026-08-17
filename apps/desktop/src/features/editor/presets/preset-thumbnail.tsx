@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { TimelineState } from "@recordforge/contracts"
-import { defaultCursorSettings } from "@recordforge/domain"
+import { defaultCursorSettings, type TimelineState } from "@recordforge/contracts"
 import {
   annotationPresetToShapePreset,
   createAnnotationClipFromPreset,
