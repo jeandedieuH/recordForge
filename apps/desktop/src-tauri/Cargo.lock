@@ -2497,6 +2497,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay-engine"
+version = "0.1.0"
+dependencies = [
+ "resvg",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tiny-skia",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2823,6 +2835,7 @@ dependencies = [
  "chrono",
  "cursor-engine",
  "hex",
+ "overlay-engine",
  "regex",
  "resvg",
  "rusqlite",

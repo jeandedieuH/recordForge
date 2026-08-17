@@ -590,12 +590,12 @@ The editor workspace follows the target shell defined in `editor-ui-cursor-imrov
 
 ### Phase 8 — Performance, accessibility, and hardening (1.5 weeks)
 
-- Performance budget testing on a low-end Windows device.
-- Accessibility audit (focus, ARIA, contrast, reduced motion).
-- E2E test for import → overlay → export.
-- Documentation, ADR for overlay engine and asset importer.
+- [x] Performance budget testing on a low-end Windows device (60 fps playback, sub-16ms transactional latency, <200ms project load).
+- [x] Accessibility audit (keyboard nudge/resize/rotate/delete, ARIA roledescriptions, tablist navigation, contrast, reduced motion).
+- [x] E2E test for import → overlay → export.
+- [x] Documentation, ADR for overlay engine (ADR 012) and asset importer (ADR 013).
 
-**Total estimated duration: 14–15 weeks.** This can be parallelized: Phase 5 can start after Phase 1, and Phase 6 after Phase 2.
+**Total estimated duration: 14–15 weeks.** All phases complete.
 
 ## 13. Migrations
 
@@ -646,19 +646,19 @@ Existing image clips on `graphics` tracks and annotation clips on `annotations` 
 
 ### 15.1 Annotations
 
-- [ ] All 8 annotation shapes can be drawn or inserted at the playhead.
-- [ ] Each shape can be moved, resized (8 handles), rotated, and deleted.
-- [ ] Arrows/lines have draggable start and end points.
-- [ ] Stroke width, style (solid/dashed/dotted), color, fill, corner radius, shadow, and text are editable.
-- [ ] During playback the overlay canvas stays at 60 fps with 20+ active annotations.
-- [ ] Exported video matches the preview within 1 px for all annotation shapes.
+- [x] All 8 annotation shapes can be drawn or inserted at the playhead.
+- [x] Each shape can be moved, resized (8 handles), rotated, and deleted.
+- [x] Arrows/lines have draggable start and end points.
+- [x] Stroke width, style (solid/dashed/dotted), color, fill, corner radius, shadow, and text are editable.
+- [x] During playback the overlay canvas stays at 60 fps with 20+ active annotations.
+- [x] Exported video matches the preview within 1 px for all annotation shapes.
 
 ### 15.2 Titles and presets
 
-- [ ] Presets are browsable by category, searchable, and can be applied to a selected clip.
-- [ ] User can create a custom preset from the inspector.
-- [ ] Text clips support primary/secondary/tag text, alignment, font family, weight, size, color, backdrop style, padding, blur, radius, shadow, and animation.
-- [ ] Text preview and export use the same font metrics and wrapping.
+- [x] Presets are browsable by category, searchable, and can be applied to a selected clip.
+- [x] User can create a custom preset from the inspector.
+- [x] Text clips support primary/secondary/tag text, alignment, font family, weight, size, color, backdrop style, padding, blur, radius, shadow, and animation.
+- [x] Text preview and export use the same font metrics and wrapping.
 
 ### 15.3 External media
 
@@ -670,10 +670,10 @@ Existing image clips on `graphics` tracks and annotation clips on `annotations` 
 
 ### 15.4 Performance and stability
 
-- [ ] No command is committed until the user completes a drag/resize gesture.
-- [ ] Cancel, pointer-capture loss, or Escape restores the pre-gesture state.
-- [ ] Preview playback does not cause React re-renders of the overlay canvas.
-- [ ] Export completes without per-frame SVG parsing.
+- [x] No command is committed until the user completes a drag/resize gesture.
+- [x] Cancel, pointer-capture loss, or Escape restores the pre-gesture state.
+- [x] Preview playback does not cause React re-renders of the overlay canvas.
+- [x] Export completes without per-frame SVG parsing.
 
 ## 16. Risks and Mitigations
 

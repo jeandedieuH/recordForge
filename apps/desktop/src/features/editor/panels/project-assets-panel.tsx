@@ -504,7 +504,14 @@ export function ProjectAssetsPanel() {
                               : `${asset.kind ?? "media"} • ${asset.role}`}
                           </p>
                           {job && (job.status === "pending" || job.status === "running") ? (
-                            <div className="mt-1 flex items-center gap-1 text-[10px] text-info">
+                            <div
+                              role="progressbar"
+                              aria-valuenow={Math.round(job.progress * 100)}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-label={`Derivative progress for ${assetLabel(asset)}`}
+                              className="mt-1 flex items-center gap-1 text-[10px] text-info"
+                            >
                               <LoaderCircle className="size-3 animate-spin" aria-hidden />
                               Derivatives {Math.round(job.progress * 100)}%
                             </div>

@@ -34,6 +34,16 @@ pub fn default_font_bundle() -> Vec<FontSpec> {
     ]
 }
 
+/// Map a semantic font family name to a font family list for SVG/canvas text rendering.
+pub fn resolve_font_family(family: &str) -> &'static str {
+    match family {
+        "serif" => "\"Source Serif 4\", Georgia, serif",
+        "mono" => "\"JetBrains Mono\", Consolas, monospace",
+        "heading" => "Outfit, Inter, sans-serif",
+        _ => "Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif",
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FontCache {
     specs: Vec<FontSpec>,

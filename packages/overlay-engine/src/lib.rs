@@ -69,6 +69,54 @@ impl OverlayEngine {
         self.scene.canvas()
     }
 
+    /// Access the retained image cache.
+    pub fn images(&self) -> &images::ImageCache {
+        self.scene.images()
+    }
+
+    /// Access the retained image cache mutably.
+    pub fn images_mut(&mut self) -> &mut images::ImageCache {
+        self.scene.images_mut()
+    }
+
+    /// Register a decoded pixmap for an image asset.
+    #[cfg(feature = "native-render")]
+    pub fn register_image(&mut self, asset_id: String, pixmap: tiny_skia::Pixmap) {
+        self.scene.images_mut().insert_pixmap(asset_id, pixmap);
+    }
+
+    /// Register and decode a PNG image asset from raw file bytes.
+    #[cfg(feature = "native-render")]
+    pub fn register_image_png(
+        &mut self,
+        asset_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), OverlayError> {
+        self.scene.images_mut().insert_png_bytes(asset_id, bytes)
+    }
+
+    /// Register and decode an SVG image asset from raw file bytes.
+    #[cfg(feature = "native-render")]
+    pub fn register_image_svg(
+        &mut self,
+        asset_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), OverlayError> {
+        self.scene.images_mut().insert_svg_bytes(asset_id, bytes)
+    }
+
+    /// Register an image asset from pre-decoded raw RGBA bytes.
+    #[cfg(feature = "native-render")]
+    pub fn register_image_rgba(
+        &mut self,
+        asset_id: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), OverlayError> {
+        self.scene.images_mut().insert_rgba(asset_id, width, height, rgba)
+    }
+
     /// Evaluate active overlays at a project timeline timestamp.
     pub fn evaluate(&self, time_ms: u64) -> DisplayList {
         evaluator::evaluate(&self.scene, time_ms)
@@ -224,5 +272,167 @@ mod tests {
         assert!(json["canvas"]["width"].is_number());
         assert!(json["items"][0]["startMs"].is_number());
         assert!(json["items"][0]["transform"]["zIndex"].is_number());
+    }
+
+    #[cfg(feature = "native-render")]
+    #[test]
+    fn renders_annotations_and_images_to_pixmap() {
+        let mut engine = OverlayEngine::from_render_plan(plan()).expect("fixture plan is valid");
+        let raw_image_rgba = vec![255u8; 100 * 100 * 4];
+        engine
+            .register_image_rgba("asset-image", 100, 100, &raw_image_rgba)
+            .expect("register raw image");
+
+        let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).expect("create pixmap");
+        engine
+            .render_to_pixmap(200, &mut pixmap)
+            .expect("render to pixmap succeeds");
+
+        // The rendered frame should not be completely empty/transparent
+        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(non_transparent, "rendered pixmap should contain pixels");
+    }
+
+    #[cfg(feature = "native-render")]
+    #[test]
+    fn renders_all_annotation_shapes_to_pixmap() {
+        let shapes = [
+            "rectangle",
+            "rounded-rect",
+            "circle",
+            "arrow",
+            "line",
+            "callout",
+            "spotlight",
+            "badge",
+        ];
+
+        let items: Vec<OverlayItem> = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, shape)| OverlayItem::Annotation {
+                base: OverlayItemBase {
+                    id: format!("ann-{shape}"),
+                    start_ms: 0,
+                    end_ms: 10_000,
+                    transform: OverlayTransform {
+                        x: (i * 100) as f64,
+                        y: 100.0,
+                        width: 150.0,
+                        height: 100.0,
+                        rotation: 5.0,
+                        z_index: i as i32,
+                        ..Default::default()
+                    },
+                    animation: OverlayAnimation::default(),
+                    enabled: true,
+                },
+                details: AnnotationDetails {
+                    annotation_type: shape.to_string(),
+                    end_x: Some((i * 100 + 150) as f64),
+                    end_y: Some(200.0),
+                    stroke_color: "#ef4444".to_string(),
+                    stroke_width: 3.0,
+                    stroke_style: "dashed".to_string(),
+                    fill_color: "#ef4444".to_string(),
+                    fill_opacity: 0.25,
+                    corner_radius: 12.0,
+                    arrow_end_head: "arrow".to_string(),
+                    arrow_start_head: "circle".to_string(),
+                    shadow_enabled: true,
+                    shadow_color: "rgba(0,0,0,0.5)".to_string(),
+                    shadow_blur: 8.0,
+                    text: Some("Label".to_string()),
+                    text_color: "#ffffff".to_string(),
+                    font_size: 14.0,
+                },
+            })
+            .collect();
+
+        let plan = OverlayRenderPlan {
+            version: 1,
+            canvas: OverlayCanvas {
+                width: 1920,
+                height: 1080,
+            },
+            items,
+            assets: Vec::new(),
+            fonts: Vec::new(),
+        };
+
+        let engine = OverlayEngine::from_render_plan(plan).expect("plan with all shapes is valid");
+        let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).expect("create pixmap");
+        engine
+            .render_to_pixmap(1000, &mut pixmap)
+            .expect("render all shapes succeeds");
+
+        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(non_transparent, "all shapes render to pixmap");
+    }
+
+    #[cfg(feature = "native-render")]
+    #[test]
+    fn renders_styled_text_presets_to_pixmap() {
+        let text_item = OverlayItem::Text {
+            base: OverlayItemBase {
+                id: "title-1".to_string(),
+                start_ms: 500,
+                end_ms: 5000,
+                transform: OverlayTransform {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 500.0,
+                    height: 160.0,
+                    z_index: 10,
+                    ..Default::default()
+                },
+                animation: OverlayAnimation::default(),
+                enabled: true,
+            },
+            details: TextDetails {
+                preset_id: "glass-title".to_string(),
+                category: "title".to_string(),
+                primary_text: "High Fidelity Screen Recording".to_string(),
+                secondary_text: Some("Built for desktop export".to_string()),
+                tag_text: Some("PRO V2".to_string()),
+                alignment: "left".to_string(),
+                font_family: "sans".to_string(),
+                font_size: 32.0,
+                font_weight: "700".to_string(),
+                text_color: "#ffffff".to_string(),
+                secondary_text_color: "#94a3b8".to_string(),
+                accent_color: "#38bdf8".to_string(),
+                backdrop_style: "glass".to_string(),
+                backdrop_color: "#0f172a".to_string(),
+                backdrop_opacity: 0.85,
+                backdrop_blur: 16.0,
+                backdrop_border_radius: 16.0,
+                backdrop_padding_x: 24.0,
+                backdrop_padding_y: 18.0,
+                shadow_enabled: true,
+                shadow_color: "rgba(0,0,0,0.5)".to_string(),
+                shadow_blur: 12.0,
+            },
+        };
+
+        let plan = OverlayRenderPlan {
+            version: 1,
+            canvas: OverlayCanvas {
+                width: 1920,
+                height: 1080,
+            },
+            items: vec![text_item],
+            assets: Vec::new(),
+            fonts: Vec::new(),
+        };
+
+        let engine = OverlayEngine::from_render_plan(plan).expect("text plan is valid");
+        let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).expect("create pixmap");
+        engine
+            .render_to_pixmap(1500, &mut pixmap)
+            .expect("render text succeeds");
+
+        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(non_transparent, "text preset renders to pixmap");
     }
 }

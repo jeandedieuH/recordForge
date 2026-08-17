@@ -1009,11 +1009,17 @@ fn render_timeline_composition(
     // The overlay layer (cursor telemetry, vector annotations, styled text presets, graphics)
     // rides on top of every other video filter in a single rawvideo stream.
     let cursor_renderers = build_cursor_renderers(plan, project_id, asset_paths, canvas)?;
+    let has_overlay_plan = plan.overlay_render_plan.is_some();
     let has_annotations = !plan.annotations.is_empty();
     let has_texts = !plan.texts.is_empty();
     let has_images = !plan.images.is_empty();
     let mut cursor_plan = None;
-    if !cursor_renderers.is_empty() || has_annotations || has_texts || has_images {
+    if !cursor_renderers.is_empty()
+        || has_overlay_plan
+        || has_annotations
+        || has_texts
+        || has_images
+    {
         let cursor_input_index = input_assets.len();
         let cursor_label = "with_overlay";
         filters.push(format!(
@@ -1024,9 +1030,8 @@ fn render_timeline_composition(
             canvas,
             plan.duration_ms,
             cursor_renderers,
-            plan.annotations.clone(),
-            plan.texts.clone(),
-            plan.images.clone(),
+            plan,
+            asset_paths,
         )?);
     }
 
@@ -1257,7 +1262,7 @@ fn build_cursor_renderers(
     Ok(renderers)
 }
 
-/// Preallocated state for streaming the combined overlay layer (cursor, annotations, text) into FFmpeg's stdin.
+/// Preallocated state for streaming the combined overlay layer (cursor, annotations, text, images) into FFmpeg's stdin.
 #[allow(dead_code)]
 struct CursorFramePlan {
     fps: u32,
@@ -1266,18 +1271,15 @@ struct CursorFramePlan {
     frame_count: u64,
     pixmap: resvg::tiny_skia::Pixmap,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
-    annotations: Vec<RenderPlanAnnotation>,
-    texts: Vec<RenderPlanText>,
-    images: Vec<RenderPlanImage>,
+    overlay_engine: Option<overlay_engine::OverlayEngine>,
 }
 
 fn prepare_cursor_frame_plan(
     canvas: &cursor::RenderCanvas,
     duration_ms: u64,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
-    annotations: Vec<RenderPlanAnnotation>,
-    texts: Vec<RenderPlanText>,
-    images: Vec<RenderPlanImage>,
+    plan: &RenderPlan,
+    asset_paths: &HashMap<String, PathBuf>,
 ) -> Result<CursorFramePlan> {
     let pixmap = resvg::tiny_skia::Pixmap::new(canvas.width, canvas.height)
         .ok_or_else(|| InternalError::Media("overlay frame is too large".into()))?;
@@ -1287,6 +1289,52 @@ fn prepare_cursor_frame_plan(
         .checked_div(1000)
         .unwrap_or(1)
         .max(1);
+
+    let overlay_plan: Option<overlay_engine::OverlayRenderPlan> =
+        if let Some(val) = &plan.overlay_render_plan {
+            serde_json::from_value(val.clone()).ok()
+        } else if !plan.annotations.is_empty() || !plan.texts.is_empty() || !plan.images.is_empty() {
+            Some(annotations::build_overlay_render_plan_from_legacy(
+                canvas.width,
+                canvas.height,
+                &plan.annotations,
+                &plan.texts,
+                &plan.images,
+            ))
+        } else {
+            None
+        };
+
+    let mut overlay_engine = None;
+    if let Some(mut parsed_plan) = overlay_plan {
+        parsed_plan.canvas = overlay_engine::OverlayCanvas {
+            width: canvas.width,
+            height: canvas.height,
+        };
+        match overlay_engine::OverlayEngine::from_render_plan(parsed_plan) {
+            Ok(mut engine) => {
+                for asset in plan.images.iter().map(|img| &img.asset_id) {
+                    if let Some(path) = asset_paths.get(asset) {
+                        register_overlay_image_asset(&mut engine, asset, path);
+                    }
+                }
+                if let Some(val) = &plan.overlay_render_plan {
+                    if let Ok(plan_obj) = serde_json::from_value::<overlay_engine::OverlayRenderPlan>(val.clone()) {
+                        for asset in &plan_obj.assets {
+                            if let Some(path) = asset_paths.get(&asset.id) {
+                                register_overlay_image_asset(&mut engine, &asset.id, path);
+                            }
+                        }
+                    }
+                }
+                overlay_engine = Some(engine);
+            }
+            Err(e) => {
+                tracing::warn!("failed to build overlay engine for export: {e}");
+            }
+        }
+    }
+
     Ok(CursorFramePlan {
         fps: canvas.fps,
         width: canvas.width,
@@ -1294,10 +1342,26 @@ fn prepare_cursor_frame_plan(
         frame_count,
         pixmap,
         renderers,
-        annotations,
-        texts,
-        images,
+        overlay_engine,
     })
+}
+
+fn register_overlay_image_asset(
+    engine: &mut overlay_engine::OverlayEngine,
+    asset_id: &str,
+    path: &Path,
+) {
+    if crate::media::svg::is_svg_path(path) {
+        if let Ok(svg_bytes) = crate::media::svg::read_safe_svg(path) {
+            if let Err(e) = engine.register_image_svg(asset_id, &svg_bytes) {
+                tracing::warn!(%asset_id, "failed to decode overlay SVG: {e}");
+            }
+        }
+    } else if let Ok(bytes) = std::fs::read(path) {
+        if let Err(e) = engine.register_image_png(asset_id, &bytes) {
+            tracing::warn!(%asset_id, "failed to decode overlay PNG: {e}");
+        }
+    }
 }
 
 /// Stream every composited overlay frame into FFmpeg's stdin.
@@ -1318,29 +1382,14 @@ fn feed_cursor_frames(
         let output_ms = frame_index.saturating_mul(1000) / cursor.fps as u64;
         cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
 
-        // 1. Render active vector annotations onto the pixmap
-        for ann in &cursor.annotations {
-            if output_ms >= ann.start_ms && output_ms < ann.end_ms {
-                let svg =
-                    annotations::build_annotation_svg(ann, cursor.width, cursor.height, output_ms);
-                let _ = annotations::render_svg_to_pixmap(&svg, &mut cursor.pixmap);
+        // 1. Render active overlay items (annotations, text presets, images)
+        if let Some(engine) = &cursor.overlay_engine {
+            if let Err(err) = engine.render_to_pixmap(output_ms, &mut cursor.pixmap) {
+                tracing::warn!(%output_ms, "failed to render overlay frame: {err}");
             }
         }
 
-        // 2. Render active styled text / title presets onto the pixmap
-        for text in &cursor.texts {
-            if output_ms >= text.start_ms && output_ms < text.end_ms {
-                let svg = annotations::build_text_preset_svg(
-                    text,
-                    cursor.width,
-                    cursor.height,
-                    output_ms,
-                );
-                let _ = annotations::render_svg_to_pixmap(&svg, &mut cursor.pixmap);
-            }
-        }
-
-        // 3. Render cursor telemetry (if active at timestamp)
+        // 2. Render cursor telemetry (if active at timestamp)
         if let Some((_, _, renderer)) = cursor
             .renderers
             .iter_mut()
@@ -2702,5 +2751,253 @@ mod tests {
         assert!(!is_progress_line(
             "C:/recordings/demo.mp4: Invalid argument"
         ));
+    }
+
+    #[test]
+    fn prepare_cursor_frame_plan_initializes_overlay_engine_with_unified_plan() {
+        let mut plan = valid_plan();
+        plan.overlay_render_plan = Some(serde_json::json!({
+            "version": 1,
+            "canvas": { "width": 1920, "height": 1080 },
+            "items": [
+                {
+                    "kind": "annotation",
+                    "id": "ann-rect",
+                    "startMs": 500,
+                    "endMs": 3000,
+                    "transform": {
+                        "x": 100.0,
+                        "y": 100.0,
+                        "width": 300.0,
+                        "height": 200.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.5,
+                        "anchorY": 0.5,
+                        "zIndex": 10,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 300,
+                        "outDurationMs": 300,
+                        "easing": "expo-out"
+                    },
+                    "enabled": true,
+                    "annotationType": "rounded-rect",
+                    "strokeColor": "#38bdf8",
+                    "strokeWidth": 4.0,
+                    "strokeStyle": "solid",
+                    "fillColor": "#38bdf8",
+                    "fillOpacity": 0.2,
+                    "cornerRadius": 16.0,
+                    "arrowEndHead": "none",
+                    "arrowStartHead": "none",
+                    "shadowEnabled": true,
+                    "shadowColor": "rgba(0,0,0,0.5)",
+                    "shadowBlur": 10.0,
+                    "textColor": "#ffffff",
+                    "fontSize": 16.0
+                },
+                {
+                    "kind": "text",
+                    "id": "text-title",
+                    "startMs": 1000,
+                    "endMs": 4000,
+                    "transform": {
+                        "x": 200.0,
+                        "y": 400.0,
+                        "width": 500.0,
+                        "height": 150.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.5,
+                        "anchorY": 0.5,
+                        "zIndex": 20,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 300,
+                        "outDurationMs": 300,
+                        "easing": "expo-out"
+                    },
+                    "enabled": true,
+                    "presetId": "glass-title",
+                    "category": "title",
+                    "primaryText": "Export Parity Title",
+                    "secondaryText": "Rendered with overlay engine",
+                    "tagText": "LIVE",
+                    "alignment": "left",
+                    "fontFamily": "sans",
+                    "fontSize": 32.0,
+                    "fontWeight": "700",
+                    "textColor": "#ffffff",
+                    "secondaryTextColor": "#94a3b8",
+                    "accentColor": "#38bdf8",
+                    "backdropStyle": "glass",
+                    "backdropColor": "#0f172a",
+                    "backdropOpacity": 0.8,
+                    "backdropBlur": 16.0,
+                    "backdropBorderRadius": 12.0,
+                    "backdropPaddingX": 20.0,
+                    "backdropPaddingY": 16.0,
+                    "shadowEnabled": true,
+                    "shadowColor": "rgba(0,0,0,0.5)",
+                    "shadowBlur": 8.0
+                }
+            ],
+            "assets": [],
+            "fonts": []
+        }));
+
+        let canvas = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            ..Default::default()
+        };
+        let asset_paths = HashMap::new();
+        let frame_plan = prepare_cursor_frame_plan(
+            &canvas,
+            5000,
+            Vec::new(),
+            &plan,
+            &asset_paths,
+        )
+        .expect("prepare frame plan succeeds");
+
+        assert!(frame_plan.overlay_engine.is_some());
+        let engine = frame_plan.overlay_engine.unwrap();
+        let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).unwrap();
+        engine.render_to_pixmap(1500, &mut pixmap).expect("render overlay frame");
+        let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(has_content, "rendered frame contains active overlay content");
+    }
+
+    #[test]
+    fn prepare_cursor_frame_plan_loads_svg_and_png_image_assets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let svg_path = dir.path().join("logo.svg");
+        let png_path = dir.path().join("badge.png");
+
+        std::fs::write(
+            &svg_path,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#38bdf8"/></svg>"##,
+        )
+        .expect("write SVG");
+
+        // Generate minimal valid PNG
+        let mut sample_pixmap = tiny_skia::Pixmap::new(60, 60).unwrap();
+        sample_pixmap.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
+        let png_bytes = sample_pixmap.encode_png().expect("encode PNG");
+        std::fs::write(&png_path, png_bytes).expect("write PNG");
+
+        let mut plan = valid_plan();
+        plan.overlay_render_plan = Some(serde_json::json!({
+            "version": 1,
+            "canvas": { "width": 1920, "height": 1080 },
+            "items": [
+                {
+                    "kind": "image",
+                    "id": "img-svg",
+                    "startMs": 0,
+                    "endMs": 5000,
+                    "transform": {
+                        "x": 50.0,
+                        "y": 50.0,
+                        "width": 200.0,
+                        "height": 100.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.5,
+                        "anchorY": 0.5,
+                        "zIndex": 10,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 300,
+                        "outDurationMs": 300,
+                        "easing": "expo-out"
+                    },
+                    "enabled": true,
+                    "assetId": "asset-svg",
+                    "fit": "contain",
+                    "borderRadius": 8.0,
+                    "borderWidth": 2.0,
+                    "borderColor": "#ffffff",
+                    "shadowEnabled": false,
+                    "shadowColor": "#000000",
+                    "shadowBlur": 0.0
+                },
+                {
+                    "kind": "image",
+                    "id": "img-png",
+                    "startMs": 0,
+                    "endMs": 5000,
+                    "transform": {
+                        "x": 300.0,
+                        "y": 50.0,
+                        "width": 120.0,
+                        "height": 120.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.5,
+                        "anchorY": 0.5,
+                        "zIndex": 20,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 300,
+                        "outDurationMs": 300,
+                        "easing": "expo-out"
+                    },
+                    "enabled": true,
+                    "assetId": "asset-png",
+                    "fit": "cover",
+                    "borderRadius": 12.0,
+                    "borderWidth": 1.0,
+                    "borderColor": "#38bdf8",
+                    "shadowEnabled": true,
+                    "shadowColor": "rgba(0,0,0,0.5)",
+                    "shadowBlur": 8.0
+                }
+            ],
+            "assets": [
+                { "id": "asset-svg", "kind": "image" },
+                { "id": "asset-png", "kind": "image" }
+            ],
+            "fonts": []
+        }));
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-svg".into(), svg_path);
+        asset_paths.insert("asset-png".into(), png_path);
+
+        let canvas = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            ..Default::default()
+        };
+        let frame_plan = prepare_cursor_frame_plan(
+            &canvas,
+            5000,
+            Vec::new(),
+            &plan,
+            &asset_paths,
+        )
+        .expect("prepare frame plan succeeds");
+
+        assert!(frame_plan.overlay_engine.is_some());
+        let engine = frame_plan.overlay_engine.unwrap();
+        assert_eq!(engine.images().len(), 2);
+
+        let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).unwrap();
+        engine.render_to_pixmap(1000, &mut pixmap).expect("render image overlays");
+        let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(has_content, "rendered image overlay frame contains pixels");
     }
 }

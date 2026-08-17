@@ -1,4 +1,6 @@
+#[cfg(test)]
 use resvg::tiny_skia::{Pixmap, Transform};
+#[cfg(test)]
 use resvg::usvg;
 
 /// Vector shape or annotation entry in the render plan.
@@ -230,7 +232,7 @@ fn default_fit() -> String {
     "contain".into()
 }
 
-/// Calculate transition opacity factor for clip intro and outro animations.
+#[cfg(test)]
 fn calculate_animation_opacity(
     current_ms: u64,
     start_ms: u64,
@@ -258,7 +260,7 @@ fn calculate_animation_opacity(
     opacity
 }
 
-/// Escape XML entities for safe SVG text embedding.
+#[cfg(test)]
 fn escape_xml(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -268,7 +270,7 @@ fn escape_xml(input: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Convert stroke style to SVG stroke-dasharray attribute.
+#[cfg(test)]
 fn stroke_dasharray_attr(style: &str, _width: f64) -> &'static str {
     match style {
         "dashed" => " stroke-dasharray=\"8 6\"",
@@ -278,6 +280,7 @@ fn stroke_dasharray_attr(style: &str, _width: f64) -> &'static str {
 }
 
 /// Build full SVG markup for an active vector annotation.
+#[cfg(test)]
 pub fn build_annotation_svg(
     ann: &RenderPlanAnnotation,
     canvas_w: u32,
@@ -511,6 +514,7 @@ pub fn build_annotation_svg(
 }
 
 /// Build full SVG markup for an active styled title / text preset.
+#[cfg(test)]
 pub fn build_text_preset_svg(
     text: &RenderPlanText,
     canvas_w: u32,
@@ -649,12 +653,226 @@ pub fn build_text_preset_svg(
 }
 
 /// Render a generated SVG document onto a tiny-skia Pixmap buffer.
+#[cfg(test)]
 pub fn render_svg_to_pixmap(svg: &str, target: &mut Pixmap) -> Result<(), String> {
     let options = usvg::Options::default();
     let tree =
         usvg::Tree::from_str(svg, &options).map_err(|e| format!("parse overlay SVG: {e}"))?;
     resvg::render(&tree, Transform::identity(), &mut target.as_mut());
     Ok(())
+}
+
+/// Convert legacy separate arrays of annotations, text presets, and image overlays
+/// into a unified `OverlayRenderPlan` for the canonical `overlay-engine`.
+pub fn build_overlay_render_plan_from_legacy(
+    canvas_w: u32,
+    canvas_h: u32,
+    annotations: &[RenderPlanAnnotation],
+    texts: &[RenderPlanText],
+    images: &[RenderPlanImage],
+) -> overlay_engine::OverlayRenderPlan {
+    let mut items = Vec::new();
+
+    for (idx, img) in images.iter().enumerate() {
+        let anim_in = match img.animation_in.as_str() {
+            "none" => overlay_engine::OverlayAnimationType::None,
+            "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
+            "scale-down" => overlay_engine::OverlayAnimationType::ScaleDown,
+            "slide-up" => overlay_engine::OverlayAnimationType::SlideUp,
+            "slide-down" => overlay_engine::OverlayAnimationType::SlideDown,
+            _ => overlay_engine::OverlayAnimationType::Fade,
+        };
+        let anim_out = match img.animation_out.as_str() {
+            "none" => overlay_engine::OverlayAnimationOutType::None,
+            "scale-up" => overlay_engine::OverlayAnimationOutType::ScaleUp,
+            "scale-down" => overlay_engine::OverlayAnimationOutType::ScaleDown,
+            "slide-up" => overlay_engine::OverlayAnimationOutType::SlideUp,
+            "slide-down" => overlay_engine::OverlayAnimationOutType::SlideDown,
+            _ => overlay_engine::OverlayAnimationOutType::Fade,
+        };
+        items.push(overlay_engine::OverlayItem::Image {
+            base: overlay_engine::OverlayItemBase {
+                id: img.id.clone(),
+                start_ms: img.start_ms,
+                end_ms: img.end_ms,
+                transform: overlay_engine::OverlayTransform {
+                    x: img.x,
+                    y: img.y,
+                    width: img.width,
+                    height: img.height,
+                    rotation: 0.0,
+                    anchor_x: 0.5,
+                    anchor_y: 0.5,
+                    z_index: idx as i32,
+                    opacity: img.opacity,
+                },
+                animation: overlay_engine::OverlayAnimation {
+                    in_type: anim_in,
+                    out_type: anim_out,
+                    in_duration_ms: 350,
+                    out_duration_ms: 350,
+                    easing: Default::default(),
+                },
+                enabled: true,
+            },
+            details: overlay_engine::ImageDetails {
+                asset_id: img.asset_id.clone(),
+                fit: img.fit.clone(),
+                border_radius: img.border_radius,
+                border_width: img.border_width,
+                border_color: img.border_color.clone(),
+                shadow_enabled: img.shadow_enabled,
+                shadow_color: img.shadow_color.clone(),
+                shadow_blur: img.shadow_blur,
+            },
+        });
+    }
+
+    for (idx, ann) in annotations.iter().enumerate() {
+        let anim_in = match ann.animation_in.as_str() {
+            "none" => overlay_engine::OverlayAnimationType::None,
+            "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
+            "scale-down" => overlay_engine::OverlayAnimationType::ScaleDown,
+            "slide-up" => overlay_engine::OverlayAnimationType::SlideUp,
+            "slide-down" => overlay_engine::OverlayAnimationType::SlideDown,
+            "draw" => overlay_engine::OverlayAnimationType::Draw,
+            _ => overlay_engine::OverlayAnimationType::Fade,
+        };
+        let anim_out = match ann.animation_out.as_str() {
+            "none" => overlay_engine::OverlayAnimationOutType::None,
+            "scale-up" => overlay_engine::OverlayAnimationOutType::ScaleUp,
+            "scale-down" => overlay_engine::OverlayAnimationOutType::ScaleDown,
+            "slide-up" => overlay_engine::OverlayAnimationOutType::SlideUp,
+            "slide-down" => overlay_engine::OverlayAnimationOutType::SlideDown,
+            _ => overlay_engine::OverlayAnimationOutType::Fade,
+        };
+        items.push(overlay_engine::OverlayItem::Annotation {
+            base: overlay_engine::OverlayItemBase {
+                id: ann.id.clone(),
+                start_ms: ann.start_ms,
+                end_ms: ann.end_ms,
+                transform: overlay_engine::OverlayTransform {
+                    x: ann.x,
+                    y: ann.y,
+                    width: ann.width,
+                    height: ann.height,
+                    rotation: 0.0,
+                    anchor_x: 0.5,
+                    anchor_y: 0.5,
+                    z_index: 1_000_000 + idx as i32,
+                    opacity: 1.0,
+                },
+                animation: overlay_engine::OverlayAnimation {
+                    in_type: anim_in,
+                    out_type: anim_out,
+                    in_duration_ms: 350,
+                    out_duration_ms: 350,
+                    easing: Default::default(),
+                },
+                enabled: true,
+            },
+            details: overlay_engine::AnnotationDetails {
+                annotation_type: ann.annotation_type.clone(),
+                end_x: ann.end_x,
+                end_y: ann.end_y,
+                stroke_color: ann.stroke_color.clone(),
+                stroke_width: ann.stroke_width,
+                stroke_style: ann.stroke_style.clone(),
+                fill_color: ann.fill_color.clone(),
+                fill_opacity: ann.fill_opacity,
+                corner_radius: ann.corner_radius,
+                arrow_end_head: ann.arrow_end_head.clone(),
+                arrow_start_head: ann.arrow_start_head.clone(),
+                shadow_enabled: ann.shadow_enabled,
+                shadow_color: ann.shadow_color.clone(),
+                shadow_blur: ann.shadow_blur,
+                text: ann.text.clone(),
+                text_color: ann.text_color.clone(),
+                font_size: ann.font_size,
+            },
+        });
+    }
+
+    for (idx, txt) in texts.iter().enumerate() {
+        let anim_in = match txt.animation_in.as_str() {
+            "none" => overlay_engine::OverlayAnimationType::None,
+            "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
+            "scale-down" => overlay_engine::OverlayAnimationType::ScaleDown,
+            "slide-up" => overlay_engine::OverlayAnimationType::SlideUp,
+            "slide-down" => overlay_engine::OverlayAnimationType::SlideDown,
+            "typewriter" => overlay_engine::OverlayAnimationType::Typewriter,
+            _ => overlay_engine::OverlayAnimationType::Fade,
+        };
+        let anim_out = match txt.animation_out.as_str() {
+            "none" => overlay_engine::OverlayAnimationOutType::None,
+            "scale-up" => overlay_engine::OverlayAnimationOutType::ScaleUp,
+            "scale-down" => overlay_engine::OverlayAnimationOutType::ScaleDown,
+            "slide-up" => overlay_engine::OverlayAnimationOutType::SlideUp,
+            "slide-down" => overlay_engine::OverlayAnimationOutType::SlideDown,
+            _ => overlay_engine::OverlayAnimationOutType::Fade,
+        };
+        items.push(overlay_engine::OverlayItem::Text {
+            base: overlay_engine::OverlayItemBase {
+                id: txt.id.clone(),
+                start_ms: txt.start_ms,
+                end_ms: txt.end_ms,
+                transform: overlay_engine::OverlayTransform {
+                    x: txt.x,
+                    y: txt.y,
+                    width: txt.width,
+                    height: txt.height,
+                    rotation: 0.0,
+                    anchor_x: 0.5,
+                    anchor_y: 0.5,
+                    z_index: 2_000_000 + idx as i32,
+                    opacity: 1.0,
+                },
+                animation: overlay_engine::OverlayAnimation {
+                    in_type: anim_in,
+                    out_type: anim_out,
+                    in_duration_ms: 350,
+                    out_duration_ms: 350,
+                    easing: Default::default(),
+                },
+                enabled: true,
+            },
+            details: overlay_engine::TextDetails {
+                preset_id: txt.preset_id.clone().unwrap_or_else(|| "default-title".into()),
+                category: txt.category.clone(),
+                primary_text: txt.primary_text.clone(),
+                secondary_text: txt.secondary_text.clone(),
+                tag_text: txt.tag_text.clone(),
+                alignment: txt.alignment.clone(),
+                font_family: txt.font_family.clone(),
+                font_size: txt.font_size,
+                font_weight: txt.font_weight.clone(),
+                text_color: txt.text_color.clone(),
+                secondary_text_color: txt.secondary_text_color.clone(),
+                accent_color: txt.accent_color.clone(),
+                backdrop_style: txt.backdrop_style.clone(),
+                backdrop_color: txt.backdrop_color.clone(),
+                backdrop_opacity: txt.backdrop_opacity,
+                backdrop_blur: txt.backdrop_blur,
+                backdrop_border_radius: txt.backdrop_border_radius,
+                backdrop_padding_x: txt.backdrop_padding_x,
+                backdrop_padding_y: txt.backdrop_padding_y,
+                shadow_enabled: txt.shadow_enabled,
+                shadow_color: txt.shadow_color.clone(),
+                shadow_blur: txt.shadow_blur,
+            },
+        });
+    }
+
+    overlay_engine::OverlayRenderPlan {
+        version: 1,
+        canvas: overlay_engine::OverlayCanvas {
+            width: canvas_w,
+            height: canvas_h,
+        },
+        items,
+        assets: Vec::new(),
+        fonts: Vec::new(),
+    }
 }
 
 #[cfg(test)]

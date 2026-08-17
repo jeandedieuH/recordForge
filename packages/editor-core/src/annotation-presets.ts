@@ -72,6 +72,7 @@ export type AnnotationPresetValues = Omit<AnnotationShapePreset, "name" | "descr
 export type AnnotationPresetRecord = PresetDefinition<AnnotationPresetValues>
 
 export const annotationPresetValuesSchema = z.object({
+  presetId: z.string().optional(),
   type: annotationTypeSchema,
   defaultWidth: z.number().positive(),
   defaultHeight: z.number().positive(),
@@ -111,7 +112,7 @@ export function annotationPresetToShapePreset(
 ): AnnotationShapePreset {
   return {
     ...preset.definition,
-    presetId: preset.id,
+    presetId: preset.definition.presetId ?? preset.id,
     name: preset.name,
     description: preset.description,
   }
@@ -292,13 +293,15 @@ export function annotationPresetFromClip(
   clip: AnnotationClip,
   metadata: { name: string; description: string; category?: string; tags?: string[] },
 ): AnnotationPresetRecord {
+  const id = `custom-${clip.id}`
   return {
-    id: `custom-${clip.id}`,
+    id,
     name: metadata.name,
     description: metadata.description,
     category: metadata.category ?? annotationCategoryForType(clip.annotationType),
     tags: metadata.tags ?? [clip.annotationType],
     definition: {
+      presetId: id,
       type: clip.annotationType,
       defaultWidth: clip.width,
       defaultHeight: clip.height,

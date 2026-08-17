@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::animation::OverlayAnimation;
 use crate::fonts::FontCache;
 use crate::fonts::FontSpec;
+use crate::images::ImageCache;
 use crate::OverlayError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -342,6 +343,7 @@ pub(crate) struct Scene {
     items: Vec<OverlayItem>,
     assets: Vec<OverlayAsset>,
     fonts: FontCache,
+    images: ImageCache,
 }
 
 impl Scene {
@@ -387,6 +389,7 @@ impl Scene {
             items: plan.items,
             assets: plan.assets,
             fonts: FontCache::new(plan.fonts),
+            images: ImageCache::new(),
         })
     }
 
@@ -406,6 +409,14 @@ impl Scene {
     #[allow(dead_code)]
     pub(crate) fn fonts(&self) -> &FontCache {
         &self.fonts
+    }
+
+    pub(crate) fn images(&self) -> &ImageCache {
+        &self.images
+    }
+
+    pub(crate) fn images_mut(&mut self) -> &mut ImageCache {
+        &mut self.images
     }
 }
 

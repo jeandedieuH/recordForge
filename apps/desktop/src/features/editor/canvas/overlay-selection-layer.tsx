@@ -1,5 +1,7 @@
 import type { OverlayClip, OverlayHandle, OverlayResizeHandle } from "@recordforge/editor-core"
+import { createDeleteClipCommand } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
+import { useTimelineStore } from "../../../stores/timeline-store"
 import { usePlayheadMs } from "../timeline/use-playback-state"
 import type { OverlayInteraction } from "./use-overlay-interaction"
 
@@ -10,6 +12,7 @@ interface OverlaySelectionLayerProps {
   selectedClipId?: string | null
   interaction: OverlayInteraction
   onSelectClip: (clip: OverlayClip) => void
+  onDeleteClip?: (clip: OverlayClip) => void
   drawMode?: boolean
   className?: string
 }
@@ -64,14 +67,82 @@ export function OverlaySelectionLayer({
   selectedClipId,
   interaction,
   onSelectClip,
+  onDeleteClip,
   drawMode = false,
   className,
 }: OverlaySelectionLayerProps) {
   const playheadMs = usePlayheadMs()
+  const execute = useTimelineStore((state) => state.execute)
   const visibleClips = clips
     .filter((clip) => isActive(clip, playheadMs))
     .slice()
     .sort((left, right) => effectiveZIndex(left) - effectiveZIndex(right))
+
+  function handleClipKeyDown(event: React.KeyboardEvent<HTMLDivElement>, clip: OverlayClip) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault()
+      onSelectClip(clip)
+      return
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault()
+      interaction.cancel()
+      return
+    }
+
+    if (clip.locked) return
+
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault()
+      if (onDeleteClip) {
+        onDeleteClip(clip)
+      } else {
+        execute(createDeleteClipCommand(clip.id))
+      }
+      return
+    }
+
+    if (event.key === "r" || event.key === "R") {
+      event.preventDefault()
+      const delta = event.shiftKey ? -15 : 15
+      interaction.rotateSelected(clip.id, delta)
+      return
+    }
+
+    const step = event.shiftKey ? 10 : 1
+    const isModifier = event.ctrlKey || event.metaKey
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault()
+      if (isModifier) {
+        interaction.resizeSelected(clip.id, -step, 0)
+      } else {
+        interaction.nudgeSelected(clip.id, -step, 0)
+      }
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault()
+      if (isModifier) {
+        interaction.resizeSelected(clip.id, step, 0)
+      } else {
+        interaction.nudgeSelected(clip.id, step, 0)
+      }
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault()
+      if (isModifier) {
+        interaction.resizeSelected(clip.id, 0, -step)
+      } else {
+        interaction.nudgeSelected(clip.id, 0, -step)
+      }
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault()
+      if (isModifier) {
+        interaction.resizeSelected(clip.id, 0, step)
+      } else {
+        interaction.nudgeSelected(clip.id, 0, step)
+      }
+    }
+  }
 
   return (
     <div
@@ -92,9 +163,11 @@ export function OverlaySelectionLayer({
                 key={clip.id}
                 role="button"
                 tabIndex={0}
-                aria-label={overlayLabel(clip)}
+                aria-roledescription="overlay clip"
+                aria-label={overlayDetailedLabel(clip)}
+                aria-pressed={isSelected}
                 className={cn(
-                  "absolute pointer-events-auto select-none outline-none",
+                  "absolute pointer-events-auto select-none outline-none motion-reduce:transition-none",
                   !clip.locked && "cursor-move",
                   clip.locked && "cursor-default",
                 )}
@@ -111,12 +184,7 @@ export function OverlaySelectionLayer({
                   onSelectClip(clip)
                 }}
                 onFocus={() => onSelectClip(clip)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault()
-                    onSelectClip(clip)
-                  }
-                }}
+                onKeyDown={(event) => handleClipKeyDown(event, clip)}
                 onPointerDown={(event) => {
                   event.stopPropagation()
                   onSelectClip(clip)
@@ -303,3 +371,12 @@ function overlayLabel(clip: OverlayClip): string {
   if (clip.kind === "text") return `Title: ${clip.primaryText}`
   return "Image overlay"
 }
+
+function overlayDetailedLabel(clip: OverlayClip): string {
+  const base = overlayLabel(clip)
+  const pos = `X ${Math.round(clip.x)}px, Y ${Math.round(clip.y)}px, ${Math.round(clip.width)} by ${Math.round(clip.height)}px`
+  const rot = clip.rotation !== 0 ? `, rotated ${Math.round(clip.rotation)} degrees` : ""
+  const lock = clip.locked ? ", locked" : ""
+  return `${base}, ${pos}${rot}${lock}. Use arrow keys to nudge, Ctrl+arrow to resize, R to rotate, Delete to remove.`
+}
+

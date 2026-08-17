@@ -4,7 +4,10 @@ import {
   ANNOTATION_PRESET_CATALOG,
   ANNOTATION_SHAPES,
   annotationPresetFromClip,
+  annotationPresetToShapePreset,
+  annotationPresetValuesSchema,
   createAnnotationClip,
+  type AnnotationPresetValues,
 } from "../annotation-presets"
 import {
   TEXT_PRESET_CATALOG,
@@ -65,6 +68,10 @@ describe("PresetRegistry", () => {
     expect(TEXT_PRESET_CATALOG.presets).toHaveLength(TEXT_PRESETS.length)
     expect(ANNOTATION_PRESET_CATALOG.categories).toContain("pointer")
     expect(TEXT_PRESET_CATALOG.categories).toContain("lower-third")
+
+    for (const preset of ANNOTATION_PRESET_CATALOG.presets) {
+      expect(preset.definition.presetId).toBe(preset.id)
+    }
   })
 
   it("searches categories, descriptions, tags, and favorites", async () => {
@@ -114,6 +121,7 @@ describe("PresetRegistry", () => {
     expect(annotationPreset.definition).not.toHaveProperty("x")
     expect(annotationPreset.definition).not.toHaveProperty("startMs")
     expect(annotationPreset.definition.defaultFillColor).toBe(annotation.fillColor)
+    expect(annotationPreset.definition.presetId).toBe(annotationPreset.id)
 
     const text = createTextClipFromPreset("title-modern", { startMs: 1_000 })
     const textPreset = textPresetFromClip(text, {
@@ -123,5 +131,33 @@ describe("PresetRegistry", () => {
     expect(textPreset.definition).not.toHaveProperty("x")
     expect(textPreset.definition).not.toHaveProperty("startMs")
     expect(textPreset.definition.defaultPrimaryText).toBe(text.primaryText)
+  })
+
+  it("round-trips custom annotation presets with presetId preserved in definition", async () => {
+    const registry = new PresetRegistry<AnnotationPresetValues>(ANNOTATION_PRESET_CATALOG, {
+      definitionSchema: annotationPresetValuesSchema,
+    })
+    const clip = createAnnotationClip("spotlight", {
+      startMs: 500,
+      durationMs: 2000,
+      strokeWidth: 6,
+    })
+    const customRecord = annotationPresetFromClip(clip, {
+      name: "My Custom Spotlight",
+      description: "A spotlight preset",
+    })
+
+    const saved = await registry.saveCustomPreset(customRecord)
+    expect(saved.id).toBe(customRecord.id)
+    expect(saved.definition.presetId).toBe(customRecord.id)
+
+    const retrieved = registry.getPresetById(saved.id)
+    expect(retrieved).toBeDefined()
+    expect(retrieved?.definition.presetId).toBe(customRecord.id)
+
+    if (retrieved) {
+      const shape = annotationPresetToShapePreset(retrieved)
+      expect(shape.presetId).toBe(customRecord.id)
+    }
   })
 })

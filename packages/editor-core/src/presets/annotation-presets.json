@@ -9,6 +9,7 @@
       "category": "frame",
       "tags": ["rectangle", "frame", "highlight"],
       "definition": {
+        "presetId": "rectangle",
         "type": "rectangle",
         "defaultWidth": 260,
         "defaultHeight": 160,
@@ -29,6 +30,7 @@
       "category": "frame",
       "tags": ["rounded", "card", "frame"],
       "definition": {
+        "presetId": "rounded-rect",
         "type": "rounded-rect",
         "defaultWidth": 280,
         "defaultHeight": 160,
@@ -49,6 +51,7 @@
       "category": "highlight",
       "tags": ["circle", "ellipse", "highlight", "ring"],
       "definition": {
+        "presetId": "circle",
         "type": "circle",
         "defaultWidth": 180,
         "defaultHeight": 180,
@@ -69,6 +72,7 @@
       "category": "pointer",
       "tags": ["arrow", "pointer", "direction"],
       "definition": {
+        "presetId": "arrow",
         "type": "arrow",
         "defaultWidth": 240,
         "defaultHeight": 120,
@@ -89,6 +93,7 @@
       "category": "pointer",
       "tags": ["line", "pointer", "underline", "connector"],
       "definition": {
+        "presetId": "line",
         "type": "line",
         "defaultWidth": 240,
         "defaultHeight": 40,
@@ -109,6 +114,7 @@
       "category": "callout",
       "tags": ["callout", "speech", "note"],
       "definition": {
+        "presetId": "callout",
         "type": "callout",
         "defaultWidth": 280,
         "defaultHeight": 140,
@@ -129,6 +135,7 @@
       "category": "spotlight",
       "tags": ["spotlight", "focus", "dim", "highlight"],
       "definition": {
+        "presetId": "spotlight",
         "type": "spotlight",
         "defaultWidth": 320,
         "defaultHeight": 200,
@@ -149,6 +156,7 @@
       "category": "badge",
       "tags": ["badge", "notice", "warning", "label"],
       "definition": {
+        "presetId": "badge",
         "type": "badge",
         "defaultWidth": 200,
         "defaultHeight": 70,

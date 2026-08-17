@@ -163,6 +163,31 @@ function PresetBrowserContent({
     )
   }
 
+  const categories = useMemo(() => {
+    return ["all", "favorites", ...active.snapshot.categories]
+  }, [active.snapshot.categories])
+
+  function handleCategoryKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const currentIndex = categories.indexOf(category)
+    if (currentIndex === -1) return
+
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault()
+      const nextIndex = (currentIndex + 1) % categories.length
+      setCategory(categories[nextIndex])
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault()
+      const prevIndex = (currentIndex - 1 + categories.length) % categories.length
+      setCategory(categories[prevIndex])
+    } else if (event.key === "Home") {
+      event.preventDefault()
+      setCategory(categories[0])
+    } else if (event.key === "End") {
+      event.preventDefault()
+      setCategory(categories[categories.length - 1])
+    }
+  }
+
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col gap-2", className)}>
       <div className="flex items-center gap-2">
@@ -183,10 +208,16 @@ function PresetBrowserContent({
         </IconButton>
       </div>
 
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {presets.length} {kind === "annotation" ? "shape" : "title"} preset
+        {presets.length === 1 ? "" : "s"} available
+      </div>
+
       <div
         className="flex gap-1 overflow-x-auto pb-1"
         role="tablist"
         aria-label="Preset categories"
+        onKeyDown={handleCategoryKeyDown}
       >
         <CategoryButton
           active={category === "all"}
@@ -209,7 +240,7 @@ function PresetBrowserContent({
         ))}
       </div>
 
-      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto pr-1">
+      <div id="preset-list" ref={listRef} className="min-h-0 flex-1 overflow-y-auto pr-1">
         {presets.length === 0 ? (
           <EmptyState
             className="mt-2"
@@ -364,6 +395,7 @@ function CategoryButton({ active, label, icon: Icon, onClick }: CategoryButtonPr
       type="button"
       role="tab"
       aria-selected={active}
+      tabIndex={active ? 0 : -1}
       onClick={onClick}
       className={cn(
         "inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2.5 text-[10px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:outline-none",
