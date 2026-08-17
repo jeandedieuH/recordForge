@@ -41,16 +41,22 @@ export function NewRecordingModal({
     videoDevices,
     profiles,
     selectedSource,
+    selectedSourceType,
     selectedProfileId,
     selectedMicrophoneId,
     selectedSystemAudioId,
     selectedWebcamId,
+    preferences,
     error,
     setSelectedSource,
+    setSelectedSourceType,
     setSelectedProfileId,
     setSelectedMicrophoneId,
+    setMicrophoneEnabled,
     setSelectedSystemAudioId,
+    setSystemAudioEnabled,
     setSelectedWebcamId,
+    setWebcamEnabled,
     loadSources,
     loadAudioDevices,
     loadVideoDevices,
@@ -58,9 +64,6 @@ export function NewRecordingModal({
     clearError,
   } = useRecorderStore()
 
-  const [selectedSourceType, setSelectedSourceType] = useState<"screen" | "window" | "region">(
-    "screen",
-  )
   const [audioLevel, setAudioLevel] = useState(0.45)
 
   // The region picker is a separate fullscreen Tauri window; its selection
@@ -76,11 +79,10 @@ export function NewRecordingModal({
       const bounds: Bounds = parsed.data
       setSelectedSource({
         kind: "region",
-        id: `region-${crypto.randomUUID()}`,
+        id: `region-${bounds.x}-${bounds.y}-${bounds.width}-${bounds.height}`,
         name: `Region ${bounds.width}×${bounds.height}`,
         bounds,
       })
-      setSelectedSourceType("region")
     }).then((fn) => {
       if (active) unlisten = fn
       else fn()
@@ -123,13 +125,6 @@ export function NewRecordingModal({
     }
   }, [open, selectedSource, sources, displaySources, setSelectedSource])
 
-  // Reflect a previously saved region selection when reopening the modal
-  useEffect(() => {
-    if (open && selectedSource?.kind === "region") {
-      setSelectedSourceType("region")
-    }
-  }, [open, selectedSource])
-
   // Dynamic audio meter effect when microphone is active
   useEffect(() => {
     if (!selectedMicrophoneId || !open) return
@@ -145,48 +140,41 @@ export function NewRecordingModal({
   const webcamEnabled = Boolean(selectedWebcamId)
 
   function handleMicToggle(enabled: boolean) {
-    if (enabled) {
-      const defaultMic = selectedMicrophoneId || microphones[0]?.id
-      if (defaultMic) {
-        setSelectedMicrophoneId(defaultMic)
-      }
-    } else {
-      setSelectedMicrophoneId("")
-    }
+    setMicrophoneEnabled(enabled)
   }
 
   function handleSystemAudioToggle(enabled: boolean) {
-    if (enabled) {
-      const defaultSys = selectedSystemAudioId || systemAudios[0]?.id
-      if (defaultSys) {
-        setSelectedSystemAudioId(defaultSys)
-      }
-    } else {
-      setSelectedSystemAudioId("")
-    }
+    setSystemAudioEnabled(enabled)
   }
 
   function handleWebcamToggle(enabled: boolean) {
-    if (enabled) {
-      const defaultCam = selectedWebcamId || webcams[0]?.id
-      if (defaultCam) {
-        setSelectedWebcamId(defaultCam)
-      }
-    } else {
-      setSelectedWebcamId("")
-    }
+    setWebcamEnabled(enabled)
   }
 
   function handleSourceTypeChange(type: "screen" | "window" | "region") {
     setSelectedSourceType(type)
     if (type === "screen") {
-      const display = displaySources[0] || sources.find((s) => s.kind === "display")
+      const display =
+        (preferences.sourceId && displaySources.find((s) => s.id === preferences.sourceId)) ||
+        displaySources[0] ||
+        sources.find((s) => s.kind === "display")
       if (display) setSelectedSource(display)
     } else if (type === "window") {
-      const window = windowSources[0] || sources.find((s) => s.kind === "window")
+      const window =
+        (preferences.sourceId && windowSources.find((s) => s.id === preferences.sourceId)) ||
+        windowSources[0] ||
+        sources.find((s) => s.kind === "window")
       if (window) setSelectedSource(window)
+    } else if (type === "region") {
+      if (preferences.regionBounds) {
+        setSelectedSource({
+          kind: "region",
+          id: `region-${preferences.regionBounds.x}-${preferences.regionBounds.y}-${preferences.regionBounds.width}-${preferences.regionBounds.height}`,
+          name: `Region ${preferences.regionBounds.width}×${preferences.regionBounds.height}`,
+          bounds: preferences.regionBounds,
+        })
+      }
     }
-    // "region" keeps the current source; the user must draw a region first.
   }
 
   const regionSource = selectedSource?.kind === "region" ? selectedSource : null

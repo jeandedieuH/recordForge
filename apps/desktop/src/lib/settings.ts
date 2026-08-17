@@ -7,11 +7,27 @@ export function isTauri(): boolean {
 }
 
 export async function getSetting(key: string): Promise<string | null> {
-  return invokeValidated("get_setting", { key }, z.string().nullable())
+  if (isTauri()) {
+    return invokeValidated("get_setting", { key }, z.string().nullable())
+  }
+  try {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(`recordforge:${key}`) : null
+  } catch {
+    return null
+  }
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
-  return invokeValidated<void>("set_setting", { key, value })
+  if (isTauri()) {
+    return invokeValidated<void>("set_setting", { key, value })
+  }
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(`recordforge:${key}`, value)
+    }
+  } catch {
+    // Ignore storage quota errors in dev/tests
+  }
 }
 
 export async function setWindowTransparency(enabled: boolean): Promise<boolean> {

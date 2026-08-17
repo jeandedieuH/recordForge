@@ -7,10 +7,20 @@ import type {
   EncoderInfo,
   RecordingConfig,
   RecordingMarker,
+  RecordingPreferences,
   RecordingProfile,
   RecordingStatus,
   RecoveryScanResult,
   VideoDevice,
+} from "@recordforge/contracts"
+import {
+  defaultRecordingPreferences,
+  reconcileCaptureSource,
+  reconcileMicrophone,
+  reconcileProfile,
+  reconcileSystemAudio,
+  reconcileWebcam,
+  recordingPreferencesSchema,
 } from "@recordforge/contracts"
 import {
   deleteRecoverySession,
@@ -33,7 +43,7 @@ import {
 } from "../lib/recorder"
 import { toErrorMessage } from "../lib/errors"
 import { prepareRecordingMedia } from "../lib/media"
-import { getSetting, isTauri } from "../lib/settings"
+import { getSetting, isTauri, setSetting } from "../lib/settings"
 
 // Transport action currently in flight. Used for granular per-button pending
 // feedback (e.g. "Stopping..." on Stop while FFmpeg flushes) instead of a single
@@ -47,6 +57,17 @@ async function queueMediaPreparation(recordingId: string): Promise<boolean> {
   } catch {
     // A saved original remains usable when the optional derivative job cannot start.
     return false
+  }
+}
+
+async function readStoredPreferences(): Promise<RecordingPreferences> {
+  try {
+    const raw = await getSetting("recordingPreferences")
+    if (!raw) return defaultRecordingPreferences
+    const parsed = recordingPreferencesSchema.safeParse(JSON.parse(raw))
+    return parsed.success ? parsed.data : defaultRecordingPreferences
+  } catch {
+    return defaultRecordingPreferences
   }
 }
 
@@ -66,10 +87,13 @@ interface RecorderStore {
   diagnostics: DiagnosticsReport | null
   markers: RecordingMarker[]
   selectedSource: CaptureSource | null
+  selectedSourceType: "screen" | "window" | "region"
   selectedProfileId: RecordingConfig["profile"]
   selectedMicrophoneId: string
   selectedSystemAudioId: string
   selectedWebcamId: string
+  preferences: RecordingPreferences
+  preferencesLoaded: boolean
   isLoading: boolean
   // Which transport action is currently in flight, for per-button feedback.
   pendingAction: TransportAction | null
@@ -79,11 +103,17 @@ interface RecorderStore {
   // The durable library ID created by the latest successful stop.
   completedRecordingId: string | null
 
+  loadPreferences: () => Promise<RecordingPreferences>
+  savePreferences: (updates: Partial<RecordingPreferences>) => Promise<void>
   setSelectedSource: (source: CaptureSource | null) => void
+  setSelectedSourceType: (type: "screen" | "window" | "region") => void
   setSelectedProfileId: (profile: RecordingConfig["profile"]) => void
   setSelectedMicrophoneId: (id: string) => void
+  setMicrophoneEnabled: (enabled: boolean) => void
   setSelectedSystemAudioId: (id: string) => void
+  setSystemAudioEnabled: (enabled: boolean) => void
   setSelectedWebcamId: (id: string) => void
+  setWebcamEnabled: (enabled: boolean) => void
   clearError: () => void
   clearSaveMessage: () => void
   clearCompletedRecording: () => void
@@ -133,21 +163,193 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   diagnostics: null,
   markers: [],
   selectedSource: null,
+  selectedSourceType: "screen",
   selectedProfileId: "low-impact" as const,
   selectedMicrophoneId: "",
   selectedSystemAudioId: "",
   selectedWebcamId: "",
+  preferences: defaultRecordingPreferences,
+  preferencesLoaded: false,
   isLoading: false,
   pendingAction: null,
   error: null,
   saveMessage: null,
   completedRecordingId: null,
 
-  setSelectedSource: (source) => set({ selectedSource: source }),
-  setSelectedProfileId: (profile) => set({ selectedProfileId: profile }),
-  setSelectedMicrophoneId: (id) => set({ selectedMicrophoneId: id }),
-  setSelectedSystemAudioId: (id) => set({ selectedSystemAudioId: id }),
-  setSelectedWebcamId: (id) => set({ selectedWebcamId: id }),
+  loadPreferences: async () => {
+    const prefs = await readStoredPreferences()
+    set({
+      preferences: prefs,
+      preferencesLoaded: true,
+      selectedSourceType: prefs.sourceType,
+      selectedProfileId: prefs.profile,
+    })
+    return prefs
+  },
+
+  savePreferences: async (updates) => {
+    const current = get().preferences
+    const next = recordingPreferencesSchema.parse({ ...current, ...updates })
+    set({
+      preferences: next,
+      selectedSourceType: next.sourceType,
+      selectedProfileId: next.profile,
+    })
+    try {
+      await setSetting("recordingPreferences", JSON.stringify(next))
+    } catch {
+      // Persistence is non-fatal
+    }
+  },
+
+  setSelectedSource: (source) => {
+    if (!source) {
+      set({ selectedSource: null })
+      return
+    }
+    if (source.kind === "display") {
+      set({ selectedSource: source, selectedSourceType: "screen" })
+      void get().savePreferences({
+        sourceType: "screen",
+        sourceId: source.id,
+        sourceName: source.name,
+      })
+    } else if (source.kind === "window") {
+      set({ selectedSource: source, selectedSourceType: "window" })
+      void get().savePreferences({
+        sourceType: "window",
+        sourceId: source.id,
+        sourceName: source.name,
+      })
+    } else if (source.kind === "region") {
+      set({ selectedSource: source, selectedSourceType: "region" })
+      void get().savePreferences({
+        sourceType: "region",
+        sourceId: source.id,
+        sourceName: source.name,
+        regionBounds: source.bounds,
+      })
+    }
+  },
+
+  setSelectedSourceType: (type) => {
+    set({ selectedSourceType: type })
+    void get().savePreferences({ sourceType: type })
+  },
+
+  setSelectedProfileId: (profile) => {
+    set({ selectedProfileId: profile })
+    void get().savePreferences({ profile })
+  },
+
+  setSelectedMicrophoneId: (id) => {
+    const mics = get().audioDevices.filter((d) => d.kind === "microphone")
+    const mic = mics.find((m) => m.id === id)
+    if (id) {
+      set({ selectedMicrophoneId: id })
+      void get().savePreferences({
+        microphoneEnabled: true,
+        microphoneId: id,
+        microphoneName: mic?.name ?? get().preferences.microphoneName,
+      })
+    } else {
+      set({ selectedMicrophoneId: "" })
+      void get().savePreferences({ microphoneEnabled: false })
+    }
+  },
+
+  setMicrophoneEnabled: (enabled) => {
+    if (enabled) {
+      const mics = get().audioDevices.filter((d) => d.kind === "microphone")
+      const reconciled = reconcileMicrophone(mics, {
+        ...get().preferences,
+        microphoneEnabled: true,
+      })
+      const mic = mics.find((m) => m.id === reconciled.id)
+      set({ selectedMicrophoneId: reconciled.id })
+      void get().savePreferences({
+        microphoneEnabled: true,
+        microphoneId: reconciled.id || get().preferences.microphoneId,
+        microphoneName: mic?.name ?? get().preferences.microphoneName,
+      })
+    } else {
+      set({ selectedMicrophoneId: "" })
+      void get().savePreferences({ microphoneEnabled: false })
+    }
+  },
+
+  setSelectedSystemAudioId: (id) => {
+    const systemAudios = get().audioDevices.filter((d) => d.kind === "system")
+    const sys = systemAudios.find((a) => a.id === id)
+    if (id) {
+      set({ selectedSystemAudioId: id })
+      void get().savePreferences({
+        systemAudioEnabled: true,
+        systemAudioId: id,
+        systemAudioName: sys?.name ?? get().preferences.systemAudioName,
+      })
+    } else {
+      set({ selectedSystemAudioId: "" })
+      void get().savePreferences({ systemAudioEnabled: false })
+    }
+  },
+
+  setSystemAudioEnabled: (enabled) => {
+    if (enabled) {
+      const systemAudios = get().audioDevices.filter((d) => d.kind === "system")
+      const reconciled = reconcileSystemAudio(systemAudios, {
+        ...get().preferences,
+        systemAudioEnabled: true,
+      })
+      const sys = systemAudios.find((a) => a.id === reconciled.id)
+      set({ selectedSystemAudioId: reconciled.id })
+      void get().savePreferences({
+        systemAudioEnabled: true,
+        systemAudioId: reconciled.id || get().preferences.systemAudioId,
+        systemAudioName: sys?.name ?? get().preferences.systemAudioName,
+      })
+    } else {
+      set({ selectedSystemAudioId: "" })
+      void get().savePreferences({ systemAudioEnabled: false })
+    }
+  },
+
+  setSelectedWebcamId: (id) => {
+    const webcams = get().videoDevices.filter((d) => d.kind === "webcam")
+    const cam = webcams.find((w) => w.id === id)
+    if (id) {
+      set({ selectedWebcamId: id })
+      void get().savePreferences({
+        webcamEnabled: true,
+        webcamId: id,
+        webcamName: cam?.name ?? get().preferences.webcamName,
+      })
+    } else {
+      set({ selectedWebcamId: "" })
+      void get().savePreferences({ webcamEnabled: false })
+    }
+  },
+
+  setWebcamEnabled: (enabled) => {
+    if (enabled) {
+      const webcams = get().videoDevices.filter((d) => d.kind === "webcam")
+      const reconciled = reconcileWebcam(webcams, {
+        ...get().preferences,
+        webcamEnabled: true,
+      })
+      const cam = webcams.find((w) => w.id === reconciled.id)
+      set({ selectedWebcamId: reconciled.id })
+      void get().savePreferences({
+        webcamEnabled: true,
+        webcamId: reconciled.id || get().preferences.webcamId,
+        webcamName: cam?.name ?? get().preferences.webcamName,
+      })
+    } else {
+      set({ selectedWebcamId: "" })
+      void get().savePreferences({ webcamEnabled: false })
+    }
+  },
+
   clearError: () => set({ error: null }),
   clearSaveMessage: () => set({ saveMessage: null }),
   clearCompletedRecording: () => set({ completedRecordingId: null }),
@@ -175,11 +377,14 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   loadSources: async () => {
     try {
       const sources = await listCaptureSources()
-      let selected = get().selectedSource
-      if (!selected || !sources.some((s) => s.id === selected?.id)) {
-        selected = sources.find((s) => s.kind === "display") || sources[0] || null
-      }
-      set({ sources, selectedSource: selected, error: null })
+      const prefs = get().preferencesLoaded ? get().preferences : await get().loadPreferences()
+      const reconciled = reconcileCaptureSource(sources, prefs)
+      set({
+        sources,
+        selectedSource: reconciled.source,
+        selectedSourceType: reconciled.sourceType,
+        error: null,
+      })
     } catch (error) {
       set({ error: toErrorMessage(error) })
     }
@@ -188,7 +393,20 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   loadAudioDevices: async () => {
     try {
       const devices = await listAudioDevices()
-      set({ audioDevices: devices, audioDevicesLoaded: true, error: null })
+      const prefs = get().preferencesLoaded ? get().preferences : await get().loadPreferences()
+      const microphones = devices.filter((d) => d.kind === "microphone")
+      const systemAudios = devices.filter((d) => d.kind === "system")
+
+      const micReconciled = reconcileMicrophone(microphones, prefs)
+      const sysReconciled = reconcileSystemAudio(systemAudios, prefs)
+
+      set({
+        audioDevices: devices,
+        audioDevicesLoaded: true,
+        selectedMicrophoneId: micReconciled.id,
+        selectedSystemAudioId: sysReconciled.id,
+        error: null,
+      })
     } catch (error) {
       set({ error: toErrorMessage(error), audioDevicesLoaded: true })
     }
@@ -197,7 +415,16 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   loadVideoDevices: async () => {
     try {
       const devices = await listVideoDevices()
-      set({ videoDevices: devices, videoDevicesLoaded: true, error: null })
+      const prefs = get().preferencesLoaded ? get().preferences : await get().loadPreferences()
+      const webcams = devices.filter((d) => d.kind === "webcam")
+      const camReconciled = reconcileWebcam(webcams, prefs)
+
+      set({
+        videoDevices: devices,
+        videoDevicesLoaded: true,
+        selectedWebcamId: camReconciled.id,
+        error: null,
+      })
     } catch (error) {
       set({ error: toErrorMessage(error), videoDevicesLoaded: true })
     }
@@ -206,7 +433,9 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   loadProfiles: async () => {
     try {
       const profiles = await listBuiltinProfiles()
-      set({ profiles, error: null })
+      const prefs = get().preferencesLoaded ? get().preferences : await get().loadPreferences()
+      const profile = reconcileProfile(profiles, prefs)
+      set({ profiles, selectedProfileId: profile, error: null })
     } catch (error) {
       set({ error: toErrorMessage(error) })
     }
@@ -293,6 +522,20 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         systemAudioDeviceId: state.selectedSystemAudioId || undefined,
         webcamDeviceId: state.selectedWebcamId || undefined,
       }
+
+      void get().savePreferences({
+        sourceType: source.kind === "display" ? "screen" : source.kind,
+        sourceId: source.id,
+        sourceName: source.name,
+        regionBounds: source.kind === "region" ? source.bounds : get().preferences.regionBounds,
+        profile: state.selectedProfileId,
+        microphoneEnabled: Boolean(state.selectedMicrophoneId),
+        microphoneId: state.selectedMicrophoneId || get().preferences.microphoneId,
+        systemAudioEnabled: Boolean(state.selectedSystemAudioId),
+        systemAudioId: state.selectedSystemAudioId || get().preferences.systemAudioId,
+        webcamEnabled: Boolean(state.selectedWebcamId),
+        webcamId: state.selectedWebcamId || get().preferences.webcamId,
+      })
 
       const configuredCountdown = isTauri()
         ? await getSetting("countdownSeconds").catch(() => null)

@@ -384,3 +384,194 @@ export const diagnosticsReportSchema = z.object({
 })
 
 export type DiagnosticsReport = z.infer<typeof diagnosticsReportSchema>
+
+// Persisted user preferences and selections for the recording dialog.
+export const recordingPreferencesSchema = z.object({
+  sourceType: z.enum(["screen", "window", "region"]).default("screen"),
+  sourceId: z.string().nullable().default(null),
+  sourceName: z.string().nullable().default(null),
+  regionBounds: boundsSchema.nullable().default(null),
+  profile: recordingConfigSchema.shape.profile.default("low-impact"),
+  microphoneEnabled: z.boolean().default(false),
+  microphoneId: z.string().nullable().default(null),
+  microphoneName: z.string().nullable().default(null),
+  systemAudioEnabled: z.boolean().default(false),
+  systemAudioId: z.string().nullable().default(null),
+  systemAudioName: z.string().nullable().default(null),
+  webcamEnabled: z.boolean().default(false),
+  webcamId: z.string().nullable().default(null),
+  webcamName: z.string().nullable().default(null),
+})
+
+export type RecordingPreferences = z.infer<typeof recordingPreferencesSchema>
+
+export const defaultRecordingPreferences: RecordingPreferences = {
+  sourceType: "screen",
+  sourceId: null,
+  sourceName: null,
+  regionBounds: null,
+  profile: "low-impact",
+  microphoneEnabled: false,
+  microphoneId: null,
+  microphoneName: null,
+  systemAudioEnabled: false,
+  systemAudioId: null,
+  systemAudioName: null,
+  webcamEnabled: false,
+  webcamId: null,
+  webcamName: null,
+}
+
+export function reconcileMicrophone(
+  availableMics: AudioDevice[],
+  prefs: RecordingPreferences,
+): { id: string; enabled: boolean } {
+  if (!prefs.microphoneEnabled || availableMics.length === 0) {
+    return { id: "", enabled: false }
+  }
+
+  // 1. Try matching by exact device ID
+  if (prefs.microphoneId) {
+    const matchedById = availableMics.find((m) => m.id === prefs.microphoneId)
+    if (matchedById) {
+      return { id: matchedById.id, enabled: true }
+    }
+  }
+
+  // 2. Try matching by device Name (e.g. Windows assigned a new endpoint ID)
+  if (prefs.microphoneName) {
+    const matchedByName = availableMics.find((m) => m.name === prefs.microphoneName)
+    if (matchedByName) {
+      return { id: matchedByName.id, enabled: true }
+    }
+  }
+
+  // 3. Fallback: immediately choose first available (preferring default if flagged)
+  const fallback = availableMics.find((m) => m.isDefault) || availableMics[0]
+  return { id: fallback?.id || "", enabled: Boolean(fallback) }
+}
+
+export function reconcileSystemAudio(
+  availableAudios: AudioDevice[],
+  prefs: RecordingPreferences,
+): { id: string; enabled: boolean } {
+  if (!prefs.systemAudioEnabled || availableAudios.length === 0) {
+    return { id: "", enabled: false }
+  }
+
+  // 1. Try matching by exact device ID
+  if (prefs.systemAudioId) {
+    const matchedById = availableAudios.find((a) => a.id === prefs.systemAudioId)
+    if (matchedById) {
+      return { id: matchedById.id, enabled: true }
+    }
+  }
+
+  // 2. Try matching by device Name
+  if (prefs.systemAudioName) {
+    const matchedByName = availableAudios.find((a) => a.name === prefs.systemAudioName)
+    if (matchedByName) {
+      return { id: matchedByName.id, enabled: true }
+    }
+  }
+
+  // 3. Fallback: immediately choose first available
+  const fallback = availableAudios.find((a) => a.isDefault) || availableAudios[0]
+  return { id: fallback?.id || "", enabled: Boolean(fallback) }
+}
+
+export function reconcileWebcam(
+  availableWebcams: VideoDevice[],
+  prefs: RecordingPreferences,
+): { id: string; enabled: boolean } {
+  if (!prefs.webcamEnabled || availableWebcams.length === 0) {
+    return { id: "", enabled: false }
+  }
+
+  // 1. Try matching by exact device ID
+  if (prefs.webcamId) {
+    const matchedById = availableWebcams.find((w) => w.id === prefs.webcamId)
+    if (matchedById) {
+      return { id: matchedById.id, enabled: true }
+    }
+  }
+
+  // 2. Try matching by device Name
+  if (prefs.webcamName) {
+    const matchedByName = availableWebcams.find((w) => w.name === prefs.webcamName)
+    if (matchedByName) {
+      return { id: matchedByName.id, enabled: true }
+    }
+  }
+
+  // 3. Fallback: immediately choose first available
+  const fallback = availableWebcams.find((w) => w.isDefault) || availableWebcams[0]
+  return { id: fallback?.id || "", enabled: Boolean(fallback) }
+}
+
+export function reconcileCaptureSource(
+  availableSources: CaptureSource[],
+  prefs: RecordingPreferences,
+): { source: CaptureSource | null; sourceType: "screen" | "window" | "region" } {
+  if (prefs.sourceType === "region") {
+    if (prefs.regionBounds) {
+      return {
+        source: {
+          kind: "region",
+          id: `region-${prefs.regionBounds.x}-${prefs.regionBounds.y}-${prefs.regionBounds.width}-${prefs.regionBounds.height}`,
+          name: `Region ${prefs.regionBounds.width}×${prefs.regionBounds.height}`,
+          bounds: prefs.regionBounds,
+        },
+        sourceType: "region",
+      }
+    }
+    return { source: null, sourceType: "region" }
+  }
+
+  if (prefs.sourceType === "window") {
+    const windowSources = availableSources.filter((s) => s.kind === "window")
+    if (prefs.sourceId) {
+      const matchedById = windowSources.find((w) => w.id === prefs.sourceId)
+      if (matchedById) return { source: matchedById, sourceType: "window" }
+    }
+    if (prefs.sourceName) {
+      const matchedByName = windowSources.find((w) => w.name === prefs.sourceName)
+      if (matchedByName) return { source: matchedByName, sourceType: "window" }
+    }
+    if (windowSources.length > 0) {
+      return { source: windowSources[0], sourceType: "window" }
+    }
+    // No open windows detected; fallback to display
+    const displaySources = availableSources.filter((s) => s.kind === "display")
+    return {
+      source: displaySources[0] || availableSources[0] || null,
+      sourceType: "screen",
+    }
+  }
+
+  // "screen" display selection
+  const displaySources = availableSources.filter((s) => s.kind === "display")
+  if (prefs.sourceId) {
+    const matchedById = displaySources.find((d) => d.id === prefs.sourceId)
+    if (matchedById) return { source: matchedById, sourceType: "screen" }
+  }
+  if (prefs.sourceName) {
+    const matchedByName = displaySources.find((d) => d.name === prefs.sourceName)
+    if (matchedByName) return { source: matchedByName, sourceType: "screen" }
+  }
+  return {
+    source: displaySources[0] || availableSources[0] || null,
+    sourceType: "screen",
+  }
+}
+
+export function reconcileProfile(
+  availableProfiles: RecordingProfile[],
+  prefs: RecordingPreferences,
+): RecordingConfig["profile"] {
+  if (availableProfiles.length === 0) return prefs.profile
+  if (availableProfiles.some((p) => p.id === prefs.profile)) {
+    return prefs.profile
+  }
+  return (availableProfiles[0]?.id as RecordingConfig["profile"]) || "low-impact"
+}

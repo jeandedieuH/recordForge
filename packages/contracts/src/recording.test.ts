@@ -3,13 +3,20 @@ import {
   audioDeviceSchema,
   benchmarkReportSchema,
   captureSourceSchema,
+  defaultRecordingPreferences,
   diagnosticsReportSchema,
   encoderInfoSchema,
   exportOptionsSchema,
   libraryRecordingSchema,
+  reconcileCaptureSource,
+  reconcileMicrophone,
+  reconcileProfile,
+  reconcileSystemAudio,
+  reconcileWebcam,
   recordingConfigSchema,
   recordingManifestSchema,
   recordingMarkerSchema,
+  recordingPreferencesSchema,
   recordingProfileSchema,
   recordingStatsSchema,
   recordingStatusSchema,
@@ -396,5 +403,187 @@ describe("recording contracts", () => {
 
     expect(trimOptionsSchema.parse(trim)).toEqual(trim)
     expect(exportOptionsSchema.parse(exportOptions)).toEqual(exportOptions)
+  })
+
+  describe("recording preferences & reconciliation", () => {
+    it("validates default preferences", () => {
+      const parsed = recordingPreferencesSchema.parse(defaultRecordingPreferences)
+      expect(parsed).toEqual(defaultRecordingPreferences)
+      expect(parsed.sourceType).toBe("screen")
+      expect(parsed.microphoneEnabled).toBe(false)
+      expect(parsed.profile).toBe("low-impact")
+    })
+
+    it("parses partial stored preferences with defaults", () => {
+      const parsed = recordingPreferencesSchema.parse({
+        profile: "balanced",
+        microphoneEnabled: true,
+        microphoneId: "mic-custom",
+      })
+      expect(parsed.profile).toBe("balanced")
+      expect(parsed.microphoneEnabled).toBe(true)
+      expect(parsed.microphoneId).toBe("mic-custom")
+      expect(parsed.sourceType).toBe("screen")
+      expect(parsed.systemAudioEnabled).toBe(false)
+    })
+
+    it("reconciles microphone by ID when available", () => {
+      const mics = [
+        { id: "mic-1", name: "Internal Mic", kind: "microphone" as const, isDefault: true },
+        { id: "mic-2", name: "USB Yeti", kind: "microphone" as const, isDefault: false },
+      ]
+      const result = reconcileMicrophone(mics, {
+        ...defaultRecordingPreferences,
+        microphoneEnabled: true,
+        microphoneId: "mic-2",
+        microphoneName: "USB Yeti",
+      })
+      expect(result).toEqual({ id: "mic-2", enabled: true })
+    })
+
+    it("reconciles microphone by Name when ID changed", () => {
+      const mics = [
+        { id: "mic-new-endpoint-id", name: "USB Yeti", kind: "microphone" as const, isDefault: false },
+        { id: "mic-1", name: "Internal Mic", kind: "microphone" as const, isDefault: true },
+      ]
+      const result = reconcileMicrophone(mics, {
+        ...defaultRecordingPreferences,
+        microphoneEnabled: true,
+        microphoneId: "mic-old-id",
+        microphoneName: "USB Yeti",
+      })
+      expect(result).toEqual({ id: "mic-new-endpoint-id", enabled: true })
+    })
+
+    it("falls back immediately to first available/default mic when previously selected mic is disconnected", () => {
+      const mics = [
+        { id: "mic-internal", name: "Realtek Audio", kind: "microphone" as const, isDefault: true },
+      ]
+      const result = reconcileMicrophone(mics, {
+        ...defaultRecordingPreferences,
+        microphoneEnabled: true,
+        microphoneId: "mic-unplugged-usb",
+        microphoneName: "Disconnected Headset",
+      })
+      expect(result).toEqual({ id: "mic-internal", enabled: true })
+    })
+
+    it("handles disabled microphone without selecting device ID", () => {
+      const mics = [
+        { id: "mic-internal", name: "Realtek Audio", kind: "microphone" as const, isDefault: true },
+      ]
+      const result = reconcileMicrophone(mics, {
+        ...defaultRecordingPreferences,
+        microphoneEnabled: false,
+        microphoneId: "mic-internal",
+      })
+      expect(result).toEqual({ id: "", enabled: false })
+    })
+
+    it("reconciles system audio with fallback if missing", () => {
+      const audios = [
+        { id: "sys-default", name: "Speakers", kind: "system" as const, isDefault: true },
+      ]
+      const result = reconcileSystemAudio(audios, {
+        ...defaultRecordingPreferences,
+        systemAudioEnabled: true,
+        systemAudioId: "sys-headphones-disconnected",
+      })
+      expect(result).toEqual({ id: "sys-default", enabled: true })
+    })
+
+    it("reconciles webcam with fallback if missing", () => {
+      const webcams = [
+        { id: "cam-built-in", name: "HD Web Camera", kind: "webcam" as const, isDefault: true },
+      ]
+      const result = reconcileWebcam(webcams, {
+        ...defaultRecordingPreferences,
+        webcamEnabled: true,
+        webcamId: "cam-external-4k",
+      })
+      expect(result).toEqual({ id: "cam-built-in", enabled: true })
+    })
+
+    it("reconciles capture source for screen, window fallback, and custom region", () => {
+      const sources = [
+        {
+          kind: "display" as const,
+          id: "disp-1",
+          name: "Main Monitor",
+          bounds: { x: 0, y: 0, width: 2560, height: 1440 },
+        },
+        {
+          kind: "window" as const,
+          id: "win-1",
+          name: "VS Code",
+          bounds: { x: 100, y: 100, width: 1200, height: 800 },
+        },
+      ]
+
+      // Screen match
+      const screenResult = reconcileCaptureSource(sources, {
+        ...defaultRecordingPreferences,
+        sourceType: "screen",
+        sourceId: "disp-1",
+      })
+      expect(screenResult.source?.id).toBe("disp-1")
+      expect(screenResult.sourceType).toBe("screen")
+
+      // Window match
+      const windowResult = reconcileCaptureSource(sources, {
+        ...defaultRecordingPreferences,
+        sourceType: "window",
+        sourceId: "win-1",
+      })
+      expect(windowResult.source?.id).toBe("win-1")
+      expect(windowResult.sourceType).toBe("window")
+
+      // Window disconnected -> falls back to available window or display
+      const windowClosedResult = reconcileCaptureSource(sources, {
+        ...defaultRecordingPreferences,
+        sourceType: "window",
+        sourceId: "win-closed-id",
+        sourceName: "Closed App",
+      })
+      expect(windowClosedResult.source?.id).toBe("win-1")
+
+      // Region restoration
+      const regionResult = reconcileCaptureSource(sources, {
+        ...defaultRecordingPreferences,
+        sourceType: "region",
+        regionBounds: { x: 50, y: 50, width: 800, height: 600 },
+      })
+      expect(regionResult.source?.kind).toBe("region")
+      expect(regionResult.source?.bounds).toEqual({ x: 50, y: 50, width: 800, height: 600 })
+      expect(regionResult.sourceType).toBe("region")
+    })
+
+    it("reconciles profile with fallback", () => {
+      const profiles = [
+        {
+          id: "balanced",
+          label: "Balanced",
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          encoderPriority: ["libx264"],
+          audioCodec: "aac",
+          audioBitrateKbps: 128,
+        },
+      ]
+      expect(
+        reconcileProfile(profiles, {
+          ...defaultRecordingPreferences,
+          profile: "balanced",
+        }),
+      ).toBe("balanced")
+
+      expect(
+        reconcileProfile(profiles, {
+          ...defaultRecordingPreferences,
+          profile: "camera-only",
+        }),
+      ).toBe("balanced")
+    })
   })
 })
