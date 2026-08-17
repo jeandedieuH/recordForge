@@ -52,6 +52,7 @@ export interface TimelineClipItemProps {
   height: number
   pixelsPerMs: number
   selected: boolean
+  playheadMs: number
   frameMs: number
   collapsed: boolean
   thumbnailManifest: ThumbnailManifest | null
@@ -80,7 +81,7 @@ export interface TimelineClipItemProps {
   onSnapGuide: (target: SnapTarget | null) => void
   onSpriteError: () => void
   onDuplicateClip: (clip: TimelineClip) => void
-  onSplitClip: (clip: TimelineClip) => void
+  onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
 }
@@ -211,6 +212,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   height,
   pixelsPerMs,
   selected,
+  playheadMs,
   frameMs,
   collapsed,
   thumbnailManifest,
@@ -235,6 +237,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const gestureRef = useRef<ClipGesture | null>(null)
   const suppressClickRef = useRef(false)
   const [gestureDelta, setGestureDelta] = useState<{ text: string; mode: string } | null>(null)
+  const [contextMenuTimeMs, setContextMenuTimeMs] = useState<number | null>(null)
 
   const waveformResource =
     clip.kind === "audio" ? waveformResources.byStream.get(clip.streamIndex ?? -1) : undefined
@@ -243,6 +246,13 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const clipHeight = collapsed ? 24 : Math.max(34, Math.min(height - 14, 44))
   const cursorRange = clip.kind === "cursor-effect" ? clip : null
   const isLocked = track.locked || (cursorRange ? cursorRange.locked : false)
+
+  const isPlayheadInside =
+    playheadMs > clip.startMs + 1 && playheadMs < clip.startMs + clip.durationMs - 1
+  const isClickInside =
+    contextMenuTimeMs !== null &&
+    contextMenuTimeMs > clip.startMs + 1 &&
+    contextMenuTimeMs < clip.startMs + clip.durationMs - 1
 
   const ClipIcon = getClipIcon(clip, track)
   const theme = getClipTheme(clip, track)
@@ -351,7 +361,17 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   }
 
   return (
-    <ContextMenu>
+    <ContextMenu
+      onOpenChange={(open) => {
+        if (open && !selected) {
+          onSelectClip(clip, track, {
+            shiftKey: false,
+            ctrlKey: false,
+            metaKey: false,
+          } as unknown as React.MouseEvent)
+        }
+      }}
+    >
       <ContextMenuTrigger asChild>
         <div
           role="button"
@@ -377,6 +397,13 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
+          onContextMenu={(event) => {
+            const timeMs = getTimelineTime(event.clientX)
+            setContextMenuTimeMs(timeMs)
+            if (!selected) {
+              onSelectClip(clip, track, event)
+            }
+          }}
           onClick={(event) => {
             event.stopPropagation()
             if (suppressClickRef.current) {
@@ -535,17 +562,32 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             <ContextMenuSeparator />
           </>
         ) : null}
-        <ContextMenuItem onSelect={() => onDuplicateClip(clip)}>
+        <ContextMenuItem onSelect={() => onDuplicateClip(clip)} disabled={isLocked}>
           <Copy className="size-3.5 mr-2" /> Duplicate
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => onSplitClip(clip)}>
-          <Scissors className="size-3.5 mr-2" /> Split at playhead
-        </ContextMenuItem>
+        {isPlayheadInside ? (
+          <ContextMenuItem onSelect={() => onSplitClip(clip, playheadMs)} disabled={isLocked}>
+            <Scissors className="size-3.5 mr-2" /> Split at playhead ({formatDurationSeconds(playheadMs)})
+          </ContextMenuItem>
+        ) : null}
+        {isClickInside && (!isPlayheadInside || Math.abs((contextMenuTimeMs ?? 0) - playheadMs) > 200) ? (
+          <ContextMenuItem
+            onSelect={() => onSplitClip(clip, contextMenuTimeMs!)}
+            disabled={isLocked}
+          >
+            <Scissors className="size-3.5 mr-2" /> Split here ({formatDurationSeconds(contextMenuTimeMs!)})
+          </ContextMenuItem>
+        ) : null}
+        {!isPlayheadInside && !isClickInside ? (
+          <ContextMenuItem disabled>
+            <Scissors className="size-3.5 mr-2" /> Split (playhead outside)
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuSeparator />
         <ContextMenuItem
           className="text-destructive focus:bg-destructive/10 focus:text-destructive"
           onSelect={() => onDeleteClip(clip)}
-          disabled={cursorRange ? cursorRange.locked : track.locked}
+          disabled={isLocked}
         >
           <Trash2 className="size-3.5 mr-2" /> Delete
         </ContextMenuItem>

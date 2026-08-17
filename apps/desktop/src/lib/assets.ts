@@ -18,7 +18,59 @@ import {
   type MediaJob,
   type MediaMetadata,
 } from "@recordforge/contracts"
+import { convertFileSrc } from "@tauri-apps/api/core"
 import { invokeValidated } from "./ipc"
+import { isTauri } from "./settings"
+
+/** Check if a string is already a valid web/blob/data/asset URL. */
+export function isWebUrl(url: string | null | undefined): boolean {
+  if (!url) return false
+  return /^(?:https?|blob|data|asset):/i.test(url)
+}
+
+/** Check if a path is an absolute filesystem path (POSIX, UNC, or Windows drive letter). */
+export function isAbsolutePath(path: string | null | undefined): boolean {
+  if (!path) return false
+  return /^(?:[a-zA-Z]:[/\\]|\/|\\\\)/.test(path)
+}
+
+/**
+ * Resolves a project asset path to an absolute path.
+ * If the path is already absolute or a web URL, it is returned directly.
+ * If the path is project-relative and a work directory is provided, it resolves against workDir.
+ */
+export function resolveAssetPath(
+  path: string | null | undefined,
+  workDir?: string | null,
+): string | null {
+  if (!path) return null
+  if (isWebUrl(path) || isAbsolutePath(path)) return path
+  if (workDir) {
+    const cleanWorkDir = workDir.replace(/[/\\]+$/, "")
+    const cleanPath = path.replace(/^[/\\]+/, "")
+    return `${cleanWorkDir}/${cleanPath}`
+  }
+  return null
+}
+
+/**
+ * Converts a filesystem path or URL to an asset URL safe for use in Tauri or the browser.
+ * Never passes unresolved relative paths to convertFileSrc to prevent Tauri protocol errors.
+ */
+export function toAssetUrl(
+  path: string | null | undefined,
+  workDir?: string | null,
+): string | null {
+  if (!path) return null
+  if (isWebUrl(path)) return path
+
+  const resolved = resolveAssetPath(path, workDir)
+  if (!resolved) {
+    return isTauri() ? null : path
+  }
+
+  return isTauri() ? convertFileSrc(resolved) : resolved
+}
 
 export function importAssets(request: AssetImportRequest): Promise<AssetImportResult> {
   return invokeValidated(
@@ -69,3 +121,4 @@ export function startAssetDerivativeJob(request: AssetDerivativeJobRequest): Pro
 export function getProjectAssetPaths(recordingId: string): Promise<ProjectAssetPathMap> {
   return invokeValidated("get_project_asset_paths", { recordingId }, projectAssetPathMapSchema)
 }
+

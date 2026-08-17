@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef } from "react"
-import { convertFileSrc } from "@tauri-apps/api/core"
 import type { AudioClip, MediaAudioTrackOutput, TimelineTrack } from "@recordforge/contracts"
-import { isTauri } from "../../../lib/settings"
+import { toAssetUrl } from "../../../lib/assets"
 
 interface PreviewAudioTrack {
   id: string
@@ -18,10 +17,7 @@ interface AudioTrackPreviewProps {
   isPlaying: boolean
   playbackRate: number
   assetPaths?: Record<string, string>
-}
-
-function toAssetUrl(path: string): string {
-  return isTauri() ? convertFileSrc(path) : path
+  workDir?: string | null
 }
 
 function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
@@ -41,6 +37,7 @@ function buildPreviewTracks(
   tracks: TimelineTrack[],
   outputs: MediaAudioTrackOutput[],
   assetPaths: Record<string, string>,
+  workDir?: string | null,
 ): PreviewAudioTrack[] {
   const outputsByStream = new Map(outputs.map((output) => [output.streamIndex, output]))
   const hasSoloTrack = tracks.some((track) => track.kind === "audio" && track.solo)
@@ -55,11 +52,14 @@ function buildPreviewTracks(
       const sourcePath = output?.audioPath ?? assetPaths[clip.assetId]
       if (!sourcePath) return []
 
+      const source = toAssetUrl(sourcePath, workDir)
+      if (!source) return []
+
       return [
         {
           id: clip.id,
           clip,
-          source: toAssetUrl(sourcePath),
+          source,
           volume: Math.max(0, Math.min(1, track.volume * clip.volume)),
           muted: track.muted || isExcludedBySolo,
         },
@@ -75,11 +75,12 @@ export function AudioTrackPreview({
   isPlaying,
   playbackRate,
   assetPaths = {},
+  workDir,
 }: AudioTrackPreviewProps) {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
   const previewTracks = useMemo(
-    () => buildPreviewTracks(tracks, outputs, assetPaths),
-    [assetPaths, outputs, tracks],
+    () => buildPreviewTracks(tracks, outputs, assetPaths, workDir),
+    [assetPaths, outputs, tracks, workDir],
   )
 
   useEffect(() => {

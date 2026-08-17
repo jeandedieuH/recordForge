@@ -31,7 +31,7 @@ import {
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
-import { getProjectAssetPaths, relinkAsset as relinkAssetRequest } from "../lib/assets"
+import { getProjectAssetPaths, relinkAsset as relinkAssetRequest, resolveAssetPath } from "../lib/assets"
 import { createProject, loadProject, saveProject, snapshotProject } from "../lib/project"
 import { getCursorTelemetry } from "../lib/cursor"
 import {
@@ -382,6 +382,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       if (isTauri()) {
         assetPaths = await getProjectAssetPaths(recordingId).catch(() => ({}))
       }
+      if (recording?.workDir) {
+        for (const asset of project.assets) {
+          if (!assetPaths[asset.id]) {
+            const resolved = resolveAssetPath(asset.path, recording.workDir)
+            if (resolved) assetPaths[asset.id] = resolved
+          }
+        }
+      }
 
       const timeline = projectToTimeline(project)
       // Persist the cursor track migration in the next autosave instead of
@@ -709,6 +717,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         assetId,
         newPath,
       })
+      if (newPath) {
+        const nextAssetPaths = { ...get().assetPaths, [assetId]: newPath }
+        set({ assetPaths: nextAssetPaths })
+      }
       const loaded = await loadProject(recording.id)
       if (!loaded) throw new Error("Project could not be reloaded after relinking")
       get().syncProject(loaded.project)
@@ -731,6 +743,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   syncProject: (nextProject) => {
     const currentProject = get().project
+    const recording = get().recording
     const mergedProject =
       currentProject?.id === nextProject.id
         ? {
@@ -744,7 +757,26 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       .filter((asset) => asset.status === "missing")
       .map((asset) => asset.id)
     const wasDirty = useEditorStore.getState().isDirty
-    set({ project: mergedProject, missingAssets })
+
+    let assetPaths = get().assetPaths
+    if (recording?.workDir) {
+      let updated = false
+      const nextAssetPaths = { ...assetPaths }
+      for (const asset of mergedProject.assets) {
+        if (!nextAssetPaths[asset.id]) {
+          const resolved = resolveAssetPath(asset.path, recording.workDir)
+          if (resolved) {
+            nextAssetPaths[asset.id] = resolved
+            updated = true
+          }
+        }
+      }
+      if (updated) {
+        assetPaths = nextAssetPaths
+      }
+    }
+
+    set({ project: mergedProject, missingAssets, assetPaths })
     useEditorStore.getState().setMissingAssets(missingAssets)
     if (wasDirty) {
       // Asset-job completion can arrive while timeline edits are unsaved. Keep

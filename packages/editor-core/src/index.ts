@@ -18,6 +18,7 @@ export * from "./playback-clock"
 export * from "./preview-composition"
 export * from "./interaction-transaction"
 export * from "./overlay-transaction"
+export * from "./smart-zoom-builder"
 export {
   analyzeCursorTelemetry,
   clampZoomTarget as clampCursorZoomTarget,

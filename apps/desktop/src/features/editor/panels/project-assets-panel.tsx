@@ -19,7 +19,7 @@ import {
   Upload,
 } from "lucide-react"
 import { Button, Card, CardContent, EmptyState, Skeleton, cn, useToast } from "@recordforge/ui"
-import { deleteAsset, importAssets, startAssetDerivativeJob } from "../../../lib/assets"
+import { deleteAsset, importAssets, resolveAssetPath, startAssetDerivativeJob } from "../../../lib/assets"
 import { onMediaJobUpdate, listMediaJobs } from "../../../lib/media"
 import { loadProject } from "../../../lib/project"
 import { toErrorMessage } from "../../../lib/errors"
@@ -462,8 +462,12 @@ export function ProjectAssetsPanel() {
                 const asset = assets[virtualItem.index]
                 const Icon = assetIcon(asset)
                 const job = jobForAsset(asset, jobs)
-                const resolvedPath = assetPaths[asset.id] ?? asset.path
-                const thumbnailUrl = asset.kind === "image" ? toAssetUrl(resolvedPath) : null
+                const resolvedPath =
+                  assetPaths[asset.id] ??
+                  resolveAssetPath(asset.path, recording.workDir) ??
+                  asset.path
+                const thumbnailUrl =
+                  asset.kind === "image" ? toAssetUrl(resolvedPath, recording.workDir) : null
                 const isInUse = Boolean(
                   timeline?.tracks.some((track) =>
                     track.clips.some((clip) => clip.assetId === asset.id),

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { convertFileSrc } from "@tauri-apps/api/core"
 import {
   thumbnailManifestSchema,
   waveformDataSchema,
@@ -9,18 +8,20 @@ import {
   type WaveformData,
 } from "@recordforge/contracts"
 import { z } from "zod"
-import { isTauri } from "../../../lib/settings"
+import {
+  toAssetUrl,
+  resolveAssetPath,
+  isAbsolutePath,
+  isWebUrl,
+} from "../../../lib/assets"
+
+export { toAssetUrl, resolveAssetPath, isAbsolutePath, isWebUrl }
 
 export type DerivativeResource<T> =
   | { status: "loading" }
   | { status: "missing" }
   | { status: "content"; data: T }
   | { status: "error"; message: string }
-
-export function toAssetUrl(path: string | null): string | null {
-  if (!path) return null
-  return isTauri() ? convertFileSrc(path) : path
-}
 
 function derivativeError(): string {
   return "Failed to load derivative resource from disk"

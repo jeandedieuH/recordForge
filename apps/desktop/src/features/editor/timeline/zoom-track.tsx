@@ -1,5 +1,5 @@
 import { memo, useCallback, useMemo, useRef, useState } from "react"
-import type { ManualZoomSegment, TimelineState, TimelineTrack } from "@recordforge/contracts"
+import type { ManualZoomSegment, TimelineState, TimelineTrack, ZoomPreset } from "@recordforge/contracts"
 import {
   buildSnapTargets,
   snapClipStart,
@@ -14,7 +14,7 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import { Lock, Sparkles, ZoomIn } from "lucide-react"
+import { Lock, Plus, Sparkles, ZoomIn } from "lucide-react"
 
 interface ZoomSegmentAction {
   kind: "toggle-lock" | "split" | "delete" | "regenerate-from-click"
@@ -36,6 +36,7 @@ export interface ZoomTrackRowProps {
   cursorClickTimesMs: number[]
   getTimelineTime: (clientX: number) => number
   onSelectZoom: (segmentId: string) => void
+  onAddZoomAtTime?: (timeMs: number, options?: { preset?: ZoomPreset; scale?: number }) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
   onMoveZoomSegment: (
     segment: ManualZoomSegment,
@@ -76,11 +77,13 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
   cursorClickTimesMs,
   getTimelineTime,
   onSelectZoom,
+  onAddZoomAtTime,
   onZoomSegmentAction,
   onMoveZoomSegment,
   onResizeZoomSegment,
 }: ZoomTrackRowProps) {
   const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
+  const [hoverGhost, setHoverGhost] = useState<{ timeMs: number } | null>(null)
   const onSnapGuide = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
 
   const snapTargets = useMemo(
@@ -98,13 +101,40 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
     [timeline.zoomSegments, visibleStartMs, visibleEndMs],
   )
 
+  function handleDoubleClick(event: React.MouseEvent<HTMLDivElement>) {
+    if (track.locked || !onAddZoomAtTime) return
+    const target = event.target as HTMLElement
+    if (target.closest("[data-timeline-zoom]")) return
+    const timeMs = Math.max(0, Math.round(getTimelineTime(event.clientX)))
+    onAddZoomAtTime(timeMs)
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (track.locked) return
+    const target = event.target as HTMLElement
+    if (target.closest("[data-timeline-zoom]")) {
+      if (hoverGhost !== null) setHoverGhost(null)
+      return
+    }
+    const timeMs = Math.max(0, Math.round(getTimelineTime(event.clientX)))
+    setHoverGhost({ timeMs })
+  }
+
+  function handlePointerLeave() {
+    setHoverGhost(null)
+  }
+
   return (
     <div
       className={cn(
-        "absolute inset-x-0 flex items-center border-b border-border/80 transition-colors",
+        "group/zoom-row absolute inset-x-0 flex items-center border-b border-border/80 transition-colors",
         track.muted && "bg-surface-dim/20 opacity-40",
+        !track.locked && "cursor-crosshair",
       )}
       style={{ top, height }}
+      onDoubleClick={handleDoubleClick}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
     >
       {snapGuide ? (
         <div
@@ -113,6 +143,24 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
           aria-hidden
         />
       ) : null}
+
+      {/* Hover Ghost Indicator for Quick Add */}
+      {hoverGhost && !track.locked ? (
+        <div
+          className="pointer-events-none absolute z-0 flex items-center justify-center rounded-lg border border-dashed border-primary/50 bg-primary/10 opacity-70 transition-opacity"
+          style={{
+            left: `${hoverGhost.timeMs * pixelsPerMs}px`,
+            width: `${Math.max(40, 2000 * pixelsPerMs)}px`,
+            height: `${Math.max(28, Math.min(height - 14, 38))}px`,
+          }}
+        >
+          <div className="flex items-center gap-1 font-mono text-[9px] font-medium text-primary">
+            <Plus className="size-2.5" />
+            <span>Double-click to add zoom</span>
+          </div>
+        </div>
+      ) : null}
+
       {visibleSegments.map((segment) => (
         <ZoomSegmentItem
           key={segment.id}
@@ -297,7 +345,13 @@ function ZoomSegmentItem({
   const transOutWidth = Math.min(width / 2, (segment.transitionOutMs ?? 400) * pixelsPerMs)
 
   return (
-    <ContextMenu>
+    <ContextMenu
+      onOpenChange={(open) => {
+        if (open && !selected) {
+          onSelectZoom(segment.id)
+        }
+      }}
+    >
       <ContextMenuTrigger asChild>
         <div
           role="button"
@@ -321,6 +375,11 @@ function ZoomSegmentItem({
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
+          onContextMenu={() => {
+            if (!selected) {
+              onSelectZoom(segment.id)
+            }
+          }}
           onClick={(event) => {
             event.stopPropagation()
             if (suppressClickRef.current) {

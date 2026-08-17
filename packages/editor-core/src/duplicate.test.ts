@@ -162,4 +162,19 @@ describe("duplicate commands", () => {
     )
     expect(result.ok).toBe(false)
   })
+
+  it("places duplicate after the last clip on track when immediate placement would overlap", () => {
+    const engine = createEngine(makeMultiClipState())
+    // clip-1 is 0..10000, clip-2 is 15000..20000.
+    // Default immediate placement for clip-1 would be 10033..20033 which overlaps clip-2.
+    // It should automatically place after clip-2 at 20033.
+    const result = executeCommand(engine, createDuplicateClipCommand("clip-1"))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const clips = result.value.history.present.tracks[0].clips
+    expect(clips).toHaveLength(3)
+    const dup = clips.find((c) => c.id.startsWith("clip-1:dup"))
+    expect(dup?.startMs).toBe(20_033)
+  })
 })

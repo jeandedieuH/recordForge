@@ -11,6 +11,7 @@ import {
   ShieldAlert,
   SkipBack,
   SkipForward,
+  Sparkles,
   StepBack,
   StepForward,
   Trash2,
@@ -35,7 +36,7 @@ import {
   cn,
 } from "@recordforge/ui"
 import { formatTime } from "@recordforge/editor-core"
-import type { MaskClip } from "@recordforge/contracts"
+import type { MaskClip, ZoomPreset } from "@recordforge/contracts"
 
 export type TimelineTool = "select" | "split" | "range"
 
@@ -52,6 +53,7 @@ interface TimelineToolbarProps {
   playbackRate: number
   zoom: number
   canRippleDelete?: boolean
+  selectedRange?: { startMs: number; endMs: number } | null
   onTogglePlay: () => void
   onSeek: (timeMs: number) => void
   onStepFrame: (direction: -1 | 1) => void
@@ -60,6 +62,7 @@ interface TimelineToolbarProps {
   onZoomToFit: () => void
   onAddMarker: () => void
   onAddMask: (mode: MaskClip["mode"]) => void
+  onAddZoom?: (options?: { preset?: ZoomPreset; scale?: number }) => void
   onSplitAtPlayhead: () => void
   onRippleDeleteSelected: () => void
 }
@@ -77,6 +80,7 @@ export function TimelineToolbar({
   playbackRate,
   zoom,
   canRippleDelete = false,
+  selectedRange = null,
   onTogglePlay,
   onSeek,
   onStepFrame,
@@ -85,6 +89,7 @@ export function TimelineToolbar({
   onZoomToFit,
   onAddMarker,
   onAddMask,
+  onAddZoom,
   onSplitAtPlayhead,
   onRippleDeleteSelected,
 }: TimelineToolbarProps) {
@@ -273,6 +278,109 @@ export function TimelineToolbar({
             <DropdownMenuItem onClick={() => onAddMask("redact")}>
               <span className="size-2 rounded-full bg-destructive mr-2" />
               Solid Redact
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Smart Zoom Dropdown */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-primary/10 hover:text-primary transition-all duration-fast"
+              aria-label="Add zoom segment (Z)"
+            >
+              <ZoomIn className="size-3.5 text-primary" />
+              <span className="hidden md:inline font-medium">Zoom</span>
+              <kbd className="hidden lg:inline-block rounded border border-border/80 bg-surface/80 px-1 py-0.2 font-mono text-[9px] text-muted-foreground">
+                Z
+              </kbd>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-60">
+            <DropdownMenuLabel className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-foreground">Add Smart Zoom</span>
+              <kbd className="font-mono text-[10px] text-muted-foreground">Z</kbd>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {selectedRange ? (
+              <>
+                <DropdownMenuItem
+                  className="bg-primary/10 text-primary font-medium focus:bg-primary/20 focus:text-primary cursor-pointer"
+                  onClick={() => onAddZoom?.({ preset: "product-demo" })}
+                >
+                  <Sparkles className="size-3.5 mr-2 text-primary shrink-0" />
+                  <div className="flex flex-col min-w-0">
+                    <span className="font-semibold text-xs truncate">Zoom Selected Range</span>
+                    <span className="font-mono text-[10px] opacity-80 truncate">
+                      {formatTime(selectedRange.startMs)} → {formatTime(selectedRange.endMs)}
+                    </span>
+                  </div>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
+            <DropdownMenuItem
+              className="cursor-pointer py-1.5"
+              onClick={() => onAddZoom?.({ preset: "product-demo" })}
+            >
+              <div className="flex flex-col gap-0.5 w-full">
+                <div className="flex items-center justify-between text-xs font-medium">
+                  <span>Standard Focus (1.5×)</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">Smooth</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">Auto-tracks active cursor</span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="cursor-pointer py-1.5"
+              onClick={() => onAddZoom?.({ preset: "developer" })}
+            >
+              <div className="flex flex-col gap-0.5 w-full">
+                <div className="flex items-center justify-between text-xs font-medium">
+                  <span>Detail Close-up (2.0×)</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">Snappy</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">Crisp focus for code & UI</span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="cursor-pointer py-1.5"
+              onClick={() => onAddZoom?.({ preset: "cinematic" })}
+            >
+              <div className="flex flex-col gap-0.5 w-full">
+                <div className="flex items-center justify-between text-xs font-medium">
+                  <span>Cinematic Pan (1.8×)</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">Cinematic</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">Smooth gliding camera</span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="cursor-pointer py-1.5"
+              onClick={() => onAddZoom?.({ preset: "subtle" })}
+            >
+              <div className="flex flex-col gap-0.5 w-full">
+                <div className="flex items-center justify-between text-xs font-medium">
+                  <span>Subtle Zoom (1.25×)</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">Gentle</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">Light emphasis</span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="cursor-pointer py-1.5"
+              onClick={() => onAddZoom?.({ preset: "manual-only" })}
+            >
+              <div className="flex flex-col gap-0.5 w-full">
+                <div className="flex items-center justify-between text-xs font-medium">
+                  <span>Fixed Center (1.5×)</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">Static</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">Centered screen frame</span>
+              </div>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

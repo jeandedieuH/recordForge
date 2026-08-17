@@ -1,5 +1,6 @@
 import { memo, useMemo, useRef, useState } from "react"
 import type { ManualZoomSegment, TimelineMarker } from "@recordforge/contracts"
+import { BookmarkPlus, Crosshair } from "lucide-react"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -71,6 +72,7 @@ export const TimelineRuler = memo(function TimelineRuler({
 }: TimelineRulerProps) {
   const rulerRef = useRef<HTMLDivElement>(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
+  const [rulerContextMenuTimeMs, setRulerContextMenuTimeMs] = useState<number | null>(null)
 
   // Sub-tick subdivisions: 5 minor divisions per major tick
   const minorInterval = tickInterval / 5
@@ -113,7 +115,12 @@ export const TimelineRuler = memo(function TimelineRuler({
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0) return
     const target = e.target as HTMLElement | null
-    if (target?.closest("[data-timeline-marker], [data-timeline-zoom-pill]")) return
+    if (
+      target?.closest(
+        "[data-timeline-marker], [data-timeline-zoom-pill], [role='menu'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-radix-menu-content], [data-radix-popper-content-wrapper]",
+      )
+    )
+      return
 
     e.currentTarget.setPointerCapture(e.pointerId)
     setIsScrubbing(true)
@@ -159,29 +166,62 @@ export const TimelineRuler = memo(function TimelineRuler({
       onDoubleClick={handleDoubleClick}
       role="presentation"
     >
-      {/* Top Section: Ruler with subpixel tick marks */}
-      <div className="relative h-7 border-b border-border/40">
-        {visibleTicks.map(({ timeMs, left, isMajor }) =>
-          isMajor ? (
-            <div
-              key={`major-${timeMs}`}
-              className="absolute bottom-0 flex flex-col items-center -translate-x-1/2"
-              style={{ left: `${left}px` }}
-            >
-              <span className="font-mono text-[9px] font-medium tabular-nums text-subtle-foreground">
-                {formatTimelineTime(timeMs)}
-              </span>
-              <div className="h-2 w-px bg-border-strong" />
-            </div>
-          ) : (
-            <div
-              key={`minor-${timeMs}`}
-              className="absolute bottom-0 h-1 w-px -translate-x-1/2 bg-border"
-              style={{ left: `${left}px` }}
-            />
-          ),
-        )}
-      </div>
+      {/* Top Section: Ruler with subpixel tick marks and ContextMenu */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            className="relative h-7 border-b border-border/40"
+            onContextMenu={(e) => {
+              const target = e.target as HTMLElement | null
+              if (target?.closest("[data-timeline-marker], [data-timeline-zoom-pill]")) return
+              const timeMs = getTimelineTime(e.clientX)
+              setRulerContextMenuTimeMs(Math.round(timeMs))
+            }}
+          >
+            {visibleTicks.map(({ timeMs, left, isMajor }) =>
+              isMajor ? (
+                <div
+                  key={`major-${timeMs}`}
+                  className="absolute bottom-0 flex flex-col items-center -translate-x-1/2"
+                  style={{ left: `${left}px` }}
+                >
+                  <span className="font-mono text-[9px] font-medium tabular-nums text-subtle-foreground">
+                    {formatTimelineTime(timeMs)}
+                  </span>
+                  <div className="h-2 w-px bg-border-strong" />
+                </div>
+              ) : (
+                <div
+                  key={`minor-${timeMs}`}
+                  className="absolute bottom-0 h-1 w-px -translate-x-1/2 bg-border"
+                  style={{ left: `${left}px` }}
+                />
+              ),
+            )}
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
+            onSelect={() => {
+              if (rulerContextMenuTimeMs !== null) {
+                onAddMarkerAtTime(rulerContextMenuTimeMs)
+              }
+            }}
+          >
+            <BookmarkPlus className="size-3.5 mr-2" /> Add marker here (
+            {formatTimelineTime(rulerContextMenuTimeMs ?? 0)})
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => {
+              if (rulerContextMenuTimeMs !== null) {
+                onSeek(rulerContextMenuTimeMs)
+              }
+            }}
+          >
+            <Crosshair className="size-3.5 mr-2" /> Move playhead here
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
 
       {/* Bottom Section: Markers and Zoom Segment Overview Lane */}
       <div className="relative h-6 overflow-hidden bg-surface-container-low/50">
@@ -192,7 +232,14 @@ export const TimelineRuler = memo(function TimelineRuler({
               marker.timeMs >= visibleStartMs - 5_000 && marker.timeMs <= visibleEndMs + 5_000,
           )
           .map((marker) => (
-            <ContextMenu key={marker.id}>
+            <ContextMenu
+              key={marker.id}
+              onOpenChange={(open) => {
+                if (open && selectedMarkerId !== marker.id) {
+                  onSelectMarker(marker)
+                }
+              }}
+            >
               <ContextMenuTrigger asChild>
                 <button
                   type="button"
@@ -204,6 +251,11 @@ export const TimelineRuler = memo(function TimelineRuler({
                       : "border-border/60 bg-surface/90 text-muted-foreground hover:border-border hover:bg-surface hover:text-foreground",
                   )}
                   style={{ left: `${marker.timeMs * pixelsPerMs}px` }}
+                  onContextMenu={() => {
+                    if (selectedMarkerId !== marker.id) {
+                      onSelectMarker(marker)
+                    }
+                  }}
                   onClick={(e) => {
                     e.stopPropagation()
                     onSeek(marker.timeMs)

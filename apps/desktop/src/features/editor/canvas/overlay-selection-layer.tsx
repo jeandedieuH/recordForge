@@ -212,13 +212,13 @@ function SelectionControls({
 }) {
   if (clip.locked) {
     return (
-      <div className="pointer-events-none absolute inset-0 -m-1 rounded-sm ring-2 ring-muted" />
+      <div className="pointer-events-none absolute inset-0 rounded-sm ring-2 ring-muted" />
     )
   }
 
   return (
     <>
-      <div className="pointer-events-none absolute inset-0 -m-1 rounded-sm border-2 border-dashed border-warning ring-2 ring-warning/20" />
+      <div className="pointer-events-none absolute inset-0 rounded-sm border-2 border-dashed border-warning ring-2 ring-warning/20" />
       {RESIZE_HANDLES.map(({ handle, left, top, cursor, label }) => (
         <Handle
           key={handle}
@@ -254,7 +254,8 @@ function RotationHandle({
       <div className="pointer-events-none absolute left-1/2 -top-6 h-6 w-px -translate-x-1/2 bg-warning" />
       <Handle
         label={`Rotate ${overlayKindLabel(clip)}`}
-        className="left-1/2 -top-8 size-3.5 -translate-x-1/2 cursor-grab rounded-full bg-warning"
+        className="cursor-grab rounded-full"
+        style={{ left: "50%", top: "-24px" }}
         onPointerDown={(event) => beginHandleGesture(event, clip, "rotate", interaction)}
         onPointerMove={interaction.moveGesture}
         onPointerUp={interaction.finishGesture}
@@ -281,7 +282,7 @@ function ArrowEndpointHandles({
     <>
       <Handle
         label="Move annotation start point"
-        className="-translate-x-1/2 -translate-y-1/2 cursor-grab rounded-full bg-primary"
+        className="cursor-grab rounded-full bg-primary"
         style={{ left: "0%", top: "0%" }}
         onPointerDown={(event) => beginHandleGesture(event, clip, "arrow-start", interaction)}
         onPointerMove={interaction.moveGesture}
@@ -291,7 +292,7 @@ function ArrowEndpointHandles({
       />
       <Handle
         label="Move annotation end point"
-        className="-translate-x-1/2 -translate-y-1/2 cursor-grab rounded-full bg-warning"
+        className="cursor-grab rounded-full bg-warning"
         style={{
           left: `${((endX - clip.x) / width) * 100}%`,
           top: `${((endY - clip.y) / height) * 100}%`,
@@ -331,7 +332,7 @@ function Handle({
       tabIndex={0}
       aria-label={label}
       className={cn(
-        "absolute size-3.5 rounded-sm border-2 border-background bg-warning shadow-e2 pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning",
+        "absolute size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-sm border-2 border-background bg-warning shadow-e2 pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning",
         className,
       )}
       style={style}

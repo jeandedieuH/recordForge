@@ -12,6 +12,8 @@ const ContextMenuRadioGroup = ContextMenuPrimitive.RadioGroup
 
 function ContextMenuContent({
   className,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof ContextMenuPrimitive.Content>) {
   return (
@@ -22,6 +24,14 @@ function ContextMenuContent({
           "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           className,
         )}
+        onPointerDown={(e) => {
+          e.stopPropagation()
+          onPointerDown?.(e)
+        }}
+        onClick={(e) => {
+          e.stopPropagation()
+          onClick?.(e)
+        }}
         {...props}
       />
     </ContextMenuPrimitive.Portal>
@@ -31,15 +41,25 @@ function ContextMenuContent({
 function ContextMenuItem({
   className,
   inset,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof ContextMenuPrimitive.Item> & { inset?: boolean }) {
   return (
     <ContextMenuPrimitive.Item
       className={cn(
-        "relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none select-none focus:bg-overlay data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground",
+        "relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none select-none focus:bg-overlay data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground",
         inset && "pl-8",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     />
   )
@@ -49,6 +69,8 @@ function ContextMenuCheckboxItem({
   className,
   children,
   checked,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof ContextMenuPrimitive.CheckboxItem>) {
   return (
@@ -58,6 +80,14 @@ function ContextMenuCheckboxItem({
         "relative flex cursor-pointer items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none focus:bg-overlay",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     >
       <span className="absolute left-2 flex size-4 items-center justify-center">
@@ -73,6 +103,8 @@ function ContextMenuCheckboxItem({
 function ContextMenuRadioItem({
   className,
   children,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof ContextMenuPrimitive.RadioItem>) {
   return (
@@ -81,6 +113,14 @@ function ContextMenuRadioItem({
         "relative flex cursor-pointer items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none focus:bg-overlay",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     >
       <span className="absolute left-2 flex size-4 items-center justify-center">
@@ -135,6 +175,8 @@ function ContextMenuSubTrigger({
   className,
   inset,
   children,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof ContextMenuPrimitive.SubTrigger> & { inset?: boolean }) {
   return (
@@ -144,6 +186,14 @@ function ContextMenuSubTrigger({
         inset && "pl-8",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     >
       {children}
@@ -154,6 +204,8 @@ function ContextMenuSubTrigger({
 
 function ContextMenuSubContent({
   className,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof ContextMenuPrimitive.SubContent>) {
   return (
@@ -162,6 +214,14 @@ function ContextMenuSubContent({
         "z-50 min-w-32 overflow-hidden rounded-md border border-border bg-elevated p-1 text-foreground shadow-e2",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     />
   )

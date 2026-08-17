@@ -8,9 +8,17 @@ import type {
   TimelineState,
   TimelineTrack,
   TimelineViewState,
+  ZoomPreset,
 } from "@recordforge/contracts"
 import { buildSnapTargets, type SnapTarget } from "@recordforge/editor-core"
-import { Scissors } from "lucide-react"
+import { BookmarkPlus, Scissors, Sparkles, Trash2, X, ZoomIn } from "lucide-react"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@recordforge/ui"
 import type {
   DerivativeResource,
   ThumbnailManifest,
@@ -21,7 +29,7 @@ import { toAssetUrl } from "../media/derivative-resources"
 import { TimelineClipItem } from "./timeline-clip-item"
 import { TimelineMarquee } from "./timeline-marquee"
 import { TimelinePlayhead } from "./timeline-playhead"
-import { TimelineRuler, getVisibleTickInterval } from "./timeline-ruler"
+import { TimelineRuler, formatTimelineTime, getVisibleTickInterval } from "./timeline-ruler"
 import { TimelineTrackHeader } from "./timeline-track-header"
 import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
@@ -77,6 +85,7 @@ export interface TimelineLanesProps {
   onDeleteMarker?: (markerId: string) => void
   onAddMarkerAtTime?: (timeMs: number) => void
   onSelectZoom: (segmentId: string) => void
+  onAddZoomAtTime?: (timeMs: number, options?: { preset?: ZoomPreset; scale?: number; endMs?: number }) => void
   onMoveZoomSegment: (
     segment: ManualZoomSegment,
     startMs: number,
@@ -97,11 +106,13 @@ export interface TimelineLanesProps {
   onCycleTrackHeight: (track: TimelineTrack) => void
   onSpriteError: () => void
   onDuplicateClip: (clip: TimelineClip) => void
-  onSplitClip: (clip: TimelineClip) => void
+  onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip) => void
   onAddAssetAtTime?: (assetId: string, timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
+  onSplitAllAtPlayhead?: () => void
+  onDeselectAll?: () => void
 }
 
 function clipIntersectsWindow(clip: TimelineClip, startMs: number, endMs: number): boolean {
@@ -138,6 +149,7 @@ export function TimelineLanes({
   onDeleteMarker,
   onAddMarkerAtTime,
   onSelectZoom,
+  onAddZoomAtTime,
   onDeleteSelection,
   onToggleTrackMuted,
   onToggleTrackSolo,
@@ -153,6 +165,8 @@ export function TimelineLanes({
   onZoomSegmentAction,
   onMoveZoomSegment,
   onResizeZoomSegment,
+  onSplitAllAtPlayhead,
+  onDeselectAll,
 }: TimelineLanesProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -348,15 +362,42 @@ export function TimelineLanes({
       target instanceof Element &&
       Boolean(
         target.closest(
-          "[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill]",
+          "[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill], [role='menu'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-radix-collection-item]",
         ),
       )
     )
   }
 
+  const lastPointerDownRef = useRef<{
+    clientX: number
+    clientY: number
+    timeMs: number
+    timestamp: number
+  } | null>(null)
+
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0 || isInteractiveTarget(e.target)) return
     const startMs = timelineTimeFromClientX(e.clientX)
+
+    const now = Date.now()
+    const last = lastPointerDownRef.current
+    if (
+      last &&
+      now - last.timestamp < 350 &&
+      Math.abs(e.clientX - last.clientX) < 15 &&
+      Math.abs(e.clientY - last.clientY) < 15
+    ) {
+      lastPointerDownRef.current = null
+      marqueePointerRef.current = null
+      onAddZoomAtTime?.(startMs)
+      return
+    }
+    lastPointerDownRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      timeMs: startMs,
+      timestamp: now,
+    }
 
     // Immediately seek playhead to clicked timestamp on empty space
     onSeek(startMs)
@@ -368,6 +409,12 @@ export function TimelineLanes({
     // Set up marquee in case user drags
     marqueePointerRef.current = { pointerId: e.pointerId, startMs, moved: false }
     e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  function handleLanesDoubleClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (isInteractiveTarget(e.target)) return
+    const startMs = timelineTimeFromClientX(e.clientX)
+    onAddZoomAtTime?.(startMs)
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
@@ -449,6 +496,8 @@ export function TimelineLanes({
 
   const onSnapGuideCallback = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
 
+  const [emptyLanesContextMenuTimeMs, setEmptyLanesContextMenuTimeMs] = useState<number | null>(null)
+
   return (
     <div
       className="flex min-h-0 flex-1 select-none overflow-hidden"
@@ -510,6 +559,7 @@ export function TimelineLanes({
         className="min-w-0 flex-1 overflow-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
         onScroll={handleScroll}
         onPointerDown={handlePointerDown}
+        onDoubleClick={handleLanesDoubleClick}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
@@ -526,185 +576,271 @@ export function TimelineLanes({
         role="region"
         aria-label="Timeline lanes and playhead"
       >
-        <div
-          className="relative bg-surface-dim/40"
-          style={{
-            width: `${timelineWidth}px`,
-            height: `${Math.max(contentHeight, viewportHeight)}px`,
-          }}
-        >
-          {/* Preload sprite image */}
-          {spriteUrl ? (
-            <img
-              src={spriteUrl}
-              alt=""
-              aria-hidden
-              className="pointer-events-none absolute size-px opacity-0"
-              onError={onSpriteError}
-            />
-          ) : null}
-
-          {/* Sticky Time Ruler & Markers Lane */}
-          <TimelineRuler
-            timelineWidth={timelineWidth}
-            pixelsPerMs={pixelsPerMs}
-            visibleStartMs={visibleStartMs}
-            visibleEndMs={visibleEndMs}
-            durationMs={view.durationMs}
-            tickInterval={tickInterval}
-            markers={timeline.markers}
-            selectedMarkerId={selectedMarkerId}
-            zoomSegments={timeline.zoomSegments}
-            selectedZoomId={selectedZoomId}
-            isPlaying={view.isPlaying}
-            getTimelineTime={timelineTimeFromClientX}
-            onSeek={onSeek}
-            onPause={onPause}
-            onSelectMarker={onSelectMarker}
-            onDeleteMarker={onDeleteMarker ?? (() => {})}
-            onAddMarkerAtTime={onAddMarkerAtTime ?? (() => {})}
-            onSelectZoom={onSelectZoom}
-          />
-
-          {/* Range Selection / Marquee Overlay */}
-          {(() => {
-            const range = marquee ?? (view.selection?.kind === "range" ? view.selection : null)
-            if (!range) return null
-            return (
-              <TimelineMarquee
-                startMs={range.startMs}
-                endMs={range.endMs}
-                pixelsPerMs={pixelsPerMs}
-                top={scrollMargin}
-              />
-            )
-          })()}
-
-          {/* Magnetic Snapping Guide Line */}
-          {snapGuide ? (
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
             <div
-              className="pointer-events-none absolute inset-y-0 z-30 w-px bg-primary shadow-[0_0_8px_rgba(9,77,178,0.9)]"
-              style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
-              aria-hidden
-            />
-          ) : null}
-
-          {/* Razor Tool Hover Indicator */}
-          {tool === "split" && razorHoverMs !== null ? (
-            <div
-              className="pointer-events-none absolute inset-y-0 z-30 flex flex-col items-center -translate-x-1/2"
-              style={{ left: `${razorHoverMs * pixelsPerMs}px` }}
+              className="relative bg-surface-dim/40"
+              style={{
+                width: `${timelineWidth}px`,
+                height: `${Math.max(contentHeight, viewportHeight)}px`,
+              }}
+              onDoubleClick={handleLanesDoubleClick}
+              onContextMenu={(e) => {
+                if (isInteractiveTarget(e.target)) return
+                const timeMs = timelineTimeFromClientX(e.clientX)
+                setEmptyLanesContextMenuTimeMs(Math.round(timeMs))
+              }}
             >
-              <div className="rounded bg-destructive p-1 text-white shadow-e2">
-                <Scissors className="size-3" />
-              </div>
-              <div className="h-full w-px bg-destructive shadow-[0_0_6px_rgba(239,68,68,0.8)]" />
-            </div>
-          ) : null}
-
-          {/* Playhead Needle */}
-          <TimelinePlayhead
-            playheadMs={view.playheadMs}
-            pixelsPerMs={pixelsPerMs}
-            timelineHeight={contentHeight}
-            isPlaying={view.isPlaying}
-            getTimelineTime={timelineTimeFromClientX}
-            onSeek={onSeek}
-            onPause={onPause}
-          />
-
-          {/* Virtualized Track Rows */}
-          {visibleTrackRows.map(({ track, virtualTrack }) => {
-            if (!track) return null
-
-            if (track.kind === "zoom") {
-              return (
-                <ZoomTrackRow
-                  key={track.id}
-                  timeline={timeline}
-                  track={track}
-                  top={virtualTrack.start}
-                  height={virtualTrack.size}
-                  visibleStartMs={visibleStartMs}
-                  visibleEndMs={visibleEndMs}
-                  pixelsPerMs={pixelsPerMs}
-                  selectedZoomId={selectedZoomId}
-                  snapEnabled={view.snapEnabled}
-                  snapThresholdMs={view.snapThresholdMs}
-                  playheadMs={view.playheadMs}
-                  cursorClickTimesMs={cursorClickTimesMs}
-                  getTimelineTime={timelineTimeFromClientX}
-                  onSelectZoom={onSelectZoom}
-                  onZoomSegmentAction={onZoomSegmentAction}
-                  onMoveZoomSegment={onMoveZoomSegment}
-                  onResizeZoomSegment={onResizeZoomSegment}
+              {/* Preload sprite image */}
+              {spriteUrl ? (
+                <img
+                  src={spriteUrl}
+                  alt=""
+                  aria-hidden
+                  className="pointer-events-none absolute size-px opacity-0"
+                  onError={onSpriteError}
                 />
-              )
-            }
+              ) : null}
 
-            const visibleClips = track.clips.filter((clip) =>
-              clipIntersectsWindow(clip, visibleStartMs, visibleEndMs),
-            )
+              {/* Sticky Time Ruler & Markers Lane */}
+              <TimelineRuler
+                timelineWidth={timelineWidth}
+                pixelsPerMs={pixelsPerMs}
+                visibleStartMs={visibleStartMs}
+                visibleEndMs={visibleEndMs}
+                durationMs={view.durationMs}
+                tickInterval={tickInterval}
+                markers={timeline.markers}
+                selectedMarkerId={selectedMarkerId}
+                zoomSegments={timeline.zoomSegments}
+                selectedZoomId={selectedZoomId}
+                isPlaying={view.isPlaying}
+                getTimelineTime={timelineTimeFromClientX}
+                onSeek={onSeek}
+                onPause={onPause}
+                onSelectMarker={onSelectMarker}
+                onDeleteMarker={onDeleteMarker ?? (() => {})}
+                onAddMarkerAtTime={onAddMarkerAtTime ?? (() => {})}
+                onSelectZoom={onSelectZoom}
+              />
 
-            const isCameraTrack = track.kind === "camera"
-            const isScreenTrack = track.kind === "screen"
-
-            let trackThumbnailData: ThumbnailManifest | null = null
-            let trackSpriteUrl: string | null = null
-
-            if (isScreenTrack) {
-              trackThumbnailData = thumbnailData
-              trackSpriteUrl = spriteUrl
-            } else if (isCameraTrack && videoThumbnailResources) {
-              const cameraStreamThumb = Array.from(videoThumbnailResources.byStream.values()).find(
-                (r) => r.status === "content",
-              )
-              if (cameraStreamThumb && cameraStreamThumb.status === "content") {
-                trackThumbnailData = cameraStreamThumb.data
-                trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath)
-              }
-            }
-
-            return (
-              <div
-                key={track.id}
-                className="absolute inset-x-0 flex items-center border-b border-border/70"
-                style={{ top: virtualTrack.start, height: virtualTrack.size }}
-              >
-                {visibleClips.map((clip) => (
-                  <TimelineClipItem
-                    key={clip.id}
-                    clip={clip}
-                    track={track}
-                    height={virtualTrack.size}
+              {/* Range Selection / Marquee Overlay */}
+              {(() => {
+                const range = marquee ?? (view.selection?.kind === "range" ? view.selection : null)
+                if (!range) return null
+                return (
+                  <TimelineMarquee
+                    startMs={range.startMs}
+                    endMs={range.endMs}
                     pixelsPerMs={pixelsPerMs}
-                    selected={selectedClipIds.has(clip.id)}
-                    frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
-                    collapsed={view.collapsedTrackIds.includes(track.id)}
-                    thumbnailManifest={trackThumbnailData}
-                    spriteUrl={trackSpriteUrl}
-                    visibleStartMs={visibleStartMs}
-                    visibleEndMs={visibleEndMs}
-                    waveformResources={waveformResources}
-                    snapTargets={snapTargets}
-                    snapEnabled={view.snapEnabled}
-                    snapThresholdMs={view.snapThresholdMs}
-                    onSelectClip={onSelectClip}
-                    onMoveClip={onMoveClip}
-                    onTrimClip={onTrimClip}
-                    getTimelineTime={timelineTimeFromClientX}
-                    onSnapGuide={onSnapGuideCallback}
-                    onSpriteError={onSpriteError}
-                    onDuplicateClip={onDuplicateClip}
-                    onSplitClip={onSplitClip}
-                    onDeleteClip={onDeleteClip}
-                    onCursorRangeAction={onCursorRangeAction}
+                    top={scrollMargin}
                   />
-                ))}
-              </div>
-            )
-          })}
-        </div>
+                )
+              })()}
+
+              {/* Magnetic Snapping Guide Line */}
+              {snapGuide ? (
+                <div
+                  className="pointer-events-none absolute inset-y-0 z-30 w-px bg-primary shadow-[0_0_8px_rgba(9,77,178,0.9)]"
+                  style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
+                  aria-hidden
+                />
+              ) : null}
+
+              {/* Razor Tool Hover Indicator */}
+              {tool === "split" && razorHoverMs !== null ? (
+                <div
+                  className="pointer-events-none absolute inset-y-0 z-30 flex flex-col items-center -translate-x-1/2"
+                  style={{ left: `${razorHoverMs * pixelsPerMs}px` }}
+                >
+                  <div className="rounded bg-destructive p-1 text-white shadow-e2">
+                    <Scissors className="size-3" />
+                  </div>
+                  <div className="h-full w-px bg-destructive shadow-[0_0_6px_rgba(239,68,68,0.8)]" />
+                </div>
+              ) : null}
+
+              {/* Playhead Needle */}
+              <TimelinePlayhead
+                playheadMs={view.playheadMs}
+                pixelsPerMs={pixelsPerMs}
+                timelineHeight={contentHeight}
+                isPlaying={view.isPlaying}
+                getTimelineTime={timelineTimeFromClientX}
+                onSeek={onSeek}
+                onPause={onPause}
+              />
+
+              {/* Virtualized Track Rows */}
+              {visibleTrackRows.map(({ track, virtualTrack }) => {
+                if (!track) return null
+
+                if (track.kind === "zoom") {
+                  return (
+                    <ZoomTrackRow
+                      key={track.id}
+                      timeline={timeline}
+                      track={track}
+                      top={virtualTrack.start}
+                      height={virtualTrack.size}
+                      visibleStartMs={visibleStartMs}
+                      visibleEndMs={visibleEndMs}
+                      pixelsPerMs={pixelsPerMs}
+                      selectedZoomId={selectedZoomId}
+                      snapEnabled={view.snapEnabled}
+                      snapThresholdMs={view.snapThresholdMs}
+                      playheadMs={view.playheadMs}
+                      cursorClickTimesMs={cursorClickTimesMs}
+                      getTimelineTime={timelineTimeFromClientX}
+                      onSelectZoom={onSelectZoom}
+                      onAddZoomAtTime={onAddZoomAtTime}
+                      onZoomSegmentAction={onZoomSegmentAction}
+                      onMoveZoomSegment={onMoveZoomSegment}
+                      onResizeZoomSegment={onResizeZoomSegment}
+                    />
+                  )
+                }
+
+                const visibleClips = track.clips.filter((clip) =>
+                  clipIntersectsWindow(clip, visibleStartMs, visibleEndMs),
+                )
+
+                const isCameraTrack = track.kind === "camera"
+                const isScreenTrack = track.kind === "screen"
+
+                let trackThumbnailData: ThumbnailManifest | null = null
+                let trackSpriteUrl: string | null = null
+
+                if (isScreenTrack) {
+                  trackThumbnailData = thumbnailData
+                  trackSpriteUrl = spriteUrl
+                } else if (isCameraTrack && videoThumbnailResources) {
+                  const cameraStreamThumb = Array.from(
+                    videoThumbnailResources.byStream.values(),
+                  ).find((r) => r.status === "content")
+                  if (cameraStreamThumb && cameraStreamThumb.status === "content") {
+                    trackThumbnailData = cameraStreamThumb.data
+                    trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath)
+                  }
+                }
+
+                return (
+                  <div
+                    key={track.id}
+                    className="absolute inset-x-0 flex items-center border-b border-border/70"
+                    style={{ top: virtualTrack.start, height: virtualTrack.size }}
+                  >
+                    {visibleClips.map((clip) => (
+                      <TimelineClipItem
+                        key={clip.id}
+                        clip={clip}
+                        track={track}
+                        height={virtualTrack.size}
+                        pixelsPerMs={pixelsPerMs}
+                        selected={selectedClipIds.has(clip.id)}
+                        playheadMs={view.playheadMs}
+                        frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
+                        collapsed={view.collapsedTrackIds.includes(track.id)}
+                        thumbnailManifest={trackThumbnailData}
+                        spriteUrl={trackSpriteUrl}
+                        visibleStartMs={visibleStartMs}
+                        visibleEndMs={visibleEndMs}
+                        waveformResources={waveformResources}
+                        snapTargets={snapTargets}
+                        snapEnabled={view.snapEnabled}
+                        snapThresholdMs={view.snapThresholdMs}
+                        onSelectClip={onSelectClip}
+                        onMoveClip={onMoveClip}
+                        onTrimClip={onTrimClip}
+                        getTimelineTime={timelineTimeFromClientX}
+                        onSnapGuide={onSnapGuideCallback}
+                        onSpriteError={onSpriteError}
+                        onDuplicateClip={onDuplicateClip}
+                        onSplitClip={onSplitClip}
+                        onDeleteClip={onDeleteClip}
+                        onCursorRangeAction={onCursorRangeAction}
+                      />
+                    ))}
+                  </div>
+                )
+              })}
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            {(() => {
+              const rangeSelection =
+                view.selection?.kind === "range" ? view.selection : null
+              if (!rangeSelection || !onAddZoomAtTime) return null
+              return (
+                <>
+                  <ContextMenuItem
+                    className="font-medium text-primary focus:bg-primary/10 focus:text-primary cursor-pointer"
+                    onSelect={() =>
+                      onAddZoomAtTime(rangeSelection.startMs, {
+                        endMs: rangeSelection.endMs,
+                      })
+                    }
+                  >
+                    <Sparkles className="size-3.5 mr-2 text-primary" /> Create Zoom from Range (
+                    {formatTimelineTime(rangeSelection.startMs)} →{" "}
+                    {formatTimelineTime(rangeSelection.endMs)})
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                </>
+              )
+            })()}
+            {emptyLanesContextMenuTimeMs !== null && onAddZoomAtTime ? (
+              <ContextMenuItem
+                onSelect={() => onAddZoomAtTime(emptyLanesContextMenuTimeMs)}
+              >
+                <ZoomIn className="size-3.5 mr-2 text-primary" /> Add Zoom here (
+                {formatTimelineTime(emptyLanesContextMenuTimeMs)})
+              </ContextMenuItem>
+            ) : null}
+            {onAddZoomAtTime ? (
+              <ContextMenuItem onSelect={() => onAddZoomAtTime(view.playheadMs)}>
+                <ZoomIn className="size-3.5 mr-2 text-primary" /> Add Zoom at playhead (
+                {formatTimelineTime(view.playheadMs)})
+              </ContextMenuItem>
+            ) : null}
+            {emptyLanesContextMenuTimeMs !== null && onAddMarkerAtTime ? (
+              <ContextMenuItem
+                onSelect={() => onAddMarkerAtTime(emptyLanesContextMenuTimeMs)}
+              >
+                <BookmarkPlus className="size-3.5 mr-2" /> Add marker here (
+                {formatTimelineTime(emptyLanesContextMenuTimeMs)})
+              </ContextMenuItem>
+            ) : null}
+            {onAddMarkerAtTime ? (
+              <ContextMenuItem onSelect={() => onAddMarkerAtTime(view.playheadMs)}>
+                <BookmarkPlus className="size-3.5 mr-2" /> Add marker at playhead (
+                {formatTimelineTime(view.playheadMs)})
+              </ContextMenuItem>
+            ) : null}
+            {onSplitAllAtPlayhead ? (
+              <ContextMenuItem onSelect={() => onSplitAllAtPlayhead()}>
+                <Scissors className="size-3.5 mr-2" /> Split all at playhead (
+                {formatTimelineTime(view.playheadMs)})
+              </ContextMenuItem>
+            ) : null}
+            {view.selection ? (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                  className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+                  onSelect={() => onDeleteSelection(false)}
+                >
+                  <Trash2 className="size-3.5 mr-2" /> Delete selected
+                </ContextMenuItem>
+                {onDeselectAll ? (
+                  <ContextMenuItem onSelect={() => onDeselectAll()}>
+                    <X className="size-3.5 mr-2" /> Deselect all
+                  </ContextMenuItem>
+                ) : null}
+              </>
+            ) : null}
+          </ContextMenuContent>
+        </ContextMenu>
       </div>
     </div>
   )

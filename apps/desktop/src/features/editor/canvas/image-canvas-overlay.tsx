@@ -60,7 +60,7 @@ export function ImageCanvasOverlay({
         const widthPercent = (clip.width / canvasWidth) * 100
         const heightPercent = (clip.height / canvasHeight) * 100
 
-        const imageUrl = assetUrls[clip.assetId] || clip.assetId
+        const imageUrl = assetUrls[clip.assetId] || null
 
         return (
           <div

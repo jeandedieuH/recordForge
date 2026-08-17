@@ -1048,7 +1048,29 @@ function applyDuplicateClip(
   }
 
   const frameMs = Math.round(1000 / Math.max(1, state.canvas.fps))
-  const newStartMs = command.newStartMs ?? clip.startMs + clip.durationMs + frameMs
+  let newStartMs = command.newStartMs
+
+  if (newStartMs === undefined) {
+    const candidateStartMs = clip.startMs + clip.durationMs + frameMs
+    const candidateEndMs = candidateStartMs + clip.durationMs
+    const allowsOverlap = track.kind === "effects" && track.clips.every((c) => c.kind === "mask")
+    const overlaps =
+      !allowsOverlap &&
+      track.clips.some(
+        (c) =>
+          c.id !== clip.id &&
+          candidateStartMs < c.startMs + c.durationMs &&
+          candidateEndMs > c.startMs,
+      )
+
+    if (overlaps) {
+      const maxEndMs = Math.max(0, ...track.clips.map((c) => c.startMs + c.durationMs))
+      newStartMs = maxEndMs + frameMs
+    } else {
+      newStartMs = candidateStartMs
+    }
+  }
+
   if (newStartMs < 0) {
     return {
       ok: false,
@@ -1097,20 +1119,55 @@ function applyDuplicateClips(
   const leftmost = Math.min(...foundClips.map(({ clip }) => clip.startMs))
   const rightmost = Math.max(...foundClips.map(({ clip }) => clip.startMs + clip.durationMs))
   const frameMs = Math.round(1000 / Math.max(1, state.canvas.fps))
-  const deltaMs = command.deltaMs ?? rightmost - leftmost + frameMs
-  if (foundClips.some(({ clip }) => clip.startMs + deltaMs < 0)) {
+  let deltaMs = command.deltaMs
+
+  if (deltaMs === undefined) {
+    const candidateDeltaMs = rightmost - leftmost + frameMs
+    // Check if candidateDelta causes any overlap on affected tracks
+    let causesOverlap = false
+    for (const { track, clip } of foundClips) {
+      const allowsOverlap = track.kind === "effects" && track.clips.every((c) => c.kind === "mask")
+      if (allowsOverlap) continue
+      const targetStart = clip.startMs + candidateDeltaMs
+      const targetEnd = targetStart + clip.durationMs
+      if (
+        track.clips.some(
+          (c) =>
+            !clipIds.has(c.id) &&
+            targetStart < c.startMs + c.durationMs &&
+            targetEnd > c.startMs,
+        )
+      ) {
+        causesOverlap = true
+        break
+      }
+    }
+
+    if (causesOverlap) {
+      const maxEndAcrossAffected = Math.max(
+        0,
+        ...foundClips.flatMap(({ track }) => track.clips.map((c) => c.startMs + c.durationMs)),
+      )
+      deltaMs = maxEndAcrossAffected - leftmost + frameMs
+    } else {
+      deltaMs = candidateDeltaMs
+    }
+  }
+
+  if (foundClips.some(({ clip }) => clip.startMs + deltaMs! < 0)) {
     return {
       ok: false,
       error: editorError("invalid_duplicate", "Duplicate cannot start before zero"),
     }
   }
 
+  const effectiveDeltaMs = deltaMs!
   const duplicatedByTrack = new Map<string, TimelineClip[]>()
   for (const { track, clip } of foundClips) {
     const newClip = duplicateClipWithStart(
       clip,
-      `${clip.id}:dup:${clip.startMs + deltaMs}`,
-      clip.startMs + deltaMs,
+      `${clip.id}:dup:${clip.startMs + effectiveDeltaMs}`,
+      clip.startMs + effectiveDeltaMs,
     )
     const trackClips = duplicatedByTrack.get(track.id) ?? []
     trackClips.push(newClip)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { convertFileSrc } from "@tauri-apps/api/core"
+import { toAssetUrl } from "../../../lib/assets"
 import {
   type AnnotationClip,
   type AnnotationType,
@@ -13,13 +13,16 @@ import {
   type TimelineClip,
   type TimelineMarker,
   type TimelineTrack,
+  type ZoomPreset,
 } from "@recordforge/contracts"
 import {
+  buildSmartZoomSegment,
   createAddAnnotationClipCommand,
   createAddExternalAudioClipCommand,
   createAddImageClipCommand,
   createAddMaskClipCommand,
   createAddMarkerCommand,
+  createAddZoomSegmentCommand,
   createDeleteClipCommand,
   createDeleteClipsCommand,
   createDeleteMarkerCommand,
@@ -58,8 +61,7 @@ import {
 } from "@recordforge/cursor-core"
 import { buildOverlayRenderPlan, isTimelineAudioMuted } from "@recordforge/media-core"
 import { AlertCircle, Monitor } from "lucide-react"
-import { Button, EmptyState, Progress, Skeleton, cn } from "@recordforge/ui"
-import { isTauri } from "../../../lib/settings"
+import { Button, EmptyState, Progress, Skeleton, cn, useToast } from "@recordforge/ui"
 import { useEditorStore } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import type {
@@ -78,6 +80,7 @@ import { OverlaySelectionLayer } from "../canvas/overlay-selection-layer"
 import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
 import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
+import { formatTimelineTime } from "./timeline-ruler"
 import { useOverlayInteraction } from "../canvas/use-overlay-interaction"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
@@ -118,11 +121,6 @@ function isPreparingJob(job: MediaJob | null): boolean {
 
 function isFailedPreparationJob(job: MediaJob | null): boolean {
   return job?.kind === "prepare" && job.status === "failed"
-}
-
-function toAssetUrl(path: string | null): string | null {
-  if (!path) return null
-  return isTauri() ? convertFileSrc(path) : path
 }
 
 function TimelineLoadingState() {
@@ -215,6 +213,7 @@ export function TimelineView({
   const setSelection = useTimelineStore((state) => state.setSelection)
   const clearError = useTimelineStore((state) => state.clearError)
   const missingAssets = useEditorStore((state) => state.missingAssets)
+  const { toast } = useToast()
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const monitorRef = useRef<HTMLDivElement>(null)
@@ -279,7 +278,10 @@ export function TimelineView({
   const isPreparing = isPreparingJob(activeJob)
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
-  const mediaUrl = useMemo(() => toAssetUrl(mediaPath), [mediaPath])
+  const mediaUrl = useMemo(
+    () => toAssetUrl(mediaPath, recording?.workDir),
+    [mediaPath, recording?.workDir],
+  )
   const composition = useMemo(
     () =>
       timeline ? resolvePreviewComposition(timeline, view.playheadMs, { cursorEngine }) : null,
@@ -388,11 +390,12 @@ export function TimelineView({
               (asset.kind === "image" || asset.role === "graphic") && asset.status !== "missing",
           )
           .flatMap((asset) => {
-            const url = toAssetUrl(assetPaths[asset.id] ?? asset.path)
+            const rawPath = assetPaths[asset.id] ?? asset.path
+            const url = toAssetUrl(rawPath, recording?.workDir)
             return url ? [[asset.id, url] as const] : []
           }),
       ),
-    [assetPaths, project?.assets],
+    [assetPaths, project?.assets, recording?.workDir],
   )
   const isPreviewMuted =
     audioTrackOutputs.length > 0 || (timeline ? isTimelineAudioMuted(timeline) : false)
@@ -634,6 +637,9 @@ export function TimelineView({
       } else if (key === "m") {
         event.preventDefault()
         addMarker()
+      } else if (key === "z") {
+        event.preventDefault()
+        handleAddZoom()
       } else if (key === "j") {
         event.preventDefault()
         setPlaybackRate(0.5)
@@ -916,12 +922,30 @@ export function TimelineView({
     execute(createDuplicateClipCommand(clip.id))
   }
 
-  function splitClip(clip: TimelineClip) {
+  function splitClip(clip: TimelineClip, splitTimeMs?: number) {
+    const timeMs = splitTimeMs ?? view.playheadMs
     if (clip.kind === "cursor-effect") {
-      execute(createSplitCursorRangeCommand(clip.id, view.playheadMs))
+      execute(createSplitCursorRangeCommand(clip.id, timeMs))
       return
     }
-    execute(createSplitClipCommand(clip.id, view.playheadMs))
+    execute(createSplitClipCommand(clip.id, timeMs))
+  }
+
+  function splitAllAtPlayhead() {
+    if (!timeline) return
+    const clipsToSplit = timeline.tracks.flatMap((track) => {
+      if (track.locked) return []
+      return track.clips.filter(
+        (c) => view.playheadMs > c.startMs + 1 && view.playheadMs < c.startMs + c.durationMs - 1,
+      )
+    })
+    for (const clip of clipsToSplit) {
+      if (clip.kind === "cursor-effect") {
+        execute(createSplitCursorRangeCommand(clip.id, view.playheadMs))
+      } else {
+        execute(createSplitClipCommand(clip.id, view.playheadMs))
+      }
+    }
   }
 
   function deleteClip(clip: TimelineClip) {
@@ -932,9 +956,13 @@ export function TimelineView({
       selection.clipIds.includes(clip.id)
     ) {
       execute(createDeleteClipsCommand(selection.clipIds))
+      setSelection(null)
       return
     }
     execute(createDeleteClipCommand(clip.id))
+    if (selection?.kind === "clip" && selection.primaryClipId === clip.id) {
+      setSelection(null)
+    }
   }
 
   function onCursorRangeAction(action: CursorRangeAction) {
@@ -1068,7 +1096,9 @@ export function TimelineView({
       return
     }
     setSelection({ kind: "clip", primaryClipId: clip.id, clipIds: [clip.id], trackId: track.id })
-    seek(clip.startMs)
+    if (event.button === 0) {
+      seek(clip.startMs)
+    }
   }
 
   function selectMultipleClips(clipIds: string[], primaryClipId: string, trackId: string) {
@@ -1160,6 +1190,104 @@ export function TimelineView({
     const track = timeline?.tracks.find((candidate) => candidate.kind === "effects")
     if (!track) return
     setSelection({ kind: "clip", primaryClipId: mask.id, clipIds: [mask.id], trackId: track.id })
+  }
+
+  function handleAddZoom(
+    timeOrOptions?:
+      | number
+      | {
+          timeMs?: number
+          endMs?: number
+          preset?: ZoomPreset
+          scale?: number
+          mode?: ManualZoomSegment["mode"]
+        },
+    maybeOptions?: {
+      preset?: ZoomPreset
+      scale?: number
+      endMs?: number
+      mode?: ManualZoomSegment["mode"]
+    },
+  ) {
+    if (!timeline) return
+
+    let timeMs: number | undefined
+    let endMs: number | undefined
+    let preset: ZoomPreset | undefined
+    let scale: number | undefined
+    let mode: ManualZoomSegment["mode"] | undefined
+
+    if (typeof timeOrOptions === "number") {
+      timeMs = timeOrOptions
+      endMs = maybeOptions?.endMs
+      preset = maybeOptions?.preset
+      scale = maybeOptions?.scale
+      mode = maybeOptions?.mode
+    } else if (timeOrOptions) {
+      timeMs = timeOrOptions.timeMs
+      endMs = timeOrOptions.endMs
+      preset = timeOrOptions.preset
+      scale = timeOrOptions.scale
+      mode = timeOrOptions.mode
+    }
+
+    const rangeSelection =
+      view.selection?.kind === "range" ? view.selection : null
+    const effectiveStartMs =
+      timeMs !== undefined
+        ? timeMs
+        : rangeSelection
+          ? rangeSelection.startMs
+          : view.playheadMs
+    const effectiveEndMs =
+      endMs !== undefined
+        ? endMs
+        : rangeSelection && timeMs === undefined
+          ? rangeSelection.endMs
+          : undefined
+
+    const cursorPoint = getCursorPointAtTimelineTime(
+      timeline,
+      effectiveStartMs,
+      cursorTelemetry,
+      cursorEngine,
+    )
+
+    const segment = buildSmartZoomSegment(timeline, cursorPoint, {
+      startMs: effectiveStartMs,
+      endMs: effectiveEndMs,
+      preset,
+      scale,
+      mode,
+    })
+
+    const success = execute(
+      createAddZoomSegmentCommand(
+        segment.startMs,
+        segment.startMs + segment.durationMs,
+        segment.target,
+        {
+          segmentId: segment.id,
+          scale: segment.scale,
+          easing: segment.easing,
+          transitionInMs: segment.transitionInMs,
+          transitionOutMs: segment.transitionOutMs,
+          mode: segment.mode,
+          source: segment.source,
+          preset: segment.preset,
+          label: segment.label,
+        },
+      ),
+    )
+
+    if (success) {
+      setSelection({ kind: "zoom", segmentId: segment.id })
+      const durationSec = (segment.durationMs / 1000).toFixed(1)
+      toast({
+        title: `Added ${segment.scale.toFixed(1)}× Zoom`,
+        description: `${segment.label ?? "Zoom segment"} (${durationSec}s) at ${formatTimelineTime(segment.startMs)}`,
+      })
+    }
   }
 
   if (isLoading) return <TimelineLoadingState />
@@ -1431,6 +1559,7 @@ export function TimelineView({
               isPlaying={view.isPlaying}
               playbackRate={view.playbackRate}
               assetPaths={assetPaths}
+              workDir={recording?.workDir}
             />
 
             {/* Media status badge */}
@@ -1477,6 +1606,11 @@ export function TimelineView({
           playbackRate={view.playbackRate}
           zoom={view.zoom}
           canRippleDelete={Boolean(view.selection)}
+          selectedRange={
+            view.selection?.kind === "range"
+              ? { startMs: view.selection.startMs, endMs: view.selection.endMs }
+              : null
+          }
           onTogglePlay={togglePlay}
           onSeek={seek}
           onStepFrame={stepFrame}
@@ -1485,6 +1619,7 @@ export function TimelineView({
           onZoomToFit={zoomToFit}
           onAddMarker={addMarker}
           onAddMask={addMask}
+          onAddZoom={handleAddZoom}
           onSplitAtPlayhead={splitSelected}
           onRippleDeleteSelected={() => deleteSelected(true)}
         />
@@ -1510,6 +1645,7 @@ export function TimelineView({
           onDeleteMarker={deleteMarker}
           onAddMarkerAtTime={addMarkerAtTime}
           onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
+          onAddZoomAtTime={handleAddZoom}
           onMoveZoomSegment={interaction.moveZoomSegment}
           onResizeZoomSegment={interaction.resizeZoomSegment}
           onDeleteSelection={deleteSelected}
@@ -1519,6 +1655,8 @@ export function TimelineView({
           onAddAssetAtTime={addAssetAtTime}
           onCursorRangeAction={onCursorRangeAction}
           onZoomSegmentAction={onZoomSegmentAction}
+          onSplitAllAtPlayhead={splitAllAtPlayhead}
+          onDeselectAll={() => setSelection(null)}
           onToggleTrackMuted={(track) =>
             execute(createUpdateTrackCommand(track.id, { muted: !track.muted }))
           }

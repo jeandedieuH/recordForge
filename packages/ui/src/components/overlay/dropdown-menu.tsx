@@ -13,6 +13,8 @@ const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup
 function DropdownMenuContent({
   className,
   sideOffset = 6,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   return (
@@ -24,6 +26,14 @@ function DropdownMenuContent({
           "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95",
           className,
         )}
+        onPointerDown={(e) => {
+          e.stopPropagation()
+          onPointerDown?.(e)
+        }}
+        onClick={(e) => {
+          e.stopPropagation()
+          onClick?.(e)
+        }}
         {...props}
       />
     </DropdownMenuPrimitive.Portal>
@@ -33,15 +43,25 @@ function DropdownMenuContent({
 function DropdownMenuItem({
   className,
   inset,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.Item> & { inset?: boolean }) {
   return (
     <DropdownMenuPrimitive.Item
       className={cn(
-        "relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none select-none focus:bg-overlay data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground",
+        "relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none select-none focus:bg-overlay data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground",
         inset && "pl-8",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     />
   )
@@ -51,15 +71,25 @@ function DropdownMenuCheckboxItem({
   className,
   children,
   checked,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.CheckboxItem>) {
   return (
     <DropdownMenuPrimitive.CheckboxItem
       checked={checked}
       className={cn(
-        "relative flex cursor-pointer items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none focus:bg-overlay data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex cursor-pointer items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none focus:bg-overlay data-disabled:pointer-events-none data-disabled:opacity-50",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     >
       <span className="absolute left-2 flex size-4 items-center justify-center">
@@ -75,14 +105,24 @@ function DropdownMenuCheckboxItem({
 function DropdownMenuRadioItem({
   className,
   children,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.RadioItem>) {
   return (
     <DropdownMenuPrimitive.RadioItem
       className={cn(
-        "relative flex cursor-pointer items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none focus:bg-overlay data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "relative flex cursor-pointer items-center rounded-sm py-1.5 pr-2 pl-8 text-sm outline-none select-none focus:bg-overlay data-disabled:pointer-events-none data-disabled:opacity-50",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     >
       <span className="absolute left-2 flex size-4 items-center justify-center">
@@ -137,6 +177,8 @@ function DropdownMenuSubTrigger({
   className,
   inset,
   children,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.SubTrigger> & { inset?: boolean }) {
   return (
@@ -146,6 +188,14 @@ function DropdownMenuSubTrigger({
         inset && "pl-8",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     >
       {children}
@@ -156,6 +206,8 @@ function DropdownMenuSubTrigger({
 
 function DropdownMenuSubContent({
   className,
+  onPointerDown,
+  onClick,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
   return (
@@ -165,6 +217,14 @@ function DropdownMenuSubContent({
         "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
         className,
       )}
+      onPointerDown={(e) => {
+        e.stopPropagation()
+        onPointerDown?.(e)
+      }}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
       {...props}
     />
   )
