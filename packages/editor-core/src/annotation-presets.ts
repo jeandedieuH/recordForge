@@ -39,6 +39,7 @@ export const ANNOTATION_PALETTES: AnnotationColorPalette[] = [
 
 export interface AnnotationShapePreset {
   type: AnnotationType
+  presetId?: string
   name: string
   description: string
   defaultWidth: number
@@ -110,6 +111,7 @@ export function annotationPresetToShapePreset(
 ): AnnotationShapePreset {
   return {
     ...preset.definition,
+    presetId: preset.id,
     name: preset.name,
     description: preset.description,
   }
@@ -192,6 +194,7 @@ export function createAnnotationClipFromPreset(
     assetId: `synthetic:annotation:${id}`,
     kind: "annotation",
     annotationType: preset.type,
+    presetId: preset.presetId ?? "",
     startMs,
     durationMs,
     sourceInMs: 0,
@@ -253,6 +256,7 @@ export function applyPresetToAnnotationClip(
   return {
     ...clip,
     annotationType: shape.type,
+    presetId: shape.presetId ?? "",
     width: nextWidth,
     height: nextHeight,
     endX: isLine ? clip.x + nextWidth : undefined,

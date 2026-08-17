@@ -108,7 +108,7 @@ export function SavePresetDialog({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="What this preset is for..."
-                className="min-h-[72px] resize-none text-xs"
+                className="min-h-18 resize-none text-xs"
               />
             </div>
 

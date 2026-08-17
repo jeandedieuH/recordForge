@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import type { AnnotationClip, AnnotationType } from "@recordforge/contracts"
 import {
   annotationPresetFromClip,
@@ -56,7 +56,10 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
   const [browserOpen, setBrowserOpen] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
 
-  const activePresetName = clip.annotationType.replace("-", " ")
+  const activePresetName = useMemo(() => {
+    const preset = clip.presetId ? registry.getPresetById(clip.presetId) : undefined
+    return preset?.name ?? clip.annotationType.replace("-", " ")
+  }, [registry, clip.presetId, clip.annotationType])
 
   function handleApplyPreset(preset: BrowserPreset) {
     const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)
@@ -162,6 +165,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
           </DialogHeader>
           <PresetBrowser
             kind="annotation"
+            selectedPresetId={clip.presetId}
             onSelect={(preset) => {
               handleApplyPreset(preset)
               setBrowserOpen(false)

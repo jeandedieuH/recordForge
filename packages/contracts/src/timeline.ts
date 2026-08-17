@@ -376,6 +376,7 @@ export const annotationClipSchema = timelineClipBaseSchema.extend({
   animationIn: annotationAnimationSchema.default("fade"),
   animationOut: annotationAnimationSchema.default("fade"),
   overlayAnimation: overlayAnimationSchema.default({}),
+  presetId: z.string().default(""),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
 })

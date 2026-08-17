@@ -77,7 +77,7 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
   }
 
   function handleQuickDraw(type: AnnotationType, color: string) {
-    onToggleDrawMode?.(!drawMode, type, color)
+    onToggleDrawMode?.(true, type, color)
   }
 
   return (
@@ -209,7 +209,7 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
       {/* Preset Browser */}
       <PresetBrowser
         kind="annotation"
-        selectedPresetId={undefined}
+        selectedPresetId={selectedAnnotationClip?.clip.presetId}
         onSelect={(preset) => {
           if (drawMode && onToggleDrawMode) {
             const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)

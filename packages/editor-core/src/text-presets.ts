@@ -289,7 +289,7 @@ export function applyTextPresetToClip(clip: TextClip, preset: TextPresetDefiniti
 
 export function textPresetFromClip(
   clip: TextClip,
-  metadata: { name: string; description: string; category?: TitlePresetCategory; tags?: string[] },
+  metadata: { name: string; description: string; category?: string; tags?: string[] },
 ): TextPresetRecord {
   return {
     id: `custom-${clip.id}`,

@@ -569,6 +569,7 @@ describe("render-plan", () => {
             id: "ann-1",
             assetId: "synth:ann-1",
             kind: "annotation",
+            presetId: "",
             annotationType: "rounded-rect",
             startMs: 1_000,
             durationMs: 4_000,
