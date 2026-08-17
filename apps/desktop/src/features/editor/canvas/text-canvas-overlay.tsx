@@ -1,5 +1,6 @@
-import { useRef } from "react"
 import type { TextClip } from "@recordforge/contracts"
+import type { OverlayHandle } from "@recordforge/editor-core"
+import type { OverlayInteraction } from "./use-overlay-interaction"
 import { cn } from "@recordforge/ui"
 
 interface TextCanvasOverlayProps {
@@ -8,22 +9,8 @@ interface TextCanvasOverlayProps {
   canvasWidth: number
   canvasHeight: number
   selectedClipId?: string | null
+  interaction: OverlayInteraction
   onSelectClip?: (clip: TextClip) => void
-  onUpdateClip?: (
-    clipId: string,
-    update: Partial<TextClip>,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-}
-
-interface GestureState {
-  clipId: string
-  pointerId: number
-  mode: "move" | "resize"
-  startX: number
-  startY: number
-  initialClip: TextClip
-  moved: boolean
 }
 
 function isActive(clip: TextClip, playheadMs: number): boolean {
@@ -40,100 +27,23 @@ export function TextCanvasOverlay({
   canvasWidth,
   canvasHeight,
   selectedClipId,
+  interaction,
   onSelectClip,
-  onUpdateClip,
 }: TextCanvasOverlayProps) {
-  const gestureRef = useRef<GestureState | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  function beginGesture(
-    event: React.PointerEvent<HTMLDivElement>,
-    clip: TextClip,
-    mode: GestureState["mode"],
-  ) {
-    if (event.button !== 0 || !isActive(clip, playheadMs) || clip.locked) return
-    event.stopPropagation()
-    event.preventDefault()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    gestureRef.current = {
-      clipId: clip.id,
-      pointerId: event.pointerId,
-      mode,
-      startX: event.clientX,
-      startY: event.clientY,
-      initialClip: { ...clip },
-      moved: false,
-    }
+  function beginGesture(event: React.PointerEvent<Element>, clip: TextClip, handle: OverlayHandle) {
+    interaction.beginGesture(event, clip, handle)
   }
 
-  function moveGesture(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId || !onUpdateClip || !containerRef.current)
-      return
-    const rect = containerRef.current.getBoundingClientRect()
-    const deltaX = ((event.clientX - gesture.startX) / Math.max(1, rect.width)) * canvasWidth
-    const deltaY = ((event.clientY - gesture.startY) / Math.max(1, rect.height)) * canvasHeight
-
-    if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1 && !gesture.moved) return
-    gesture.moved = true
-    event.preventDefault()
-
-    const init = gesture.initialClip
-    const update: Partial<TextClip> = {}
-
-    if (gesture.mode === "move") {
-      update.x = Math.max(0, Math.min(canvasWidth - init.width, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight - init.height, init.y + deltaY))
-    } else if (gesture.mode === "resize") {
-      update.width = Math.max(80, init.width + deltaX)
-      update.height = Math.max(40, init.height + deltaY)
-    }
-
-    onUpdateClip(gesture.clipId, update, { phase: "draft" })
+  function moveGesture(event: React.PointerEvent<Element>) {
+    interaction.moveGesture(event)
   }
 
-  function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const wasCancelled = event.type === "pointercancel"
-    const didMove = gesture.moved
-    gestureRef.current = null
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId)
-      }
-    } catch {}
-
-    if (!onUpdateClip) return
-    if (wasCancelled || !didMove) {
-      onUpdateClip(gesture.clipId, gesture.initialClip, { phase: "cancel" })
-      return
-    }
-
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const deltaX = ((event.clientX - gesture.startX) / Math.max(1, rect.width)) * canvasWidth
-    const deltaY = ((event.clientY - gesture.startY) / Math.max(1, rect.height)) * canvasHeight
-
-    const init = gesture.initialClip
-    const update: Partial<TextClip> = {}
-
-    if (gesture.mode === "move") {
-      update.x = Math.max(0, Math.min(canvasWidth - init.width, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight - init.height, init.y + deltaY))
-    } else if (gesture.mode === "resize") {
-      update.width = Math.max(80, init.width + deltaX)
-      update.height = Math.max(40, init.height + deltaY)
-    }
-
-    onUpdateClip(gesture.clipId, update, { phase: "commit" })
+  function finishGesture(event: React.PointerEvent<Element>) {
+    interaction.finishGesture(event)
   }
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute inset-0 z-36 size-full pointer-events-none overflow-hidden"
-    >
+    <div className="absolute inset-0 z-36 size-full pointer-events-none overflow-hidden">
       {clips.map((clip) => {
         const active = isActive(clip, playheadMs)
         if (!active) return null
@@ -179,16 +89,20 @@ export function TextCanvasOverlay({
               left: `${leftPercent}%`,
               top: `${topPercent}%`,
               width: `${widthPercent}%`,
-              minHeight: `${heightPercent}%`,
+              height: `${heightPercent}%`,
+              transform: `rotate(${clip.rotation}deg)`,
+              transformOrigin: `${clip.anchorX * 100}% ${clip.anchorY * 100}%`,
             }}
+            onFocus={() => onSelectClip?.(clip)}
             onClick={(e) => {
               e.stopPropagation()
               onSelectClip?.(clip)
             }}
-            onPointerDown={(e) => beginGesture(e, clip, "move")}
+            onPointerDown={(e) => beginGesture(e, clip, "body")}
             onPointerMove={moveGesture}
             onPointerUp={finishGesture}
             onPointerCancel={finishGesture}
+            onLostPointerCapture={interaction.handleLostPointerCapture}
           >
             {/* Backdrop Card */}
             <div
@@ -258,17 +172,106 @@ export function TextCanvasOverlay({
 
             {/* Resize Handle for Selected Clip */}
             {isSelected && !clip.locked && (
-              <div
-                role="button"
-                tabIndex={0}
-                aria-label="Resize title"
-                className="absolute -bottom-1.5 -right-1.5 size-3.5 cursor-nwse-resize rounded-sm border-2 border-white bg-warning shadow-e2 pointer-events-auto"
-                onPointerDown={(e) => {
-                  e.stopPropagation()
-                  beginGesture(e, clip, "resize")
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
+              <>
+                {[
+                  {
+                    handle: "nw" as const,
+                    left: "0%",
+                    top: "0%",
+                    cursor: "cursor-nwse-resize",
+                    label: "Resize title northwest",
+                  },
+                  {
+                    handle: "n" as const,
+                    left: "50%",
+                    top: "0%",
+                    cursor: "cursor-n-resize",
+                    label: "Resize title north",
+                  },
+                  {
+                    handle: "ne" as const,
+                    left: "100%",
+                    top: "0%",
+                    cursor: "cursor-nesw-resize",
+                    label: "Resize title northeast",
+                  },
+                  {
+                    handle: "e" as const,
+                    left: "100%",
+                    top: "50%",
+                    cursor: "cursor-ew-resize",
+                    label: "Resize title east",
+                  },
+                  {
+                    handle: "se" as const,
+                    left: "100%",
+                    top: "100%",
+                    cursor: "cursor-nwse-resize",
+                    label: "Resize title southeast",
+                  },
+                  {
+                    handle: "s" as const,
+                    left: "50%",
+                    top: "100%",
+                    cursor: "cursor-s-resize",
+                    label: "Resize title south",
+                  },
+                  {
+                    handle: "sw" as const,
+                    left: "0%",
+                    top: "100%",
+                    cursor: "cursor-nesw-resize",
+                    label: "Resize title southwest",
+                  },
+                  {
+                    handle: "w" as const,
+                    left: "0%",
+                    top: "50%",
+                    cursor: "cursor-ew-resize",
+                    label: "Resize title west",
+                  },
+                ].map(({ handle, left, top, cursor, label }) => (
+                  <div
+                    key={handle}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={label}
+                    className={cn(
+                      "absolute -translate-x-1/2 -translate-y-1/2 size-3.5 rounded-sm border-2 border-background bg-warning shadow-e2 pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning",
+                      cursor,
+                    )}
+                    style={{ left, top }}
+                    onPointerDown={(event) => {
+                      event.stopPropagation()
+                      beginGesture(event, clip, handle)
+                    }}
+                    onPointerMove={moveGesture}
+                    onPointerUp={finishGesture}
+                    onPointerCancel={finishGesture}
+                    onLostPointerCapture={interaction.handleLostPointerCapture}
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ))}
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-1/2 -top-6 h-6 w-px -translate-x-1/2 bg-warning"
+                />
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Rotate title"
+                  className="absolute left-1/2 -top-8 size-3.5 -translate-x-1/2 cursor-grab rounded-full border-2 border-background bg-warning shadow-e2 pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning"
+                  onPointerDown={(event) => {
+                    event.stopPropagation()
+                    beginGesture(event, clip, "rotate")
+                  }}
+                  onPointerMove={moveGesture}
+                  onPointerUp={finishGesture}
+                  onPointerCancel={finishGesture}
+                  onLostPointerCapture={interaction.handleLostPointerCapture}
+                  onClick={(event) => event.stopPropagation()}
+                />
+              </>
             )}
           </div>
         )

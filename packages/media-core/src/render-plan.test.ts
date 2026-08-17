@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type ProjectAsset, type TimelineState } from "@recordforge/domain"
-import { buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
+import {
+  annotationClipSchema,
+  defaultCursorSettings,
+  imageClipSchema,
+  textClipSchema,
+  type ProjectAsset,
+  type TimelineState,
+} from "@recordforge/domain"
+import { buildOverlayRenderPlan, buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
 
 function makeTimeline(clipCount = 1): TimelineState {
   return {
@@ -291,6 +298,7 @@ describe("render-plan", () => {
         role: "cursor_events",
         path: "cursor_telemetry.json",
         status: "available",
+        derivativeVersion: 1,
         durationMs: 60_000,
         hasAudio: false,
       },
@@ -571,6 +579,11 @@ describe("render-plan", () => {
             y: 150,
             width: 300,
             height: 200,
+            rotation: 0,
+            anchorX: 0.5,
+            anchorY: 0.5,
+            zIndex: 0,
+            opacity: 1,
             strokeColor: "#e879f9",
             strokeWidth: 4,
             strokeStyle: "solid",
@@ -583,6 +596,13 @@ describe("render-plan", () => {
             fontSize: 16,
             animationIn: "fade",
             animationOut: "fade",
+            overlayAnimation: {
+              inType: "fade",
+              outType: "fade",
+              inDurationMs: 350,
+              outDurationMs: 350,
+              easing: "expo-out",
+            },
             shadowEnabled: true,
             shadowColor: "rgba(0,0,0,0.5)",
             shadowBlur: 8,
@@ -618,6 +638,11 @@ describe("render-plan", () => {
             y: 80,
             width: 600,
             height: 180,
+            rotation: 0,
+            anchorX: 0.5,
+            anchorY: 0.5,
+            zIndex: 0,
+            opacity: 1,
             alignment: "left",
             fontFamily: "sans",
             fontSize: 32,
@@ -637,6 +662,13 @@ describe("render-plan", () => {
             shadowBlur: 16,
             animationIn: "fade",
             animationOut: "fade",
+            overlayAnimation: {
+              inType: "fade",
+              outType: "fade",
+              inDurationMs: 350,
+              outDurationMs: 350,
+              easing: "expo-out",
+            },
             enabled: true,
             locked: false,
           },
@@ -664,6 +696,10 @@ describe("render-plan", () => {
             y: 40,
             width: 160,
             height: 160,
+            rotation: 0,
+            anchorX: 0.5,
+            anchorY: 0.5,
+            zIndex: 0,
             opacity: 1,
             borderRadius: 8,
             borderWidth: 0,
@@ -674,6 +710,13 @@ describe("render-plan", () => {
             fit: "contain",
             animationIn: "fade",
             animationOut: "fade",
+            overlayAnimation: {
+              inType: "fade",
+              outType: "fade",
+              inDurationMs: 350,
+              outDurationMs: 350,
+              easing: "expo-out",
+            },
             enabled: true,
             locked: false,
           },
@@ -690,5 +733,115 @@ describe("render-plan", () => {
     expect(plan.value.texts[0].presetId).toBe("cyberpunk-neon")
     expect(plan.value.images).toHaveLength(1)
     expect(plan.value.images[0].assetId).toBe("logo-1")
+  })
+
+  it("emits one canonical overlay render plan with transform and animation metadata", () => {
+    const state = makeTimeline()
+    const baseClip = {
+      assetId: "synthetic:overlay",
+      startMs: 0,
+      durationMs: 4_000,
+      sourceInMs: 0,
+      sourceOutMs: 4_000,
+      speed: 1,
+    }
+    const annotation = annotationClipSchema.parse({
+      ...baseClip,
+      id: "overlay-annotation",
+      kind: "annotation",
+      x: 100,
+      y: 120,
+      width: 320,
+      height: 180,
+      rotation: 12,
+      zIndex: 5,
+      overlayAnimation: {
+        inType: "draw",
+        outType: "fade",
+        inDurationMs: 500,
+        outDurationMs: 250,
+        easing: "ease-out",
+      },
+    })
+    const text = textClipSchema.parse({
+      ...baseClip,
+      id: "overlay-text",
+      kind: "text",
+      x: 80,
+      y: 80,
+      zIndex: 1,
+      primaryText: "Overlay title",
+    })
+    const image = imageClipSchema.parse({
+      ...baseClip,
+      id: "overlay-image",
+      assetId: "asset-logo",
+      kind: "image",
+      x: 1_200,
+      y: 60,
+      width: 400,
+      height: 120,
+      zIndex: 1,
+      rotation: -4,
+      opacity: 0.9,
+    })
+
+    state.tracks.push({
+      id: "overlay-track",
+      kind: "overlay",
+      name: "Overlays",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [annotation, text, image],
+    })
+
+    const assets: ProjectAsset[] = [
+      {
+        id: "asset-logo",
+        role: "graphic",
+        path: "logo.svg",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 0,
+        width: 400,
+        height: 120,
+        hasAudio: false,
+        kind: "image",
+      },
+    ]
+    const plan = buildRenderPlan({ state, projectId: "project-1", assets })
+    const previewPlan = buildOverlayRenderPlan(state, assets)
+
+    expect(previewPlan.items.map((item) => item.id)).toEqual([
+      "overlay-image",
+      "overlay-annotation",
+      "overlay-text",
+    ])
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.overlayRenderPlan).toBeDefined()
+    expect(plan.value.overlayRenderPlan?.items.map((item) => item.kind)).toEqual([
+      "image",
+      "annotation",
+      "text",
+    ])
+    expect(plan.value.overlayRenderPlan?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "overlay-annotation",
+          transform: expect.objectContaining({ rotation: 12 }),
+          animation: expect.objectContaining({ inType: "draw", inDurationMs: 500 }),
+        }),
+        expect.objectContaining({
+          id: "overlay-image",
+          transform: expect.objectContaining({ rotation: -4, opacity: 0.9 }),
+        }),
+      ]),
+    )
+    expect(plan.value.overlayRenderPlan?.assets).toEqual([
+      expect.objectContaining({ id: "asset-logo", kind: "image", width: 400, height: 120 }),
+    ])
   })
 })

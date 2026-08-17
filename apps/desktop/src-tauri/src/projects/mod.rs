@@ -33,6 +33,10 @@ pub enum ProjectAssetRole {
     CursorEvents,
     Caption,
     Image,
+    Graphic,
+    AudioTrack,
+    #[serde(rename = "b_roll")]
+    BRoll,
 }
 
 impl ProjectAssetRole {
@@ -46,6 +50,9 @@ impl ProjectAssetRole {
             ProjectAssetRole::CursorEvents => "cursor_events",
             ProjectAssetRole::Caption => "caption",
             ProjectAssetRole::Image => "image",
+            ProjectAssetRole::Graphic => "graphic",
+            ProjectAssetRole::AudioTrack => "audio_track",
+            ProjectAssetRole::BRoll => "b_roll",
         }
     }
 }
@@ -66,9 +73,23 @@ pub enum ProjectAssetStatus {
 pub struct ProjectAsset {
     pub id: String,
     pub role: ProjectAssetRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub path: String,
     #[serde(default)]
     pub status: ProjectAssetStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svg_safe: Option<bool>,
+    #[serde(default = "default_derivative_version")]
+    pub derivative_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivatives: Option<HashMap<String, String>>,
     #[serde(default)]
     pub duration_ms: u64,
     pub width: Option<i32>,
@@ -93,6 +114,10 @@ pub struct ProjectAsset {
     pub timebase: Option<crate::capture::cursor::CursorTelemetryTimebase>,
     #[serde(default)]
     pub cursor_metadata: Option<String>,
+}
+
+fn default_derivative_version() -> u32 {
+    1
 }
 
 /// Export settings persisted with the project.
@@ -156,9 +181,11 @@ pub struct ProjectFile {
     pub zoom_segments: Value,
     #[serde(default = "empty_json_object")]
     pub smart_zoom_settings: Value,
+    #[serde(default)]
     pub export_settings: ProjectExportSettings,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
     pub checksum: String,
 }
 
@@ -257,11 +284,16 @@ pub fn migrate_project(value: &mut Value) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a project-relative asset path to an absolute path and update status.
+/// Resolve an asset path and update its availability without exposing an
+/// absolute path to the React timeline state. Copied assets must stay inside
+/// the project; reference assets are validated as external regular files.
 fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPolicy) -> Result<()> {
-    let relative = Path::new(&asset.path);
-    if relative.is_absolute()
-        || relative.components().any(|component| {
+    let stored_path = Path::new(&asset.path);
+    let is_reference =
+        asset.import_strategy.as_deref() == Some("reference") || stored_path.is_absolute();
+
+    if !is_reference
+        && stored_path.components().any(|component| {
             matches!(
                 component,
                 Component::ParentDir | Component::Prefix(_) | Component::RootDir
@@ -275,36 +307,61 @@ fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPoli
         .into());
     }
 
-    let absolute = project_dir.join(relative);
+    let candidate = if is_reference {
+        stored_path.to_path_buf()
+    } else {
+        project_dir.join(stored_path)
+    };
+    let exists = candidate.is_file();
 
-    // Containment: the resolved absolute path must be inside the project directory.
-    // Canonicalize the parent when the asset is missing so Windows extended-path
-    // prefixes cannot make a valid missing asset look like traversal.
-    let canonical_project = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
-    let canonical_asset = absolute.canonicalize().unwrap_or_else(|_| {
-        absolute
-            .parent()
-            .and_then(|parent| parent.canonicalize().ok())
-            .and_then(|parent| absolute.file_name().map(|name| parent.join(name)))
-            .unwrap_or_else(|| absolute.clone())
-    });
-
-    if !policy.is_contained(&canonical_project, &canonical_asset) {
-        return Err(InternalError::Permissions(format!(
-            "asset path escapes project directory: {}",
-            asset.path
-        ))
-        .into());
+    if exists {
+        if is_reference {
+            policy.validate_external_asset_path(&candidate)?;
+        } else {
+            let canonical_project = project_dir
+                .canonicalize()
+                .unwrap_or_else(|_| project_dir.to_path_buf());
+            let canonical_asset = candidate
+                .canonicalize()
+                .map_err(|e| InternalError::Storage(format!("canonicalize asset: {e}")))?;
+            if !policy.is_contained(&canonical_project, &canonical_asset) {
+                return Err(InternalError::Permissions(format!(
+                    "asset path escapes project directory: {}",
+                    asset.path
+                ))
+                .into());
+            }
+        }
+    } else if !is_reference {
+        // Canonicalize the parent when a copied asset is missing so a missing
+        // path cannot hide traversal through a symlinked project directory.
+        let canonical_project = project_dir
+            .canonicalize()
+            .unwrap_or_else(|_| project_dir.to_path_buf());
+        let canonical_asset = candidate.canonicalize().unwrap_or_else(|_| {
+            candidate
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .and_then(|parent| candidate.file_name().map(|name| parent.join(name)))
+                .unwrap_or_else(|| candidate.clone())
+        });
+        if !policy.is_contained(&canonical_project, &canonical_asset) {
+            return Err(InternalError::Permissions(format!(
+                "asset path escapes project directory: {}",
+                asset.path
+            ))
+            .into());
+        }
     }
 
-    if canonical_asset.exists() {
+    if exists {
         if matches!(asset.status, ProjectAssetStatus::Missing) {
-            // A file has reappeared (e.g. after relink or media restore).
             asset.status = ProjectAssetStatus::Available;
         }
-    } else if matches!(asset.status, ProjectAssetStatus::Available) {
+    } else if matches!(
+        asset.status,
+        ProjectAssetStatus::Available | ProjectAssetStatus::Relinked
+    ) {
         asset.status = ProjectAssetStatus::Missing;
     }
 
@@ -350,8 +407,15 @@ fn telemetry_asset_from_file(
     let asset = ProjectAsset {
         id: meta.asset_id.clone(),
         role: ProjectAssetRole::CursorEvents,
+        kind: Some("cursor".into()),
         path: "cursor_telemetry.json".into(),
         status: ProjectAssetStatus::Available,
+        content_hash: None,
+        import_strategy: Some("copy".into()),
+        original_path: None,
+        svg_safe: None,
+        derivative_version: 1,
+        derivatives: None,
         duration_ms,
         width: Some(meta.source_width as i32),
         height: Some(meta.source_height as i32),
@@ -431,21 +495,26 @@ pub fn load_project(project_dir: &Path, policy: &PathPolicy) -> Result<Option<Lo
 
     // Validate checksum before any mutations. If the primary file is corrupt,
     // fall back to the backup if one exists.
-    if let Err(err) = validate_checksum(&project) {
-        warn!(error = %err, "project checksum failed; trying backup");
-        let backup = backup_path(project_dir);
-        if backup.exists() {
-            let backup_content = fs::read_to_string(&backup)
-                .map_err(|e| InternalError::Storage(format!("read project backup: {e}")))?;
-            let mut backup_value: Value = serde_json::from_str(&backup_content)
-                .map_err(|e| InternalError::Project(format!("parse project backup: {e}")))?;
-            migrate_project(&mut backup_value)?;
-            project = serde_json::from_value(backup_value)
-                .map_err(|e| InternalError::Project(format!("deserialize project backup: {e}")))?;
-            validate_checksum(&project)?;
-            info!("loaded project from backup");
-        } else {
-            return Err(err);
+    if !project.checksum.is_empty() {
+        if let Err(err) = validate_checksum(&project) {
+            warn!(error = %err, "project checksum failed; trying backup");
+            let backup = backup_path(project_dir);
+            if backup.exists() {
+                let backup_content = fs::read_to_string(&backup)
+                    .map_err(|e| InternalError::Storage(format!("read project backup: {e}")))?;
+                let mut backup_value: Value = serde_json::from_str(&backup_content)
+                    .map_err(|e| InternalError::Project(format!("parse project backup: {e}")))?;
+                migrate_project(&mut backup_value)?;
+                project = serde_json::from_value(backup_value).map_err(|e| {
+                    InternalError::Project(format!("deserialize project backup: {e}"))
+                })?;
+                if !project.checksum.is_empty() {
+                    validate_checksum(&project)?;
+                }
+                info!("loaded project from backup");
+            } else {
+                return Err(err);
+            }
         }
     }
 
@@ -558,7 +627,7 @@ fn prune_snapshots(project_dir: &Path) -> Result<()> {
 
 /// Return a path relative to the project directory when the absolute path is
 /// inside it; otherwise return the absolute path as a fallback.
-fn make_project_relative(project_dir: &Path, absolute: &Path) -> String {
+pub fn make_project_relative(project_dir: &Path, absolute: &Path) -> String {
     if let Ok(project_canonical) = project_dir.canonicalize() {
         if let Ok(asset_canonical) = absolute.canonicalize() {
             if asset_canonical.starts_with(&project_canonical) {
@@ -588,8 +657,15 @@ fn create_screen_asset(recording: &LibraryRecording, metadata: &MediaMetadata) -
     ProjectAsset {
         id: recording.id.clone(),
         role: ProjectAssetRole::Screen,
+        kind: Some("video".into()),
         path: filename,
         status: ProjectAssetStatus::Available,
+        content_hash: None,
+        import_strategy: Some("copy".into()),
+        original_path: None,
+        svg_safe: None,
+        derivative_version: 1,
+        derivatives: None,
         duration_ms: metadata.duration_ms,
         width: metadata.width,
         height: metadata.height,
@@ -801,6 +877,15 @@ pub fn relink_asset(
 }
 
 /// Convenience function for building an asset id -> path map for export.
+pub fn absolute_asset_path(asset: &ProjectAsset, project_dir: &Path) -> PathBuf {
+    let path = Path::new(&asset.path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_dir.join(path)
+    }
+}
+
 pub fn asset_path_map(project: &ProjectFile, project_dir: &Path) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     for asset in &project.assets {
@@ -808,7 +893,7 @@ pub fn asset_path_map(project: &ProjectFile, project_dir: &Path) -> HashMap<Stri
             asset.status,
             ProjectAssetStatus::Available | ProjectAssetStatus::Relinked
         ) {
-            map.insert(asset.id.clone(), project_dir.join(&asset.path));
+            map.insert(asset.id.clone(), absolute_asset_path(asset, project_dir));
         }
     }
     map
@@ -827,8 +912,14 @@ pub fn load_asset_path_map(project_dir: &Path) -> Result<HashMap<String, PathBuf
             ProjectAssetStatus::Available | ProjectAssetStatus::Relinked
         )
     }) {
-        let path = project_dir.join(&asset.path);
-        let canonical = policy.validate_project_asset_path(project_dir, &path)?;
+        let path = absolute_asset_path(asset, project_dir);
+        let canonical = if Path::new(&asset.path).is_absolute()
+            || asset.import_strategy.as_deref() == Some("reference")
+        {
+            policy.validate_external_asset_path(&path)?
+        } else {
+            policy.validate_project_asset_path(project_dir, &path)?
+        };
         paths.insert(asset.id.clone(), canonical);
     }
     Ok(paths)
@@ -989,12 +1080,80 @@ mod tests {
         fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
 
         let mut project = create_project(&recording, &metadata, None, &project_dir).unwrap();
-        project.assets[0].status = ProjectAssetStatus::Available;
+        project.assets[0].status = ProjectAssetStatus::Relinked;
         save_project(&project, &project_dir).unwrap();
 
         fs::remove_file(project_dir.join("output.mp4")).unwrap();
 
         let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
         assert_eq!(loaded.missing_assets.len(), 1);
+    }
+
+    #[test]
+    fn loads_reference_assets_outside_the_project_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let external = temp.path().join("external.png");
+        let (recording, metadata) = make_test_recording(&project_dir);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
+        fs::write(&external, b"image").unwrap();
+
+        let mut project = create_project(&recording, &metadata, None, &project_dir).unwrap();
+        let mut asset = project.assets[0].clone();
+        asset.id = "asset-external".into();
+        asset.role = ProjectAssetRole::Graphic;
+        asset.kind = Some("image".into());
+        asset.path = external.to_string_lossy().into_owned();
+        asset.import_strategy = Some("reference".into());
+        asset.original_path = Some(asset.path.clone());
+        project.assets.push(asset);
+        save_project(&project, &project_dir).unwrap();
+
+        let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
+        let external_asset = loaded
+            .project
+            .assets
+            .iter()
+            .find(|candidate| candidate.id == "asset-external")
+            .unwrap();
+        assert_eq!(external_asset.status, ProjectAssetStatus::Available);
+        assert!(loaded.missing_assets.is_empty());
+    }
+
+    #[test]
+    fn loads_v1_projects_without_phase1_metadata_or_checksum() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let (recording, metadata) = make_test_recording(&project_dir);
+
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
+
+        let project = create_project(&recording, &metadata, None, &project_dir).unwrap();
+        let mut raw = serde_json::to_value(&project).unwrap();
+        let object = raw.as_object_mut().unwrap();
+        object.remove("checksum");
+        object.remove("exportSettings");
+        let asset = object
+            .get_mut("assets")
+            .and_then(Value::as_array_mut)
+            .and_then(|assets| assets.first_mut())
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        asset.remove("kind");
+        asset.remove("importStrategy");
+        asset.remove("derivativeVersion");
+        fs::write(
+            project_dir.join(PROJECT_FILE_NAME),
+            serde_json::to_string_pretty(&raw).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
+        assert_eq!(loaded.project.checksum, "");
+        assert_eq!(loaded.project.export_settings.preset, "default-mp4");
+        assert_eq!(loaded.project.assets[0].kind, None);
+        assert_eq!(loaded.project.assets[0].derivative_version, 1);
     }
 }

@@ -251,7 +251,7 @@ Tauri commands for external media:
 - `delete_asset(request: AssetDeleteRequest)`
 - `relink_asset(request: AssetRelinkRequest) -> ProjectAsset`
 - `probe_asset(request: AssetProbeRequest) -> MediaMetadata`
-- `start_derivative_job(request: DerivativeJobRequest) -> job_id`
+- `start_derivative_job(request: DerivativeJobRequest) -> MediaJob`
 
 ### 6.6 `apps/desktop/src/features/editor/panels/project-assets-panel.tsx`
 
@@ -662,11 +662,11 @@ Existing image clips on `graphics` tracks and annotation clips on `annotations` 
 
 ### 15.3 External media
 
-- [ ] Audio and image files can be imported via the Tauri dialog and persisted in the project.
-- [ ] Imported audio appears in the timeline and mixes with existing audio.
-- [ ] Imported images appear as overlay clips and render in preview and export.
-- [ ] Missing assets can be relinked; in-use assets cannot be deleted.
-- [ ] Derivatives (waveform, thumbnail) are generated in the background.
+- [x] Audio and image files can be imported via the Tauri dialog and persisted in the project.
+- [x] Imported audio appears in the timeline and mixes with existing audio.
+- [x] Imported images appear as overlay clips and render in preview and export.
+- [x] Missing assets can be relinked; in-use assets cannot be deleted.
+- [x] Derivatives (waveform, thumbnail) are generated in the background.
 
 ### 15.4 Performance and stability
 

@@ -1,6 +1,7 @@
 import type {
   AppError,
   ExportRange,
+  OverlayRenderPlan,
   ProjectAsset,
   ProjectExportSettings,
   RenderPlan,
@@ -15,11 +16,20 @@ import type {
   RenderPlanText,
   RenderPlanZoomSegment,
   RenderSegment,
+  OverlayRenderItem,
+  OverlayTransform,
   TimelineClip,
   TimelineState,
 } from "@recordforge/domain"
 import { clampZoomTarget, getManualZoomSegments } from "@recordforge/editor-core"
-import { sortClips } from "@recordforge/domain"
+import {
+  annotationClipSchema,
+  imageClipSchema,
+  normalizeOverlayClipInput,
+  overlayRenderPlanSchema,
+  sortClips,
+  textClipSchema,
+} from "@recordforge/domain"
 
 function editorError(code: string, message: string): AppError {
   return { category: "editor", code, message }
@@ -378,6 +388,210 @@ function toImages(state: TimelineState, range: ExportRange | undefined): RenderP
     .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
 }
 
+const OVERLAY_GROUP_OFFSET: Record<"image" | "annotation" | "text", number> = {
+  image: 0,
+  annotation: 1_000_000,
+  text: 2_000_000,
+}
+
+function overlayZIndex(
+  kind: "image" | "annotation" | "text",
+  zIndex: number,
+  trackIndex: number,
+  clipIndex: number,
+): number {
+  const insertionOrder = trackIndex * 1_000 + clipIndex
+  return OVERLAY_GROUP_OFFSET[kind] + zIndex + (zIndex === 0 ? insertionOrder : 0)
+}
+
+function overlayTransform(
+  clip: Extract<TimelineClip, { kind: "annotation" | "text" | "image" }>,
+  zIndex: number,
+): OverlayTransform {
+  return {
+    x: clip.x,
+    y: clip.y,
+    width: clip.width,
+    height: clip.height,
+    rotation: clip.rotation,
+    anchorX: clip.anchorX,
+    anchorY: clip.anchorY,
+    zIndex,
+    opacity: clip.opacity,
+  }
+}
+
+interface OverlayCandidate {
+  item: OverlayRenderItem
+  trackIndex: number
+  clipIndex: number
+}
+
+function toOverlayRenderPlan(
+  state: TimelineState,
+  range: ExportRange | undefined,
+  assets: ProjectAsset[] | undefined,
+): OverlayRenderPlan {
+  const candidates: OverlayCandidate[] = []
+
+  state.tracks.forEach((track, trackIndex) => {
+    if (track.muted) return
+    track.clips.forEach((clip, clipIndex) => {
+      if (clip.kind !== "annotation" && clip.kind !== "text" && clip.kind !== "image") return
+
+      const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
+      if (!window) return
+
+      if (clip.kind === "annotation") {
+        const normalized = annotationClipSchema.parse(normalizeOverlayClipInput(clip))
+        if (!normalized.enabled) return
+        candidates.push({
+          trackIndex,
+          clipIndex,
+          item: {
+            kind: "annotation",
+            id: normalized.id,
+            startMs: window.startMs,
+            endMs: window.endMs,
+            transform: overlayTransform(
+              normalized,
+              overlayZIndex("annotation", normalized.zIndex, trackIndex, clipIndex),
+            ),
+            animation: normalized.overlayAnimation,
+            enabled: true,
+            annotationType: normalized.annotationType,
+            endX: normalized.endX,
+            endY: normalized.endY,
+            strokeColor: normalized.strokeColor,
+            strokeWidth: normalized.strokeWidth,
+            strokeStyle: normalized.strokeStyle,
+            fillColor: normalized.fillColor,
+            fillOpacity: normalized.fillOpacity,
+            cornerRadius: normalized.cornerRadius,
+            arrowEndHead: normalized.arrowEndHead,
+            arrowStartHead: normalized.arrowStartHead,
+            shadowEnabled: normalized.shadowEnabled,
+            shadowColor: normalized.shadowColor,
+            shadowBlur: normalized.shadowBlur,
+            text: normalized.text,
+            textColor: normalized.textColor,
+            fontSize: normalized.fontSize,
+          },
+        })
+        return
+      }
+
+      if (clip.kind === "text") {
+        const normalized = textClipSchema.parse(normalizeOverlayClipInput(clip))
+        if (!normalized.enabled) return
+        candidates.push({
+          trackIndex,
+          clipIndex,
+          item: {
+            kind: "text",
+            id: normalized.id,
+            startMs: window.startMs,
+            endMs: window.endMs,
+            transform: overlayTransform(
+              normalized,
+              overlayZIndex("text", normalized.zIndex, trackIndex, clipIndex),
+            ),
+            animation: normalized.overlayAnimation,
+            enabled: true,
+            presetId: normalized.presetId,
+            category: normalized.category,
+            primaryText: normalized.primaryText,
+            secondaryText: normalized.secondaryText,
+            tagText: normalized.tagText,
+            alignment: normalized.alignment,
+            fontFamily: normalized.fontFamily,
+            fontSize: normalized.fontSize,
+            fontWeight: normalized.fontWeight,
+            textColor: normalized.textColor,
+            secondaryTextColor: normalized.secondaryTextColor,
+            accentColor: normalized.accentColor,
+            backdropStyle: normalized.backdropStyle,
+            backdropColor: normalized.backdropColor,
+            backdropOpacity: normalized.backdropOpacity,
+            backdropBlur: normalized.backdropBlur,
+            backdropBorderRadius: normalized.backdropBorderRadius,
+            backdropPaddingX: normalized.backdropPaddingX,
+            backdropPaddingY: normalized.backdropPaddingY,
+            shadowEnabled: normalized.shadowEnabled,
+            shadowColor: normalized.shadowColor,
+            shadowBlur: normalized.shadowBlur,
+          },
+        })
+        return
+      }
+
+      const normalized = imageClipSchema.parse(normalizeOverlayClipInput(clip))
+      if (!normalized.enabled) return
+      candidates.push({
+        trackIndex,
+        clipIndex,
+        item: {
+          kind: "image",
+          id: normalized.id,
+          startMs: window.startMs,
+          endMs: window.endMs,
+          transform: overlayTransform(
+            normalized,
+            overlayZIndex("image", normalized.zIndex, trackIndex, clipIndex),
+          ),
+          animation: normalized.overlayAnimation,
+          enabled: true,
+          assetId: normalized.assetId,
+          fit: normalized.fit,
+          borderRadius: normalized.borderRadius,
+          borderWidth: normalized.borderWidth,
+          borderColor: normalized.borderColor,
+          shadowEnabled: normalized.shadowEnabled,
+          shadowColor: normalized.shadowColor,
+          shadowBlur: normalized.shadowBlur,
+        },
+      })
+    })
+  })
+
+  candidates.sort(
+    (left, right) =>
+      left.item.transform.zIndex - right.item.transform.zIndex ||
+      left.trackIndex - right.trackIndex ||
+      left.clipIndex - right.clipIndex ||
+      left.item.id.localeCompare(right.item.id),
+  )
+
+  const imageAssetIds = new Set(
+    candidates.flatMap((candidate) =>
+      candidate.item.kind === "image" ? [candidate.item.assetId] : [],
+    ),
+  )
+  const overlayAssets = (assets ?? [])
+    .filter((asset) => imageAssetIds.has(asset.id))
+    .map((asset) => ({
+      id: asset.id,
+      kind: "image" as const,
+      ...(typeof asset.width === "number" && asset.width > 0 ? { width: asset.width } : {}),
+      ...(typeof asset.height === "number" && asset.height > 0 ? { height: asset.height } : {}),
+      ...(asset.contentHash ? { contentHash: asset.contentHash } : {}),
+    }))
+
+  return overlayRenderPlanSchema.parse({
+    canvas: { width: state.canvas.width, height: state.canvas.height },
+    items: candidates.map(({ item }) => item),
+    assets: overlayAssets,
+    fonts: [],
+  })
+}
+
+export function buildOverlayRenderPlan(
+  state: TimelineState,
+  assets?: ProjectAsset[],
+): OverlayRenderPlan {
+  return toOverlayRenderPlan(state, undefined, assets)
+}
+
 function toZoomSegments(
   state: TimelineState,
   range: ExportRange | undefined,
@@ -573,6 +787,7 @@ export function buildRenderPlan(
   const annotations = toAnnotations(state, range)
   const texts = toTexts(state, range)
   const images = toImages(state, range)
+  const overlayRenderPlan = toOverlayRenderPlan(state, range, input.assets)
   const screenDurationMs = segments.reduce(
     (duration, segment) => Math.max(duration, segment.outputEndMs),
     0,
@@ -635,6 +850,7 @@ export function buildRenderPlan(
       masks,
       zoomSegments,
       cursorEffects,
+      overlayRenderPlan,
       annotations,
       texts,
       images,

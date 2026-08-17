@@ -28,6 +28,17 @@
       "cache": false,
       "persistent": true
     },
+    "build:wasm": {
+      "cache": false,
+      "outputs": ["wasm/**"],
+      "inputs": [
+        "src/**",
+        "scripts/**",
+        "package.json",
+        "../overlay-engine/Cargo.toml",
+        "../overlay-engine/src/**"
+      ]
+    },
     "lint": {
       "dependsOn": ["^build"]
     },

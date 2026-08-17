@@ -9,6 +9,7 @@ import {
   cursorEffectSettingsSchema,
   imageClipSchema,
   maskColorSchema,
+  overlayAnimationSchema,
   maskModeSchema,
   maskRectSchema,
   cursorIconPresetSchema,
@@ -459,7 +460,9 @@ export type AddAnnotationClipCommand = z.infer<typeof addAnnotationClipCommandSc
 export const updateAnnotationClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-annotation-clip"),
   clipId: z.string(),
-  update: annotationClipSchema.partial(),
+  update: annotationClipSchema.partial().extend({
+    overlayAnimation: overlayAnimationSchema.partial().optional(),
+  }),
 })
 
 export type UpdateAnnotationClipCommand = z.infer<typeof updateAnnotationClipCommandSchema>
@@ -475,7 +478,9 @@ export type AddTextClipCommand = z.infer<typeof addTextClipCommandSchema>
 export const updateTextClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-text-clip"),
   clipId: z.string(),
-  update: textClipSchema.partial(),
+  update: textClipSchema.partial().extend({
+    overlayAnimation: overlayAnimationSchema.partial().optional(),
+  }),
 })
 
 export type UpdateTextClipCommand = z.infer<typeof updateTextClipCommandSchema>
@@ -491,7 +496,9 @@ export type AddImageClipCommand = z.infer<typeof addImageClipCommandSchema>
 export const updateImageClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-image-clip"),
   clipId: z.string(),
-  update: imageClipSchema.partial(),
+  update: imageClipSchema.partial().extend({
+    overlayAnimation: overlayAnimationSchema.partial().optional(),
+  }),
 })
 
 export type UpdateImageClipCommand = z.infer<typeof updateImageClipCommandSchema>

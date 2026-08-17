@@ -13,6 +13,7 @@ import {
   captionStylePresetSchema,
   renderCaptionModeSchema,
 } from "./captions"
+import type { OverlayRenderPlan } from "./overlay"
 
 // Output framing presets are intentionally explicit so preview and export can
 // reject unsupported aspect ratios instead of silently cropping the recording.
@@ -274,6 +275,46 @@ export const cursorEffectClipSchema = z.object({
 
 export type CursorEffectClip = z.infer<typeof cursorEffectClipSchema>
 
+export const overlayAnimationTypeSchema = z.enum([
+  "none",
+  "fade",
+  "scale-up",
+  "scale-down",
+  "slide-up",
+  "slide-down",
+  "draw",
+  "typewriter",
+])
+export type OverlayAnimationType = z.infer<typeof overlayAnimationTypeSchema>
+
+export const overlayAnimationOutTypeSchema = z.enum([
+  "none",
+  "fade",
+  "scale-up",
+  "scale-down",
+  "slide-up",
+  "slide-down",
+])
+export type OverlayAnimationOutType = z.infer<typeof overlayAnimationOutTypeSchema>
+
+export const overlayEasingSchema = z.enum([
+  "linear",
+  "ease-in",
+  "ease-out",
+  "ease-in-out",
+  "expo-out",
+])
+export type OverlayEasing = z.infer<typeof overlayEasingSchema>
+
+export const overlayAnimationSchema = z.object({
+  inType: overlayAnimationTypeSchema.default("fade"),
+  outType: overlayAnimationOutTypeSchema.default("fade"),
+  inDurationMs: z.number().int().min(0).default(350),
+  outDurationMs: z.number().int().min(0).default(350),
+  easing: overlayEasingSchema.default("expo-out"),
+})
+export type OverlayAnimation = z.infer<typeof overlayAnimationSchema>
+
 // Annotation clip: on-canvas shapes, arrows, lines, callouts, spotlights, and badges.
 export const annotationTypeSchema = z.enum([
   "rectangle",
@@ -311,6 +352,11 @@ export const annotationClipSchema = timelineClipBaseSchema.extend({
   y: z.number().default(0),
   width: z.number().min(0).default(240),
   height: z.number().min(0).default(140),
+  rotation: z.number().default(0),
+  anchorX: z.number().min(0).max(1).default(0.5),
+  anchorY: z.number().min(0).max(1).default(0.5),
+  zIndex: z.number().int().default(0),
+  opacity: z.number().min(0).max(1).default(1),
   endX: z.number().optional(),
   endY: z.number().optional(),
   strokeColor: z.string().default("#38bdf8"),
@@ -329,6 +375,7 @@ export const annotationClipSchema = timelineClipBaseSchema.extend({
   fontSize: z.number().min(8).max(120).default(16),
   animationIn: annotationAnimationSchema.default("fade"),
   animationOut: annotationAnimationSchema.default("fade"),
+  overlayAnimation: overlayAnimationSchema.default({}),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
 })
@@ -369,13 +416,16 @@ const FONT_WEIGHT_MAP: Record<string, string> = {
   black: "900",
 }
 
-export const textFontWeightSchema = z.preprocess((val) => {
-  if (typeof val === "string") {
-    const lower = val.toLowerCase()
-    if (FONT_WEIGHT_MAP[lower]) return FONT_WEIGHT_MAP[lower]
-  }
-  return val
-}, z.enum(["400", "500", "600", "700", "800", "900"]))
+export const textFontWeightSchema = z.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      const lower = val.toLowerCase()
+      if (FONT_WEIGHT_MAP[lower]) return FONT_WEIGHT_MAP[lower]
+    }
+    return val
+  },
+  z.enum(["400", "500", "600", "700", "800", "900"]),
+)
 export type TextFontWeight = z.infer<typeof textFontWeightSchema>
 
 export const textAlignmentSchema = z.enum(["left", "center", "right"])
@@ -403,6 +453,11 @@ export const textClipSchema = timelineClipBaseSchema.extend({
   y: z.number().default(60),
   width: z.number().min(20).default(460),
   height: z.number().min(20).default(160),
+  rotation: z.number().default(0),
+  anchorX: z.number().min(0).max(1).default(0.5),
+  anchorY: z.number().min(0).max(1).default(0.5),
+  zIndex: z.number().int().default(0),
+  opacity: z.number().min(0).max(1).default(1),
   alignment: textAlignmentSchema.default("left"),
   fontFamily: textFontFamilySchema.default("sans"),
   fontSize: z.number().min(8).max(200).default(36),
@@ -422,6 +477,7 @@ export const textClipSchema = timelineClipBaseSchema.extend({
   shadowBlur: z.number().min(0).max(100).default(10),
   animationIn: textAnimationSchema.default("fade"),
   animationOut: textAnimationSchema.default("fade"),
+  overlayAnimation: overlayAnimationSchema.default({}),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
 })
@@ -438,6 +494,10 @@ export const imageClipSchema = timelineClipBaseSchema.extend({
   y: z.number().default(60),
   width: z.number().min(10).default(320),
   height: z.number().min(10).default(200),
+  rotation: z.number().default(0),
+  anchorX: z.number().min(0).max(1).default(0.5),
+  anchorY: z.number().min(0).max(1).default(0.5),
+  zIndex: z.number().int().default(0),
   opacity: z.number().min(0).max(1).default(1),
   borderRadius: z.number().min(0).max(200).default(0),
   borderWidth: z.number().min(0).max(64).default(0),
@@ -448,6 +508,7 @@ export const imageClipSchema = timelineClipBaseSchema.extend({
   fit: imageFitSchema.default("contain"),
   animationIn: z.enum(["none", "fade", "scale-up", "slide-up"]).default("fade"),
   animationOut: z.enum(["none", "fade", "scale-down"]).default("fade"),
+  overlayAnimation: overlayAnimationSchema.default({}),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
 })
@@ -823,6 +884,7 @@ export const renderPlanSchema = z
     masks: z.array(renderPlanMaskSchema).default([]),
     zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
     cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
+    overlayRenderPlan: z.custom<OverlayRenderPlan>().optional(),
     annotations: z.array(renderPlanAnnotationSchema).default([]),
     texts: z.array(renderPlanTextSchema).default([]),
     images: z.array(renderPlanImageSchema).default([]),

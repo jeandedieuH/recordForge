@@ -99,6 +99,7 @@ export interface TimelineLanesProps {
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip) => void
   onDeleteClip: (clip: TimelineClip) => void
+  onAddAssetAtTime?: (assetId: string, timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
 }
@@ -147,6 +148,7 @@ export function TimelineLanes({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onAddAssetAtTime,
   onCursorRangeAction,
   onZoomSegmentAction,
   onMoveZoomSegment,
@@ -425,6 +427,19 @@ export function TimelineLanes({
     }
   }
 
+  function handleAssetDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!event.dataTransfer.types.includes("application/x-recordforge-asset")) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = "copy"
+  }
+
+  function handleAssetDrop(event: React.DragEvent<HTMLDivElement>) {
+    const assetId = event.dataTransfer.getData("application/x-recordforge-asset")
+    if (!assetId || !onAddAssetAtTime) return
+    event.preventDefault()
+    onAddAssetAtTime(assetId, timelineTimeFromClientX(event.clientX))
+  }
+
   const thumbnailData = thumbnailResource.status === "content" ? thumbnailResource.data : null
   const spriteUrl = thumbnailData ? toAssetUrl(thumbnailData.spritePath) : null
   const snapTargets = useMemo(
@@ -499,6 +514,8 @@ export function TimelineLanes({
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onPointerLeave={() => setRazorHoverMs(null)}
+        onDragOver={handleAssetDragOver}
+        onDrop={handleAssetDrop}
         onKeyDown={(e) => {
           if (e.key === "Delete" || e.key === "Backspace") {
             e.preventDefault()

@@ -1,7 +1,9 @@
 pub mod audio;
+pub mod derivatives;
 pub mod disk;
 pub mod probe;
 pub mod proxy;
+pub mod svg;
 pub mod thumbnails;
 pub mod video;
 pub mod waveform;

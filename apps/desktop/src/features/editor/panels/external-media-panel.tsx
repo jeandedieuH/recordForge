@@ -1,20 +1,13 @@
 import { useRef, useState } from "react"
+import { useVirtualizer } from "@tanstack/react-virtual"
 import {
   createAddExternalAudioClipCommand,
   createAddImageClipCommand,
 } from "@recordforge/editor-core"
 import type { ImageClip } from "@recordforge/contracts"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { Button, Card, CardContent, ScrollArea, useToast, cn } from "@recordforge/ui"
-import {
-  FileAudio,
-  FileImage,
-  FolderOpen,
-  Music,
-  Plus,
-  Trash2,
-  Upload,
-} from "lucide-react"
+import { Button, Card, CardContent, useToast, cn } from "@recordforge/ui"
+import { FileAudio, FileImage, FolderOpen, Music, Plus, Trash2, Upload } from "lucide-react"
 
 export interface ExternalMediaItem {
   id: string
@@ -33,6 +26,7 @@ export function ExternalMediaPanel() {
   const [mediaItems, setMediaItems] = useState<ExternalMediaItem[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const mediaListRef = useRef<HTMLDivElement>(null)
   const [importType, setImportType] = useState<"all" | "audio" | "image">("all")
 
   const engine = useTimelineStore((state) => state.engine)
@@ -136,6 +130,10 @@ export function ExternalMediaPanel() {
         y: 80,
         width: 320,
         height: 200,
+        rotation: 0,
+        anchorX: 0.5,
+        anchorY: 0.5,
+        zIndex: 0,
         opacity: 1,
         borderRadius: 8,
         borderWidth: 0,
@@ -146,6 +144,13 @@ export function ExternalMediaPanel() {
         fit: "contain",
         animationIn: "fade",
         animationOut: "fade",
+        overlayAnimation: {
+          inType: "fade",
+          outType: "fade",
+          inDurationMs: 350,
+          outDurationMs: 350,
+          easing: "expo-out",
+        },
         enabled: true,
         locked: false,
       }
@@ -171,6 +176,12 @@ export function ExternalMediaPanel() {
   const filteredItems = mediaItems.filter((item) => {
     if (importType === "all") return true
     return item.kind === importType
+  })
+  const mediaVirtualizer = useVirtualizer({
+    count: filteredItems.length,
+    getScrollElement: () => mediaListRef.current,
+    estimateSize: () => 58,
+    overscan: 8,
   })
 
   return (
@@ -265,7 +276,7 @@ export function ExternalMediaPanel() {
       </div>
 
       {/* Drop Zone & Media List */}
-      <ScrollArea className="flex-1 p-3">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
         {/* Drag & Drop Area */}
         <div
           onDragOver={(e) => {
@@ -280,88 +291,102 @@ export function ExternalMediaPanel() {
           }}
           onClick={() => fileInputRef.current?.click()}
           className={cn(
-            "flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-4 text-center cursor-pointer transition-all duration-fast",
+            "flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-4 text-center transition-all duration-fast",
             isDragging
               ? "border-primary bg-primary/10"
               : "border-border bg-surface-dim hover:border-primary/50 hover:bg-surface-container",
           )}
         >
-          <Upload className="size-6 text-muted-foreground/60 mb-1.5" aria-hidden />
+          <Upload className="mb-1.5 size-6 text-muted-foreground/60" aria-hidden />
           <p className="text-xs font-semibold text-foreground">Drag & drop media files</p>
-          <p className="text-[10px] text-muted-foreground mt-0.5">
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
             Supports MP3, WAV, AAC, PNG, JPG, SVG, WebP
           </p>
         </div>
 
         {/* Media Items List */}
-        <div className="mt-3.5 space-y-2 pb-6">
+        <div className="mt-3.5 flex min-h-0 flex-1 flex-col gap-2">
           <div className="flex items-center justify-between text-[11px] font-medium text-muted-foreground">
             <span>Imported Assets ({filteredItems.length})</span>
           </div>
+          {filteredItems.length > 0 ? (
+            <div ref={mediaListRef} className="min-h-0 flex-1 overflow-y-auto">
+              <div className="relative w-full" style={{ height: mediaVirtualizer.getTotalSize() }}>
+                {mediaVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const item = filteredItems[virtualItem.index]
+                  return (
+                    <div
+                      key={item.id}
+                      ref={mediaVirtualizer.measureElement}
+                      data-index={virtualItem.index}
+                      className="absolute left-0 top-0 w-full pb-2"
+                      style={{ transform: `translateY(${virtualItem.start}px)` }}
+                    >
+                      <Card className="group overflow-hidden border border-border bg-surface-container transition-all hover:border-primary/50 hover:bg-surface-container-high">
+                        <CardContent className="flex items-center gap-2.5 p-2.5">
+                          <div
+                            className={cn(
+                              "flex size-9 shrink-0 items-center justify-center rounded-lg text-foreground",
+                              item.kind === "audio"
+                                ? "bg-emerald-500/15 text-emerald-400"
+                                : "bg-cyan-500/15 text-cyan-400",
+                            )}
+                          >
+                            {item.kind === "audio" ? (
+                              <FileAudio className="size-5" aria-hidden />
+                            ) : (
+                              <FileImage className="size-5" aria-hidden />
+                            )}
+                          </div>
 
-          {filteredItems.map((item) => (
-            <Card
-              key={item.id}
-              className="group overflow-hidden border border-border bg-surface-container transition-all hover:border-primary/50 hover:bg-surface-container-high"
-            >
-              <CardContent className="flex items-center gap-2.5 p-2.5">
-                <div
-                  className={cn(
-                    "flex size-9 shrink-0 items-center justify-center rounded-lg text-foreground",
-                    item.kind === "audio"
-                      ? "bg-emerald-500/15 text-emerald-400"
-                      : "bg-cyan-500/15 text-cyan-400",
-                  )}
-                >
-                  {item.kind === "audio" ? (
-                    <FileAudio className="size-5" aria-hidden />
-                  ) : (
-                    <FileImage className="size-5" aria-hidden />
-                  )}
-                </div>
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className="truncate text-xs font-semibold text-foreground"
+                              title={item.name}
+                            >
+                              {item.name}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground">
+                              {item.kind === "audio"
+                                ? "Audio Track • Click + to add"
+                                : "Image Overlay • Click + to add"}
+                            </p>
+                          </div>
 
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-semibold text-foreground" title={item.name}>
-                    {item.name}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {item.kind === "audio"
-                      ? "Audio Track • Click + to add"
-                      : "Image Overlay • Click + to add"}
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => handleAddToTimeline(item)}
-                    className="size-7 p-0 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
-                    title="Add to timeline at playhead"
-                  >
-                    <Plus className="size-4" aria-hidden />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => handleRemoveItem(item.id)}
-                    className="size-7 p-0 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
-                    title="Remove asset"
-                  >
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-
-          {filteredItems.length === 0 ? (
+                          <div className="flex items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleAddToTimeline(item)}
+                              className="size-7 p-0 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+                              title="Add to timeline at playhead"
+                            >
+                              <Plus className="size-4" aria-hidden />
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleRemoveItem(item.id)}
+                              className="size-7 p-0 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+                              title="Remove asset"
+                            >
+                              <Trash2 className="size-3.5" aria-hidden />
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
             <p className="py-4 text-center text-xs text-muted-foreground">
               No external media imported yet.
             </p>
-          ) : null}
+          )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   )
 }

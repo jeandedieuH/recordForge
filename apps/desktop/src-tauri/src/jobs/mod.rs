@@ -8,13 +8,16 @@ use tracing::{error, info, instrument};
 use crate::database::library::get_recording;
 use crate::database::media as media_db;
 use crate::database::media::{
-    DerivativeFile, MediaAudioTrackOutput, MediaJob, MediaJobKind, MediaJobOutputs,
+    DerivativeFile, MediaAudioTrackOutput, MediaFormat, MediaJob, MediaJobKind, MediaJobOutputs,
     MediaVideoTrackOutput,
 };
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
 use crate::exports::{run_render_plan, ExportSettings, RenderPlan};
 use crate::media::audio::extract_audio_track;
+use crate::media::derivatives::{
+    copy_audio_preview, generate_image_thumbnail, normalize_derivative_paths,
+};
 use crate::media::disk::{available_space, derivative_dir, estimate_derivative_size};
 use crate::media::probe::probe_media;
 use crate::media::proxy::generate_proxy;
@@ -41,6 +44,18 @@ pub struct PrepareOptions {
     pub recording_id: String,
     pub proxy_height: i32,
     pub thumbnail_interval_sec: u64,
+    pub force: bool,
+}
+
+/// Restartable options for derivatives attached to one imported project asset.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetDerivativeOptions {
+    pub recording_id: String,
+    pub asset_id: String,
+    pub source_path: String,
+    pub asset_kind: String,
+    #[serde(default)]
     pub force: bool,
 }
 
@@ -147,6 +162,83 @@ impl JobManager {
         });
 
         Ok(job.id)
+    }
+
+    /// Queue derivatives for one imported asset and reuse an active/completed
+    /// job when its output files are still present.
+    #[instrument(skip(self, options))]
+    pub fn start_asset_derivative(&self, options: AssetDerivativeOptions) -> Result<MediaJob> {
+        let _start_lock = self
+            .start_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("job start mutex poisoned".into()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let _recording = get_recording(&conn, &options.recording_id)?;
+
+        if !options.force {
+            if let Some(existing) = media_db::list_jobs(&conn, &options.recording_id)?
+                .into_iter()
+                .find(|job| {
+                    if job.kind != MediaJobKind::AssetDerivative
+                        || !matches!(
+                            job.status,
+                            crate::database::media::MediaJobStatus::Pending
+                                | crate::database::media::MediaJobStatus::Running
+                        )
+                    {
+                        return false;
+                    }
+                    job.options
+                        .get("assetId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(options.asset_id.as_str())
+                })
+            {
+                return Ok(existing);
+            }
+        }
+
+        let options_json = serde_json::to_value(&options).map_err(|error| {
+            InternalError::Storage(format!("serialize asset derivative options: {error}"))
+        })?;
+        let job = media_db::insert_job_with_options(
+            &conn,
+            &options.recording_id,
+            MediaJobKind::AssetDerivative,
+            options_json,
+        )?;
+        drop(conn);
+
+        let token = Arc::new(AtomicBool::new(false));
+        self.active_tokens
+            .lock()
+            .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
+            .insert(job.id.clone(), token.clone());
+        self.emit_job_update(&job)?;
+
+        let worker = AssetWorker {
+            app: self.app.clone(),
+            db: Arc::clone(&self.db),
+            ffmpeg_path: self.ffmpeg_path.clone(),
+            ffprobe_path: self.ffprobe_path.clone(),
+            path_policy: self.path_policy.clone(),
+            available_encoders: self.available_encoders.clone(),
+            active_tokens: Arc::clone(&self.active_tokens),
+            worker_lock: Arc::clone(&self.worker_lock),
+            job_id: job.id.clone(),
+            options,
+        };
+        let worker_id = worker.job_id.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = worker.run(token) {
+                error!(job_id = %worker_id, error = %error, "asset derivative job failed");
+            }
+        });
+
+        Ok(job)
     }
 
     /// Persist and start one export job. The job row and its restartable request
@@ -366,6 +458,44 @@ impl JobManager {
         drop(conn);
 
         for job in jobs {
+            if matches!(
+                job.kind,
+                crate::database::media::MediaJobKind::AssetDerivative
+            ) {
+                let options = match serde_json::from_value::<AssetDerivativeOptions>(
+                    job.options.clone(),
+                ) {
+                    Ok(options) => options,
+                    Err(error) => {
+                        error!(job_id = %job.id, error = %error, "cannot resume asset derivative with invalid options");
+                        continue;
+                    }
+                };
+                let token = Arc::new(AtomicBool::new(false));
+                self.active_tokens
+                    .lock()
+                    .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
+                    .insert(job.id.clone(), token.clone());
+                let worker = AssetWorker {
+                    app: self.app.clone(),
+                    db: Arc::clone(&self.db),
+                    ffmpeg_path: self.ffmpeg_path.clone(),
+                    ffprobe_path: self.ffprobe_path.clone(),
+                    path_policy: self.path_policy.clone(),
+                    available_encoders: self.available_encoders.clone(),
+                    active_tokens: Arc::clone(&self.active_tokens),
+                    worker_lock: Arc::clone(&self.worker_lock),
+                    job_id: job.id.clone(),
+                    options,
+                };
+                let worker_id = worker.job_id.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = worker.run(token) {
+                        error!(job_id = %worker_id, error = %error, "resumed asset derivative failed");
+                    }
+                });
+                continue;
+            }
             if matches!(job.kind, crate::database::media::MediaJobKind::Export) {
                 let request = match serde_json::from_value::<ExportRequest>(job.options.clone()) {
                     Ok(request) => request,
@@ -1104,5 +1234,377 @@ impl Worker {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         self.with_db(|conn| media_db::insert_derivative(conn, &derivative))
+    }
+}
+
+#[derive(Debug)]
+struct AssetWorker {
+    app: tauri::AppHandle,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    ffmpeg_path: PathBuf,
+    ffprobe_path: PathBuf,
+    path_policy: PathPolicy,
+    available_encoders: Vec<String>,
+    active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    worker_lock: Arc<Mutex<()>>,
+    job_id: String,
+    options: AssetDerivativeOptions,
+}
+
+impl AssetWorker {
+    fn run(self, cancel: Arc<AtomicBool>) -> Result<()> {
+        let result = self.run_inner(cancel);
+        if let Err(error) = &result {
+            let _ = self.fail(&error.to_string());
+        }
+        result
+    }
+
+    fn run_inner(&self, cancel: Arc<AtomicBool>) -> Result<()> {
+        let _lock = self
+            .worker_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("worker lock poisoned".into()))?;
+        if cancel.load(Ordering::Relaxed) {
+            return self.finish_cancelled();
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::start_job(&conn, &self.job_id)?;
+        drop(conn);
+        self.emit(&job)?;
+
+        let source = PathBuf::from(&self.options.source_path);
+        if !source.is_file() {
+            return self.fail("asset source is missing");
+        }
+
+        let recording = match self.with_db(|conn| get_recording(conn, &self.options.recording_id)) {
+            Ok(recording) => recording,
+            Err(error) => return self.fail(&format!("load recording: {error}")),
+        };
+        let work_dir = PathBuf::from(&recording.work_dir);
+        let metadata = match self.probe_asset(&source) {
+            Ok(metadata) => metadata,
+            Err(error) => return self.fail(&format!("probe asset: {error}")),
+        };
+
+        self.set_progress(0.15, "derivatives")?;
+        let asset_dir = work_dir
+            .join("derivatives")
+            .join("assets")
+            .join(safe_asset_directory_name(&self.options.asset_id));
+        std::fs::create_dir_all(&asset_dir).map_err(|error| {
+            InternalError::Storage(format!("create asset derivative dir: {error}"))
+        })?;
+
+        let mut output_paths = Vec::new();
+        match self.options.asset_kind.as_str() {
+            "audio" => {
+                if !metadata.has_audio {
+                    return self.fail("asset has no audio stream");
+                }
+                let extension = source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("bin");
+                let preview_path = asset_dir.join(format!("audio-preview.{extension}"));
+                if self.options.force || !preview_path.is_file() {
+                    copy_audio_preview(&source, &preview_path)?;
+                }
+                output_paths.push(("audioPreview".to_string(), preview_path.clone()));
+                self.record_derivative(&preview_path.to_string_lossy(), "audio")?;
+
+                let waveform_dir = asset_dir.join("waveform");
+                let waveform_json = waveform_dir.join("waveform.json");
+                let waveform_png = waveform_dir.join("waveform.png");
+                if self.options.force || !waveform_json.is_file() || !waveform_png.is_file() {
+                    let (json, png) = crate::media::waveform::generate_waveform(
+                        &self.ffmpeg_path.to_string_lossy(),
+                        &source,
+                        &waveform_dir,
+                        &metadata,
+                        cancel.clone(),
+                    )?;
+                    output_paths.push(("waveform".to_string(), json));
+                    output_paths.push(("waveformImage".to_string(), png));
+                } else {
+                    output_paths.push(("waveform".to_string(), waveform_json));
+                    output_paths.push(("waveformImage".to_string(), waveform_png));
+                }
+                self.set_progress(0.8, "waveform")?;
+            }
+            "image" => {
+                let thumbnail_path = asset_dir.join("thumbnail.png");
+                let generated = if self.options.force || !thumbnail_path.is_file() {
+                    generate_image_thumbnail(
+                        &self.ffmpeg_path.to_string_lossy(),
+                        &source,
+                        &thumbnail_path,
+                        cancel.clone(),
+                    )?
+                } else {
+                    thumbnail_path.clone()
+                };
+                if generated != source {
+                    output_paths.push(("thumbnail".to_string(), generated.clone()));
+                    self.record_derivative(&generated.to_string_lossy(), "thumbnail")?;
+                }
+                self.set_progress(0.8, "thumbnail")?;
+            }
+            "video" => {
+                let proxy_path = asset_dir.join("proxy.mp4");
+                if self.options.force || !proxy_path.is_file() {
+                    let encoder = crate::capture::encoder::select_best_encoder(
+                        &self.available_encoders,
+                        &crate::capture::config::default_encoder_priority(),
+                    );
+                    generate_proxy(
+                        &self.ffmpeg_path.to_string_lossy(),
+                        &source,
+                        &proxy_path,
+                        &metadata,
+                        540,
+                        &encoder,
+                        cancel.clone(),
+                        |_| {},
+                    )?;
+                }
+                output_paths.push(("proxy".to_string(), proxy_path.clone()));
+                self.record_derivative(&proxy_path.to_string_lossy(), "proxy")?;
+
+                let thumbnail_dir = asset_dir.join("thumbnails");
+                let (sprite, manifest) = if self.options.force
+                    || !thumbnail_dir.join("sprite.jpg").is_file()
+                    || !thumbnail_dir.join("thumbnails.json").is_file()
+                {
+                    crate::media::thumbnails::generate_thumbnails(
+                        &self.ffmpeg_path.to_string_lossy(),
+                        &source,
+                        &thumbnail_dir,
+                        &metadata,
+                        5,
+                    )?
+                } else {
+                    (
+                        thumbnail_dir.join("sprite.jpg"),
+                        thumbnail_dir.join("thumbnails.json"),
+                    )
+                };
+                output_paths.push(("thumbnail".to_string(), sprite.clone()));
+                output_paths.push(("thumbnailManifest".to_string(), manifest.clone()));
+                self.record_derivative(&sprite.to_string_lossy(), "thumbnail")?;
+                self.record_derivative(&manifest.to_string_lossy(), "thumbnail")?;
+                self.set_progress(0.8, "video thumbnails")?;
+            }
+            _ => return self.fail("asset kind does not support derivatives"),
+        }
+
+        if cancel.load(Ordering::Relaxed) {
+            return self.finish_cancelled();
+        }
+
+        let derivatives = normalize_derivative_paths(&work_dir, output_paths);
+        self.persist_asset_derivatives(&work_dir, &derivatives)?;
+        self.set_progress(0.95, "finalizing")?;
+
+        let outputs = MediaJobOutputs {
+            asset_id: Some(self.options.asset_id.clone()),
+            derivatives: derivatives.clone(),
+            ..Default::default()
+        };
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let completed = media_db::complete_job(&conn, &self.job_id, &outputs)?;
+        drop(conn);
+        self.cleanup_active_token();
+        self.emit(&completed)?;
+        Ok(())
+    }
+
+    fn probe_asset(&self, source: &Path) -> Result<media_db::MediaMetadata> {
+        if self.options.asset_kind == "image" {
+            if crate::media::svg::is_svg_path(source) {
+                crate::media::svg::read_safe_svg(source)?;
+                return Ok(static_image_metadata(&self.options.recording_id, source));
+            }
+            return crate::media::probe::probe_media(
+                &self.ffprobe_path.to_string_lossy(),
+                source,
+                &self.options.recording_id,
+            )
+            .or_else(|_| Ok(static_image_metadata(&self.options.recording_id, source)));
+        }
+
+        crate::media::probe::probe_media(
+            &self.ffprobe_path.to_string_lossy(),
+            source,
+            &self.options.recording_id,
+        )
+    }
+
+    fn persist_asset_derivatives(
+        &self,
+        project_dir: &Path,
+        derivatives: &HashMap<String, String>,
+    ) -> Result<()> {
+        let loaded =
+            crate::projects::load_project(project_dir, &self.path_policy)?.ok_or_else(|| {
+                InternalError::Project("project file is required for asset derivatives".into())
+            })?;
+        let mut project = loaded.project;
+        let asset = project
+            .assets
+            .iter_mut()
+            .find(|asset| asset.id == self.options.asset_id)
+            .ok_or_else(|| {
+                InternalError::Project("asset was removed before derivatives completed".into())
+            })?;
+        asset.derivatives = Some(derivatives.clone());
+        let saved = crate::projects::save_project(&project, project_dir)?;
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        crate::database::projects::upsert_project(
+            &conn,
+            &crate::database::projects::ProjectRecord {
+                id: saved.id.clone(),
+                name: saved.name.clone(),
+                recording_id: saved.recording_id.clone(),
+                created_at: saved.created_at.clone(),
+                updated_at: saved.updated_at.clone(),
+                project_json: serde_json::to_string(&saved).map_err(|error| {
+                    InternalError::Storage(format!("serialize asset project: {error}"))
+                })?,
+            },
+        )?;
+        Ok(())
+    }
+
+    fn set_progress(&self, progress: f64, stage: &str) -> Result<MediaJob> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        media_db::update_job_progress(&conn, &self.job_id, progress, stage, None)?;
+        let job = media_db::get_job(&conn, &self.job_id)?;
+        drop(conn);
+        self.emit(&job)?;
+        Ok(job)
+    }
+
+    fn fail(&self, message: &str) -> Result<()> {
+        error!(job_id = %self.job_id, %message, "asset derivative failed");
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::fail_job(&conn, &self.job_id, message)?;
+        drop(conn);
+        self.cleanup_active_token();
+        self.emit(&job)
+    }
+
+    fn finish_cancelled(&self) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::cancel_job(&conn, &self.job_id)?;
+        drop(conn);
+        self.cleanup_active_token();
+        self.emit(&job)
+    }
+
+    fn cleanup_active_token(&self) {
+        if let Ok(mut tokens) = self.active_tokens.lock() {
+            tokens.remove(&self.job_id);
+        }
+    }
+
+    fn emit(&self, job: &MediaJob) -> Result<()> {
+        EventPublisher::new(&self.app).media_job_update(job)
+    }
+
+    fn with_db<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&rusqlite::Connection) -> Result<T>,
+    {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        f(&conn)
+    }
+
+    fn record_derivative(&self, path: &str, kind: &str) -> Result<()> {
+        let size = std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let derivative = DerivativeFile {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id: self.options.recording_id.clone(),
+            job_id: self.job_id.clone(),
+            kind: kind.to_string(),
+            path: path.to_string(),
+            size_bytes: size,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.with_db(|conn| media_db::insert_derivative(conn, &derivative))
+    }
+}
+
+fn static_image_metadata(recording_id: &str, source: &Path) -> media_db::MediaMetadata {
+    media_db::MediaMetadata {
+        recording_id: recording_id.into(),
+        path: source.to_string_lossy().into_owned(),
+        duration_ms: 0,
+        width: None,
+        height: None,
+        fps: None,
+        has_audio: false,
+        video_codec: None,
+        audio_codec: None,
+        bitrate_kbps: None,
+        streams: Vec::new(),
+        format: MediaFormat {
+            name: source
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image")
+                .to_ascii_lowercase(),
+            duration_ms: Some(0),
+            size_bytes: std::fs::metadata(source)
+                .ok()
+                .map(|metadata| metadata.len()),
+            bitrate_kbps: None,
+        },
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+fn safe_asset_directory_name(asset_id: &str) -> String {
+    let value: String = asset_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect();
+    if value.is_empty() {
+        "asset".into()
+    } else {
+        value
     }
 }

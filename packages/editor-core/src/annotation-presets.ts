@@ -1,9 +1,24 @@
-import type {
-  AnnotationClip,
-  AnnotationHead,
-  AnnotationStrokeStyle,
-  AnnotationType,
+import { z } from "zod"
+import {
+  annotationHeadSchema,
+  annotationStrokeStyleSchema,
+  annotationTypeSchema,
+  annotationAnimationSchema,
+  overlayAnimationSchema,
+  type AnnotationAnimation,
+  type OverlayAnimationOutType,
+  type AnnotationClip,
+  type AnnotationHead,
+  type AnnotationStrokeStyle,
+  type AnnotationType,
+  type OverlayAnimation,
 } from "@recordforge/domain"
+import annotationPresetCatalogJson from "./presets/annotation-presets.json"
+import {
+  parsePresetCatalog,
+  type PresetCatalog,
+  type PresetDefinition,
+} from "./presets/preset-registry"
 
 export interface AnnotationColorPalette {
   id: string
@@ -36,134 +51,87 @@ export interface AnnotationShapePreset {
   defaultArrowStartHead: AnnotationHead
   defaultArrowEndHead: AnnotationHead
   defaultStrokeStyle: AnnotationStrokeStyle
+  text?: string
+  textColor?: string
+  fontSize?: number
+  shadowEnabled?: boolean
+  shadowColor?: string
+  shadowBlur?: number
+  animationIn?: AnnotationAnimation
+  animationOut?: AnnotationAnimation
+  overlayAnimation?: Partial<OverlayAnimation>
+  rotation?: number
+  anchorX?: number
+  anchorY?: number
+  zIndex?: number
+  opacity?: number
 }
 
-export const ANNOTATION_SHAPES: AnnotationShapePreset[] = [
-  {
-    type: "rectangle",
-    name: "Rectangle Box",
-    description: "Outlined box to focus and highlight areas",
-    defaultWidth: 260,
-    defaultHeight: 160,
-    defaultStrokeWidth: 4,
-    defaultStrokeColor: "#38bdf8",
-    defaultFillColor: "#38bdf8",
-    defaultFillOpacity: 0.1,
-    defaultCornerRadius: 0,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "rounded-rect",
-    name: "Rounded Card",
-    description: "Smooth rounded frame for modern UI callouts",
-    defaultWidth: 280,
-    defaultHeight: 160,
-    defaultStrokeWidth: 4,
-    defaultStrokeColor: "#38bdf8",
-    defaultFillColor: "#38bdf8",
-    defaultFillOpacity: 0.12,
-    defaultCornerRadius: 14,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "circle",
-    name: "Circle / Ellipse",
-    description: "Circular spotlight ring to point at key buttons or icons",
-    defaultWidth: 180,
-    defaultHeight: 180,
-    defaultStrokeWidth: 4,
-    defaultStrokeColor: "#f59e0b",
-    defaultFillColor: "#f59e0b",
-    defaultFillOpacity: 0.1,
-    defaultCornerRadius: 0,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "arrow",
-    name: "Direct Arrow",
-    description: "Directional pointer arrow with sharp arrowhead",
-    defaultWidth: 240,
-    defaultHeight: 120,
-    defaultStrokeWidth: 5,
-    defaultStrokeColor: "#f43f5e",
-    defaultFillColor: "#f43f5e",
-    defaultFillOpacity: 0,
-    defaultCornerRadius: 0,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "arrow",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "line",
-    name: "Straight Line",
-    description: "Clean underline or connector line",
-    defaultWidth: 240,
-    defaultHeight: 40,
-    defaultStrokeWidth: 4,
-    defaultStrokeColor: "#34d399",
-    defaultFillColor: "#34d399",
-    defaultFillOpacity: 0,
-    defaultCornerRadius: 0,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "callout",
-    name: "Speech Bubble",
-    description: "Speech callout container with optional text caption",
-    defaultWidth: 280,
-    defaultHeight: 140,
-    defaultStrokeWidth: 3,
-    defaultStrokeColor: "#a78bfa",
-    defaultFillColor: "#1e1b4b",
-    defaultFillOpacity: 0.85,
-    defaultCornerRadius: 12,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "spotlight",
-    name: "Soft Spotlight",
-    description: "Dim surrounding canvas to draw intense focus to a region",
-    defaultWidth: 320,
-    defaultHeight: 200,
-    defaultStrokeWidth: 2,
-    defaultStrokeColor: "rgba(255, 255, 255, 0.4)",
-    defaultFillColor: "rgba(0, 0, 0, 0.6)",
-    defaultFillOpacity: 0.6,
-    defaultCornerRadius: 16,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-  {
-    type: "badge",
-    name: "Notice Badge",
-    description: "Compact framed badge with custom icon or warning",
-    defaultWidth: 200,
-    defaultHeight: 70,
-    defaultStrokeWidth: 3,
-    defaultStrokeColor: "#f59e0b",
-    defaultFillColor: "#451a03",
-    defaultFillOpacity: 0.85,
-    defaultCornerRadius: 20,
-    defaultArrowStartHead: "none",
-    defaultArrowEndHead: "none",
-    defaultStrokeStyle: "solid",
-  },
-]
+export type AnnotationPresetValues = Omit<AnnotationShapePreset, "name" | "description">
+export type AnnotationPresetRecord = PresetDefinition<AnnotationPresetValues>
+
+export const annotationPresetValuesSchema = z.object({
+  type: annotationTypeSchema,
+  defaultWidth: z.number().positive(),
+  defaultHeight: z.number().positive(),
+  defaultStrokeWidth: z.number().min(0).max(64),
+  defaultStrokeColor: z.string().min(1),
+  defaultFillColor: z.string().min(1),
+  defaultFillOpacity: z.number().min(0).max(1),
+  defaultCornerRadius: z.number().min(0).max(100),
+  defaultArrowStartHead: annotationHeadSchema,
+  defaultArrowEndHead: annotationHeadSchema,
+  defaultStrokeStyle: annotationStrokeStyleSchema,
+  text: z.string().optional(),
+  textColor: z.string().optional(),
+  fontSize: z.number().min(8).max(120).optional(),
+  shadowEnabled: z.boolean().optional(),
+  shadowColor: z.string().optional(),
+  shadowBlur: z.number().min(0).max(100).optional(),
+  animationIn: annotationAnimationSchema.optional(),
+  animationOut: annotationAnimationSchema.optional(),
+  overlayAnimation: overlayAnimationSchema.partial().optional(),
+  rotation: z.number().optional(),
+  anchorX: z.number().min(0).max(1).optional(),
+  anchorY: z.number().min(0).max(1).optional(),
+  zIndex: z.number().int().optional(),
+  opacity: z.number().min(0).max(1).optional(),
+})
+
+export const ANNOTATION_PRESET_CATALOG: PresetCatalog<AnnotationPresetValues> = parsePresetCatalog(
+  annotationPresetCatalogJson,
+  annotationPresetValuesSchema,
+)
+
+export const ANNOTATION_PRESETS: AnnotationPresetRecord[] = ANNOTATION_PRESET_CATALOG.presets
+
+export function annotationPresetToShapePreset(
+  preset: AnnotationPresetRecord,
+): AnnotationShapePreset {
+  return {
+    ...preset.definition,
+    name: preset.name,
+    description: preset.description,
+  }
+}
+
+export const ANNOTATION_SHAPES: AnnotationShapePreset[] = ANNOTATION_PRESETS.map(
+  annotationPresetToShapePreset,
+)
+
+export function getAnnotationPresetById(id: string): AnnotationPresetRecord {
+  const found = ANNOTATION_PRESETS.find((preset) => preset.id === id)
+  return found ?? ANNOTATION_PRESETS[0]
+}
 
 export function getAnnotationShapePreset(type: AnnotationType): AnnotationShapePreset {
-  const found = ANNOTATION_SHAPES.find((s) => s.type === type)
+  const found = ANNOTATION_SHAPES.find((preset) => preset.type === type)
   return found ?? ANNOTATION_SHAPES[0]
+}
+
+function toOverlayAnimationOut(animation: AnnotationAnimation): OverlayAnimationOutType {
+  if (animation === "draw" || animation === "scale-up") return "scale-down"
+  return animation
 }
 
 export function createAnnotationClip(
@@ -185,23 +153,45 @@ export function createAnnotationClip(
     canvasHeight?: number
   },
 ): AnnotationClip {
-  const preset = getAnnotationShapePreset(type)
+  return createAnnotationClipFromPreset(getAnnotationShapePreset(type), options)
+}
+
+export function createAnnotationClipFromPreset(
+  preset: AnnotationShapePreset,
+  options?: {
+    id?: string
+    startMs?: number
+    durationMs?: number
+    x?: number
+    y?: number
+    width?: number
+    height?: number
+    endX?: number
+    endY?: number
+    strokeColor?: string
+    strokeWidth?: number
+    text?: string
+    canvasWidth?: number
+    canvasHeight?: number
+  },
+): AnnotationClip {
   const id = options?.id ?? `annot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
   const startMs = options?.startMs ?? 0
   const durationMs = options?.durationMs ?? 3000
   const canvasWidth = options?.canvasWidth ?? 1920
   const canvasHeight = options?.canvasHeight ?? 1080
-
   const width = options?.width ?? preset.defaultWidth
   const height = options?.height ?? preset.defaultHeight
   const x = options?.x ?? Math.max(40, Math.round((canvasWidth - width) / 2))
   const y = options?.y ?? Math.max(40, Math.round((canvasHeight - height) / 2))
+  const animationIn = preset.animationIn ?? "fade"
+  const animationOut = preset.animationOut ?? "fade"
 
   return {
     id,
     assetId: `synthetic:annotation:${id}`,
     kind: "annotation",
-    annotationType: type,
+    annotationType: preset.type,
     startMs,
     durationMs,
     sourceInMs: 0,
@@ -211,8 +201,15 @@ export function createAnnotationClip(
     y,
     width,
     height,
-    endX: options?.endX ?? (type === "arrow" || type === "line" ? x + width : undefined),
-    endY: options?.endY ?? (type === "arrow" || type === "line" ? y + height : undefined),
+    rotation: preset.rotation ?? 0,
+    anchorX: preset.anchorX ?? 0.5,
+    anchorY: preset.anchorY ?? 0.5,
+    zIndex: preset.zIndex ?? 0,
+    opacity: preset.opacity ?? 1,
+    endX:
+      options?.endX ?? (preset.type === "arrow" || preset.type === "line" ? x + width : undefined),
+    endY:
+      options?.endY ?? (preset.type === "arrow" || preset.type === "line" ? y + height : undefined),
     strokeColor: options?.strokeColor ?? preset.defaultStrokeColor,
     strokeWidth: options?.strokeWidth ?? preset.defaultStrokeWidth,
     strokeStyle: preset.defaultStrokeStyle,
@@ -221,15 +218,115 @@ export function createAnnotationClip(
     cornerRadius: preset.defaultCornerRadius,
     arrowStartHead: preset.defaultArrowStartHead,
     arrowEndHead: preset.defaultArrowEndHead,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.5)",
-    shadowBlur: 10,
-    text: options?.text ?? (type === "callout" ? "Add note here..." : undefined),
-    textColor: "#ffffff",
-    fontSize: 16,
-    animationIn: "fade",
-    animationOut: "fade",
+    shadowEnabled: preset.shadowEnabled ?? true,
+    shadowColor: preset.shadowColor ?? "rgba(0, 0, 0, 0.5)",
+    shadowBlur: preset.shadowBlur ?? 10,
+    text:
+      options?.text ?? preset.text ?? (preset.type === "callout" ? "Add note here..." : undefined),
+    textColor: preset.textColor ?? "#ffffff",
+    fontSize: preset.fontSize ?? 16,
+    animationIn,
+    animationOut,
+    overlayAnimation: {
+      inType: preset.overlayAnimation?.inType ?? animationIn,
+      outType: preset.overlayAnimation?.outType ?? toOverlayAnimationOut(animationOut),
+      inDurationMs: preset.overlayAnimation?.inDurationMs ?? 350,
+      outDurationMs: preset.overlayAnimation?.outDurationMs ?? 350,
+      easing: preset.overlayAnimation?.easing ?? "expo-out",
+    },
     enabled: true,
     locked: false,
   }
+}
+
+export function applyPresetToAnnotationClip(
+  clip: AnnotationClip,
+  preset: AnnotationShapePreset | AnnotationPresetRecord,
+): AnnotationClip {
+  const shape = "definition" in preset ? annotationPresetToShapePreset(preset) : preset
+  const nextWidth = shape.defaultWidth
+  const nextHeight = shape.defaultHeight
+  const isLine = shape.type === "arrow" || shape.type === "line"
+  const animationIn = shape.animationIn ?? clip.animationIn
+  const animationOut = shape.animationOut ?? clip.animationOut
+
+  return {
+    ...clip,
+    annotationType: shape.type,
+    width: nextWidth,
+    height: nextHeight,
+    endX: isLine ? clip.x + nextWidth : undefined,
+    endY: isLine ? clip.y + nextHeight : undefined,
+    strokeWidth: shape.defaultStrokeWidth,
+    strokeColor: shape.defaultStrokeColor,
+    strokeStyle: shape.defaultStrokeStyle,
+    fillColor: shape.defaultFillColor,
+    fillOpacity: shape.defaultFillOpacity,
+    cornerRadius: shape.defaultCornerRadius,
+    arrowStartHead: shape.defaultArrowStartHead,
+    arrowEndHead: shape.defaultArrowEndHead,
+    ...(shape.text !== undefined ? { text: shape.text } : {}),
+    ...(shape.textColor !== undefined ? { textColor: shape.textColor } : {}),
+    ...(shape.fontSize !== undefined ? { fontSize: shape.fontSize } : {}),
+    ...(shape.shadowEnabled !== undefined ? { shadowEnabled: shape.shadowEnabled } : {}),
+    ...(shape.shadowColor !== undefined ? { shadowColor: shape.shadowColor } : {}),
+    ...(shape.shadowBlur !== undefined ? { shadowBlur: shape.shadowBlur } : {}),
+    ...(shape.rotation !== undefined ? { rotation: shape.rotation } : {}),
+    ...(shape.anchorX !== undefined ? { anchorX: shape.anchorX } : {}),
+    ...(shape.anchorY !== undefined ? { anchorY: shape.anchorY } : {}),
+    ...(shape.zIndex !== undefined ? { zIndex: shape.zIndex } : {}),
+    ...(shape.opacity !== undefined ? { opacity: shape.opacity } : {}),
+    ...(animationIn !== undefined ? { animationIn } : {}),
+    ...(animationOut !== undefined ? { animationOut } : {}),
+    ...(shape.overlayAnimation !== undefined
+      ? { overlayAnimation: { ...clip.overlayAnimation, ...shape.overlayAnimation } }
+      : {}),
+  }
+}
+
+export function annotationPresetFromClip(
+  clip: AnnotationClip,
+  metadata: { name: string; description: string; category?: string; tags?: string[] },
+): AnnotationPresetRecord {
+  return {
+    id: `custom-${clip.id}`,
+    name: metadata.name,
+    description: metadata.description,
+    category: metadata.category ?? annotationCategoryForType(clip.annotationType),
+    tags: metadata.tags ?? [clip.annotationType],
+    definition: {
+      type: clip.annotationType,
+      defaultWidth: clip.width,
+      defaultHeight: clip.height,
+      defaultStrokeWidth: clip.strokeWidth,
+      defaultStrokeColor: clip.strokeColor,
+      defaultFillColor: clip.fillColor,
+      defaultFillOpacity: clip.fillOpacity,
+      defaultCornerRadius: clip.cornerRadius,
+      defaultArrowStartHead: clip.arrowStartHead,
+      defaultArrowEndHead: clip.arrowEndHead,
+      defaultStrokeStyle: clip.strokeStyle,
+      text: clip.text,
+      textColor: clip.textColor,
+      fontSize: clip.fontSize,
+      shadowEnabled: clip.shadowEnabled,
+      shadowColor: clip.shadowColor,
+      shadowBlur: clip.shadowBlur,
+      animationIn: clip.animationIn,
+      animationOut: clip.animationOut,
+      overlayAnimation: clip.overlayAnimation,
+      rotation: clip.rotation,
+      anchorX: clip.anchorX,
+      anchorY: clip.anchorY,
+      zIndex: clip.zIndex,
+      opacity: clip.opacity,
+    },
+  }
+}
+
+function annotationCategoryForType(type: AnnotationType): string {
+  if (type === "rectangle" || type === "rounded-rect") return "frame"
+  if (type === "circle") return "highlight"
+  if (type === "arrow" || type === "line") return "pointer"
+  return type
 }

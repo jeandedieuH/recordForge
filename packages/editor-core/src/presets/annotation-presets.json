@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "categories": ["frame", "highlight", "pointer", "callout", "spotlight", "badge"],
+  "presets": [
+    {
+      "id": "rectangle",
+      "name": "Rectangle Box",
+      "description": "Outlined box to focus and highlight areas",
+      "category": "frame",
+      "tags": ["rectangle", "frame", "highlight"],
+      "definition": {
+        "type": "rectangle",
+        "defaultWidth": 260,
+        "defaultHeight": 160,
+        "defaultStrokeWidth": 4,
+        "defaultStrokeColor": "#38bdf8",
+        "defaultFillColor": "#38bdf8",
+        "defaultFillOpacity": 0.1,
+        "defaultCornerRadius": 0,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "rounded-rect",
+      "name": "Rounded Card",
+      "description": "Smooth rounded frame for modern UI callouts",
+      "category": "frame",
+      "tags": ["rounded", "card", "frame"],
+      "definition": {
+        "type": "rounded-rect",
+        "defaultWidth": 280,
+        "defaultHeight": 160,
+        "defaultStrokeWidth": 4,
+        "defaultStrokeColor": "#38bdf8",
+        "defaultFillColor": "#38bdf8",
+        "defaultFillOpacity": 0.12,
+        "defaultCornerRadius": 14,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "circle",
+      "name": "Circle / Ellipse",
+      "description": "Circular spotlight ring to point at key buttons or icons",
+      "category": "highlight",
+      "tags": ["circle", "ellipse", "highlight", "ring"],
+      "definition": {
+        "type": "circle",
+        "defaultWidth": 180,
+        "defaultHeight": 180,
+        "defaultStrokeWidth": 4,
+        "defaultStrokeColor": "#f59e0b",
+        "defaultFillColor": "#f59e0b",
+        "defaultFillOpacity": 0.1,
+        "defaultCornerRadius": 0,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "arrow",
+      "name": "Direct Arrow",
+      "description": "Directional pointer arrow with sharp arrowhead",
+      "category": "pointer",
+      "tags": ["arrow", "pointer", "direction"],
+      "definition": {
+        "type": "arrow",
+        "defaultWidth": 240,
+        "defaultHeight": 120,
+        "defaultStrokeWidth": 5,
+        "defaultStrokeColor": "#f43f5e",
+        "defaultFillColor": "#f43f5e",
+        "defaultFillOpacity": 0,
+        "defaultCornerRadius": 0,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "arrow",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "line",
+      "name": "Straight Line",
+      "description": "Clean underline or connector line",
+      "category": "pointer",
+      "tags": ["line", "pointer", "underline", "connector"],
+      "definition": {
+        "type": "line",
+        "defaultWidth": 240,
+        "defaultHeight": 40,
+        "defaultStrokeWidth": 4,
+        "defaultStrokeColor": "#34d399",
+        "defaultFillColor": "#34d399",
+        "defaultFillOpacity": 0,
+        "defaultCornerRadius": 0,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "callout",
+      "name": "Speech Bubble",
+      "description": "Speech callout container with optional text caption",
+      "category": "callout",
+      "tags": ["callout", "speech", "note"],
+      "definition": {
+        "type": "callout",
+        "defaultWidth": 280,
+        "defaultHeight": 140,
+        "defaultStrokeWidth": 3,
+        "defaultStrokeColor": "#a78bfa",
+        "defaultFillColor": "#1e1b4b",
+        "defaultFillOpacity": 0.85,
+        "defaultCornerRadius": 12,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "spotlight",
+      "name": "Soft Spotlight",
+      "description": "Dim surrounding canvas to draw intense focus to a region",
+      "category": "spotlight",
+      "tags": ["spotlight", "focus", "dim", "highlight"],
+      "definition": {
+        "type": "spotlight",
+        "defaultWidth": 320,
+        "defaultHeight": 200,
+        "defaultStrokeWidth": 2,
+        "defaultStrokeColor": "rgba(255, 255, 255, 0.4)",
+        "defaultFillColor": "rgba(0, 0, 0, 0.6)",
+        "defaultFillOpacity": 0.6,
+        "defaultCornerRadius": 16,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "badge",
+      "name": "Notice Badge",
+      "description": "Compact framed badge with custom icon or warning",
+      "category": "badge",
+      "tags": ["badge", "notice", "warning", "label"],
+      "definition": {
+        "type": "badge",
+        "defaultWidth": 200,
+        "defaultHeight": 70,
+        "defaultStrokeWidth": 3,
+        "defaultStrokeColor": "#f59e0b",
+        "defaultFillColor": "#451a03",
+        "defaultFillOpacity": 0.85,
+        "defaultCornerRadius": 20,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "none",
+        "defaultStrokeStyle": "solid"
+      }
+    }
+  ]
+}

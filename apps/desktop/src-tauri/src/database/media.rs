@@ -1,6 +1,7 @@
 use chrono::Utc;
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::errors::{InternalError, Result};
@@ -52,6 +53,8 @@ pub enum MediaJobKind {
     Thumbnail,
     Waveform,
     Prepare,
+    #[serde(rename = "asset_derivative")]
+    AssetDerivative,
     Export,
 }
 
@@ -63,6 +66,7 @@ impl MediaJobKind {
             MediaJobKind::Thumbnail => "thumbnail",
             MediaJobKind::Waveform => "waveform",
             MediaJobKind::Prepare => "prepare",
+            MediaJobKind::AssetDerivative => "asset_derivative",
             MediaJobKind::Export => "export",
         }
     }
@@ -78,6 +82,7 @@ impl std::str::FromStr for MediaJobKind {
             "thumbnail" => Ok(MediaJobKind::Thumbnail),
             "waveform" => Ok(MediaJobKind::Waveform),
             "prepare" => Ok(MediaJobKind::Prepare),
+            "asset_derivative" => Ok(MediaJobKind::AssetDerivative),
             "export" => Ok(MediaJobKind::Export),
             _ => Err(()),
         }
@@ -118,6 +123,10 @@ pub struct MediaVideoTrackOutput {
 pub struct MediaJobOutputs {
     #[serde(default)]
     pub prepare_version: u32,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub derivatives: HashMap<String, String>,
     pub metadata_path: Option<String>,
     pub proxy_path: Option<String>,
     pub thumbnail_dir: Option<String>,
@@ -626,6 +635,22 @@ pub fn delete_derivatives_for_recording(
     )
     .map_err(|e| InternalError::Storage(format!("delete derivatives: {e}")))?;
 
+    Ok(())
+}
+
+/// Delete derivative rows associated with one asset's output paths.
+pub fn delete_derivatives_for_paths(
+    conn: &Connection,
+    recording_id: &str,
+    paths: &[String],
+) -> Result<()> {
+    for path in paths {
+        conn.execute(
+            "DELETE FROM derivatives WHERE recording_id = ?1 AND path = ?2",
+            params![recording_id, path],
+        )
+        .map_err(|e| InternalError::Storage(format!("delete asset derivative: {e}")))?;
+    }
     Ok(())
 }
 

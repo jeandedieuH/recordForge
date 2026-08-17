@@ -36,6 +36,8 @@ const EDITOR_METADATA_FILES = [
   "project-duplicate-ranges.json",
   "project-long.json",
   "project-no-cursor.json",
+  "project-overlays.json",
+  "external-logo.svg",
   "cursor-telemetry.json",
   "captions.srt",
 ] as const

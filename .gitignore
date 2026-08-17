@@ -20,6 +20,10 @@ packages/cursor-engine/Cargo.lock
 tooling/prototypes/cursor-engine-wasm/target
 tooling/prototypes/cursor-engine-wasm/pkg
 
+# Rust overlay engine
+packages/overlay-engine/target
+packages/overlay-engine/Cargo.lock
+
 # Turbo cache
 .turbo
 

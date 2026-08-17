@@ -24,6 +24,7 @@
     "@recordforge/cursor-core": "workspace:*",
     "@recordforge/editor-core": "workspace:*",
     "@recordforge/media-core": "workspace:*",
+    "@recordforge/overlay-core": "workspace:*",
     "@recordforge/ui": "workspace:*",
     "@tanstack/react-virtual": "^3.14.9",
     "@tauri-apps/api": "^2.11.1",

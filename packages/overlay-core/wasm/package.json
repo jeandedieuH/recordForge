@@ -1,0 +1,20 @@
+{
+  "name": "overlay-engine",
+  "type": "module",
+  "collaborators": [
+    "recordForge"
+  ],
+  "description": "Canonical overlay evaluation engine for preview and export",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "overlay_engine_bg.wasm",
+    "overlay_engine.js",
+    "overlay_engine.d.ts"
+  ],
+  "main": "overlay_engine.js",
+  "types": "overlay_engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

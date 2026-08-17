@@ -1,7 +1,7 @@
-import { useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import type { LucideIcon } from "lucide-react"
 import { ChevronDown } from "lucide-react"
-import { Button, Input } from "@recordforge/ui"
+import { Button, Input, Slider } from "@recordforge/ui"
 
 export function InfoField({ label, value }: { label: string; value: string }) {
   return (
@@ -36,6 +36,68 @@ export function NumberField({
         onChange={(event) => onChange(Number(event.target.value))}
       />
     </label>
+  )
+}
+
+export interface DebouncedSliderProps extends Omit<
+  ComponentProps<typeof Slider>,
+  "value" | "defaultValue" | "onValueChange" | "onValueCommit"
+> {
+  value: number[]
+  onValueCommit: (value: number[]) => void
+  onValueChange?: (value: number[]) => void
+  debounceMs?: number
+}
+
+export function DebouncedSlider({
+  value,
+  onValueCommit,
+  onValueChange,
+  debounceMs = 150,
+  ...props
+}: DebouncedSliderProps) {
+  const [draftValue, setDraftValue] = useState(value)
+  const isInteractingRef = useRef(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function clearTimer() {
+    if (timerRef.current === null) return
+    clearTimeout(timerRef.current)
+    timerRef.current = null
+  }
+
+  useEffect(() => {
+    if (!isInteractingRef.current) setDraftValue(value)
+  }, [value])
+
+  useEffect(() => clearTimer, [debounceMs])
+
+  function handleValueChange(nextValue: number[]) {
+    isInteractingRef.current = true
+    setDraftValue(nextValue)
+    clearTimer()
+    if (onValueChange) {
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null
+        onValueChange(nextValue)
+      }, debounceMs)
+    }
+  }
+
+  function handleValueCommit(nextValue: number[]) {
+    clearTimer()
+    isInteractingRef.current = false
+    setDraftValue(nextValue)
+    onValueCommit(nextValue)
+  }
+
+  return (
+    <Slider
+      {...props}
+      value={draftValue}
+      onValueChange={handleValueChange}
+      onValueCommit={handleValueCommit}
+    />
   )
 }
 

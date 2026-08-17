@@ -9,6 +9,8 @@ This directory contains deterministic, checked-in metadata fixtures for editor P
 - `project-duplicate-ranges.json` describes a project where the same source range appears in two non-overlapping timeline clips to test source↔timeline mapping.
 - `project-long.json` describes a five-minute project for timeline and playback performance checks.
 - `project-no-cursor.json` describes an imported MP4 with unavailable cursor metadata.
+- `project-overlays.json` describes the Phase 0 overlay engine fixture with annotations, titles, and a copied external SVG image on one overlay track.
+- `external-logo.svg` is the deterministic, script-free external image referenced by `project-overlays.json`.
 - `cursor-telemetry.json` contains source-relative cursor events, including left/right click samples and a non-16:9 source size.
 - `captions.srt` contains deterministic caption timing for import and split/ripple tests.
 
@@ -32,7 +34,7 @@ The generator writes these editor assets to `tooling/fixtures/output/`:
 - `system_audio_10s.wav` - system-audio source.
 - `720p30_5m.mp4` - optional five-minute performance source, generated with `--include-long`.
 
-The generator also copies the checked-in project, cursor, and caption metadata into the output directory so their relative asset paths resolve without remapping. Phase 1 will validate and migrate this target project shape through the durable project contract.
+The generator also copies the checked-in project, cursor, caption, and overlay metadata into the output directory so their relative asset paths resolve without remapping. Phase 1 will validate and migrate these target project shapes through the durable project contract.
 
 Increment the generator's `FIXTURE_RECIPE_VERSION` whenever a media recipe, encoder setting, or expected media property changes so stale generated files are rebuilt.
 
@@ -44,4 +46,6 @@ Increment the generator's `FIXTURE_RECIPE_VERSION` whenever a media recipe, enco
 - `project-duplicate-ranges.json` contains overlapping source ranges to test mapping ambiguity.
 - Cursor coordinates are relative to the declared source dimensions.
 - Captions have stable millisecond boundaries.
+- `project-overlays.json` keeps annotation, title, and external-image clips on one overlay track.
+- The external SVG fixture contains no scripts, event handlers, or external references.
 - No fixture contains user media, secrets, or absolute machine paths.

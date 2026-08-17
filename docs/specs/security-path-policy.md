@@ -36,6 +36,7 @@ recordForge is a desktop app that receives untrusted input from:
 | Sessions | `{app_data_dir}/sessions/` | Read, write, delete (recording data) |
 | User export | One-time OS dialog selection | Write (export destination) |
 | User import | One-time OS dialog selection | Read (import source) |
+| Referenced media | Canonical regular file selected by the user | Read while available; protected system directories rejected |
 
 ### 2.2 Containment rules
 
@@ -105,7 +106,7 @@ On Windows, paths may contain:
 - Junction points (`mklink /j`)
 - Reparse points
 
-The path policy MUST canonicalize before containment checks to resolve these.
+The path policy MUST canonicalize before containment checks to resolve these. The asset importer calls `validate_import_source_path` for every dialog-selected source; copied destinations are contained under the project, while reference assets call `validate_external_asset_path` and reject protected system directories.
 
 ---
 

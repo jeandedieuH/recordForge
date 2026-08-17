@@ -1,11 +1,37 @@
-import type {
-  TextAnimation,
-  TextBackdropStyle,
-  TextClip,
-  TextFontFamily,
-  TextFontWeight,
-  TitlePresetCategory,
+import { z } from "zod"
+import {
+  overlayAnimationSchema,
+  textAlignmentSchema,
+  textAnimationSchema,
+  textBackdropStyleSchema,
+  textFontFamilySchema,
+  type OverlayAnimation,
+  type TextAnimation,
+  type TextBackdropStyle,
+  type TextClip,
+  type TextFontFamily,
+  type TextFontWeight,
+  type TitlePresetCategory,
 } from "@recordforge/domain"
+import textPresetCatalogJson from "./presets/text-presets.json"
+import {
+  parsePresetCatalog,
+  type PresetCatalog,
+  type PresetDefinition,
+} from "./presets/preset-registry"
+
+function toOverlayAnimationIn(animation: TextAnimation): OverlayAnimation["inType"] {
+  if (animation === "zoom-punch") return "scale-up"
+  if (animation === "expand-bar") return "slide-up"
+  return animation
+}
+
+function toOverlayAnimationOut(animation: TextAnimation): OverlayAnimation["outType"] {
+  if (animation === "zoom-punch") return "scale-down"
+  if (animation === "expand-bar") return "slide-down"
+  if (animation === "typewriter") return "fade"
+  return animation
+}
 
 export interface TextPresetDefinition {
   id: string
@@ -36,503 +62,85 @@ export interface TextPresetDefinition {
   shadowBlur: number
   animationIn: TextAnimation
   animationOut: TextAnimation
+  overlayAnimation?: Partial<OverlayAnimation>
+  rotation?: number
+  anchorX?: number
+  anchorY?: number
+  zIndex?: number
+  opacity?: number
 }
 
-export const TEXT_PRESETS: TextPresetDefinition[] = [
-  // --- Main Titles ---
-  {
-    id: "title-modern",
-    name: "Modern Minimalist",
-    description: "Crisp, bold sans-serif title with a vibrant accent bar and clean subtitle",
-    category: "title",
-    defaultPrimaryText: "Creative Video Studio",
-    defaultSecondaryText: "High performance desktop screen recording & editing",
-    defaultTagText: "RECORDING V1",
-    width: 540,
-    height: 180,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 40,
-    fontWeight: "800",
-    textColor: "#ffffff",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#38bdf8",
-    backdropStyle: "none",
-    backdropColor: "#0f172a",
-    backdropOpacity: 0.8,
-    backdropBlur: 16,
-    backdropBorderRadius: 12,
-    backdropPaddingX: 24,
-    backdropPaddingY: 20,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.7)",
-    shadowBlur: 16,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
-  {
-    id: "title-cinematic",
-    name: "Cinematic Hero",
-    description: "Dramatic serif typography with wide uppercase spacing and subtle backdrop",
-    category: "title",
-    defaultPrimaryText: "MASTER THE CRAFT",
-    defaultSecondaryText: "A comprehensive guide to modern workflows",
-    defaultTagText: "EPISODE 01",
-    width: 580,
-    height: 190,
-    alignment: "center",
-    fontFamily: "serif",
-    fontSize: 44,
-    fontWeight: "700",
-    textColor: "#f8fafc",
-    secondaryTextColor: "#cbd5e1",
-    accentColor: "#f59e0b",
-    backdropStyle: "gradient",
-    backdropColor: "#070b14",
-    backdropOpacity: 0.85,
-    backdropBlur: 20,
-    backdropBorderRadius: 16,
-    backdropPaddingX: 32,
-    backdropPaddingY: 24,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.8)",
-    shadowBlur: 24,
-    animationIn: "zoom-punch",
-    animationOut: "fade",
-  },
-  {
-    id: "title-glass",
-    name: "Glassmorphic Glow",
-    description: "Frosted translucent glass container with subtle border glow and clean typography",
-    category: "title",
-    defaultPrimaryText: "Next Gen Interface",
-    defaultSecondaryText: "Crafted with precision, designed for speed",
-    defaultTagText: "PRO FEATURE",
-    width: 520,
-    height: 170,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 36,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#cbd5e1",
-    accentColor: "#a78bfa",
-    backdropStyle: "glass",
-    backdropColor: "#1e1b4b",
-    backdropOpacity: 0.65,
-    backdropBlur: 24,
-    backdropBorderRadius: 16,
-    backdropPaddingX: 28,
-    backdropPaddingY: 20,
-    shadowEnabled: true,
-    shadowColor: "rgba(167, 139, 250, 0.25)",
-    shadowBlur: 20,
-    animationIn: "slide-up",
-    animationOut: "slide-down",
-  },
-  {
-    id: "title-tech",
-    name: "Tech Cyber",
-    description: "Monospace code-inspired title with neon cyan highlights and digital badge",
-    category: "title",
-    defaultPrimaryText: "System::Initialize()",
-    defaultSecondaryText: "Deploying production pipelines across nodes",
-    defaultTagText: "v2.4.0-STABLE",
-    width: 500,
-    height: 160,
-    alignment: "left",
-    fontFamily: "mono",
-    fontSize: 32,
-    fontWeight: "700",
-    textColor: "#38bdf8",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#22d3ee",
-    backdropStyle: "solid",
-    backdropColor: "#090d16",
-    backdropOpacity: 0.9,
-    backdropBlur: 12,
-    backdropBorderRadius: 8,
-    backdropPaddingX: 24,
-    backdropPaddingY: 18,
-    shadowEnabled: true,
-    shadowColor: "rgba(34, 211, 238, 0.2)",
-    shadowBlur: 12,
-    animationIn: "typewriter",
-    animationOut: "fade",
-  },
-  {
-    id: "title-split",
-    name: "Split Accent",
-    description: "High-contrast bold badge with contrasting colored header",
-    category: "title",
-    defaultPrimaryText: "DESIGN BREAKTHROUGH",
-    defaultSecondaryText: "Rethinking the developer canvas experience",
-    defaultTagText: "INSIGHTS",
-    width: 520,
-    height: 165,
-    alignment: "left",
-    fontFamily: "heading",
-    fontSize: 36,
-    fontWeight: "900",
-    textColor: "#ffffff",
-    secondaryTextColor: "#f1f5f9",
-    accentColor: "#f43f5e",
-    backdropStyle: "solid",
-    backdropColor: "#1e293b",
-    backdropOpacity: 0.95,
-    backdropBlur: 8,
-    backdropBorderRadius: 10,
-    backdropPaddingX: 26,
-    backdropPaddingY: 20,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.6)",
-    shadowBlur: 18,
-    animationIn: "expand-bar",
-    animationOut: "fade",
-  },
-  {
-    id: "title-editorial",
-    name: "Editorial Serif",
-    description: "Classic publication style with refined serif italic accents",
-    category: "title",
-    defaultPrimaryText: "The Art of Storytelling",
-    defaultSecondaryText: "Visual pacing and cinematic structure",
-    defaultTagText: "ESSAY",
-    width: 500,
-    height: 155,
-    alignment: "center",
-    fontFamily: "serif",
-    fontSize: 38,
-    fontWeight: "600",
-    textColor: "#ffffff",
-    secondaryTextColor: "#cbd5e1",
-    accentColor: "#fbbf24",
-    backdropStyle: "none",
-    backdropColor: "#0f172a",
-    backdropOpacity: 0.8,
-    backdropBlur: 16,
-    backdropBorderRadius: 8,
-    backdropPaddingX: 20,
-    backdropPaddingY: 16,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.7)",
-    shadowBlur: 14,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
+export type TextPresetValues = Omit<
+  TextPresetDefinition,
+  "id" | "name" | "description" | "category"
+>
+export type TextPresetRecord = PresetDefinition<TextPresetValues>
 
-  // --- Lower Thirds ---
-  {
-    id: "lowerthird-accent-bar",
-    name: "Accent Bar Left",
-    description: "Signature broadcast lower third with vertical accent color strip",
-    category: "lower-third",
-    defaultPrimaryText: "Alex Vance",
-    defaultSecondaryText: "Lead Software Architect & Creator",
-    width: 440,
-    height: 100,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 26,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#38bdf8",
-    backdropStyle: "accent-bar",
-    backdropColor: "#0c1220",
-    backdropOpacity: 0.85,
-    backdropBlur: 16,
-    backdropBorderRadius: 8,
-    backdropPaddingX: 20,
-    backdropPaddingY: 14,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.5)",
-    shadowBlur: 12,
-    animationIn: "slide-up",
-    animationOut: "slide-down",
-  },
-  {
-    id: "lowerthird-glass-pill",
-    name: "Floating Glass Pill",
-    description: "Rounded glass pill with smooth backdrop blur and colored dot",
-    category: "lower-third",
-    defaultPrimaryText: "Sarah Jenkins",
-    defaultSecondaryText: "Head of Product Experience",
-    defaultTagText: "GUEST",
-    width: 400,
-    height: 90,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 22,
-    fontWeight: "600",
-    textColor: "#ffffff",
-    secondaryTextColor: "#cbd5e1",
-    accentColor: "#34d399",
-    backdropStyle: "pill",
-    backdropColor: "#0f172a",
-    backdropOpacity: 0.75,
-    backdropBlur: 20,
-    backdropBorderRadius: 40,
-    backdropPaddingX: 24,
-    backdropPaddingY: 14,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.4)",
-    shadowBlur: 14,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
-  {
-    id: "lowerthird-broadcast",
-    name: "Broadcast Dual Strip",
-    description: "High impact two-level banner for formal presentations and interviews",
-    category: "lower-third",
-    defaultPrimaryText: "Dr. Evelyn Reed",
-    defaultSecondaryText: "Principal Research Scientist // AI Lab",
-    width: 460,
-    height: 95,
-    alignment: "left",
-    fontFamily: "heading",
-    fontSize: 24,
-    fontWeight: "800",
-    textColor: "#ffffff",
-    secondaryTextColor: "#e2e8f0",
-    accentColor: "#6366f1",
-    backdropStyle: "solid",
-    backdropColor: "#1e1b4b",
-    backdropOpacity: 0.92,
-    backdropBlur: 12,
-    backdropBorderRadius: 6,
-    backdropPaddingX: 20,
-    backdropPaddingY: 12,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.6)",
-    shadowBlur: 16,
-    animationIn: "expand-bar",
-    animationOut: "fade",
-  },
-  {
-    id: "lowerthird-gradient-ribbon",
-    name: "Gradient Ribbon",
-    description: "Modern gradient outline with subtle colored ambient lighting",
-    category: "lower-third",
-    defaultPrimaryText: "recordForge Desktop",
-    defaultSecondaryText: "Local-first screen recording & proxy editor",
-    defaultTagText: "OVERVIEW",
-    width: 430,
-    height: 95,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 22,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#ec4899",
-    backdropStyle: "gradient",
-    backdropColor: "#090d16",
-    backdropOpacity: 0.88,
-    backdropBlur: 16,
-    backdropBorderRadius: 12,
-    backdropPaddingX: 22,
-    backdropPaddingY: 14,
-    shadowEnabled: true,
-    shadowColor: "rgba(236, 72, 153, 0.2)",
-    shadowBlur: 16,
-    animationIn: "slide-up",
-    animationOut: "slide-down",
-  },
-  {
-    id: "lowerthird-social",
-    name: "Social Handle Tag",
-    description: "Sleek username and channel badge with accent tag",
-    category: "lower-third",
-    defaultPrimaryText: "@recordforge_app",
-    defaultSecondaryText: "Subscribe for weekly product updates",
-    defaultTagText: "FOLLOW",
-    width: 380,
-    height: 85,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 20,
-    fontWeight: "700",
-    textColor: "#38bdf8",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#38bdf8",
-    backdropStyle: "pill",
-    backdropColor: "#0c1220",
-    backdropOpacity: 0.85,
-    backdropBlur: 16,
-    backdropBorderRadius: 30,
-    backdropPaddingX: 20,
-    backdropPaddingY: 12,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.4)",
-    shadowBlur: 10,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
+export const textPresetValuesSchema = z.object({
+  defaultPrimaryText: z.string().min(1),
+  defaultSecondaryText: z.string().optional(),
+  defaultTagText: z.string().optional(),
+  width: z.number().min(20),
+  height: z.number().min(20),
+  alignment: textAlignmentSchema,
+  fontFamily: textFontFamilySchema,
+  fontSize: z.number().min(8).max(200),
+  fontWeight: z.enum(["400", "500", "600", "700", "800", "900"]),
+  textColor: z.string().min(1),
+  secondaryTextColor: z.string().min(1),
+  accentColor: z.string().min(1),
+  backdropStyle: textBackdropStyleSchema,
+  backdropColor: z.string().min(1),
+  backdropOpacity: z.number().min(0).max(1),
+  backdropBlur: z.number().min(0).max(64),
+  backdropBorderRadius: z.number().min(0).max(100),
+  backdropPaddingX: z.number().min(0).max(200),
+  backdropPaddingY: z.number().min(0).max(200),
+  shadowEnabled: z.boolean(),
+  shadowColor: z.string().min(1),
+  shadowBlur: z.number().min(0).max(100),
+  animationIn: textAnimationSchema,
+  animationOut: textAnimationSchema,
+  overlayAnimation: overlayAnimationSchema.partial().optional(),
+  rotation: z.number().optional(),
+  anchorX: z.number().min(0).max(1).optional(),
+  anchorY: z.number().min(0).max(1).optional(),
+  zIndex: z.number().int().optional(),
+  opacity: z.number().min(0).max(1).optional(),
+})
 
-  // --- Callouts & Badges ---
-  {
-    id: "callout-feature-pill",
-    name: "Feature Highlight Pill",
-    description: "Compact highlight badge perfect for pointing out features and shortcuts",
-    category: "callout",
-    defaultPrimaryText: "Zero Lag Local Export",
-    defaultSecondaryText: "GPU accelerated NVENC & QSV encoding",
-    defaultTagText: "LIGHTNING FAST",
-    width: 360,
-    height: 90,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 20,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#10b981",
-    backdropStyle: "glass",
-    backdropColor: "#064e3b",
-    backdropOpacity: 0.65,
-    backdropBlur: 16,
-    backdropBorderRadius: 12,
-    backdropPaddingX: 18,
-    backdropPaddingY: 12,
-    shadowEnabled: true,
-    shadowColor: "rgba(16, 185, 129, 0.25)",
-    shadowBlur: 14,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
-  {
-    id: "callout-keypoint",
-    name: "Key Takeaway Card",
-    description: "Framed card with accent header and clean structured message",
-    category: "callout",
-    defaultPrimaryText: "Pro Tip: Auto-Snap",
-    defaultSecondaryText:
-      "Hold Shift while scrubbing to snap to clip boundaries and markers seamlessly.",
-    defaultTagText: "SHORTCUT",
-    width: 400,
-    height: 125,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 20,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#cbd5e1",
-    accentColor: "#f59e0b",
-    backdropStyle: "solid",
-    backdropColor: "#1e293b",
-    backdropOpacity: 0.9,
-    backdropBlur: 12,
-    backdropBorderRadius: 10,
-    backdropPaddingX: 20,
-    backdropPaddingY: 16,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.5)",
-    shadowBlur: 14,
-    animationIn: "slide-up",
-    animationOut: "slide-down",
-  },
-  {
-    id: "callout-step",
-    name: "Step Counter Badge",
-    description: "Step-by-step tutorial callout with highlighted step tag",
-    category: "badge",
-    defaultPrimaryText: "Step 01: Select Region",
-    defaultSecondaryText: "Drag across your display to define capture bounds",
-    defaultTagText: "01",
-    width: 360,
-    height: 95,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 22,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#94a3b8",
-    accentColor: "#38bdf8",
-    backdropStyle: "pill",
-    backdropColor: "#0f172a",
-    backdropOpacity: 0.85,
-    backdropBlur: 16,
-    backdropBorderRadius: 20,
-    backdropPaddingX: 22,
-    backdropPaddingY: 14,
-    shadowEnabled: true,
-    shadowColor: "rgba(56, 189, 248, 0.2)",
-    shadowBlur: 12,
-    animationIn: "zoom-punch",
-    animationOut: "fade",
-  },
-  {
-    id: "callout-pro-tip",
-    name: "Warning / Notice Pill",
-    description: "High visibility amber notice badge for warnings or vital recommendations",
-    category: "badge",
-    defaultPrimaryText: "Audio Level Warning",
-    defaultSecondaryText: "Microphone volume is peaking above -3dB",
-    defaultTagText: "IMPORTANT",
-    width: 360,
-    height: 90,
-    alignment: "left",
-    fontFamily: "sans",
-    fontSize: 20,
-    fontWeight: "700",
-    textColor: "#ffffff",
-    secondaryTextColor: "#fbbf24",
-    accentColor: "#f59e0b",
-    backdropStyle: "solid",
-    backdropColor: "#451a03",
-    backdropOpacity: 0.85,
-    backdropBlur: 14,
-    backdropBorderRadius: 10,
-    backdropPaddingX: 18,
-    backdropPaddingY: 12,
-    shadowEnabled: true,
-    shadowColor: "rgba(245, 158, 11, 0.25)",
-    shadowBlur: 14,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
+export const TEXT_PRESET_CATALOG: PresetCatalog<TextPresetValues> = parsePresetCatalog(
+  textPresetCatalogJson,
+  textPresetValuesSchema,
+)
 
-  // --- Minimal ---
-  {
-    id: "minimal-center",
-    name: "Clean Center Subtitle",
-    description: "Centered subtitle with soft dark backing for maximum video legibility",
-    category: "minimal",
-    defaultPrimaryText: "Everything stays local on your machine.",
-    width: 480,
-    height: 80,
-    alignment: "center",
-    fontFamily: "sans",
-    fontSize: 24,
-    fontWeight: "600",
-    textColor: "#ffffff",
-    secondaryTextColor: "#cbd5e1",
-    accentColor: "#38bdf8",
-    backdropStyle: "solid",
-    backdropColor: "#000000",
-    backdropOpacity: 0.65,
-    backdropBlur: 12,
-    backdropBorderRadius: 8,
-    backdropPaddingX: 20,
-    backdropPaddingY: 12,
-    shadowEnabled: true,
-    shadowColor: "rgba(0, 0, 0, 0.8)",
-    shadowBlur: 12,
-    animationIn: "fade",
-    animationOut: "fade",
-  },
-]
+export const TEXT_PRESETS: TextPresetDefinition[] =
+  TEXT_PRESET_CATALOG.presets.map(textPresetToDefinition)
+
+export function textPresetToDefinition(preset: TextPresetRecord): TextPresetDefinition {
+  return {
+    ...preset.definition,
+    id: preset.id,
+    name: preset.name,
+    description: preset.description,
+    category: preset.category as TitlePresetCategory,
+  }
+}
+
+export function getTextPresetRecordById(presetId: string): TextPresetRecord {
+  const found = TEXT_PRESET_CATALOG.presets.find((preset) => preset.id === presetId)
+  return found ?? TEXT_PRESET_CATALOG.presets[0]
+}
 
 export function getTextPresetById(presetId: string): TextPresetDefinition {
-  const found = TEXT_PRESETS.find((p) => p.id === presetId)
-  return found ?? TEXT_PRESETS[0]
+  return textPresetToDefinition(getTextPresetRecordById(presetId))
 }
 
 export function listTextPresetsByCategory(category?: TitlePresetCategory): TextPresetDefinition[] {
-  if (!category) return TEXT_PRESETS
-  return TEXT_PRESETS.filter((p) => p.category === category)
+  const presets = category
+    ? TEXT_PRESETS.filter((preset) => preset.category === category)
+    : TEXT_PRESETS
+  return presets
 }
 
 export function createTextClipFromPreset(
@@ -545,17 +153,27 @@ export function createTextClipFromPreset(
     canvasHeight?: number
   },
 ): TextClip {
-  const preset = getTextPresetById(presetId)
+  return createTextClipFromDefinition(getTextPresetById(presetId), options)
+}
+
+export function createTextClipFromDefinition(
+  preset: TextPresetDefinition,
+  options?: {
+    id?: string
+    startMs?: number
+    durationMs?: number
+    canvasWidth?: number
+    canvasHeight?: number
+  },
+): TextClip {
   const id = options?.id ?? `text-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
   const startMs = options?.startMs ?? 0
   const durationMs = options?.durationMs ?? 4000
   const canvasWidth = options?.canvasWidth ?? 1920
   const canvasHeight = options?.canvasHeight ?? 1080
 
-  // Position lower thirds near the bottom, titles near center/top
   let x = Math.round((canvasWidth - preset.width) / 2)
   let y = Math.round((canvasHeight - preset.height) / 2)
-
   if (preset.category === "lower-third") {
     x = 80
     y = canvasHeight - preset.height - 90
@@ -563,8 +181,15 @@ export function createTextClipFromPreset(
     x = 80
     y = 80
   } else if (preset.category === "minimal") {
-    x = Math.round((canvasWidth - preset.width) / 2)
     y = canvasHeight - preset.height - 80
+  }
+
+  const animation = {
+    inType: preset.overlayAnimation?.inType ?? toOverlayAnimationIn(preset.animationIn),
+    outType: preset.overlayAnimation?.outType ?? toOverlayAnimationOut(preset.animationOut),
+    inDurationMs: preset.overlayAnimation?.inDurationMs ?? 350,
+    outDurationMs: preset.overlayAnimation?.outDurationMs ?? 350,
+    easing: preset.overlayAnimation?.easing ?? "expo-out",
   }
 
   return {
@@ -585,6 +210,11 @@ export function createTextClipFromPreset(
     y: Math.max(0, y),
     width: preset.width,
     height: preset.height,
+    rotation: preset.rotation ?? 0,
+    anchorX: preset.anchorX ?? 0.5,
+    anchorY: preset.anchorY ?? 0.5,
+    zIndex: preset.zIndex ?? 0,
+    opacity: preset.opacity ?? 1,
     alignment: preset.alignment,
     fontFamily: preset.fontFamily,
     fontSize: preset.fontSize,
@@ -604,13 +234,25 @@ export function createTextClipFromPreset(
     shadowBlur: preset.shadowBlur,
     animationIn: preset.animationIn,
     animationOut: preset.animationOut,
+    overlayAnimation: animation,
     enabled: true,
     locked: false,
   }
 }
 
 export function applyPresetToTextClip(clip: TextClip, presetId: string): TextClip {
-  const preset = getTextPresetById(presetId)
+  return applyTextPresetToClip(clip, getTextPresetById(presetId))
+}
+
+export function applyTextPresetToClip(clip: TextClip, preset: TextPresetDefinition): TextClip {
+  const overlayAnimation = preset.overlayAnimation
+    ? { ...clip.overlayAnimation, ...preset.overlayAnimation }
+    : {
+        ...clip.overlayAnimation,
+        inType: toOverlayAnimationIn(preset.animationIn),
+        outType: toOverlayAnimationOut(preset.animationOut),
+      }
+
   return {
     ...clip,
     presetId: preset.id,
@@ -633,8 +275,59 @@ export function applyPresetToTextClip(clip: TextClip, presetId: string): TextCli
     shadowBlur: preset.shadowBlur,
     animationIn: preset.animationIn,
     animationOut: preset.animationOut,
+    overlayAnimation,
     width: preset.width,
     height: preset.height,
     alignment: preset.alignment,
+    ...(preset.rotation !== undefined ? { rotation: preset.rotation } : {}),
+    ...(preset.anchorX !== undefined ? { anchorX: preset.anchorX } : {}),
+    ...(preset.anchorY !== undefined ? { anchorY: preset.anchorY } : {}),
+    ...(preset.zIndex !== undefined ? { zIndex: preset.zIndex } : {}),
+    ...(preset.opacity !== undefined ? { opacity: preset.opacity } : {}),
+  }
+}
+
+export function textPresetFromClip(
+  clip: TextClip,
+  metadata: { name: string; description: string; category?: TitlePresetCategory; tags?: string[] },
+): TextPresetRecord {
+  return {
+    id: `custom-${clip.id}`,
+    name: metadata.name,
+    description: metadata.description,
+    category: metadata.category ?? clip.category,
+    tags: metadata.tags ?? [clip.category, clip.fontFamily],
+    definition: {
+      defaultPrimaryText: clip.primaryText,
+      defaultSecondaryText: clip.secondaryText,
+      defaultTagText: clip.tagText,
+      width: clip.width,
+      height: clip.height,
+      alignment: clip.alignment,
+      fontFamily: clip.fontFamily,
+      fontSize: clip.fontSize,
+      fontWeight: clip.fontWeight,
+      textColor: clip.textColor,
+      secondaryTextColor: clip.secondaryTextColor,
+      accentColor: clip.accentColor,
+      backdropStyle: clip.backdropStyle,
+      backdropColor: clip.backdropColor,
+      backdropOpacity: clip.backdropOpacity,
+      backdropBlur: clip.backdropBlur,
+      backdropBorderRadius: clip.backdropBorderRadius,
+      backdropPaddingX: clip.backdropPaddingX,
+      backdropPaddingY: clip.backdropPaddingY,
+      shadowEnabled: clip.shadowEnabled,
+      shadowColor: clip.shadowColor,
+      shadowBlur: clip.shadowBlur,
+      animationIn: clip.animationIn,
+      animationOut: clip.animationOut,
+      overlayAnimation: clip.overlayAnimation,
+      rotation: clip.rotation,
+      anchorX: clip.anchorX,
+      anchorY: clip.anchorY,
+      zIndex: clip.zIndex,
+      opacity: clip.opacity,
+    },
   }
 }

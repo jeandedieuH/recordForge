@@ -64,6 +64,8 @@ pub struct RenderPlan {
     #[serde(default)]
     pub cursor_effects: Vec<RenderPlanCursorEffect>,
     #[serde(default)]
+    pub overlay_render_plan: Option<serde_json::Value>,
+    #[serde(default)]
     pub canvas: Option<cursor::RenderCanvas>,
     #[serde(default)]
     pub audio: Option<RenderPlanAudio>,
@@ -2470,6 +2472,7 @@ mod tests {
             masks: Vec::new(),
             zoom_segments: Vec::new(),
             cursor_effects: Vec::new(),
+            overlay_render_plan: None,
             canvas: Some(cursor::RenderCanvas {
                 width: 1_920,
                 height: 1_080,
@@ -2500,6 +2503,21 @@ mod tests {
         let plan: RenderPlan = serde_json::from_str(&json).expect("serde render plan fixture");
         assert_eq!(plan.project_id, "project-phase8");
         assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn accepts_the_unified_overlay_render_plan_field() {
+        let mut raw = serde_json::to_value(valid_plan()).expect("serialize render plan");
+        raw["overlayRenderPlan"] = serde_json::json!({
+            "version": 1,
+            "canvas": { "width": 1920, "height": 1080 },
+            "items": [],
+            "assets": [],
+            "fonts": []
+        });
+
+        let parsed: RenderPlan = serde_json::from_value(raw).expect("unified overlay plan");
+        assert!(parsed.overlay_render_plan.is_some());
     }
 
     #[test]

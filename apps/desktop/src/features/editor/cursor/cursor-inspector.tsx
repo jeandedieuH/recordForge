@@ -10,7 +10,6 @@ import {
   Input,
   Label,
   NativeSelect,
-  Slider,
   Switch,
   Tabs,
   TabsContent,
@@ -19,6 +18,7 @@ import {
   cn,
 } from "@recordforge/ui"
 import { RenderCursorPreset } from "./cursor-asset"
+import { DebouncedSlider } from "../inspector/fields"
 
 /** Motion presets that map to tested smoothing parameters. */
 const MOTION_PRESETS: {
@@ -330,12 +330,12 @@ function BasicCursorSettings({
         <div className="flex items-center justify-between">
           <Label className="font-semibold">Size ({Math.round(scale * 100)}%)</Label>
         </div>
-        <Slider
+        <DebouncedSlider
           value={[scale]}
           min={0.5}
           max={3.0}
           step={0.1}
-          onValueChange={([val]) => onChange({ scale: val })}
+          onValueCommit={([val]) => onChange({ scale: val })}
           aria-label="Cursor size"
         />
       </div>
@@ -480,12 +480,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
             <span>Stroke Width</span>
             <span className="font-mono">{settings.strokeWidth ?? 2}px</span>
           </div>
-          <Slider
+          <DebouncedSlider
             value={[settings.strokeWidth ?? 2]}
             min={0}
             max={8}
             step={0.5}
-            onValueChange={([val]) => onChange({ strokeWidth: val })}
+            onValueCommit={([val]) => onChange({ strokeWidth: val })}
             aria-label="Stroke width"
           />
         </div>
@@ -495,12 +495,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
             <span>Cursor opacity</span>
             <span className="font-mono">{Math.round((settings.fillOpacity ?? 1) * 100)}%</span>
           </div>
-          <Slider
+          <DebouncedSlider
             value={[settings.fillOpacity ?? 1]}
             min={0}
             max={1}
             step={0.05}
-            onValueChange={([val]) => onChange({ fillOpacity: val })}
+            onValueCommit={([val]) => onChange({ fillOpacity: val })}
             aria-label="Cursor opacity"
           />
         </div>
@@ -534,12 +534,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
                 <span>Blur Radius</span>
                 <span className="font-mono">{settings.shadowBlur ?? 8}px</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 value={[settings.shadowBlur ?? 8]}
                 min={0}
                 max={25}
                 step={1}
-                onValueChange={([val]) => onChange({ shadowBlur: val })}
+                onValueCommit={([val]) => onChange({ shadowBlur: val })}
                 aria-label="Shadow blur"
               />
             </div>
@@ -584,12 +584,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
                 <span>Ring Size</span>
                 <span className="font-mono">{settings.clickSize ?? 36}px</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 value={[settings.clickSize ?? 36]}
                 min={10}
                 max={100}
                 step={1}
-                onValueChange={([val]) => onChange({ clickSize: val })}
+                onValueCommit={([val]) => onChange({ clickSize: val })}
                 aria-label="Click effect size"
               />
             </div>
@@ -599,12 +599,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
                 <span>Effect Duration</span>
                 <span className="font-mono">{settings.clickDurationMs ?? 350}ms</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 value={[settings.clickDurationMs ?? 350]}
                 min={100}
                 max={2000}
                 step={50}
-                onValueChange={([val]) => onChange({ clickDurationMs: val })}
+                onValueCommit={([val]) => onChange({ clickDurationMs: val })}
                 aria-label="Click effect duration"
               />
             </div>
@@ -635,12 +635,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
                 <span>Spotlight Radius</span>
                 <span className="font-mono">{settings.spotlightRadius ?? 120}px</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 value={[settings.spotlightRadius ?? 120]}
                 min={50}
                 max={250}
                 step={10}
-                onValueChange={([val]) => onChange({ spotlightRadius: val })}
+                onValueCommit={([val]) => onChange({ spotlightRadius: val })}
                 aria-label="Spotlight radius"
               />
             </div>
@@ -651,12 +651,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
                   {Math.round((settings.spotlightDimOpacity ?? 0.5) * 100)}%
                 </span>
               </div>
-              <Slider
+              <DebouncedSlider
                 value={[settings.spotlightDimOpacity ?? 0.5]}
                 min={0}
                 max={0.9}
                 step={0.05}
-                onValueChange={([val]) => onChange({ spotlightDimOpacity: val })}
+                onValueCommit={([val]) => onChange({ spotlightDimOpacity: val })}
                 aria-label="Spotlight dim opacity"
               />
             </div>
@@ -669,12 +669,12 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
               <span>Idle timeout</span>
               <span className="font-mono">{settings.idleTimeoutMs ?? 2000}ms</span>
             </div>
-            <Slider
+            <DebouncedSlider
               value={[settings.idleTimeoutMs ?? 2000]}
               min={500}
               max={10000}
               step={100}
-              onValueChange={([value]) => onChange({ idleTimeoutMs: value })}
+              onValueCommit={([value]) => onChange({ idleTimeoutMs: value })}
               aria-label="Idle timeout"
             />
           </div>
@@ -687,13 +687,13 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
               {Math.round((1 - (settings.smoothFactor ?? 0.25)) * 100)}%
             </span>
           </div>
-          <Slider
+          <DebouncedSlider
             value={[settings.smoothFactor ?? 0.25]}
             min={0.05}
             max={1}
             step={0.05}
             aria-label="Cursor smoothing strength"
-            onValueChange={([value]) => onChange({ smoothFactor: value })}
+            onValueCommit={([value]) => onChange({ smoothFactor: value })}
           />
         </div>
       </div>

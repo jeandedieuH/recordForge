@@ -443,7 +443,12 @@ describe("recording contracts", () => {
 
     it("reconciles microphone by Name when ID changed", () => {
       const mics = [
-        { id: "mic-new-endpoint-id", name: "USB Yeti", kind: "microphone" as const, isDefault: false },
+        {
+          id: "mic-new-endpoint-id",
+          name: "USB Yeti",
+          kind: "microphone" as const,
+          isDefault: false,
+        },
         { id: "mic-1", name: "Internal Mic", kind: "microphone" as const, isDefault: true },
       ]
       const result = reconcileMicrophone(mics, {

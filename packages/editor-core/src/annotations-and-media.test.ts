@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, defaultSmartZoomSettings, type TimelineState } from "@recordforge/domain"
+import {
+  defaultCursorSettings,
+  defaultSmartZoomSettings,
+  type TimelineState,
+} from "@recordforge/domain"
 import {
   applyPresetToTextClip,
   createAddAnnotationClipCommand,
@@ -140,6 +144,67 @@ describe("Annotations & Vector Shapes", () => {
     found = engine.history.present.tracks[1].clips[0] as any
     expect(found.strokeColor).toBe("#ef4444")
   })
+
+  it("applies phase 1 transform and animation updates to overlay clips", () => {
+    let engine = createEngine(makeTestTimeline())
+    const clip = createAnnotationClip("rectangle", { startMs: 500, durationMs: 2_000 })
+    const added = executeCommand(engine, createAddAnnotationClipCommand(clip))
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+    engine = added.value
+
+    const updated = executeCommand(
+      engine,
+      createUpdateAnnotationClipCommand(clip.id, {
+        rotation: 18,
+        zIndex: 42,
+        anchorX: 0.25,
+        anchorY: 0.75,
+        opacity: 0.8,
+        overlayAnimation: {
+          inType: "draw",
+          outType: "fade",
+          inDurationMs: 500,
+          outDurationMs: 200,
+          easing: "ease-out",
+        },
+      }),
+    )
+    expect(updated.ok).toBe(true)
+    if (!updated.ok) return
+
+    const next = updated.value.history.present.tracks[1].clips[0]
+    expect(next).toMatchObject({
+      rotation: 18,
+      zIndex: 42,
+      anchorX: 0.25,
+      anchorY: 0.75,
+      opacity: 0.8,
+      overlayAnimation: {
+        inType: "draw",
+        outType: "fade",
+        inDurationMs: 500,
+        outDurationMs: 200,
+        easing: "ease-out",
+      },
+    })
+
+    const partial = executeCommand(
+      updated.value,
+      createUpdateAnnotationClipCommand(clip.id, {
+        overlayAnimation: { inDurationMs: 600 },
+      }),
+    )
+    expect(partial.ok).toBe(true)
+    if (!partial.ok) return
+    expect(partial.value.history.present.tracks[1].clips[0]).toMatchObject({
+      overlayAnimation: {
+        inDurationMs: 600,
+        outDurationMs: 200,
+        easing: "ease-out",
+      },
+    })
+  })
 })
 
 describe("Titles & Text Presets", () => {
@@ -235,6 +300,10 @@ describe("External Media (Audio & Graphics)", () => {
       y: 100,
       width: 250,
       height: 150,
+      rotation: 0,
+      anchorX: 0.5,
+      anchorY: 0.5,
+      zIndex: 0,
       opacity: 0.9,
       borderRadius: 12,
       borderWidth: 2,
@@ -245,6 +314,13 @@ describe("External Media (Audio & Graphics)", () => {
       fit: "contain" as const,
       animationIn: "fade" as const,
       animationOut: "fade" as const,
+      overlayAnimation: {
+        inType: "fade" as const,
+        outType: "fade" as const,
+        inDurationMs: 350,
+        outDurationMs: 350,
+        easing: "expo-out" as const,
+      },
       enabled: true,
       locked: false,
     }

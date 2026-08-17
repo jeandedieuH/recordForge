@@ -6,6 +6,7 @@ import {
   recordingConfigSchema,
   recordingStatusSchema,
   libraryRecordingSchema,
+  projectSchema,
   renderPlanSchema,
 } from "@recordforge/contracts"
 
@@ -157,6 +158,77 @@ describe("Fixture Validation", () => {
       mode: "redaction",
       shape: "rectangle",
     })
+  })
+
+  test("editor overlay fixture includes annotations, titles, and external images", () => {
+    const project = JSON.parse(
+      readFileSync(
+        join(__dirname, "..", "fixtures", "editor-fixtures", "project-overlays.json"),
+        "utf-8",
+      ),
+    ) as EditorFixtureProject
+
+    const overlayTrack = project.tracks.find((track) => track.kind === "overlay")
+    expect(overlayTrack).toBeDefined()
+    if (!overlayTrack) throw new Error("overlay track fixture is missing")
+
+    expect(overlayTrack.clips.map((clip) => clip.kind)).toEqual(
+      expect.arrayContaining(["annotation", "text", "image"]),
+    )
+    expect(overlayTrack.clips).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "annotation",
+          annotationType: "rounded-rect",
+          zIndex: 10,
+        }),
+        expect.objectContaining({
+          kind: "text",
+          primaryText: "Overlay Engine Demo",
+          presetId: "title-modern",
+        }),
+        expect.objectContaining({
+          kind: "image",
+          assetId: "asset-external-logo",
+          fit: "contain",
+        }),
+      ]),
+    )
+
+    const parsed = projectSchema.parse(project)
+    expect(parsed.tracks.find((track) => track.kind === "overlay")?.clips).toHaveLength(4)
+    expect(parsed.tracks.find((track) => track.kind === "overlay")?.clips[0]).toMatchObject({
+      rotation: 0,
+      zIndex: 10,
+      overlayAnimation: {
+        inType: "fade",
+        outType: "fade",
+        inDurationMs: 350,
+        outDurationMs: 350,
+        easing: "expo-out",
+      },
+    })
+    expect(parsed.assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "asset-external-logo",
+          role: "graphic",
+          kind: "image",
+          path: "external-logo.svg",
+          importStrategy: "copy",
+          svgSafe: true,
+        }),
+      ]),
+    )
+
+    const svg = readFileSync(
+      join(__dirname, "..", "fixtures", "editor-fixtures", "external-logo.svg"),
+      "utf-8",
+    )
+    expect(svg).not.toMatch(/<script|on[a-z]+\s*=|(?:href|xlink:href)\s*=\s*["']https?:\/\//i)
+    for (const asset of project.assets) {
+      if (asset.path) expect(asset.path).not.toMatch(/^(?:[a-z]:[\\/]|[\\/])/i)
+    }
   })
 
   test("editor no-cursor fixture represents imported media", () => {

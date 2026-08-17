@@ -31,13 +31,8 @@ import {
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
-import {
-  createProject,
-  loadProject,
-  relinkProjectAsset,
-  saveProject,
-  snapshotProject,
-} from "../lib/project"
+import { getProjectAssetPaths, relinkAsset as relinkAssetRequest } from "../lib/assets"
+import { createProject, loadProject, saveProject, snapshotProject } from "../lib/project"
 import { getCursorTelemetry } from "../lib/cursor"
 import {
   createCursorEngine,
@@ -72,6 +67,9 @@ interface TimelineStore {
   error: string | null
   activeExportJob: MediaJob | null
   missingAssets: string[]
+  // Resolved absolute paths are kept outside the durable project schema so
+  // React can use Tauri's asset protocol without rewriting project-relative paths.
+  assetPaths: Record<string, string>
   // Phase 2: transient draft state shown while a pointer gesture is active.
   // Committed state remains in engine.history.present.
   draftTimeline: TimelineState | null
@@ -133,6 +131,8 @@ interface TimelineStore {
   save: () => Promise<void>
   scheduleAutosave: () => void
   relinkAsset: (assetId: string, newPath: string) => Promise<void>
+  refreshAssetPaths: () => Promise<void>
+  syncProject: (project: recordForgeProject) => void
 
   // Phase 1: mark a new project revision, update dirty state, and schedule save.
   markProjectChanged: (
@@ -275,6 +275,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   error: null,
   activeExportJob: null,
   missingAssets: [],
+  assetPaths: {},
   draftTimeline: null,
   draftError: null,
   isListening: false,
@@ -300,6 +301,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
+      assetPaths: {},
       draftTimeline: null,
       draftError: null,
       projectRevision: 0,
@@ -376,6 +378,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         project = await createProject(project)
       }
 
+      let assetPaths: Record<string, string> = {}
+      if (isTauri()) {
+        assetPaths = await getProjectAssetPaths(recordingId).catch(() => ({}))
+      }
+
       const timeline = projectToTimeline(project)
       // Persist the cursor track migration in the next autosave instead of
       // keeping it only as a runtime fallback for legacy project files.
@@ -404,6 +411,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         activeJob,
         activeExportJob: null,
         missingAssets,
+        assetPaths,
         view: {
           zoom: 50,
           scrollMs: 0,
@@ -693,20 +701,59 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   relinkAsset: async (assetId, newPath) => {
-    const { recording, project } = get()
-    if (!recording || !project) return
+    const { recording } = get()
+    if (!recording) return
     try {
-      const updated = await relinkProjectAsset(recording.id, assetId, newPath)
-      const missing = updated.assets.filter((a) => a.status === "missing").map((a) => a.id)
-      set({ missingAssets: missing })
-      useEditorStore.getState().setMissingAssets(missing)
-      // Phase 1: mark the relinked project as changed and flush immediately so a
-      // missing-asset state is never lost on close.
-      get().markProjectChanged(updated)
-      await get().save()
+      await relinkAssetRequest({
+        recordingId: recording.id,
+        assetId,
+        newPath,
+      })
+      const loaded = await loadProject(recording.id)
+      if (!loaded) throw new Error("Project could not be reloaded after relinking")
+      get().syncProject(loaded.project)
+      await get().refreshAssetPaths()
     } catch (err) {
       set({ error: toErrorMessage(err) })
     }
+  },
+
+  refreshAssetPaths: async () => {
+    const recording = get().recording
+    if (!recording || !isTauri()) return
+    try {
+      const assetPaths = await getProjectAssetPaths(recording.id)
+      set({ assetPaths })
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+    }
+  },
+
+  syncProject: (nextProject) => {
+    const currentProject = get().project
+    const mergedProject =
+      currentProject?.id === nextProject.id
+        ? {
+            ...currentProject,
+            assets: nextProject.assets,
+            checksum: nextProject.checksum,
+            updatedAt: nextProject.updatedAt,
+          }
+        : nextProject
+    const missingAssets = mergedProject.assets
+      .filter((asset) => asset.status === "missing")
+      .map((asset) => asset.id)
+    const wasDirty = useEditorStore.getState().isDirty
+    set({ project: mergedProject, missingAssets })
+    useEditorStore.getState().setMissingAssets(missingAssets)
+    if (wasDirty) {
+      // Asset-job completion can arrive while timeline edits are unsaved. Keep
+      // those edits authoritative and let the normal revision-aware save merge
+      // the refreshed asset metadata into the next project write.
+      get().markProjectChanged(mergedProject)
+      return
+    }
+    useEditorStore.getState().setProject(mergedProject)
   },
 
   play: () => {
@@ -1056,6 +1103,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
+      assetPaths: {},
       isLoading: false,
       error: null,
       isListening: false,

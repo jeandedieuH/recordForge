@@ -7,13 +7,12 @@ import {
   type PlaybackClock,
   type PreviewQualityMode,
 } from "@recordforge/editor-core"
+import { useTimelineStore } from "../../../stores/timeline-store"
+import { usePlayheadMs } from "./use-playback-state"
 
 interface UsePlaybackClockOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>
   timeline: TimelineState | null
-  playheadMs: number
-  isPlaying: boolean
-  playbackRate: number
   previewQuality: PreviewQualityMode
   mediaUrl?: string | null
   onSeek: (ms: number) => void
@@ -32,15 +31,15 @@ interface UsePlaybackClockOptions {
 export function usePlaybackClock({
   videoRef,
   timeline,
-  playheadMs,
-  isPlaying,
-  playbackRate,
   previewQuality,
   mediaUrl,
   onSeek,
   onPlayNext,
   onPause,
 }: UsePlaybackClockOptions): { isReady: boolean } {
+  const playheadMs = usePlayheadMs()
+  const isPlaying = useTimelineStore((state) => state.view.isPlaying)
+  const playbackRate = useTimelineStore((state) => state.view.playbackRate)
   const clock = useMemo<PlaybackClock | null>(() => {
     if (!timeline) return null
     return createPlaybackClock(timeline, { mode: previewQuality, fps: timeline.canvas.fps })

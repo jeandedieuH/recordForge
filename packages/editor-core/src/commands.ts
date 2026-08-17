@@ -1,3 +1,9 @@
+import {
+  annotationClipSchema,
+  imageClipSchema,
+  normalizeOverlayClipInput,
+  textClipSchema,
+} from "@recordforge/domain"
 import type {
   AnnotationClip,
   AppError,
@@ -11,6 +17,7 @@ import type {
   ManualZoomSegment,
   MaskClip,
   MaskRect,
+  OverlayAnimation,
   TextClip,
   TimelineClip,
   TimelineCanvas,
@@ -81,6 +88,10 @@ import type { CommandResult } from "./history"
 
 function editorError(code: string, message: string): AppError {
   return { category: "editor", code, message }
+}
+
+type OverlayClipUpdate<T> = Partial<Omit<T, "overlayAnimation">> & {
+  overlayAnimation?: Partial<OverlayAnimation>
 }
 
 function now(): string {
@@ -1714,7 +1725,8 @@ function applyAddAnnotationClip(
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
-  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, command.clip] }
+  const clip = annotationClipSchema.parse(normalizeOverlayClipInput(command.clip))
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, clip] }
   const tracks = existingTrack
     ? state.tracks.map((t) => (t.id === track.id ? nextTrack : t))
     : [...state.tracks, nextTrack]
@@ -1736,10 +1748,16 @@ function applyUpdateAnnotationClip(
   if (found.clip.kind !== "annotation") {
     return { ok: false, error: editorError("invalid_clip", "Clip is not an annotation") }
   }
-  const next: AnnotationClip = {
-    ...found.clip,
-    ...command.update,
-  }
+  const next = annotationClipSchema.parse(
+    normalizeOverlayClipInput({
+      ...found.clip,
+      ...command.update,
+      overlayAnimation:
+        command.update.overlayAnimation === undefined
+          ? found.clip.overlayAnimation
+          : { ...found.clip.overlayAnimation, ...command.update.overlayAnimation },
+    }),
+  )
   return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
@@ -1763,7 +1781,8 @@ function applyAddTextClip(
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
-  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, command.clip] }
+  const clip = textClipSchema.parse(normalizeOverlayClipInput(command.clip))
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, clip] }
   const tracks = existingTrack
     ? state.tracks.map((t) => (t.id === track.id ? nextTrack : t))
     : [...state.tracks, nextTrack]
@@ -1785,10 +1804,16 @@ function applyUpdateTextClip(
   if (found.clip.kind !== "text") {
     return { ok: false, error: editorError("invalid_clip", "Clip is not a text clip") }
   }
-  const next: TextClip = {
-    ...found.clip,
-    ...command.update,
-  }
+  const next = textClipSchema.parse(
+    normalizeOverlayClipInput({
+      ...found.clip,
+      ...command.update,
+      overlayAnimation:
+        command.update.overlayAnimation === undefined
+          ? found.clip.overlayAnimation
+          : { ...found.clip.overlayAnimation, ...command.update.overlayAnimation },
+    }),
+  )
   return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
@@ -1812,7 +1837,8 @@ function applyAddImageClip(
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
-  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, command.clip] }
+  const clip = imageClipSchema.parse(normalizeOverlayClipInput(command.clip))
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, clip] }
   const tracks = existingTrack
     ? state.tracks.map((t) => (t.id === track.id ? nextTrack : t))
     : [...state.tracks, nextTrack]
@@ -1834,10 +1860,16 @@ function applyUpdateImageClip(
   if (found.clip.kind !== "image") {
     return { ok: false, error: editorError("invalid_clip", "Clip is not an image clip") }
   }
-  const next: ImageClip = {
-    ...found.clip,
-    ...command.update,
-  }
+  const next = imageClipSchema.parse(
+    normalizeOverlayClipInput({
+      ...found.clip,
+      ...command.update,
+      overlayAnimation:
+        command.update.overlayAnimation === undefined
+          ? found.clip.overlayAnimation
+          : { ...found.clip.overlayAnimation, ...command.update.overlayAnimation },
+    }),
+  )
   return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
@@ -2894,7 +2926,7 @@ export function createAddAnnotationClipCommand(
 
 export function createUpdateAnnotationClipCommand(
   clipId: string,
-  update: Partial<AnnotationClip>,
+  update: OverlayClipUpdate<AnnotationClip>,
 ): CommandRecord {
   return {
     kind: "update-annotation-clip",
@@ -2905,7 +2937,13 @@ export function createUpdateAnnotationClipCommand(
       update.x !== undefined ||
       update.y !== undefined ||
       update.width !== undefined ||
-      update.height !== undefined,
+      update.height !== undefined ||
+      update.rotation !== undefined ||
+      update.anchorX !== undefined ||
+      update.anchorY !== undefined ||
+      update.zIndex !== undefined ||
+      update.opacity !== undefined ||
+      update.overlayAnimation !== undefined,
     coalesceKey: `annotation:${clipId}`,
   }
 }
@@ -2921,7 +2959,7 @@ export function createAddTextClipCommand(clip: TextClip, trackId?: string): Comm
 
 export function createUpdateTextClipCommand(
   clipId: string,
-  update: Partial<TextClip>,
+  update: OverlayClipUpdate<TextClip>,
 ): CommandRecord {
   return {
     kind: "update-text-clip",
@@ -2932,7 +2970,13 @@ export function createUpdateTextClipCommand(
       update.x !== undefined ||
       update.y !== undefined ||
       update.width !== undefined ||
-      update.height !== undefined,
+      update.height !== undefined ||
+      update.rotation !== undefined ||
+      update.anchorX !== undefined ||
+      update.anchorY !== undefined ||
+      update.zIndex !== undefined ||
+      update.opacity !== undefined ||
+      update.overlayAnimation !== undefined,
     coalesceKey: `text:${clipId}`,
   }
 }
@@ -2948,7 +2992,7 @@ export function createAddImageClipCommand(clip: ImageClip, trackId?: string): Co
 
 export function createUpdateImageClipCommand(
   clipId: string,
-  update: Partial<ImageClip>,
+  update: OverlayClipUpdate<ImageClip>,
 ): CommandRecord {
   return {
     kind: "update-image-clip",
@@ -2959,7 +3003,13 @@ export function createUpdateImageClipCommand(
       update.x !== undefined ||
       update.y !== undefined ||
       update.width !== undefined ||
-      update.height !== undefined,
+      update.height !== undefined ||
+      update.rotation !== undefined ||
+      update.anchorX !== undefined ||
+      update.anchorY !== undefined ||
+      update.zIndex !== undefined ||
+      update.opacity !== undefined ||
+      update.overlayAnimation !== undefined,
     coalesceKey: `image:${clipId}`,
   }
 }

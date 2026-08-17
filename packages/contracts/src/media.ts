@@ -21,6 +21,12 @@ export const projectAssetRoleSchema = z.enum([
 ])
 export type ProjectAssetRole = z.infer<typeof projectAssetRoleSchema>
 
+export const mediaKindSchema = z.enum(["audio", "image", "video", "cursor", "caption"])
+export type MediaKind = z.infer<typeof mediaKindSchema>
+
+export const projectAssetImportStrategySchema = z.enum(["copy", "reference"])
+export type ProjectAssetImportStrategy = z.infer<typeof projectAssetImportStrategySchema>
+
 // Individual media stream from FFprobe.
 export const mediaStreamSchema = z.object({
   index: z.number().int().min(0),
@@ -103,6 +109,7 @@ export const mediaJobKindSchema = z.enum([
   "thumbnail",
   "waveform",
   "prepare",
+  "asset_derivative",
   "export",
 ])
 
@@ -157,6 +164,8 @@ export type MediaVideoTrackOutput = z.infer<typeof mediaVideoTrackOutputSchema>
 // Output files produced by a prepare job.
 export const mediaJobOutputsSchema = z.object({
   prepareVersion: z.number().int().min(0).default(0),
+  assetId: z.string().nullish(),
+  derivatives: z.record(z.string(), z.string()).default({}),
   metadataPath: z.string().nullish(),
   proxyPath: z.string().nullish(),
   thumbnailDir: z.string().nullish(),

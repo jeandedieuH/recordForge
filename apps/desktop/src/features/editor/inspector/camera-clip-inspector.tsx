@@ -7,10 +7,10 @@ import type {
 import { buildCameraPresetTransform } from "@recordforge/editor-core"
 import { useEffect, useMemo } from "react"
 import { AlignLeft, AlignRight, Maximize2, Sparkles } from "lucide-react"
-import { ColorPicker, Slider, Switch } from "@recordforge/ui"
+import { ColorPicker, Switch } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
-import { InspectorSection, NumberField, PresetButton } from "./fields"
+import { DebouncedSlider, InspectorSection, NumberField, PresetButton } from "./fields"
 import { CameraPresetPicker } from "./camera-preset-picker"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
@@ -193,13 +193,13 @@ export function CameraClipInspector({
               {Math.round(clip.transform.opacity * 100)}%
             </span>
           </div>
-          <Slider
+          <DebouncedSlider
             value={[clip.transform.opacity]}
             min={0}
             max={1}
             step={0.05}
             aria-label="Camera opacity"
-            onValueChange={(value) => updateTransform({ opacity: value[0] ?? 1 })}
+            onValueCommit={(value) => updateTransform({ opacity: value[0] ?? 1 })}
           />
           <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
             <span>Show camera</span>

@@ -437,7 +437,7 @@ pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>> 
     Ok(summaries)
 }
 
-fn index_project(state: &AppState, project: &ProjectFile) -> Result<()> {
+pub(crate) fn index_project(state: &AppState, project: &ProjectFile) -> Result<()> {
     let db = get_db(state)?;
     upsert_project(
         &db,

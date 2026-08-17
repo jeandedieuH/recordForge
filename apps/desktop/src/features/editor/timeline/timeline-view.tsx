@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { convertFileSrc } from "@tauri-apps/api/core"
 import {
   type AnnotationClip,
+  type AnnotationType,
   type CursorSmoothing,
   type ImageClip,
   type ManualZoomSegment,
@@ -15,6 +16,8 @@ import {
 } from "@recordforge/contracts"
 import {
   createAddAnnotationClipCommand,
+  createAddExternalAudioClipCommand,
+  createAddImageClipCommand,
   createAddMaskClipCommand,
   createAddMarkerCommand,
   createDeleteClipCommand,
@@ -35,10 +38,7 @@ import {
   createSplitCursorRangeCommand,
   createSplitZoomSegmentCommand,
   createTrimClipCommand,
-  createUpdateAnnotationClipCommand,
   createUpdateCursorRangeCommand,
-  createUpdateImageClipCommand,
-  createUpdateTextClipCommand,
   createUpdateTrackCommand,
   createUpdateZoomSegmentCommand,
   findClip,
@@ -56,7 +56,7 @@ import {
   sourcePointToCanvas,
   zoomTargetForCursorPoint,
 } from "@recordforge/cursor-core"
-import { isTimelineAudioMuted } from "@recordforge/media-core"
+import { buildOverlayRenderPlan, isTimelineAudioMuted } from "@recordforge/media-core"
 import { AlertCircle, Monitor } from "lucide-react"
 import { Button, EmptyState, Progress, Skeleton, cn } from "@recordforge/ui"
 import { isTauri } from "../../../lib/settings"
@@ -73,11 +73,12 @@ import { CaptionPreview } from "./caption-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
-import { AnnotationCanvasOverlay } from "../canvas/annotation-canvas-overlay"
-import { TextCanvasOverlay } from "../canvas/text-canvas-overlay"
-import { ImageCanvasOverlay } from "../canvas/image-canvas-overlay"
+import { OverlayCanvas } from "../canvas/overlay-canvas"
+import { OverlaySelectionLayer } from "../canvas/overlay-selection-layer"
+import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
 import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
+import { useOverlayInteraction } from "../canvas/use-overlay-interaction"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
 import { CustomCursorOverlay } from "../cursor"
@@ -89,6 +90,9 @@ interface TimelineViewProps {
   thumbnailResource: DerivativeResource<ThumbnailManifest> & { retry: () => void }
   videoThumbnailResources?: VideoTrackThumbnailResources
   waveformResources: WaveformResources
+  drawMode?: boolean
+  drawType?: AnnotationType
+  drawColor?: string
 }
 
 interface SelectedClip {
@@ -102,6 +106,10 @@ interface VideoBounds {
   width: number
   height: number
   scale: number
+}
+
+function isOverlayClip(clip: TimelineClip): clip is AnnotationClip | TextClip | ImageClip {
+  return clip.kind === "annotation" || clip.kind === "text" || clip.kind === "image"
 }
 
 function isPreparingJob(job: MediaJob | null): boolean {
@@ -166,12 +174,17 @@ export function TimelineView({
   thumbnailResource,
   videoThumbnailResources,
   waveformResources,
+  drawMode = false,
+  drawType = "rectangle",
+  drawColor = "#38bdf8",
 }: TimelineViewProps) {
   const engine = useTimelineStore((state) => state.engine)
   const draftTimeline = useTimelineStore((state) => state.draftTimeline)
   const timeline = draftTimeline ?? engine?.history.present ?? null
   const view = useTimelineStore((state) => state.view)
   const recording = useTimelineStore((state) => state.recording)
+  const project = useTimelineStore((state) => state.project)
+  const assetPaths = useTimelineStore((state) => state.assetPaths)
   const metadata = useTimelineStore((state) => state.metadata)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
   const cursorEngine = useTimelineStore((state) => state.cursorEngine)
@@ -220,6 +233,11 @@ export function TimelineView({
   })
 
   const interaction = useTimelineInteraction()
+  const overlayInteraction = useOverlayInteraction({
+    canvasRef,
+    canvasWidth: timeline?.canvas.width ?? 1,
+    canvasHeight: timeline?.canvas.height ?? 1,
+  })
 
   const selectedClip = useMemo<SelectedClip | null>(() => {
     const selection = view.selection
@@ -230,6 +248,9 @@ export function TimelineView({
     }
     return null
   }, [timeline, view.selection])
+
+  const selectedOverlayClip =
+    selectedClip && isOverlayClip(selectedClip.clip) ? selectedClip.clip : null
 
   const selectedMarker = useMemo<TimelineMarker | null>(() => {
     const selection = view.selection
@@ -353,6 +374,25 @@ export function TimelineView({
           track.clips.filter((clip): clip is ImageClip => clip.kind === "image"),
         ) ?? [],
     [timeline],
+  )
+  const overlayRenderPlan = useMemo(
+    () => (timeline ? buildOverlayRenderPlan(timeline, project?.assets) : null),
+    [project?.assets, timeline],
+  )
+  const overlayAssetUrls = useMemo(
+    () =>
+      Object.fromEntries(
+        (project?.assets ?? [])
+          .filter(
+            (asset) =>
+              (asset.kind === "image" || asset.role === "graphic") && asset.status !== "missing",
+          )
+          .flatMap((asset) => {
+            const url = toAssetUrl(assetPaths[asset.id] ?? asset.path)
+            return url ? [[asset.id, url] as const] : []
+          }),
+      ),
+    [assetPaths, project?.assets],
   )
   const isPreviewMuted =
     audioTrackOutputs.length > 0 || (timeline ? isTimelineAudioMuted(timeline) : false)
@@ -512,9 +552,6 @@ export function TimelineView({
   usePlaybackClock({
     videoRef,
     timeline,
-    playheadMs: view.playheadMs,
-    isPlaying: view.isPlaying,
-    playbackRate: view.playbackRate,
     previewQuality: view.previewQuality,
     mediaUrl,
     onSeek: seek,
@@ -578,6 +615,13 @@ export function TimelineView({
       } else if (event.shiftKey && key === "z") {
         event.preventDefault()
         zoomToFit()
+      } else if (key === "r" && selectedOverlayClip && !hasModifier) {
+        event.preventDefault()
+        if (overlayInteraction.isRotateMode) overlayInteraction.finishRotateMode()
+        else overlayInteraction.startRotateMode(selectedOverlayClip.id)
+      } else if (key === "escape") {
+        event.preventDefault()
+        overlayInteraction.cancel()
       } else if (key === "v") {
         setTool("select")
       } else if (key === "c") {
@@ -607,7 +651,32 @@ export function TimelineView({
       } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault()
         const direction = event.key === "ArrowLeft" ? -1 : 1
-        if (event.altKey && selectedClip) {
+        if (selectedOverlayClip && overlayInteraction.isRotateMode) {
+          overlayInteraction.rotateSelected(
+            selectedOverlayClip.id,
+            direction * (event.shiftKey ? 15 : 1),
+          )
+        } else if (selectedOverlayClip && hasModifier) {
+          overlayInteraction.resizeSelected(
+            selectedOverlayClip.id,
+            event.key === "ArrowRight"
+              ? event.shiftKey
+                ? 10
+                : 1
+              : event.key === "ArrowLeft"
+                ? event.shiftKey
+                  ? -10
+                  : -1
+                : 0,
+            0,
+          )
+        } else if (selectedOverlayClip) {
+          overlayInteraction.nudgeSelected(
+            selectedOverlayClip.id,
+            direction * (event.shiftKey ? 10 : 1),
+            0,
+          )
+        } else if (event.altKey && selectedClip) {
           trimSelected(
             event.shiftKey
               ? direction === -1
@@ -623,6 +692,26 @@ export function TimelineView({
         } else {
           seek(view.playheadMs + direction * (event.shiftKey ? 1_000 : frameMs))
         }
+      } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && selectedOverlayClip) {
+        event.preventDefault()
+        if (overlayInteraction.isRotateMode) {
+          overlayInteraction.rotateSelected(
+            selectedOverlayClip.id,
+            (event.key === "ArrowUp" ? -1 : 1) * (event.shiftKey ? 15 : 1),
+          )
+        } else if (hasModifier) {
+          overlayInteraction.resizeSelected(
+            selectedOverlayClip.id,
+            0,
+            event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
+          )
+        } else {
+          overlayInteraction.nudgeSelected(
+            selectedOverlayClip.id,
+            0,
+            event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
+          )
+        }
       } else if (event.key === "Home") {
         event.preventDefault()
         seek(0)
@@ -637,12 +726,14 @@ export function TimelineView({
       duplicateSelected,
       frameMs,
       nudgeSelected,
+      overlayInteraction,
       pause,
       play,
       redo,
       save,
       seek,
       selectedClip,
+      selectedOverlayClip,
       setPlaybackRate,
       splitSelected,
       togglePlay,
@@ -1001,6 +1092,37 @@ export function TimelineView({
     }
   }
 
+  function addAssetAtTime(assetId: string, timeMs: number) {
+    if (!timeline || !project) return
+    const asset = project.assets.find((candidate) => candidate.id === assetId)
+    if (!asset || asset.status === "missing") return
+
+    if (asset.kind === "audio") {
+      const durationMs = assetDurationMs(asset, 30_000)
+      const audioTrack = timeline.tracks.find(
+        (track) => track.kind === "audio" && track.name.toLowerCase().includes("music"),
+      )
+      execute(
+        createAddExternalAudioClipCommand(asset.id, Math.round(timeMs), durationMs, {
+          sourceInMs: 0,
+          sourceOutMs: durationMs,
+          role: asset.role === "music" ? "music" : "other",
+          trackId: audioTrack?.id,
+          trackName: audioTrack?.name ?? "Audio Track",
+        }),
+      )
+      return
+    }
+
+    if (asset.kind === "image") {
+      const clip = createImageClipForAsset(asset, timeMs, timeline.canvas)
+      const graphicsTrack = timeline.tracks.find((track) => track.kind === "graphics")
+      if (execute(createAddImageClipCommand(clip, graphicsTrack?.id))) {
+        setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
+      }
+    }
+  }
+
   function addMarkerAtTime(timeMs: number) {
     execute(createAddMarkerCommand(timeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`))
   }
@@ -1125,7 +1247,7 @@ export function TimelineView({
           >
             <div
               ref={canvasRef}
-              className="relative flex items-center justify-center overflow-hidden"
+              className="relative flex items-center justify-center overflow-visible"
               style={canvasStyle}
             >
               {mediaUrl && !mediaError ? (
@@ -1255,81 +1377,50 @@ export function TimelineView({
                 />
               ) : null}
 
-              {annotationClips.length > 0 ? (
-                <AnnotationCanvasOverlay
-                  clips={annotationClips}
-                  playheadMs={view.playheadMs}
-                  canvasWidth={timeline.canvas.width}
-                  canvasHeight={timeline.canvas.height}
-                  selectedClipId={
-                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
-                  }
-                  onSelectClip={(clip) =>
-                    setSelection({
-                      kind: "clip",
-                      clipIds: [clip.id],
-                      primaryClipId: clip.id,
-                    })
-                  }
-                  onUpdateClip={(clipId, update) =>
-                    execute(createUpdateAnnotationClipCommand(clipId, update))
-                  }
-                  onCreateClip={(clip) => {
-                    const track = timeline.tracks.find((t) => t.kind === "annotations")
-                    const ok = execute(createAddAnnotationClipCommand(clip, track?.id))
-                    if (ok) {
+              {overlayRenderPlan ? (
+                <>
+                  <OverlayCanvas
+                    renderPlan={overlayRenderPlan}
+                    canvasWidth={timeline.canvas.width}
+                    canvasHeight={timeline.canvas.height}
+                    assetUrls={overlayAssetUrls}
+                    drawMode={drawMode}
+                    drawType={drawType}
+                    drawColor={drawColor}
+                    onCreateClip={(clip) => {
+                      const track = timeline.tracks.find(
+                        (candidate) => candidate.kind === "annotations",
+                      )
+                      const ok = execute(createAddAnnotationClipCommand(clip, track?.id))
+                      if (ok) {
+                        setSelection({
+                          kind: "clip",
+                          clipIds: [clip.id],
+                          primaryClipId: clip.id,
+                        })
+                      }
+                    }}
+                    className="z-35"
+                  />
+                  <OverlaySelectionLayer
+                    clips={[...annotationClips, ...textClips, ...imageClips]}
+                    canvasWidth={timeline.canvas.width}
+                    canvasHeight={timeline.canvas.height}
+                    selectedClipId={
+                      view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                    }
+                    interaction={overlayInteraction}
+                    drawMode={drawMode}
+                    onSelectClip={(clip) =>
                       setSelection({
                         kind: "clip",
                         clipIds: [clip.id],
                         primaryClipId: clip.id,
                       })
                     }
-                  }}
-                />
-              ) : null}
-
-              {textClips.length > 0 ? (
-                <TextCanvasOverlay
-                  clips={textClips}
-                  playheadMs={view.playheadMs}
-                  canvasWidth={timeline.canvas.width}
-                  canvasHeight={timeline.canvas.height}
-                  selectedClipId={
-                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
-                  }
-                  onSelectClip={(clip) =>
-                    setSelection({
-                      kind: "clip",
-                      clipIds: [clip.id],
-                      primaryClipId: clip.id,
-                    })
-                  }
-                  onUpdateClip={(clipId, update) =>
-                    execute(createUpdateTextClipCommand(clipId, update))
-                  }
-                />
-              ) : null}
-
-              {imageClips.length > 0 ? (
-                <ImageCanvasOverlay
-                  clips={imageClips}
-                  playheadMs={view.playheadMs}
-                  canvasWidth={timeline.canvas.width}
-                  canvasHeight={timeline.canvas.height}
-                  selectedClipId={
-                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
-                  }
-                  onSelectClip={(clip) =>
-                    setSelection({
-                      kind: "clip",
-                      clipIds: [clip.id],
-                      primaryClipId: clip.id,
-                    })
-                  }
-                  onUpdateClip={(clipId, update) =>
-                    execute(createUpdateImageClipCommand(clipId, update))
-                  }
-                />
+                    className="z-40"
+                  />
+                </>
               ) : null}
             </div>
 
@@ -1339,6 +1430,7 @@ export function TimelineView({
               playheadMs={view.playheadMs}
               isPlaying={view.isPlaying}
               playbackRate={view.playbackRate}
+              assetPaths={assetPaths}
             />
 
             {/* Media status badge */}
@@ -1424,6 +1516,7 @@ export function TimelineView({
           onDuplicateClip={duplicateClip}
           onSplitClip={splitClip}
           onDeleteClip={deleteClip}
+          onAddAssetAtTime={addAssetAtTime}
           onCursorRangeAction={onCursorRangeAction}
           onZoomSegmentAction={onZoomSegmentAction}
           onToggleTrackMuted={(track) =>

@@ -7,12 +7,11 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Slider,
   Switch,
   cn,
 } from "@recordforge/ui"
 import { Eye, Image as ImageIcon, Lock } from "lucide-react"
-import { InspectorSection, NumberField } from "./fields"
+import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 
 interface ImageClipInspectorProps {
   clip: ImageClip
@@ -79,12 +78,12 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
             <span>Opacity</span>
             <span>{Math.round(clip.opacity * 100)}%</span>
           </div>
-          <Slider
+          <DebouncedSlider
             min={0}
             max={1}
             step={0.05}
             value={[clip.opacity]}
-            onValueChange={([val]) => onChange({ opacity: val })}
+            onValueCommit={([val]) => onChange({ opacity: val })}
           />
         </div>
 
@@ -93,12 +92,12 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
             <span>Corner Radius</span>
             <span>{clip.borderRadius}px</span>
           </div>
-          <Slider
+          <DebouncedSlider
             min={0}
             max={48}
             step={2}
             value={[clip.borderRadius]}
-            onValueChange={([val]) => onChange({ borderRadius: val })}
+            onValueCommit={([val]) => onChange({ borderRadius: val })}
           />
         </div>
       </InspectorSection>
@@ -110,12 +109,12 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
             <span>Border Width</span>
             <span>{clip.borderWidth}px</span>
           </div>
-          <Slider
+          <DebouncedSlider
             min={0}
             max={16}
             step={1}
             value={[clip.borderWidth]}
-            onValueChange={([val]) => onChange({ borderWidth: val })}
+            onValueCommit={([val]) => onChange({ borderWidth: val })}
           />
         </div>
 
@@ -153,12 +152,12 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
               <span>Shadow Blur</span>
               <span>{clip.shadowBlur ?? 12}px</span>
             </div>
-            <Slider
+            <DebouncedSlider
               min={2}
               max={36}
               step={2}
               value={[clip.shadowBlur ?? 12]}
-              onValueChange={([val]) => onChange({ shadowBlur: val })}
+              onValueCommit={([val]) => onChange({ shadowBlur: val })}
             />
           </div>
         )}

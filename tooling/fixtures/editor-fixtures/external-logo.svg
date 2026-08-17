@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="128" viewBox="0 0 512 128">
+  <rect width="512" height="128" rx="18" fill="#0f172a" />
+  <path d="M34 32h26l18 32 18-32h26L91 96H65z" fill="#38bdf8" />
+  <path d="M132 32h18l24 48 24-48h18l-33 64h-18z" fill="#f59e0b" />
+  <text x="252" y="78" fill="#f8fafc" font-family="sans-serif" font-size="34" font-weight="700">recordForge</text>
+</svg>

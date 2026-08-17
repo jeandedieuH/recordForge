@@ -13,6 +13,10 @@ const ALLOWED_KEYS: &[&str] = &[
     "hardwareCheckDone",
     "cursorPresets",
     "defaultCursorSettings",
+    "editorAnnotationPresets",
+    "editorAnnotationPresetFavorites",
+    "editorTextPresets",
+    "editorTextPresetFavorites",
     "recordingPreferences",
 ];
 

@@ -8,11 +8,12 @@
 
 ## 1. Job System Overview
 
-The durable job scheduler manages three categories of background work:
+The durable job scheduler manages background media and project work:
 
 | Kind | Purpose | Trigger |
 |------|---------|---------|
-| `prepare` | Probe, proxy, thumbnail, waveform generation | After recording stop or recovery |
+| `prepare` | Probe, proxy, thumbnail, waveform generation for a recording | After recording stop or recovery |
+| `asset_derivative` | Generate thumbnails, waveforms, previews, or proxies for one imported asset | Asset import or relink |
 | `export` | Render timeline to final MP4 | User initiates export |
 | `upload` | Send exported file to S3/Drive/local folder | User initiates upload |
 
@@ -24,7 +25,7 @@ The durable job scheduler manages three categories of background work:
 {
   "id": "job-uuid",
   "recordingId": "recording-uuid",
-  "kind": "prepare",             // prepare | export | upload
+  "kind": "prepare",             // prepare | asset_derivative | export | upload
   "status": "running",           // pending | running | completed | failed | cancelled
   "progress": 0.45,              // 0.0–1.0
   "stage": "proxy",              // Current sub-stage label
@@ -44,7 +45,9 @@ The durable job scheduler manages three categories of background work:
     "thumbnailDir": "...",
     "thumbnailManifestPath": "...",
     "waveformPath": "...",
-    "waveformImagePath": "..."
+    "waveformImagePath": "...",
+    "assetId": null,
+    "derivatives": {}
   },
   "options": { "projectId": "...", "outputPath": "...", "plan": "...", "settings": "..." }, // JSON persisted in SQLite
   "cancellationToken": "in-memory AtomicBool"
@@ -220,8 +223,10 @@ Derivatives are versioned and can be invalidated when the recipe changes:
 | Derivative | Recipe Version | Inputs | Invalidation |
 |-----------|---------------|--------|-------------|
 | Proxy | 1 | Original video, proxy height | Source file changed, height changed |
-| Thumbnails | 1 | Original video, interval, sprite size | Source file changed, interval changed |
-| Waveform | 1 | Original video audio track | Source file changed |
-| Metadata | 1 | Original video | Source file changed |
+| Thumbnails | 1 | Original video or imported image, interval, sprite size | Source file changed, interval changed |
+| Waveform | 1 | Original video or imported audio track | Source file changed |
+| Audio preview | 1 | Imported audio source | Source file changed |
+| Image thumbnail | 1 | Imported raster/SVG image | Source file changed |
+| Metadata | 1 | Original or imported media | Source file changed |
 
 When a recipe version changes (e.g., proxy generation quality improves), all derivatives of that kind are automatically rebuilt.

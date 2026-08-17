@@ -17,6 +17,7 @@ interface AudioTrackPreviewProps {
   playheadMs: number
   isPlaying: boolean
   playbackRate: number
+  assetPaths?: Record<string, string>
 }
 
 function toAssetUrl(path: string): string {
@@ -39,6 +40,7 @@ function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
 function buildPreviewTracks(
   tracks: TimelineTrack[],
   outputs: MediaAudioTrackOutput[],
+  assetPaths: Record<string, string>,
 ): PreviewAudioTrack[] {
   const outputsByStream = new Map(outputs.map((output) => [output.streamIndex, output]))
   const hasSoloTrack = tracks.some((track) => track.kind === "audio" && track.solo)
@@ -50,13 +52,14 @@ function buildPreviewTracks(
     return track.clips.flatMap((clip) => {
       if (clip.kind !== "audio") return []
       const output = outputsByStream.get(clip.streamIndex ?? -1)
-      if (!output?.audioPath) return []
+      const sourcePath = output?.audioPath ?? assetPaths[clip.assetId]
+      if (!sourcePath) return []
 
       return [
         {
           id: clip.id,
           clip,
-          source: toAssetUrl(output.audioPath),
+          source: toAssetUrl(sourcePath),
           volume: Math.max(0, Math.min(1, track.volume * clip.volume)),
           muted: track.muted || isExcludedBySolo,
         },
@@ -71,9 +74,13 @@ export function AudioTrackPreview({
   playheadMs,
   isPlaying,
   playbackRate,
+  assetPaths = {},
 }: AudioTrackPreviewProps) {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
-  const previewTracks = useMemo(() => buildPreviewTracks(tracks, outputs), [outputs, tracks])
+  const previewTracks = useMemo(
+    () => buildPreviewTracks(tracks, outputs, assetPaths),
+    [assetPaths, outputs, tracks],
+  )
 
   useEffect(() => {
     for (const previewTrack of previewTracks) {

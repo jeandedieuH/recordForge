@@ -3,7 +3,7 @@ import type { LibraryRecording, MediaMetadata, TimelineState } from "@recordforg
 import { Monitor } from "lucide-react"
 import { EmptyState, Skeleton, Tabs, TabsList, TabsTrigger } from "@recordforge/ui"
 import { DerivativeCard, DerivativeStatus } from "../components/derivative-status"
-import { ExternalMediaPanel } from "./external-media-panel"
+import { ProjectAssetsPanel } from "./project-assets-panel"
 import type {
   DerivativeResource,
   ThumbnailManifest,
@@ -25,7 +25,7 @@ export function MediaPanel({
   thumbnailResource,
   waveformResources,
 }: MediaPanelProps) {
-  const [tab, setTab] = useState<"project" | "external">("project")
+  const [tab, setTab] = useState<"project" | "assets">("project")
   const isReady = thumbnailResource.status === "content"
 
   return (
@@ -36,15 +36,15 @@ export function MediaPanel({
             <TabsTrigger value="project" className="text-xs py-0 h-6">
               Source
             </TabsTrigger>
-            <TabsTrigger value="external" className="text-xs py-0 h-6">
-              External
+            <TabsTrigger value="assets" className="text-xs py-0 h-6">
+              Assets
             </TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
 
-      {tab === "external" ? (
-        <ExternalMediaPanel />
+      {tab === "assets" ? (
+        <ProjectAssetsPanel />
       ) : (
         <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-3">
           {recording ? (

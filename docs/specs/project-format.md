@@ -24,10 +24,12 @@ sessions/{session_id}/
     output.mp4             # Immutable original
     project.json           # Project file (editor state)
     project.json.bak       # Last known good backup
+    assets/                  # copied external media sources
     derivatives/
         proxy/proxy.mp4
         thumbnails/
         waveform/
+        assets/{asset-id}/     # imported asset derivatives
 ```
 
 ### 2.2 `project.json` Schema
@@ -52,8 +54,11 @@ sessions/{session_id}/
     {
       "id": "asset-uuid-screen",
       "role": "screen",
-      "path": "output.mp4", // Relative to project dir
+      "path": "output.mp4", // Relative to project dir for copied assets
       "status": "available",
+      "kind": "video",
+      "importStrategy": "copy",
+      "derivativeVersion": 1,
       "durationMs": 180000,
       "width": 1920,
       "height": 1080,
@@ -135,18 +140,24 @@ The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 dig
 
 ### 2.4 Asset fields
 
-| Field         | Type      | Required | Description                                               |
-| ------------- | --------- | -------- | --------------------------------------------------------- |
-| `id`          | string    | yes      | UUID that clips use as `assetId`                          |
-| `role`        | string    | yes      | One of the roles in §3.1                                  |
-| `path`        | string    | yes      | Path relative to the project directory                    |
-| `status`      | string    | no       | `available` (default), `missing`, or `relinked`          |
-| `durationMs`  | integer   | no       | Cached source duration in milliseconds                    |
-| `width`       | integer   | no       | Cached video width                                        |
-| `height`      | integer   | no       | Cached video height                                       |
-| `fps`         | float     | no       | Cached frame rate                                         |
-| `hasAudio`    | boolean   | no       | Whether the source has at least one audio stream          |
-| `streamIndex` | integer   | no       | Optional FFmpeg stream index used for multi-stream files  |
+| Field              | Type      | Required | Description                                                                    |
+| ------------------ | --------- | -------- | ------------------------------------------------------------------------------ |
+| `id`               | string    | yes      | Durable id that clips use as `assetId`                                         |
+| `role`             | string    | yes      | Timeline purpose such as `music`, `graphic`, or `b_roll`                      |
+| `kind`             | string    | no       | Source kind: `audio`, `image`, `video`, `cursor`, or `caption`                |
+| `path`             | string    | yes      | Project-relative copied path, or canonical absolute path for a reference     |
+| `status`           | string    | no       | `available` (default), `missing`, or `relinked`                               |
+| `contentHash`      | string    | no       | SHA-256 source hash used for project-local deduplication                      |
+| `importStrategy`   | string    | no       | `copy` (default) or `reference`                                               |
+| `originalPath`     | string    | no       | Source path captured at import/relink time                                    |
+| `svgSafe`          | boolean   | no       | Whether an SVG passed script, event-handler, and external-reference checks   |
+| `derivatives`      | object    | no       | Derivative name to project-relative path map                                  |
+| `durationMs`       | integer   | no       | Cached source duration in milliseconds                                        |
+| `width`            | integer   | no       | Cached media width                                                            |
+| `height`           | integer   | no       | Cached media height                                                           |
+| `fps`              | float     | no       | Cached frame rate                                                             |
+| `hasAudio`         | boolean   | no       | Whether the source has at least one audio stream                              |
+| `streamIndex`      | integer   | no       | Optional FFmpeg stream index used for multi-stream files                     |
 
 ## 3. Asset Registry
 
@@ -158,20 +169,29 @@ The `checksum` field holds `sha256:<hex>` where the hex value is the SHA-256 dig
 | `microphone`    | Independent mic audio track          | Native WASAPI capture                     |
 | `system_audio`  | Independent system audio track       | Native WASAPI loopback                    |
 | `webcam`        | Webcam sidecar video                 | Separate FFmpeg process                   |
-| `cursor_events` | Cursor position/click metadata       | Editor Phase 5 capture/editor integration |
-| `image`         | User-imported image overlay          | Manual import                             |
+| `cursor_events` | Cursor position/click metadata       | Editor capture/editor integration         |
+| `music`         | Imported background music            | Project asset importer                    |
+| `audio_track`   | Imported non-music audio             | Project asset importer                    |
+| `graphic`       | Imported image or SVG overlay        | Project asset importer                    |
+| `b_roll`        | Imported video overlay source        | Project asset importer                    |
+| `image`         | Legacy user-imported image           | Manual import                             |
 | `caption`       | Text/subtitle data                   | User-created                              |
 
 ### 3.2 Asset Resolution
 
-Assets store paths relative to the project directory. Rust resolves absolute paths at load time:
+Copied assets store paths relative to the project directory. Reference assets retain a canonical absolute source path. Rust resolves and validates both forms at load time:
 
 ```rust
-let absolute = project_dir.join(&asset.path);
-// Validate: absolute.starts_with(project_dir) — containment check
+let absolute = if asset.import_strategy.as_deref() == Some("reference") {
+    PathBuf::from(&asset.path)
+} else {
+    project_dir.join(&asset.path)
+};
+// Copied paths must remain contained; reference paths must be regular files
+// outside protected system directories.
 ```
 
-**Security rule:** The render pipeline NEVER accepts paths from React/IPC. It resolves paths from asset IDs through the project's asset registry.
+**Security rule:** The render pipeline NEVER accepts paths from React/IPC. It resolves paths from asset IDs through the project's asset registry and applies `PathPolicy` before probing, previewing, or exporting.
 
 ### 3.3 Missing Asset Handling
 

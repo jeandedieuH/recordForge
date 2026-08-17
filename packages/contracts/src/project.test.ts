@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { exportTimelineOptionsSchema, renderPlanSchema } from "./timeline"
+import {
+  annotationClipSchema,
+  exportTimelineOptionsSchema,
+  imageClipSchema,
+  renderPlanSchema,
+  textClipSchema,
+} from "./timeline"
 import { projectSchema, projectAssetSchema, projectExportSettingsSchema } from "./project"
 
 const minimalProject = {
@@ -284,6 +290,131 @@ describe("project contract", () => {
 
     expect(project.tracks[1].clips[0]).toMatchObject({ kind: "caption", text: "Safe caption" })
     expect(project.tracks[2].clips[0]).toMatchObject({ kind: "mask", mode: "redact" })
+  })
+
+  it("defaults phase 1 overlay fields for every overlay clip kind", () => {
+    const baseClip = {
+      id: "overlay-clip",
+      assetId: "synthetic:overlay",
+      startMs: 0,
+      durationMs: 1_000,
+      sourceInMs: 0,
+      sourceOutMs: 1_000,
+      speed: 1,
+    }
+
+    expect(annotationClipSchema.parse({ ...baseClip, kind: "annotation" })).toMatchObject({
+      rotation: 0,
+      anchorX: 0.5,
+      anchorY: 0.5,
+      zIndex: 0,
+      opacity: 1,
+      overlayAnimation: {
+        inType: "fade",
+        outType: "fade",
+        inDurationMs: 350,
+        outDurationMs: 350,
+        easing: "expo-out",
+      },
+    })
+    expect(textClipSchema.parse({ ...baseClip, kind: "text" })).toMatchObject({
+      rotation: 0,
+      zIndex: 0,
+      overlayAnimation: expect.any(Object),
+    })
+    expect(imageClipSchema.parse({ ...baseClip, kind: "image" })).toMatchObject({
+      rotation: 0,
+      zIndex: 0,
+      overlayAnimation: expect.any(Object),
+    })
+  })
+
+  it("migrates v1 overlay animation fields and infers asset metadata on load", () => {
+    const parsed = projectSchema.parse({
+      ...minimalProject,
+      assets: [
+        ...minimalProject.assets,
+        {
+          id: "asset-logo",
+          role: "graphic",
+          path: "logo.svg",
+          durationMs: 0,
+          hasAudio: false,
+        },
+      ],
+      tracks: [
+        ...minimalProject.tracks,
+        {
+          id: "track-overlays",
+          kind: "overlay",
+          name: "Overlays",
+          muted: false,
+          locked: false,
+          solo: false,
+          volume: 1,
+          clips: [
+            {
+              id: "legacy-annotation",
+              assetId: "synthetic:annotation",
+              kind: "annotation",
+              annotationType: "rectangle",
+              startMs: 100,
+              durationMs: 500,
+              sourceInMs: 0,
+              sourceOutMs: 500,
+              speed: 1,
+              animationIn: "draw",
+              animationOut: "fade",
+              enabled: true,
+              locked: false,
+            },
+          ],
+        },
+      ],
+    })
+
+    const asset = parsed.assets.find((candidate) => candidate.id === "asset-logo")
+    expect(asset).toMatchObject({
+      kind: "image",
+      importStrategy: "copy",
+      derivativeVersion: 1,
+    })
+
+    const clip = parsed.tracks[1].clips[0]
+    expect(clip).toMatchObject({
+      rotation: 0,
+      zIndex: 0,
+      overlayAnimation: {
+        inType: "draw",
+        outType: "fade",
+        inDurationMs: 350,
+        outDurationMs: 350,
+        easing: "expo-out",
+      },
+    })
+  })
+
+  it("accepts persisted asset provenance and derivatives", () => {
+    const parsed = projectAssetSchema.parse({
+      id: "asset-logo",
+      role: "graphic",
+      kind: "image",
+      path: "logo.svg",
+      contentHash: "sha256:abc",
+      importStrategy: "copy",
+      originalPath: "C:/Users/example/logo.svg",
+      svgSafe: true,
+      derivatives: { thumbnail: "derivatives/logo.png" },
+    })
+
+    expect(parsed).toMatchObject({
+      contentHash: "sha256:abc",
+      importStrategy: "copy",
+      originalPath: "C:/Users/example/logo.svg",
+      svgSafe: true,
+      derivativeVersion: 1,
+      derivatives: { thumbnail: "derivatives/logo.png" },
+    })
   })
 
   it("defaults missing asset status", () => {

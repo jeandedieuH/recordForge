@@ -1,32 +1,47 @@
+import { useState } from "react"
 import type { AnnotationClip, AnnotationType } from "@recordforge/contracts"
-import { ANNOTATION_PALETTES } from "@recordforge/editor-core"
+import {
+  annotationPresetFromClip,
+  annotationPresetToShapePreset,
+  applyPresetToAnnotationClip,
+  type AnnotationPresetRecord,
+} from "@recordforge/editor-core"
 import {
   Button,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
   Input,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Slider,
   Switch,
   ToggleGroup,
   ToggleGroupItem,
   cn,
+  useToast,
 } from "@recordforge/ui"
 import {
   ArrowUpRight,
   Circle,
   Eye,
+  FolderOpen,
   Lock,
   MessageSquare,
   Minus,
   Radio,
+  Save,
   Shapes,
   ShieldAlert,
   Square,
 } from "lucide-react"
-import { InspectorSection, NumberField } from "./fields"
+import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
+import { useAnnotationPresetRegistry } from "../presets/preset-store"
+import { PresetBrowser, type BrowserPreset } from "../panels/preset-browser"
+import { SavePresetDialog, type SavePresetFormData } from "../presets/save-preset-dialog"
 
 interface AnnotationClipInspectorProps {
   clip: AnnotationClip
@@ -36,6 +51,40 @@ interface AnnotationClipInspectorProps {
 export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspectorProps) {
   const isArrowOrLine = clip.annotationType === "arrow" || clip.annotationType === "line"
   const hasText = clip.annotationType === "callout" || clip.annotationType === "badge"
+  const { registry, snapshot } = useAnnotationPresetRegistry()
+  const { toast } = useToast()
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const [saveOpen, setSaveOpen] = useState(false)
+
+  const activePresetName = clip.annotationType.replace("-", " ")
+
+  function handleApplyPreset(preset: BrowserPreset) {
+    const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)
+    const updated = applyPresetToAnnotationClip(clip, shape)
+    onChange(updated)
+  }
+
+  async function handleSavePreset(data: SavePresetFormData) {
+    const record = annotationPresetFromClip(clip, {
+      name: data.name,
+      description: data.description,
+      category: data.category,
+      tags: data.tags
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+    })
+    try {
+      await registry.saveCustomPreset(record)
+      toast({ title: "Preset saved", description: `${data.name} is now in your library.` })
+    } catch (error) {
+      toast({
+        title: "Could not save preset",
+        description: error instanceof Error ? error.message : "Try again.",
+        variant: "error",
+      })
+    }
+  }
 
   return (
     <div className="flex flex-col gap-4 p-3 text-xs">
@@ -49,7 +98,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
             <h3 className="text-sm font-semibold capitalize text-foreground">
               {clip.annotationType.replace("-", " ")}
             </h3>
-            <p className="text-[10px] text-muted-foreground">Annotation Vector</p>
+            <p className="text-[10px] text-muted-foreground">{activePresetName}</p>
           </div>
         </div>
 
@@ -74,6 +123,60 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
           </Button>
         </div>
       </div>
+
+      {/* Preset Controls */}
+      <InspectorSection title="Shape Preset">
+        <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 flex-col rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
+            <span className="text-[10px] text-muted-foreground">Active preset</span>
+            <span className="truncate text-xs font-medium text-foreground">{activePresetName}</span>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => setBrowserOpen(true)}
+          >
+            <FolderOpen className="size-3.5" aria-hidden />
+            Browse
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => setSaveOpen(true)}
+          >
+            <Save className="size-3.5" aria-hidden />
+            Save
+          </Button>
+        </div>
+      </InspectorSection>
+
+      <Dialog open={browserOpen} onOpenChange={setBrowserOpen}>
+        <DialogContent className="flex max-h-[min(760px,90vh)] max-w-3xl flex-col gap-3 overflow-hidden p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Shapes className="size-4 text-secondary" aria-hidden />
+              Browse annotation presets
+            </DialogTitle>
+          </DialogHeader>
+          <PresetBrowser
+            kind="annotation"
+            onSelect={(preset) => {
+              handleApplyPreset(preset)
+              setBrowserOpen(false)
+            }}
+          />
+        </DialogContent>
+      </Dialog>
+
+      <SavePresetDialog
+        open={saveOpen}
+        onOpenChange={setSaveOpen}
+        defaultCategory={clip.annotationType}
+        categories={snapshot.categories}
+        onSave={handleSavePreset}
+      />
 
       {/* Shape Type Selector */}
       <InspectorSection title="Shape Type">
@@ -161,28 +264,6 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
 
       {/* Stroke & Color Style */}
       <InspectorSection title="Stroke & Color">
-        <div>
-          <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1.5">
-            Color Swatches
-          </label>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {ANNOTATION_PALETTES.map((palette) => (
-              <button
-                key={palette.id}
-                type="button"
-                onClick={() => onChange({ strokeColor: palette.color })}
-                className={cn(
-                  "size-5 rounded-full border border-border transition-all",
-                  clip.strokeColor.toLowerCase() === palette.color.toLowerCase() &&
-                    "ring-2 ring-primary ring-offset-1 ring-offset-surface scale-110",
-                )}
-                style={{ backgroundColor: palette.color }}
-                title={palette.name}
-              />
-            ))}
-          </div>
-        </div>
-
         <div className="flex items-center gap-2 mt-1">
           <Input
             type="color"
@@ -203,12 +284,12 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
             <span>Stroke Width</span>
             <span>{clip.strokeWidth}px</span>
           </div>
-          <Slider
+          <DebouncedSlider
             min={1}
             max={24}
             step={1}
             value={[clip.strokeWidth]}
-            onValueChange={([val]) => onChange({ strokeWidth: val })}
+            onValueCommit={([val]) => onChange({ strokeWidth: val })}
           />
         </div>
 
@@ -243,12 +324,12 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
               <span>Fill Opacity</span>
               <span>{Math.round(clip.fillOpacity * 100)}%</span>
             </div>
-            <Slider
+            <DebouncedSlider
               min={0}
               max={1}
               step={0.05}
               value={[clip.fillOpacity]}
-              onValueChange={([val]) => onChange({ fillOpacity: val })}
+              onValueCommit={([val]) => onChange({ fillOpacity: val })}
             />
           </div>
 
@@ -273,12 +354,12 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
                 <span>Corner Radius</span>
                 <span>{clip.cornerRadius ?? 12}px</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 min={0}
                 max={48}
                 step={2}
                 value={[clip.cornerRadius ?? 12]}
-                onValueChange={([val]) => onChange({ cornerRadius: val })}
+                onValueCommit={([val]) => onChange({ cornerRadius: val })}
               />
             </div>
           ) : null}
@@ -322,6 +403,52 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
         </InspectorSection>
       )}
 
+      {/* Arrow Heads */}
+      {isArrowOrLine && (
+        <InspectorSection title="Arrow Heads">
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
+                Start Head
+              </label>
+              <Select
+                value={clip.arrowStartHead}
+                onValueChange={(val) => onChange({ arrowStartHead: val as any })}
+              >
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="arrow">Arrow</SelectItem>
+                  <SelectItem value="circle">Circle</SelectItem>
+                  <SelectItem value="square">Square</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
+                End Head
+              </label>
+              <Select
+                value={clip.arrowEndHead}
+                onValueChange={(val) => onChange({ arrowEndHead: val as any })}
+              >
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="arrow">Arrow</SelectItem>
+                  <SelectItem value="circle">Circle</SelectItem>
+                  <SelectItem value="square">Square</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </InspectorSection>
+      )}
+
       {/* Shadow & Glow */}
       <InspectorSection title="Shadow & Glow">
         <div className="flex items-center justify-between">
@@ -338,12 +465,12 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
               <span>Shadow Blur</span>
               <span>{clip.shadowBlur ?? 8}px</span>
             </div>
-            <Slider
+            <DebouncedSlider
               min={2}
               max={32}
               step={1}
               value={[clip.shadowBlur ?? 8]}
-              onValueChange={([val]) => onChange({ shadowBlur: val })}
+              onValueCommit={([val]) => onChange({ shadowBlur: val })}
             />
           </div>
         )}

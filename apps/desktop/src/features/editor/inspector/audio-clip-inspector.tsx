@@ -1,10 +1,9 @@
 import type { AudioClip, MediaMetadata } from "@recordforge/contracts"
 import { createUpdateClipAudioCommand } from "@recordforge/editor-core"
 import { Volume2 } from "lucide-react"
-import { Slider } from "@recordforge/ui"
+import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
-import { InspectorSection, NumberField } from "./fields"
 
 interface AudioClipInspectorProps {
   clip: AudioClip
@@ -48,13 +47,13 @@ export function AudioClipInspector({
               {Math.round(clip.volume * 100)}%
             </span>
           </div>
-          <Slider
+          <DebouncedSlider
             value={[clip.volume]}
             min={0}
             max={2}
             step={0.01}
             aria-label="Clip volume"
-            onValueChange={([value]) => updateAudio({ volume: value ?? 1 })}
+            onValueCommit={([value]) => updateAudio({ volume: value ?? 1 })}
           />
           <div className="grid grid-cols-2 gap-2">
             <NumberField

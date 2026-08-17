@@ -1,33 +1,18 @@
 import { useState } from "react"
+import type { AnnotationType } from "@recordforge/contracts"
 import {
   ANNOTATION_PALETTES,
-  ANNOTATION_SHAPES,
-  createAnnotationClip,
+  annotationPresetToShapePreset,
+  applyPresetToAnnotationClip,
   createAddAnnotationClipCommand,
-  type AnnotationShapePreset,
+  createAnnotationClip,
+  createUpdateAnnotationClipCommand,
+  type AnnotationPresetRecord,
 } from "@recordforge/editor-core"
-import type { AnnotationType } from "@recordforge/contracts"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import {
-  Button,
-  Card,
-  CardContent,
-  ScrollArea,
-  ToggleGroup,
-  ToggleGroupItem,
-  cn,
-} from "@recordforge/ui"
-import {
-  ArrowUpRight,
-  Circle,
-  MessageSquare,
-  Minus,
-  Pencil,
-  Radio,
-  Shapes,
-  ShieldAlert,
-  Square,
-} from "lucide-react"
+import { Button, cn } from "@recordforge/ui"
+import { Pencil, Shapes } from "lucide-react"
+import { PresetBrowser, type BrowserPreset } from "./preset-browser"
 
 interface AnnotationsPanelProps {
   drawMode?: boolean
@@ -35,7 +20,6 @@ interface AnnotationsPanelProps {
 }
 
 export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: AnnotationsPanelProps) {
-  const [selectedType, setSelectedType] = useState<AnnotationType>("rectangle")
   const [selectedColor, setSelectedColor] = useState<string>("#38bdf8")
   const [strokeWidth, setStrokeWidth] = useState<number>(4)
   const [strokeStyle, setStrokeStyle] = useState<"solid" | "dashed" | "dotted">("solid")
@@ -49,19 +33,39 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
   const canvasWidth = timeline?.canvas.width ?? 1920
   const canvasHeight = timeline?.canvas.height ?? 1080
 
-  function handleAddShape(shape: AnnotationShapePreset) {
+  const selectedAnnotationClip = (() => {
+    if (!timeline || view.selection?.kind !== "clip") return null
+    const primaryClipId = view.selection.primaryClipId
+    for (const track of timeline.tracks) {
+      const clip = track.clips.find((candidate) => candidate.id === primaryClipId)
+      if (clip?.kind === "annotation") return { clip }
+    }
+    return null
+  })()
+
+  function handleAddPreset(preset: BrowserPreset) {
+    const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)
+    if (selectedAnnotationClip) {
+      const updated = applyPresetToAnnotationClip(selectedAnnotationClip.clip, shape)
+      execute(createUpdateAnnotationClipCommand(selectedAnnotationClip.clip.id, updated))
+      return
+    }
+
     const startMs = Math.round(view.playheadMs)
     const clip = createAnnotationClip(shape.type, {
       startMs,
       durationMs: 3500,
       strokeColor: selectedColor,
       strokeWidth,
+      text: shape.text,
       canvasWidth,
       canvasHeight,
     })
     clip.strokeStyle = strokeStyle
+    clip.fillColor = shape.defaultFillColor
+    clip.fillOpacity = shape.defaultFillOpacity
 
-    const annotationsTrack = timeline?.tracks.find((t) => t.kind === "annotations")
+    const annotationsTrack = timeline?.tracks.find((track) => track.kind === "annotations")
     const ok = execute(createAddAnnotationClipCommand(clip, annotationsTrack?.id))
     if (ok) {
       setSelection({
@@ -72,27 +76,8 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
     }
   }
 
-  function getShapeIcon(type: AnnotationType) {
-    switch (type) {
-      case "rectangle":
-        return Square
-      case "rounded-rect":
-        return Square
-      case "circle":
-        return Circle
-      case "arrow":
-        return ArrowUpRight
-      case "line":
-        return Minus
-      case "callout":
-        return MessageSquare
-      case "spotlight":
-        return Radio
-      case "badge":
-        return ShieldAlert
-      default:
-        return Shapes
-    }
+  function handleQuickDraw(type: AnnotationType, color: string) {
+    onToggleDrawMode?.(!drawMode, type, color)
   }
 
   return (
@@ -106,7 +91,11 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
             </div>
             <div>
               <h3 className="text-sm font-semibold text-foreground">Annotations & Shapes</h3>
-              <p className="text-[11px] text-muted-foreground">Draw and place vector callouts</p>
+              <p className="text-[11px] text-muted-foreground">
+                {selectedAnnotationClip
+                  ? "Click a preset to apply it to the selected annotation"
+                  : "Draw and place vector callouts"}
+              </p>
             </div>
           </div>
         </div>
@@ -126,7 +115,7 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
                   onClick={() => {
                     setSelectedColor(palette.color)
                     if (drawMode && onToggleDrawMode) {
-                      onToggleDrawMode(true, selectedType, palette.color)
+                      handleQuickDraw("rectangle", palette.color)
                     }
                   }}
                   className={cn(
@@ -150,44 +139,54 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
             <label className="text-[11px] font-medium text-muted-foreground mb-1 block">
               Width
             </label>
-            <ToggleGroup
-              type="single"
-              value={String(strokeWidth)}
-              onValueChange={(val) => val && setStrokeWidth(Number(val))}
-              className="bg-surface-dim p-0.5 rounded-lg border border-border"
+            <div
+              className="flex items-center gap-0.5 rounded-lg border border-border bg-surface-dim p-0.5"
+              role="group"
+              aria-label="Stroke width"
             >
-              <ToggleGroupItem value="2" className="h-6 px-2 text-[11px]">
-                2px
-              </ToggleGroupItem>
-              <ToggleGroupItem value="4" className="h-6 px-2 text-[11px]">
-                4px
-              </ToggleGroupItem>
-              <ToggleGroupItem value="6" className="h-6 px-2 text-[11px]">
-                6px
-              </ToggleGroupItem>
-              <ToggleGroupItem value="8" className="h-6 px-2 text-[11px]">
-                8px
-              </ToggleGroupItem>
-            </ToggleGroup>
+              {[2, 4, 6, 8].map((width) => (
+                <button
+                  key={width}
+                  type="button"
+                  onClick={() => setStrokeWidth(width)}
+                  className={cn(
+                    "h-6 px-2 text-[11px] rounded-md transition-colors",
+                    strokeWidth === width
+                      ? "bg-surface text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {width}px
+                </button>
+              ))}
+            </div>
           </div>
 
           <div>
             <label className="text-[11px] font-medium text-muted-foreground mb-1 block">
               Style
             </label>
-            <ToggleGroup
-              type="single"
-              value={strokeStyle}
-              onValueChange={(val) => val && setStrokeStyle(val as any)}
-              className="bg-surface-dim p-0.5 rounded-lg border border-border"
+            <div
+              className="flex items-center gap-0.5 rounded-lg border border-border bg-surface-dim p-0.5"
+              role="group"
+              aria-label="Stroke style"
             >
-              <ToggleGroupItem value="solid" className="h-6 px-2 text-[11px]">
-                Solid
-              </ToggleGroupItem>
-              <ToggleGroupItem value="dashed" className="h-6 px-2 text-[11px]">
-                Dashed
-              </ToggleGroupItem>
-            </ToggleGroup>
+              {(["solid", "dashed"] as const).map((style) => (
+                <button
+                  key={style}
+                  type="button"
+                  onClick={() => setStrokeStyle(style)}
+                  className={cn(
+                    "h-6 px-2 text-[11px] rounded-md transition-colors capitalize",
+                    strokeStyle === style
+                      ? "bg-surface text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {style}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -197,7 +196,7 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
             <Button
               variant={drawMode ? "primary" : "outline"}
               size="sm"
-              onClick={() => onToggleDrawMode(!drawMode, selectedType, selectedColor)}
+              onClick={() => onToggleDrawMode(!drawMode, "rectangle", selectedColor)}
               className="w-full gap-2 text-xs font-medium"
             >
               <Pencil className="size-3.5" aria-hidden />
@@ -207,50 +206,20 @@ export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: Annotat
         ) : null}
       </div>
 
-      {/* Shape Library Grid */}
-      <ScrollArea className="flex-1 p-3">
-        <div className="grid grid-cols-2 gap-2 pb-6">
-          {ANNOTATION_SHAPES.map((shape) => {
-            const Icon = getShapeIcon(shape.type)
-            const isSelected = selectedType === shape.type
-            return (
-              <Card
-                key={shape.type}
-                onClick={() => {
-                  setSelectedType(shape.type)
-                  if (drawMode && onToggleDrawMode) {
-                    onToggleDrawMode(true, shape.type, selectedColor)
-                  } else {
-                    handleAddShape(shape)
-                  }
-                }}
-                className={cn(
-                  "group relative cursor-pointer overflow-hidden border border-border bg-surface-container transition-all duration-fast ease-forge hover:border-primary/60 hover:bg-surface-container-high hover:shadow-e2",
-                  isSelected && "border-primary bg-surface-container-high",
-                )}
-              >
-                <CardContent className="flex flex-col items-center justify-center p-3 text-center">
-                  <div
-                    className="flex size-11 items-center justify-center rounded-xl transition-transform duration-fast group-hover:scale-105"
-                    style={{
-                      backgroundColor: `${selectedColor}18`,
-                      color: selectedColor,
-                    }}
-                  >
-                    <Icon className="size-6" aria-hidden />
-                  </div>
-                  <h4 className="mt-2 text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
-                    {shape.name}
-                  </h4>
-                  <p className="mt-0.5 line-clamp-1 text-[10px] text-muted-foreground">
-                    {shape.description}
-                  </p>
-                </CardContent>
-              </Card>
-            )
-          })}
-        </div>
-      </ScrollArea>
+      {/* Preset Browser */}
+      <PresetBrowser
+        kind="annotation"
+        selectedPresetId={undefined}
+        onSelect={(preset) => {
+          if (drawMode && onToggleDrawMode) {
+            const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)
+            handleQuickDraw(shape.type, selectedColor)
+          } else {
+            handleAddPreset(preset)
+          }
+        }}
+        className="p-3"
+      />
     </div>
   )
 }

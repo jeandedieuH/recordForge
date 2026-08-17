@@ -165,6 +165,59 @@ impl PathPolicy {
         candidate.starts_with(base)
     }
 
+    /// Validate a source selected through the desktop file dialog. The dialog
+    /// is not an authorization boundary, so the Rust side still canonicalizes
+    /// the file and rejects system locations before probing or copying it.
+    pub fn validate_import_source_path(&self, path: &Path) -> Result<PathBuf> {
+        self.validate_external_asset_path(path)
+    }
+
+    /// Validate a referenced asset that may remain outside the project folder.
+    /// Reference imports are intentionally limited to regular files outside
+    /// protected operating-system directories.
+    pub fn validate_external_asset_path(&self, path: &Path) -> Result<PathBuf> {
+        if !path.is_file() {
+            return Err(InternalError::Storage(format!(
+                "asset source is not a file: {}",
+                path.display()
+            ))
+            .into());
+        }
+
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| InternalError::Storage(format!("canonicalize asset source: {e}")))?;
+        self.reject_protected_path(&canonical)?;
+        Ok(canonical)
+    }
+
+    fn reject_protected_path(&self, path: &Path) -> Result<()> {
+        #[cfg(windows)]
+        {
+            let normalized = path.to_string_lossy().replace('/', "\\").to_lowercase();
+            let windows_dir = std::env::var("WINDIR")
+                .unwrap_or_else(|_| String::from(r"C:\Windows"))
+                .replace('/', "\\")
+                .to_lowercase();
+            let protected_prefixes = [
+                windows_dir,
+                String::from(r"c:\program files"),
+                String::from(r"c:\program files (x86)"),
+                String::from(r"c:\programdata"),
+            ];
+            if protected_prefixes.iter().any(|prefix| {
+                normalized == *prefix || normalized.starts_with(&format!("{prefix}\\"))
+            }) {
+                return Err(InternalError::Permissions(format!(
+                    "asset source is in a protected system directory: {}",
+                    path.display()
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Validate a new asset path for a project. The path may be absolute or
     /// relative to the project directory, but it must resolve to a file inside
     /// the project directory and it must exist.
@@ -251,5 +304,16 @@ mod tests {
 
         let result = policy.validate_project_asset_path(&project_dir, &outside_file);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_a_regular_external_import_source() {
+        let (temp, policy) = setup_policy();
+        let source = temp.path().join("Downloads").join("voice.wav");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"fixture").unwrap();
+
+        let result = policy.validate_import_source_path(&source).unwrap();
+        assert_eq!(result, source.canonicalize().unwrap());
     }
 }

@@ -1,6 +1,8 @@
 import { useRef, useState } from "react"
 import type { AnnotationClip, AnnotationType } from "@recordforge/contracts"
 import { createAnnotationClip } from "@recordforge/editor-core"
+import type { OverlayHandle } from "@recordforge/editor-core"
+import type { OverlayInteraction } from "./use-overlay-interaction"
 import { cn } from "@recordforge/ui"
 
 interface AnnotationCanvasOverlayProps {
@@ -12,34 +14,9 @@ interface AnnotationCanvasOverlayProps {
   drawMode?: boolean
   drawType?: AnnotationType
   drawColor?: string
+  interaction: OverlayInteraction
   onSelectClip?: (clip: AnnotationClip) => void
-  onUpdateClip?: (
-    clipId: string,
-    update: Partial<AnnotationClip>,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
   onCreateClip?: (clip: AnnotationClip) => void
-}
-
-interface GestureState {
-  clipId: string
-  pointerId: number
-  mode:
-    | "move"
-    | "resize-se"
-    | "resize-nw"
-    | "resize-ne"
-    | "resize-sw"
-    | "resize-e"
-    | "resize-s"
-    | "resize-w"
-    | "resize-n"
-    | "arrow-start"
-    | "arrow-end"
-  startX: number
-  startY: number
-  initialClip: AnnotationClip
-  moved: boolean
 }
 
 interface DrawState {
@@ -67,11 +44,10 @@ export function AnnotationCanvasOverlay({
   drawMode = false,
   drawType = "rectangle",
   drawColor = "#38bdf8",
+  interaction,
   onSelectClip,
-  onUpdateClip,
   onCreateClip,
 }: AnnotationCanvasOverlayProps) {
-  const gestureRef = useRef<GestureState | null>(null)
   const [drawState, setDrawState] = useState<DrawState | null>(null)
   const containerRef = useRef<SVGSVGElement>(null)
 
@@ -157,119 +133,20 @@ export function AnnotationCanvasOverlay({
 
   // Handle move/resize gestures on shapes
   function beginShapeGesture(
-    event: React.PointerEvent,
+    event: React.PointerEvent<Element>,
     clip: AnnotationClip,
-    mode: GestureState["mode"],
+    handle: OverlayHandle,
   ) {
-    if (drawMode || event.button !== 0 || !isActive(clip, playheadMs) || clip.locked) return
-    event.stopPropagation()
-    event.preventDefault()
-    ;(event.currentTarget as Element).setPointerCapture(event.pointerId)
-    gestureRef.current = {
-      clipId: clip.id,
-      pointerId: event.pointerId,
-      mode,
-      startX: event.clientX,
-      startY: event.clientY,
-      initialClip: { ...clip },
-      moved: false,
-    }
+    if (drawMode) return
+    interaction.beginGesture(event, clip, handle)
   }
 
-  function moveShapeGesture(event: React.PointerEvent) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId || !onUpdateClip || !containerRef.current)
-      return
-    const rect = containerRef.current.getBoundingClientRect()
-    const deltaX = ((event.clientX - gesture.startX) / Math.max(1, rect.width)) * canvasWidth
-    const deltaY = ((event.clientY - gesture.startY) / Math.max(1, rect.height)) * canvasHeight
-
-    if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1 && !gesture.moved) return
-    gesture.moved = true
-    event.preventDefault()
-
-    const init = gesture.initialClip
-    const update: Partial<AnnotationClip> = {}
-
-    if (gesture.mode === "move") {
-      update.x = Math.max(0, Math.min(canvasWidth - init.width, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight - init.height, init.y + deltaY))
-      if (init.endX !== undefined && init.endY !== undefined) {
-        update.endX = init.endX + deltaX
-        update.endY = init.endY + deltaY
-      }
-    } else if (gesture.mode === "resize-se") {
-      update.width = Math.max(20, init.width + deltaX)
-      update.height = Math.max(20, init.height + deltaY)
-    } else if (gesture.mode === "resize-nw") {
-      const nextW = Math.max(20, init.width - deltaX)
-      const nextH = Math.max(20, init.height - deltaY)
-      update.x = init.x + (init.width - nextW)
-      update.y = init.y + (init.height - nextH)
-      update.width = nextW
-      update.height = nextH
-    } else if (gesture.mode === "arrow-start") {
-      update.x = Math.max(0, Math.min(canvasWidth, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight, init.y + deltaY))
-    } else if (gesture.mode === "arrow-end") {
-      update.endX = Math.max(0, Math.min(canvasWidth, (init.endX ?? init.x + init.width) + deltaX))
-      update.endY = Math.max(
-        0,
-        Math.min(canvasHeight, (init.endY ?? init.y + init.height) + deltaY),
-      )
-    }
-
-    onUpdateClip(gesture.clipId, update, { phase: "draft" })
+  function moveShapeGesture(event: React.PointerEvent<Element>) {
+    interaction.moveGesture(event)
   }
 
-  function finishShapeGesture(event: React.PointerEvent) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const wasCancelled = event.type === "pointercancel"
-    const didMove = gesture.moved
-    gestureRef.current = null
-    try {
-      if ((event.currentTarget as Element).hasPointerCapture(event.pointerId)) {
-        ;(event.currentTarget as Element).releasePointerCapture(event.pointerId)
-      }
-    } catch {}
-
-    if (!onUpdateClip) return
-    if (wasCancelled || !didMove) {
-      onUpdateClip(gesture.clipId, gesture.initialClip, { phase: "cancel" })
-      return
-    }
-
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const deltaX = ((event.clientX - gesture.startX) / Math.max(1, rect.width)) * canvasWidth
-    const deltaY = ((event.clientY - gesture.startY) / Math.max(1, rect.height)) * canvasHeight
-
-    const init = gesture.initialClip
-    const update: Partial<AnnotationClip> = {}
-
-    if (gesture.mode === "move") {
-      update.x = Math.max(0, Math.min(canvasWidth - init.width, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight - init.height, init.y + deltaY))
-      if (init.endX !== undefined && init.endY !== undefined) {
-        update.endX = init.endX + deltaX
-        update.endY = init.endY + deltaY
-      }
-    } else if (gesture.mode === "resize-se") {
-      update.width = Math.max(20, init.width + deltaX)
-      update.height = Math.max(20, init.height + deltaY)
-    } else if (gesture.mode === "arrow-start") {
-      update.x = Math.max(0, Math.min(canvasWidth, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight, init.y + deltaY))
-    } else if (gesture.mode === "arrow-end") {
-      update.endX = Math.max(0, Math.min(canvasWidth, (init.endX ?? init.x + init.width) + deltaX))
-      update.endY = Math.max(
-        0,
-        Math.min(canvasHeight, (init.endY ?? init.y + init.height) + deltaY),
-      )
-    }
-
-    onUpdateClip(gesture.clipId, update, { phase: "commit" })
+  function finishShapeGesture(event: React.PointerEvent<Element>) {
+    interaction.finishGesture(event)
   }
 
   return (
@@ -311,10 +188,15 @@ export function AnnotationCanvasOverlay({
               e.stopPropagation()
               onSelectClip?.(clip)
             }}
-            onPointerDown={(e) => beginShapeGesture(e, clip, "move")}
+            onPointerDown={(e) => beginShapeGesture(e, clip, "body")}
+            tabIndex={0}
+            role="button"
+            aria-label={`${clip.annotationType} annotation`}
+            onFocus={() => onSelectClip?.(clip)}
             onPointerMove={moveShapeGesture}
             onPointerUp={finishShapeGesture}
             onPointerCancel={finishShapeGesture}
+            onLostPointerCapture={interaction.handleLostPointerCapture}
           >
             {/* Spotlight backdrop blackout if spotlight */}
             {clip.annotationType === "spotlight" && (
@@ -325,6 +207,7 @@ export function AnnotationCanvasOverlay({
                   cy={clip.y + clip.height / 2}
                   rx={clip.width / 2}
                   ry={clip.height / 2}
+                  transform={`rotate(${clip.rotation} ${clip.x + clip.width * clip.anchorX} ${clip.y + clip.height * clip.anchorY})`}
                   fill="black"
                 />
               </mask>
@@ -343,74 +226,92 @@ export function AnnotationCanvasOverlay({
               />
             )}
 
-            {/* Shape Geometry */}
-            {clip.annotationType === "rectangle" && (
-              <rect
-                x={clip.x}
-                y={clip.y}
-                width={clip.width}
-                height={clip.height}
-                stroke={clip.strokeColor}
-                strokeWidth={clip.strokeWidth}
-                strokeDasharray={
-                  clip.strokeStyle === "dashed"
-                    ? "8 8"
-                    : clip.strokeStyle === "dotted"
-                      ? "3 6"
-                      : undefined
-                }
-                fill={clip.fillColor}
-                fillOpacity={clip.fillOpacity}
-                filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
-              />
-            )}
+            <g
+              transform={`rotate(${clip.rotation} ${clip.x + clip.width * clip.anchorX} ${clip.y + clip.height * clip.anchorY})`}
+            >
+              {/* Shape Geometry */}
+              {clip.annotationType === "rectangle" && (
+                <rect
+                  x={clip.x}
+                  y={clip.y}
+                  width={clip.width}
+                  height={clip.height}
+                  stroke={clip.strokeColor}
+                  strokeWidth={clip.strokeWidth}
+                  strokeDasharray={
+                    clip.strokeStyle === "dashed"
+                      ? "8 8"
+                      : clip.strokeStyle === "dotted"
+                        ? "3 6"
+                        : undefined
+                  }
+                  fill={clip.fillColor}
+                  fillOpacity={clip.fillOpacity}
+                  filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
+                />
+              )}
 
-            {clip.annotationType === "rounded-rect" && (
-              <rect
-                x={clip.x}
-                y={clip.y}
-                width={clip.width}
-                height={clip.height}
-                rx={clip.cornerRadius ?? 16}
-                ry={clip.cornerRadius ?? 16}
-                stroke={clip.strokeColor}
-                strokeWidth={clip.strokeWidth}
-                strokeDasharray={
-                  clip.strokeStyle === "dashed"
-                    ? "8 8"
-                    : clip.strokeStyle === "dotted"
-                      ? "3 6"
-                      : undefined
-                }
-                fill={clip.fillColor}
-                fillOpacity={clip.fillOpacity}
-                filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
-              />
-            )}
+              {clip.annotationType === "rounded-rect" && (
+                <rect
+                  x={clip.x}
+                  y={clip.y}
+                  width={clip.width}
+                  height={clip.height}
+                  rx={clip.cornerRadius ?? 16}
+                  ry={clip.cornerRadius ?? 16}
+                  stroke={clip.strokeColor}
+                  strokeWidth={clip.strokeWidth}
+                  strokeDasharray={
+                    clip.strokeStyle === "dashed"
+                      ? "8 8"
+                      : clip.strokeStyle === "dotted"
+                        ? "3 6"
+                        : undefined
+                  }
+                  fill={clip.fillColor}
+                  fillOpacity={clip.fillOpacity}
+                  filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
+                />
+              )}
 
-            {clip.annotationType === "circle" && (
-              <ellipse
-                cx={clip.x + clip.width / 2}
-                cy={clip.y + clip.height / 2}
-                rx={clip.width / 2}
-                ry={clip.height / 2}
-                stroke={clip.strokeColor}
-                strokeWidth={clip.strokeWidth}
-                strokeDasharray={
-                  clip.strokeStyle === "dashed"
-                    ? "8 8"
-                    : clip.strokeStyle === "dotted"
-                      ? "3 6"
-                      : undefined
-                }
-                fill={clip.fillColor}
-                fillOpacity={clip.fillOpacity}
-                filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
-              />
-            )}
+              {clip.annotationType === "circle" && (
+                <ellipse
+                  cx={clip.x + clip.width / 2}
+                  cy={clip.y + clip.height / 2}
+                  rx={clip.width / 2}
+                  ry={clip.height / 2}
+                  stroke={clip.strokeColor}
+                  strokeWidth={clip.strokeWidth}
+                  strokeDasharray={
+                    clip.strokeStyle === "dashed"
+                      ? "8 8"
+                      : clip.strokeStyle === "dotted"
+                        ? "3 6"
+                        : undefined
+                  }
+                  fill={clip.fillColor}
+                  fillOpacity={clip.fillOpacity}
+                  filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
+                />
+              )}
 
-            {clip.annotationType === "arrow" && (
-              <g color={clip.strokeColor}>
+              {clip.annotationType === "arrow" && (
+                <g color={clip.strokeColor}>
+                  <line
+                    x1={clip.x}
+                    y1={clip.y}
+                    x2={clip.endX ?? clip.x + clip.width}
+                    y2={clip.endY ?? clip.y + clip.height}
+                    stroke={clip.strokeColor}
+                    strokeWidth={clip.strokeWidth}
+                    strokeDasharray={clip.strokeStyle === "dashed" ? "8 8" : undefined}
+                    markerEnd="url(#arrowhead)"
+                    filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
+                  />
+                </g>
+              )}
+
+              {clip.annotationType === "line" && (
                 <line
                   x1={clip.x}
                   y1={clip.y}
@@ -418,177 +319,244 @@ export function AnnotationCanvasOverlay({
                   y2={clip.endY ?? clip.y + clip.height}
                   stroke={clip.strokeColor}
                   strokeWidth={clip.strokeWidth}
-                  strokeDasharray={clip.strokeStyle === "dashed" ? "8 8" : undefined}
-                  markerEnd="url(#arrowhead)"
+                  strokeDasharray={
+                    clip.strokeStyle === "dashed"
+                      ? "8 8"
+                      : clip.strokeStyle === "dotted"
+                        ? "4 6"
+                        : undefined
+                  }
                   filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
                 />
-              </g>
-            )}
+              )}
 
-            {clip.annotationType === "line" && (
-              <line
-                x1={clip.x}
-                y1={clip.y}
-                x2={clip.endX ?? clip.x + clip.width}
-                y2={clip.endY ?? clip.y + clip.height}
-                stroke={clip.strokeColor}
-                strokeWidth={clip.strokeWidth}
-                strokeDasharray={
-                  clip.strokeStyle === "dashed"
-                    ? "8 8"
-                    : clip.strokeStyle === "dotted"
-                      ? "4 6"
-                      : undefined
-                }
-                filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
-              />
-            )}
+              {clip.annotationType === "callout" && (
+                <g filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}>
+                  <rect
+                    x={clip.x}
+                    y={clip.y}
+                    width={clip.width}
+                    height={clip.height}
+                    rx={clip.cornerRadius ?? 12}
+                    stroke={clip.strokeColor}
+                    strokeWidth={clip.strokeWidth}
+                    fill={clip.fillColor}
+                    fillOpacity={clip.fillOpacity}
+                  />
+                  <text
+                    x={clip.x + clip.width / 2}
+                    y={clip.y + clip.height / 2 + (clip.fontSize ?? 16) * 0.35}
+                    textAnchor="middle"
+                    fill={clip.textColor ?? "#ffffff"}
+                    fontSize={clip.fontSize ?? 16}
+                    fontWeight="bold"
+                    fontFamily="sans-serif"
+                  >
+                    {clip.text}
+                  </text>
+                </g>
+              )}
 
-            {clip.annotationType === "callout" && (
-              <g filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}>
-                <rect
-                  x={clip.x}
-                  y={clip.y}
-                  width={clip.width}
-                  height={clip.height}
-                  rx={clip.cornerRadius ?? 12}
-                  stroke={clip.strokeColor}
-                  strokeWidth={clip.strokeWidth}
-                  fill={clip.fillColor}
-                  fillOpacity={clip.fillOpacity}
-                />
-                <text
-                  x={clip.x + clip.width / 2}
-                  y={clip.y + clip.height / 2 + (clip.fontSize ?? 16) * 0.35}
-                  textAnchor="middle"
-                  fill={clip.textColor ?? "#ffffff"}
-                  fontSize={clip.fontSize ?? 16}
-                  fontWeight="bold"
-                  fontFamily="sans-serif"
-                >
-                  {clip.text}
-                </text>
-              </g>
-            )}
+              {clip.annotationType === "badge" && (
+                <g filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}>
+                  <rect
+                    x={clip.x}
+                    y={clip.y}
+                    width={clip.width}
+                    height={clip.height}
+                    rx={8}
+                    stroke={clip.strokeColor}
+                    strokeWidth={clip.strokeWidth}
+                    fill={clip.fillColor}
+                    fillOpacity={clip.fillOpacity}
+                  />
+                  <text
+                    x={clip.x + clip.width / 2}
+                    y={clip.y + clip.height / 2 + 5}
+                    textAnchor="middle"
+                    fill={clip.textColor ?? "#ffffff"}
+                    fontSize={clip.fontSize ?? 14}
+                    fontWeight="bold"
+                    letterSpacing="1px"
+                    fontFamily="sans-serif"
+                  >
+                    {clip.text}
+                  </text>
+                </g>
+              )}
 
-            {clip.annotationType === "badge" && (
-              <g filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}>
-                <rect
-                  x={clip.x}
-                  y={clip.y}
-                  width={clip.width}
-                  height={clip.height}
-                  rx={8}
-                  stroke={clip.strokeColor}
-                  strokeWidth={clip.strokeWidth}
-                  fill={clip.fillColor}
-                  fillOpacity={clip.fillOpacity}
-                />
-                <text
-                  x={clip.x + clip.width / 2}
-                  y={clip.y + clip.height / 2 + 5}
-                  textAnchor="middle"
-                  fill={clip.textColor ?? "#ffffff"}
-                  fontSize={clip.fontSize ?? 14}
-                  fontWeight="bold"
-                  letterSpacing="1px"
-                  fontFamily="sans-serif"
-                >
-                  {clip.text}
-                </text>
-              </g>
-            )}
-
-            {/* Selection Bounding Box & Handles */}
-            {isSelected && !clip.locked && (
-              <g>
-                <rect
-                  x={clip.x - 4}
-                  y={clip.y - 4}
-                  width={clip.width + 8}
-                  height={clip.height + 8}
-                  fill="none"
-                  stroke="#38bdf8"
-                  strokeWidth="2"
-                  strokeDasharray="4 4"
-                />
-                {/* Resize Handle SE */}
-                <rect
-                  x={clip.x + clip.width - 4}
-                  y={clip.y + clip.height - 4}
-                  width="12"
-                  height="12"
-                  fill="#38bdf8"
-                  stroke="#ffffff"
-                  strokeWidth="2"
-                  rx="2"
-                  className="cursor-nwse-resize pointer-events-auto"
-                  onPointerDown={(e) => {
-                    e.stopPropagation()
-                    beginShapeGesture(e, clip, "resize-se")
-                  }}
-                  onPointerMove={moveShapeGesture}
-                  onPointerUp={finishShapeGesture}
-                  onPointerCancel={finishShapeGesture}
-                />
-                {/* Resize Handle NW */}
-                <rect
-                  x={clip.x - 8}
-                  y={clip.y - 8}
-                  width="12"
-                  height="12"
-                  fill="#38bdf8"
-                  stroke="#ffffff"
-                  strokeWidth="2"
-                  rx="2"
-                  className="cursor-nwse-resize pointer-events-auto"
-                  onPointerDown={(e) => {
-                    e.stopPropagation()
-                    beginShapeGesture(e, clip, "resize-nw")
-                  }}
-                  onPointerMove={moveShapeGesture}
-                  onPointerUp={finishShapeGesture}
-                  onPointerCancel={finishShapeGesture}
-                />
-                {/* Arrow specific start/end handles */}
-                {(clip.annotationType === "arrow" || clip.annotationType === "line") && (
-                  <>
-                    <circle
-                      cx={clip.x}
-                      cy={clip.y}
-                      r="7"
-                      fill="#38bdf8"
-                      stroke="#ffffff"
-                      strokeWidth="2"
-                      className="cursor-grab pointer-events-auto"
-                      onPointerDown={(e) => {
-                        e.stopPropagation()
-                        beginShapeGesture(e, clip, "arrow-start")
+              {/* Selection Bounding Box & Handles */}
+              {isSelected && !clip.locked && (
+                <g>
+                  <rect
+                    x={clip.x - 4}
+                    y={clip.y - 4}
+                    width={clip.width + 8}
+                    height={clip.height + 8}
+                    className="fill-none stroke-primary"
+                    strokeWidth={2}
+                    strokeDasharray="4 4"
+                    pointerEvents="none"
+                  />
+                  {/* Resize Handle SE */}
+                  {/* Resize Handle NW */}
+                  {[
+                    {
+                      handle: "nw" as const,
+                      x: clip.x - 6,
+                      y: clip.y - 6,
+                      cursor: "cursor-nwse-resize",
+                      label: "Resize annotation northwest",
+                    },
+                    {
+                      handle: "n" as const,
+                      x: clip.x + clip.width / 2 - 6,
+                      y: clip.y - 6,
+                      cursor: "cursor-n-resize",
+                      label: "Resize annotation north",
+                    },
+                    {
+                      handle: "ne" as const,
+                      x: clip.x + clip.width - 6,
+                      y: clip.y - 6,
+                      cursor: "cursor-nesw-resize",
+                      label: "Resize annotation northeast",
+                    },
+                    {
+                      handle: "e" as const,
+                      x: clip.x + clip.width - 6,
+                      y: clip.y + clip.height / 2 - 6,
+                      cursor: "cursor-ew-resize",
+                      label: "Resize annotation east",
+                    },
+                    {
+                      handle: "se" as const,
+                      x: clip.x + clip.width - 6,
+                      y: clip.y + clip.height - 6,
+                      cursor: "cursor-nwse-resize",
+                      label: "Resize annotation southeast",
+                    },
+                    {
+                      handle: "s" as const,
+                      x: clip.x + clip.width / 2 - 6,
+                      y: clip.y + clip.height - 6,
+                      cursor: "cursor-s-resize",
+                      label: "Resize annotation south",
+                    },
+                    {
+                      handle: "sw" as const,
+                      x: clip.x - 6,
+                      y: clip.y + clip.height - 6,
+                      cursor: "cursor-nesw-resize",
+                      label: "Resize annotation southwest",
+                    },
+                    {
+                      handle: "w" as const,
+                      x: clip.x - 6,
+                      y: clip.y + clip.height / 2 - 6,
+                      cursor: "cursor-ew-resize",
+                      label: "Resize annotation west",
+                    },
+                  ].map(({ handle, x, y, cursor, label }) => (
+                    <rect
+                      key={handle}
+                      x={x}
+                      y={y}
+                      width={12}
+                      height={12}
+                      rx={2}
+                      className={cn(
+                        "pointer-events-auto fill-primary stroke-background focus-visible:outline-none",
+                        cursor,
+                      )}
+                      strokeWidth={2}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={label}
+                      onPointerDown={(event) => {
+                        event.stopPropagation()
+                        beginShapeGesture(event, clip, handle)
                       }}
                       onPointerMove={moveShapeGesture}
                       onPointerUp={finishShapeGesture}
                       onPointerCancel={finishShapeGesture}
+                      onLostPointerCapture={interaction.handleLostPointerCapture}
                     />
-                    <circle
-                      cx={clip.endX ?? clip.x + clip.width}
-                      cy={clip.endY ?? clip.y + clip.height}
-                      r="7"
-                      fill="#e879f9"
-                      stroke="#ffffff"
-                      strokeWidth="2"
-                      className="cursor-grab pointer-events-auto"
-                      onPointerDown={(e) => {
-                        e.stopPropagation()
-                        beginShapeGesture(e, clip, "arrow-end")
-                      }}
-                      onPointerMove={moveShapeGesture}
-                      onPointerUp={finishShapeGesture}
-                      onPointerCancel={finishShapeGesture}
-                    />
-                  </>
-                )}
-              </g>
-            )}
+                  ))}
+                  {clip.annotationType !== "arrow" && clip.annotationType !== "line" && (
+                    <>
+                      <line
+                        x1={clip.x + clip.width / 2}
+                        y1={clip.y}
+                        x2={clip.x + clip.width / 2}
+                        y2={clip.y - 24}
+                        className="pointer-events-none stroke-primary"
+                        strokeWidth={2}
+                      />
+                      <circle
+                        cx={clip.x + clip.width / 2}
+                        cy={clip.y - 30}
+                        r={7}
+                        className="pointer-events-auto fill-primary stroke-background focus-visible:outline-none cursor-grab"
+                        strokeWidth={2}
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Rotate annotation"
+                        onPointerDown={(event) => {
+                          event.stopPropagation()
+                          beginShapeGesture(event, clip, "rotate")
+                        }}
+                        onPointerMove={moveShapeGesture}
+                        onPointerUp={finishShapeGesture}
+                        onPointerCancel={finishShapeGesture}
+                        onLostPointerCapture={interaction.handleLostPointerCapture}
+                      />
+                    </>
+                  )}
+                  {/* Arrow specific start/end handles */}
+                  {(clip.annotationType === "arrow" || clip.annotationType === "line") && (
+                    <>
+                      <circle
+                        cx={clip.x}
+                        cy={clip.y}
+                        r={7}
+                        className="pointer-events-auto fill-primary stroke-background focus-visible:outline-none cursor-grab"
+                        strokeWidth={2}
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Move annotation start point"
+                        onPointerDown={(event) => {
+                          event.stopPropagation()
+                          beginShapeGesture(event, clip, "arrow-start")
+                        }}
+                        onPointerMove={moveShapeGesture}
+                        onPointerUp={finishShapeGesture}
+                        onPointerCancel={finishShapeGesture}
+                        onLostPointerCapture={interaction.handleLostPointerCapture}
+                      />
+                      <circle
+                        cx={clip.endX ?? clip.x + clip.width}
+                        cy={clip.endY ?? clip.y + clip.height}
+                        r={7}
+                        className="pointer-events-auto fill-warning stroke-background focus-visible:outline-none cursor-grab"
+                        strokeWidth={2}
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Move annotation end point"
+                        onPointerDown={(event) => {
+                          event.stopPropagation()
+                          beginShapeGesture(event, clip, "arrow-end")
+                        }}
+                        onPointerMove={moveShapeGesture}
+                        onPointerUp={finishShapeGesture}
+                        onPointerCancel={finishShapeGesture}
+                        onLostPointerCapture={interaction.handleLostPointerCapture}
+                      />
+                    </>
+                  )}
+                </g>
+              )}
+            </g>
           </g>
         )
       })}

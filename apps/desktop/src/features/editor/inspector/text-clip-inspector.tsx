@@ -1,21 +1,34 @@
-import type { TextClip, TextBackdropStyle } from "@recordforge/contracts"
-import { applyPresetToTextClip, TEXT_PRESETS } from "@recordforge/editor-core"
+import { useMemo, useState } from "react"
+import type { TextClip, TextBackdropStyle, TitlePresetCategory } from "@recordforge/contracts"
+import {
+  applyTextPresetToClip,
+  textPresetFromClip,
+  textPresetToDefinition,
+  type TextPresetRecord,
+} from "@recordforge/editor-core"
 import {
   Button,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
   Input,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Slider,
   Switch,
   ToggleGroup,
   ToggleGroupItem,
   cn,
+  useToast,
 } from "@recordforge/ui"
-import { AlignCenter, AlignLeft, AlignRight, Eye, Lock, Type } from "lucide-react"
-import { InspectorSection, NumberField } from "./fields"
+import { AlignCenter, AlignLeft, AlignRight, Eye, FolderOpen, Lock, Save, Type } from "lucide-react"
+import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
+import { useTextPresetRegistry } from "../presets/preset-store"
+import { PresetBrowser, type BrowserPreset } from "../panels/preset-browser"
+import { SavePresetDialog, type SavePresetFormData } from "../presets/save-preset-dialog"
 
 interface TextClipInspectorProps {
   clip: TextClip
@@ -23,9 +36,47 @@ interface TextClipInspectorProps {
 }
 
 export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
-  function handlePresetChange(presetId: string) {
-    const updated = applyPresetToTextClip(clip, presetId)
-    onChange(updated)
+  const { registry, snapshot } = useTextPresetRegistry()
+  const { toast } = useToast()
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const [saveOpen, setSaveOpen] = useState(false)
+
+  const activePresetName = useMemo(() => {
+    const preset = registry.getPresetById(clip.presetId)
+    return preset?.name ?? clip.presetId
+  }, [registry, clip.presetId])
+
+  function handleApplyPreset(preset: BrowserPreset) {
+    const definition = textPresetToDefinition(preset as TextPresetRecord)
+    const updated = applyTextPresetToClip(clip, definition)
+    onChange({
+      ...updated,
+      primaryText: clip.primaryText,
+      secondaryText: clip.secondaryText,
+      tagText: clip.tagText,
+    })
+  }
+
+  async function handleSavePreset(data: SavePresetFormData) {
+    const record = textPresetFromClip(clip, {
+      name: data.name,
+      description: data.description,
+      category: data.category as TitlePresetCategory,
+      tags: data.tags
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+    })
+    try {
+      await registry.saveCustomPreset(record)
+      toast({ title: "Preset saved", description: `${data.name} is now in your library.` })
+    } catch (error) {
+      toast({
+        title: "Could not save preset",
+        description: error instanceof Error ? error.message : "Try again.",
+        variant: "error",
+      })
+    }
   }
 
   return (
@@ -40,7 +91,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             <h3 className="text-sm font-semibold capitalize text-foreground">
               {clip.category.replace("-", " ")}
             </h3>
-            <p className="text-[10px] text-muted-foreground">{clip.presetId}</p>
+            <p className="text-[10px] text-muted-foreground">{activePresetName}</p>
           </div>
         </div>
 
@@ -66,21 +117,60 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
         </div>
       </div>
 
-      {/* Preset Swapper */}
+      {/* Preset Controls */}
       <InspectorSection title="Style Preset">
-        <Select value={clip.presetId} onValueChange={handlePresetChange}>
-          <SelectTrigger className="h-8 text-xs bg-surface-dim">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent className="max-h-60">
-            {TEXT_PRESETS.map((preset) => (
-              <SelectItem key={preset.id} value={preset.id} className="text-xs">
-                {preset.name} ({preset.category})
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 flex-col rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
+            <span className="text-[10px] text-muted-foreground">Active preset</span>
+            <span className="truncate text-xs font-medium text-foreground">{activePresetName}</span>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => setBrowserOpen(true)}
+          >
+            <FolderOpen className="size-3.5" aria-hidden />
+            Browse
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => setSaveOpen(true)}
+          >
+            <Save className="size-3.5" aria-hidden />
+            Save
+          </Button>
+        </div>
       </InspectorSection>
+
+      <Dialog open={browserOpen} onOpenChange={setBrowserOpen}>
+        <DialogContent className="flex max-h-[min(760px,90vh)] max-w-3xl flex-col gap-3 overflow-hidden p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Type className="size-4 text-warning" aria-hidden />
+              Browse title presets
+            </DialogTitle>
+          </DialogHeader>
+          <PresetBrowser
+            kind="text"
+            selectedPresetId={clip.presetId}
+            onSelect={(preset) => {
+              handleApplyPreset(preset)
+              setBrowserOpen(false)
+            }}
+          />
+        </DialogContent>
+      </Dialog>
+
+      <SavePresetDialog
+        open={saveOpen}
+        onOpenChange={setSaveOpen}
+        defaultCategory={clip.category}
+        categories={snapshot.categories}
+        onSave={handleSavePreset}
+      />
 
       {/* Text Content */}
       <InspectorSection title="Text Content">
@@ -261,12 +351,12 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
                 <span>Backdrop Opacity</span>
                 <span>{Math.round(clip.backdropOpacity * 100)}%</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 min={0}
                 max={1}
                 step={0.05}
                 value={[clip.backdropOpacity]}
-                onValueChange={([val]) => onChange({ backdropOpacity: val })}
+                onValueCommit={([val]) => onChange({ backdropOpacity: val })}
               />
             </div>
 
@@ -275,12 +365,12 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
                 <span>Corner Radius</span>
                 <span>{clip.backdropBorderRadius}px</span>
               </div>
-              <Slider
+              <DebouncedSlider
                 min={0}
                 max={32}
                 step={2}
                 value={[clip.backdropBorderRadius]}
-                onValueChange={([val]) => onChange({ backdropBorderRadius: val })}
+                onValueCommit={([val]) => onChange({ backdropBorderRadius: val })}
               />
             </div>
           </div>
@@ -303,12 +393,12 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               <span>Shadow Blur</span>
               <span>{clip.shadowBlur ?? 16}px</span>
             </div>
-            <Slider
+            <DebouncedSlider
               min={2}
               max={40}
               step={2}
               value={[clip.shadowBlur ?? 16]}
-              onValueChange={([val]) => onChange({ shadowBlur: val })}
+              onValueCommit={([val]) => onChange({ shadowBlur: val })}
             />
           </div>
         )}

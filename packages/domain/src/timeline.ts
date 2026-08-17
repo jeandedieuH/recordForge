@@ -371,8 +371,11 @@ function createScreenAsset(recording: LibraryRecording, metadata: MediaMetadata)
   return {
     id: recording.id,
     role: "screen",
+    kind: "video",
     path: sourceFileName(recording),
     status: "available",
+    importStrategy: "copy",
+    derivativeVersion: 1,
     durationMs: metadata.durationMs,
     width: metadata.width ?? recording.width,
     height: metadata.height ?? recording.height,
@@ -390,8 +393,11 @@ function createStreamAsset(
   return {
     id: `${recording.id}:${role}:${stream.index}`,
     role,
+    kind: stream.kind === "audio" ? "audio" : "video",
     path,
     status: "available",
+    importStrategy: "copy",
+    derivativeVersion: 1,
     durationMs: stream.durationMs ?? 0,
     width: stream.width,
     height: stream.height,

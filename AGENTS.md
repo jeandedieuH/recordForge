@@ -23,13 +23,15 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 | Validation | Zod |
 | UI kit | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010) |
 | Icons | lucide-react (no emoji in product UI) |
-| Font | Inter Variable, vendored via `@fontsource-variable/inter` |
+| Font | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
 
 ## Repository Layout
 
 - `apps/desktop/` — Tauri desktop app (React frontend + Rust backend)
 - `packages/contracts/` — Zod schemas and DTOs
 - `packages/cursor-core/` — Pure cursor telemetry normalization, mapping, and parity algorithms
+- `packages/overlay-core/` — TypeScript/WASM overlay engine adapter
+- `packages/overlay-engine/` — Canonical Rust overlay evaluation engine
 - `packages/domain/` — Domain models
 - `packages/editor-core/` — Pure timeline command engine
 - `packages/media-core/` — FFmpeg job specifications
@@ -71,6 +73,12 @@ Install dependencies:
 
 ```bash
 bun install
+```
+
+Build the overlay engine WASM artifact:
+
+```bash
+bun run build:wasm:overlay
 ```
 
 Download FFmpeg/FFprobe sidecar binaries (required after fresh clone):

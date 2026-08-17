@@ -1,5 +1,6 @@
-import { useRef } from "react"
 import type { ImageClip } from "@recordforge/contracts"
+import type { OverlayHandle } from "@recordforge/editor-core"
+import type { OverlayInteraction } from "./use-overlay-interaction"
 import { cn } from "@recordforge/ui"
 
 interface ImageCanvasOverlayProps {
@@ -9,22 +10,8 @@ interface ImageCanvasOverlayProps {
   canvasHeight: number
   selectedClipId?: string | null
   assetUrls?: Record<string, string>
+  interaction: OverlayInteraction
   onSelectClip?: (clip: ImageClip) => void
-  onUpdateClip?: (
-    clipId: string,
-    update: Partial<ImageClip>,
-    options?: { phase?: "draft" | "commit" | "cancel" },
-  ) => void
-}
-
-interface GestureState {
-  clipId: string
-  pointerId: number
-  mode: "move" | "resize"
-  startX: number
-  startY: number
-  initialClip: ImageClip
-  moved: boolean
 }
 
 function isActive(clip: ImageClip, playheadMs: number): boolean {
@@ -42,100 +29,27 @@ export function ImageCanvasOverlay({
   canvasHeight,
   selectedClipId,
   assetUrls = {},
+  interaction,
   onSelectClip,
-  onUpdateClip,
 }: ImageCanvasOverlayProps) {
-  const gestureRef = useRef<GestureState | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
   function beginGesture(
-    event: React.PointerEvent<HTMLDivElement>,
+    event: React.PointerEvent<Element>,
     clip: ImageClip,
-    mode: GestureState["mode"],
+    handle: OverlayHandle,
   ) {
-    if (event.button !== 0 || !isActive(clip, playheadMs) || clip.locked) return
-    event.stopPropagation()
-    event.preventDefault()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    gestureRef.current = {
-      clipId: clip.id,
-      pointerId: event.pointerId,
-      mode,
-      startX: event.clientX,
-      startY: event.clientY,
-      initialClip: { ...clip },
-      moved: false,
-    }
+    interaction.beginGesture(event, clip, handle)
   }
 
-  function moveGesture(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId || !onUpdateClip || !containerRef.current)
-      return
-    const rect = containerRef.current.getBoundingClientRect()
-    const deltaX = ((event.clientX - gesture.startX) / Math.max(1, rect.width)) * canvasWidth
-    const deltaY = ((event.clientY - gesture.startY) / Math.max(1, rect.height)) * canvasHeight
-
-    if (Math.abs(deltaX) < 1 && Math.abs(deltaY) < 1 && !gesture.moved) return
-    gesture.moved = true
-    event.preventDefault()
-
-    const init = gesture.initialClip
-    const update: Partial<ImageClip> = {}
-
-    if (gesture.mode === "move") {
-      update.x = Math.max(0, Math.min(canvasWidth - init.width, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight - init.height, init.y + deltaY))
-    } else if (gesture.mode === "resize") {
-      update.width = Math.max(40, init.width + deltaX)
-      update.height = Math.max(40, init.height + deltaY)
-    }
-
-    onUpdateClip(gesture.clipId, update, { phase: "draft" })
+  function moveGesture(event: React.PointerEvent<Element>) {
+    interaction.moveGesture(event)
   }
 
-  function finishGesture(event: React.PointerEvent<HTMLDivElement>) {
-    const gesture = gestureRef.current
-    if (!gesture || gesture.pointerId !== event.pointerId) return
-    const wasCancelled = event.type === "pointercancel"
-    const didMove = gesture.moved
-    gestureRef.current = null
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId)
-      }
-    } catch {}
-
-    if (!onUpdateClip) return
-    if (wasCancelled || !didMove) {
-      onUpdateClip(gesture.clipId, gesture.initialClip, { phase: "cancel" })
-      return
-    }
-
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const deltaX = ((event.clientX - gesture.startX) / Math.max(1, rect.width)) * canvasWidth
-    const deltaY = ((event.clientY - gesture.startY) / Math.max(1, rect.height)) * canvasHeight
-
-    const init = gesture.initialClip
-    const update: Partial<ImageClip> = {}
-
-    if (gesture.mode === "move") {
-      update.x = Math.max(0, Math.min(canvasWidth - init.width, init.x + deltaX))
-      update.y = Math.max(0, Math.min(canvasHeight - init.height, init.y + deltaY))
-    } else if (gesture.mode === "resize") {
-      update.width = Math.max(40, init.width + deltaX)
-      update.height = Math.max(40, init.height + deltaY)
-    }
-
-    onUpdateClip(gesture.clipId, update, { phase: "commit" })
+  function finishGesture(event: React.PointerEvent<Element>) {
+    interaction.finishGesture(event)
   }
 
   return (
-    <div
-      ref={containerRef}
-      className="absolute inset-0 z-34 size-full pointer-events-none overflow-hidden"
-    >
+    <div className="absolute inset-0 z-34 size-full pointer-events-none overflow-hidden">
       {clips.map((clip) => {
         const active = isActive(clip, playheadMs)
         if (!active) return null
@@ -165,6 +79,8 @@ export function ImageCanvasOverlay({
               width: `${widthPercent}%`,
               height: `${heightPercent}%`,
               opacity: clip.opacity,
+              transform: `rotate(${clip.rotation}deg)`,
+              transformOrigin: `${clip.anchorX * 100}% ${clip.anchorY * 100}%`,
               borderRadius: `${clip.borderRadius}px`,
               border:
                 clip.borderWidth > 0
@@ -176,10 +92,12 @@ export function ImageCanvasOverlay({
               e.stopPropagation()
               onSelectClip?.(clip)
             }}
-            onPointerDown={(e) => beginGesture(e, clip, "move")}
+            onFocus={() => onSelectClip?.(clip)}
+            onPointerDown={(e) => beginGesture(e, clip, "body")}
             onPointerMove={moveGesture}
             onPointerUp={finishGesture}
             onPointerCancel={finishGesture}
+            onLostPointerCapture={interaction.handleLostPointerCapture}
           >
             {imageUrl ? (
               <img
@@ -207,17 +125,106 @@ export function ImageCanvasOverlay({
 
             {/* Resize Handle */}
             {isSelected && !clip.locked && (
-              <div
-                role="button"
-                tabIndex={0}
-                aria-label="Resize image"
-                className="absolute -bottom-1.5 -right-1.5 size-3.5 cursor-nwse-resize rounded-sm border-2 border-white bg-info shadow-e2 pointer-events-auto"
-                onPointerDown={(e) => {
-                  e.stopPropagation()
-                  beginGesture(e, clip, "resize")
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
+              <>
+                {[
+                  {
+                    handle: "nw" as const,
+                    left: "0%",
+                    top: "0%",
+                    cursor: "cursor-nwse-resize",
+                    label: "Resize image northwest",
+                  },
+                  {
+                    handle: "n" as const,
+                    left: "50%",
+                    top: "0%",
+                    cursor: "cursor-n-resize",
+                    label: "Resize image north",
+                  },
+                  {
+                    handle: "ne" as const,
+                    left: "100%",
+                    top: "0%",
+                    cursor: "cursor-nesw-resize",
+                    label: "Resize image northeast",
+                  },
+                  {
+                    handle: "e" as const,
+                    left: "100%",
+                    top: "50%",
+                    cursor: "cursor-ew-resize",
+                    label: "Resize image east",
+                  },
+                  {
+                    handle: "se" as const,
+                    left: "100%",
+                    top: "100%",
+                    cursor: "cursor-nwse-resize",
+                    label: "Resize image southeast",
+                  },
+                  {
+                    handle: "s" as const,
+                    left: "50%",
+                    top: "100%",
+                    cursor: "cursor-s-resize",
+                    label: "Resize image south",
+                  },
+                  {
+                    handle: "sw" as const,
+                    left: "0%",
+                    top: "100%",
+                    cursor: "cursor-nesw-resize",
+                    label: "Resize image southwest",
+                  },
+                  {
+                    handle: "w" as const,
+                    left: "0%",
+                    top: "50%",
+                    cursor: "cursor-ew-resize",
+                    label: "Resize image west",
+                  },
+                ].map(({ handle, left, top, cursor, label }) => (
+                  <div
+                    key={handle}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={label}
+                    className={cn(
+                      "absolute -translate-x-1/2 -translate-y-1/2 size-3.5 rounded-sm border-2 border-background bg-info shadow-e2 pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-info",
+                      cursor,
+                    )}
+                    style={{ left, top }}
+                    onPointerDown={(event) => {
+                      event.stopPropagation()
+                      beginGesture(event, clip, handle)
+                    }}
+                    onPointerMove={moveGesture}
+                    onPointerUp={finishGesture}
+                    onPointerCancel={finishGesture}
+                    onLostPointerCapture={interaction.handleLostPointerCapture}
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ))}
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-1/2 -top-6 h-6 w-px -translate-x-1/2 bg-info"
+                />
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Rotate image"
+                  className="absolute left-1/2 -top-8 size-3.5 -translate-x-1/2 cursor-grab rounded-full border-2 border-background bg-info shadow-e2 pointer-events-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-info"
+                  onPointerDown={(event) => {
+                    event.stopPropagation()
+                    beginGesture(event, clip, "rotate")
+                  }}
+                  onPointerMove={moveGesture}
+                  onPointerUp={finishGesture}
+                  onPointerCancel={finishGesture}
+                  onLostPointerCapture={interaction.handleLostPointerCapture}
+                  onClick={(event) => event.stopPropagation()}
+                />
+              </>
             )}
           </div>
         )

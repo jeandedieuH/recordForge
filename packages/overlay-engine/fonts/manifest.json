@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "license": "OFL-1.1",
+  "fontFiles": [
+    {
+      "family": "sans",
+      "file": "Inter-VariableFont_slnt,wght.ttf",
+      "role": "default sans"
+    },
+    {
+      "family": "serif",
+      "file": "SourceSerif4-Regular.ttf",
+      "role": "serif fallback"
+    },
+    {
+      "family": "mono",
+      "file": "JetBrainsMono-Regular.ttf",
+      "role": "monospace fallback"
+    },
+    {
+      "family": "heading",
+      "file": "Outfit-VariableFont_wght.ttf",
+      "role": "heading"
+    }
+  ],
+  "licenseFile": "LICENSE.md",
+  "sourcePolicy": "Vendor the official upstream files at the pinned version before native text shaping is enabled."
+}

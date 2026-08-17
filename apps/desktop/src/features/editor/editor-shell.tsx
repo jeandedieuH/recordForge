@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { X } from "lucide-react"
 import { Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
+import type { AnnotationType } from "@recordforge/contracts"
 import { useTimelineStore } from "../../stores/timeline-store"
 import {
   useThumbnailManifest,
@@ -42,6 +43,9 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const [activeTask, setActiveTask] = useState(loadActiveTask)
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false)
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false)
+  const [drawMode, setDrawMode] = useState(false)
+  const [drawType, setDrawType] = useState<AnnotationType>("rectangle")
+  const [drawColor, setDrawColor] = useState("#38bdf8")
 
   const [activePanelWidth, setActivePanelWidth] = useResizableDimension({
     defaultValue: 260,
@@ -92,6 +96,12 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
     if (isNarrow) setMobilePanelOpen(true)
   }
 
+  function handleToggleDrawMode(enabled: boolean, type: AnnotationType, color: string) {
+    setDrawMode(enabled)
+    setDrawType(type)
+    setDrawColor(color)
+  }
+
   const activePanel = (
     <ActivePanel
       activeTask={activeTask}
@@ -100,6 +110,8 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
       metadata={metadata}
       thumbnailResource={thumbnailResource}
       waveformResources={waveformResources}
+      drawMode={drawMode}
+      onToggleDrawMode={handleToggleDrawMode}
       onOpenExport={onOpenExport}
     />
   )
@@ -140,6 +152,9 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
             thumbnailResource={thumbnailResource}
             videoThumbnailResources={videoThumbnailResources}
             waveformResources={waveformResources}
+            drawMode={drawMode}
+            drawType={drawType}
+            drawColor={drawColor}
           />
         </section>
 

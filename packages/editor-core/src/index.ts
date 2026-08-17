@@ -3,6 +3,7 @@
 
 export * from "@recordforge/domain"
 export * from "./camera-presets"
+export * from "./presets/preset-registry"
 export * from "./text-presets"
 export * from "./annotation-presets"
 export * from "./command-records"
@@ -16,6 +17,7 @@ export * from "./composition"
 export * from "./playback-clock"
 export * from "./preview-composition"
 export * from "./interaction-transaction"
+export * from "./overlay-transaction"
 export {
   analyzeCursorTelemetry,
   clampZoomTarget as clampCursorZoomTarget,
