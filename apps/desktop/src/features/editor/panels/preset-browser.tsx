@@ -104,6 +104,10 @@ function PresetBrowserContent({
     }) as BrowserPreset[]
   }, [active.registry, category, query])
 
+  const categories = useMemo(() => {
+    return ["all", "favorites", ...(active.snapshot?.categories ?? [])]
+  }, [active.snapshot?.categories])
+
   const columnCount = viewMode === "grid" ? 2 : 1
   const rowCount = Math.ceil(presets.length / columnCount)
   const virtualizer = useVirtualizer({
@@ -162,10 +166,6 @@ function PresetBrowserContent({
       />
     )
   }
-
-  const categories = useMemo(() => {
-    return ["all", "favorites", ...active.snapshot.categories]
-  }, [active.snapshot.categories])
 
   function handleCategoryKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     const currentIndex = categories.indexOf(category)
@@ -410,7 +410,8 @@ function CategoryButton({ active, label, icon: Icon, onClick }: CategoryButtonPr
   )
 }
 
-function formatCategory(category: string): string {
+function formatCategory(category?: string): string {
+  if (!category) return ""
   return category
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))

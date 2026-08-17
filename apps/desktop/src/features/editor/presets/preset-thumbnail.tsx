@@ -29,10 +29,21 @@ interface PresetThumbnailProps {
 export function PresetThumbnail({ kind, preset, className }: PresetThumbnailProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
-  const plan = useMemo(() => createThumbnailPlan(kind, preset), [kind, preset])
+  const plan = useMemo(() => {
+    try {
+      return createThumbnailPlan(kind, preset)
+    } catch {
+      return null
+    }
+  }, [kind, preset])
 
   useEffect(() => {
     let isCancelled = false
+    if (!plan) {
+      setStatus("error")
+      return
+    }
+
     setStatus("loading")
     const canvas = canvasRef.current
     if (!canvas) return
@@ -99,13 +110,18 @@ function createThumbnailPlan(kind: "annotation" | "text", preset: AnnotationPres
           canvasWidth: THUMBNAIL_WIDTH,
           canvasHeight: THUMBNAIL_HEIGHT,
         })
-      : createTextClipFromDefinition(textPresetToDefinition(preset as TextPreset), {
-          id,
-          startMs: 0,
-          durationMs: 2_000,
-          canvasWidth: THUMBNAIL_WIDTH,
-          canvasHeight: THUMBNAIL_HEIGHT,
-        })
+      : createTextClipFromDefinition(
+          "definition" in preset && preset.definition
+            ? textPresetToDefinition(preset as TextPreset)
+            : (preset as unknown as import("@recordforge/editor-core").TextPresetDefinition),
+          {
+            id,
+            startMs: 0,
+            durationMs: 2_000,
+            canvasWidth: THUMBNAIL_WIDTH,
+            canvasHeight: THUMBNAIL_HEIGHT,
+          },
+        )
 
   const timeline: TimelineState = {
     version: 1,

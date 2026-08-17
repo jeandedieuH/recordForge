@@ -12,6 +12,7 @@ import {
   ZoomIn,
 } from "lucide-react"
 import type { EditorTask } from "./task-rail"
+import { ActivePanelErrorBoundary } from "./active-panel-error-boundary"
 import { MediaPanel } from "../panels/media-panel"
 import { TitlesPanel } from "../panels/titles-panel"
 import { AnnotationsPanel } from "../panels/annotations-panel"
@@ -70,36 +71,44 @@ export function ActivePanel({
   onToggleDrawMode,
   onOpenExport,
 }: ActivePanelProps) {
-  switch (activeTask) {
-    case "media":
-      return (
-        <MediaPanel
-          timeline={timeline}
-          recording={recording}
-          metadata={metadata}
-          thumbnailResource={thumbnailResource}
-          waveformResources={waveformResources}
-        />
-      )
-    case "titles":
-      return <TitlesPanel />
-    case "annotations":
-      return <AnnotationsPanel drawMode={drawMode} onToggleDrawMode={onToggleDrawMode} />
-    case "focus":
-      return <FocusPanel />
-    case "cursor":
-      return <CursorPanel />
-    case "captions":
-      return <CaptionsPanel />
-    case "layout":
-      return <LayoutPanel />
-    case "audio":
-      return <AudioPanel />
-    case "privacy":
-      return <PrivacyPanel />
-    case "export":
-      return <ExportPanel onOpenExport={onOpenExport} />
-    default:
-      return null
+  function renderContent() {
+    switch (activeTask) {
+      case "media":
+        return (
+          <MediaPanel
+            timeline={timeline}
+            recording={recording}
+            metadata={metadata}
+            thumbnailResource={thumbnailResource}
+            waveformResources={waveformResources}
+          />
+        )
+      case "titles":
+        return <TitlesPanel />
+      case "annotations":
+        return <AnnotationsPanel drawMode={drawMode} onToggleDrawMode={onToggleDrawMode} />
+      case "focus":
+        return <FocusPanel />
+      case "cursor":
+        return <CursorPanel />
+      case "captions":
+        return <CaptionsPanel />
+      case "layout":
+        return <LayoutPanel />
+      case "audio":
+        return <AudioPanel />
+      case "privacy":
+        return <PrivacyPanel />
+      case "export":
+        return <ExportPanel onOpenExport={onOpenExport} />
+      default:
+        return null
+    }
   }
+
+  return (
+    <ActivePanelErrorBoundary resetKey={activeTask} panelName={activeTask}>
+      {renderContent()}
+    </ActivePanelErrorBoundary>
+  )
 }
