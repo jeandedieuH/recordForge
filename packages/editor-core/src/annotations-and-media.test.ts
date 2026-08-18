@@ -536,4 +536,3 @@ describe("Track Movement for Overlays (Annotations, Titles, Graphics)", () => {
     }
   })
 })
-

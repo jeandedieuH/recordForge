@@ -1137,9 +1137,7 @@ function applyDuplicateClips(
       if (
         track.clips.some(
           (c) =>
-            !clipIds.has(c.id) &&
-            targetStart < c.startMs + c.durationMs &&
-            targetEnd > c.startMs,
+            !clipIds.has(c.id) && targetStart < c.startMs + c.durationMs && targetEnd > c.startMs,
         )
       ) {
         causesOverlap = true

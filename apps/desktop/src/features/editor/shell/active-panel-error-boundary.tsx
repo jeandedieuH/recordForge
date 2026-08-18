@@ -48,7 +48,8 @@ export class ActivePanelErrorBoundary extends Component<
             icon={AlertCircle}
             title={`${this.props.panelName ?? "Panel"} error`}
             description={
-              this.state.error?.message || "An unexpected error occurred while rendering this panel."
+              this.state.error?.message ||
+              "An unexpected error occurred while rendering this panel."
             }
             action={
               <Button variant="secondary" size="sm" onClick={this.handleReset} className="gap-1.5">

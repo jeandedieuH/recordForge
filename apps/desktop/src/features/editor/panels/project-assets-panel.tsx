@@ -19,7 +19,12 @@ import {
   Upload,
 } from "lucide-react"
 import { Button, Card, CardContent, EmptyState, Skeleton, cn, useToast } from "@recordforge/ui"
-import { deleteAsset, importAssets, resolveAssetPath, startAssetDerivativeJob } from "../../../lib/assets"
+import {
+  deleteAsset,
+  importAssets,
+  resolveAssetPath,
+  startAssetDerivativeJob,
+} from "../../../lib/assets"
 import { onMediaJobUpdate, listMediaJobs } from "../../../lib/media"
 import { loadProject } from "../../../lib/project"
 import { toErrorMessage } from "../../../lib/errors"

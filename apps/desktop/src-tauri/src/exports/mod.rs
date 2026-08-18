@@ -662,7 +662,15 @@ fn render_timeline_composition(
         .as_ref()
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
-    let input_assets = collect_input_assets(plan, asset_paths)?;
+    let bg_image_path = resolve_background_image(&canvas.background, asset_paths);
+    let mut input_assets = collect_input_assets(plan, asset_paths)?;
+    let bg_input_index = if let Some(bg_path) = &bg_image_path {
+        let idx = input_assets.len();
+        input_assets.push(("canvas:background".to_string(), bg_path.clone()));
+        Some(idx)
+    } else {
+        None
+    };
     let input_indices = input_assets
         .iter()
         .enumerate()
@@ -712,8 +720,13 @@ fn render_timeline_composition(
         }
         if segment.output_start_ms > cursor_ms {
             let gap_label = format!("gap{index}");
+            let gap_color = if bg_input_index.is_some() {
+                "black@0".to_string()
+            } else {
+                background.clone()
+            };
             filters.push(format!(
-                "color=c={background}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
+                "color=c={gap_color}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
                 canvas.fps,
                 seconds(segment.output_start_ms - cursor_ms),
             ));
@@ -733,8 +746,13 @@ fn render_timeline_composition(
         if (segment.speed - 1.0).abs() > f64::EPSILON {
             filter.push_str(&format!(",setpts=PTS/{:.6}", segment.speed));
         }
+        let pad_color = if bg_input_index.is_some() {
+            "black@0".to_string()
+        } else {
+            background.clone()
+        };
         filter.push_str(&format!(
-            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={background},fps={},setsar=1[{label}]",
+            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1[{label}]",
             canvas.fps,
         ));
         filters.push(filter);
@@ -743,8 +761,13 @@ fn render_timeline_composition(
     }
     if cursor_ms < plan.duration_ms {
         let gap_label = "gap_trailing";
+        let gap_color = if bg_input_index.is_some() {
+            "black@0".to_string()
+        } else {
+            background.clone()
+        };
         filters.push(format!(
-            "color=c={background}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
+            "color=c={gap_color}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
             canvas.fps,
             seconds(plan.duration_ms - cursor_ms),
         ));
@@ -770,43 +793,76 @@ fn render_timeline_composition(
     // Filters are pull-based, so the oversized stop_duration only materializes
     // frames up to the trim cutoff.
     let plan_duration = seconds(plan.duration_ms);
-    // Crop the fitted recorded video out of the padded content area, then pad
-    // it to the full canvas so radius and shadow are applied to the actual
-    // video layer rather than the padded content box.
-    let mut canvas_filter = format!(
-        "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},pad={}:{}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1",
-        canvas.width, canvas.height
+
+    // 1. Generate the background plate [bg_plate]
+    if let Some(bg_idx) = bg_input_index {
+        let mut bg_filter = format!(
+            "[{bg_idx}:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1,fps={}",
+            canvas.width, canvas.height, canvas.width, canvas.height, canvas.fps
+        );
+        let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
+        if bg_blur > 0.0 {
+            let radius = (bg_blur.round() as u32).clamp(1, 50);
+            bg_filter.push_str(&format!(
+                ",boxblur=luma_radius={radius}:luma_power=2:chroma_radius={radius}:chroma_power=2"
+            ));
+        }
+        let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
+        if bg_dim > 0.0 {
+            bg_filter.push_str(&format!(
+                ",drawbox=x=0:y=0:w={}:h={}:color=black@{:.3}:t=fill",
+                canvas.width, canvas.height, bg_dim
+            ));
+        }
+        bg_filter.push_str(&format!(
+            ",tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[bg_plate]"
+        ));
+        filters.push(bg_filter);
+    } else {
+        filters.push(format!(
+            "color=c={background}:s={}x{}:r={}:d={}[bg_plate]",
+            canvas.width, canvas.height, canvas.fps, plan_duration
+        ));
+    }
+
+    // 2. Crop and format the fitted video layer [screen_fitted]
+    let mut screen_filter = format!(
+        "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
     );
     if canvas.border_radius > 0 {
-        let (red, green, blue) = hex_rgb(&background);
         let radius = (canvas.border_radius as f64)
             .min(screen_w / 2.0)
             .min(screen_h / 2.0);
-        let left = screen_x + radius;
-        let right = screen_x + screen_w - radius;
-        let top = screen_y + radius;
-        let bottom = screen_y + screen_h - radius;
+        let left = radius;
+        let right = screen_w - radius;
+        let top = radius;
+        let bottom = screen_h - radius;
         let mask = format!(
             "(((X<{left})*(Y<{top})*(hypot(X-{left},Y-{top})>{radius})+(X>{right})*(Y<{top})*(hypot(X-{right},Y-{top})>{radius})+(X<{left})*(Y>{bottom})*(hypot(X-{left},Y-{bottom})>{radius})+(X>{right})*(Y>{bottom})*(hypot(X-{right},Y-{bottom})>{radius}))>0)"
         );
-        canvas_filter.push_str(&format!(
-            ",format=rgb24,geq=r='if({mask},{red},r)':g='if({mask},{green},g)':b='if({mask},{blue},b)'"
+        screen_filter.push_str(&format!(
+            ",format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if({mask},0,255)'"
         ));
     }
+    screen_filter.push_str("[screen_fitted]");
+    filters.push(screen_filter);
+
+    // 3. Composite shadow and screen layer onto background plate [canvas_base]
+    let mut bg_current = "[bg_plate]".to_string();
     if canvas.shadow {
         let shadow_color = safe_filter_color(canvas.shadow_color.as_deref().unwrap_or("#000000"));
         let shadow_blur = canvas.shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
-        canvas_filter.push_str(&format!(
-            ",drawbox=x={}:y={}:w={}:h={}:color={shadow_color}@0.3:t={shadow_blur:.2}",
-            (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0),
-            (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0),
-            screen_w,
-            screen_h,
+        let shadow_x = (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0);
+        let shadow_y = (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0);
+        filters.push(format!(
+            "{bg_current}drawbox=x={shadow_x:.0}:y={shadow_y:.0}:w={screen_w:.0}:h={screen_h:.0}:color={shadow_color}@0.3:t={shadow_blur:.2}[bg_with_shadow]"
         ));
+        bg_current = "[bg_with_shadow]".to_string();
     }
     let base_label = "canvas_base";
-    canvas_filter.push_str(&format!("[{base_label}]"));
-    filters.push(canvas_filter);
+    filters.push(format!(
+        "{bg_current}[screen_fitted]overlay=x={screen_x:.0}:y={screen_y:.0}:shortest=1[{base_label}]"
+    ));
 
     let composed_label = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
         let width_expression = zoom_crop_expression(plan, canvas, "width");
@@ -1999,6 +2055,18 @@ fn validate_canvas(canvas: &cursor::RenderCanvas) -> Result<()> {
     if canvas.border_radius > canvas.width.min(canvas.height) / 2 {
         return Err(InternalError::Media("render canvas border radius is too large".into()).into());
     }
+    if canvas
+        .background_blur
+        .is_some_and(|b| !b.is_finite() || b < 0.0 || b > 200.0)
+    {
+        return Err(InternalError::Media("render canvas background blur is invalid".into()).into());
+    }
+    if canvas
+        .background_dim
+        .is_some_and(|d| !d.is_finite() || d < 0.0 || d > 1.0)
+    {
+        return Err(InternalError::Media("render canvas background dim is invalid".into()).into());
+    }
     Ok(())
 }
 
@@ -2012,25 +2080,120 @@ fn safe_filter_color(value: &str) -> String {
     if is_hex {
         return trimmed.to_string();
     }
+    // If the value contains a hex color (e.g. from linear-gradient(#1e1b4b, ...)), extract the first 6-digit hex
+    if let Some(pos) = trimmed.find('#') {
+        let candidate = &trimmed[pos..];
+        if candidate.len() >= 7 && candidate[1..7].chars().all(|c| c.is_ascii_hexdigit()) {
+            return candidate[..7].to_string();
+        }
+    }
     match trimmed.to_ascii_lowercase().as_str() {
         "white" => "#ffffff".into(),
         "red" => "#ef4444".into(),
         "blue" => "#3b82f6".into(),
         "yellow" => "#facc15".into(),
         "transparent" => "#00000000".into(),
-        _ => "#000000".into(),
+        _ => "#070b14".into(),
     }
 }
 
-fn hex_rgb(value: &str) -> (u8, u8, u8) {
-    let digits = value.strip_prefix('#').unwrap_or("");
-    if digits.len() < 6 {
-        return (0, 0, 0);
+
+pub(crate) fn resolve_background_image(
+    background: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    let trimmed = background.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    let red = u8::from_str_radix(&digits[0..2], 16).unwrap_or(0);
-    let green = u8::from_str_radix(&digits[2..4], 16).unwrap_or(0);
-    let blue = u8::from_str_radix(&digits[4..6], 16).unwrap_or(0);
-    (red, green, blue)
+    if trimmed.starts_with('#')
+        || trimmed.starts_with("rgb(")
+        || trimmed.starts_with("rgba(")
+        || trimmed.starts_with("hsl(")
+        || trimmed.starts_with("hsla(")
+        || trimmed.starts_with("linear-gradient")
+        || trimmed.starts_with("radial-gradient")
+        || trimmed.starts_with("conic-gradient")
+    {
+        return None;
+    }
+
+    let path_str = if trimmed.starts_with("url(") && trimmed.ends_with(')') {
+        let inner = &trimmed[4..trimmed.len() - 1].trim();
+        inner.trim_matches(|c| c == '"' || c == '\'').trim()
+    } else {
+        trimmed
+    };
+
+    if path_str.starts_with("data:image/") {
+        if let Some((_, base64_data)) = path_str.split_once(";base64,") {
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data.trim()) {
+                let temp_path = std::env::temp_dir().join(format!("recordforge_bg_{}.png", uuid::Uuid::new_v4()));
+                if std::fs::write(&temp_path, bytes).is_ok() {
+                    return Some(temp_path);
+                }
+            }
+        }
+    }
+
+    if let Some(path) = asset_paths.get(path_str) {
+        if path.is_file() {
+            return Some(path.clone());
+        }
+    }
+
+    let direct = PathBuf::from(path_str);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    let filename = direct
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(path_str);
+    let trimmed_leading = path_str.trim_start_matches(|c| c == '/' || c == '\\');
+
+    let mut candidate_names = vec![filename.to_string(), trimmed_leading.to_string()];
+    if !filename.contains('.') {
+        candidate_names.push(format!("{filename}.jpg"));
+        candidate_names.push(format!("{filename}.png"));
+    }
+
+    let mut search_dirs = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        search_dirs.push(cwd.join("public").join("backgrounds"));
+        search_dirs.push(cwd.join("apps").join("desktop").join("public").join("backgrounds"));
+        search_dirs.push(cwd.join("dist").join("backgrounds"));
+        search_dirs.push(cwd.join("backgrounds"));
+        search_dirs.push(cwd.clone());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            search_dirs.push(parent.join("backgrounds"));
+            search_dirs.push(parent.join("public").join("backgrounds"));
+            search_dirs.push(parent.join("dist").join("backgrounds"));
+            search_dirs.push(parent.join("resources").join("backgrounds"));
+            search_dirs.push(parent.to_path_buf());
+        }
+    }
+    for asset_path in asset_paths.values() {
+        if let Some(parent) = asset_path.parent() {
+            search_dirs.push(parent.join("backgrounds"));
+            search_dirs.push(parent.to_path_buf());
+        }
+    }
+
+    for dir in search_dirs {
+        for name in &candidate_names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
 }
 
 fn zoom_easing_expression(progress: &str, easing: &str) -> String {
@@ -3000,4 +3163,60 @@ mod tests {
         let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
         assert!(has_content, "rendered image overlay frame contains pixels");
     }
+
+    #[test]
+    fn test_resolve_background_image_formats() {
+        let mut asset_paths = HashMap::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("custom-bg.jpg");
+        std::fs::write(&file_path, b"fake jpg content").unwrap();
+        asset_paths.insert("asset-bg-1".into(), file_path.clone());
+
+        // Solid colors and gradients return None
+        assert!(resolve_background_image("#1e1b4b", &asset_paths).is_none());
+        assert!(resolve_background_image("linear-gradient(135deg, #111 0%, #222 100%)", &asset_paths).is_none());
+        assert!(resolve_background_image("radial-gradient(circle, #fff, #000)", &asset_paths).is_none());
+
+        // Asset ID lookup returns file path
+        let resolved_asset = resolve_background_image("asset-bg-1", &asset_paths);
+        assert_eq!(resolved_asset, Some(file_path.clone()));
+
+        // Direct file path returns file path
+        let resolved_direct = resolve_background_image(file_path.to_str().unwrap(), &asset_paths);
+        assert_eq!(resolved_direct, Some(file_path));
+
+        // Base64 data URL decodes to a file
+        let data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let resolved_data = resolve_background_image(data_url, &asset_paths);
+        assert!(resolved_data.is_some());
+        let written_path = resolved_data.unwrap();
+        assert!(written_path.is_file());
+        let _ = std::fs::remove_file(written_path);
+    }
+
+    #[test]
+    fn test_validate_canvas_blur_and_dim() {
+        let mut canvas = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            ..Default::default()
+        };
+        assert!(validate_canvas(&canvas).is_ok());
+
+        canvas.background_blur = Some(24.0);
+        canvas.background_dim = Some(0.35);
+        assert!(validate_canvas(&canvas).is_ok());
+
+        canvas.background_blur = Some(-5.0);
+        assert!(validate_canvas(&canvas).is_err());
+
+        canvas.background_blur = Some(250.0);
+        assert!(validate_canvas(&canvas).is_err());
+
+        canvas.background_blur = Some(20.0);
+        canvas.background_dim = Some(1.5);
+        assert!(validate_canvas(&canvas).is_err());
+    }
 }
+

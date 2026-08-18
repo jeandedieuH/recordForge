@@ -121,4 +121,3 @@ export function startAssetDerivativeJob(request: AssetDerivativeJobRequest): Pro
 export function getProjectAssetPaths(recordingId: string): Promise<ProjectAssetPathMap> {
   return invokeValidated("get_project_asset_paths", { recordingId }, projectAssetPathMapSchema)
 }
-

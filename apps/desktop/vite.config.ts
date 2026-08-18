@@ -3,7 +3,6 @@ import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 
-
 const host = process.env.TAURI_DEV_HOST
 
 // https://vite.dev/config/
@@ -12,12 +11,24 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@recordforge/contracts": path.resolve(import.meta.dirname, "../../packages/contracts/src"),
-      "@recordforge/cursor-core": path.resolve(import.meta.dirname, "../../packages/cursor-core/src"),
+      "@recordforge/cursor-core": path.resolve(
+        import.meta.dirname,
+        "../../packages/cursor-core/src",
+      ),
       "@recordforge/domain": path.resolve(import.meta.dirname, "../../packages/domain/src"),
-      "@recordforge/editor-core": path.resolve(import.meta.dirname, "../../packages/editor-core/src"),
+      "@recordforge/editor-core": path.resolve(
+        import.meta.dirname,
+        "../../packages/editor-core/src",
+      ),
       "@recordforge/media-core": path.resolve(import.meta.dirname, "../../packages/media-core/src"),
-      "@recordforge/overlay-core": path.resolve(import.meta.dirname, "../../packages/overlay-core/src"),
-      "@recordforge/storage-core": path.resolve(import.meta.dirname, "../../packages/storage-core/src"),
+      "@recordforge/overlay-core": path.resolve(
+        import.meta.dirname,
+        "../../packages/overlay-core/src",
+      ),
+      "@recordforge/storage-core": path.resolve(
+        import.meta.dirname,
+        "../../packages/storage-core/src",
+      ),
       "@recordforge/ui/theme.css": path.resolve(
         import.meta.dirname,
         "../../packages/ui/src/styles/theme.css",

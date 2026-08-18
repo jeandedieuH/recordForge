@@ -1,8 +1,4 @@
-import type {
-  ManualZoomSegment,
-  TimelineState,
-  ZoomPreset,
-} from "@recordforge/contracts"
+import type { ManualZoomSegment, TimelineState, ZoomPreset } from "@recordforge/contracts"
 import { clampZoomTarget, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import { getTotalDuration } from "@recordforge/domain"
 import { getManualZoomSegments } from "./composition"

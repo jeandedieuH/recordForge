@@ -42,6 +42,8 @@ export function aspectRatioValue(aspectRatio: CanvasAspectRatio | undefined): nu
   if (aspectRatio === "16:9") return 16 / 9
   if (aspectRatio === "1:1") return 1
   if (aspectRatio === "9:16") return 9 / 16
+  if (aspectRatio === "4:3") return 4 / 3
+  if (aspectRatio === "21:9") return 21 / 9
   return null
 }
 

@@ -211,9 +211,7 @@ function SelectionControls({
   interaction: OverlayInteraction
 }) {
   if (clip.locked) {
-    return (
-      <div className="pointer-events-none absolute inset-0 rounded-sm ring-2 ring-muted" />
-    )
+    return <div className="pointer-events-none absolute inset-0 rounded-sm ring-2 ring-muted" />
   }
 
   return (
@@ -380,4 +378,3 @@ function overlayDetailedLabel(clip: OverlayClip): string {
   const lock = clip.locked ? ", locked" : ""
   return `${base}, ${pos}${rot}${lock}. Use arrow keys to nudge, Ctrl+arrow to resize, R to rotate, Delete to remove.`
 }
-

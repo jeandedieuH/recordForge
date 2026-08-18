@@ -1,5 +1,10 @@
 import { memo, useCallback, useMemo, useRef, useState } from "react"
-import type { ManualZoomSegment, TimelineState, TimelineTrack, ZoomPreset } from "@recordforge/contracts"
+import type {
+  ManualZoomSegment,
+  TimelineState,
+  TimelineTrack,
+  ZoomPreset,
+} from "@recordforge/contracts"
 import {
   buildSnapTargets,
   snapClipStart,

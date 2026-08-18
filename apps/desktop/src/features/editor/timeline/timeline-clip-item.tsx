@@ -567,15 +567,18 @@ export const TimelineClipItem = memo(function TimelineClipItem({
         </ContextMenuItem>
         {isPlayheadInside ? (
           <ContextMenuItem onSelect={() => onSplitClip(clip, playheadMs)} disabled={isLocked}>
-            <Scissors className="size-3.5 mr-2" /> Split at playhead ({formatDurationSeconds(playheadMs)})
+            <Scissors className="size-3.5 mr-2" /> Split at playhead (
+            {formatDurationSeconds(playheadMs)})
           </ContextMenuItem>
         ) : null}
-        {isClickInside && (!isPlayheadInside || Math.abs((contextMenuTimeMs ?? 0) - playheadMs) > 200) ? (
+        {isClickInside &&
+        (!isPlayheadInside || Math.abs((contextMenuTimeMs ?? 0) - playheadMs) > 200) ? (
           <ContextMenuItem
             onSelect={() => onSplitClip(clip, contextMenuTimeMs!)}
             disabled={isLocked}
           >
-            <Scissors className="size-3.5 mr-2" /> Split here ({formatDurationSeconds(contextMenuTimeMs!)})
+            <Scissors className="size-3.5 mr-2" /> Split here (
+            {formatDurationSeconds(contextMenuTimeMs!)})
           </ContextMenuItem>
         ) : null}
         {!isPlayheadInside && !isClickInside ? (

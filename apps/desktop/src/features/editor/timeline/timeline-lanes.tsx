@@ -85,7 +85,10 @@ export interface TimelineLanesProps {
   onDeleteMarker?: (markerId: string) => void
   onAddMarkerAtTime?: (timeMs: number) => void
   onSelectZoom: (segmentId: string) => void
-  onAddZoomAtTime?: (timeMs: number, options?: { preset?: ZoomPreset; scale?: number; endMs?: number }) => void
+  onAddZoomAtTime?: (
+    timeMs: number,
+    options?: { preset?: ZoomPreset; scale?: number; endMs?: number },
+  ) => void
   onMoveZoomSegment: (
     segment: ManualZoomSegment,
     startMs: number,
@@ -499,7 +502,9 @@ export function TimelineLanes({
 
   const onSnapGuideCallback = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
 
-  const [emptyLanesContextMenuTimeMs, setEmptyLanesContextMenuTimeMs] = useState<number | null>(null)
+  const [emptyLanesContextMenuTimeMs, setEmptyLanesContextMenuTimeMs] = useState<number | null>(
+    null,
+  )
 
   return (
     <div
@@ -773,8 +778,7 @@ export function TimelineLanes({
           </ContextMenuTrigger>
           <ContextMenuContent>
             {(() => {
-              const rangeSelection =
-                view.selection?.kind === "range" ? view.selection : null
+              const rangeSelection = view.selection?.kind === "range" ? view.selection : null
               if (!rangeSelection || !onAddZoomAtTime) return null
               return (
                 <>
@@ -795,9 +799,7 @@ export function TimelineLanes({
               )
             })()}
             {emptyLanesContextMenuTimeMs !== null && onAddZoomAtTime ? (
-              <ContextMenuItem
-                onSelect={() => onAddZoomAtTime(emptyLanesContextMenuTimeMs)}
-              >
+              <ContextMenuItem onSelect={() => onAddZoomAtTime(emptyLanesContextMenuTimeMs)}>
                 <ZoomIn className="size-3.5 mr-2 text-primary" /> Add Zoom here (
                 {formatTimelineTime(emptyLanesContextMenuTimeMs)})
               </ContextMenuItem>
@@ -809,9 +811,7 @@ export function TimelineLanes({
               </ContextMenuItem>
             ) : null}
             {emptyLanesContextMenuTimeMs !== null && onAddMarkerAtTime ? (
-              <ContextMenuItem
-                onSelect={() => onAddMarkerAtTime(emptyLanesContextMenuTimeMs)}
-              >
+              <ContextMenuItem onSelect={() => onAddMarkerAtTime(emptyLanesContextMenuTimeMs)}>
                 <BookmarkPlus className="size-3.5 mr-2" /> Add marker here (
                 {formatTimelineTime(emptyLanesContextMenuTimeMs)})
               </ContextMenuItem>

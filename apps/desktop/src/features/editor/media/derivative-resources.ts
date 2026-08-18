@@ -8,12 +8,7 @@ import {
   type WaveformData,
 } from "@recordforge/contracts"
 import { z } from "zod"
-import {
-  toAssetUrl,
-  resolveAssetPath,
-  isAbsolutePath,
-  isWebUrl,
-} from "../../../lib/assets"
+import { toAssetUrl, resolveAssetPath, isAbsolutePath, isWebUrl } from "../../../lib/assets"
 
 export { toAssetUrl, resolveAssetPath, isAbsolutePath, isWebUrl }
 

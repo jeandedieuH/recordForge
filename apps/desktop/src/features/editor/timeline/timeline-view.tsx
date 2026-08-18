@@ -51,6 +51,8 @@ import {
   zoomTransformToCss,
   type PlaybackBoundary,
   canvasShadowStyle,
+  normalizeBackgroundCss,
+  computeBackgroundImageLayerStyle,
 } from "@recordforge/editor-core"
 import {
   findCursorEventAtTime,
@@ -519,9 +521,16 @@ export function TimelineView({
     return {
       width: `min(100cqw, calc(100cqh * ${width / height}))`,
       aspectRatio: `${width} / ${height}`,
-      backgroundColor: timeline.canvas.background,
     }
-  }, [timeline?.canvas.width, timeline?.canvas.height, timeline?.canvas.background])
+  }, [timeline?.canvas.width, timeline?.canvas.height])
+
+  const backgroundLayerStyle = useMemo(() => {
+    if (!timeline) return { filter: undefined, transform: undefined, overlayOpacity: undefined }
+    return computeBackgroundImageLayerStyle(
+      timeline.canvas.backgroundBlur,
+      timeline.canvas.backgroundDim,
+    )
+  }, [timeline?.canvas.backgroundBlur, timeline?.canvas.backgroundDim])
 
   const screenStyle = useMemo<React.CSSProperties>(() => {
     if (!timeline || !videoBounds) {
@@ -1234,14 +1243,9 @@ export function TimelineView({
       mode = timeOrOptions.mode
     }
 
-    const rangeSelection =
-      view.selection?.kind === "range" ? view.selection : null
+    const rangeSelection = view.selection?.kind === "range" ? view.selection : null
     const effectiveStartMs =
-      timeMs !== undefined
-        ? timeMs
-        : rangeSelection
-          ? rangeSelection.startMs
-          : view.playheadMs
+      timeMs !== undefined ? timeMs : rangeSelection ? rangeSelection.startMs : view.playheadMs
     const effectiveEndMs =
       endMs !== undefined
         ? endMs
@@ -1381,6 +1385,26 @@ export function TimelineView({
               className="relative flex items-center justify-center overflow-visible"
               style={canvasStyle}
             >
+              {/* Background Layer */}
+              <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-[inherit] z-0">
+                <div
+                  className="size-full"
+                  style={{
+                    background: normalizeBackgroundCss(timeline.canvas.background),
+                    backgroundSize: "cover",
+                    backgroundPosition: "center",
+                    backgroundRepeat: "no-repeat",
+                    filter: backgroundLayerStyle.filter,
+                    transform: backgroundLayerStyle.transform,
+                  }}
+                />
+                {backgroundLayerStyle.overlayOpacity !== undefined && (
+                  <div
+                    className="absolute inset-0 bg-black pointer-events-none"
+                    style={{ opacity: backgroundLayerStyle.overlayOpacity }}
+                  />
+                )}
+              </div>
               {mediaUrl && !mediaError ? (
                 <div style={screenStyle} onClick={togglePlay}>
                   <video

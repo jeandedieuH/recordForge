@@ -192,7 +192,10 @@ describe("Phase 8 End-to-End lifecycle: import -> overlay -> transform -> evalua
       sourceOutMs: 15_000,
       speed: 1,
     }
-    const addImageRes = executeCommand(engine, createAddImageClipCommand(imageClip, "track:graphics"))
+    const addImageRes = executeCommand(
+      engine,
+      createAddImageClipCommand(imageClip, "track:graphics"),
+    )
     expect(addImageRes.ok).toBe(true)
     if (addImageRes.ok) engine = addImageRes.value
 
@@ -214,7 +217,10 @@ describe("Phase 8 End-to-End lifecycle: import -> overlay -> transform -> evalua
     calloutClip.fillOpacity = 0.2
     calloutClip.zIndex = 10
 
-    const addCalloutRes = executeCommand(engine, createAddAnnotationClipCommand(calloutClip, "track:annotations"))
+    const addCalloutRes = executeCommand(
+      engine,
+      createAddAnnotationClipCommand(calloutClip, "track:annotations"),
+    )
     expect(addCalloutRes.ok).toBe(true)
     if (addCalloutRes.ok) engine = addCalloutRes.value
 
@@ -239,8 +245,12 @@ describe("Phase 8 End-to-End lifecycle: import -> overlay -> transform -> evalua
 
     // Verify all tracks populated
     expect(engine.history.present.tracks.find((t) => t.id === "track:audio")?.clips.length).toBe(1)
-    expect(engine.history.present.tracks.find((t) => t.id === "track:graphics")?.clips.length).toBe(1)
-    expect(engine.history.present.tracks.find((t) => t.id === "track:annotations")?.clips.length).toBe(1)
+    expect(engine.history.present.tracks.find((t) => t.id === "track:graphics")?.clips.length).toBe(
+      1,
+    )
+    expect(
+      engine.history.present.tracks.find((t) => t.id === "track:annotations")?.clips.length,
+    ).toBe(1)
     expect(engine.history.present.tracks.find((t) => t.id === "track:titles")?.clips.length).toBe(1)
 
     // Verify domain schema contract compliance

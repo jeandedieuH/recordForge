@@ -33,11 +33,32 @@ export function CanvasInspector() {
         <InfoField label="Height" value={`${timeline.canvas.height}px`} />
         <InfoField label="Frame rate" value={`${timeline.canvas.fps} fps`} />
         <InfoField label="Tracks" value={String(timeline.tracks.length)} />
-        <InfoField label="Background" value={timeline.canvas.background} />
+        <InfoField
+          label="Background"
+          value={
+            timeline.canvas.background.startsWith("linear-gradient") ||
+            timeline.canvas.background.startsWith("radial-gradient")
+              ? "Gradient"
+              : timeline.canvas.background.startsWith("url(") ||
+                  timeline.canvas.background.startsWith("/backgrounds/") ||
+                  timeline.canvas.background.startsWith("data:")
+                ? "Image"
+                : timeline.canvas.background
+          }
+        />
         <InfoField
           label="Aspect ratio"
           value={timeline.canvas.aspectRatio?.toString() ?? "custom"}
         />
+        {(timeline.canvas.backgroundBlur ?? 0) > 0 ? (
+          <InfoField label="Background blur" value={`${timeline.canvas.backgroundBlur}px`} />
+        ) : null}
+        {(timeline.canvas.backgroundDim ?? 0) > 0 ? (
+          <InfoField
+            label="Background dim"
+            value={`${Math.round((timeline.canvas.backgroundDim ?? 0) * 100)}%`}
+          />
+        ) : null}
       </div>
 
       {recording ? (

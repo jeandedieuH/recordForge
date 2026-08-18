@@ -31,7 +31,11 @@ import {
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan } from "@recordforge/media-core"
-import { getProjectAssetPaths, relinkAsset as relinkAssetRequest, resolveAssetPath } from "../lib/assets"
+import {
+  getProjectAssetPaths,
+  relinkAsset as relinkAssetRequest,
+  resolveAssetPath,
+} from "../lib/assets"
 import { createProject, loadProject, saveProject, snapshotProject } from "../lib/project"
 import { getCursorTelemetry } from "../lib/cursor"
 import {

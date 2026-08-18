@@ -4,10 +4,7 @@ import {
   type TimelineCanvas,
   type TimelineState,
 } from "@recordforge/contracts"
-import {
-  buildSmartZoomSegment,
-  computeSmartZoomDuration,
-} from "./smart-zoom-builder"
+import { buildSmartZoomSegment, computeSmartZoomDuration } from "./smart-zoom-builder"
 
 const canvas: TimelineCanvas = {
   width: 1920,
@@ -114,10 +111,14 @@ describe("Smart Zoom Builder", () => {
 
   it("applies developer preset (2.0x, snappy, 300ms transitions)", () => {
     const mockTimeline = makeState()
-    const segment = buildSmartZoomSegment(mockTimeline, { x: 500, y: 500 }, {
-      startMs: 1_000,
-      preset: "developer",
-    })
+    const segment = buildSmartZoomSegment(
+      mockTimeline,
+      { x: 500, y: 500 },
+      {
+        startMs: 1_000,
+        preset: "developer",
+      },
+    )
 
     expect(segment.scale).toBe(2.0)
     expect(segment.easing).toBe("snappy")
@@ -127,10 +128,14 @@ describe("Smart Zoom Builder", () => {
 
   it("applies cinematic preset (1.8x, cinematic, 600ms transitions)", () => {
     const mockTimeline = makeState()
-    const segment = buildSmartZoomSegment(mockTimeline, { x: 500, y: 500 }, {
-      startMs: 1_000,
-      preset: "cinematic",
-    })
+    const segment = buildSmartZoomSegment(
+      mockTimeline,
+      { x: 500, y: 500 },
+      {
+        startMs: 1_000,
+        preset: "cinematic",
+      },
+    )
 
     expect(segment.scale).toBe(1.8)
     expect(segment.easing).toBe("cinematic")
@@ -141,10 +146,14 @@ describe("Smart Zoom Builder", () => {
 
   it("applies subtle preset (1.25x, smooth, 400ms transitions)", () => {
     const mockTimeline = makeState()
-    const segment = buildSmartZoomSegment(mockTimeline, { x: 500, y: 500 }, {
-      startMs: 1_000,
-      preset: "subtle",
-    })
+    const segment = buildSmartZoomSegment(
+      mockTimeline,
+      { x: 500, y: 500 },
+      {
+        startMs: 1_000,
+        preset: "subtle",
+      },
+    )
 
     expect(segment.scale).toBe(1.25)
     expect(segment.easing).toBe("smooth")

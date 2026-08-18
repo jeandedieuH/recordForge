@@ -32,6 +32,10 @@ pub struct RenderCanvas {
     #[serde(default)]
     pub shadow_offset_y: Option<f64>,
     #[serde(default)]
+    pub background_blur: Option<f64>,
+    #[serde(default)]
+    pub background_dim: Option<f64>,
+    #[serde(default)]
     pub aspect_ratio: Option<String>,
     pub cursor_settings: CursorSettings,
 }

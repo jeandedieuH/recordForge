@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-  isAbsolutePath,
-  isWebUrl,
-  resolveAssetPath,
-  toAssetUrl,
-} from "./assets"
+import { isAbsolutePath, isWebUrl, resolveAssetPath, toAssetUrl } from "./assets"
 
 describe("Asset Path Resolution & URL Helpers", () => {
   describe("isWebUrl", () => {
@@ -64,7 +59,8 @@ describe("Asset Path Resolution & URL Helpers", () => {
   })
 
   describe("resolveAssetPath", () => {
-    const workDirWindows = "C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1"
+    const workDirWindows =
+      "C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1"
     const workDirPosix = "/home/user/.config/com.recordforge.app/sessions/sess-1"
 
     it("returns absolute paths untouched", () => {
@@ -91,7 +87,9 @@ describe("Asset Path Resolution & URL Helpers", () => {
     it("normalizes trailing slashes on workDir during join", () => {
       const workDirWithSlash = "C:/sessions/sess-1/"
       const relative = "assets/image.png"
-      expect(resolveAssetPath(relative, workDirWithSlash)).toBe("C:/sessions/sess-1/assets/image.png")
+      expect(resolveAssetPath(relative, workDirWithSlash)).toBe(
+        "C:/sessions/sess-1/assets/image.png",
+      )
     })
 
     it("returns null when relative path is given without workDir", () => {

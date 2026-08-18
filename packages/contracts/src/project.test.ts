@@ -428,4 +428,18 @@ describe("project contract", () => {
     expect(parsed.hasAudio).toBe(false)
     expect(parsed.fps).toBeUndefined()
   })
+
+  it("validates canvas background blur and dim filter fields", () => {
+    const parsed = projectSchema.parse({
+      ...minimalProject,
+      canvas: {
+        ...minimalProject.canvas,
+        background: "/backgrounds/bg-1.jpg",
+        backgroundBlur: 24,
+        backgroundDim: 0.35,
+      },
+    })
+    expect(parsed.canvas.backgroundBlur).toBe(24)
+    expect(parsed.canvas.backgroundDim).toBe(0.35)
+  })
 })

@@ -135,7 +135,10 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
             <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
               Active Preset
             </span>
-            <span className="truncate text-xs font-medium text-foreground text-right" title={activePresetName}>
+            <span
+              className="truncate text-xs font-medium text-foreground text-right"
+              title={activePresetName}
+            >
               {activePresetName}
             </span>
           </div>

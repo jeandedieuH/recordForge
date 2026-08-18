@@ -97,7 +97,16 @@ describe("Phase 8 performance budgets", () => {
     let engine = createEngine(makeBaseTimelineState())
 
     // Add 10 annotation shapes
-    const shapes = ["rectangle", "rounded-rect", "circle", "arrow", "line", "callout", "spotlight", "badge"] as const
+    const shapes = [
+      "rectangle",
+      "rounded-rect",
+      "circle",
+      "arrow",
+      "line",
+      "callout",
+      "spotlight",
+      "badge",
+    ] as const
     for (let i = 0; i < 10; i++) {
       const type = shapes[i % shapes.length]
       const clip = createAnnotationClip(type, {
@@ -107,8 +116,8 @@ describe("Phase 8 performance budgets", () => {
         canvasHeight: 1080,
       })
       clip.id = `perf-ann-${i}`
-      clip.x = 50 + (i * 60) % 1600
-      clip.y = 50 + (i * 40) % 800
+      clip.x = 50 + ((i * 60) % 1600)
+      clip.y = 50 + ((i * 40) % 800)
       clip.zIndex = i
       const res = executeCommand(engine, createAddAnnotationClipCommand(clip, "annotations-track"))
       expect(res.ok).toBe(true)
@@ -127,8 +136,8 @@ describe("Phase 8 performance budgets", () => {
       textClip.primaryText = `Benchmark Title Preset ${i}`
       textClip.secondaryText = `Subtitle line for item ${i}`
       textClip.tagText = `TAG ${i}`
-      textClip.x = 100 + (i * 40)
-      textClip.y = 200 + (i * 30)
+      textClip.x = 100 + i * 40
+      textClip.y = 200 + i * 30
       textClip.width = 450
       textClip.height = 120
       textClip.zIndex = 10 + i
@@ -146,8 +155,8 @@ describe("Phase 8 performance budgets", () => {
         assetId: `asset-img-${i % 3}`,
         startMs: 1_000,
         durationMs: 10_000,
-        x: 300 + (i * 50),
-        y: 150 + (i * 40),
+        x: 300 + i * 50,
+        y: 150 + i * 40,
         width: 320,
         height: 240,
         rotation: i * 5,
@@ -219,7 +228,10 @@ describe("Phase 8 performance budgets", () => {
     clip.id = "gesture-test-clip"
 
     let engine = createEngine(baseState)
-    const addResult = executeCommand(engine, createAddAnnotationClipCommand(clip, "annotations-track"))
+    const addResult = executeCommand(
+      engine,
+      createAddAnnotationClipCommand(clip, "annotations-track"),
+    )
     expect(addResult.ok).toBe(true)
     if (!addResult.ok) return
     engine = addResult.value
@@ -261,12 +273,10 @@ describe("Phase 8 performance budgets", () => {
       opacity: clip.opacity,
     }
     for (let step = 1; step <= 100; step++) {
-      currentTransform = moveOverlayTransform(
-        currentTransform,
-        1.5,
-        1.0,
-        { canvasWidth: 1920, canvasHeight: 1080 },
-      )
+      currentTransform = moveOverlayTransform(currentTransform, 1.5, 1.0, {
+        canvasWidth: 1920,
+        canvasHeight: 1080,
+      })
       transaction.update({
         kind: "move",
         clipId: clip.id,
@@ -316,6 +326,8 @@ describe("Phase 8 performance budgets", () => {
 
     const loadDuration = performance.now() - loadStart
     expect(loadDuration).toBeLessThan(200) // Project load budget <= 200 ms
-    expect(engine.history.present.tracks.find((t) => t.kind === "annotations")?.clips.length).toBe(50)
+    expect(engine.history.present.tracks.find((t) => t.kind === "annotations")?.clips.length).toBe(
+      50,
+    )
   })
 })
