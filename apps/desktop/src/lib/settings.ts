@@ -8,7 +8,23 @@ export function isTauri(): boolean {
 
 export async function getSetting(key: string): Promise<string | null> {
   if (isTauri()) {
-    return invokeValidated("get_setting", { key }, z.string().nullable())
+    try {
+      const val = await invokeValidated("get_setting", { key }, z.string().nullable())
+      if (val !== null && typeof localStorage !== "undefined") {
+        try {
+          localStorage.setItem(`recordforge:${key}`, val)
+        } catch {
+          // Ignore storage errors
+        }
+      }
+      return val
+    } catch {
+      try {
+        return typeof localStorage !== "undefined" ? localStorage.getItem(`recordforge:${key}`) : null
+      } catch {
+        return null
+      }
+    }
   }
   try {
     return typeof localStorage !== "undefined" ? localStorage.getItem(`recordforge:${key}`) : null
@@ -18,15 +34,15 @@ export async function getSetting(key: string): Promise<string | null> {
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
-  if (isTauri()) {
-    return invokeValidated<void>("set_setting", { key, value })
-  }
   try {
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(`recordforge:${key}`, value)
     }
   } catch {
     // Ignore storage quota errors in dev/tests
+  }
+  if (isTauri()) {
+    return invokeValidated<void>("set_setting", { key, value })
   }
 }
 

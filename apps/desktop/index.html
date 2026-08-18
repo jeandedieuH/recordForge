@@ -18,6 +18,23 @@
         if (params.get("boundary") === "1") document.documentElement.dataset.boundary = "true"
         if (params.get("countdown") === "1") document.documentElement.dataset.countdown = "true"
         if (params.get("region") === "1") document.documentElement.dataset.regionPicker = "true"
+
+        try {
+          var theme = localStorage.getItem("recordforge:theme") || "dark"
+          var resolved =
+            theme === "system"
+              ? window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark"
+              : theme
+          if (resolved === "light") {
+            document.documentElement.dataset.theme = "light"
+          } else if (resolved === "dark") {
+            document.documentElement.dataset.theme = "dark"
+          }
+        } catch (e) {
+          // Ignore localStorage errors
+        }
       })()
     </script>
   </head>

@@ -43,16 +43,33 @@ function applyToDocument(resolvedTheme: ResolvedTheme, micaActive: boolean) {
   }
 }
 
+function getInitialTheme(): Theme {
+  try {
+    if (typeof localStorage !== "undefined") {
+      const cached = localStorage.getItem("recordforge:theme")
+      if (cached === "dark" || cached === "light" || cached === "system") {
+        return cached
+      }
+    }
+  } catch {
+    // Fall back to default
+  }
+  return "dark"
+}
+
+const initialTheme = getInitialTheme()
+const initialResolved = resolve(initialTheme)
+
 // Dark-first by default per spec-010; the persisted setting is applied in load().
 export const useThemeStore = create<ThemeStore>((set, get) => ({
-  theme: "dark",
-  resolvedTheme: "dark",
+  theme: initialTheme,
+  resolvedTheme: initialResolved,
   micaEnabled: true,
   micaActive: false,
   loaded: false,
 
   load: async () => {
-    let theme: Theme = "dark"
+    let theme: Theme = getInitialTheme()
     let micaEnabled = true
     let micaActive = false
 
@@ -69,6 +86,14 @@ export const useThemeStore = create<ThemeStore>((set, get) => ({
       }
     }
 
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("recordforge:theme", theme)
+      }
+    } catch {
+      // Ignore storage errors
+    }
+
     const resolvedTheme = resolve(theme)
     applyToDocument(resolvedTheme, micaEnabled && micaActive)
     set({ theme, resolvedTheme, micaEnabled, micaActive, loaded: true })
@@ -78,6 +103,13 @@ export const useThemeStore = create<ThemeStore>((set, get) => ({
     const resolvedTheme = resolve(theme)
     const { micaEnabled, micaActive } = get()
     applyToDocument(resolvedTheme, micaEnabled && micaActive)
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("recordforge:theme", theme)
+      }
+    } catch {
+      // Ignore storage errors
+    }
     set({ theme, resolvedTheme })
     if (isTauri()) {
       await setSetting("theme", theme)
