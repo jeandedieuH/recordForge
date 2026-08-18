@@ -1,5 +1,4 @@
 use regex::Regex;
-use std::process::Command;
 use std::time::Instant;
 use tracing::{info, instrument};
 
@@ -124,7 +123,7 @@ fn os_info() -> String {
 }
 
 fn ffmpeg_version(ffmpeg_path: &str) -> crate::errors::Result<String> {
-    let output = Command::new(ffmpeg_path)
+    let output = crate::process::create_command(ffmpeg_path)
         .arg("-version")
         .output()
         .map_err(|e| crate::errors::InternalError::Media(format!("ffmpeg version: {e}")))?;
@@ -152,7 +151,7 @@ fn benchmark_single(
         profile.width, profile.height, profile.fps, duration_sec
     );
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command.args([
         "-f",
         "lavfi",

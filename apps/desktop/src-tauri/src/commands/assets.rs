@@ -624,10 +624,10 @@ fn copy_asset_into_project(
     std::fs::create_dir_all(&assets_dir).map_err(|error| {
         InternalError::Storage(format!("create project asset directory: {error}"))
     })?;
-    let project_root = project_dir.canonicalize().map_err(|error| {
+    let project_root = crate::path_policy::canonicalize_path(project_dir).map_err(|error| {
         InternalError::Storage(format!("canonicalize project directory: {error}"))
     })?;
-    let canonical_assets = assets_dir.canonicalize().map_err(|error| {
+    let canonical_assets = crate::path_policy::canonicalize_path(&assets_dir).map_err(|error| {
         InternalError::Storage(format!("canonicalize project asset directory: {error}"))
     })?;
     if !canonical_assets.starts_with(&project_root) {
@@ -653,9 +653,10 @@ fn copy_asset_into_project(
         return Err(InternalError::Permissions("asset destination is invalid".into()).into());
     }
     if destination.exists() {
-        let canonical_destination = destination.canonicalize().map_err(|error| {
-            InternalError::Storage(format!("canonicalize copied asset: {error}"))
-        })?;
+        let canonical_destination =
+            crate::path_policy::canonicalize_path(&destination).map_err(|error| {
+                InternalError::Storage(format!("canonicalize copied asset: {error}"))
+            })?;
         if !canonical_destination.starts_with(&canonical_assets) {
             return Err(InternalError::Permissions(
                 "copied asset destination is a symlink outside the project".into(),

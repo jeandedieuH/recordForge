@@ -1,6 +1,27 @@
 use crate::errors::{InternalError, Result};
 use std::path::{Path, PathBuf};
 
+/// Strip Windows extended-length verbatim prefixes (`\\?\` and `\\?\UNC\`).
+pub fn normalize_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path_str = path.to_string_lossy();
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{stripped}"));
+        }
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Canonicalize a path while removing any Windows verbatim prefix.
+pub fn canonicalize_path(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    Ok(normalize_path(&canonical))
+}
+
 /// Path authorization and security policy enforcer for recordForge.
 ///
 /// Ensures all filesystem accesses are contained within allowed directories,
@@ -43,18 +64,18 @@ impl PathPolicy {
 
         // 3. Canonicalize if directory exists, or canonicalize parent
         let canonical = if target.exists() {
-            target.canonicalize().map_err(|e| {
+            canonicalize_path(&target).map_err(|e| {
                 InternalError::Storage(format!("failed to canonicalize session dir: {e}"))
             })?
         } else {
-            let parent_canonical = self.sessions_dir.canonicalize().map_err(|e| {
+            let parent_canonical = canonicalize_path(&self.sessions_dir).map_err(|e| {
                 InternalError::Storage(format!("failed to canonicalize sessions root: {e}"))
             })?;
             parent_canonical.join(session_id)
         };
 
         // 4. Verify containment
-        let sessions_canonical = self.sessions_dir.canonicalize().map_err(|e| {
+        let sessions_canonical = canonicalize_path(&self.sessions_dir).map_err(|e| {
             InternalError::Storage(format!("failed to canonicalize sessions root: {e}"))
         })?;
 
@@ -82,7 +103,7 @@ impl PathPolicy {
             .into());
         }
 
-        let parent_canonical = parent.canonicalize().map_err(|e| {
+        let parent_canonical = canonicalize_path(parent).map_err(|e| {
             InternalError::Storage(format!("failed to canonicalize export destination: {e}"))
         })?;
 
@@ -92,7 +113,7 @@ impl PathPolicy {
 
         let canonical = parent_canonical.join(filename);
         if std::fs::symlink_metadata(path).is_ok() {
-            let existing = path.canonicalize().map_err(|error| {
+            let existing = canonicalize_path(path).map_err(|error| {
                 InternalError::Storage(format!(
                     "failed to canonicalize existing export destination: {error}"
                 ))
@@ -141,11 +162,11 @@ impl PathPolicy {
             .into());
         }
 
-        let canonical = path.canonicalize().map_err(|e| {
+        let canonical = canonicalize_path(path).map_err(|e| {
             InternalError::Storage(format!("failed to canonicalize recording path: {e}"))
         })?;
 
-        let app_data_canonical = self.app_data_dir.canonicalize().map_err(|e| {
+        let app_data_canonical = canonicalize_path(&self.app_data_dir).map_err(|e| {
             InternalError::Storage(format!("failed to canonicalize app data dir: {e}"))
         })?;
 
@@ -184,8 +205,7 @@ impl PathPolicy {
             .into());
         }
 
-        let canonical = path
-            .canonicalize()
+        let canonical = canonicalize_path(path)
             .map_err(|e| InternalError::Storage(format!("canonicalize asset source: {e}")))?;
         self.reject_protected_path(&canonical)?;
         Ok(canonical)
@@ -236,12 +256,10 @@ impl PathPolicy {
             .into());
         }
 
-        let canonical = absolute
-            .canonicalize()
+        let canonical = canonicalize_path(&absolute)
             .map_err(|e| InternalError::Storage(format!("canonicalize asset path: {e}")))?;
 
-        let project_canonical = project_dir
-            .canonicalize()
+        let project_canonical = canonicalize_path(project_dir)
             .map_err(|e| InternalError::Storage(format!("canonicalize project dir: {e}")))?;
 
         if !canonical.starts_with(&project_canonical) {
@@ -314,6 +332,6 @@ mod tests {
         std::fs::write(&source, b"fixture").unwrap();
 
         let result = policy.validate_import_source_path(&source).unwrap();
-        assert_eq!(result, source.canonicalize().unwrap());
+        assert_eq!(result, canonicalize_path(&source).unwrap());
     }
 }

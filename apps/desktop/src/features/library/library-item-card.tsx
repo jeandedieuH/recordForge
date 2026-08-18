@@ -56,7 +56,9 @@ export function LibraryItemCard({
     recording.tags.includes("gdrive")
 
   const thumbnailSrc =
-    !imageError && recording.thumbnailPath ? toAssetUrl(recording.thumbnailPath) : null
+    !imageError && recording.thumbnailPath
+      ? toAssetUrl(recording.thumbnailPath, recording.workDir)
+      : null
 
   return (
     <div className="group relative flex flex-col overflow-hidden rounded-xl border border-border bg-surface transition-all duration-200 hover:border-border-strong hover:shadow-xl">

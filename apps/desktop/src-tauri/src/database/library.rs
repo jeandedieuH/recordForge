@@ -346,15 +346,14 @@ pub fn restore_recording(conn: &Connection, id: &str) -> Result<()> {
 pub fn delete_recording(conn: &Connection, id: &str, app_data_dir: &std::path::Path) -> Result<()> {
     let recording = get_recording(conn, id)?;
 
-    let app_data_canonical = app_data_dir
-        .canonicalize()
+    let app_data_canonical = crate::path_policy::canonicalize_path(app_data_dir)
         .map_err(|e| InternalError::Storage(format!("failed to canonicalize app data dir: {e}")))?;
 
     // 1. Remove physical files first
     if let Some(output) = &recording.output_path {
         let output_path = Path::new(output);
         if output_path.exists() {
-            let canonical = output_path.canonicalize().map_err(|e| {
+            let canonical = crate::path_policy::canonicalize_path(output_path).map_err(|e| {
                 InternalError::Storage(format!("failed to canonicalize output path: {e}"))
             })?;
             if !canonical.starts_with(&app_data_canonical) {
@@ -372,8 +371,7 @@ pub fn delete_recording(conn: &Connection, id: &str, app_data_dir: &std::path::P
 
     let work_dir = PathBuf::from(&recording.work_dir);
     if work_dir.exists() {
-        let canonical = work_dir
-            .canonicalize()
+        let canonical = crate::path_policy::canonicalize_path(&work_dir)
             .map_err(|e| InternalError::Storage(format!("failed to canonicalize work dir: {e}")))?;
         if !canonical.starts_with(&app_data_canonical) {
             return Err(InternalError::Permissions(format!(

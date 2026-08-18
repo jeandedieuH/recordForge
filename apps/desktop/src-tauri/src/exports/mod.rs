@@ -672,6 +672,17 @@ fn render_timeline_composition(
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
     let bg_image_path = resolve_background_image(&canvas.background, asset_paths);
+    let mut temp_mask_guards = Vec::new();
+    if let Some(bg_path) = &bg_image_path {
+        if bg_path.starts_with(std::env::temp_dir())
+            && bg_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|name| name.starts_with("recordforge_bg_"))
+        {
+            temp_mask_guards.push(TempMaskFile(bg_path.clone()));
+        }
+    }
     let mut input_assets = collect_input_assets(plan, asset_paths)?;
     let bg_input_index = if let Some(bg_path) = &bg_image_path {
         let idx = input_assets.len();
@@ -688,7 +699,6 @@ fn render_timeline_composition(
         .height
         .saturating_sub(canvas.padding.saturating_mul(2))
         .max(1);
-    let mut temp_mask_guards = Vec::new();
     let is_side_by_side = plan.overlays.iter().any(|overlay| {
         if !overlay.visible {
             return false;
@@ -752,8 +762,9 @@ fn render_timeline_composition(
             camera_mask_indices.insert(index, idx);
         } else if overlay.shape == "rounded" {
             let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32;
-            let mask_bytes = cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius)
-                .map_err(|err| InternalError::Media(format!("generate rounded mask: {err}")))?;
+            let mask_bytes =
+                cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius)
+                    .map_err(|err| InternalError::Media(format!("generate rounded mask: {err}")))?;
             let mask_path = std::env::temp_dir().join(format!(
                 "rf-mask-cam-rounded-{}-{}-{}-{}.png",
                 project_id, index, overlay_w, overlay_h
@@ -891,7 +902,7 @@ fn render_timeline_composition(
         // 1. Generate the background plate [bg_plate]
         if let Some(bg_idx) = bg_input_index {
             let mut bg_filter = format!(
-                "[{bg_idx}:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1",
+                "[{bg_idx}:v]loop=loop=-1:size=1:start=0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1",
                 canvas.width, canvas.height, canvas.width, canvas.height
             );
             let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
@@ -941,7 +952,8 @@ fn render_timeline_composition(
         // 3. Composite shadow and screen layer onto background plate [canvas_base]
         let mut bg_current = "[bg_plate]".to_string();
         if canvas.shadow {
-            let shadow_color = safe_filter_color(canvas.shadow_color.as_deref().unwrap_or("#000000"));
+            let shadow_color =
+                safe_filter_color(canvas.shadow_color.as_deref().unwrap_or("#000000"));
             let shadow_blur = canvas.shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
             let shadow_x = (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0);
             let shadow_y = (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0);
@@ -1292,7 +1304,7 @@ fn render_timeline_composition(
         ));
     }
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
         .args([
@@ -2276,36 +2288,60 @@ pub(crate) fn resolve_background_image(
         candidate_names.push(format!("{filename}.png"));
     }
 
-    let mut search_dirs = Vec::new();
+    let mut base_roots = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
-        search_dirs.push(cwd.join("public").join("backgrounds"));
-        search_dirs.push(
-            cwd.join("apps")
-                .join("desktop")
-                .join("public")
-                .join("backgrounds"),
-        );
-        search_dirs.push(cwd.join("dist").join("backgrounds"));
-        search_dirs.push(cwd.join("backgrounds"));
-        search_dirs.push(cwd.clone());
+        let mut cur = Some(cwd.as_path());
+        let mut depth = 0;
+        while let Some(dir) = cur {
+            base_roots.push(dir.to_path_buf());
+            cur = dir.parent();
+            depth += 1;
+            if depth >= 5 {
+                break;
+            }
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            search_dirs.push(parent.join("backgrounds"));
-            search_dirs.push(parent.join("public").join("backgrounds"));
-            search_dirs.push(parent.join("dist").join("backgrounds"));
-            search_dirs.push(parent.join("resources").join("backgrounds"));
-            search_dirs.push(parent.to_path_buf());
+        let mut cur = exe.parent();
+        let mut depth = 0;
+        while let Some(dir) = cur {
+            base_roots.push(dir.to_path_buf());
+            cur = dir.parent();
+            depth += 1;
+            if depth >= 6 {
+                break;
+            }
         }
     }
     for asset_path in asset_paths.values() {
         if let Some(parent) = asset_path.parent() {
-            search_dirs.push(parent.join("backgrounds"));
-            search_dirs.push(parent.to_path_buf());
+            base_roots.push(parent.to_path_buf());
         }
     }
 
-    for dir in search_dirs {
+    let mut search_dirs = Vec::new();
+    for root in &base_roots {
+        search_dirs.push(root.join("public").join("backgrounds"));
+        search_dirs.push(
+            root.join("apps")
+                .join("desktop")
+                .join("public")
+                .join("backgrounds"),
+        );
+        search_dirs.push(
+            root.join("apps")
+                .join("desktop")
+                .join("dist")
+                .join("backgrounds"),
+        );
+        search_dirs.push(root.join("dist").join("backgrounds"));
+        search_dirs.push(root.join("assets").join("backgrounds"));
+        search_dirs.push(root.join("resources").join("backgrounds"));
+        search_dirs.push(root.join("backgrounds"));
+        search_dirs.push(root.to_path_buf());
+    }
+
+    for dir in &search_dirs {
         for name in &candidate_names {
             let candidate = dir.join(name);
             if candidate.is_file() {
@@ -3314,6 +3350,23 @@ mod tests {
         let written_path = resolved_data.unwrap();
         assert!(written_path.is_file());
         let _ = std::fs::remove_file(written_path);
+
+        // Curated preset background paths and URLs resolve
+        let resolved_preset = resolve_background_image("/backgrounds/bg-1.jpg", &asset_paths);
+        assert!(
+            resolved_preset.is_some(),
+            "preset /backgrounds/bg-1.jpg should resolve to a valid file"
+        );
+        let resolved_url = resolve_background_image("url('/backgrounds/bg-1.jpg')", &asset_paths);
+        assert!(
+            resolved_url.is_some(),
+            "url('/backgrounds/bg-1.jpg') should resolve to a valid file"
+        );
+        let resolved_id = resolve_background_image("bg-1", &asset_paths);
+        assert!(
+            resolved_id.is_some(),
+            "preset ID bg-1 should resolve to a valid file"
+        );
     }
 
     #[test]

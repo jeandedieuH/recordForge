@@ -29,10 +29,19 @@ function App() {
   useRecorderStatusEvents()
 
   const params = new URLSearchParams(window.location.search)
-  const isFloating = params.get("floating") === "1"
-  const isBoundary = params.get("boundary") === "1"
-  const isCountdown = params.get("countdown") === "1"
-  const isRegionPicker = params.get("region") === "1"
+  const windowKind =
+    typeof window !== "undefined"
+      ? (window as unknown as { __RECORD_FORGE_WINDOW_KIND?: string }).__RECORD_FORGE_WINDOW_KIND
+      : undefined
+
+  const isFloating = params.get("floating") === "1" || windowKind === "floating"
+  const isBoundary = params.get("boundary") === "1" || windowKind === "boundary"
+  const isCountdown = params.get("countdown") === "1" || windowKind === "countdown"
+  const isRegionPicker =
+    params.get("region") === "1" ||
+    params.get("region_picker") === "1" ||
+    windowKind === "region-picker" ||
+    windowKind === "region"
   useEffect(() => {
     const root = document.documentElement
     if (isFloating) root.dataset.floating = "true"

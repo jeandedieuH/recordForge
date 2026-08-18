@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, instrument};
@@ -130,7 +130,7 @@ fn generate_waveform_png(
     stream_index: Option<i32>,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command.args(build_waveform_png_args(input, output, stream_index));
 
     info!("generating waveform png");
@@ -157,7 +157,7 @@ fn extract_peaks(
     stream_index: Option<i32>,
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<f32>> {
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

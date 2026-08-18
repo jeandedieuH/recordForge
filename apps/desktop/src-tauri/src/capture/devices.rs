@@ -1,6 +1,5 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use tracing::{info, instrument};
 
 /// Audio device kinds supported during recording.
@@ -120,7 +119,7 @@ struct DshowDevice {
 ///   `DirectShow video devices` / `DirectShow audio devices` section headers.
 ///   Kept as a fallback so the parser still works on older builds.
 fn list_dshow_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<DshowDevice>> {
-    let output = Command::new(ffmpeg_path)
+    let output = crate::process::create_command(ffmpeg_path)
         .args(["-f", "dshow", "-list_devices", "true", "-i", "dummy"])
         .output()
         .map_err(|e| crate::errors::InternalError::Media(format!("ffmpeg dshow list: {e}")))?;

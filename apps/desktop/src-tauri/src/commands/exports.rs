@@ -82,7 +82,7 @@ pub fn reveal_export(job_id: String, state: State<'_, AppState>) -> Result<()> {
     #[cfg(windows)]
     {
         let validated_str = validated.to_string_lossy();
-        std::process::Command::new("explorer")
+        crate::process::create_command("explorer")
             .args(["/select,", validated_str.as_ref()])
             .spawn()
             .map_err(|error| InternalError::Media(format!("reveal export: {error}")))?;

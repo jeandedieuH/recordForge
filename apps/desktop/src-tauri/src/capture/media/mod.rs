@@ -73,7 +73,7 @@ pub fn concatenate_segments(
     std::fs::write(&list_path, list)
         .map_err(|e| crate::errors::InternalError::Storage(format!("write concat list: {e}")))?;
 
-    let output = Command::new(ffmpeg_path)
+    let output = crate::process::create_command(ffmpeg_path)
         .arg("-y")
         .args(["-fflags", "+genpts+igndts"])
         .args(["-avoid_negative_ts", "make_zero"])
@@ -146,7 +146,7 @@ pub fn concatenate_webcam_segments(
         })?;
     }
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
         .args(["-hide_banner", "-loglevel", "error"]);
@@ -307,7 +307,7 @@ pub fn mux_audio_tracks(
         })?;
     }
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
         .args(["-hide_banner", "-loglevel", "error"])
@@ -409,7 +409,7 @@ pub fn trim_recording(
     let start_sec = start_ms as f64 / 1000.0;
     let duration_sec = (end_ms - start_ms) as f64 / 1000.0;
 
-    let output = Command::new(ffmpeg_path)
+    let output = crate::process::create_command(ffmpeg_path)
         .arg("-y")
         .args(["-ss", &format!("{start_sec:.3}")])
         .arg("-i")
@@ -459,7 +459,7 @@ pub fn copy_export(source_path: &Path, destination_path: &Path) -> crate::errors
 /// Return the FFmpeg version string reported by `ffmpeg -version`.
 #[instrument(skip(ffmpeg_path))]
 pub fn ffmpeg_version(ffmpeg_path: &str) -> crate::errors::Result<String> {
-    let output = Command::new(ffmpeg_path)
+    let output = crate::process::create_command(ffmpeg_path)
         .arg("-version")
         .output()
         .map_err(|e| crate::errors::InternalError::Media(format!("ffmpeg version: {e}")))?;
@@ -482,7 +482,7 @@ pub fn ffmpeg_version(ffmpeg_path: &str) -> crate::errors::Result<String> {
 /// which exits successfully only when the filter exists.
 #[instrument(skip(ffmpeg_path))]
 pub fn ffmpeg_has_filter(ffmpeg_path: &str, filter: &str) -> bool {
-    let status = Command::new(ffmpeg_path)
+    let status = crate::process::create_command(ffmpeg_path)
         .args(["-hide_banner", "-h", &format!("filter={filter}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -498,7 +498,7 @@ pub fn ffmpeg_has_filter(ffmpeg_path: &str, filter: &str) -> bool {
 /// recording no longer calls it; microphone and system audio use WASAPI.
 #[instrument(skip(ffmpeg_path, input_spec))]
 pub fn probe_dshow_device(ffmpeg_path: &str, input_spec: &str) -> bool {
-    let output = Command::new(ffmpeg_path)
+    let output = crate::process::create_command(ffmpeg_path)
         .args(["-hide_banner", "-f", "dshow", "-i", input_spec])
         .args(["-t", "0.1", "-f", "null", "-"])
         .stdout(Stdio::null())

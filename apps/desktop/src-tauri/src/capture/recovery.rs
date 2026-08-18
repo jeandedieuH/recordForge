@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{info, instrument};
 
 use super::config::builtin_profiles;
@@ -249,13 +248,13 @@ pub fn delete_recovery_session(session_id: &str, sessions_dir: &Path) -> crate::
     let work_dir = sessions_dir.join(session_id);
     if work_dir.exists() {
         // 2. Canonicalize target and parent to enforce containment
-        let canonical_target = work_dir.canonicalize().map_err(|e| {
+        let canonical_target = crate::path_policy::canonicalize_path(&work_dir).map_err(|e| {
             crate::errors::InternalError::Storage(format!(
                 "failed to canonicalize session path: {e}"
             ))
         })?;
 
-        let canonical_root = sessions_dir.canonicalize().map_err(|e| {
+        let canonical_root = crate::path_policy::canonicalize_path(sessions_dir).map_err(|e| {
             crate::errors::InternalError::Storage(format!(
                 "failed to canonicalize sessions root: {e}"
             ))
@@ -320,10 +319,10 @@ fn recover_webcam_asset(
     if !path.is_file() || !validate_media_file(ffprobe_path, &path) {
         return Ok(None);
     }
-    let canonical_root = work_dir.canonicalize().map_err(|error| {
+    let canonical_root = crate::path_policy::canonicalize_path(work_dir).map_err(|error| {
         crate::errors::InternalError::Storage(format!("canonicalize session: {error}"))
     })?;
-    let canonical_path = path.canonicalize().map_err(|error| {
+    let canonical_path = crate::path_policy::canonicalize_path(&path).map_err(|error| {
         crate::errors::InternalError::Storage(format!("canonicalize webcam asset: {error}"))
     })?;
     if !canonical_path.starts_with(&canonical_root) {
@@ -382,7 +381,7 @@ fn segment_index(path: &Path) -> Option<u32> {
 }
 
 fn validate_media_file(ffprobe_path: &str, path: &Path) -> bool {
-    let output = Command::new(ffprobe_path)
+    let output = crate::process::create_command(ffprobe_path)
         .args([
             "-v",
             "error",

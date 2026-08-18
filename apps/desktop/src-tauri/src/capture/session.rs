@@ -479,16 +479,32 @@ impl Recorder {
             profile = %profile.id,
             "selected video encoder for recording segment"
         );
-        let screen = FfmpegCapture::start(
+        let screen = match FfmpegCapture::start(
             &ffmpeg,
             config,
             profile,
             &encoder,
             &screen_output.to_string_lossy(),
             index,
-            Some(manifest),
+            Some(Arc::clone(&manifest)),
             self.ddagrab_available,
-        )?;
+        ) {
+            Ok(capture) => capture,
+            Err(error) if self.ddagrab_available => {
+                tracing::warn!(%error, "ddagrab display capture failed; falling back to gdigrab");
+                FfmpegCapture::start(
+                    &ffmpeg,
+                    config,
+                    profile,
+                    &encoder,
+                    &screen_output.to_string_lossy(),
+                    index,
+                    Some(manifest),
+                    false,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
 
         // Every audio worker writes against the screen capture's monotonic
         // origin, so startup latency is represented as leading silence rather
@@ -1673,6 +1689,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an active desktop display session for live capture"]
     fn stopped_session_aligns_container_duration_to_video_stream() {
         let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
         let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");

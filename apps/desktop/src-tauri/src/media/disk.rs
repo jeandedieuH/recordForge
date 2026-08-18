@@ -60,7 +60,7 @@ pub fn available_space(path: &Path) -> Result<u64> {
 
     #[cfg(not(windows))]
     {
-        let output = std::process::Command::new("df")
+        let output = crate::process::create_command("df")
             .args(["-k", dir.as_os_str().to_string_lossy().as_ref()])
             .output()
             .map_err(|e| InternalError::Storage(format!("df: {e}")))?;

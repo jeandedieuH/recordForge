@@ -7,6 +7,7 @@ import {
   CircleAlert,
   Flag,
   GripVertical,
+  Loader2,
   Mic,
   MoreVertical,
   Pause,
@@ -350,10 +351,9 @@ export function FloatingControls() {
               title="Stop & save recording"
               aria-label="Stop & save"
               disabled={!isActive || pendingAction != null}
-              loading={pendingAction === "stop"}
               onClick={stop}
             >
-              <Square className="size-4 fill-current" />
+              {pendingAction === "stop" ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4 fill-current" />}
             </Button>
 
             <Button

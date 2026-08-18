@@ -56,7 +56,9 @@ export function LibraryItemRow({
     recording.name.toLowerCase().includes("audio")
 
   const thumbnailSrc =
-    !imageError && recording.thumbnailPath ? toAssetUrl(recording.thumbnailPath) : null
+    !imageError && recording.thumbnailPath
+      ? toAssetUrl(recording.thumbnailPath, recording.workDir)
+      : null
 
   function handleAddTag() {
     const tag = newTag.trim()

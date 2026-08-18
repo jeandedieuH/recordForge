@@ -318,11 +318,9 @@ fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPoli
         if is_reference {
             policy.validate_external_asset_path(&candidate)?;
         } else {
-            let canonical_project = project_dir
-                .canonicalize()
+            let canonical_project = crate::path_policy::canonicalize_path(project_dir)
                 .unwrap_or_else(|_| project_dir.to_path_buf());
-            let canonical_asset = candidate
-                .canonicalize()
+            let canonical_asset = crate::path_policy::canonicalize_path(&candidate)
                 .map_err(|e| InternalError::Storage(format!("canonicalize asset: {e}")))?;
             if !policy.is_contained(&canonical_project, &canonical_asset) {
                 return Err(InternalError::Permissions(format!(
@@ -335,16 +333,16 @@ fn resolve_asset(asset: &mut ProjectAsset, project_dir: &Path, policy: &PathPoli
     } else if !is_reference {
         // Canonicalize the parent when a copied asset is missing so a missing
         // path cannot hide traversal through a symlinked project directory.
-        let canonical_project = project_dir
-            .canonicalize()
+        let canonical_project = crate::path_policy::canonicalize_path(project_dir)
             .unwrap_or_else(|_| project_dir.to_path_buf());
-        let canonical_asset = candidate.canonicalize().unwrap_or_else(|_| {
-            candidate
-                .parent()
-                .and_then(|parent| parent.canonicalize().ok())
-                .and_then(|parent| candidate.file_name().map(|name| parent.join(name)))
-                .unwrap_or_else(|| candidate.clone())
-        });
+        let canonical_asset =
+            crate::path_policy::canonicalize_path(&candidate).unwrap_or_else(|_| {
+                candidate
+                    .parent()
+                    .and_then(|parent| crate::path_policy::canonicalize_path(parent).ok())
+                    .and_then(|parent| candidate.file_name().map(|name| parent.join(name)))
+                    .unwrap_or_else(|| candidate.clone())
+            });
         if !policy.is_contained(&canonical_project, &canonical_asset) {
             return Err(InternalError::Permissions(format!(
                 "asset path escapes project directory: {}",
@@ -628,8 +626,8 @@ fn prune_snapshots(project_dir: &Path) -> Result<()> {
 /// Return a path relative to the project directory when the absolute path is
 /// inside it; otherwise return the absolute path as a fallback.
 pub fn make_project_relative(project_dir: &Path, absolute: &Path) -> String {
-    if let Ok(project_canonical) = project_dir.canonicalize() {
-        if let Ok(asset_canonical) = absolute.canonicalize() {
+    if let Ok(project_canonical) = crate::path_policy::canonicalize_path(project_dir) {
+        if let Ok(asset_canonical) = crate::path_policy::canonicalize_path(absolute) {
             if asset_canonical.starts_with(&project_canonical) {
                 return asset_canonical
                     .strip_prefix(&project_canonical)

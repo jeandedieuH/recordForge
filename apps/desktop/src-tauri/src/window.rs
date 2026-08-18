@@ -57,7 +57,7 @@ impl FloatingWindow {
         let mut builder = tauri::WebviewWindowBuilder::new(
             app,
             "floating",
-            tauri::WebviewUrl::App("index.html?floating=1".into()),
+            tauri::WebviewUrl::App("index.html".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'floating';")
         .title("RecordForge Transport Controls")
@@ -155,7 +155,7 @@ impl BoundaryWindow {
         let builder = tauri::WebviewWindowBuilder::new(
             app,
             "boundary",
-            tauri::WebviewUrl::App("index.html?boundary=1".into()),
+            tauri::WebviewUrl::App("index.html".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'boundary';")
         .title("RecordForge Capture Boundary")
@@ -233,7 +233,7 @@ impl RegionPickerWindow {
         tauri::WebviewWindowBuilder::new(
             app,
             "region-picker",
-            tauri::WebviewUrl::App("index.html?region=1".into()),
+            tauri::WebviewUrl::App("index.html".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'region-picker';")
         .title("RecordForge Select Region")
@@ -342,30 +342,29 @@ impl CountdownWindow {
             Size::Logical(size) => size,
             Size::Physical(size) => size.to_logical(1.0),
         };
-        let url = format!(
-            "index.html?countdown=1&sessionId={}&seconds={}&sourceName={}",
-            query_component(session_id),
-            seconds,
-            query_component(source_name),
+        let script = format!(
+            "window.__RECORD_FORGE_WINDOW_KIND = 'countdown'; window.__RECORD_FORGE_COUNTDOWN_PARAMS = {{ sessionId: {:?}, seconds: {}, sourceName: {:?} }};",
+            session_id, seconds, source_name
         );
 
-        let window =
-            tauri::WebviewWindowBuilder::new(app, "countdown", tauri::WebviewUrl::App(url.into()))
-                .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'countdown';")
-                .title("RecordForge Starting Recording")
-                .inner_size(logical_size.width, logical_size.height)
-                .position(logical_position.x, logical_position.y)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .content_protected(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .shadow(false)
-                .build()
-                .map_err(|error| {
-                    InternalError::Unknown(format!("create countdown window: {error:?}"))
-                })?;
+        let window = tauri::WebviewWindowBuilder::new(
+            app,
+            "countdown",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .initialization_script(&script)
+        .title("RecordForge Starting Recording")
+        .inner_size(logical_size.width, logical_size.height)
+        .position(logical_position.x, logical_position.y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .content_protected(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .build()
+        .map_err(|error| InternalError::Unknown(format!("create countdown window: {error:?}")))?;
 
         // A blank or stalled countdown must never become a full-screen input trap.
         if let Err(error) = window.set_ignore_cursor_events(true) {
@@ -418,6 +417,7 @@ fn logical_capture_rect(app: &tauri::AppHandle, bounds: Bounds) -> (Position, Si
     )
 }
 
+#[allow(dead_code)]
 fn query_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {

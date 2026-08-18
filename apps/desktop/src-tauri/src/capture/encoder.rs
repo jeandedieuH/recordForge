@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 /// Encoder description returned to the TypeScript front end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +88,7 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
     let output = std::env::temp_dir().join(format!("rf-encoder-probe-{encoder}.mp4"));
 
     // Generate a tiny 1-second 30fps color pattern and encode with the target encoder.
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .args([
             "-f",

@@ -741,7 +741,7 @@ pub fn reveal_recording(recording_id: String, state: State<'_, AppState>) -> Res
         // directory, preventing a compromised database from opening arbitrary files.
         let validated = state.path_policy.validate_recording_path(Path::new(path))?;
         let validated_str = validated.to_string_lossy();
-        std::process::Command::new("explorer")
+        crate::process::create_command("explorer")
             .args(["/select,", validated_str.as_ref()])
             .spawn()
             .map_err(|e| InternalError::Media(format!("reveal recording: {e}")))?;

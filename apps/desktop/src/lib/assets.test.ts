@@ -1,7 +1,39 @@
 import { describe, expect, it } from "vitest"
-import { isAbsolutePath, isWebUrl, resolveAssetPath, toAssetUrl } from "./assets"
+import { isAbsolutePath, isWebUrl, normalizePath, resolveAssetPath, toAssetUrl } from "./assets"
 
 describe("Asset Path Resolution & URL Helpers", () => {
+  describe("normalizePath", () => {
+    it("converts backslashes to forward slashes", () => {
+      expect(normalizePath("C:\\Users\\user\\sessions\\uuid\\file.png")).toBe(
+        "C:/Users/user/sessions/uuid/file.png",
+      )
+    })
+
+    it("strips Windows extended-length verbatim prefix (\\\\?\\)", () => {
+      expect(normalizePath("\\\\?\\C:\\Users\\user\\sessions\\uuid\\file.png")).toBe(
+        "C:/Users/user/sessions/uuid/file.png",
+      )
+      expect(normalizePath("//?/C:/Users/user/sessions/uuid/file.png")).toBe(
+        "C:/Users/user/sessions/uuid/file.png",
+      )
+    })
+
+    it("strips Windows UNC verbatim prefix (\\\\?\\UNC\\)", () => {
+      expect(normalizePath("\\\\?\\UNC\\server\\share\\assets\\file.png")).toBe(
+        "//server/share/assets/file.png",
+      )
+      expect(normalizePath("//?/UNC/server/share/assets/file.png")).toBe(
+        "//server/share/assets/file.png",
+      )
+    })
+
+    it("returns null for nullish values", () => {
+      expect(normalizePath(null)).toBeNull()
+      expect(normalizePath(undefined)).toBeNull()
+      expect(normalizePath("")).toBeNull()
+    })
+  })
+
   describe("isWebUrl", () => {
     it("identifies http and https URLs", () => {
       expect(isWebUrl("http://localhost:1420/test.png")).toBe(true)
@@ -34,6 +66,10 @@ describe("Asset Path Resolution & URL Helpers", () => {
       expect(isAbsolutePath("z:/media/test.mp4")).toBe(true)
     })
 
+    it("identifies Windows verbatim paths (\\\\?\\C:\\...)", () => {
+      expect(isAbsolutePath("\\\\?\\C:\\Users\\user\\sessions\\uuid\\assets\\file.png")).toBe(true)
+    })
+
     it("identifies UNC network paths", () => {
       expect(isAbsolutePath("\\\\server\\share\\assets\\file.png")).toBe(true)
     })
@@ -63,9 +99,9 @@ describe("Asset Path Resolution & URL Helpers", () => {
       "C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1"
     const workDirPosix = "/home/user/.config/com.recordforge.app/sessions/sess-1"
 
-    it("returns absolute paths untouched", () => {
+    it("returns normalized absolute paths", () => {
       const winPath = "C:\\temp\\image.png"
-      expect(resolveAssetPath(winPath, workDirWindows)).toBe(winPath)
+      expect(resolveAssetPath(winPath, workDirWindows)).toBe("C:/temp/image.png")
 
       const posixPath = "/tmp/image.png"
       expect(resolveAssetPath(posixPath, workDirPosix)).toBe(posixPath)
@@ -76,11 +112,11 @@ describe("Asset Path Resolution & URL Helpers", () => {
       expect(resolveAssetPath(url, workDirWindows)).toBe(url)
     })
 
-    it("joins relative asset paths with workDir", () => {
+    it("joins relative asset paths with workDir cleanly without mixed slashes", () => {
       const relative = "assets/4c8966f0562843da-prestigelearning.png"
       const resolved = resolveAssetPath(relative, workDirWindows)
       expect(resolved).toBe(
-        "C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1/assets/4c8966f0562843da-prestigelearning.png",
+        "C:/Users/user/AppData/Roaming/com.recordforge.app/sessions/sess-1/assets/4c8966f0562843da-prestigelearning.png",
       )
     })
 
@@ -89,6 +125,15 @@ describe("Asset Path Resolution & URL Helpers", () => {
       const relative = "assets/image.png"
       expect(resolveAssetPath(relative, workDirWithSlash)).toBe(
         "C:/sessions/sess-1/assets/image.png",
+      )
+    })
+
+    it("strips Windows verbatim prefix from workDir during join", () => {
+      const verbatimWorkDir =
+        "\\\\?\\C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1"
+      const relative = "assets/image.png"
+      expect(resolveAssetPath(relative, verbatimWorkDir)).toBe(
+        "C:/Users/user/AppData/Roaming/com.recordforge.app/sessions/sess-1/assets/image.png",
       )
     })
 

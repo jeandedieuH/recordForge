@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -34,7 +33,7 @@ pub fn extract_audio_track(
     }
 
     let map = format!("0:{stream_index}");
-    let result = Command::new(ffmpeg_path)
+    let result = crate::process::create_command(ffmpeg_path)
         .args(["-y", "-hide_banner", "-loglevel", "error"])
         .arg("-i")
         .arg(input)

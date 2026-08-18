@@ -76,28 +76,87 @@ fn bundled_candidates(name: &str, resource_dir: Option<&Path>) -> Vec<PathBuf> {
         name.to_string()
     };
 
+    let target_triple = env!("TARGET_TRIPLE");
+    let triple_file = if cfg!(windows) {
+        format!("{name}-{target_triple}.exe")
+    } else {
+        format!("{name}-{target_triple}")
+    };
+
+    let check_files = if !target_triple.is_empty() && triple_file != file {
+        vec![file.clone(), triple_file]
+    } else {
+        vec![file.clone()]
+    };
+
     // 1. Tauri resource/externalBin directory (production installs).
     if let Some(res_dir) = resource_dir {
-        candidates.push(res_dir.join(&file));
+        push_dir_candidates(&mut candidates, res_dir, name, &check_files);
     }
 
-    // 2–4. Relative to the current executable (dev builds).
+    // 2. Relative to current executable (dev builds and installed applications).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(&file));
-            candidates.push(dir.join(name).join(&file));
+            push_dir_candidates(&mut candidates, dir, name, &check_files);
 
             if let Some(parent) = dir.parent() {
-                candidates.push(parent.join("bin").join(&file));
+                push_dir_candidates(&mut candidates, parent, name, &check_files);
+                if let Some(grandparent) = parent.parent() {
+                    push_dir_candidates(&mut candidates, grandparent, name, &check_files);
+                    for f in &check_files {
+                        candidates.push(
+                            grandparent
+                                .join("apps")
+                                .join("desktop")
+                                .join("src-tauri")
+                                .join("binaries")
+                                .join(f),
+                        );
+                        candidates.push(grandparent.join("src-tauri").join("binaries").join(f));
+                    }
+                }
             }
+        }
+    }
+
+    // 3. Relative to current working directory (e.g. CLI/tests).
+    if let Ok(cwd) = std::env::current_dir() {
+        push_dir_candidates(&mut candidates, &cwd, name, &check_files);
+        for f in &check_files {
+            candidates.push(
+                cwd.join("apps")
+                    .join("desktop")
+                    .join("src-tauri")
+                    .join("binaries")
+                    .join(f),
+            );
+            candidates.push(cwd.join("src-tauri").join("binaries").join(f));
         }
     }
 
     candidates
 }
 
+fn push_dir_candidates(
+    candidates: &mut Vec<PathBuf>,
+    dir: &Path,
+    name: &str,
+    check_files: &[String],
+) {
+    for f in check_files {
+        candidates.push(dir.join(f));
+        candidates.push(dir.join("binaries").join(f));
+        candidates.push(dir.join("bin").join(f));
+        candidates.push(dir.join("resources").join(f));
+        candidates.push(dir.join("resources").join("binaries").join(f));
+        candidates.push(dir.join(name).join(f));
+        candidates.push(dir.join("_up_").join("binaries").join(f));
+        candidates.push(dir.join("_up_").join("src-tauri").join("binaries").join(f));
+    }
+}
+
 fn can_run(path: &Path) -> bool {
-    Command::new(path)
+    crate::process::create_command(path)
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

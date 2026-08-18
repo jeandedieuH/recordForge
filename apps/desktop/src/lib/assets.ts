@@ -22,6 +22,21 @@ import { convertFileSrc } from "@tauri-apps/api/core"
 import { invokeValidated } from "./ipc"
 import { isTauri } from "./settings"
 
+/**
+ * Normalizes Windows and POSIX paths by converting backslashes to forward slashes
+ * and stripping Windows extended-length verbatim prefixes (`\\?\` and `\\?\UNC\`).
+ */
+export function normalizePath(path: string | null | undefined): string | null {
+  if (!path) return null
+  let normalized = path.replace(/\\/g, "/")
+  if (normalized.startsWith("//?/UNC/")) {
+    normalized = "//" + normalized.slice(8)
+  } else if (normalized.startsWith("//?/")) {
+    normalized = normalized.slice(4)
+  }
+  return normalized
+}
+
 /** Check if a string is already a valid web/blob/data/asset URL. */
 export function isWebUrl(url: string | null | undefined): boolean {
   if (!url) return false
@@ -31,7 +46,9 @@ export function isWebUrl(url: string | null | undefined): boolean {
 /** Check if a path is an absolute filesystem path (POSIX, UNC, or Windows drive letter). */
 export function isAbsolutePath(path: string | null | undefined): boolean {
   if (!path) return false
-  return /^(?:[a-zA-Z]:[/\\]|\/|\\\\)/.test(path)
+  const clean = normalizePath(path)
+  if (!clean) return false
+  return /^(?:[a-zA-Z]:[/\\]|\/|\\\\)/.test(clean)
 }
 
 /**
@@ -44,11 +61,16 @@ export function resolveAssetPath(
   workDir?: string | null,
 ): string | null {
   if (!path) return null
-  if (isWebUrl(path) || isAbsolutePath(path)) return path
+  if (isWebUrl(path)) return path
+
+  const clean = normalizePath(path)
+  if (!clean) return null
+  if (isAbsolutePath(clean)) return clean
+
   if (workDir) {
-    const cleanWorkDir = workDir.replace(/[/\\]+$/, "")
-    const cleanPath = path.replace(/^[/\\]+/, "")
-    return `${cleanWorkDir}/${cleanPath}`
+    const cleanWorkDir = normalizePath(workDir)?.replace(/\/+$/, "")
+    const cleanPath = clean.replace(/^\/+/, "")
+    return cleanWorkDir ? `${cleanWorkDir}/${cleanPath}` : cleanPath
   }
   return null
 }

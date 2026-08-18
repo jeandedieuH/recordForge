@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{info, instrument};
 
 use crate::database::media::MediaMetadata;
@@ -83,7 +82,7 @@ pub fn generate_thumbnails(
 
     let filter = build_thumbnail_filter(thumbnail_interval_sec, columns, rows, count);
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
         .arg("-i")
@@ -156,7 +155,7 @@ pub fn generate_poster_frame(
     }
 
     // Try extracting at 0.5s first; fallback to 0.0s if needed
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
         .arg("-ss")
@@ -176,7 +175,7 @@ pub fn generate_poster_frame(
 
     if !output.status.success() || !output_image.is_file() {
         // Fallback: extract first frame at 0.0s
-        let mut fallback = Command::new(ffmpeg_path);
+        let mut fallback = crate::process::create_command(ffmpeg_path);
         fallback
             .arg("-y")
             .arg("-ss")

@@ -5,10 +5,26 @@ import { toErrorMessage } from "../../lib/errors"
 
 export function CountdownWindow() {
   const params = new URLSearchParams(window.location.search)
-  const sessionId = params.get("sessionId") ?? ""
-  const secondsValue = Number.parseInt(params.get("seconds") ?? "3", 10)
+  const windowParams =
+    typeof window !== "undefined"
+      ? (
+          window as unknown as {
+            __RECORD_FORGE_COUNTDOWN_PARAMS?: {
+              sessionId?: string
+              seconds?: number
+              sourceName?: string
+            }
+          }
+        ).__RECORD_FORGE_COUNTDOWN_PARAMS
+      : undefined
+
+  const sessionId = params.get("sessionId") ?? windowParams?.sessionId ?? ""
+  const secondsValue = Number.parseInt(
+    params.get("seconds") ?? String(windowParams?.seconds ?? "3"),
+    10,
+  )
   const seconds = secondsValue === 5 ? 5 : 3
-  const sourceName = params.get("sourceName") ?? "Selected Target"
+  const sourceName = params.get("sourceName") ?? windowParams?.sourceName ?? "Selected Target"
   const [error, setError] = useState<string | null>(null)
 
   if (!sessionId) return null

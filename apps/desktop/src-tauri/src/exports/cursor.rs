@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use cursor_engine::CursorTelemetryFile;
 
 use resvg::tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
@@ -106,10 +108,9 @@ pub struct CursorRenderer {
     /// The final cursor scale is the user setting combined with the fit scale
     /// so the rendered cursor stays visually proportional to the output video.
     cursor_scale: f64,
-    /// Cached rasterization of the cursor asset. The asset and settings are
-    /// constant for a given export, so the expensive SVG parse/render happens
-    /// once and is blitted each frame.
-    cursor_cache: Option<RasterizedCursor>,
+    /// Cached rasterizations of cursor assets by canonical asset ID.
+    /// Expensive SVG parsing and rendering is done on-demand per shape type.
+    cursor_cache: HashMap<String, RasterizedCursor>,
 }
 
 impl CursorRenderer {
@@ -169,7 +170,7 @@ impl CursorRenderer {
             canvas_padding: canvas.padding,
             video_screen,
             cursor_scale,
-            cursor_cache: None,
+            cursor_cache: HashMap::new(),
         })
     }
 
@@ -445,17 +446,20 @@ impl CursorRenderer {
         clip: &ClipRect,
     ) {
         let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
-        if self.cursor_cache.is_none() {
+        if !self.cursor_cache.contains_key(&asset.id) {
             match self.rasterize_cursor_asset(asset) {
-                Ok(cursor) => self.cursor_cache = Some(cursor),
+                Ok(cursor) => {
+                    self.cursor_cache.insert(asset.id.clone(), cursor);
+                }
                 Err(error) => {
-                    tracing::warn!(%error, "failed to rasterize cursor asset; skipping cursor");
+                    tracing::warn!(%error, asset_id = %asset.id, "failed to rasterize cursor asset; skipping cursor");
                     return;
                 }
             }
         }
-        let cursor = self.cursor_cache.as_ref().unwrap();
-        self.blit_cursor(frame, cursor, x, y, opacity, clip);
+        if let Some(cursor) = self.cursor_cache.get(&asset.id) {
+            self.blit_cursor(frame, cursor, x, y, opacity, clip);
+        }
     }
 
     fn blit_cursor(
@@ -695,7 +699,11 @@ pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
 }
 
 /// Generates a grayscale anti-aliased rounded rectangle mask PNG for fast hardware/SIMD compositing with alphamerge.
-pub fn generate_rounded_rect_mask_png(width: u32, height: u32, radius: f32) -> Result<Vec<u8>, String> {
+pub fn generate_rounded_rect_mask_png(
+    width: u32,
+    height: u32,
+    radius: f32,
+) -> Result<Vec<u8>, String> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1))
         .ok_or_else(|| "failed to allocate mask pixmap".to_string())?;
     pixmap.fill(Color::BLACK);
@@ -728,9 +736,17 @@ pub fn generate_rounded_rect_mask_png(width: u32, height: u32, radius: f32) -> R
         let mut paint = Paint::default();
         paint.set_color(Color::WHITE);
         paint.anti_alias = true;
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
-    pixmap.encode_png().map_err(|e| format!("encode mask png: {e}"))
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("encode mask png: {e}"))
 }
 
 /// Generates a grayscale anti-aliased circle mask PNG for fast hardware/SIMD compositing with alphamerge.
@@ -761,9 +777,17 @@ pub fn generate_circle_mask_png(width: u32, height: u32) -> Result<Vec<u8>, Stri
         let mut paint = Paint::default();
         paint.set_color(Color::WHITE);
         paint.anti_alias = true;
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
-    pixmap.encode_png().map_err(|e| format!("encode circle mask png: {e}"))
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("encode circle mask png: {e}"))
 }
 
 fn source_time_for_output(segments: &[RenderSegment], output_ms: u64) -> Option<u64> {
@@ -1274,5 +1298,71 @@ mod tests {
         let (no_zoom_x, no_zoom_y) = renderer.apply_zoom(1_001, 120.0, 120.0);
         assert!((no_zoom_x - 120.0).abs() < 0.01);
         assert!((no_zoom_y - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn renders_different_cursor_types_per_frame() {
+        let mut telemetry = make_v2_telemetry();
+        telemetry.events = vec![
+            cursor_engine::CursorEvent {
+                t_ms: 0,
+                x: 50.0,
+                y: 50.0,
+                visible: true,
+                shape_id: Some("arrow".into()),
+                ..Default::default()
+            },
+            cursor_engine::CursorEvent {
+                t_ms: 200,
+                x: 50.0,
+                y: 50.0,
+                visible: true,
+                shape_id: Some("ibeam".into()),
+                ..Default::default()
+            },
+            cursor_engine::CursorEvent {
+                t_ms: 400,
+                x: 50.0,
+                y: 50.0,
+                visible: true,
+                shape_id: Some("hand".into()),
+                ..Default::default()
+            },
+        ];
+        let mut settings = CursorSettings::default();
+        settings.shape_mode = "optimized".into();
+
+        let mut renderer =
+            CursorRenderer::new(settings, telemetry, &segments(), &test_canvas(100, 100, 0))
+                .expect("valid cursor renderer");
+
+        let mut frame_arrow = vec![0; 100 * 100 * 4];
+        renderer.render_frame(0, &mut frame_arrow);
+
+        let mut frame_ibeam = vec![0; 100 * 100 * 4];
+        renderer.render_frame(200, &mut frame_ibeam);
+
+        let mut frame_hand = vec![0; 100 * 100 * 4];
+        renderer.render_frame(400, &mut frame_hand);
+
+        // All 3 frames should have non-empty cursor content
+        assert!(frame_arrow.iter().any(|&b| b > 0));
+        assert!(frame_ibeam.iter().any(|&b| b > 0));
+        assert!(frame_hand.iter().any(|&b| b > 0));
+
+        // And the rendered pixel buffers must differ between cursor shapes
+        assert_ne!(
+            frame_arrow, frame_ibeam,
+            "arrow and ibeam should render different pixels"
+        );
+        assert_ne!(
+            frame_ibeam, frame_hand,
+            "ibeam and hand should render different pixels"
+        );
+
+        // The cache should hold all 3 resolved assets
+        assert!(renderer.cursor_cache.contains_key("shape-arrow"));
+        assert!(renderer.cursor_cache.contains_key("shape-ibeam"));
+        assert!(renderer.cursor_cache.contains_key("shape-hand"));
     }
 }

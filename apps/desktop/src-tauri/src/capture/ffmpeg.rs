@@ -246,7 +246,7 @@ fn build_screen_command(
     output: &str,
     ddagrab_available: bool,
 ) -> Command {
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -304,7 +304,7 @@ fn build_webcam_command(
     encoder: &str,
     output: &str,
 ) -> Command {
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

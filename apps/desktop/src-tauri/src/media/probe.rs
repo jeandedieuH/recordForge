@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tracing::instrument;
 
 use crate::database::media::{MediaFormat, MediaMetadata, MediaStream};
@@ -50,7 +50,7 @@ pub fn probe_media(ffprobe_path: &str, input: &Path, recording_id: &str) -> Resu
         return Err(InternalError::Media(format!("input not found: {}", input.display())).into());
     }
 
-    let output = Command::new(ffprobe_path)
+    let output = crate::process::create_command(ffprobe_path)
         .args([
             "-v",
             "quiet",

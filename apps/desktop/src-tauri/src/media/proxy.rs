@@ -30,7 +30,7 @@ pub(crate) fn build_proxy_command(
         format!("scale=960:{proxy_height}")
     };
 
-    let mut command = Command::new(ffmpeg_path);
+    let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
         .arg("-i")

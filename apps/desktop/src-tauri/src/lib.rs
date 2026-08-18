@@ -7,6 +7,7 @@ pub mod exports;
 pub mod jobs;
 pub mod media;
 pub mod path_policy;
+pub mod process;
 pub mod projects;
 pub mod shortcuts;
 pub mod state;
