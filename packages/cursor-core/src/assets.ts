@@ -84,11 +84,11 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 10,
-    hotspotY: 5,
+    hotspotX: 8.5,
+    hotspotY: 2,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
-      <path d="M8 20 C6 20 4 18 4 15 L4 11 C4 10 5 9 6 9 C7 9 8 10 8 11 L8 14 L8 7 C8 6 9 5 10 5 C11 5 12 6 12 7 L12 14 L12 9 C12 8 13 7 14 7 C15 7 16 8 16 9 L16 14 L16 11 C16 10 17 9 18 9 C19 9 20 10 20 11 L20 15 C20 18 18 20 16 20 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
+      <path d="M8.5 2 C7.4 2 6.5 2.9 6.5 4 L6.5 11.8 C5.8 11.2 4.9 11 4 11.5 C3 12 2.5 13 2.7 14.2 C3.3 16.8 5.5 21 9.5 21.8 C14 22.5 17.8 20 18 16 L18 11.5 C18 10.4 17.1 9.5 16 9.5 C15.7 9.5 15.4 9.6 15.1 9.7 C14.8 8.7 13.9 8 12.8 8 C12.5 8 12.2 8.1 11.9 8.2 C11.6 7.2 10.6 6.5 9.5 6.5 C9.1 6.5 8.7 6.6 8.5 6.8 L8.5 4 C8.5 2.9 7.6 2 8.5 2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
     </g>`,
   },
   "shape-ibeam": {
