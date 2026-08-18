@@ -77,10 +77,10 @@ export function ImageBackgroundPicker({
             type="button"
             onClick={() => setActiveCategory(cat.value)}
             className={cn(
-              "rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors",
+              "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
               activeCategory === cat.value
-                ? "bg-primary text-primary-foreground"
-                : "bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
+                ? "border-primary/40 bg-primary/15 font-semibold text-primary"
+                : "border-transparent bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
             )}
           >
             {cat.label}
@@ -90,7 +90,7 @@ export function ImageBackgroundPicker({
 
       {/* Preset Images Grid */}
       <div
-        className="grid grid-cols-3 gap-2 max-h-[220px] overflow-y-auto pr-1"
+        className="grid grid-cols-3 gap-2 max-h-55 overflow-y-auto pr-1"
         role="listbox"
         aria-label="Image background presets"
       >
@@ -122,7 +122,7 @@ export function ImageBackgroundPicker({
                 />
                 {selected && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                    <Check className="size-4 stroke-[3] text-white drop-shadow-md" aria-hidden />
+                    <Check className="size-4 stroke-3 text-white drop-shadow-md" aria-hidden />
                   </div>
                 )}
               </div>
@@ -210,10 +210,10 @@ export function ImageBackgroundPicker({
                 type="button"
                 onClick={() => onBlurChange?.(p.value)}
                 className={cn(
-                  "flex-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
+                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
                   backgroundBlur === p.value
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-surface text-subtle-foreground hover:bg-surface-hover hover:text-foreground",
+                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
                 )}
               >
                 {p.label}
@@ -244,10 +244,10 @@ export function ImageBackgroundPicker({
                 type="button"
                 onClick={() => onDimChange?.(p.value)}
                 className={cn(
-                  "flex-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
+                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
                   Math.abs(backgroundDim - p.value) < 0.01
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-surface text-subtle-foreground hover:bg-surface-hover hover:text-foreground",
+                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
                 )}
               >
                 {p.label}

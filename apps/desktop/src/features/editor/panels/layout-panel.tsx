@@ -163,10 +163,10 @@ export function LayoutPanel() {
                 type="button"
                 onClick={() => execute(createUpdateCanvasCommand({ padding: p }))}
                 className={cn(
-                  "flex-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
+                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
                   canvas.padding === p
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-surface text-subtle-foreground hover:bg-surface-hover hover:text-foreground",
+                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
                 )}
               >
                 {p}px
@@ -197,10 +197,10 @@ export function LayoutPanel() {
                 type="button"
                 onClick={() => execute(createUpdateCanvasCommand({ borderRadius: r.value }))}
                 className={cn(
-                  "flex-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
+                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
                   canvas.borderRadius === r.value
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-surface text-subtle-foreground hover:bg-surface-hover hover:text-foreground",
+                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
                 )}
               >
                 {r.label}

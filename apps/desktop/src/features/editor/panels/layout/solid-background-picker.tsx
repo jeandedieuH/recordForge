@@ -38,10 +38,10 @@ export function SolidBackgroundPicker({ value, onChange }: SolidBackgroundPicker
             type="button"
             onClick={() => setActiveCategory(cat.value)}
             className={cn(
-              "rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors",
+              "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
               activeCategory === cat.value
-                ? "bg-primary text-primary-foreground"
-                : "bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
+                ? "border-primary/40 bg-primary/15 font-semibold text-primary"
+                : "border-transparent bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
             )}
           >
             {cat.label}
@@ -82,7 +82,7 @@ export function SolidBackgroundPicker({ value, onChange }: SolidBackgroundPicker
               >
                 {selected && (
                   <Check
-                    className={cn("size-3.5 stroke-[3]", isLight ? "text-slate-900" : "text-white")}
+                    className={cn("size-3.5 stroke-3", isLight ? "text-slate-900" : "text-white")}
                     aria-hidden
                   />
                 )}

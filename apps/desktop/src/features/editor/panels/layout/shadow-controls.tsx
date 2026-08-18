@@ -77,10 +77,10 @@ export function ShadowControls({ canvas, onChange }: ShadowControlsProps) {
                   type="button"
                   onClick={() => applyPreset(preset)}
                   className={cn(
-                    "flex-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
+                    "flex-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors",
                     isMatch
-                      ? "bg-primary text-primary-foreground shadow-xs"
-                      : "bg-surface text-subtle-foreground hover:bg-surface-hover hover:text-foreground",
+                      ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                      : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
                   )}
                 >
                   {preset.label}

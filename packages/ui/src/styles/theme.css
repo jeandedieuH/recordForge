@@ -35,10 +35,10 @@
   --color-primary-hover: #073d8e;
   --color-primary-container: #3366cc;
   --color-on-primary-container: #e7ecff;
-  --color-secondary: #4e5d86; /* Slate blue */
-  --color-secondary-hover: #3d4a6e;
-  --color-tertiary: #7d308f; /* Sophisticated purple accent */
-  --color-tertiary-hover: #652575;
+  --color-secondary: #7d308f; /* Sophisticated purple accent */
+  --color-secondary-hover: #652575;
+  --color-tertiary: #4e5d86;  /* Slate blue */
+  --color-tertiary-hover: #3d4a6e;
   --color-tertiary-container: #984aaa;
   --color-recording: #ef4444; /* Recording red dot / actions */
   --color-recording-hover: #dc2626;

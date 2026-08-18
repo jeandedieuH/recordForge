@@ -59,10 +59,10 @@ export function GradientBackgroundPicker({ value, onChange }: GradientBackground
             type="button"
             onClick={() => setActiveCategory(cat.value)}
             className={cn(
-              "rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors",
+              "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
               activeCategory === cat.value
-                ? "bg-primary text-primary-foreground"
-                : "bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
+                ? "border-primary/40 bg-primary/15 font-semibold text-primary"
+                : "border-transparent bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
             )}
           >
             {cat.label}
@@ -101,7 +101,7 @@ export function GradientBackgroundPicker({ value, onChange }: GradientBackground
               >
                 {selected && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/25">
-                    <Check className="size-4 stroke-[3] text-white drop-shadow-md" aria-hidden />
+                    <Check className="size-4 stroke-3 text-white drop-shadow-md" aria-hidden />
                   </div>
                 )}
               </div>
@@ -224,10 +224,10 @@ export function GradientBackgroundPicker({ value, onChange }: GradientBackground
                       applyCustomLinear(customColor1, customColor2, angle, customColor3)
                     }}
                     className={cn(
-                      "rounded px-1.5 py-0.5 font-mono text-[9px] transition-colors",
+                      "rounded border px-1.5 py-0.5 font-mono text-[9px] font-medium transition-colors",
                       customAngle === angle
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-surface text-subtle-foreground hover:text-foreground",
+                        ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                        : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
                     )}
                   >
                     {angle}°
