@@ -1,11 +1,14 @@
-import { useRef } from "react"
+import { useEffect, useRef } from "react"
 import type { MaskClip, MaskRect } from "@recordforge/contracts"
+import { renderMasksToCanvas } from "../canvas/mask-shader-renderer"
 
 interface MaskPreviewProps {
   clips: MaskClip[]
   playheadMs: number
   canvasWidth: number
   canvasHeight: number
+  videoElement?: HTMLVideoElement | null
+  useShaderOptimization?: boolean
   onSelectMask?: (clip: MaskClip) => void
   onUpdateMask?: (
     clipId: string,
@@ -39,7 +42,7 @@ function clampRect(rect: MaskRect, canvasWidth: number, canvasHeight: number): M
   }
 }
 
-function maskVisual(clip: MaskClip): React.CSSProperties {
+function maskFallbackVisual(clip: MaskClip): React.CSSProperties {
   if (clip.mode === "redact") {
     return { backgroundColor: clip.redactColor, opacity: 0.98 }
   }
@@ -64,10 +67,38 @@ export function MaskPreview({
   playheadMs,
   canvasWidth,
   canvasHeight,
+  videoElement,
+  useShaderOptimization = true,
   onSelectMask,
   onUpdateMask,
 }: MaskPreviewProps) {
   const gestureRef = useRef<MaskGesture | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const webglBundleRef = useRef<any>(null)
+
+  // Render hardware-accelerated WebGL / Canvas2D shaders onto the canvas layer
+  useEffect(() => {
+    if (!useShaderOptimization || !canvasRef.current) return
+
+    const canvas = canvasRef.current
+    if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
+      canvas.width = canvasWidth
+      canvas.height = canvasHeight
+    }
+
+    renderMasksToCanvas(
+      canvas,
+      videoElement ?? null,
+      clips,
+      {
+        canvasWidth,
+        canvasHeight,
+        playheadMs,
+        preferWebGL: true,
+      },
+      webglBundleRef,
+    )
+  }, [clips, playheadMs, canvasWidth, canvasHeight, videoElement, useShaderOptimization])
 
   function beginGesture(
     event: React.PointerEvent<HTMLDivElement>,
@@ -155,22 +186,37 @@ export function MaskPreview({
 
   return (
     <>
+      {useShaderOptimization ? (
+        <canvas
+          ref={canvasRef}
+          className="pointer-events-none absolute inset-0 size-full z-28"
+          style={{ width: "100%", height: "100%" }}
+        />
+      ) : null}
+
       {clips.map((clip) => {
         const active = isActive(clip, playheadMs)
         const rect = clampRect(clip.rect, canvasWidth, canvasHeight)
+        const visualStyle = useShaderOptimization
+          ? {
+              backgroundColor: "transparent",
+              backdropFilter: "none",
+            }
+          : maskFallbackVisual(clip)
+
         return (
           <div
             key={clip.id}
             role="button"
             tabIndex={active ? 0 : -1}
             aria-label={`${clip.mode} privacy mask`}
-            className="absolute z-30 overflow-visible rounded-sm border border-warning/80 outline-none focus-visible:ring-2 focus-visible:ring-warning"
+            className="absolute z-30 overflow-visible rounded-sm border border-warning/80 outline-none focus-visible:ring-2 focus-visible:ring-warning hover:border-warning"
             style={{
               left: `${(rect.x / canvasWidth) * 100}%`,
               top: `${(rect.y / canvasHeight) * 100}%`,
               width: `${(rect.width / canvasWidth) * 100}%`,
               height: `${(rect.height / canvasHeight) * 100}%`,
-              ...maskVisual(clip),
+              ...visualStyle,
               opacity: active ? 1 : 0,
               pointerEvents: active && onUpdateMask ? "auto" : "none",
             }}

@@ -7,13 +7,15 @@ import {
   Cpu,
   Gauge,
   HardDrive,
+  Layers,
   Mic,
   Monitor,
   Video,
   Zap,
 } from "lucide-react"
-import { Badge, Button } from "@recordforge/ui"
+import { Badge, Button, Switch } from "@recordforge/ui"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { getSetting, setSetting } from "../../lib/settings"
 
 // User-friendly descriptions for common encoders
 const ENCODER_INFO_MAP: Record<string, { desc: string; iconLabel: string }> = {
@@ -43,10 +45,21 @@ export function DiagnosticsPanel() {
   const { diagnostics, benchmark, isLoading, error, loadDiagnostics, runBenchmark, clearError } =
     useRecorderStore()
   const [expandedEncoder, setExpandedEncoder] = useState<string | null>(null)
+  const [lowGpuFilterOptimization, setLowGpuFilterOptimization] = useState(true)
 
   useEffect(() => {
     void loadDiagnostics()
+    void getSetting("lowGpuFilterOptimization").then((value) => {
+      if (value !== null) {
+        setLowGpuFilterOptimization(value !== "false")
+      }
+    })
   }, [loadDiagnostics])
+
+  function handleToggleOptimization(checked: boolean) {
+    setLowGpuFilterOptimization(checked)
+    void setSetting("lowGpuFilterOptimization", String(checked))
+  }
 
   return (
     <div className="space-y-6">
@@ -298,6 +311,33 @@ export function DiagnosticsPanel() {
           ) : (
             <p className="text-xs text-subtle-foreground italic">No webcam devices detected.</p>
           )}
+        </div>
+      </div>
+
+      {/* Preview Rendering & GPU Acceleration Card */}
+      <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+              <Layers className="size-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-foreground">
+                Low-Spec GPU Preview Optimization (WebGL / Shaders)
+              </h4>
+              <p className="text-xs text-subtle-foreground mt-0.5 max-w-2xl leading-relaxed">
+                Accelerates privacy masks (blur & pixelate) using WebGL fragment shaders and
+                pre-renders blurred backgrounds to offscreen canvas caches. Eliminates live CSS
+                filter compositor bottlenecks on Intel iGPU / low-power hardware.
+              </p>
+            </div>
+          </div>
+
+          <Switch
+            checked={lowGpuFilterOptimization}
+            onCheckedChange={handleToggleOptimization}
+            aria-label="Toggle Low-Spec GPU Preview Optimization"
+          />
         </div>
       </div>
 

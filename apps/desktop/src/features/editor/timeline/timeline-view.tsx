@@ -51,7 +51,6 @@ import {
   zoomTransformToCss,
   type PlaybackBoundary,
   canvasShadowStyle,
-  normalizeBackgroundCss,
   computeBackgroundImageLayerStyle,
 } from "@recordforge/editor-core"
 import {
@@ -79,6 +78,7 @@ import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
 import { OverlayCanvas } from "../canvas/overlay-canvas"
 import { OverlaySelectionLayer } from "../canvas/overlay-selection-layer"
+import { usePreRenderedBackground } from "../canvas/background-cache"
 import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
 import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
@@ -524,18 +524,32 @@ export function TimelineView({
     }
   }, [timeline?.canvas.width, timeline?.canvas.height])
 
+  const preRenderedBackground = usePreRenderedBackground(timeline?.canvas, view.previewQuality)
+
   const backgroundLayerStyle = useMemo(() => {
     if (!timeline) return { filter: undefined, transform: undefined, overlayOpacity: undefined }
+    if (preRenderedBackground.isPreRendered) {
+      return {
+        filter: preRenderedBackground.filter,
+        transform: preRenderedBackground.transform,
+        overlayOpacity: preRenderedBackground.overlayOpacity,
+      }
+    }
     return computeBackgroundImageLayerStyle(
       timeline.canvas.backgroundBlur,
       timeline.canvas.backgroundDim,
     )
-  }, [timeline?.canvas.backgroundBlur, timeline?.canvas.backgroundDim])
+  }, [timeline, preRenderedBackground])
 
   const screenStyle = useMemo<React.CSSProperties>(() => {
     if (!timeline || !videoBounds) {
       return { position: "absolute", inset: 0, overflow: "hidden" }
     }
+
+    const shadow =
+      view.previewQuality === "power"
+        ? undefined
+        : canvasShadowStyle(timeline.canvas, videoBounds.scale)
 
     return {
       position: "absolute",
@@ -544,10 +558,10 @@ export function TimelineView({
       width: videoBounds.width,
       height: videoBounds.height,
       borderRadius: timeline.canvas.borderRadius * videoBounds.scale,
-      boxShadow: canvasShadowStyle(timeline.canvas, videoBounds.scale),
+      boxShadow: shadow,
       overflow: "hidden",
     }
-  }, [videoBounds, timeline?.canvas])
+  }, [videoBounds, timeline?.canvas, view.previewQuality])
 
   const handleClockBoundary = useCallback(
     (boundary: PlaybackBoundary) => {
@@ -1390,7 +1404,7 @@ export function TimelineView({
                 <div
                   className="size-full"
                   style={{
-                    background: normalizeBackgroundCss(timeline.canvas.background),
+                    background: preRenderedBackground.backgroundStyle,
                     backgroundSize: "cover",
                     backgroundPosition: "center",
                     backgroundRepeat: "no-repeat",
@@ -1479,6 +1493,8 @@ export function TimelineView({
                   playheadMs={view.playheadMs}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
+                  videoElement={videoRef.current}
+                  useShaderOptimization={view.previewQuality !== "quality"}
                   onSelectMask={selectMask}
                   onUpdateMask={(clipId, rect, options) =>
                     interaction.updateMaskRect(clipId, rect, options)

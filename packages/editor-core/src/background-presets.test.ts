@@ -156,4 +156,3 @@ describe("background-presets", () => {
     })
   })
 })
-
