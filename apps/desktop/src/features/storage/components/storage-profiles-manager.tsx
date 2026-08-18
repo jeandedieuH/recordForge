@@ -126,7 +126,7 @@ export function StorageProfilesManager() {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={() => handleOpenAdd("s3")} className="gap-1.5 text-xs">
+          <Button variant="secondary" size="sm" onClick={() => handleOpenAdd("s3")} className="gap-1.5 text-xs">
             <Plus className="h-3.5 w-3.5" />
             Add S3 Bucket
           </Button>
@@ -216,7 +216,7 @@ export function StorageProfilesManager() {
                 <Card
                   key={profile.id}
                   className={`p-4 transition-all ${
-                    profile.isDefault ? "border-primary/40 bg-primary/[0.02]" : ""
+                    profile.isDefault ? "border-primary/40 bg-primary/2" : ""
                   }`}
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">

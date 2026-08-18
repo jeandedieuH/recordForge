@@ -53,8 +53,9 @@ impl LocalFolderClient {
         cancel_flag: &AtomicBool,
     ) -> Result<String> {
         let dest_dir = Path::new(&self.config.destination_path);
-        fs::create_dir_all(dest_dir)
-            .map_err(|e| InternalError::Storage(format!("failed to create destination folder: {e}")))?;
+        fs::create_dir_all(dest_dir).map_err(|e| {
+            InternalError::Storage(format!("failed to create destination folder: {e}"))
+        })?;
 
         let final_dest = dest_dir.join(destination_name);
         let partial_dest = dest_dir.join(format!("{}.partial", destination_name));
@@ -96,8 +97,9 @@ impl LocalFolderClient {
             .map_err(|e| InternalError::Storage(format!("flush error: {e}")))?;
         drop(dst);
 
-        fs::rename(&partial_dest, &final_dest)
-            .map_err(|e| InternalError::Storage(format!("failed to finalize destination file: {e}")))?;
+        fs::rename(&partial_dest, &final_dest).map_err(|e| {
+            InternalError::Storage(format!("failed to finalize destination file: {e}"))
+        })?;
 
         Ok(final_dest.to_string_lossy().to_string())
     }

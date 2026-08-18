@@ -7,12 +7,12 @@ use std::net::TcpListener;
 use tauri::{Emitter, State};
 use tracing::instrument;
 
-use crate::database::storage::{
-    self as storage_db, StorageProfile, UploadJob,
-};
+use crate::database::storage::{self as storage_db, StorageProfile, UploadJob};
 use crate::errors::{InternalError, Result};
 use crate::state::AppState;
-use crate::storage::drive::{GoogleDriveClient, GoogleDriveConfig, GOOGLE_DRIVE_AUTH_SCOPE, GOOGLE_DRIVE_CLIENT_ID};
+use crate::storage::drive::{
+    GoogleDriveClient, GoogleDriveConfig, GOOGLE_DRIVE_AUTH_SCOPE, GOOGLE_DRIVE_CLIENT_ID,
+};
 use crate::storage::local::{LocalFolderClient, LocalFolderConfig};
 use crate::storage::s3::{ConnectionTestResult, S3Client, S3Config};
 use crate::storage::vault;
@@ -101,7 +101,10 @@ pub fn save_s3_profile(
         vault::set_secret(&format!("{}:access_key", profile_id), &input.access_key_id)?;
     }
     if !input.secret_access_key.trim().is_empty() {
-        vault::set_secret(&format!("{}:secret_key", profile_id), &input.secret_access_key)?;
+        vault::set_secret(
+            &format!("{}:secret_key", profile_id),
+            &input.secret_access_key,
+        )?;
     }
 
     let profile = StorageProfile {
@@ -223,9 +226,15 @@ pub async fn test_storage_profile(
             .map_err(|_| InternalError::Storage("db mutex poisoned".into()))?;
         let p = storage_db::get_profile_by_id(&conn, &profile_id)?
             .ok_or_else(|| InternalError::Storage(format!("profile {} not found", profile_id)))?;
-        let ak = vault::get_secret(&format!("{}:access_key", profile_id)).ok().flatten();
-        let sk = vault::get_secret(&format!("{}:secret_key", profile_id)).ok().flatten();
-        let rt = vault::get_secret(&format!("{}:refresh_token", profile_id)).ok().flatten();
+        let ak = vault::get_secret(&format!("{}:access_key", profile_id))
+            .ok()
+            .flatten();
+        let sk = vault::get_secret(&format!("{}:secret_key", profile_id))
+            .ok()
+            .flatten();
+        let rt = vault::get_secret(&format!("{}:refresh_token", profile_id))
+            .ok()
+            .flatten();
         (p, ak, sk, rt)
     };
 
@@ -234,8 +243,10 @@ pub async fn test_storage_profile(
             let s3_config = profile.s3_config.ok_or_else(|| {
                 InternalError::Storage("S3 configuration missing for profile".into())
             })?;
-            let ak = access_key.ok_or_else(|| InternalError::Storage("Access key missing".into()))?;
-            let sk = secret_key.ok_or_else(|| InternalError::Storage("Secret key missing".into()))?;
+            let ak =
+                access_key.ok_or_else(|| InternalError::Storage("Access key missing".into()))?;
+            let sk =
+                secret_key.ok_or_else(|| InternalError::Storage("Secret key missing".into()))?;
             let client = S3Client::new(s3_config, ak, sk);
             client.test_connection().await
         }
@@ -243,8 +254,9 @@ pub async fn test_storage_profile(
             let drive_config = profile.drive_config.ok_or_else(|| {
                 InternalError::Storage("Google Drive configuration missing".into())
             })?;
-            let rt = refresh_token
-                .ok_or_else(|| InternalError::Storage("Google Drive is not authenticated".into()))?;
+            let rt = refresh_token.ok_or_else(|| {
+                InternalError::Storage("Google Drive is not authenticated".into())
+            })?;
             let client = GoogleDriveClient::new(drive_config, rt);
             client.test_connection().await
         }
@@ -364,44 +376,60 @@ pub async fn start_google_drive_oauth(app: tauri::AppHandle) -> Result<OAuthFlow
 
                         match res {
                             Ok(resp) if resp.status().is_success() => {
-                                if let Ok(token_resp) = resp.json::<crate::storage::drive::TokenResponse>().await {
+                                if let Ok(token_resp) =
+                                    resp.json::<crate::storage::drive::TokenResponse>().await
+                                {
                                     // Fetch user email
                                     let mut email = None;
                                     if let Ok(about_res) = http
-                                        .get("https://www.googleapis.com/drive/v3/about?fields=user")
+                                        .get(
+                                            "https://www.googleapis.com/drive/v3/about?fields=user",
+                                        )
                                         .bearer_auth(&token_resp.access_token)
                                         .send()
                                         .await
                                     {
-                                        if let Ok(about) = about_res.json::<crate::storage::drive::DriveAboutResponse>().await {
+                                        if let Ok(about) = about_res
+                                            .json::<crate::storage::drive::DriveAboutResponse>()
+                                            .await
+                                        {
                                             email = about.user.and_then(|u| u.email_address);
                                         }
                                     }
 
-                                    let _ = app_clone.emit("google-drive-oauth-completed", OAuthCompletedEvent {
-                                        success: true,
-                                        refresh_token: token_resp.refresh_token,
-                                        account_email: email,
-                                        error: None,
-                                    });
+                                    let _ = app_clone.emit(
+                                        "google-drive-oauth-completed",
+                                        OAuthCompletedEvent {
+                                            success: true,
+                                            refresh_token: token_resp.refresh_token,
+                                            account_email: email,
+                                            error: None,
+                                        },
+                                    );
                                 }
                             }
                             Ok(resp) => {
                                 let err = resp.text().await.unwrap_or_default();
-                                let _ = app_clone.emit("google-drive-oauth-completed", OAuthCompletedEvent {
-                                    success: false,
-                                    refresh_token: None,
-                                    account_email: None,
-                                    error: Some(err),
-                                });
+                                let _ = app_clone.emit(
+                                    "google-drive-oauth-completed",
+                                    OAuthCompletedEvent {
+                                        success: false,
+                                        refresh_token: None,
+                                        account_email: None,
+                                        error: Some(err),
+                                    },
+                                );
                             }
                             Err(e) => {
-                                let _ = app_clone.emit("google-drive-oauth-completed", OAuthCompletedEvent {
-                                    success: false,
-                                    refresh_token: None,
-                                    account_email: None,
-                                    error: Some(e.to_string()),
-                                });
+                                let _ = app_clone.emit(
+                                    "google-drive-oauth-completed",
+                                    OAuthCompletedEvent {
+                                        success: false,
+                                        refresh_token: None,
+                                        account_email: None,
+                                        error: Some(e.to_string()),
+                                    },
+                                );
                             }
                         }
                     });

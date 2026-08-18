@@ -15,7 +15,8 @@ use crate::errors::{InternalError, Result};
 use crate::storage::s3::ConnectionTestResult;
 
 // Public client credentials for desktop app authorization (installed application)
-pub const GOOGLE_DRIVE_CLIENT_ID: &str = "1041930258169-p8b6v74u3eab4387d890o82e347h0vck.apps.googleusercontent.com";
+pub const GOOGLE_DRIVE_CLIENT_ID: &str =
+    "1041930258169-p8b6v74u3eab4387d890o82e347h0vck.apps.googleusercontent.com";
 pub const GOOGLE_DRIVE_AUTH_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -87,7 +88,9 @@ impl GoogleDriveClient {
     /// Refresh access token using the stored refresh token
     pub async fn get_access_token(&self) -> Result<String> {
         if self.refresh_token.trim().is_empty() {
-            return Err(InternalError::Storage("Google Drive refresh token is missing".into()).into());
+            return Err(
+                InternalError::Storage("Google Drive refresh token is missing".into()).into(),
+            );
         }
 
         let params = [
@@ -107,7 +110,10 @@ impl GoogleDriveClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(InternalError::Storage(format!("failed to refresh Google token ({status}): {text}")).into());
+            return Err(InternalError::Storage(format!(
+                "failed to refresh Google token ({status}): {text}"
+            ))
+            .into());
         }
 
         let token_resp: TokenResponse = resp
@@ -144,8 +150,14 @@ impl GoogleDriveClient {
         match resp {
             Ok(res) => {
                 if res.status().is_success() {
-                    let about: DriveAboutResponse = res.json().await.unwrap_or(DriveAboutResponse { user: None });
-                    let user_email = about.user.and_then(|u| u.email_address).unwrap_or_else(|| "Connected User".into());
+                    let about: DriveAboutResponse = res
+                        .json()
+                        .await
+                        .unwrap_or(DriveAboutResponse { user: None });
+                    let user_email = about
+                        .user
+                        .and_then(|u| u.email_address)
+                        .unwrap_or_else(|| "Connected User".into());
                     Ok(ConnectionTestResult {
                         ok: true,
                         message: format!("Connected to Google Drive as {}", user_email),
@@ -177,8 +189,9 @@ impl GoogleDriveClient {
         progress_cb: impl Fn(u64, u64),
         cancel_flag: &AtomicBool,
     ) -> Result<String> {
-        let mut file = File::open(local_path)
-            .map_err(|e| InternalError::Storage(format!("failed to open file for Google Drive upload: {e}")))?;
+        let mut file = File::open(local_path).map_err(|e| {
+            InternalError::Storage(format!("failed to open file for Google Drive upload: {e}"))
+        })?;
         let file_len = file
             .metadata()
             .map_err(|e| InternalError::Storage(format!("failed to get file metadata: {e}")))?
@@ -210,22 +223,36 @@ impl GoogleDriveClient {
             .json(&metadata)
             .send()
             .await
-            .map_err(|e| InternalError::Storage(format!("failed to initiate Google Drive resumable session: {e}")))?;
+            .map_err(|e| {
+                InternalError::Storage(format!(
+                    "failed to initiate Google Drive resumable session: {e}"
+                ))
+            })?;
 
         if !init_resp.status().is_success() {
             let status = init_resp.status();
             let text = init_resp.text().await.unwrap_or_default();
-            return Err(InternalError::Storage(format!("resumable upload init failed ({status}): {text}")).into());
+            return Err(InternalError::Storage(format!(
+                "resumable upload init failed ({status}): {text}"
+            ))
+            .into());
         }
 
         let session_uri = init_resp
             .headers()
             .get("location")
             .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| InternalError::Storage("Google Drive Location header missing in resumable response".into()))?
+            .ok_or_else(|| {
+                InternalError::Storage(
+                    "Google Drive Location header missing in resumable response".into(),
+                )
+            })?
             .to_string();
 
-        info!(file_len, "Google Drive upload session created, uploading chunks");
+        info!(
+            file_len,
+            "Google Drive upload session created, uploading chunks"
+        );
 
         // 2. Upload Chunks
         let chunk_size = self.config.chunk_size_bytes;
@@ -235,7 +262,9 @@ impl GoogleDriveClient {
 
         while uploaded_bytes < file_len {
             if cancel_flag.load(Ordering::Relaxed) {
-                return Err(InternalError::Storage("Google Drive upload cancelled by user".into()).into());
+                return Err(
+                    InternalError::Storage("Google Drive upload cancelled by user".into()).into(),
+                );
             }
 
             file.seek(SeekFrom::Start(uploaded_bytes))
@@ -279,7 +308,10 @@ impl GoogleDriveClient {
                 break;
             } else {
                 let text = chunk_resp.text().await.unwrap_or_default();
-                return Err(InternalError::Storage(format!("Google Drive chunk upload error ({status}): {text}")).into());
+                return Err(InternalError::Storage(format!(
+                    "Google Drive chunk upload error ({status}): {text}"
+                ))
+                .into());
             }
         }
 

@@ -314,12 +314,24 @@ fn migrate_v8(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     )?;
 
     // Safe column additions to upload_jobs if they don't already exist
-    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0", []);
+    let _ = tx.execute(
+        "ALTER TABLE upload_jobs ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN remote_url TEXT", []);
-    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN created_at TEXT NOT NULL DEFAULT ''", []);
-    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''", []);
+    let _ = tx.execute(
+        "ALTER TABLE upload_jobs ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = tx.execute(
+        "ALTER TABLE upload_jobs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN completed_at TEXT", []);
-    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 's3'", []);
+    let _ = tx.execute(
+        "ALTER TABLE upload_jobs ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 's3'",
+        [],
+    );
     let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN recording_id TEXT", []);
 
     Ok(())

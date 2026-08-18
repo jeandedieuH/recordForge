@@ -837,7 +837,10 @@ pub fn build_overlay_render_plan_from_legacy(
                 enabled: true,
             },
             details: overlay_engine::TextDetails {
-                preset_id: txt.preset_id.clone().unwrap_or_else(|| "default-title".into()),
+                preset_id: txt
+                    .preset_id
+                    .clone()
+                    .unwrap_or_else(|| "default-title".into()),
                 category: txt.category.clone(),
                 primary_text: txt.primary_text.clone(),
                 secondary_text: txt.secondary_text.clone(),

@@ -17,6 +17,15 @@ mod encoding;
 
 pub use annotations::{RenderPlanAnnotation, RenderPlanImage, RenderPlanText};
 
+/// Auto-cleanup guard for temporary mask PNG files generated during timeline compositing.
+struct TempMaskFile(PathBuf);
+
+impl Drop for TempMaskFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// A single trimmed segment in the final export.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -671,11 +680,6 @@ fn render_timeline_composition(
     } else {
         None
     };
-    let input_indices = input_assets
-        .iter()
-        .enumerate()
-        .map(|(index, (asset_id, _))| (asset_id.clone(), index))
-        .collect::<HashMap<_, _>>();
     let content_width = canvas
         .width
         .saturating_sub(canvas.padding.saturating_mul(2))
@@ -684,6 +688,7 @@ fn render_timeline_composition(
         .height
         .saturating_sub(canvas.padding.saturating_mul(2))
         .max(1);
+    let mut temp_mask_guards = Vec::new();
     let is_side_by_side = plan.overlays.iter().any(|overlay| {
         if !overlay.visible {
             return false;
@@ -698,6 +703,75 @@ fn render_timeline_composition(
         common_screen_source(&plan.segments),
         is_side_by_side,
     );
+
+    let canvas_mask_idx = if canvas.border_radius > 0 {
+        let radius = (canvas.border_radius as f32)
+            .min(screen_w as f32 / 2.0)
+            .min(screen_h as f32 / 2.0);
+        let mask_bytes = cursor::generate_rounded_rect_mask_png(
+            screen_w.round().max(1.0) as u32,
+            screen_h.round().max(1.0) as u32,
+            radius,
+        )
+        .map_err(|err| InternalError::Media(format!("generate canvas border mask: {err}")))?;
+        let mask_path = std::env::temp_dir().join(format!(
+            "rf-mask-canvas-{}-{}-{}.png",
+            project_id,
+            screen_w.round() as u32,
+            screen_h.round() as u32
+        ));
+        std::fs::write(&mask_path, &mask_bytes)
+            .map_err(|err| InternalError::Storage(format!("write canvas border mask: {err}")))?;
+        let idx = input_assets.len();
+        input_assets.push(("mask:canvas".to_string(), mask_path.clone()));
+        temp_mask_guards.push(TempMaskFile(mask_path));
+        Some(idx)
+    } else {
+        None
+    };
+
+    let mut camera_mask_indices = HashMap::new();
+    for (index, overlay) in plan.overlays.iter().enumerate() {
+        if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
+            continue;
+        }
+        let overlay_w = overlay.width.round().max(1.0) as u32;
+        let overlay_h = overlay.height.round().max(1.0) as u32;
+        if overlay.shape == "circle" {
+            let mask_bytes = cursor::generate_circle_mask_png(overlay_w, overlay_h)
+                .map_err(|err| InternalError::Media(format!("generate circle mask: {err}")))?;
+            let mask_path = std::env::temp_dir().join(format!(
+                "rf-mask-cam-circle-{}-{}-{}-{}.png",
+                project_id, index, overlay_w, overlay_h
+            ));
+            std::fs::write(&mask_path, &mask_bytes)
+                .map_err(|err| InternalError::Storage(format!("write circle mask: {err}")))?;
+            let idx = input_assets.len();
+            input_assets.push((format!("mask:cam_circle:{index}"), mask_path.clone()));
+            temp_mask_guards.push(TempMaskFile(mask_path));
+            camera_mask_indices.insert(index, idx);
+        } else if overlay.shape == "rounded" {
+            let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32;
+            let mask_bytes = cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius)
+                .map_err(|err| InternalError::Media(format!("generate rounded mask: {err}")))?;
+            let mask_path = std::env::temp_dir().join(format!(
+                "rf-mask-cam-rounded-{}-{}-{}-{}.png",
+                project_id, index, overlay_w, overlay_h
+            ));
+            std::fs::write(&mask_path, &mask_bytes)
+                .map_err(|err| InternalError::Storage(format!("write rounded mask: {err}")))?;
+            let idx = input_assets.len();
+            input_assets.push((format!("mask:cam_rounded:{index}"), mask_path.clone()));
+            temp_mask_guards.push(TempMaskFile(mask_path));
+            camera_mask_indices.insert(index, idx);
+        }
+    }
+
+    let input_indices = input_assets
+        .iter()
+        .enumerate()
+        .map(|(index, (asset_id, _))| (asset_id.clone(), index))
+        .collect::<HashMap<_, _>>();
     let (segment_w, segment_h) = if is_side_by_side {
         (
             (content_width as f64 * 0.68).round().max(1.0) as u32,
@@ -794,75 +868,97 @@ fn render_timeline_composition(
     // frames up to the trim cutoff.
     let plan_duration = seconds(plan.duration_ms);
 
-    // 1. Generate the background plate [bg_plate]
-    if let Some(bg_idx) = bg_input_index {
-        let mut bg_filter = format!(
-            "[{bg_idx}:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1,fps={}",
-            canvas.width, canvas.height, canvas.width, canvas.height, canvas.fps
-        );
-        let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
-        if bg_blur > 0.0 {
-            let radius = (bg_blur.round() as u32).clamp(1, 50);
-            bg_filter.push_str(&format!(
-                ",boxblur=luma_radius={radius}:luma_power=2:chroma_radius={radius}:chroma_power=2"
-            ));
-        }
-        let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
-        if bg_dim > 0.0 {
-            bg_filter.push_str(&format!(
-                ",drawbox=x=0:y=0:w={}:h={}:color=black@{:.3}:t=fill",
-                canvas.width, canvas.height, bg_dim
-            ));
-        }
-        bg_filter.push_str(&format!(
-            ",tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[bg_plate]"
-        ));
-        filters.push(bg_filter);
-    } else {
-        filters.push(format!(
-            "color=c={background}:s={}x{}:r={}:d={}[bg_plate]",
-            canvas.width, canvas.height, canvas.fps, plan_duration
-        ));
-    }
+    let is_fullscreen_canvas = bg_input_index.is_none()
+        && canvas.border_radius == 0
+        && !canvas.shadow
+        && !is_side_by_side
+        && screen_w >= (canvas.width as f64 - 0.5)
+        && screen_h >= (canvas.height as f64 - 0.5)
+        && screen_x.abs() < 0.5
+        && screen_y.abs() < 0.5
+        && crop_x.abs() < 0.5
+        && crop_y.abs() < 0.5;
 
-    // 2. Crop and format the fitted video layer [screen_fitted]
-    let mut screen_filter = format!(
-        "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
-    );
-    if canvas.border_radius > 0 {
-        let radius = (canvas.border_radius as f64)
-            .min(screen_w / 2.0)
-            .min(screen_h / 2.0);
-        let left = radius;
-        let right = screen_w - radius;
-        let top = radius;
-        let bottom = screen_h - radius;
-        let mask = format!(
-            "(((X<{left})*(Y<{top})*(hypot(X-{left},Y-{top})>{radius})+(X>{right})*(Y<{top})*(hypot(X-{right},Y-{top})>{radius})+(X<{left})*(Y>{bottom})*(hypot(X-{left},Y-{bottom})>{radius})+(X>{right})*(Y>{bottom})*(hypot(X-{right},Y-{bottom})>{radius}))>0)"
-        );
-        screen_filter.push_str(&format!(
-            ",format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if({mask},0,255)'"
-        ));
-    }
-    screen_filter.push_str("[screen_fitted]");
-    filters.push(screen_filter);
-
-    // 3. Composite shadow and screen layer onto background plate [canvas_base]
-    let mut bg_current = "[bg_plate]".to_string();
-    if canvas.shadow {
-        let shadow_color = safe_filter_color(canvas.shadow_color.as_deref().unwrap_or("#000000"));
-        let shadow_blur = canvas.shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
-        let shadow_x = (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0);
-        let shadow_y = (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0);
-        filters.push(format!(
-            "{bg_current}drawbox=x={shadow_x:.0}:y={shadow_y:.0}:w={screen_w:.0}:h={screen_h:.0}:color={shadow_color}@0.3:t={shadow_blur:.2}[bg_with_shadow]"
-        ));
-        bg_current = "[bg_with_shadow]".to_string();
-    }
     let base_label = "canvas_base";
-    filters.push(format!(
-        "{bg_current}[screen_fitted]overlay=x={screen_x:.0}:y={screen_y:.0}:shortest=1[{base_label}]"
-    ));
+    if is_fullscreen_canvas {
+        // Fast-path: screen video directly matches the canvas with no background,
+        // padding, shadow, or corner rounding. Bypass solid background plate generation,
+        // RGBA format conversion, and software overlay blending completely.
+        filters.push(format!(
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},setsar=1[{base_label}]"
+        ));
+    } else {
+        // 1. Generate the background plate [bg_plate]
+        if let Some(bg_idx) = bg_input_index {
+            let mut bg_filter = format!(
+                "[{bg_idx}:v]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1",
+                canvas.width, canvas.height, canvas.width, canvas.height
+            );
+            let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
+            if bg_blur > 0.0 {
+                let radius = (bg_blur.round() as u32).clamp(1, 50);
+                bg_filter.push_str(&format!(
+                    ",boxblur=luma_radius={radius}:luma_power=2:chroma_radius={radius}:chroma_power=2"
+                ));
+            }
+            let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
+            if bg_dim > 0.0 {
+                bg_filter.push_str(&format!(
+                    ",drawbox=x=0:y=0:w={}:h={}:color=black@{:.3}:t=fill",
+                    canvas.width, canvas.height, bg_dim
+                ));
+            }
+            bg_filter.push_str(&format!(
+                ",fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[bg_plate]",
+                canvas.fps
+            ));
+            filters.push(bg_filter);
+        } else {
+            filters.push(format!(
+                "color=c={background}:s={}x{}:r={}:d={}[bg_plate]",
+                canvas.width, canvas.height, canvas.fps, plan_duration
+            ));
+        }
+
+        // 2. Crop and format the fitted video layer [screen_fitted]
+        let mut screen_filter = format!(
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
+        );
+        if let Some(mask_idx) = canvas_mask_idx {
+            let raw_label = "screen_unmasked";
+            let mask_label = "screen_mask_loop";
+            screen_filter.push_str(&format!(",format=rgba[{raw_label}]"));
+            filters.push(screen_filter);
+            filters.push(format!(
+                "[{mask_idx}:v]format=gray,scale={screen_w:.0}:{screen_h:.0},setsar=1,loop=loop=-1:size=1:start=0[{mask_label}];\
+                 [{raw_label}][{mask_label}]alphamerge[screen_fitted]"
+            ));
+        } else {
+            screen_filter.push_str("[screen_fitted]");
+            filters.push(screen_filter);
+        }
+
+        // 3. Composite shadow and screen layer onto background plate [canvas_base]
+        let mut bg_current = "[bg_plate]".to_string();
+        if canvas.shadow {
+            let shadow_color = safe_filter_color(canvas.shadow_color.as_deref().unwrap_or("#000000"));
+            let shadow_blur = canvas.shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
+            let shadow_x = (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0);
+            let shadow_y = (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0);
+            filters.push(format!(
+                "{bg_current}drawbox=x={shadow_x:.0}:y={shadow_y:.0}:w={screen_w:.0}:h={screen_h:.0}:color={shadow_color}@0.3:t={shadow_blur:.2}[bg_with_shadow]"
+            ));
+            bg_current = "[bg_with_shadow]".to_string();
+        }
+        let overlay_format = if canvas_mask_idx.is_some() {
+            "format=auto"
+        } else {
+            "format=yuv420"
+        };
+        filters.push(format!(
+            "{bg_current}[screen_fitted]overlay=x={screen_x:.0}:y={screen_y:.0}:shortest=1:{overlay_format}[{base_label}]"
+        ));
+    }
 
     let composed_label = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
         let width_expression = zoom_crop_expression(plan, canvas, "width");
@@ -917,18 +1013,6 @@ fn render_timeline_composition(
         if overlay.opacity < 1.0 {
             camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
         }
-        if overlay.shape == "circle" {
-            camera_filter.push_str(
-                ",geq=r='r':g='g':b='b':a='if(lte((X-W/2)^2+(Y-H/2)^2,(min(W,H)/2)^2),255,0)'",
-            );
-        } else if overlay.shape == "rounded" {
-            let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0);
-            let radius_squared = radius * radius;
-            let alpha = format!(
-                "if((X>={radius:.2})*(X<=W-{radius:.2})+(Y>={radius:.2})*(Y<=H-{radius:.2})+((X-{radius:.2})^2+(Y-{radius:.2})^2<={radius_squared:.2})+((X-W+{radius:.2})^2+(Y-{radius:.2})^2<={radius_squared:.2})+((X-{radius:.2})^2+(Y-H+{radius:.2})^2<={radius_squared:.2})+((X-W+{radius:.2})^2+(Y-H+{radius:.2})^2<={radius_squared:.2})>0,255,0)"
-            );
-            camera_filter.push_str(&format!(",geq=r='r':g='g':b='b':a='{alpha}'"));
-        }
         if overlay.shadow_enabled.unwrap_or(false) {
             let shadow_color =
                 safe_filter_color(overlay.shadow_color.as_deref().unwrap_or("#000000"));
@@ -947,8 +1031,21 @@ fn render_timeline_composition(
                 ",drawbox=x=0:y=0:w=iw-1:h=ih-1:color={camera_color}@{border_opacity:.4}:t={border_width:.2}"
             ));
         }
-        camera_filter.push_str(&format!("[{camera_label}]"));
-        filters.push(camera_filter);
+        if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
+            let raw_label = format!("camera_unmasked{index}");
+            let mask_label = format!("cam_mask_loop{index}");
+            let overlay_w = overlay.width.max(1.0).round() as u32;
+            let overlay_h = overlay.height.max(1.0).round() as u32;
+            camera_filter.push_str(&format!("[{raw_label}]"));
+            filters.push(camera_filter);
+            filters.push(format!(
+                "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{mask_label}];\
+                 [{raw_label}][{mask_label}]alphamerge[{camera_label}]"
+            ));
+        } else {
+            camera_filter.push_str(&format!("[{camera_label}]"));
+            filters.push(camera_filter);
+        }
 
         let next_label = format!("composite{index}");
         let enable = format!(
@@ -1079,7 +1176,7 @@ fn render_timeline_composition(
         let cursor_input_index = input_assets.len();
         let cursor_label = "with_overlay";
         filters.push(format!(
-            "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=auto[{cursor_label}]"
+            "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=yuv420[{cursor_label}]"
         ));
         current_label = cursor_label.to_string();
         cursor_plan = Some(prepare_cursor_frame_plan(
@@ -1090,6 +1187,10 @@ fn render_timeline_composition(
             asset_paths,
         )?);
     }
+
+    let final_label = "export_output";
+    filters.push(format!("[{current_label}]format=yuv420p[{final_label}]"));
+    current_label = final_label.to_string();
 
     let audio_tracks = plan
         .audio_tracks
@@ -1176,8 +1277,9 @@ fn render_timeline_composition(
     }
 
     if audio_labels.len() == 1 {
+        let label = "aout";
         filters.push(format!(
-            "{}atrim=duration={}[aout]",
+            "{}atrim=duration={}[{label}]",
             audio_labels[0],
             seconds(duration_ms)
         ));
@@ -1193,7 +1295,15 @@ fn render_timeline_composition(
     let mut command = Command::new(ffmpeg_path);
     command
         .arg("-y")
-        .args(["-hide_banner", "-loglevel", "error"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "0",
+            "-filter_threads",
+            "0",
+        ])
         // Machine-readable progress blocks on stderr; the runner parses
         // `out_time=` from them and keeps them out of failure diagnostics.
         .args(["-progress", "pipe:2"]);
@@ -1346,20 +1456,21 @@ fn prepare_cursor_frame_plan(
         .unwrap_or(1)
         .max(1);
 
-    let overlay_plan: Option<overlay_engine::OverlayRenderPlan> =
-        if let Some(val) = &plan.overlay_render_plan {
-            serde_json::from_value(val.clone()).ok()
-        } else if !plan.annotations.is_empty() || !plan.texts.is_empty() || !plan.images.is_empty() {
-            Some(annotations::build_overlay_render_plan_from_legacy(
-                canvas.width,
-                canvas.height,
-                &plan.annotations,
-                &plan.texts,
-                &plan.images,
-            ))
-        } else {
-            None
-        };
+    let overlay_plan: Option<overlay_engine::OverlayRenderPlan> = if let Some(val) =
+        &plan.overlay_render_plan
+    {
+        serde_json::from_value(val.clone()).ok()
+    } else if !plan.annotations.is_empty() || !plan.texts.is_empty() || !plan.images.is_empty() {
+        Some(annotations::build_overlay_render_plan_from_legacy(
+            canvas.width,
+            canvas.height,
+            &plan.annotations,
+            &plan.texts,
+            &plan.images,
+        ))
+    } else {
+        None
+    };
 
     let mut overlay_engine = None;
     if let Some(mut parsed_plan) = overlay_plan {
@@ -1375,7 +1486,9 @@ fn prepare_cursor_frame_plan(
                     }
                 }
                 if let Some(val) = &plan.overlay_render_plan {
-                    if let Ok(plan_obj) = serde_json::from_value::<overlay_engine::OverlayRenderPlan>(val.clone()) {
+                    if let Ok(plan_obj) =
+                        serde_json::from_value::<overlay_engine::OverlayRenderPlan>(val.clone())
+                    {
                         for asset in &plan_obj.assets {
                             if let Some(path) = asset_paths.get(&asset.id) {
                                 register_overlay_image_asset(&mut engine, &asset.id, path);
@@ -1431,6 +1544,7 @@ fn feed_cursor_frames(
     cursor: &mut CursorFramePlan,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
+    let mut writer = std::io::BufWriter::with_capacity(256 * 1024, stdin);
     for frame_index in 0..cursor.frame_count {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
@@ -1454,16 +1568,17 @@ fn feed_cursor_frames(
             renderer.render_frame(output_ms, cursor.pixmap.data_mut());
         }
 
-        let mut data = cursor.pixmap.data().to_vec();
-        cursor::unpremultiply_rgba(&mut data);
+        // Unpremultiply directly in-place without heap allocations
+        cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
 
-        if let Err(error) = stdin.write_all(&data) {
+        if let Err(error) = writer.write_all(cursor.pixmap.data()) {
             if is_pipe_closed(&error) {
                 return Ok(());
             }
             return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
         }
     }
+    let _ = writer.flush();
     Ok(())
 }
 
@@ -2097,7 +2212,6 @@ fn safe_filter_color(value: &str) -> String {
     }
 }
 
-
 pub(crate) fn resolve_background_image(
     background: &str,
     asset_paths: &HashMap<String, PathBuf>,
@@ -2128,8 +2242,10 @@ pub(crate) fn resolve_background_image(
     if path_str.starts_with("data:image/") {
         if let Some((_, base64_data)) = path_str.split_once(";base64,") {
             use base64::Engine;
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data.trim()) {
-                let temp_path = std::env::temp_dir().join(format!("recordforge_bg_{}.png", uuid::Uuid::new_v4()));
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data.trim())
+            {
+                let temp_path = std::env::temp_dir()
+                    .join(format!("recordforge_bg_{}.png", uuid::Uuid::new_v4()));
                 if std::fs::write(&temp_path, bytes).is_ok() {
                     return Some(temp_path);
                 }
@@ -2163,7 +2279,12 @@ pub(crate) fn resolve_background_image(
     let mut search_dirs = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         search_dirs.push(cwd.join("public").join("backgrounds"));
-        search_dirs.push(cwd.join("apps").join("desktop").join("public").join("backgrounds"));
+        search_dirs.push(
+            cwd.join("apps")
+                .join("desktop")
+                .join("public")
+                .join("backgrounds"),
+        );
         search_dirs.push(cwd.join("dist").join("backgrounds"));
         search_dirs.push(cwd.join("backgrounds"));
         search_dirs.push(cwd.clone());
@@ -3021,21 +3142,20 @@ mod tests {
             ..Default::default()
         };
         let asset_paths = HashMap::new();
-        let frame_plan = prepare_cursor_frame_plan(
-            &canvas,
-            5000,
-            Vec::new(),
-            &plan,
-            &asset_paths,
-        )
-        .expect("prepare frame plan succeeds");
+        let frame_plan = prepare_cursor_frame_plan(&canvas, 5000, Vec::new(), &plan, &asset_paths)
+            .expect("prepare frame plan succeeds");
 
         assert!(frame_plan.overlay_engine.is_some());
         let engine = frame_plan.overlay_engine.unwrap();
         let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).unwrap();
-        engine.render_to_pixmap(1500, &mut pixmap).expect("render overlay frame");
+        engine
+            .render_to_pixmap(1500, &mut pixmap)
+            .expect("render overlay frame");
         let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
-        assert!(has_content, "rendered frame contains active overlay content");
+        assert!(
+            has_content,
+            "rendered frame contains active overlay content"
+        );
     }
 
     #[test]
@@ -3145,21 +3265,17 @@ mod tests {
             fps: 30,
             ..Default::default()
         };
-        let frame_plan = prepare_cursor_frame_plan(
-            &canvas,
-            5000,
-            Vec::new(),
-            &plan,
-            &asset_paths,
-        )
-        .expect("prepare frame plan succeeds");
+        let frame_plan = prepare_cursor_frame_plan(&canvas, 5000, Vec::new(), &plan, &asset_paths)
+            .expect("prepare frame plan succeeds");
 
         assert!(frame_plan.overlay_engine.is_some());
         let engine = frame_plan.overlay_engine.unwrap();
         assert_eq!(engine.images().len(), 2);
 
         let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).unwrap();
-        engine.render_to_pixmap(1000, &mut pixmap).expect("render image overlays");
+        engine
+            .render_to_pixmap(1000, &mut pixmap)
+            .expect("render image overlays");
         let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
         assert!(has_content, "rendered image overlay frame contains pixels");
     }
@@ -3174,8 +3290,14 @@ mod tests {
 
         // Solid colors and gradients return None
         assert!(resolve_background_image("#1e1b4b", &asset_paths).is_none());
-        assert!(resolve_background_image("linear-gradient(135deg, #111 0%, #222 100%)", &asset_paths).is_none());
-        assert!(resolve_background_image("radial-gradient(circle, #fff, #000)", &asset_paths).is_none());
+        assert!(resolve_background_image(
+            "linear-gradient(135deg, #111 0%, #222 100%)",
+            &asset_paths
+        )
+        .is_none());
+        assert!(
+            resolve_background_image("radial-gradient(circle, #fff, #000)", &asset_paths).is_none()
+        );
 
         // Asset ID lookup returns file path
         let resolved_asset = resolve_background_image("asset-bg-1", &asset_paths);
@@ -3218,5 +3340,21 @@ mod tests {
         canvas.background_dim = Some(1.5);
         assert!(validate_canvas(&canvas).is_err());
     }
-}
 
+    #[test]
+    fn test_mask_generation_and_alphamerge() {
+        // Rounded rectangle mask generation generates non-empty valid PNG bytes
+        let mask_png = cursor::generate_rounded_rect_mask_png(1920, 1080, 24.0);
+        assert!(mask_png.is_ok());
+        let png_bytes = mask_png.unwrap();
+        assert!(!png_bytes.is_empty());
+        assert_eq!(&png_bytes[0..8], b"\x89PNG\r\n\x1a\n");
+
+        // Circle mask generation generates non-empty valid PNG bytes
+        let circle_png = cursor::generate_circle_mask_png(300, 300);
+        assert!(circle_png.is_ok());
+        let circle_bytes = circle_png.unwrap();
+        assert!(!circle_bytes.is_empty());
+        assert_eq!(&circle_bytes[0..8], b"\x89PNG\r\n\x1a\n");
+    }
+}

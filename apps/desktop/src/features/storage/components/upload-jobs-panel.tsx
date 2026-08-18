@@ -89,7 +89,7 @@ export function UploadJobsPanel() {
               <Card
                 key={job.id}
                 className={`p-3.5 space-y-2.5 transition-all text-xs bg-surface border-border ${
-                  isUploading ? "border-primary/40 bg-primary/[0.02]" : ""
+                  isUploading ? "border-primary/40 bg-primary/2" : ""
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">

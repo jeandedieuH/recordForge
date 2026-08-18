@@ -119,12 +119,25 @@ mod tests {
 
     #[test]
     fn test_sigv4_signing() {
-        let signer = SigV4Signer::new("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "us-east-1");
-        let (auth, date, hash) = signer.sign("GET", "/", "", "examplebucket.s3.amazonaws.com", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        let signer = SigV4Signer::new(
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "us-east-1",
+        );
+        let (auth, date, hash) = signer.sign(
+            "GET",
+            "/",
+            "",
+            "examplebucket.s3.amazonaws.com",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
 
         assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"));
         assert!(auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         assert_eq!(date.len(), 16);
     }
 }

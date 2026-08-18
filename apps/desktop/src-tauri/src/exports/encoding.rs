@@ -90,9 +90,9 @@ pub(crate) fn resolve_export_encoder(
 fn software_preset(preset: &str) -> (&'static str, &'static str) {
     match preset {
         "fast-share" => ("ultrafast", "23"),
-        "high-quality" => ("slow", "18"),
+        "high-quality" => ("medium", "18"),
         "smooth-60fps" => ("veryfast", "20"),
-        "ultra-4k" | "ultra-4k-60" => ("medium", "18"),
+        "ultra-4k" | "ultra-4k-60" => ("veryfast", "18"),
         "vertical" | "square" => ("veryfast", "20"),
         _ => ("veryfast", "20"),
     }
@@ -134,7 +134,7 @@ pub(crate) fn append_export_video_args(
         ExportEncoder::Nvenc => {
             command
                 .arg("-preset")
-                .arg(if quality_tier { "p7" } else { "p5" })
+                .arg(if quality_tier { "p6" } else { "p4" })
                 .arg("-tune")
                 .arg("hq")
                 .arg("-rc")
@@ -322,7 +322,7 @@ mod tests {
         );
         let args = args_of(&command);
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_nvenc"]));
-        assert!(args.windows(2).any(|pair| pair == ["-preset", "p7"]));
+        assert!(args.windows(2).any(|pair| pair == ["-preset", "p6"]));
         assert!(args.windows(2).any(|pair| pair == ["-tune", "hq"]));
         assert!(args.windows(2).any(|pair| pair == ["-rc", "vbr"]));
         assert!(args.windows(2).any(|pair| pair == ["-cq", "18"]));

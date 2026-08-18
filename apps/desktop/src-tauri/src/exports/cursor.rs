@@ -1,6 +1,6 @@
 use cursor_engine::CursorTelemetryFile;
 
-use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 use resvg::usvg;
 
 use super::{clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
@@ -201,7 +201,6 @@ impl CursorRenderer {
     }
 
     pub fn render_frame(&mut self, output_ms: u64, frame: &mut [u8]) {
-        frame.fill(0);
         let expected_len = self.canvas_width as usize * self.canvas_height as usize * 4;
         if frame.len() != expected_len {
             return;
@@ -672,17 +671,99 @@ fn parse_hex_color(value: &str, fallback: &str) -> String {
 }
 
 /// tiny-skia / resvg store pixels as premultiplied RGBA. The export frame uses
-/// straight-alpha RGBA, so convert once when the cursor asset is cached.
+/// straight-alpha RGBA, so convert once when the cursor asset is cached or in-place per frame.
 pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
+    static INV_ALPHA: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    let inv_lut = INV_ALPHA.get_or_init(|| {
+        let mut lut = [0.0f32; 256];
+        for a in 1..255 {
+            lut[a] = 255.0 / a as f32;
+        }
+        lut[255] = 1.0;
+        lut
+    });
+
     for pixel in data.chunks_exact_mut(4) {
-        let alpha = pixel[3];
+        let alpha = pixel[3] as usize;
         if alpha > 0 && alpha < 255 {
-            let inv = 255.0 / alpha as f32;
+            let inv = inv_lut[alpha];
             pixel[0] = (pixel[0] as f32 * inv).min(255.0) as u8;
             pixel[1] = (pixel[1] as f32 * inv).min(255.0) as u8;
             pixel[2] = (pixel[2] as f32 * inv).min(255.0) as u8;
         }
     }
+}
+
+/// Generates a grayscale anti-aliased rounded rectangle mask PNG for fast hardware/SIMD compositing with alphamerge.
+pub fn generate_rounded_rect_mask_png(width: u32, height: u32, radius: f32) -> Result<Vec<u8>, String> {
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))
+        .ok_or_else(|| "failed to allocate mask pixmap".to_string())?;
+    pixmap.fill(Color::BLACK);
+
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+
+    let mut pb = PathBuilder::new();
+    if r <= 0.0 {
+        pb.move_to(0.0, 0.0);
+        pb.line_to(w, 0.0);
+        pb.line_to(w, h);
+        pb.line_to(0.0, h);
+        pb.close();
+    } else {
+        pb.move_to(r, 0.0);
+        pb.line_to(w - r, 0.0);
+        pb.quad_to(w, 0.0, w, r);
+        pb.line_to(w, h - r);
+        pb.quad_to(w, h, w - r, h);
+        pb.line_to(r, h);
+        pb.quad_to(0.0, h, 0.0, h - r);
+        pb.line_to(0.0, r);
+        pb.quad_to(0.0, 0.0, r, 0.0);
+        pb.close();
+    }
+
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(Color::WHITE);
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+    pixmap.encode_png().map_err(|e| format!("encode mask png: {e}"))
+}
+
+/// Generates a grayscale anti-aliased circle mask PNG for fast hardware/SIMD compositing with alphamerge.
+pub fn generate_circle_mask_png(width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))
+        .ok_or_else(|| "failed to allocate circle mask pixmap".to_string())?;
+    pixmap.fill(Color::BLACK);
+
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    let rx = (w / 2.0).min(h / 2.0);
+    let ry = rx;
+    let cx = w / 2.0;
+    let cy = h / 2.0;
+
+    let k = 0.552_284_8;
+    let kx = rx * k;
+    let ky = ry * k;
+    let mut pb = PathBuilder::new();
+    pb.move_to(cx, cy - ry);
+    pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
+    pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
+    pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
+    pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
+    pb.close();
+
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(Color::WHITE);
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+    pixmap.encode_png().map_err(|e| format!("encode circle mask png: {e}"))
 }
 
 fn source_time_for_output(segments: &[RenderSegment], output_ms: u64) -> Option<u64> {

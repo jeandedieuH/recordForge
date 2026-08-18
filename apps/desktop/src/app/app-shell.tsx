@@ -289,7 +289,7 @@ export function AppShell() {
             className={cn(
               "min-w-0 flex-1 bg-background",
               activeView === "editor" || activeView === "export"
-                ? "overflow-hidden"
+                ? "flex flex-col overflow-hidden"
                 : "overflow-y-auto",
             )}
           >

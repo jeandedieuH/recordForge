@@ -227,8 +227,8 @@ export function ExportView({
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-background text-foreground select-none">
-      <div className="flex h-12 items-center justify-between border-b border-border px-6 text-xs text-subtle-foreground">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground select-none">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-6 text-xs text-subtle-foreground">
         <button
           type="button"
           onClick={onBack}
@@ -241,8 +241,9 @@ export function ExportView({
         </button>
       </div>
 
-      <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col p-8 pb-32">
-        <h1 className="mb-1 font-serif text-3xl font-bold tracking-tight text-foreground">
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-5xl flex-col p-8 pb-12">
+          <h1 className="mb-1 font-serif text-3xl font-bold tracking-tight text-foreground">
           Export project
         </h1>
         <p className="mb-8 text-sm text-subtle-foreground">
@@ -514,33 +515,36 @@ export function ExportView({
           ) : null}
         </div>
       </div>
+    </div>
 
-      <div className="fixed inset-x-0 bottom-0 flex min-h-18 items-center justify-between gap-4 border-t border-border bg-background/95 px-8 py-3 shadow-2xl backdrop-blur">
-        <div className="flex min-w-0 flex-col">
-          <span className="text-[10px] font-label font-bold uppercase tracking-wider text-subtle-foreground">
-            Summary
-          </span>
-          <span className="truncate font-mono text-xs font-semibold text-foreground">
-            {projectName} ·{" "}
-            {canvas ? `${canvas.width}×${canvas.height} · ${canvas.fps}fps` : "Source canvas"} ·{" "}
-            {exportSettings?.codec?.toUpperCase() ?? "H264"}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-3">
-          <Button variant="secondary" onClick={onBack} disabled={isRunning}>
-            Back to editor
-          </Button>
-          <Button
-            onClick={() => void handleStartExport()}
-            disabled={isStarting || isRunning || !canStart}
-          >
-            <Play className="mr-2 size-3.5 fill-current" aria-hidden />
-            {isStarting
-              ? "Choosing destination…"
-              : isRunning
-                ? `Exporting ${progress}%`
-                : "Choose destination"}
-          </Button>
+      <div className="shrink-0 border-t border-border bg-background/95 px-8 py-3 shadow-2xl backdrop-blur">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4">
+          <div className="flex min-w-0 flex-col">
+            <span className="text-[10px] font-label font-bold uppercase tracking-wider text-subtle-foreground">
+              Summary
+            </span>
+            <span className="truncate font-mono text-xs font-semibold text-foreground">
+              {projectName} ·{" "}
+              {canvas ? `${canvas.width}×${canvas.height} · ${canvas.fps}fps` : "Source canvas"} ·{" "}
+              {exportSettings?.codec?.toUpperCase() ?? "H264"}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-3">
+            <Button variant="secondary" onClick={onBack} disabled={isRunning}>
+              Back to editor
+            </Button>
+            <Button
+              onClick={() => void handleStartExport()}
+              disabled={isStarting || isRunning || !canStart}
+            >
+              <Play className="mr-2 size-3.5 fill-current" aria-hidden />
+              {isStarting
+                ? "Choosing destination…"
+                : isRunning
+                  ? `Exporting ${progress}%`
+                  : "Choose destination"}
+            </Button>
+          </div>
         </div>
       </div>
 

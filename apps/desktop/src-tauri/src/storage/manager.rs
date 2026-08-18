@@ -207,7 +207,14 @@ impl StorageManager {
             .map_err(|_| InternalError::Storage("db mutex poisoned".into()))?;
 
         let now = Utc::now().to_rfc3339();
-        update_upload_job_status(&conn, job_id, "cancelled", None, Some("Cancelled by user"), Some(&now))?;
+        update_upload_job_status(
+            &conn,
+            job_id,
+            "cancelled",
+            None,
+            Some("Cancelled by user"),
+            Some(&now),
+        )?;
 
         if let Ok(Some(job)) = get_upload_job(&conn, job_id) {
             let _ = self.app.emit(EVENT_UPLOAD_JOB_UPDATE, &job);
@@ -277,7 +284,13 @@ impl StorageManager {
 
             if should_emit {
                 if let Ok(conn) = db_update.lock() {
-                    let _ = update_upload_job_progress(&conn, &job_id_update, uploaded, total, speed_bps);
+                    let _ = update_upload_job_progress(
+                        &conn,
+                        &job_id_update,
+                        uploaded,
+                        total,
+                        speed_bps,
+                    );
                     if let Ok(Some(job)) = get_upload_job(&conn, &job_id_update) {
                         let _ = app_emit.emit(EVENT_UPLOAD_JOB_UPDATE, &job);
                     }
@@ -291,9 +304,13 @@ impl StorageManager {
                     InternalError::Storage("S3 configuration missing for profile".into())
                 })?;
                 let access_key = vault::get_secret(&format!("{}:access_key", profile.id))?
-                    .ok_or_else(|| InternalError::Storage("S3 Access Key ID missing from vault".into()))?;
+                    .ok_or_else(|| {
+                        InternalError::Storage("S3 Access Key ID missing from vault".into())
+                    })?;
                 let secret_key = vault::get_secret(&format!("{}:secret_key", profile.id))?
-                    .ok_or_else(|| InternalError::Storage("S3 Secret Access Key missing from vault".into()))?;
+                    .ok_or_else(|| {
+                        InternalError::Storage("S3 Secret Access Key missing from vault".into())
+                    })?;
 
                 let client = S3Client::new(s3_config, access_key, secret_key);
                 client
@@ -305,7 +322,11 @@ impl StorageManager {
                     InternalError::Storage("Google Drive configuration missing for profile".into())
                 })?;
                 let refresh_token = vault::get_secret(&format!("{}:refresh_token", profile.id))?
-                    .ok_or_else(|| InternalError::Storage("Google Drive refresh token missing from vault".into()))?;
+                    .ok_or_else(|| {
+                        InternalError::Storage(
+                            "Google Drive refresh token missing from vault".into(),
+                        )
+                    })?;
 
                 let client = GoogleDriveClient::new(drive_config, refresh_token);
                 client

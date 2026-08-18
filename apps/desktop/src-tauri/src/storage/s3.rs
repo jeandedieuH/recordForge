@@ -63,13 +63,15 @@ impl S3Client {
 
     fn host_and_path(&self, key: &str, query_params: &str) -> (String, String, String) {
         let endpoint = self.config.endpoint.trim_end_matches('/');
-        let url_parsed = reqwest::Url::parse(endpoint).unwrap_or_else(|_| {
-            reqwest::Url::parse(&format!("https://{}", endpoint)).unwrap()
-        });
+        let url_parsed = reqwest::Url::parse(endpoint)
+            .unwrap_or_else(|_| reqwest::Url::parse(&format!("https://{}", endpoint)).unwrap());
 
         let scheme = url_parsed.scheme();
         let base_host = url_parsed.host_str().unwrap_or("s3.amazonaws.com");
-        let port_suffix = url_parsed.port().map(|p| format!(":{}", p)).unwrap_or_default();
+        let port_suffix = url_parsed
+            .port()
+            .map(|p| format!(":{}", p))
+            .unwrap_or_default();
 
         let clean_key = key.trim_start_matches('/');
 
@@ -130,7 +132,10 @@ impl S3Client {
                 if status.is_success() {
                     Ok(ConnectionTestResult {
                         ok: true,
-                        message: format!("Successfully connected to bucket '{}'", self.config.bucket),
+                        message: format!(
+                            "Successfully connected to bucket '{}'",
+                            self.config.bucket
+                        ),
                         latency_ms: Some(elapsed),
                     })
                 } else {
@@ -139,7 +144,10 @@ impl S3Client {
                     warn!(status = status_code, body = %err_body, "S3 test connection returned error status");
                     Ok(ConnectionTestResult {
                         ok: false,
-                        message: format!("S3 connection failed (HTTP {}): {}", status_code, err_body),
+                        message: format!(
+                            "S3 connection failed (HTTP {}): {}",
+                            status_code, err_body
+                        ),
                         latency_ms: Some(elapsed),
                     })
                 }
@@ -173,7 +181,11 @@ impl S3Client {
         let remote_key = if self.config.prefix.trim().is_empty() {
             destination_name.to_string()
         } else {
-            format!("{}/{}", self.config.prefix.trim_matches('/'), destination_name)
+            format!(
+                "{}/{}",
+                self.config.prefix.trim_matches('/'),
+                destination_name
+            )
         };
 
         let signer = SigV4Signer::new(&self.access_key, &self.secret_key, &self.config.region);
@@ -204,12 +216,17 @@ impl S3Client {
                 .body(buffer)
                 .send()
                 .await
-                .map_err(|e| InternalError::Storage(format!("S3 single upload request failed: {e}")))?;
+                .map_err(|e| {
+                    InternalError::Storage(format!("S3 single upload request failed: {e}"))
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                return Err(InternalError::Storage(format!("S3 single upload failed ({status}): {text}")).into());
+                return Err(InternalError::Storage(format!(
+                    "S3 single upload failed ({status}): {text}"
+                ))
+                .into());
             }
 
             progress_cb(file_len, file_len);
@@ -236,18 +253,22 @@ impl S3Client {
             .header("content-type", "video/mp4")
             .send()
             .await
-            .map_err(|e| InternalError::Storage(format!("failed to initiate multipart upload: {e}")))?;
+            .map_err(|e| {
+                InternalError::Storage(format!("failed to initiate multipart upload: {e}"))
+            })?;
 
         if !init_resp.status().is_success() {
             let status = init_resp.status();
             let text = init_resp.text().await.unwrap_or_default();
-            return Err(InternalError::Storage(format!("initiate multipart upload failed ({status}): {text}")).into());
+            return Err(InternalError::Storage(format!(
+                "initiate multipart upload failed ({status}): {text}"
+            ))
+            .into());
         }
 
-        let init_xml = init_resp
-            .text()
-            .await
-            .map_err(|e| InternalError::Storage(format!("failed to read init response XML: {e}")))?;
+        let init_xml = init_resp.text().await.map_err(|e| {
+            InternalError::Storage(format!("failed to read init response XML: {e}"))
+        })?;
 
         let upload_id = extract_xml_tag(&init_xml, "UploadId")
             .ok_or_else(|| InternalError::Storage("UploadId not found in XML response".into()))?;
@@ -277,7 +298,9 @@ impl S3Client {
                     .header("authorization", &auth_header)
                     .send()
                     .await;
-                return Err(InternalError::Storage("multipart upload cancelled by user".into()).into());
+                return Err(
+                    InternalError::Storage("multipart upload cancelled by user".into()).into(),
+                );
             }
 
             file.seek(SeekFrom::Start(uploaded_bytes))
@@ -307,12 +330,17 @@ impl S3Client {
                 .body(slice.to_vec())
                 .send()
                 .await
-                .map_err(|e| InternalError::Storage(format!("failed to upload part {part_number}: {e}")))?;
+                .map_err(|e| {
+                    InternalError::Storage(format!("failed to upload part {part_number}: {e}"))
+                })?;
 
             if !part_resp.status().is_success() {
                 let status = part_resp.status();
                 let text = part_resp.text().await.unwrap_or_default();
-                return Err(InternalError::Storage(format!("upload part {part_number} failed ({status}): {text}")).into());
+                return Err(InternalError::Storage(format!(
+                    "upload part {part_number} failed ({status}): {text}"
+                ))
+                .into());
             }
 
             let etag = part_resp
@@ -357,12 +385,17 @@ impl S3Client {
             .body(complete_xml)
             .send()
             .await
-            .map_err(|e| InternalError::Storage(format!("failed to complete multipart upload: {e}")))?;
+            .map_err(|e| {
+                InternalError::Storage(format!("failed to complete multipart upload: {e}"))
+            })?;
 
         if !complete_resp.status().is_success() {
             let status = complete_resp.status();
             let text = complete_resp.text().await.unwrap_or_default();
-            return Err(InternalError::Storage(format!("complete multipart upload failed ({status}): {text}")).into());
+            return Err(InternalError::Storage(format!(
+                "complete multipart upload failed ({status}): {text}"
+            ))
+            .into());
         }
 
         let (_, _, dest_url) = self.host_and_path(&remote_key, "");

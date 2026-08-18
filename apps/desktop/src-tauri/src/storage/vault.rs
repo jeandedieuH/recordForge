@@ -132,11 +132,7 @@ pub fn delete_secret(account: &str) -> Result<()> {
         let mut target_utf16: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
-            let _ = CredDeleteW(
-                PWSTR(target_utf16.as_mut_ptr()),
-                CRED_TYPE_GENERIC,
-                None,
-            );
+            let _ = CredDeleteW(PWSTR(target_utf16.as_mut_ptr()), CRED_TYPE_GENERIC, None);
         }
     }
 
