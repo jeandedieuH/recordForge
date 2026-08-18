@@ -12,6 +12,7 @@ import { MediaJobsPanel } from "./media-jobs-panel"
 import { MediaPrepareDialog } from "./media-prepare-dialog"
 import { RecoveryBanner } from "./recovery-banner"
 import { useLibraryStore, type LibrarySort } from "./use-library"
+import { UploadDialog } from "../storage/components/upload-dialog"
 
 function matchesSearch(recording: LibraryRecording, query: string) {
   if (!query) return true
@@ -57,6 +58,7 @@ export function LibraryView() {
   const [trimEnd, setTrimEnd] = useState("")
   const [trimError, setTrimError] = useState<string | null>(null)
   const [prepareTarget, setPrepareTarget] = useState<LibraryRecording | null>(null)
+  const [uploadTarget, setUploadTarget] = useState<LibraryRecording | null>(null)
 
   useEffect(() => {
     void useLibraryStore.getState().load()
@@ -278,6 +280,7 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
+              onUpload={(rec) => setUploadTarget(rec)}
               onPrepare={handleOpenPrepare}
               onOpenEditor={handleOpenEditor}
               onAddTag={store.addTag}
@@ -295,6 +298,7 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
+              onUpload={(rec) => setUploadTarget(rec)}
               onPrepare={handleOpenPrepare}
               onOpenEditor={handleOpenEditor}
               onAddTag={store.addTag}
@@ -303,6 +307,14 @@ export function LibraryView() {
           ))}
         </div>
       )}
+
+      <UploadDialog
+        open={!!uploadTarget}
+        onOpenChange={(open) => !open && setUploadTarget(null)}
+        localPath={uploadTarget?.outputPath ?? ""}
+        recordingId={uploadTarget?.id}
+        defaultName={uploadTarget ? `${uploadTarget.name}.mp4` : undefined}
+      />
     </div>
   )
 }

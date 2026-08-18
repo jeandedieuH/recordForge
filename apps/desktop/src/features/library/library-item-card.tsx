@@ -1,5 +1,6 @@
 import { useState } from "react"
 import {
+  Cloud,
   CloudCheck,
   Download,
   Film,
@@ -29,6 +30,7 @@ interface LibraryItemCardProps {
   onExport: (recording: LibraryRecording) => void
   onPrepare: (recording: LibraryRecording) => void
   onOpenEditor: (recording: LibraryRecording) => void
+  onUpload?: (recording: LibraryRecording) => void
   onAddTag: (recordingId: string, tag: string) => void
   onRemoveTag: (recordingId: string, tag: string) => void
 }
@@ -41,6 +43,7 @@ export function LibraryItemCard({
   onExport,
   onPrepare,
   onOpenEditor,
+  onUpload,
 }: LibraryItemCardProps) {
   const [imageError, setImageError] = useState(false)
   const isAudio =
@@ -147,6 +150,11 @@ export function LibraryItemCard({
               <DropdownMenuItem onClick={() => onExport(recording)}>
                 <Download className="mr-2 size-4 text-subtle-foreground" /> Export MP4
               </DropdownMenuItem>
+              {onUpload ? (
+                <DropdownMenuItem onClick={() => onUpload(recording)}>
+                  <Cloud className="mr-2 size-4 text-primary" /> Upload to Cloud
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem onClick={() => onPrepare(recording)}>
                 <Sparkles className="mr-2 size-4 text-sky-400" /> Prepare Media
               </DropdownMenuItem>

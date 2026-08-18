@@ -19,6 +19,7 @@ import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
 import { LibraryView } from "../features/library"
 import { ProjectsView } from "../features/projects"
+import { StorageView } from "../features/storage"
 import { NewRecordingModal } from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { toErrorMessage } from "../lib/errors"
@@ -318,10 +319,7 @@ export function AppShell() {
               />
             ) : null}
             {activeView === "storage" ? (
-              <div className="p-8 text-center text-subtle-foreground">
-                <h3 className="font-serif text-lg font-bold text-foreground mb-2">Storage View</h3>
-                <p className="text-sm">Manage disk space and S3/Google Drive cloud providers.</p>
-              </div>
+              <StorageView onNavigateToSettings={() => setActiveView("settings")} />
             ) : null}
             {activeView === "editor" ? (
               <EditorView

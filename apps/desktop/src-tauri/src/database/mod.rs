@@ -3,6 +3,7 @@ pub mod media;
 pub mod migrations;
 pub mod projects;
 pub mod settings;
+pub mod storage;
 
 use rusqlite::Connection;
 use std::fmt::Debug;

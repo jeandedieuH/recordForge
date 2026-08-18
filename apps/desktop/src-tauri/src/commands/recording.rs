@@ -79,6 +79,12 @@ pub fn init(app: &tauri::App) -> Result<()> {
         tracing::error!(error = ?err, "failed to resume media jobs");
     }
 
+    let storage_manager = crate::storage::StorageManager::new(
+        app.handle().clone(),
+        Arc::clone(&db),
+        path_policy.clone(),
+    );
+
     app.manage(AppState {
         recorder: Arc::new(Mutex::new(recorder)),
         db,
@@ -88,6 +94,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         ffprobe_path,
         quick_config: Arc::new(Mutex::new(None)),
         path_policy,
+        storage_manager,
     });
 
     Ok(())

@@ -7,6 +7,7 @@ import {
   Scissors,
   Trash2,
   Video,
+  Cloud,
 } from "lucide-react"
 import {
   Button,
@@ -28,6 +29,7 @@ interface LibraryItemRowProps {
   onExport: (recording: LibraryRecording) => void
   onPrepare: (recording: LibraryRecording) => void
   onOpenEditor: (recording: LibraryRecording) => void
+  onUpload?: (recording: LibraryRecording) => void
   onAddTag: (recordingId: string, tag: string) => void
   onRemoveTag: (recordingId: string, tag: string) => void
 }
@@ -40,6 +42,7 @@ export function LibraryItemRow({
   onExport,
   onPrepare,
   onOpenEditor,
+  onUpload,
   onAddTag,
   onRemoveTag,
 }: LibraryItemRowProps) {
@@ -184,6 +187,11 @@ export function LibraryItemRow({
             <DropdownMenuItem onClick={() => onReveal(recording.id)}>
               <FolderIcon className="mr-2 size-4" /> Reveal File
             </DropdownMenuItem>
+            {onUpload ? (
+              <DropdownMenuItem onClick={() => onUpload(recording)}>
+                <Cloud className="mr-2 size-4 text-primary" /> Upload to Cloud
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem onClick={() => onTrim(recording)}>Trim Video</DropdownMenuItem>
             <DropdownMenuItem onClick={() => onPrepare(recording)}>Prepare Media</DropdownMenuItem>
             <DropdownMenuItem onClick={() => onDelete(recording.id)} className="text-red-400">

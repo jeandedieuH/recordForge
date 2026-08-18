@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react"
 import {
-  Cloud,
   Cpu,
   Folder,
   HardDrive,
@@ -29,6 +28,7 @@ import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, isTauri, setSetting } from "../../lib/settings"
 import { DiagnosticsPanel } from "./diagnostics-panel"
 import { CursorInspector } from "../editor/cursor"
+import { StorageSettings } from "./storage-settings"
 
 type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "storage"
 
@@ -424,61 +424,7 @@ export function SettingsView() {
       {activeTab === "diagnostics" ? <DiagnosticsPanel /> : null}
 
       {/* Tab 4: Storage & Cloud */}
-      {activeTab === "storage" ? (
-        <div className="space-y-6">
-          {/* Disk Usage Overview */}
-          <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-semibold text-foreground">Local Storage Quota</h3>
-                <p className="text-xs text-subtle-foreground mt-0.5">
-                  Available storage on current output drive (C:)
-                </p>
-              </div>
-              <span className="font-mono text-xs font-semibold text-foreground">
-                14.2 GB / 480 GB Used
-              </span>
-            </div>
-
-            <div className="h-2.5 w-full overflow-hidden rounded-full bg-surface-dim border border-border">
-              <div className="h-full w-[12%] rounded-full bg-primary" />
-            </div>
-          </div>
-
-          {/* Cloud Integration Cards */}
-          <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-foreground">Cloud Storage Integrations</h3>
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="flex items-center justify-between rounded-xl border border-border bg-surface-dim p-4">
-                <div className="flex items-center gap-3">
-                  <Cloud className="size-5 text-amber-400" />
-                  <div>
-                    <p className="text-xs font-semibold text-foreground">Amazon S3 Storage</p>
-                    <p className="text-[10px] text-subtle-foreground">Not connected</p>
-                  </div>
-                </div>
-                <Button variant="outline" size="sm" className="h-7 text-[11px] px-3">
-                  Connect
-                </Button>
-              </div>
-
-              <div className="flex items-center justify-between rounded-xl border border-border bg-surface-dim p-4">
-                <div className="flex items-center gap-3">
-                  <Cloud className="size-5 text-sky-400" />
-                  <div>
-                    <p className="text-xs font-semibold text-foreground">Google Drive</p>
-                    <p className="text-[10px] text-subtle-foreground">Not connected</p>
-                  </div>
-                </div>
-                <Button variant="outline" size="sm" className="h-7 text-[11px] px-3">
-                  Connect
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {activeTab === "storage" ? <StorageSettings /> : null}
     </div>
   )
 }

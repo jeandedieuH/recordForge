@@ -48,9 +48,12 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if current_version < 7 {
         migrate_v7(&tx)?;
     }
+    if current_version < 8 {
+        migrate_v8(&tx)?;
+    }
 
     tx.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '7')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '8')",
         [],
     )?;
 
@@ -293,6 +296,35 @@ fn migrate_v7(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v8: storage profiles and enhanced upload jobs table.
+fn migrate_v8(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS storage_profiles (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            s3_config_json TEXT,
+            drive_config_json TEXT,
+            local_config_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    // Safe column additions to upload_jobs if they don't already exist
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN speed_bps INTEGER NOT NULL DEFAULT 0", []);
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN remote_url TEXT", []);
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN created_at TEXT NOT NULL DEFAULT ''", []);
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''", []);
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN completed_at TEXT", []);
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 's3'", []);
+    let _ = tx.execute("ALTER TABLE upload_jobs ADD COLUMN recording_id TEXT", []);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,7 +360,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
 
         let webcam_column_count: i64 = conn
             .query_row(
@@ -338,5 +370,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(webcam_column_count, 1);
+
+        let storage_profiles_table_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='storage_profiles'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(storage_profiles_table_count, 1);
     }
 }

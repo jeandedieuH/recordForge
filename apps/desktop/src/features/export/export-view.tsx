@@ -13,6 +13,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Cloud,
   Film,
   FolderOpen,
   Pause,
@@ -32,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@recordforge/ui"
+import { UploadDialog } from "../storage/components/upload-dialog"
 
 interface ExportViewProps {
   projectName?: string
@@ -178,6 +180,7 @@ export function ExportView({
   const [audioAccordionOpen, setAudioAccordionOpen] = useState(false)
   const [rangeStart, setRangeStart] = useState(exportSettings?.range?.startMs ?? 0)
   const [rangeEnd, setRangeEnd] = useState(exportSettings?.range?.endMs ?? durationMs)
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
 
   useEffect(() => {
     const nextPreset = normalizePreset(exportSettings?.preset)
@@ -269,12 +272,23 @@ export function ExportView({
               <Check className="size-4 text-success" aria-hidden />
               Export complete. The validated MP4 is ready.
             </span>
-            {onRevealExport ? (
-              <Button variant="ghost" size="sm" onClick={() => void onRevealExport()}>
-                <FolderOpen className="mr-2 size-4" aria-hidden />
-                Reveal file
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => setUploadDialogOpen(true)}
+              >
+                <Cloud className="size-4 text-primary" aria-hidden />
+                Upload to Cloud
               </Button>
-            ) : null}
+              {onRevealExport ? (
+                <Button variant="ghost" size="sm" onClick={() => void onRevealExport()}>
+                  <FolderOpen className="mr-2 size-4" aria-hidden />
+                  Reveal file
+                </Button>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -529,6 +543,14 @@ export function ExportView({
           </Button>
         </div>
       </div>
+
+      <UploadDialog
+        open={uploadDialogOpen}
+        onOpenChange={setUploadDialogOpen}
+        localPath={exportJob?.outputs?.outputPath ?? ""}
+        exportId={exportJob?.id}
+        defaultName={`${projectName ?? "export"}.mp4`}
+      />
     </div>
   )
 }

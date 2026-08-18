@@ -23,4 +23,6 @@ pub struct AppState {
     pub quick_config: Arc<Mutex<Option<RecordingConfig>>>,
     /// Path authorization policy shared across commands.
     pub path_policy: PathPolicy,
+    /// Storage upload manager for cloud and local destinations.
+    pub storage_manager: crate::storage::StorageManager,
 }

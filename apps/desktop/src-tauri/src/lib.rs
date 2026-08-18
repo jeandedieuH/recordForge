@@ -126,6 +126,19 @@ pub fn run() {
             commands::settings::set_setting,
             commands::settings::set_window_transparency,
             commands::settings::window_transparency_active,
+            commands::storage::list_storage_profiles,
+            commands::storage::save_s3_profile,
+            commands::storage::save_google_drive_profile,
+            commands::storage::save_local_profile,
+            commands::storage::delete_storage_profile,
+            commands::storage::test_storage_profile,
+            commands::storage::test_s3_credentials,
+            commands::storage::start_google_drive_oauth,
+            commands::storage::start_upload_job,
+            commands::storage::cancel_upload_job,
+            commands::storage::retry_upload_job,
+            commands::storage::list_upload_jobs,
+            commands::storage::delete_upload_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
