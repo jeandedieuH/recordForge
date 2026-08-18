@@ -88,6 +88,44 @@ export function validateNoOverlap(clips: TimelineClip[], ignoreClipId?: string):
   return true
 }
 
+/**
+ * Evaluates whether a track kind accepts a given clip kind.
+ * Maps both 1:1 track kinds and specialized overlay/composite lanes.
+ */
+export function trackAcceptsClipKind(
+  trackKind: TimelineTrackKind,
+  clipKind: TimelineClip["kind"],
+): boolean {
+  if (trackKind === clipKind) return true
+  if (trackKind === "captions" && clipKind === "caption") return true
+  if (trackKind === "cursor" && clipKind === "cursor-effect") return true
+  if (trackKind === "effects" && clipKind === "mask") return true
+  if (trackKind === "annotations" && clipKind === "annotation") return true
+  if (trackKind === "titles" && clipKind === "text") return true
+  if (trackKind === "graphics" && clipKind === "image") return true
+  if (
+    trackKind === "overlay" &&
+    (clipKind === "annotation" || clipKind === "text" || clipKind === "image")
+  ) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Determines whether clips on a given track can overlap in time.
+ * Overlay and effect tracks are composited by z-order/positioning and permit overlapping clips,
+ * whereas single-lane media tracks enforce sequential, non-overlapping layouts.
+ */
+export function trackAllowsOverlap(track: TimelineTrack): boolean {
+  if (track.kind === "effects" && track.clips.every((clip) => clip.kind === "mask")) return true
+  if (track.kind === "annotations") return true
+  if (track.kind === "titles") return true
+  if (track.kind === "graphics") return true
+  if (track.kind === "overlay") return true
+  return false
+}
+
 export function sourceTimeFromClipTime(clip: TimelineClip, clipTimeMs: number): number {
   return clip.sourceInMs + clipTimeMs * clip.speed
 }

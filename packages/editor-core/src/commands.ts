@@ -30,6 +30,8 @@ import {
   findClip,
   findTrack,
   getTotalDuration,
+  trackAcceptsClipKind,
+  trackAllowsOverlap,
   validateNoOverlap,
 } from "@recordforge/domain"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
@@ -155,9 +157,9 @@ function sortAndValidateTrack(
     return { ok: false, error: editorError("track_not_found", "Track not found") }
   }
   const sorted = [...track.clips].sort((a, b) => a.startMs - b.startMs)
-  // Privacy masks are independent compositing layers and may overlap; every
-  // other track remains a single ordered lane to keep edits deterministic.
-  const allowsOverlap = track.kind === "effects" && sorted.every((clip) => clip.kind === "mask")
+  // Overlay and effect layers are composited visually and may overlap;
+  // single-lane media tracks remain strictly non-overlapping.
+  const allowsOverlap = trackAllowsOverlap(track)
   if (!allowsOverlap && !validateNoOverlap(sorted, ignoreClipId)) {
     return { ok: false, error: editorError("clip_overlap", "Clips overlap on this track") }
   }
@@ -328,12 +330,18 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       if (found.clip.kind === "cursor-effect" && found.clip.locked) {
         return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
       }
-      if (command.kind === "move-clip" && command.newTrackId) {
-        const target = findTrack(state, command.newTrackId)
+      if (command.kind === "move-clip") {
+        const target = command.newTrackId ? findTrack(state, command.newTrackId) : found.track
         if (!target)
           return { ok: false, error: editorError("track_not_found", "Target track not found") }
         const targetResult = checkTrackLocked(target)
         if (!targetResult.ok) return targetResult
+        if (!trackAcceptsClipKind(target.kind, found.clip.kind)) {
+          return {
+            ok: false,
+            error: editorError("invalid_move", "Clip kind does not match target track"),
+          }
+        }
       }
       return { ok: true, value: undefined }
     }
@@ -962,11 +970,7 @@ function applyMoveClip(
       error: editorError("track_locked", `Track "${targetTrack.name}" is locked`),
     }
   }
-  const targetAcceptsClip =
-    (targetTrack.kind === "captions" && clip.kind === "caption") ||
-    (targetTrack.kind === "cursor" && clip.kind === "cursor-effect") ||
-    (targetTrack.kind === "effects" && clip.kind === "mask") ||
-    targetTrack.kind === clip.kind
+  const targetAcceptsClip = trackAcceptsClipKind(targetTrack.kind, clip.kind)
   if (!targetAcceptsClip) {
     return {
       ok: false,
@@ -1053,7 +1057,7 @@ function applyDuplicateClip(
   if (newStartMs === undefined) {
     const candidateStartMs = clip.startMs + clip.durationMs + frameMs
     const candidateEndMs = candidateStartMs + clip.durationMs
-    const allowsOverlap = track.kind === "effects" && track.clips.every((c) => c.kind === "mask")
+    const allowsOverlap = trackAllowsOverlap(track)
     const overlaps =
       !allowsOverlap &&
       track.clips.some(
@@ -1126,7 +1130,7 @@ function applyDuplicateClips(
     // Check if candidateDelta causes any overlap on affected tracks
     let causesOverlap = false
     for (const { track, clip } of foundClips) {
-      const allowsOverlap = track.kind === "effects" && track.clips.every((c) => c.kind === "mask")
+      const allowsOverlap = trackAllowsOverlap(track)
       if (allowsOverlap) continue
       const targetStart = clip.startMs + candidateDeltaMs
       const targetEnd = targetStart + clip.durationMs

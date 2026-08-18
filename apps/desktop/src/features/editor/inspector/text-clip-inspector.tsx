@@ -8,6 +8,7 @@ import {
 } from "@recordforge/editor-core"
 import {
   Button,
+  ColorPicker,
   Dialog,
   DialogContent,
   DialogHeader,
@@ -119,29 +120,35 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
 
       {/* Preset Controls */}
       <InspectorSection title="Style Preset">
-        <div className="flex items-center gap-2">
-          <div className="flex min-w-0 flex-1 flex-col rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
-            <span className="text-[10px] text-muted-foreground">Active preset</span>
-            <span className="truncate text-xs font-medium text-foreground">{activePresetName}</span>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
+              Active Preset
+            </span>
+            <span className="truncate text-xs font-medium text-foreground text-right" title={activePresetName}>
+              {activePresetName}
+            </span>
           </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={() => setBrowserOpen(true)}
-          >
-            <FolderOpen className="size-3.5" aria-hidden />
-            Browse
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={() => setSaveOpen(true)}
-          >
-            <Save className="size-3.5" aria-hidden />
-            Save
-          </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 gap-1.5 text-xs justify-center"
+              onClick={() => setBrowserOpen(true)}
+            >
+              <FolderOpen className="size-3.5" aria-hidden />
+              Browse
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 text-xs justify-center"
+              onClick={() => setSaveOpen(true)}
+            >
+              <Save className="size-3.5" aria-hidden />
+              Save
+            </Button>
+          </div>
         </div>
       </InspectorSection>
 
@@ -216,16 +223,23 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               Font Family
             </label>
             <Select
-              value={clip.fontFamily}
+              value={
+                clip.fontFamily === "inter"
+                  ? "sans"
+                  : clip.fontFamily === "outfit"
+                    ? "heading"
+                    : clip.fontFamily || "sans"
+              }
               onValueChange={(val) => onChange({ fontFamily: val as any })}
             >
               <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
+                <SelectValue placeholder="Font family" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="sans">Inter (Modern Sans)</SelectItem>
-                <SelectItem value="serif">Noto Serif (Editorial)</SelectItem>
-                <SelectItem value="mono">Cascadia (Code Mono)</SelectItem>
+                <SelectItem value="heading">Outfit (Bold Display)</SelectItem>
+                <SelectItem value="serif">Source Serif (Editorial)</SelectItem>
+                <SelectItem value="mono">JetBrains Mono (Code)</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -246,8 +260,8 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               Weight
             </label>
             <Select
-              value={clip.fontWeight}
-              onValueChange={(val) => onChange({ fontWeight: val as any })}
+              value={String(clip.fontWeight ?? 700)}
+              onValueChange={(val) => onChange({ fontWeight: Number(val) as any })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -289,34 +303,34 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
 
       {/* Colors & Backdrop Styling */}
       <InspectorSection title="Colors & Backdrop">
-        <div className="grid grid-cols-3 gap-2">
-          <div className="flex flex-col gap-1 items-center">
-            <span className="text-[10px] text-muted-foreground">Title Color</span>
-            <Input
-              type="color"
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] text-muted-foreground">Title Color</span>
+            <ColorPicker
+              aria-label="Title color"
+              size="sm"
               value={clip.textColor}
-              onChange={(e) => onChange({ textColor: e.target.value })}
-              className="size-8 p-0.5 rounded cursor-pointer"
+              onChange={(textColor) => onChange({ textColor })}
             />
           </div>
 
-          <div className="flex flex-col gap-1 items-center">
-            <span className="text-[10px] text-muted-foreground">Subtitle Color</span>
-            <Input
-              type="color"
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] text-muted-foreground">Subtitle Color</span>
+            <ColorPicker
+              aria-label="Subtitle color"
+              size="sm"
               value={clip.secondaryTextColor ?? "#94a3b8"}
-              onChange={(e) => onChange({ secondaryTextColor: e.target.value })}
-              className="size-8 p-0.5 rounded cursor-pointer"
+              onChange={(secondaryTextColor) => onChange({ secondaryTextColor })}
             />
           </div>
 
-          <div className="flex flex-col gap-1 items-center">
-            <span className="text-[10px] text-muted-foreground">Accent Bar</span>
-            <Input
-              type="color"
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] text-muted-foreground">Accent Bar</span>
+            <ColorPicker
+              aria-label="Accent bar color"
+              size="sm"
               value={clip.accentColor}
-              onChange={(e) => onChange({ accentColor: e.target.value })}
-              className="size-8 p-0.5 rounded cursor-pointer"
+              onChange={(accentColor) => onChange({ accentColor })}
             />
           </div>
         </div>

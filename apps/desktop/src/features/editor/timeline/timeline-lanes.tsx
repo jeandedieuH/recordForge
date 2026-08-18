@@ -401,6 +401,7 @@ export function TimelineLanes({
 
     // Immediately seek playhead to clicked timestamp on empty space
     onSeek(startMs)
+    onDeselectAll?.()
 
     if (tool === "split") {
       return
@@ -463,6 +464,8 @@ export function TimelineLanes({
 
         if (matchingClipIds.length > 0 && primaryClip && onSelectMultipleClips) {
           onSelectMultipleClips(matchingClipIds, primaryClip.id, primaryClip.trackId)
+        } else if (matchingClipIds.length === 0 && onDeselectAll) {
+          onDeselectAll()
         }
       }
     }
@@ -622,6 +625,7 @@ export function TimelineLanes({
                 onDeleteMarker={onDeleteMarker ?? (() => {})}
                 onAddMarkerAtTime={onAddMarkerAtTime ?? (() => {})}
                 onSelectZoom={onSelectZoom}
+                onDeselectAll={onDeselectAll}
               />
 
               {/* Range Selection / Marquee Overlay */}
@@ -669,6 +673,7 @@ export function TimelineLanes({
                 getTimelineTime={timelineTimeFromClientX}
                 onSeek={onSeek}
                 onPause={onPause}
+                onDeselectAll={onDeselectAll}
               />
 
               {/* Virtualized Track Rows */}

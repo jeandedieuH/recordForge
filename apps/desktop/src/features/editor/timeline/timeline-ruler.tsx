@@ -29,6 +29,7 @@ interface TimelineRulerProps {
   onDeleteMarker: (markerId: string) => void
   onAddMarkerAtTime: (timeMs: number) => void
   onSelectZoom: (segmentId: string) => void
+  onDeselectAll?: () => void
 }
 
 export function formatTimelineTime(ms: number): string {
@@ -69,6 +70,7 @@ export const TimelineRuler = memo(function TimelineRuler({
   onDeleteMarker,
   onAddMarkerAtTime,
   onSelectZoom,
+  onDeselectAll,
 }: TimelineRulerProps) {
   const rulerRef = useRef<HTMLDivElement>(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
@@ -129,6 +131,7 @@ export const TimelineRuler = memo(function TimelineRuler({
     }
     const timeMs = getTimelineTime(e.clientX)
     onSeek(timeMs)
+    onDeselectAll?.()
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
@@ -215,6 +218,7 @@ export const TimelineRuler = memo(function TimelineRuler({
             onSelect={() => {
               if (rulerContextMenuTimeMs !== null) {
                 onSeek(rulerContextMenuTimeMs)
+                onDeselectAll?.()
               }
             }}
           >

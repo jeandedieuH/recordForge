@@ -8,6 +8,7 @@ import {
 } from "@recordforge/editor-core"
 import {
   Button,
+  ColorPicker,
   Dialog,
   DialogContent,
   DialogHeader,
@@ -129,29 +130,35 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
 
       {/* Preset Controls */}
       <InspectorSection title="Shape Preset">
-        <div className="flex items-center gap-2">
-          <div className="flex min-w-0 flex-1 flex-col rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
-            <span className="text-[10px] text-muted-foreground">Active preset</span>
-            <span className="truncate text-xs font-medium text-foreground">{activePresetName}</span>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
+              Active Preset
+            </span>
+            <span className="truncate text-xs font-medium text-foreground text-right" title={activePresetName}>
+              {activePresetName}
+            </span>
           </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={() => setBrowserOpen(true)}
-          >
-            <FolderOpen className="size-3.5" aria-hidden />
-            Browse
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={() => setSaveOpen(true)}
-          >
-            <Save className="size-3.5" aria-hidden />
-            Save
-          </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 gap-1.5 text-xs justify-center"
+              onClick={() => setBrowserOpen(true)}
+            >
+              <FolderOpen className="size-3.5" aria-hidden />
+              Browse
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 text-xs justify-center"
+              onClick={() => setSaveOpen(true)}
+            >
+              <Save className="size-3.5" aria-hidden />
+              Save
+            </Button>
+          </div>
         </div>
       </InspectorSection>
 
@@ -268,18 +275,13 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
 
       {/* Stroke & Color Style */}
       <InspectorSection title="Stroke & Color">
-        <div className="flex items-center gap-2 mt-1">
-          <Input
-            type="color"
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[11px] text-muted-foreground">Stroke Color</span>
+          <ColorPicker
+            aria-label="Stroke color"
+            size="sm"
             value={clip.strokeColor}
-            onChange={(e) => onChange({ strokeColor: e.target.value })}
-            className="size-8 p-0.5 rounded cursor-pointer"
-          />
-          <Input
-            type="text"
-            value={clip.strokeColor}
-            onChange={(e) => onChange({ strokeColor: e.target.value })}
-            className="h-8 font-mono text-xs"
+            onChange={(strokeColor) => onChange({ strokeColor })}
           />
         </div>
 
@@ -323,6 +325,16 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
       {/* Fill & Background */}
       {!isArrowOrLine && (
         <InspectorSection title="Fill & Background">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] text-muted-foreground">Fill Color</span>
+            <ColorPicker
+              aria-label="Fill color"
+              size="sm"
+              value={clip.fillColor}
+              onChange={(fillColor) => onChange({ fillColor })}
+            />
+          </div>
+
           <div className="space-y-1.5">
             <div className="flex justify-between text-[11px] text-muted-foreground">
               <span>Fill Opacity</span>
@@ -334,21 +346,6 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
               step={0.05}
               value={[clip.fillOpacity]}
               onValueCommit={([val]) => onChange({ fillOpacity: val })}
-            />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Input
-              type="color"
-              value={clip.fillColor}
-              onChange={(e) => onChange({ fillColor: e.target.value })}
-              className="size-8 p-0.5 rounded cursor-pointer"
-            />
-            <Input
-              type="text"
-              value={clip.fillColor}
-              onChange={(e) => onChange({ fillColor: e.target.value })}
-              className="h-8 font-mono text-xs"
             />
           </div>
 
@@ -385,14 +382,14 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
           </label>
 
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 flex-1">
-              <Input
-                type="color"
-                value={clip.textColor ?? "#ffffff"}
-                onChange={(e) => onChange({ textColor: e.target.value })}
-                className="size-7 p-0.5 rounded"
-              />
+            <div className="flex items-center justify-between gap-2 flex-1">
               <span className="text-[11px] text-muted-foreground">Text Color</span>
+              <ColorPicker
+                aria-label="Text color"
+                size="sm"
+                value={clip.textColor ?? "#ffffff"}
+                onChange={(textColor) => onChange({ textColor })}
+              />
             </div>
 
             <div className="w-20">

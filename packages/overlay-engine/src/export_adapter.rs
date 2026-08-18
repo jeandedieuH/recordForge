@@ -226,9 +226,9 @@ fn draw_arrow_head(
         pb.close();
     } else if head == "diamond" {
         let (p1x, p1y) = rot(0.0, 0.0);
-        let (p2x, p2y) = rot(-size, size / 2.0);
-        let (p3x, p3y) = rot(-size * 1.5, 0.0);
-        let (p4x, p4y) = rot(-size, -size / 2.0);
+        let (p2x, p2y) = rot(size * 0.75, size * 0.45);
+        let (p3x, p3y) = rot(size * 1.5, 0.0);
+        let (p4x, p4y) = rot(size * 0.75, -size * 0.45);
         pb.move_to(p1x, p1y);
         pb.line_to(p2x, p2y);
         pb.line_to(p3x, p3y);
@@ -237,11 +237,13 @@ fn draw_arrow_head(
     } else {
         // Default "arrow"
         let (p1x, p1y) = rot(0.0, 0.0);
-        let (p2x, p2y) = rot(-size, size / 2.0);
-        let (p3x, p3y) = rot(-size, -size / 2.0);
+        let (p2x, p2y) = rot(size, size * 0.5);
+        let (p3x, p3y) = rot(size * 0.75, 0.0);
+        let (p4x, p4y) = rot(size, -size * 0.5);
         pb.move_to(p1x, p1y);
         pb.line_to(p2x, p2y);
         pb.line_to(p3x, p3y);
+        pb.line_to(p4x, p4y);
         pb.close();
     }
 }
@@ -333,45 +335,65 @@ fn render_annotation(
         let end_y = item.end_y.unwrap_or(t.y + t.height) as f32;
         let start_x = t.x as f32;
         let start_y = t.y as f32;
+        let dx = end_x - start_x;
+        let dy = end_y - start_y;
+        let len = (dx * dx + dy * dy).sqrt();
 
-        let mut pb = PathBuilder::new();
-        pb.move_to(start_x, start_y);
-        pb.line_to(end_x, end_y);
-        if let Some(line_path) = pb.finish() {
-            let stroke_color = parse_color(&item.stroke_color, opacity);
-            let mut stroke_paint = Paint::default();
-            stroke_paint.set_color(stroke_color);
-            stroke_paint.anti_alias = true;
-            let stroke = stroke_for_style(&item.stroke_style, stroke_width);
-            pixmap.stroke_path(&line_path, &stroke_paint, &stroke, ts, None);
-        }
+        if len > 0.001 {
+            let head_size = (stroke_width * 3.5).max(10.0);
+            let start_offset = if item.arrow_start_head != "none" {
+                (len * 0.45).min(if item.arrow_start_head == "circle" { head_size / 2.0 } else { head_size * 0.7 })
+            } else {
+                0.0
+            };
+            let end_offset = if item.arrow_end_head != "none" {
+                (len * 0.45).min(if item.arrow_end_head == "circle" { head_size / 2.0 } else { head_size * 0.7 })
+            } else {
+                0.0
+            };
 
-        if item.annotation_type == "arrow" {
-            let mut head_pb = PathBuilder::new();
-            draw_arrow_head(
-                &mut head_pb,
-                &item.arrow_start_head,
-                start_x,
-                start_y,
-                end_x,
-                end_y,
-                stroke_width,
-            );
-            draw_arrow_head(
-                &mut head_pb,
-                &item.arrow_end_head,
-                end_x,
-                end_y,
-                start_x,
-                start_y,
-                stroke_width,
-            );
-            if let Some(head_path) = head_pb.finish() {
+            let ux = dx / len;
+            let uy = dy / len;
+
+            let mut pb = PathBuilder::new();
+            pb.move_to(start_x + ux * start_offset, start_y + uy * start_offset);
+            pb.line_to(end_x - ux * end_offset, end_y - uy * end_offset);
+            if let Some(line_path) = pb.finish() {
                 let stroke_color = parse_color(&item.stroke_color, opacity);
-                let mut fill_paint = Paint::default();
-                fill_paint.set_color(stroke_color);
-                fill_paint.anti_alias = true;
-                pixmap.fill_path(&head_path, &fill_paint, FillRule::Winding, ts, None);
+                let mut stroke_paint = Paint::default();
+                stroke_paint.set_color(stroke_color);
+                stroke_paint.anti_alias = true;
+                let stroke = stroke_for_style(&item.stroke_style, stroke_width);
+                pixmap.stroke_path(&line_path, &stroke_paint, &stroke, ts, None);
+            }
+
+            if item.annotation_type == "arrow" {
+                let mut head_pb = PathBuilder::new();
+                draw_arrow_head(
+                    &mut head_pb,
+                    &item.arrow_start_head,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    stroke_width,
+                );
+                draw_arrow_head(
+                    &mut head_pb,
+                    &item.arrow_end_head,
+                    end_x,
+                    end_y,
+                    start_x,
+                    start_y,
+                    stroke_width,
+                );
+                if let Some(head_path) = head_pb.finish() {
+                    let stroke_color = parse_color(&item.stroke_color, opacity);
+                    let mut fill_paint = Paint::default();
+                    fill_paint.set_color(stroke_color);
+                    fill_paint.anti_alias = true;
+                    pixmap.fill_path(&head_path, &fill_paint, FillRule::Winding, ts, None);
+                }
             }
         }
         return Ok(());

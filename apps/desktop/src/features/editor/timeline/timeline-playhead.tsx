@@ -8,6 +8,7 @@ interface TimelinePlayheadProps {
   getTimelineTime: (clientX: number) => number
   onSeek: (ms: number) => void
   onPause?: () => void
+  onDeselectAll?: () => void
 }
 
 export const TimelinePlayhead = memo(function TimelinePlayhead({
@@ -18,6 +19,7 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
   getTimelineTime,
   onSeek,
   onPause,
+  onDeselectAll,
 }: TimelinePlayheadProps) {
   const [isDragging, setIsDragging] = useState(false)
   const left = playheadMs * pixelsPerMs
@@ -33,6 +35,7 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
     }
     const timeMs = getTimelineTime(e.clientX)
     onSeek(timeMs)
+    onDeselectAll?.()
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {

@@ -12,6 +12,8 @@ import {
   createAddTextClipCommand,
   createAnnotationClip,
   createEngine,
+  createMoveClipCommand,
+  createMoveClipsCommand,
   createTextClipFromPreset,
   createUpdateAnnotationClipCommand,
   createUpdateImageClipCommand,
@@ -379,3 +381,159 @@ describe("Preview Composition Integration", () => {
     expect(comp3.texts[0].active).toBe(true)
   })
 })
+
+describe("Track Movement for Overlays (Annotations, Titles, Graphics)", () => {
+  it("moves an annotation clip along its annotations track", () => {
+    let engine = createEngine(makeTestTimeline())
+    const clip = createAnnotationClip("rectangle", { startMs: 1000, durationMs: 4000 })
+    const addRes = executeCommand(engine, createAddAnnotationClipCommand(clip))
+    expect(addRes.ok).toBe(true)
+    if (!addRes.ok) return
+    engine = addRes.value
+
+    const moveRes = executeCommand(engine, createMoveClipCommand(clip.id, 6000))
+    expect(moveRes.ok).toBe(true)
+    if (!moveRes.ok) return
+    engine = moveRes.value
+
+    const track = engine.history.present.tracks.find((t) => t.kind === "annotations")
+    expect(track).toBeDefined()
+    expect(track?.clips[0].startMs).toBe(6000)
+  })
+
+  it("moves a title / text clip along its titles track", () => {
+    let engine = createEngine(makeTestTimeline())
+    const clip = createTextClipFromPreset("title-modern", { startMs: 2000, durationMs: 5000 })
+    const addRes = executeCommand(engine, createAddTextClipCommand(clip))
+    expect(addRes.ok).toBe(true)
+    if (!addRes.ok) return
+    engine = addRes.value
+
+    const moveRes = executeCommand(engine, createMoveClipCommand(clip.id, 8000))
+    expect(moveRes.ok).toBe(true)
+    if (!moveRes.ok) return
+    engine = moveRes.value
+
+    const track = engine.history.present.tracks.find((t) => t.kind === "titles")
+    expect(track).toBeDefined()
+    expect(track?.clips[0].startMs).toBe(8000)
+  })
+
+  it("moves an image graphic clip along its graphics track", () => {
+    let engine = createEngine(makeTestTimeline())
+    const imageClip = {
+      id: "img-move-1",
+      assetId: "logo-asset",
+      kind: "image" as const,
+      startMs: 1500,
+      durationMs: 4000,
+      sourceInMs: 0,
+      sourceOutMs: 4000,
+      speed: 1,
+      x: 100,
+      y: 100,
+      width: 200,
+      height: 100,
+      rotation: 0,
+      anchorX: 0.5,
+      anchorY: 0.5,
+      zIndex: 0,
+      opacity: 1,
+      borderRadius: 0,
+      borderWidth: 0,
+      borderColor: "#ffffff",
+      shadowEnabled: false,
+      shadowColor: "#000000",
+      shadowBlur: 0,
+      fit: "contain" as const,
+      animationIn: "fade" as const,
+      animationOut: "fade" as const,
+      overlayAnimation: {
+        inType: "fade" as const,
+        outType: "fade" as const,
+        inDurationMs: 350,
+        outDurationMs: 350,
+        easing: "expo-out" as const,
+      },
+      enabled: true,
+      locked: false,
+    }
+    const addRes = executeCommand(engine, createAddImageClipCommand(imageClip))
+    expect(addRes.ok).toBe(true)
+    if (!addRes.ok) return
+    engine = addRes.value
+
+    const moveRes = executeCommand(engine, createMoveClipCommand(imageClip.id, 7000))
+    expect(moveRes.ok).toBe(true)
+    if (!moveRes.ok) return
+    engine = moveRes.value
+
+    const track = engine.history.present.tracks.find((t) => t.kind === "graphics")
+    expect(track).toBeDefined()
+    expect(track?.clips[0].startMs).toBe(7000)
+  })
+
+  it("moves multiple overlay clips together along the timeline", () => {
+    let engine = createEngine(makeTestTimeline())
+    const annClip = createAnnotationClip("rectangle", { startMs: 1000, durationMs: 4000 })
+    const titleClip = createTextClipFromPreset("title-modern", { startMs: 2000, durationMs: 5000 })
+
+    let res = executeCommand(engine, createAddAnnotationClipCommand(annClip))
+    if (res.ok) engine = res.value
+    res = executeCommand(engine, createAddTextClipCommand(titleClip))
+    if (res.ok) engine = res.value
+
+    const moveMultipleRes = executeCommand(
+      engine,
+      createMoveClipsCommand([annClip.id, titleClip.id], 3000),
+    )
+    expect(moveMultipleRes.ok).toBe(true)
+    if (!moveMultipleRes.ok) return
+    engine = moveMultipleRes.value
+
+    const annTrack = engine.history.present.tracks.find((t) => t.kind === "annotations")
+    const titlesTrack = engine.history.present.tracks.find((t) => t.kind === "titles")
+    expect(annTrack?.clips[0].startMs).toBe(4000)
+    expect(titlesTrack?.clips[0].startMs).toBe(5000)
+  })
+
+  it("allows overlapping overlay clips on annotations, titles, and graphics tracks", () => {
+    let engine = createEngine(makeTestTimeline())
+    const clip1 = createAnnotationClip("rectangle", { startMs: 1000, durationMs: 4000 })
+    const clip2 = createAnnotationClip("arrow", { startMs: 7000, durationMs: 3000 })
+    clip2.id = "arrow-clip-2"
+
+    let res = executeCommand(engine, createAddAnnotationClipCommand(clip1))
+    if (res.ok) engine = res.value
+    res = executeCommand(engine, createAddAnnotationClipCommand(clip2))
+    if (res.ok) engine = res.value
+
+    // Move clip2 so that it overlaps clip1 (2000ms is within 1000-5000ms)
+    const moveRes = executeCommand(engine, createMoveClipCommand(clip2.id, 2000))
+    expect(moveRes.ok).toBe(true)
+    if (!moveRes.ok) return
+    engine = moveRes.value
+
+    const track = engine.history.present.tracks.find((t) => t.kind === "annotations")
+    expect(track?.clips.length).toBe(2)
+  })
+
+  it("rejects moving overlay clip to an incompatible track kind", () => {
+    let engine = createEngine(makeTestTimeline())
+    const clip = createAnnotationClip("rectangle", { startMs: 1000, durationMs: 4000 })
+    const addRes = executeCommand(engine, createAddAnnotationClipCommand(clip))
+    expect(addRes.ok).toBe(true)
+    if (!addRes.ok) return
+    engine = addRes.value
+
+    // Attempt to move annotation clip to the screen track
+    const screenTrackId = engine.history.present.tracks[0].id
+    const moveRes = executeCommand(engine, createMoveClipCommand(clip.id, 3000, screenTrackId))
+    expect(moveRes.ok).toBe(false)
+    if (!moveRes.ok) {
+      expect(moveRes.error.code).toBe("invalid_move")
+      expect(moveRes.error.message).toBe("Clip kind does not match target track")
+    }
+  })
+})
+

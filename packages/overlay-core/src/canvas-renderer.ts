@@ -60,14 +60,36 @@ function renderAnnotation(
   }
 
   if (item.annotationType === "arrow" || item.annotationType === "line") {
+    const startX = transform.x
+    const startY = transform.y
     const endX = item.endX ?? transform.x + transform.width
     const endY = item.endY ?? transform.y + transform.height
-    context.beginPath()
-    context.moveTo(transform.x, transform.y)
-    context.lineTo(endX, endY)
-    context.stroke()
-    drawArrowHead(context, item.arrowStartHead, transform.x, transform.y, endX, endY)
-    drawArrowHead(context, item.arrowEndHead, endX, endY, transform.x, transform.y)
+    const dx = endX - startX
+    const dy = endY - startY
+    const len = Math.hypot(dx, dy)
+
+    if (len > 0.001) {
+      const headSize = Math.max(10, item.strokeWidth * 3.5)
+      const startOffset =
+        item.arrowStartHead !== "none"
+          ? Math.min(len * 0.45, item.arrowStartHead === "circle" ? headSize / 2 : headSize * 0.7)
+          : 0
+      const endOffset =
+        item.arrowEndHead !== "none"
+          ? Math.min(len * 0.45, item.arrowEndHead === "circle" ? headSize / 2 : headSize * 0.7)
+          : 0
+
+      const ux = dx / len
+      const uy = dy / len
+
+      context.beginPath()
+      context.moveTo(startX + ux * startOffset, startY + uy * startOffset)
+      context.lineTo(endX - ux * endOffset, endY - uy * endOffset)
+      context.stroke()
+
+      drawArrowHead(context, item.arrowStartHead, startX, startY, endX, endY)
+      drawArrowHead(context, item.arrowEndHead, endX, endY, startX, startY)
+    }
     context.restore()
     return
   }
@@ -386,7 +408,7 @@ function drawArrowHead(
 ): void {
   if (head === "none") return
   const angle = Math.atan2(towardY - y, towardX - x)
-  const size = Math.max(8, context.lineWidth * 3)
+  const size = Math.max(10, context.lineWidth * 3.5)
   context.save()
   context.setLineDash([])
   if (head === "circle") {
@@ -394,23 +416,28 @@ function drawArrowHead(
     context.arc(x, y, size / 2, 0, Math.PI * 2)
     context.fillStyle = context.strokeStyle
     context.fill()
-  } else {
+  } else if (head === "diamond") {
     context.translate(x, y)
     context.rotate(angle)
     context.beginPath()
     context.moveTo(0, 0)
-    context.lineTo(-size, size / 2)
-    context.lineTo(-size, -size / 2)
+    context.lineTo(size * 0.75, size * 0.45)
+    context.lineTo(size * 1.5, 0)
+    context.lineTo(size * 0.75, -size * 0.45)
     context.closePath()
     context.fillStyle = context.strokeStyle
-    if (head === "diamond") {
-      context.beginPath()
-      context.moveTo(0, 0)
-      context.lineTo(-size, size / 2)
-      context.lineTo(-size * 1.5, 0)
-      context.lineTo(-size, -size / 2)
-      context.closePath()
-    }
+    context.fill()
+  } else {
+    // Standard arrow head pointing outward from (x, y) away from (towardX, towardY)
+    context.translate(x, y)
+    context.rotate(angle)
+    context.beginPath()
+    context.moveTo(0, 0)
+    context.lineTo(size, size * 0.5)
+    context.lineTo(size * 0.75, 0)
+    context.lineTo(size, -size * 0.5)
+    context.closePath()
+    context.fillStyle = context.strokeStyle
     context.fill()
   }
   context.restore()

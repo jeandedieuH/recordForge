@@ -1,7 +1,7 @@
 import type { ImageClip, ImageFit } from "@recordforge/contracts"
 import {
   Button,
-  Input,
+  ColorPicker,
   Select,
   SelectContent,
   SelectItem,
@@ -119,18 +119,13 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
         </div>
 
         {clip.borderWidth > 0 && (
-          <div className="flex items-center gap-2 mt-2">
-            <Input
-              type="color"
+          <div className="flex items-center justify-between gap-3 mt-2">
+            <span className="text-[11px] text-muted-foreground">Border Color</span>
+            <ColorPicker
+              aria-label="Border color"
+              size="sm"
               value={clip.borderColor}
-              onChange={(e) => onChange({ borderColor: e.target.value })}
-              className="size-8 p-0.5 rounded cursor-pointer"
-            />
-            <Input
-              type="text"
-              value={clip.borderColor}
-              onChange={(e) => onChange({ borderColor: e.target.value })}
-              className="h-8 font-mono text-xs"
+              onChange={(borderColor) => onChange({ borderColor })}
             />
           </div>
         )}
