@@ -86,7 +86,7 @@ export function EditorSession({ recordingId }: EditorSessionProps) {
             return
           }
           allowCloseAfterFlush = true
-          await getCurrentWindow().close()
+          await getCurrentWindow().destroy()
         } catch {
           isFlushing = false
         }
