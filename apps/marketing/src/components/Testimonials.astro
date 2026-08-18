@@ -1,0 +1,83 @@
+---
+const testimonials = [
+  {
+    name: "Alex Rivera",
+    role: "Senior Staff Engineer & Tech Educator",
+    company: "DevGuides.io",
+    content:
+      "Most screen recorders turn my laptop into a jet engine and lag my code editor. RecordForge uses practically zero CPU during 4K recordings, and the cursor smoothing looks like a polished studio production out of the box.",
+    avatar: "AR",
+    rating: 5,
+  },
+  {
+    name: "Elena Rostova",
+    role: "Open-Source Maintainer & Developer Advocate",
+    company: "SaaS Academy",
+    content:
+      "The architecture behind RecordForge is brilliant. Tauri v2 + pure Rust capture and SQLite WAL crash recovery saved a 45-minute workshop recording when my power tripped. Relaunched the app, and every second was intact.",
+    avatar: "ER",
+    rating: 5,
+  },
+  {
+    name: "Marcus Chen",
+    role: "Developer Relations Lead",
+    company: "Rust Ecosystem",
+    content:
+      "Having an integrated timeline editor with keyboard-driven multi-track splitting and hardware NVENC rendering completely replaced my bloated video editing suite for technical demos.",
+    avatar: "MC",
+    rating: 5,
+  },
+]
+---
+
+<section class="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-border">
+  <div class="text-center max-w-3xl mx-auto mb-16">
+    <span class="px-3.5 py-1 rounded-full bg-surface border border-primary/40 text-xs font-mono text-track-screen uppercase tracking-wider">
+      COMMUNITY &amp; CREATORS
+    </span>
+    <h2 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-foreground font-['Outfit'] mt-3">
+      Engineered for Technical Creators
+    </h2>
+    <p class="mt-4 text-base sm:text-lg text-muted-foreground">
+      Experience why creators and engineers are switching to RecordForge for high-precision tutorials and product demos.
+    </p>
+  </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      {
+        testimonials.map((t) => (
+          <div class="rounded-2xl border border-border bg-surface backdrop-blur-xl p-6 sm:p-8 flex flex-col justify-between hover:border-primary/50 transition-all shadow-xl">
+            <div>
+              <div class="flex items-center gap-1 text-track-title mb-4">
+                {[...Array(t.rating)].map(() => (
+                  <svg class="w-4 h-4 fill-track-title" viewBox="0 0 24 24">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                  </svg>
+                ))}
+              </div>
+              <p class="text-sm sm:text-base text-foreground leading-relaxed italic">
+                "{t.content}"
+              </p>
+            </div>
+
+            <div class="mt-8 pt-6 border-t border-border flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-linear-to-tr from-primary to-secondary flex items-center justify-center text-foreground font-bold text-xs tracking-wider shrink-0 shadow">
+                {t.avatar}
+              </div>
+              <div>
+                <div class="text-sm font-bold text-foreground flex items-center gap-1.5">
+                  {t.name}
+                  <svg class="w-3.5 h-3.5 text-track-screen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+                  </svg>
+                </div>
+                <div class="text-xs text-muted-foreground">
+                  {t.role} &bull; <span class="text-track-screen">{t.company}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))
+      }
+    </div>
+  </section>

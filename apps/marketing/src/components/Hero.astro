@@ -1,0 +1,113 @@
+---
+---
+
+<section class="relative pt-12 pb-20 sm:pt-20 sm:pb-28 overflow-hidden">
+  {/* Atmospheric Background Glows in brand primary & secondary */}
+  <div class="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-175 h-87.5 bg-radial-glow blur-[120px] pointer-events-none -z-10 rounded-full"></div>
+
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+    {/* Announcement Pill with Brand Icon */}
+    <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-surface border border-border backdrop-blur-md mb-8 hover:border-track-screen/40 transition-all cursor-default">
+      <img src="/forge-mark.svg" alt="recordForge logo icon" class="w-3.5 h-3.5 object-contain" />
+      <span class="text-xs font-medium text-muted-foreground">
+        Native Rust Engine &bull; Zero Frame Drop &bull; Windows 11 Optimized
+      </span>
+      <span class="px-1.5 py-0.2 rounded bg-primary/20 text-track-screen text-[10px] font-mono font-semibold border border-primary/30">
+        NEW
+      </span>
+    </div>
+
+    {/* Primary Headline */}
+    <h1 class="text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight text-foreground font-['Outfit'] max-w-5xl mx-auto leading-[1.1]">
+      Screen recording that respects your machine. <br class="hidden sm:inline" />
+      <span class="text-gradient-primary">And your privacy.</span>
+    </h1>
+
+    {/* Subheadline */}
+    <p class="mt-6 text-base sm:text-xl text-muted-foreground max-w-3xl mx-auto leading-relaxed">
+      A local-first, low-end friendly desktop recorder with studio-grade cursor smoothing, 
+      multi-track timeline editing, and zero mandatory cloud subscriptions.
+    </p>
+
+    {/* Primary Call to Actions */}
+    <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4 max-w-md mx-auto sm:max-w-none">
+      <a
+        href="#download"
+        class="w-full sm:w-auto flex items-center justify-center gap-3 px-8 py-4 rounded-2xl bg-primary hover:bg-primary-hover text-foreground font-bold text-sm sm:text-base tracking-wide shadow-xl shadow-primary/35 hover:shadow-primary/50 hover:scale-[1.02] active:scale-[0.98] transition-all group"
+      >
+        <svg class="w-5 h-5 group-hover:-translate-y-0.5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <div class="text-left">
+          <div>Download for Windows</div>
+          <div class="text-[10px] font-normal text-on-primary-container opacity-90">v0.1.0 Beta &bull; Free & Open-Source</div>
+        </div>
+      </a>
+
+      <a
+        href="#editor"
+        class="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-4 rounded-2xl bg-surface hover:bg-surface-container-high border border-border text-foreground font-semibold text-sm sm:text-base backdrop-blur-md transition-all hover:border-track-screen/30"
+      >
+        <svg class="w-4 h-4 text-track-screen fill-track-screen/20" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <span>Explore Timeline Demo</span>
+      </a>
+    </div>
+
+    {/* Key Architecture Badges */}
+    <div class="mt-14 pt-8 border-t border-border grid grid-cols-2 md:grid-cols-4 gap-4 max-w-4xl mx-auto text-left">
+      <div class="p-3.5 rounded-xl bg-surface border border-border flex items-center gap-3">
+        <div class="p-2 rounded-lg bg-primary/15 text-track-screen shrink-0 border border-primary/30">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="4" y="4" width="16" height="16" rx="2"/>
+            <rect x="9" y="9" width="6" height="6"/>
+            <path d="M15 2v2M9 2v2M15 20v2M9 20v2M20 15h2M20 9h2M2 15h2M2 9h2"/>
+          </svg>
+        </div>
+        <div>
+          <div class="text-xs font-bold text-foreground">&lt;48MB Idle RAM</div>
+          <div class="text-[11px] text-muted-foreground">Pure Rust &amp; Tauri v2</div>
+        </div>
+      </div>
+
+      <div class="p-3.5 rounded-xl bg-surface border border-border flex items-center gap-3">
+        <div class="p-2 rounded-lg bg-track-mic/15 text-track-mic shrink-0 border border-track-mic/30">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          </svg>
+        </div>
+        <div>
+          <div class="text-xs font-bold text-foreground">0ms A/V Drift</div>
+          <div class="text-[11px] text-muted-foreground">WASAPI Loopback</div>
+        </div>
+      </div>
+
+      <div class="p-3.5 rounded-xl bg-surface border border-border flex items-center gap-3">
+        <div class="p-2 rounded-lg bg-secondary/15 text-track-annotation shrink-0 border border-secondary/30">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="text-xs font-bold text-foreground">60Hz Subpixel Vector</div>
+          <div class="text-[11px] text-muted-foreground">Studio Cursor Parity</div>
+        </div>
+      </div>
+
+      <div class="p-3.5 rounded-xl bg-surface border border-border flex items-center gap-3">
+        <div class="p-2 rounded-lg bg-track-title/15 text-track-title shrink-0 border border-track-title/30">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="text-xs font-bold text-foreground">SQLite WAL Recovery</div>
+          <div class="text-[11px] text-muted-foreground">Zero Lost Takes</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

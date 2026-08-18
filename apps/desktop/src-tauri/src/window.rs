@@ -60,7 +60,7 @@ impl FloatingWindow {
             tauri::WebviewUrl::App("index.html?floating=1".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'floating';")
-        .title("recordForge Transport Controls")
+        .title("RecordForge Transport Controls")
         .inner_size(FLOATING_WINDOW_WIDTH, FLOATING_WINDOW_HEIGHT)
         .decorations(false)
         .transparent(true)
@@ -158,7 +158,7 @@ impl BoundaryWindow {
             tauri::WebviewUrl::App("index.html?boundary=1".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'boundary';")
-        .title("recordForge Capture Boundary")
+        .title("RecordForge Capture Boundary")
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -236,7 +236,7 @@ impl RegionPickerWindow {
             tauri::WebviewUrl::App("index.html?region=1".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'region-picker';")
-        .title("recordForge Select Region")
+        .title("RecordForge Select Region")
         .inner_size(logical_size.width, logical_size.height)
         .position(logical_position.x, logical_position.y)
         .decorations(false)
@@ -352,7 +352,7 @@ impl CountdownWindow {
         let window =
             tauri::WebviewWindowBuilder::new(app, "countdown", tauri::WebviewUrl::App(url.into()))
                 .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'countdown';")
-                .title("recordForge Starting Recording")
+                .title("RecordForge Starting Recording")
                 .inner_size(logical_size.width, logical_size.height)
                 .position(logical_position.x, logical_position.y)
                 .decorations(false)

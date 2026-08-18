@@ -271,8 +271,8 @@ export function FloatingControls() {
             <Button
               size="icon"
               variant="ghost"
-              title="Open recordForge main window"
-              aria-label="Open recordForge"
+              title="Open RecordForge main window"
+              aria-label="Open RecordForge"
               onClick={() => void showMainWindow()}
             >
               <AppWindow className="size-4" />

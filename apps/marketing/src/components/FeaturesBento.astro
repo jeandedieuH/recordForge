@@ -1,0 +1,195 @@
+---
+---
+
+<section id="features" class="py-24 relative">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    {/* Section Header */}
+    <div class="text-center max-w-3xl mx-auto mb-16">
+      <div class="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-surface border border-primary/40 text-xs font-mono text-track-screen mb-4">
+        <svg class="w-3.5 h-3.5 text-track-screen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        BUILT WITHOUT BLOAT
+      </div>
+      <h2 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-foreground font-['Outfit']">
+        Engineering Excellence for Every Frame
+      </h2>
+      <p class="mt-4 text-base sm:text-lg text-muted-foreground">
+        Engineered from the metal up to deliver buttery-smooth 60fps recording, rock-solid audio synchronization, and effortless editing on any Windows machine.
+      </p>
+    </div>
+
+    {/* Bento Grid */}
+    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-3 gap-6">
+      {/* Bento Card 1: Native Performance & WASAPI (Span 2 on MD/LG) */}
+      <div class="md:col-span-2 rounded-2xl border border-border bg-linear-to-br from-surface via-surface-dim to-background p-8 flex flex-col justify-between group hover:border-primary/60 transition-all shadow-xl">
+        <div>
+          <div class="w-12 h-12 rounded-xl bg-primary/15 border border-primary/30 flex items-center justify-center text-track-screen mb-6 group-hover:scale-110 transition-transform">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M9 2v2M15 20v2M9 20v2M20 15h2M20 9h2M2 15h2M2 9h2"/>
+            </svg>
+          </div>
+          <span class="text-xs font-mono uppercase tracking-wider text-track-screen font-semibold">Low-End Optimized Architecture</span>
+          <h3 class="text-2xl font-bold text-foreground mt-1">
+            Native Rust Capture &amp; Zero-Drift WASAPI Audio
+          </h3>
+          <p class="mt-3 text-sm sm:text-base text-muted-foreground leading-relaxed">
+            Record crystal-clear 4K at 60 FPS without dropping frames or bogging down your system. 
+            Direct Windows Graphics Capture pipeline bypasses slow copy buffers, while native WASAPI loopback 
+            keeps your mic and desktop audio permanently in phase.
+          </p>
+        </div>
+
+        <div class="mt-8 pt-6 border-t border-border grid grid-cols-3 gap-4 text-xs font-mono">
+          <div class="p-3 rounded-lg bg-background border border-border">
+            <div class="text-track-screen font-bold">&lt; 3% CPU</div>
+            <div class="text-[11px] text-muted-foreground">4K NVENC Pipeline</div>
+          </div>
+          <div class="p-3 rounded-lg bg-background border border-border">
+            <div class="text-track-mic font-bold">0.00 ms</div>
+            <div class="text-[11px] text-muted-foreground">A/V Phase Drift</div>
+          </div>
+          <div class="p-3 rounded-lg bg-background border border-border">
+            <div class="text-track-annotation font-bold">48 MB</div>
+            <div class="text-[11px] text-muted-foreground">Idle Memory Footprint</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bento Card 2: 100% Local Privacy */}
+      <div class="rounded-2xl border border-border bg-linear-to-br from-surface via-surface-dim to-background p-8 flex flex-col justify-between group hover:border-track-mic/40 transition-all shadow-xl">
+        <div>
+          <div class="w-12 h-12 rounded-xl bg-track-mic/15 border border-track-mic/30 flex items-center justify-center text-track-mic mb-6 group-hover:scale-110 transition-transform">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+          </div>
+          <span class="text-xs font-mono uppercase tracking-wider text-track-mic font-semibold">100% Local-First Privacy</span>
+          <h3 class="text-2xl font-bold text-foreground mt-1">
+            Zero Cloud Lock-in
+          </h3>
+          <p class="mt-3 text-sm text-muted-foreground leading-relaxed">
+            Your screen, audio, and projects never touch remote servers unless you explicitly upload them. 
+            No logins, no telemetry spying, no monthly paywalls.
+          </p>
+        </div>
+
+        <div class="mt-8 pt-4 border-t border-border flex items-center gap-2 text-xs text-track-mic font-medium">
+          <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          <span>Local SQLite Database &amp; MP4 / WAV files</span>
+        </div>
+      </div>
+
+      {/* Bento Card 3: Smart Telemetry & Smooth Cursor */}
+      <div class="rounded-2xl border border-border bg-linear-to-br from-surface via-surface-dim to-background p-8 flex flex-col justify-between group hover:border-track-screen/40 transition-all shadow-xl">
+        <div>
+          <div class="w-12 h-12 rounded-xl bg-primary/15 border border-track-screen/30 flex items-center justify-center text-track-screen mb-6 group-hover:scale-110 transition-transform">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="m13 13 6 6"/>
+            </svg>
+          </div>
+          <span class="text-xs font-mono uppercase tracking-wider text-track-screen font-semibold">Subpixel Vector Engine</span>
+          <h3 class="text-2xl font-bold text-foreground mt-1">
+            Studio Cursor &amp; Auto-Zoom
+          </h3>
+          <p class="mt-3 text-sm text-muted-foreground leading-relaxed">
+            Subpixel cursor vectors are captured independently of screen pixels. 
+            Apply buttery spring physics, click ripples, and automatic focal zoom at full SVG crispness.
+          </p>
+        </div>
+
+        <div class="mt-8 pt-4 border-t border-border flex items-center gap-2 text-xs text-track-screen font-medium">
+          <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+          <span>resvg + tiny-skia rasterization</span>
+        </div>
+      </div>
+
+      {/* Bento Card 4: Multi-Track Timeline Editor (Span 2 on MD/LG) */}
+      <div class="md:col-span-2 rounded-2xl border border-border bg-linear-to-br from-surface via-surface-dim to-background p-8 flex flex-col justify-between group hover:border-secondary/50 transition-all shadow-xl">
+        <div>
+          <div class="w-12 h-12 rounded-xl bg-secondary/15 border border-secondary/30 flex items-center justify-center text-track-annotation mb-6 group-hover:scale-110 transition-transform">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
+            </svg>
+          </div>
+          <span class="text-xs font-mono uppercase tracking-wider text-track-annotation font-semibold">Proxy-Based Timeline</span>
+          <h3 class="text-2xl font-bold text-foreground mt-1">
+            Lightweight Multi-Track Non-Linear Editor
+          </h3>
+          <p class="mt-3 text-sm sm:text-base text-muted-foreground leading-relaxed">
+            Trim silences, split clips, reposition camera PiP overlays, and layer annotations with instant scrubbing. 
+            WebAssembly overlay evaluation delivers fluid 60fps playback without heavy transcoding waits.
+          </p>
+        </div>
+
+        <div class="mt-8 pt-6 border-t border-border grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-medium text-foreground">
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-track-screen"></span>
+            Screen &amp; Window
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-track-webcam"></span>
+            Webcam PiP Overlay
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-track-mic"></span>
+            WASAPI Dual Audio
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-track-title"></span>
+            Zoom &amp; Captions
+          </div>
+        </div>
+      </div>
+
+      {/* Bento Card 5: Crash-Proof Write-Ahead Logs */}
+      <div class="rounded-2xl border border-border bg-linear-to-br from-surface via-surface-dim to-background p-8 flex flex-col justify-between group hover:border-track-title/40 transition-all shadow-xl">
+        <div>
+          <div class="w-12 h-12 rounded-xl bg-track-title/15 border border-track-title/30 flex items-center justify-center text-track-title mb-6 group-hover:scale-110 transition-transform">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>
+            </svg>
+          </div>
+          <span class="text-xs font-mono uppercase tracking-wider text-track-title font-semibold">Resilient Journaling</span>
+          <h3 class="text-2xl font-bold text-foreground mt-1">
+            Bulletproof Crash Recovery
+          </h3>
+          <p class="mt-3 text-sm text-muted-foreground leading-relaxed">
+            Power cut or unexpected OS restart during an important demo? 
+            SQLite Write-Ahead Logging journals every frame chunk in real time so you never lose a take.
+          </p>
+        </div>
+
+        <div class="mt-8 pt-4 border-t border-border flex items-center gap-2 text-xs text-track-title font-medium">
+          <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          <span>Automatic Session Reconstructor</span>
+        </div>
+      </div>
+
+      {/* Bento Card 6: Hardware-Accelerated Export */}
+      <div class="md:col-span-2 rounded-2xl border border-border bg-linear-to-br from-surface via-surface-dim to-background p-8 flex flex-col justify-between group hover:border-track-graphic/40 transition-all shadow-xl">
+        <div>
+          <div class="w-12 h-12 rounded-xl bg-track-graphic/15 border border-track-graphic/30 flex items-center justify-center text-track-graphic mb-6 group-hover:scale-110 transition-transform">
+            <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+            </svg>
+          </div>
+          <span class="text-xs font-mono uppercase tracking-wider text-track-graphic font-semibold">Hardware Acceleration</span>
+          <h3 class="text-2xl font-bold text-foreground mt-1">
+            Blazing FFmpeg NVENC, QuickSync &amp; AMF Exports
+          </h3>
+          <p class="mt-3 text-sm sm:text-base text-muted-foreground leading-relaxed">
+            Export directly to crisp MP4, WebM, or animated GIF in seconds with automatic GPU encoder detection. 
+            Optionally publish directly to your custom S3 buckets or Google Drive with credentials sealed in the Windows Credential Vault.
+          </p>
+        </div>
+
+        <div class="mt-8 pt-6 border-t border-border flex flex-wrap items-center gap-4 text-xs font-mono text-foreground">
+          <span class="px-3 py-1 rounded bg-surface border border-border">NVIDIA NVENC</span>
+          <span class="px-3 py-1 rounded bg-surface border border-border">Intel QuickSync</span>
+          <span class="px-3 py-1 rounded bg-surface border border-border">AMD AMF</span>
+          <span class="px-3 py-1 rounded bg-surface border border-border">x264 Multi-Thread</span>
+          <span class="px-3 py-1 rounded bg-surface border border-border">S3 / Google Drive Vault</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

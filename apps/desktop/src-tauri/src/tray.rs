@@ -52,7 +52,7 @@ pub fn create_tray(app: &tauri::App) -> Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon.clone())
-        .tooltip("recordForge")
+        .tooltip("RecordForge")
         .menu(&menu)
         // Left-click focuses the app instead of opening the menu (Windows
         // convention); the menu stays available on right-click.
@@ -163,11 +163,11 @@ pub fn refresh_tray_menu(app: &tauri::AppHandle) {
 /// state transitions, so an elapsed timer here would go stale between them.
 fn tray_tooltip(state: RecorderState) -> String {
     match state {
-        RecorderState::Recording => "recordForge — Recording",
-        RecorderState::Paused => "recordForge — Paused",
-        RecorderState::Countdown => "recordForge — Starting…",
-        RecorderState::Finalizing | RecorderState::Recovering => "recordForge — Saving…",
-        _ => "recordForge",
+        RecorderState::Recording => "RecordForge — Recording",
+        RecorderState::Paused => "RecordForge — Paused",
+        RecorderState::Countdown => "RecordForge — Starting…",
+        RecorderState::Finalizing | RecorderState::Recovering => "RecordForge — Saving…",
+        _ => "RecordForge",
     }
     .into()
 }
@@ -470,19 +470,19 @@ mod tests {
     fn tooltip_names_each_live_state() {
         assert_eq!(
             tray_tooltip(RecorderState::Recording),
-            "recordForge — Recording"
+            "RecordForge — Recording"
         );
-        assert_eq!(tray_tooltip(RecorderState::Paused), "recordForge — Paused");
+        assert_eq!(tray_tooltip(RecorderState::Paused), "RecordForge — Paused");
         assert_eq!(
             tray_tooltip(RecorderState::Countdown),
-            "recordForge — Starting…"
+            "RecordForge — Starting…"
         );
         assert_eq!(
             tray_tooltip(RecorderState::Finalizing),
-            "recordForge — Saving…"
+            "RecordForge — Saving…"
         );
-        assert_eq!(tray_tooltip(RecorderState::Idle), "recordForge");
-        assert_eq!(tray_tooltip(RecorderState::Completed), "recordForge");
+        assert_eq!(tray_tooltip(RecorderState::Idle), "RecordForge");
+        assert_eq!(tray_tooltip(RecorderState::Completed), "RecordForge");
     }
 
     #[test]

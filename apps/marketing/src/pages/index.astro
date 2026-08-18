@@ -1,0 +1,100 @@
+---
+import Layout from "../layouts/Layout.astro"
+import Navbar from "../components/Navbar.astro"
+import Hero from "../components/Hero.astro"
+import FeaturesBento from "../components/FeaturesBento.astro"
+import Architecture from "../components/Architecture.astro"
+import Testimonials from "../components/Testimonials.astro"
+import DownloadCta from "../components/DownloadCta.astro"
+import Footer from "../components/Footer.astro"
+
+import { AppShowcase } from "../components/interactive/AppShowcase"
+import { CursorDemo } from "../components/interactive/CursorDemo"
+import { TimelineSandbox } from "../components/interactive/TimelineSandbox"
+import { PerformanceComparison } from "../components/interactive/PerformanceComparison"
+import { FaqAccordion } from "../components/interactive/FaqAccordion"
+---
+
+<Layout>
+  <Navbar />
+
+  <main class="flex-1">
+    {/* Hero Section */}
+    <Hero />
+
+    {/* Live Interactive App Showcase */}
+    <section class="py-8 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto -mt-6 sm:-mt-10 mb-20 relative z-20">
+      <AppShowcase client:load />
+    </section>
+
+    {/* Bento Grid of Core Features */}
+    <FeaturesBento />
+
+    {/* Cursor Smoothing Deep Dive */}
+    <section id="cursor-engine" class="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto mb-14">
+        <span class="px-3.5 py-1 rounded-full bg-surface border border-primary/40 text-xs font-mono text-track-screen uppercase tracking-wider">
+          TELEMETRY SMOOTHING PARITY
+        </span>
+        <h2 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-foreground font-['Outfit'] mt-3">
+          Sleek Subpixel Cursor Motion
+        </h2>
+        <p class="mt-4 text-base sm:text-lg text-muted-foreground">
+          Raw hardware clicks and jerky hand movements are automatically transformed into silky, studio-grade bezier trajectories with spring physics.
+        </p>
+      </div>
+
+      <CursorDemo client:visible />
+    </section>
+
+    {/* Multi-Track Non-Linear Timeline Editor Showcase */}
+    <section id="editor" class="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto mb-14">
+        <span class="px-3.5 py-1 rounded-full bg-surface border border-secondary/40 text-xs font-mono text-track-annotation uppercase tracking-wider">
+          NON-LINEAR EDITING PIPELINE
+        </span>
+        <h2 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-foreground font-['Outfit'] mt-3">
+          Proxy Timeline That Never Stutters
+        </h2>
+        <p class="mt-4 text-base sm:text-lg text-muted-foreground">
+          Trim, split, reposition, and synchronize multi-track audio and zoom segments with instantaneous 60fps scrubbing.
+        </p>
+      </div>
+
+      <TimelineSandbox client:visible />
+    </section>
+
+    {/* Performance Benchmarks & Comparison */}
+    <section id="benchmarks" class="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <PerformanceComparison client:visible />
+    </section>
+
+    {/* Architecture & Engineering Deep-Dive */}
+    <Architecture />
+
+    {/* Testimonials */}
+    <Testimonials />
+
+    {/* Interactive FAQ */}
+    <section id="faq" class="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center max-w-3xl mx-auto mb-14">
+        <span class="px-3.5 py-1 rounded-full bg-surface border border-primary/40 text-xs font-mono text-track-screen uppercase tracking-wider">
+          ANSWERS &amp; DETAILS
+        </span>
+        <h2 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-foreground font-['Outfit'] mt-3">
+          Frequently Asked Questions
+        </h2>
+        <p class="mt-4 text-base sm:text-lg text-muted-foreground">
+          Everything you need to know about RecordForge’s architecture, performance, licensing, and privacy.
+        </p>
+      </div>
+
+      <FaqAccordion client:visible />
+    </section>
+
+    {/* Download CTA Banner */}
+    <DownloadCta />
+  </main>
+
+  <Footer />
+</Layout>

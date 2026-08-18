@@ -1,0 +1,54 @@
+---
+import "../styles/global.css"
+
+interface Props {
+  title?: string
+  description?: string
+}
+
+const {
+  title = "RecordForge — Local-First, Ultra-Smooth Screen Recorder & Editor for Windows",
+  description = "A high-performance, local-first screen recorder and proxy editor engineered with Rust, Tauri v2, and WebAssembly. No frame drops, zero cloud lock-in.",
+} = Astro.props
+---
+
+<!doctype html>
+<html lang="en" class="dark scroll-smooth">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="generator" content={Astro.generator} />
+
+    {/* Favicon and Icons */}
+    <link rel="icon" type="image/svg+xml" href="/forge-mark.svg" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="apple-touch-icon" href="/icon.png" />
+
+    {/* Meta / SEO */}
+    <meta name="theme-color" content="#070b14" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content="/logo.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content="/logo.png" />
+
+    {/* Typography - Inter & Outfit for modern UI */}
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-background text-foreground antialiased min-h-screen relative overflow-x-hidden">
+    {/* Ambient Mesh Background */}
+    <div class="fixed inset-0 bg-grid-mesh opacity-40 pointer-events-none -z-20"></div>
+
+    <slot />
+  </body>
+</html>

@@ -204,7 +204,7 @@ export function SettingsView() {
             <div>
               <h3 className="text-sm font-semibold text-foreground">Theme Preference</h3>
               <p className="text-xs text-subtle-foreground mt-0.5">
-                Select your preferred visual style for recordForge.
+                Select your preferred visual style for RecordForge.
               </p>
             </div>
 
@@ -302,7 +302,7 @@ export function SettingsView() {
               <div>
                 <p className="text-xs font-medium text-foreground">Minimize to System Tray</p>
                 <p className="text-[11px] text-subtle-foreground">
-                  Keep recordForge running in the notification area when window is closed.
+                  Keep RecordForge running in the notification area when window is closed.
                 </p>
               </div>
               <Switch checked={startMinimized} onCheckedChange={handleStartMinimizedChange} />
