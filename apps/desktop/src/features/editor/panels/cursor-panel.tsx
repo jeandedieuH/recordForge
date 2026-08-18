@@ -1,7 +1,6 @@
 import type { CursorSettings } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
 import { createUpdateCursorSettingsCommand } from "@recordforge/editor-core"
-import { MousePointer2 } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { CursorInspector } from "../cursor"
 
@@ -16,15 +15,8 @@ export function CursorPanel() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 p-3">
-      <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
-        <MousePointer2 className="size-4 text-primary" aria-hidden />
-        <h2>Cursor</h2>
-      </div>
-
-      <div className="rounded-lg border border-border bg-surface-dim p-2">
-        <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
-      </div>
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto p-3">
+      <CursorInspector settings={cursorSettings} onChange={handleCursorChange} />
     </div>
   )
 }

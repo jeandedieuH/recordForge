@@ -65,7 +65,7 @@ export function TitlesPanel() {
   }
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-surface">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface">
       <div className="border-b border-border p-3.5 pb-3">
         <div className="flex items-center gap-2">
           <div className="flex size-7 items-center justify-center rounded-md bg-warning/15 text-warning">

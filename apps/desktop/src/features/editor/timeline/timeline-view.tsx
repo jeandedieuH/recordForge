@@ -127,15 +127,137 @@ function isFailedPreparationJob(job: MediaJob | null): boolean {
 
 function TimelineLoadingState() {
   return (
-    <div className="flex h-full min-h-160 flex-col gap-4 bg-background p-6">
-      <div className="flex min-h-0 flex-1 gap-4">
-        <div className="flex min-w-0 flex-1 flex-col items-center justify-center rounded-xl border border-border bg-surface-dim p-6">
-          <Skeleton className="aspect-video w-full max-w-4xl rounded-xl" />
-          <Skeleton className="mt-5 h-10 w-72 rounded-xl" />
+    <div
+      className="flex h-full min-h-160 flex-col overflow-hidden bg-background text-foreground select-none"
+      aria-label="Loading timeline"
+      aria-busy="true"
+    >
+      {/* Top Section: Monitor Canvas Preview */}
+      <div className="flex min-h-0 flex-1 border-b border-border">
+        <div className="flex min-w-0 flex-1 flex-col bg-background p-4">
+          <div className="@container-size relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-2 shadow-e2">
+            {/* Centered Canvas Container */}
+            <div className="relative flex aspect-video max-h-full w-full max-w-4xl items-center justify-center rounded-lg border border-border/20 bg-surface-dim/40">
+              <div className="flex flex-col items-center gap-3 text-center">
+                <div className="flex size-16 items-center justify-center rounded-2xl bg-surface-dim text-primary/30">
+                  <Monitor className="size-8 animate-pulse" aria-hidden />
+                </div>
+                <Skeleton className="h-4 w-32 rounded-md" />
+              </div>
+            </div>
+
+            {/* Media status badge skeleton at top-left */}
+            <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full border border-border/80 bg-background/80 px-2.5 py-1 backdrop-blur shadow-e1">
+              <Skeleton className="size-1.5 rounded-full" />
+              <Skeleton className="h-2.5 w-20 rounded" />
+            </div>
+          </div>
         </div>
-        <Skeleton className="hidden w-80 shrink-0 rounded-xl lg:block" />
       </div>
-      <Skeleton className="h-72 rounded-xl" />
+
+      {/* Resizable handle divider placeholder */}
+      <div className="h-1 shrink-0 border-y border-border bg-surface-dim" />
+
+      {/* Bottom Section: Integrated Toolbar & Timeline Lanes */}
+      <div className="flex shrink-0 flex-col bg-surface-dim" style={{ height: 340 }}>
+        {/* TimelineToolbar Skeleton */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-dim/80 px-3 py-1.5 backdrop-blur-md">
+          {/* Left Section: Tool Selection & Quick Actions */}
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center rounded-lg border border-border/80 bg-surface/90 p-0.5 shadow-e1 gap-1">
+              <Skeleton className="size-7 rounded-md" />
+              <Skeleton className="size-7 rounded-md" />
+              <Skeleton className="size-7 rounded-md" />
+            </div>
+            <div className="h-4 w-px bg-border/60" />
+            <Skeleton className="h-7 w-20 rounded-md" />
+            <Skeleton className="size-7 rounded-md" />
+            <Skeleton className="h-7 w-16 rounded-md" />
+            <Skeleton className="h-7 w-18 rounded-md" />
+          </div>
+
+          {/* Center Section: Transport Controls & Timecode */}
+          <div className="flex items-center gap-2">
+            <Skeleton className="size-7 rounded-md" />
+            <Skeleton className="size-7 rounded-md" />
+            <Skeleton className="size-8 rounded-full" />
+            <Skeleton className="size-7 rounded-md" />
+            <Skeleton className="size-7 rounded-md" />
+            <Skeleton className="h-6 w-32 rounded-md" />
+          </div>
+
+          {/* Right Section: Playback Speed & Zoom Controls */}
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-7 w-18 rounded-md" />
+            <div className="hidden h-4 w-px bg-border/60 sm:block" />
+            <div className="hidden items-center gap-1 sm:flex">
+              <Skeleton className="size-7 rounded-md" />
+              <Skeleton className="h-2 w-20 rounded-full" />
+              <Skeleton className="size-7 rounded-md" />
+              <Skeleton className="h-6 w-12 rounded-md" />
+              <Skeleton className="h-3 w-8 rounded" />
+            </div>
+          </div>
+        </div>
+
+        {/* TimelineLanes Skeleton */}
+        <div className="flex min-h-0 flex-1 select-none overflow-hidden">
+          {/* Left Column: Track Headers */}
+          <div className="w-56 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20 flex flex-col">
+            <div className="flex h-13 flex-col justify-center border-b border-border/80 bg-surface-dim/95 px-3">
+              <Skeleton className="h-3 w-24 rounded" />
+              <Skeleton className="mt-1.5 h-2 w-16 rounded" />
+            </div>
+            <div className="flex flex-col divide-y divide-border/40">
+              {[
+                { label: "Screen", width: "w-20" },
+                { label: "Audio", width: "w-16" },
+                { label: "Camera", width: "w-18" },
+              ].map((item, idx) => (
+                <div key={idx} className="flex h-14 items-center justify-between px-3">
+                  <div className="flex items-center gap-2">
+                    <Skeleton className="size-4 rounded" />
+                    <Skeleton className={`h-3.5 ${item.width} rounded`} />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Skeleton className="size-5 rounded" />
+                    <Skeleton className="size-5 rounded" />
+                    <Skeleton className="size-5 rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Right Column: Scrollable Ruler & Tracks Area */}
+          <div className="min-w-0 flex-1 overflow-hidden flex flex-col bg-surface-dim/40">
+            {/* Ruler Skeleton */}
+            <div className="flex h-13 items-center border-b border-border/80 bg-surface-dim/90 px-4">
+              <div className="flex w-full items-center justify-between opacity-60">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="flex flex-col items-center gap-1">
+                    <Skeleton className="h-2 w-10 rounded" />
+                    <div className="h-2 w-px bg-border" />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Track Lanes Skeleton */}
+            <div className="flex flex-1 flex-col gap-2 p-2">
+              <div className="flex h-14 items-center rounded-md bg-surface-dim/60 px-2">
+                <Skeleton className="h-10 w-3/4 rounded-lg bg-overlay/80" />
+              </div>
+              <div className="flex h-14 items-center rounded-md bg-surface-dim/60 px-2">
+                <Skeleton className="h-10 w-4/5 rounded-lg bg-overlay/80" />
+              </div>
+              <div className="flex h-14 items-center rounded-md bg-surface-dim/60 px-2">
+                <Skeleton className="h-10 w-1/2 rounded-lg bg-overlay/80" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

@@ -100,7 +100,7 @@ export function TaskRail({
 
   return (
     <nav
-      className="flex h-full w-14 shrink-0 flex-col items-center gap-1 border-r border-border bg-surface-dim py-2"
+      className="flex h-full min-h-0 w-14 shrink-0 flex-col items-center gap-1 overflow-y-auto overflow-x-hidden border-r border-border bg-surface-dim py-2"
       role="tablist"
       aria-label="Editor tasks"
       aria-orientation="vertical"

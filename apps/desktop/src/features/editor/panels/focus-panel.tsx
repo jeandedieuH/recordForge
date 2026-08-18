@@ -135,7 +135,7 @@ export function FocusPanel() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 p-3">
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
       <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
         <ZoomIn className="size-4 text-primary" aria-hidden />
         <h2>Focus</h2>

@@ -4,6 +4,7 @@ import { Monitor } from "lucide-react"
 import { EmptyState, Skeleton, Tabs, TabsList, TabsTrigger } from "@recordforge/ui"
 import { DerivativeCard, DerivativeStatus } from "../components/derivative-status"
 import { ProjectAssetsPanel } from "./project-assets-panel"
+import { useTimelineStore } from "../../../stores/timeline-store"
 import type {
   DerivativeResource,
   ThumbnailManifest,
@@ -26,7 +27,92 @@ export function MediaPanel({
   waveformResources,
 }: MediaPanelProps) {
   const [tab, setTab] = useState<"project" | "assets">("project")
+  const isLoading = useTimelineStore((state) => state.isLoading)
   const isReady = thumbnailResource.status === "content"
+
+  if (isLoading) {
+    return (
+      <div className="flex h-full flex-col overflow-hidden bg-surface">
+        <div className="border-b border-border p-3 pb-2">
+          <Tabs value={tab} onValueChange={(v) => setTab(v as any)} className="w-full">
+            <TabsList className="grid w-full grid-cols-2 h-7 bg-surface-dim p-0.5">
+              <TabsTrigger value="project" className="text-xs py-0 h-6">
+                Source
+              </TabsTrigger>
+              <TabsTrigger value="assets" className="text-xs py-0 h-6">
+                Assets
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
+          {/* Source metadata skeleton */}
+          <div className="flex flex-col gap-2.5">
+            <div className="flex items-center justify-between">
+              <Skeleton className="h-3 w-12 rounded" />
+              <Skeleton className="h-3 w-28 rounded" />
+            </div>
+            <div className="flex items-center justify-between">
+              <Skeleton className="h-3 w-16 rounded" />
+              <Skeleton className="h-3 w-20 rounded" />
+            </div>
+            <div className="flex items-center justify-between">
+              <Skeleton className="h-3 w-14 rounded" />
+              <Skeleton className="h-3 w-16 rounded" />
+            </div>
+          </div>
+
+          {/* Canvas info grid skeleton */}
+          <div className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-surface-dim p-2 text-xs">
+            <div className="flex flex-col gap-1">
+              <Skeleton className="h-2.5 w-10 rounded" />
+              <Skeleton className="h-3 w-16 rounded" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Skeleton className="h-2.5 w-10 rounded" />
+              <Skeleton className="h-3 w-16 rounded" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Skeleton className="h-2.5 w-16 rounded" />
+              <Skeleton className="h-3 w-12 rounded" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Skeleton className="h-2.5 w-12 rounded" />
+              <Skeleton className="h-3 w-8 rounded" />
+            </div>
+          </div>
+
+          {/* Derivative status skeleton */}
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-3 w-24 rounded" />
+            <div className="flex gap-2">
+              <Skeleton className="h-6 w-24 rounded-full" />
+              <Skeleton className="h-6 w-24 rounded-full" />
+            </div>
+          </div>
+
+          {/* Derivative cards skeleton */}
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-3">
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-3 w-20 rounded" />
+                <Skeleton className="h-3 w-14 rounded" />
+              </div>
+              <Skeleton className="h-2 w-full rounded" />
+            </div>
+            <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-3">
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-3 w-24 rounded" />
+                <Skeleton className="h-3 w-14 rounded" />
+              </div>
+              <Skeleton className="h-2 w-full rounded" />
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-surface">
@@ -46,7 +132,7 @@ export function MediaPanel({
       {tab === "assets" ? (
         <ProjectAssetsPanel />
       ) : (
-        <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-3">
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
           {recording ? (
             <div className="flex flex-col gap-2">
               <InfoRow label="Source" value={recording.name} />

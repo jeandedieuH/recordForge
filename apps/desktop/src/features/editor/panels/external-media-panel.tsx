@@ -185,7 +185,7 @@ export function ExternalMediaPanel() {
   })
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-surface">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface">
       {/* Hidden file input */}
       <input
         ref={fileInputRef}

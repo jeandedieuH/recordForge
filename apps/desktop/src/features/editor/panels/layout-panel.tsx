@@ -8,6 +8,7 @@ import {
 import {
   Button,
   Input,
+  Skeleton,
   Slider,
   Tabs,
   TabsContent,
@@ -42,14 +43,57 @@ const RADIUS_PRESETS = [
 export function LayoutPanel() {
   const execute = useTimelineStore((state) => state.execute)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const isLoading = useTimelineStore((state) => state.isLoading)
 
   const currentBackground = timeline?.canvas.background ?? "#070b14"
   const detectedKind = getBackgroundKind(currentBackground)
   const [activeBgTab, setActiveBgTab] = useState<BackgroundKind>(detectedKind)
 
+  if (isLoading) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-3">
+        <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
+          <LayoutTemplate className="size-4 text-primary" aria-hidden />
+          <h2>Canvas Layout</h2>
+        </div>
+
+        {/* Aspect Ratio Skeleton */}
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-3 w-20 rounded" />
+          <div className="grid grid-cols-3 gap-1.5">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-7 rounded-md" />
+            ))}
+          </div>
+        </div>
+
+        {/* Padding / Radius Presets Skeleton */}
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-3 w-16 rounded" />
+          <div className="flex gap-1.5">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-7 flex-1 rounded-md" />
+            ))}
+          </div>
+        </div>
+
+        {/* Background Picker Skeleton */}
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-3 w-24 rounded" />
+          <Skeleton className="h-8 w-full rounded-md" />
+          <div className="grid grid-cols-4 gap-2 pt-1">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <Skeleton key={i} className="h-9 rounded-lg" />
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (!timeline) {
     return (
-      <div className="flex h-full flex-col gap-3 p-3">
+      <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
         <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
           <LayoutTemplate className="size-4 text-primary" aria-hidden />
           <h2>Canvas Layout</h2>
@@ -80,7 +124,7 @@ export function LayoutPanel() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto p-3 pr-2">
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-3 pr-2">
       {/* Panel Header */}
       <div className="flex items-center justify-between border-b border-border pb-2">
         <div className="flex items-center gap-2 text-sm font-semibold text-foreground">

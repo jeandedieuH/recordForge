@@ -1,16 +1,53 @@
 import type { AudioClip, TimelineTrack } from "@recordforge/contracts"
 import { createUpdateClipAudioCommand, createUpdateTrackCommand } from "@recordforge/editor-core"
 import { Volume2 } from "lucide-react"
-import { Slider, Switch } from "@recordforge/ui"
+import { Skeleton, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
 export function AudioPanel() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const isLoading = useTimelineStore((state) => state.isLoading)
 
   const tracks = timeline?.tracks.filter((track) => track.kind === "audio") ?? []
 
+  if (isLoading) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-3">
+        <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
+          <Volume2 className="size-4 text-primary" aria-hidden />
+          <h2>Audio</h2>
+        </div>
+
+        {/* Track rows skeleton */}
+        <div className="flex flex-col gap-3">
+          {[1, 2].map((i) => (
+            <div
+              key={i}
+              className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-2.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <Skeleton className="h-3.5 w-24 rounded" />
+                <div className="flex items-center gap-2">
+                  <Skeleton className="h-2.5 w-8 rounded" />
+                  <Skeleton className="h-4 w-7 rounded-full" />
+                </div>
+              </div>
+              <Skeleton className="h-3 w-full rounded-full" />
+            </div>
+          ))}
+        </div>
+
+        {/* Audio clips skeleton */}
+        <div className="flex flex-col gap-2 border-t border-border pt-3">
+          <Skeleton className="h-3 w-20 rounded" />
+          <Skeleton className="h-10 w-full rounded-lg" />
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="flex h-full flex-col gap-3 p-3">
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
       <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
         <Volume2 className="size-4 text-primary" aria-hidden />
         <h2>Audio</h2>

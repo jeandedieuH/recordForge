@@ -1,12 +1,36 @@
 import { Monitor, MousePointer2 } from "lucide-react"
-import { Button, EmptyState } from "@recordforge/ui"
+import { Button, EmptyState, Skeleton } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { InfoField } from "./fields"
 
 export function CanvasInspector() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const isLoading = useTimelineStore((state) => state.isLoading)
   const recording = useTimelineStore((state) => state.recording)
   const setSelection = useTimelineStore((state) => state.setSelection)
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center gap-2 border-b border-border pb-3">
+          <Skeleton className="size-4 rounded" />
+          <Skeleton className="h-4 w-28 rounded" />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {Array.from({ length: 6 }).map((_, idx) => (
+            <div
+              key={idx}
+              className="flex flex-col gap-1 rounded-md border border-border/80 bg-surface-dim/60 p-2 text-xs"
+            >
+              <Skeleton className="h-2.5 w-14 rounded" />
+              <Skeleton className="h-3.5 w-20 rounded" />
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   if (!timeline) {
     return (
