@@ -11,6 +11,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Skeleton,
   Switch,
   useToast,
 } from "@recordforge/ui"
@@ -37,9 +38,13 @@ export function NewRecordingModal({
   const { toast } = useToast()
   const {
     sources,
+    sourcesLoaded,
     audioDevices,
+    audioDevicesLoaded,
     videoDevices,
+    videoDevicesLoaded,
     profiles,
+    profilesLoaded,
     selectedSource,
     selectedSourceType,
     selectedProfileId,
@@ -65,6 +70,13 @@ export function NewRecordingModal({
   } = useRecorderStore()
 
   const [audioLevel, setAudioLevel] = useState(0.45)
+
+  // Clear stale errors when modal opens
+  useEffect(() => {
+    if (open) {
+      clearError()
+    }
+  }, [open, clearError])
 
   // The region picker is a separate fullscreen Tauri window; its selection
   // arrives as a `region-selected` event in absolute physical coordinates.
@@ -283,13 +295,17 @@ export function NewRecordingModal({
                 <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg border border-border bg-background">
                   <div className="absolute inset-0 opacity-20 bg-[radial-gradient(var(--color-primary)_1px,transparent_1px)] bg-size-[16px_16px]" />
                   <div className="relative z-10 flex flex-col items-center gap-2 rounded-md border border-border-strong bg-surface/90 px-4 py-2 text-xs font-medium text-foreground backdrop-blur text-center max-w-[85%]">
-                    <span className="truncate">
-                      {selectedSourceType === "region"
-                        ? regionSource
-                          ? regionSource.name
-                          : "No region selected yet"
-                        : `${selectedSource?.name || "Display 1"} (${selectedDisplayResolution})`}
-                    </span>
+                    {!sourcesLoaded && !selectedSource ? (
+                      <Skeleton className="h-4 w-40 rounded" />
+                    ) : (
+                      <span className="truncate">
+                        {selectedSourceType === "region"
+                          ? regionSource
+                            ? regionSource.name
+                            : "No region selected yet"
+                          : `${selectedSource?.name || "Display 1"} (${selectedDisplayResolution})`}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -316,7 +332,9 @@ export function NewRecordingModal({
                 ) : null}
 
                 {selectedSourceType === "window" ? (
-                  windowSources.length > 0 ? (
+                  !sourcesLoaded ? (
+                    <Skeleton className="mt-1 h-9 w-full rounded-md" />
+                  ) : windowSources.length > 0 ? (
                     <Select
                       value={selectedSource?.id || windowSources[0]?.id || ""}
                       onValueChange={(val) => {
@@ -400,28 +418,32 @@ export function NewRecordingModal({
                 >
                   Quality Profile
                 </label>
-                <Select
-                  value={selectedProfileId}
-                  onValueChange={(val) => setSelectedProfileId(val as RecordingConfig["profile"])}
-                >
-                  <SelectTrigger
-                    id="modal-quality-profile"
-                    className="border-border bg-surface-dim text-xs text-foreground"
+                {!profilesLoaded && profiles.length === 0 ? (
+                  <Skeleton className="h-9 w-full rounded-md" />
+                ) : (
+                  <Select
+                    value={selectedProfileId}
+                    onValueChange={(val) => setSelectedProfileId(val as RecordingConfig["profile"])}
                   >
-                    <SelectValue placeholder="Select quality profile" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {profiles.length > 0 ? (
-                      profiles.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.label} ({p.width}×{p.height}, {p.fps}fps)
-                        </SelectItem>
-                      ))
-                    ) : (
-                      <SelectItem value="balanced">Balanced (1080p, 30fps)</SelectItem>
-                    )}
-                  </SelectContent>
-                </Select>
+                    <SelectTrigger
+                      id="modal-quality-profile"
+                      className="border-border bg-surface-dim text-xs text-foreground"
+                    >
+                      <SelectValue placeholder="Select quality profile" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {profiles.length > 0 ? (
+                        profiles.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.label} ({p.width}×{p.height}, {p.fps}fps)
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <SelectItem value="balanced">Balanced (1080p, 30fps)</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
             </div>
 
@@ -441,11 +463,17 @@ export function NewRecordingModal({
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-semibold text-foreground">Microphone</div>
                       <div className="text-xs text-subtle-foreground truncate">
-                        {micEnabled
-                          ? microphones.find((m) => m.id === selectedMicrophoneId)?.name ||
+                        {micEnabled ? (
+                          !audioDevicesLoaded ? (
+                            <Skeleton className="h-3 w-28 rounded mt-1" />
+                          ) : (
+                            microphones.find((m) => m.id === selectedMicrophoneId)?.name ||
                             microphones[0]?.name ||
                             "Default Microphone"
-                          : "Disabled"}
+                          )
+                        ) : (
+                          "Disabled"
+                        )}
                       </div>
                     </div>
                   </div>
@@ -454,25 +482,29 @@ export function NewRecordingModal({
 
                 {micEnabled ? (
                   <div className="flex flex-col gap-2 border-t border-border/40 pt-2.5 min-w-0">
-                    <Select
-                      value={selectedMicrophoneId}
-                      onValueChange={(val) => setSelectedMicrophoneId(val)}
-                    >
-                      <SelectTrigger className="w-full min-w-0 border-border bg-surface text-xs text-foreground">
-                        <SelectValue placeholder="Select microphone" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {microphones.length > 0 ? (
-                          microphones.map((m) => (
-                            <SelectItem key={m.id} value={m.id}>
-                              {m.name} {m.isDefault ? "(default)" : ""}
-                            </SelectItem>
-                          ))
-                        ) : (
-                          <SelectItem value="default">Default Microphone</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
+                    {!audioDevicesLoaded ? (
+                      <Skeleton className="h-9 w-full rounded-md" />
+                    ) : (
+                      <Select
+                        value={selectedMicrophoneId}
+                        onValueChange={(val) => setSelectedMicrophoneId(val)}
+                      >
+                        <SelectTrigger className="w-full min-w-0 border-border bg-surface text-xs text-foreground">
+                          <SelectValue placeholder="Select microphone" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {microphones.length > 0 ? (
+                            microphones.map((m) => (
+                              <SelectItem key={m.id} value={m.id}>
+                                {m.name} {m.isDefault ? "(default)" : ""}
+                              </SelectItem>
+                            ))
+                          ) : (
+                            <SelectItem value="default">Default Microphone</SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                    )}
 
                     <AudioLevelMeter level={audioLevel} className="h-2 rounded bg-background" />
                   </div>
@@ -489,33 +521,43 @@ export function NewRecordingModal({
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-semibold text-foreground">System Audio</div>
                       <div className="text-xs text-subtle-foreground truncate">
-                        {systemAudioEnabled
-                          ? systemAudios.find((s) => s.id === selectedSystemAudioId)?.name ||
+                        {systemAudioEnabled ? (
+                          !audioDevicesLoaded ? (
+                            <Skeleton className="h-3 w-28 rounded mt-1" />
+                          ) : (
+                            systemAudios.find((s) => s.id === selectedSystemAudioId)?.name ||
                             "Default System Audio"
-                          : "Disabled"}
+                          )
+                        ) : (
+                          "Disabled"
+                        )}
                       </div>
                     </div>
                   </div>
                   <Switch checked={systemAudioEnabled} onCheckedChange={handleSystemAudioToggle} />
                 </div>
 
-                {systemAudioEnabled && systemAudios.length > 1 ? (
+                {systemAudioEnabled && (!audioDevicesLoaded || systemAudios.length > 1) ? (
                   <div className="border-t border-border/40 pt-2.5 min-w-0">
-                    <Select
-                      value={selectedSystemAudioId}
-                      onValueChange={(val) => setSelectedSystemAudioId(val)}
-                    >
-                      <SelectTrigger className="w-full min-w-0 border-border bg-surface text-xs text-foreground">
-                        <SelectValue placeholder="Select system audio device" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {systemAudios.map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
-                            {s.name} {s.isDefault ? "(default)" : ""}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    {!audioDevicesLoaded ? (
+                      <Skeleton className="h-9 w-full rounded-md" />
+                    ) : (
+                      <Select
+                        value={selectedSystemAudioId}
+                        onValueChange={(val) => setSelectedSystemAudioId(val)}
+                      >
+                        <SelectTrigger className="w-full min-w-0 border-border bg-surface text-xs text-foreground">
+                          <SelectValue placeholder="Select system audio device" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {systemAudios.map((s) => (
+                            <SelectItem key={s.id} value={s.id}>
+                              {s.name} {s.isDefault ? "(default)" : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -530,9 +572,16 @@ export function NewRecordingModal({
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-semibold text-foreground">Webcam Overlay</div>
                       <div className="text-xs text-subtle-foreground truncate">
-                        {webcamEnabled
-                          ? webcams.find((w) => w.id === selectedWebcamId)?.name || "Default Camera"
-                          : "Disabled"}
+                        {webcamEnabled ? (
+                          !videoDevicesLoaded ? (
+                            <Skeleton className="h-3 w-28 rounded mt-1" />
+                          ) : (
+                            webcams.find((w) => w.id === selectedWebcamId)?.name ||
+                            "Default Camera"
+                          )
+                        ) : (
+                          "Disabled"
+                        )}
                       </div>
                     </div>
                   </div>
@@ -541,33 +590,41 @@ export function NewRecordingModal({
 
                 {webcamEnabled ? (
                   <div className="flex flex-col gap-2.5 border-t border-border/40 pt-2.5 min-w-0">
-                    <Select
-                      value={selectedWebcamId}
-                      onValueChange={(val) => setSelectedWebcamId(val)}
-                    >
-                      <SelectTrigger className="w-full min-w-0 border-border bg-surface text-xs text-foreground">
-                        <SelectValue placeholder="Select camera" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {webcams.length > 0 ? (
-                          webcams.map((w) => (
-                            <SelectItem key={w.id} value={w.id}>
-                              {w.name} {w.isDefault ? "(default)" : ""}
-                            </SelectItem>
-                          ))
-                        ) : (
-                          <SelectItem value="default">Integrated Webcam</SelectItem>
-                        )}
-                      </SelectContent>
-                    </Select>
+                    {!videoDevicesLoaded ? (
+                      <Skeleton className="h-9 w-full rounded-md" />
+                    ) : (
+                      <Select
+                        value={selectedWebcamId}
+                        onValueChange={(val) => setSelectedWebcamId(val)}
+                      >
+                        <SelectTrigger className="w-full min-w-0 border-border bg-surface text-xs text-foreground">
+                          <SelectValue placeholder="Select camera" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {webcams.length > 0 ? (
+                            webcams.map((w) => (
+                              <SelectItem key={w.id} value={w.id}>
+                                {w.name} {w.isDefault ? "(default)" : ""}
+                              </SelectItem>
+                            ))
+                          ) : (
+                            <SelectItem value="default">Integrated Webcam</SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                    )}
 
                     <div className="relative flex h-24 w-full items-center justify-center overflow-hidden rounded-md border border-border bg-background">
-                      <div className="absolute bottom-2 right-2 z-10 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white font-medium truncate max-w-[80%]">
-                        {webcams.find((w) => w.id === selectedWebcamId)?.name || "Camera Active"}
-                      </div>
+                      {videoDevicesLoaded ? (
+                        <div className="absolute bottom-2 right-2 z-10 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white font-medium truncate max-w-[80%]">
+                          {webcams.find((w) => w.id === selectedWebcamId)?.name || "Camera Active"}
+                        </div>
+                      ) : null}
                       <WebcamPreview
                         deviceName={
-                          webcams.find((w) => w.id === selectedWebcamId)?.name || selectedWebcamId
+                          videoDevicesLoaded
+                            ? webcams.find((w) => w.id === selectedWebcamId)?.name || selectedWebcamId
+                            : ""
                         }
                       />
                     </div>

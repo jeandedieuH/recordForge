@@ -73,6 +73,7 @@ async function readStoredPreferences(): Promise<RecordingPreferences> {
 
 interface RecorderStore {
   sources: CaptureSource[]
+  sourcesLoaded: boolean
   audioDevices: AudioDevice[]
   // True once the first audio-device enumeration has settled (success or fail),
   // so the UI can distinguish "still loading" from "loaded but empty".
@@ -80,11 +81,14 @@ interface RecorderStore {
   videoDevices: VideoDevice[]
   videoDevicesLoaded: boolean
   profiles: RecordingProfile[]
+  profilesLoaded: boolean
   status: RecordingStatus | null
   encoders: EncoderInfo[]
   recovery: RecoveryScanResult[]
   benchmark: BenchmarkReport | null
   diagnostics: DiagnosticsReport | null
+  diagnosticsLoading: boolean
+  diagnosticsLoaded: boolean
   markers: RecordingMarker[]
   selectedSource: CaptureSource | null
   selectedSourceType: "screen" | "window" | "region"
@@ -151,16 +155,20 @@ interface RecorderStore {
 
 export const useRecorderStore = create<RecorderStore>((set, get) => ({
   sources: [],
+  sourcesLoaded: false,
   audioDevices: [],
   audioDevicesLoaded: false,
   videoDevices: [],
   videoDevicesLoaded: false,
   profiles: [],
+  profilesLoaded: false,
   status: null,
   encoders: [],
   recovery: [],
   benchmark: null,
   diagnostics: null,
+  diagnosticsLoading: false,
+  diagnosticsLoaded: false,
   markers: [],
   selectedSource: null,
   selectedSourceType: "screen",
@@ -381,12 +389,13 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       const reconciled = reconcileCaptureSource(sources, prefs)
       set({
         sources,
+        sourcesLoaded: true,
         selectedSource: reconciled.source,
         selectedSourceType: reconciled.sourceType,
         error: null,
       })
     } catch (error) {
-      set({ error: toErrorMessage(error) })
+      set({ error: toErrorMessage(error), sourcesLoaded: true })
     }
   },
 
@@ -435,9 +444,9 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       const profiles = await listBuiltinProfiles()
       const prefs = get().preferencesLoaded ? get().preferences : await get().loadPreferences()
       const profile = reconcileProfile(profiles, prefs)
-      set({ profiles, selectedProfileId: profile, error: null })
+      set({ profiles, profilesLoaded: true, selectedProfileId: profile, error: null })
     } catch (error) {
-      set({ error: toErrorMessage(error) })
+      set({ error: toErrorMessage(error), profilesLoaded: true })
     }
   },
 
@@ -460,11 +469,12 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   },
 
   loadDiagnostics: async () => {
+    set({ diagnosticsLoading: true })
     try {
       const diagnostics = await getDiagnosticsReport()
-      set({ diagnostics, error: null })
+      set({ diagnostics, diagnosticsLoading: false, diagnosticsLoaded: true, error: null })
     } catch (error) {
-      set({ error: toErrorMessage(error) })
+      set({ error: toErrorMessage(error), diagnosticsLoading: false, diagnosticsLoaded: true })
     }
   },
 

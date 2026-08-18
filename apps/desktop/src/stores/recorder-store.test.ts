@@ -140,4 +140,50 @@ describe("recorder-store preferences & fallback", () => {
     expect(useRecorderStore.getState().selectedMicrophoneId).toBe("mic-1")
     expect(useRecorderStore.getState().preferences.microphoneEnabled).toBe(true)
   })
+
+  it("tracks sourcesLoaded, profilesLoaded, and diagnosticsLoading / diagnosticsLoaded flags", async () => {
+    vi.spyOn(recorderApi, "listCaptureSources").mockResolvedValue([
+      {
+        kind: "display",
+        id: "display-0",
+        name: "Display 1",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      },
+    ])
+    vi.spyOn(recorderApi, "listBuiltinProfiles").mockResolvedValue([
+      {
+        id: "balanced",
+        label: "Balanced",
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        encoderPriority: ["libx264"],
+        audioCodec: "aac",
+        audioBitrateKbps: 128,
+      },
+    ])
+    vi.spyOn(recorderApi, "getDiagnosticsReport").mockResolvedValue({
+      platform: { os: "Windows 11", ffmpegVersion: "8.1" },
+      encoders: [],
+      audioDevices: [],
+      videoDevices: [],
+    })
+
+    expect(useRecorderStore.getState().sourcesLoaded).toBe(false)
+    expect(useRecorderStore.getState().profilesLoaded).toBe(false)
+    expect(useRecorderStore.getState().diagnosticsLoaded).toBe(false)
+
+    await useRecorderStore.getState().loadSources()
+    expect(useRecorderStore.getState().sourcesLoaded).toBe(true)
+    expect(useRecorderStore.getState().sources.length).toBe(1)
+
+    await useRecorderStore.getState().loadProfiles()
+    expect(useRecorderStore.getState().profilesLoaded).toBe(true)
+    expect(useRecorderStore.getState().profiles.length).toBe(1)
+
+    await useRecorderStore.getState().loadDiagnostics()
+    expect(useRecorderStore.getState().diagnosticsLoading).toBe(false)
+    expect(useRecorderStore.getState().diagnosticsLoaded).toBe(true)
+    expect(useRecorderStore.getState().diagnostics?.platform.os).toBe("Windows 11")
+  })
 })

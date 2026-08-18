@@ -13,7 +13,7 @@ import {
   Video,
   Zap,
 } from "lucide-react"
-import { Badge, Button, Switch } from "@recordforge/ui"
+import { Badge, Button, Skeleton, Switch } from "@recordforge/ui"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, setSetting } from "../../lib/settings"
 
@@ -42,19 +42,29 @@ const ENCODER_INFO_MAP: Record<string, { desc: string; iconLabel: string }> = {
 }
 
 export function DiagnosticsPanel() {
-  const { diagnostics, benchmark, isLoading, error, loadDiagnostics, runBenchmark, clearError } =
-    useRecorderStore()
+  const {
+    diagnostics,
+    diagnosticsLoading,
+    diagnosticsLoaded,
+    benchmark,
+    isLoading,
+    error,
+    loadDiagnostics,
+    runBenchmark,
+    clearError,
+  } = useRecorderStore()
   const [expandedEncoder, setExpandedEncoder] = useState<string | null>(null)
   const [lowGpuFilterOptimization, setLowGpuFilterOptimization] = useState(true)
 
   useEffect(() => {
+    clearError()
     void loadDiagnostics()
     void getSetting("lowGpuFilterOptimization").then((value) => {
       if (value !== null) {
         setLowGpuFilterOptimization(value !== "false")
       }
     })
-  }, [loadDiagnostics])
+  }, [loadDiagnostics, clearError])
 
   function handleToggleOptimization(checked: boolean) {
     setLowGpuFilterOptimization(checked)
@@ -149,7 +159,19 @@ export function DiagnosticsPanel() {
               </div>
             </div>
           </div>
-        ) : null}
+        ) : (
+          <div className="mt-5 grid grid-cols-2 gap-3 border-t border-border/50 pt-4 sm:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="flex items-center gap-2.5 rounded-lg bg-surface-dim p-2.5">
+                <Skeleton className="size-4 rounded shrink-0" />
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <Skeleton className="h-2 w-12 rounded" />
+                  <Skeleton className="h-3 w-20 rounded" />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {error ? (
@@ -169,8 +191,9 @@ export function DiagnosticsPanel() {
             <span>Hardware Encoders</span>
           </h3>
           <span className="text-xs text-subtle-foreground">
-            {diagnostics?.encoders.filter((e) => e.available).length || 0} active acceleration
-            engines
+            {diagnostics?.encoders
+              ? `${diagnostics.encoders.filter((e) => e.available).length} active acceleration engines`
+              : "Checking encoders..."}
           </span>
         </div>
 
@@ -246,8 +269,20 @@ export function DiagnosticsPanel() {
             })}
           </div>
         ) : (
-          <div className="rounded-xl border border-border bg-surface p-6 text-center text-xs text-subtle-foreground">
-            Detecting hardware encoders...
+          <div className="grid gap-3.5 sm:grid-cols-2">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="rounded-xl border border-border bg-surface p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Skeleton className="size-2.5 rounded-full" />
+                    <Skeleton className="h-4 w-28 rounded" />
+                  </div>
+                  <Skeleton className="h-4 w-14 rounded" />
+                </div>
+                <Skeleton className="h-3 w-4/5 rounded" />
+                <Skeleton className="h-3 w-2/3 rounded" />
+              </div>
+            ))}
           </div>
         )}
       </section>
@@ -261,7 +296,22 @@ export function DiagnosticsPanel() {
             <span>Audio Capture Devices</span>
           </h4>
 
-          {diagnostics?.audioDevices && diagnostics.audioDevices.length > 0 ? (
+          {diagnosticsLoading || !diagnosticsLoaded ? (
+            <div className="space-y-2">
+              {[0, 1].map((i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
+                >
+                  <div className="min-w-0 flex-1 space-y-1.5 pr-2">
+                    <Skeleton className="h-3.5 w-3/4 rounded" />
+                    <Skeleton className="h-2.5 w-1/4 rounded" />
+                  </div>
+                  {i === 0 ? <Skeleton className="h-4 w-12 rounded" /> : null}
+                </div>
+              ))}
+            </div>
+          ) : diagnostics?.audioDevices && diagnostics.audioDevices.length > 0 ? (
             <div className="space-y-2">
               {diagnostics.audioDevices.map((dev) => (
                 <div
@@ -292,7 +342,19 @@ export function DiagnosticsPanel() {
             <span>Camera & Capture Devices</span>
           </h4>
 
-          {diagnostics?.videoDevices && diagnostics.videoDevices.length > 0 ? (
+          {diagnosticsLoading || !diagnosticsLoaded ? (
+            <div className="space-y-2">
+              {[0, 1].map((i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
+                >
+                  <Skeleton className="h-3.5 w-2/3 rounded" />
+                  {i === 0 ? <Skeleton className="h-4 w-12 rounded" /> : null}
+                </div>
+              ))}
+            </div>
+          ) : diagnostics?.videoDevices && diagnostics.videoDevices.length > 0 ? (
             <div className="space-y-2">
               {diagnostics.videoDevices.map((dev) => (
                 <div

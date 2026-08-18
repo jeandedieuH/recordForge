@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Video } from "lucide-react"
+import { Video, VideoOff } from "lucide-react"
+import { Skeleton } from "@recordforge/ui"
 
 interface WebcamPreviewProps {
   deviceName: string
@@ -20,11 +21,18 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
   useEffect(() => {
     let cancelled = false
 
+    if (!deviceName || !deviceName.trim()) {
+      setState("loading")
+      return
+    }
+
     async function startPreview() {
       if (!navigator.mediaDevices?.getUserMedia) {
         setState("error")
         return
       }
+
+      setState("loading")
 
       try {
         // Enumerate first; if labels are already available the user has
@@ -50,7 +58,7 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
           // The selected camera is not exposed to the browser (or its label
           // does not match). Do not fall back to the default camera to avoid
           // showing the wrong preview.
-          setState("error")
+          if (!cancelled) setState("error")
           return
         }
 
@@ -71,7 +79,7 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
         }
         setState("active")
       } catch {
-        setState("error")
+        if (!cancelled) setState("error")
       }
     }
 
@@ -97,9 +105,14 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
           muted
           className="h-full w-full object-cover"
         />
+      ) : state === "loading" ? (
+        <div className="relative flex h-full w-full items-center justify-center">
+          <Skeleton className="absolute inset-0 rounded-none bg-overlay/80" />
+          <Video className="relative z-10 size-7 text-subtle-foreground animate-pulse" />
+        </div>
       ) : (
         <div className="flex h-full w-full items-center justify-center">
-          <Video className="size-8 text-subtle-foreground" />
+          <VideoOff className="size-7 text-subtle-foreground" />
         </div>
       )}
     </div>
