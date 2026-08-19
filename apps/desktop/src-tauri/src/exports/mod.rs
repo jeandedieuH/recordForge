@@ -1045,10 +1045,50 @@ fn render_timeline_composition(
     let base_label = "canvas_base";
     if is_fullscreen_canvas {
         if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let width_expression = zoom_crop_expression(plan, canvas, "width");
-            let height_expression = zoom_crop_expression(plan, canvas, "height");
-            let x_expression = zoom_crop_expression(plan, canvas, "x");
-            let y_expression = zoom_crop_expression(plan, canvas, "y");
+            let width_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                canvas.width as f64,
+                canvas.height as f64,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "width",
+            );
+            let height_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                canvas.width as f64,
+                canvas.height as f64,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "height",
+            );
+            let x_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                canvas.width as f64,
+                canvas.height as f64,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "x",
+            );
+            let y_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                canvas.width as f64,
+                canvas.height as f64,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                "y",
+            );
             filters.push(format!(
                 "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={}:{}[{base_label}]",
                 canvas.width, canvas.height
@@ -1102,10 +1142,50 @@ fn render_timeline_composition(
 
         // 2. Crop and format the fitted video layer [screen_fitted]
         let mut screen_filter = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let width_expression = zoom_crop_expression(plan, canvas, "width");
-            let height_expression = zoom_crop_expression(plan, canvas, "height");
-            let x_expression = zoom_crop_expression(plan, canvas, "x");
-            let y_expression = zoom_crop_expression(plan, canvas, "y");
+            let width_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                screen_w,
+                screen_h,
+                screen_x,
+                screen_y,
+                crop_x,
+                crop_y,
+                "width",
+            );
+            let height_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                screen_w,
+                screen_h,
+                screen_x,
+                screen_y,
+                crop_x,
+                crop_y,
+                "height",
+            );
+            let x_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                screen_w,
+                screen_h,
+                screen_x,
+                screen_y,
+                crop_x,
+                crop_y,
+                "x",
+            );
+            let y_expression = zoom_crop_expression(
+                plan,
+                canvas,
+                screen_w,
+                screen_h,
+                screen_x,
+                screen_y,
+                crop_x,
+                crop_y,
+                "y",
+            );
             format!(
                 "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={screen_w:.0}:{screen_h:.0},setsar=1"
             )
@@ -1132,9 +1212,11 @@ fn render_timeline_composition(
         let mut bg_current = "[bg_plate]".to_string();
         if let Some(shadow_idx) = shadow_input_index {
             filters.push(format!(
-                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[shadow_loop];\
-                 {bg_current}[shadow_loop]overlay=x=0:y=0:shortest=1:format=auto[bg_with_shadow]",
+                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[shadow_loop]",
                 canvas.width, canvas.height, canvas.fps
+            ));
+            filters.push(format!(
+                "{bg_current}[shadow_loop]overlay=x=0:y=0:shortest=1:format=auto[bg_with_shadow]"
             ));
             bg_current = "[bg_with_shadow]".to_string();
         }
@@ -2894,10 +2976,22 @@ pub(crate) fn clamped_zoom_target(
     }
 }
 
-fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: &str) -> String {
+fn zoom_crop_expression(
+    plan: &RenderPlan,
+    canvas: &cursor::RenderCanvas,
+    screen_w: f64,
+    screen_h: f64,
+    screen_x: f64,
+    screen_y: f64,
+    crop_x: f64,
+    crop_y: f64,
+    axis: &str,
+) -> String {
     let full = match axis {
-        "width" => canvas.width as f64,
-        "height" => canvas.height as f64,
+        "width" => screen_w,
+        "height" => screen_h,
+        "x" => crop_x,
+        "y" => crop_y,
         _ => 0.0,
     };
     let full_str = compact_num(full);
@@ -2926,10 +3020,10 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
 
         let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
         let target_val = match axis {
-            "width" => target.width,
-            "height" => target.height,
-            "x" => target.x,
-            "y" => target.y,
+            "width" => target.width.min(screen_w),
+            "height" => target.height.min(screen_h),
+            "x" => (target.x - screen_x + crop_x).clamp(0.0, (screen_w - target.width).max(0.0)),
+            "y" => (target.y - screen_y + crop_y).clamp(0.0, (screen_h - target.height).max(0.0)),
             _ => full,
         };
 
@@ -3494,6 +3588,12 @@ mod tests {
                 fps: 30,
                 ..Default::default()
             },
+            1920.0,
+            1080.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
             "width",
         );
         assert!(crop.contains("lt(t,1)"));
@@ -3534,6 +3634,12 @@ mod tests {
                 padding: 48,
                 ..Default::default()
             },
+            1824.0,
+            984.0,
+            48.0,
+            48.0,
+            0.0,
+            0.0,
             "width",
         );
         // The content area for a 48px padded 1920x1080 canvas is 1824x984,
@@ -4166,10 +4272,10 @@ mod tests {
             ..Default::default()
         };
 
-        let w_expr = zoom_crop_expression(&plan, &canvas, "width");
-        let h_expr = zoom_crop_expression(&plan, &canvas, "height");
-        let x_expr = zoom_crop_expression(&plan, &canvas, "x");
-        let y_expr = zoom_crop_expression(&plan, &canvas, "y");
+        let w_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "width");
+        let h_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "height");
+        let x_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "x");
+        let y_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "y");
 
         let total_filter_len = w_expr.len() + h_expr.len() + x_expr.len() + y_expr.len();
         // Ensure that 30 dynamic zoom segments total well under the Windows 32,767 char limit
