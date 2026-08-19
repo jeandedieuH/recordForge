@@ -615,7 +615,9 @@ fn render_annotation(
                     fs = fs,
                     tspans = tspans,
                 );
-                let _ = render_svg_markup(&svg, ts, pixmap);
+                if let Err(err) = render_svg_markup(&svg, ts, pixmap) {
+                    eprintln!("failed to render annotation text SVG: {err}");
+                }
             }
         }
     }
@@ -779,7 +781,9 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
         content = content_markup,
     );
 
-    let _ = render_svg_markup(&svg, ts, pixmap);
+    if let Err(err) = render_svg_markup(&svg, ts, pixmap) {
+        eprintln!("failed to render title text SVG: {err}");
+    }
     Ok(())
 }
 

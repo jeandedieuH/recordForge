@@ -1564,7 +1564,13 @@ fn render_timeline_composition(
         // Machine-readable progress blocks on stderr; the runner parses
         // `out_time=` from them and keeps them out of failure diagnostics.
         .args(["-progress", "pipe:2"]);
-    for (_, asset_path) in &input_assets {
+    for (asset_kind, asset_path) in &input_assets {
+        if asset_kind == "canvas:background"
+            || asset_kind == "canvas:shadow"
+            || asset_kind.starts_with("mask:")
+        {
+            command.args(["-loop", "1"]);
+        }
         command.arg("-i").arg(asset_path);
     }
     if cursor_plan.is_some() {
@@ -2635,132 +2641,265 @@ fn parse_css_gradient_to_svg(
     height: u32,
 ) -> Option<String> {
     let trimmed = gradient_str.trim();
-    if trimmed.starts_with("linear-gradient(") && trimmed.ends_with(')') {
-        let inner = &trimmed[16..trimmed.len() - 1].trim();
-        let mut parts = Vec::new();
-        let mut current = String::new();
-        let mut paren_depth: i32 = 0;
-        for c in inner.chars() {
-            match c {
-                '(' => {
-                    paren_depth += 1;
-                    current.push(c);
-                }
-                ')' => {
-                    paren_depth = paren_depth.saturating_sub(1);
-                    current.push(c);
-                }
-                ',' if paren_depth == 0 => {
-                    parts.push(current.trim().to_string());
-                    current.clear();
-                }
-                _ => current.push(c),
+    if !trimmed.contains("-gradient(") {
+        return None;
+    }
+
+    // Split top-level comma-separated gradient functions and base color
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth: i32 = 0;
+    for c in trimmed.chars() {
+        match c {
+            '(' => {
+                paren_depth += 1;
+                current.push(c);
             }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if paren_depth == 0 => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(c),
         }
-        if !current.trim().is_empty() {
-            parts.push(current.trim().to_string());
-        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
 
-        if parts.is_empty() {
-            return None;
-        }
+    if parts.is_empty() {
+        return None;
+    }
 
-        let first = parts[0].trim().to_lowercase();
-        let (angle_deg, stops_start_idx) = if first.ends_with("deg") {
-            let deg: f64 = first.trim_end_matches("deg").trim().parse().unwrap_or(180.0);
-            (deg, 1)
-        } else if first == "to bottom" {
-            (180.0, 1)
-        } else if first == "to top" {
-            (0.0, 1)
-        } else if first == "to right" {
-            (90.0, 1)
-        } else if first == "to left" {
-            (270.0, 1)
-        } else if first == "to bottom right" || first == "to right bottom" {
-            (135.0, 1)
-        } else if first == "to bottom left" || first == "to left bottom" {
-            (225.0, 1)
-        } else if first == "to top right" || first == "to right top" {
-            (45.0, 1)
-        } else if first == "to top left" || first == "to left top" {
-            (315.0, 1)
+    let mut defs_xml = String::new();
+    let mut layers_xml = String::new();
+    let mut base_fill: Option<String> = None;
+
+    for (idx, part) in parts.iter().enumerate() {
+        let p = part.trim();
+        if p.starts_with("linear-gradient(") && p.ends_with(')') {
+            let inner = &p[16..p.len() - 1].trim();
+            if let Some((grad_def, rect_layer)) = parse_linear_gradient_layer(inner, &format!("grad_{idx}")) {
+                defs_xml.push_str(&grad_def);
+                layers_xml.push_str(&rect_layer);
+            }
+        } else if p.starts_with("radial-gradient(") && p.ends_with(')') {
+            let inner = &p[16..p.len() - 1].trim();
+            if let Some((grad_def, rect_layer)) = parse_radial_gradient_layer(inner, &format!("grad_{idx}")) {
+                defs_xml.push_str(&grad_def);
+                layers_xml.push_str(&rect_layer);
+            }
+        } else if p.starts_with('#') || p.starts_with("rgb(") || p.starts_with("rgba(") {
+            base_fill = Some(p.to_string());
+        }
+    }
+
+    if defs_xml.is_empty() && base_fill.is_none() {
+        return None;
+    }
+
+    let base_rect = if let Some(fill) = base_fill {
+        format!(r##"<rect width="100%" height="100%" fill="{fill}" />"##)
+    } else {
+        String::new()
+    };
+
+    Some(format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">
+  <defs>
+    {defs_xml}
+  </defs>
+  {base_rect}
+  {layers_xml}
+</svg>"##
+    ))
+}
+
+fn parse_linear_gradient_layer(inner: &str, grad_id: &str) -> Option<(String, String)> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth: i32 = 0;
+    for c in inner.chars() {
+        match c {
+            '(' => {
+                paren_depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if paren_depth == 0 => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let first = parts[0].trim().to_lowercase();
+    let (angle_deg, stops_start_idx) = if first.ends_with("deg") {
+        let deg: f64 = first.trim_end_matches("deg").trim().parse().unwrap_or(180.0);
+        (deg, 1)
+    } else if first == "to bottom" {
+        (180.0, 1)
+    } else if first == "to top" {
+        (0.0, 1)
+    } else if first == "to right" {
+        (90.0, 1)
+    } else if first == "to left" {
+        (270.0, 1)
+    } else if first == "to bottom right" || first == "to right bottom" {
+        (135.0, 1)
+    } else if first == "to bottom left" || first == "to left bottom" {
+        (225.0, 1)
+    } else if first == "to top right" || first == "to right top" {
+        (45.0, 1)
+    } else if first == "to top left" || first == "to left top" {
+        (315.0, 1)
+    } else {
+        (180.0, 0)
+    };
+
+    let rad = (angle_deg - 90.0) * std::f64::consts::PI / 180.0;
+    let x1 = 50.0 - 50.0 * rad.cos();
+    let y1 = 50.0 - 50.0 * rad.sin();
+    let x2 = 50.0 + 50.0 * rad.cos();
+    let y2 = 50.0 + 50.0 * rad.sin();
+
+    let stop_parts = &parts[stops_start_idx..];
+    if stop_parts.is_empty() {
+        return None;
+    }
+
+    let stops_xml = parse_gradient_stops(stop_parts);
+    let def = format!(
+        r##"<linearGradient id="{grad_id}" x1="{x1:.2}%" y1="{y1:.2}%" x2="{x2:.2}%" y2="{y2:.2}%">{stops_xml}</linearGradient>"##
+    );
+    let rect = format!(r##"<rect width="100%" height="100%" fill="url(#{grad_id})" />"##);
+    Some((def, rect))
+}
+
+fn parse_radial_gradient_layer(inner: &str, grad_id: &str) -> Option<(String, String)> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth: i32 = 0;
+    for c in inner.chars() {
+        match c {
+            '(' => {
+                paren_depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if paren_depth == 0 => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let first = parts[0].trim().to_lowercase();
+    let (cx, cy, r, stops_start_idx) = if first.starts_with("at ") || first.contains("at ") {
+        let pos_str = if let Some((_, pos)) = first.split_once("at ") {
+            pos.trim()
         } else {
-            (180.0, 0)
+            "50% 50%"
         };
+        let coords: Vec<&str> = pos_str.split_whitespace().collect();
+        let x_pct = coords.first().unwrap_or(&"50%").trim();
+        let y_pct = coords.get(1).unwrap_or(&"50%").trim();
+        (x_pct.to_string(), y_pct.to_string(), "65%".to_string(), 1)
+    } else {
+        ("50%".to_string(), "50%".to_string(), "65%".to_string(), 0)
+    };
 
-        let rad = (angle_deg - 90.0) * std::f64::consts::PI / 180.0;
-        let x1 = 50.0 - 50.0 * rad.cos();
-        let y1 = 50.0 - 50.0 * rad.sin();
-        let x2 = 50.0 + 50.0 * rad.cos();
-        let y2 = 50.0 + 50.0 * rad.sin();
+    let stop_parts = &parts[stops_start_idx..];
+    if stop_parts.is_empty() {
+        return None;
+    }
 
-        let stop_parts = &parts[stops_start_idx..];
-        if stop_parts.is_empty() {
-            return None;
-        }
+    let stops_xml = parse_gradient_stops(stop_parts);
+    let def = format!(
+        r##"<radialGradient id="{grad_id}" cx="{cx}" cy="{cy}" r="{r}">{stops_xml}</radialGradient>"##
+    );
+    let rect = format!(r##"<rect width="100%" height="100%" fill="url(#{grad_id})" />"##);
+    Some((def, rect))
+}
 
-        let mut stops_xml = String::new();
-        let total_stops = stop_parts.len();
-        for (i, stop_str) in stop_parts.iter().enumerate() {
-            let stop_trimmed = stop_str.trim();
-            let (color, offset) = if let Some((c, off)) = stop_trimmed.rsplit_once(' ') {
-                if off.ends_with('%') {
-                    (c.trim(), off.trim().to_string())
-                } else {
-                    let pct = (i as f64 / (total_stops - 1).max(1) as f64) * 100.0;
-                    (stop_trimmed, format!("{pct:.1}%"))
-                }
+fn parse_gradient_stops(stop_parts: &[String]) -> String {
+    let mut stops_xml = String::new();
+    let total_stops = stop_parts.len();
+    for (i, stop_str) in stop_parts.iter().enumerate() {
+        let stop_trimmed = stop_str.trim();
+        let (color, offset) = if let Some((c, off)) = stop_trimmed.rsplit_once(' ') {
+            if off.ends_with('%') {
+                (c.trim(), off.trim().to_string())
+            } else if off.ends_with("px") && off == "0px" {
+                (c.trim(), "0%".to_string())
             } else {
                 let pct = (i as f64 / (total_stops - 1).max(1) as f64) * 100.0;
                 (stop_trimmed, format!("{pct:.1}%"))
-            };
+            }
+        } else {
+            let pct = (i as f64 / (total_stops - 1).max(1) as f64) * 100.0;
+            (stop_trimmed, format!("{pct:.1}%"))
+        };
 
-            let (hex_color, opacity) = if color.starts_with("rgba(") && color.ends_with(')') {
-                let inner = &color[5..color.len() - 1];
-                let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                if nums.len() == 4 {
-                    let r: u8 = nums[0].parse().unwrap_or(0);
-                    let g: u8 = nums[1].parse().unwrap_or(0);
-                    let b: u8 = nums[2].parse().unwrap_or(0);
-                    let a: f64 = nums[3].parse().unwrap_or(1.0);
-                    (format!("#{r:02x}{g:02x}{b:02x}"), a)
-                } else {
-                    (color.to_string(), 1.0)
-                }
-            } else if color.starts_with("rgb(") && color.ends_with(')') {
-                let inner = &color[4..color.len() - 1];
-                let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                if nums.len() == 3 {
-                    let r: u8 = nums[0].parse().unwrap_or(0);
-                    let g: u8 = nums[1].parse().unwrap_or(0);
-                    let b: u8 = nums[2].parse().unwrap_or(0);
-                    (format!("#{r:02x}{g:02x}{b:02x}"), 1.0)
-                } else {
-                    (color.to_string(), 1.0)
-                }
+        let (hex_color, opacity) = if color == "transparent" {
+            ("#000000".to_string(), 0.0)
+        } else if color.starts_with("rgba(") && color.ends_with(')') {
+            let inner = &color[5..color.len() - 1];
+            let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if nums.len() == 4 {
+                let r: u8 = nums[0].parse().unwrap_or(0);
+                let g: u8 = nums[1].parse().unwrap_or(0);
+                let b: u8 = nums[2].parse().unwrap_or(0);
+                let a: f64 = nums[3].parse().unwrap_or(1.0);
+                (format!("#{r:02x}{g:02x}{b:02x}"), a)
             } else {
                 (color.to_string(), 1.0)
-            };
+            }
+        } else if color.starts_with("rgb(") && color.ends_with(')') {
+            let inner = &color[4..color.len() - 1];
+            let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if nums.len() == 3 {
+                let r: u8 = nums[0].parse().unwrap_or(0);
+                let g: u8 = nums[1].parse().unwrap_or(0);
+                let b: u8 = nums[2].parse().unwrap_or(0);
+                (format!("#{r:02x}{g:02x}{b:02x}"), 1.0)
+            } else {
+                (color.to_string(), 1.0)
+            }
+        } else {
+            (color.to_string(), 1.0)
+        };
 
-            stops_xml.push_str(&format!(
-                r##"<stop offset="{offset}" stop-color="{hex_color}" stop-opacity="{opacity}" />"##
-            ));
-        }
-
-        Some(format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">
-  <defs>
-    <linearGradient id="rf-bg-grad" x1="{x1:.2}%" y1="{y1:.2}%" x2="{x2:.2}%" y2="{y2:.2}%">
-      {stops_xml}
-    </linearGradient>
-  </defs>
-  <rect width="100%" height="100%" fill="url(#rf-bg-grad)" />
-</svg>"##
-        ))
-    } else {
-        None
+        stops_xml.push_str(&format!(
+            r##"<stop offset="{offset}" stop-color="{hex_color}" stop-opacity="{opacity}" />"##
+        ));
     }
+    stops_xml
 }
 
 pub(crate) fn generate_background_plate_png(
@@ -2792,21 +2931,19 @@ pub(crate) fn resolve_background_image(
         || trimmed.starts_with("rgba(")
         || trimmed.starts_with("hsl(")
         || trimmed.starts_with("hsla(")
-        || trimmed.starts_with("radial-gradient")
-        || trimmed.starts_with("conic-gradient")
     {
         return None;
     }
 
-    // Try generating CSS linear gradients to a temporary PNG
-    if trimmed.starts_with("linear-gradient") {
+    // Try generating CSS gradients (linear, radial, mesh) to a temporary PNG
+    if trimmed.contains("-gradient(") {
         if let Some(grad_path) = generate_background_plate_png(trimmed, 1920, 1080) {
             return Some(grad_path);
         }
         return None;
     }
 
-    let path_str = if trimmed.starts_with("url(") && trimmed.ends_with(')') {
+    let mut path_str = if trimmed.starts_with("url(") && trimmed.ends_with(')') {
         let inner = &trimmed[4..trimmed.len() - 1].trim();
         inner.trim_matches(|c| c == '"' || c == '\'').trim()
     } else {
@@ -2825,6 +2962,19 @@ pub(crate) fn resolve_background_image(
                 }
             }
         }
+    }
+
+    if let Some(idx) = path_str.find("://") {
+        let after_scheme = &path_str[idx + 3..];
+        if let Some(slash_idx) = after_scheme.find('/') {
+            path_str = &after_scheme[slash_idx..];
+        }
+    }
+    if let Some(idx) = path_str.find('?') {
+        path_str = &path_str[..idx];
+    }
+    if let Some(idx) = path_str.find('#') {
+        path_str = &path_str[..idx];
     }
 
     if let Some(path) = asset_paths.get(path_str) {
@@ -2937,25 +3087,24 @@ fn zoom_easing_expression(p: &str, easing: &str) -> String {
 }
 
 /// Clamp a zoom segment target to the padded visible content area and apply its
-/// additional scale, returning the final crop rectangle in full-canvas coordinates.
+/// Clamp a zoom segment target to full canvas coordinates [0..canvas_width] x [0..canvas_height].
 /// This mirrors the TypeScript `clampZoomTarget` and `resolveZoomTransform`
-/// behavior used by the preview so exports produce the same framing.
+/// behavior used by the preview so exports produce identical framing.
 pub(crate) fn clamped_zoom_target(
     canvas_width: u32,
     canvas_height: u32,
-    canvas_padding: u32,
+    _canvas_padding: u32,
     segment: &RenderPlanZoomSegment,
 ) -> RenderCropFloat {
-    let padding = canvas_padding as f64;
-    let content_width = (canvas_width as f64 - padding * 2.0).max(1.0);
-    let content_height = (canvas_height as f64 - padding * 2.0).max(1.0);
+    let canvas_w = canvas_width as f64;
+    let canvas_h = canvas_height as f64;
     let scale = segment.scale.clamp(1.0, 8.0);
 
-    let target_width = segment.target.width.max(1.0).min(content_width);
-    let target_height = segment.target.height.max(1.0).min(content_height);
+    let target_width = segment.target.width.clamp(1.0, canvas_w);
+    let target_height = segment.target.height.clamp(1.0, canvas_h);
 
-    let (final_width, final_height) = if (target_width - content_width).abs() < 1.0 && scale > 1.01 {
-        ((content_width / scale).max(1.0), (content_height / scale).max(1.0))
+    let (final_width, final_height) = if (target_width - canvas_w).abs() < 1.0 && scale > 1.01 {
+        ((canvas_w / scale).max(1.0), (canvas_h / scale).max(1.0))
     } else {
         (target_width, target_height)
     };
@@ -2963,10 +3112,8 @@ pub(crate) fn clamped_zoom_target(
     let target_cx = segment.target.x + segment.target.width / 2.0;
     let target_cy = segment.target.y + segment.target.height / 2.0;
 
-    let final_x = (target_cx - final_width / 2.0)
-        .clamp(padding, canvas_width as f64 - padding - final_width);
-    let final_y = (target_cy - final_height / 2.0)
-        .clamp(padding, canvas_height as f64 - padding - final_height);
+    let final_x = (target_cx - final_width / 2.0).clamp(0.0, (canvas_w - final_width).max(0.0));
+    let final_y = (target_cy - final_height / 2.0).clamp(0.0, (canvas_h - final_height).max(0.0));
 
     RenderCropFloat {
         x: final_x,
@@ -2981,8 +3128,8 @@ fn zoom_crop_expression(
     canvas: &cursor::RenderCanvas,
     screen_w: f64,
     screen_h: f64,
-    screen_x: f64,
-    screen_y: f64,
+    _screen_x: f64,
+    _screen_y: f64,
     crop_x: f64,
     crop_y: f64,
     axis: &str,
@@ -3019,11 +3166,14 @@ fn zoom_crop_expression(
         let out_start_s = end_s - trans_out_s;
 
         let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
+        let canvas_w = canvas.width as f64;
+        let canvas_h = canvas.height as f64;
+
         let target_val = match axis {
-            "width" => target.width.min(screen_w),
-            "height" => target.height.min(screen_h),
-            "x" => (target.x - screen_x + crop_x).clamp(0.0, (screen_w - target.width).max(0.0)),
-            "y" => (target.y - screen_y + crop_y).clamp(0.0, (screen_h - target.height).max(0.0)),
+            "width" => ((target.width / canvas_w) * screen_w).clamp(1.0, screen_w),
+            "height" => ((target.height / canvas_h) * screen_h).clamp(1.0, screen_h),
+            "x" => ((target.x / canvas_w) * screen_w + crop_x).clamp(0.0, (screen_w - 1.0).max(0.0)),
+            "y" => ((target.y / canvas_h) * screen_h + crop_y).clamp(0.0, (screen_h - 1.0).max(0.0)),
             _ => full,
         };
 
@@ -4004,9 +4154,17 @@ mod tests {
 
         // Solid colors return None
         assert!(resolve_background_image("#1e1b4b", &asset_paths).is_none());
-        assert!(
-            resolve_background_image("radial-gradient(circle, #fff, #000)", &asset_paths).is_none()
+
+        // Radial gradients generate a rendered background plate file
+        let resolved_radial = resolve_background_image(
+            "radial-gradient(circle, #fff, #000)",
+            &asset_paths,
         );
+        assert!(resolved_radial.is_some());
+        if let Some(path) = resolved_radial {
+            assert!(path.is_file());
+            let _ = std::fs::remove_file(path);
+        }
 
         // Linear gradients generate a rendered background plate file
         let resolved_gradient = resolve_background_image(

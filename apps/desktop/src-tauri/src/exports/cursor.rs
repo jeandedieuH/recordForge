@@ -348,31 +348,48 @@ impl CursorRenderer {
             }
         };
 
-        // Use the same padded, aspect-preserving crop geometry as the export so
-        // the cursor overlay tracks the video frame exactly.
+        // Use the same normalized crop transform as the editor preview and FFmpeg
+        // so the cursor tracks the video frame with sub-pixel precision.
         let target = clamped_zoom_target(
             self.canvas_width,
             self.canvas_height,
             self.canvas_padding,
             segment,
         );
-        let full_w = self.canvas_width as f64;
-        let full_h = self.canvas_height as f64;
-        let full_cx = full_w / 2.0;
-        let full_cy = full_h / 2.0;
+        let canvas_w = self.canvas_width as f64;
+        let canvas_h = self.canvas_height as f64;
+        let padding = self.canvas_padding as f64;
+        let screen_w = (canvas_w - padding * 2.0).max(1.0);
+        let screen_h = (canvas_h - padding * 2.0).max(1.0);
+        let screen_x = padding;
+        let screen_y = padding;
+
+        let full_cx = canvas_w / 2.0;
+        let full_cy = canvas_h / 2.0;
         let target_cx = target.x + target.width / 2.0;
         let target_cy = target.y + target.height / 2.0;
 
         let cur_cx = full_cx + (target_cx - full_cx) * eased;
         let cur_cy = full_cy + (target_cy - full_cy) * eased;
-        let crop_width = full_w + (target.width - full_w) * eased;
-        let crop_height = full_h + (target.height - full_h) * eased;
-        let crop_x = (cur_cx - crop_width / 2.0).clamp(0.0, full_w - crop_width);
-        let crop_y = (cur_cy - crop_height / 2.0).clamp(0.0, full_h - crop_height);
+        let crop_width = canvas_w + (target.width - canvas_w) * eased;
+        let crop_height = canvas_h + (target.height - canvas_h) * eased;
+        let crop_x = (cur_cx - crop_width / 2.0).clamp(0.0, canvas_w - crop_width);
+        let crop_y = (cur_cy - crop_height / 2.0).clamp(0.0, canvas_h - crop_height);
+
+        let norm_crop_x = crop_x / canvas_w;
+        let norm_crop_y = crop_y / canvas_h;
+        let norm_crop_w = (crop_width / canvas_w).max(1e-4);
+        let norm_crop_h = (crop_height / canvas_h).max(1e-4);
+
+        let rel_x = x - screen_x;
+        let rel_y = y - screen_y;
+
+        let zoomed_rel_x = (rel_x - norm_crop_x * screen_w) / norm_crop_w;
+        let zoomed_rel_y = (rel_y - norm_crop_y * screen_h) / norm_crop_h;
 
         (
-            ((x - crop_x) * full_w / crop_width).clamp(0.0, full_w),
-            ((y - crop_y) * full_h / crop_height).clamp(0.0, full_h),
+            (screen_x + zoomed_rel_x).clamp(0.0, canvas_w),
+            (screen_y + zoomed_rel_y).clamp(0.0, canvas_h),
         )
     }
 
@@ -1314,9 +1331,10 @@ mod tests {
         .expect("valid cursor renderer");
 
         // In the 3-phase lifecycle, 500ms is in the sustained hold phase (progress 1.0)
+        // Center is (100, 100). Point (120, 120) is +20px from center. At 2x zoom, +20px * 2 = +40px from center -> 140.0.
         let (x, y) = renderer.apply_zoom(500, 120.0, 120.0);
-        assert!((x - 150.0).abs() < 0.1, "expected ~150.0, got {x}");
-        assert!((y - 150.0).abs() < 0.1, "expected ~150.0, got {y}");
+        assert!((x - 140.0).abs() < 0.1, "expected 140.0, got {x}");
+        assert!((y - 140.0).abs() < 0.1, "expected 140.0, got {y}");
 
         let (no_zoom_x, no_zoom_y) = renderer.apply_zoom(1_001, 120.0, 120.0);
         assert!((no_zoom_x - 120.0).abs() < 0.01);
