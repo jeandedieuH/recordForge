@@ -51,6 +51,8 @@ pub struct RenderPlanAnnotation {
     pub animation_in: String,
     #[serde(default = "default_animation")]
     pub animation_out: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Text clip or title preset entry in the render plan.
@@ -111,6 +113,8 @@ pub struct RenderPlanText {
     pub animation_in: String,
     #[serde(default = "default_animation")]
     pub animation_out: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Image graphic overlay entry in the render plan.
@@ -145,6 +149,12 @@ pub struct RenderPlanImage {
     pub animation_in: String,
     #[serde(default = "default_animation")]
     pub animation_out: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_stroke_color() -> String {
@@ -673,7 +683,7 @@ pub fn build_overlay_render_plan_from_legacy(
 ) -> overlay_engine::OverlayRenderPlan {
     let mut items = Vec::new();
 
-    for (idx, img) in images.iter().enumerate() {
+    for (idx, img) in images.iter().filter(|i| i.enabled).enumerate() {
         let anim_in = match img.animation_in.as_str() {
             "none" => overlay_engine::OverlayAnimationType::None,
             "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
@@ -728,7 +738,7 @@ pub fn build_overlay_render_plan_from_legacy(
         });
     }
 
-    for (idx, ann) in annotations.iter().enumerate() {
+    for (idx, ann) in annotations.iter().filter(|a| a.enabled).enumerate() {
         let anim_in = match ann.animation_in.as_str() {
             "none" => overlay_engine::OverlayAnimationType::None,
             "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
@@ -793,7 +803,7 @@ pub fn build_overlay_render_plan_from_legacy(
         });
     }
 
-    for (idx, txt) in texts.iter().enumerate() {
+    for (idx, txt) in texts.iter().filter(|t| t.enabled).enumerate() {
         let anim_in = match txt.animation_in.as_str() {
             "none" => overlay_engine::OverlayAnimationType::None,
             "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
@@ -840,7 +850,7 @@ pub fn build_overlay_render_plan_from_legacy(
                 preset_id: txt
                     .preset_id
                     .clone()
-                    .unwrap_or_else(|| "default-title".into()),
+                    .unwrap_or_else(|| "title-modern".into()),
                 category: txt.category.clone(),
                 primary_text: txt.primary_text.clone(),
                 secondary_text: txt.secondary_text.clone(),
@@ -911,6 +921,7 @@ mod tests {
             font_size: 16.0,
             animation_in: "fade".into(),
             animation_out: "fade".into(),
+            enabled: true,
         };
 
         let svg = build_annotation_svg(&ann, 1920, 1080, 2000);
@@ -962,6 +973,7 @@ mod tests {
                 font_size: 14.0,
                 animation_in: "scale-up".into(),
                 animation_out: "fade".into(),
+                enabled: true,
             };
 
             let svg = build_annotation_svg(&ann, 1920, 1080, 1000);
@@ -1005,6 +1017,7 @@ mod tests {
             shadow_blur: 12.0,
             animation_in: "fade".into(),
             animation_out: "fade".into(),
+            enabled: true,
         };
 
         let svg = build_text_preset_svg(&text, 1920, 1080, 1500);
@@ -1014,5 +1027,96 @@ mod tests {
         let mut pixmap = Pixmap::new(1920, 1080).unwrap();
         let res = render_svg_to_pixmap(&svg, &mut pixmap);
         assert!(res.is_ok(), "render failed: {:?}", res);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_enabled_field() {
+        let json_ann = serde_json::json!({
+            "id": "ann-test",
+            "startMs": 100,
+            "endMs": 2000,
+            "annotationType": "rectangle",
+            "x": 10.0,
+            "y": 20.0,
+            "width": 100.0,
+            "height": 50.0,
+            "strokeColor": "#38bdf8",
+            "strokeWidth": 2.0,
+            "strokeStyle": "solid",
+            "fillColor": "#38bdf8",
+            "fillOpacity": 0.5,
+            "cornerRadius": 4.0,
+            "arrowEndHead": "none",
+            "arrowStartHead": "none",
+            "shadowEnabled": false,
+            "shadowColor": "black",
+            "shadowBlur": 0.0,
+            "textColor": "#ffffff",
+            "fontSize": 14.0,
+            "animationIn": "fade",
+            "animationOut": "fade",
+            "enabled": true
+        });
+        let parsed_ann: RenderPlanAnnotation = serde_json::from_value(json_ann).unwrap();
+        assert!(parsed_ann.enabled);
+
+        let json_text = serde_json::json!({
+            "id": "txt-test",
+            "startMs": 100,
+            "endMs": 2000,
+            "presetId": "title-1",
+            "category": "title",
+            "primaryText": "Hello",
+            "x": 10.0,
+            "y": 20.0,
+            "width": 100.0,
+            "height": 50.0,
+            "alignment": "left",
+            "fontFamily": "sans",
+            "fontSize": 24.0,
+            "fontWeight": "700",
+            "textColor": "#ffffff",
+            "secondaryTextColor": "#94a3b8",
+            "accentColor": "#38bdf8",
+            "backdropStyle": "none",
+            "backdropColor": "#000000",
+            "backdropOpacity": 0.5,
+            "backdropBlur": 0.0,
+            "backdropBorderRadius": 0.0,
+            "backdropPaddingX": 0.0,
+            "backdropPaddingY": 0.0,
+            "shadowEnabled": false,
+            "shadowColor": "black",
+            "shadowBlur": 0.0,
+            "animationIn": "fade",
+            "animationOut": "fade",
+            "enabled": true
+        });
+        let parsed_text: RenderPlanText = serde_json::from_value(json_text).unwrap();
+        assert!(parsed_text.enabled);
+
+        let json_img = serde_json::json!({
+            "id": "img-test",
+            "assetId": "asset-img-1",
+            "startMs": 100,
+            "endMs": 2000,
+            "x": 10.0,
+            "y": 20.0,
+            "width": 100.0,
+            "height": 50.0,
+            "opacity": 1.0,
+            "borderRadius": 0.0,
+            "borderWidth": 0.0,
+            "borderColor": "#ffffff",
+            "shadowEnabled": false,
+            "shadowColor": "black",
+            "shadowBlur": 0.0,
+            "fit": "contain",
+            "animationIn": "fade",
+            "animationOut": "fade",
+            "enabled": true
+        });
+        let parsed_img: RenderPlanImage = serde_json::from_value(json_img).unwrap();
+        assert!(parsed_img.enabled);
     }
 }

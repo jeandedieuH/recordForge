@@ -2890,6 +2890,105 @@ mod tests {
     }
 
     #[test]
+    fn test_render_plan_deserialization_with_overlays_and_enabled_field() {
+        let mut raw = serde_json::to_value(valid_plan()).expect("serialize render plan");
+        raw["annotations"] = serde_json::json!([
+            {
+                "id": "ann-1",
+                "startMs": 0,
+                "endMs": 1000,
+                "annotationType": "rounded-rect",
+                "x": 10.0,
+                "y": 20.0,
+                "width": 100.0,
+                "height": 50.0,
+                "strokeColor": "#38bdf8",
+                "strokeWidth": 2.0,
+                "strokeStyle": "solid",
+                "fillColor": "#38bdf8",
+                "fillOpacity": 0.2,
+                "cornerRadius": 8.0,
+                "arrowEndHead": "arrow",
+                "arrowStartHead": "none",
+                "shadowEnabled": false,
+                "shadowColor": "black",
+                "shadowBlur": 0.0,
+                "textColor": "#ffffff",
+                "fontSize": 14.0,
+                "animationIn": "fade",
+                "animationOut": "fade",
+                "enabled": true
+            }
+        ]);
+        raw["texts"] = serde_json::json!([
+            {
+                "id": "txt-1",
+                "startMs": 0,
+                "endMs": 1000,
+                "presetId": "title-modern",
+                "category": "title",
+                "primaryText": "Test Title",
+                "x": 10.0,
+                "y": 20.0,
+                "width": 100.0,
+                "height": 50.0,
+                "alignment": "left",
+                "fontFamily": "sans",
+                "fontSize": 32.0,
+                "fontWeight": "700",
+                "textColor": "#ffffff",
+                "secondaryTextColor": "#94a3b8",
+                "accentColor": "#38bdf8",
+                "backdropStyle": "glass",
+                "backdropColor": "#0f172a",
+                "backdropOpacity": 0.8,
+                "backdropBlur": 16.0,
+                "backdropBorderRadius": 12.0,
+                "backdropPaddingX": 24.0,
+                "backdropPaddingY": 16.0,
+                "shadowEnabled": false,
+                "shadowColor": "black",
+                "shadowBlur": 0.0,
+                "animationIn": "fade",
+                "animationOut": "fade",
+                "enabled": true
+            }
+        ]);
+        raw["images"] = serde_json::json!([
+            {
+                "id": "img-1",
+                "assetId": "asset-image-1",
+                "startMs": 0,
+                "endMs": 1000,
+                "x": 10.0,
+                "y": 20.0,
+                "width": 100.0,
+                "height": 50.0,
+                "opacity": 1.0,
+                "borderRadius": 4.0,
+                "borderWidth": 1.0,
+                "borderColor": "#ffffff",
+                "shadowEnabled": false,
+                "shadowColor": "black",
+                "shadowBlur": 0.0,
+                "fit": "contain",
+                "animationIn": "fade",
+                "animationOut": "fade",
+                "enabled": true
+            }
+        ]);
+
+        let parsed: RenderPlan =
+            serde_json::from_value(raw).expect("deserialization of RenderPlan with overlays");
+        assert_eq!(parsed.annotations.len(), 1);
+        assert!(parsed.annotations[0].enabled);
+        assert_eq!(parsed.texts.len(), 1);
+        assert!(parsed.texts[0].enabled);
+        assert_eq!(parsed.images.len(), 1);
+        assert!(parsed.images[0].enabled);
+    }
+
+    #[test]
     fn uses_shared_zoom_easing_names_and_exclusive_segment_end() {
         let progress = zoom_easing_expression("p", "cinematic");
         assert!(progress.contains("3-2*"));
