@@ -2,7 +2,7 @@
 
 use tiny_skia::{
     BlendMode, Color, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
-    Stroke, StrokeDash, Transform,
+    Point, Stroke, StrokeDash, Transform,
 };
 
 use crate::fonts::resolve_font_family;
@@ -259,15 +259,130 @@ fn draw_shadow_path(
     if shadow_blur <= 0.0 {
         return;
     }
-    let color = parse_color(shadow_color, opacity * 0.5);
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
+    let color = parse_color(shadow_color, opacity * 0.45);
+    if color.alpha() <= 0.0 {
+        return;
+    }
 
-    let offset_y = (shadow_blur as f32 / 2.0).clamp(1.0, 15.0);
+    let offset_y = (shadow_blur as f32 / 2.0).clamp(1.0, 24.0);
     let shadow_transform = transform.post_translate(0.0, offset_y);
-    pixmap.fill_path(path, &paint, FillRule::Winding, shadow_transform, None);
+
+    let blur_radius = (shadow_blur / 2.0).clamp(1.0, 32.0) as f32;
+    let pad = (blur_radius * 3.0).ceil() as i32;
+
+    let bounds = path.bounds();
+    let pts = [
+        (bounds.left(), bounds.top()),
+        (bounds.right(), bounds.top()),
+        (bounds.right(), bounds.bottom()),
+        (bounds.left(), bounds.bottom()),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (px, py) in pts {
+        let mut pt = Point::from_xy(px, py);
+        shadow_transform.map_point(&mut pt);
+        min_x = min_x.min(pt.x);
+        min_y = min_y.min(pt.y);
+        max_x = max_x.max(pt.x);
+        max_y = max_y.max(pt.y);
+    }
+
+
+    let sub_x0 = (min_x.floor() as i32 - pad).max(0);
+    let sub_y0 = (min_y.floor() as i32 - pad).max(0);
+    let sub_x1 = (max_x.ceil() as i32 + pad).min(pixmap.width() as i32);
+    let sub_y1 = (max_y.ceil() as i32 + pad).min(pixmap.height() as i32);
+
+    let sub_w = (sub_x1 - sub_x0).max(0) as u32;
+    let sub_h = (sub_y1 - sub_y0).max(0) as u32;
+
+    if sub_w == 0 || sub_h == 0 {
+        return;
+    }
+
+    if let Some(mut sub_pix) = Pixmap::new(sub_w, sub_h) {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        let local_transform = shadow_transform.post_translate(-(sub_x0 as f32), -(sub_y0 as f32));
+        sub_pix.fill_path(path, &paint, FillRule::Winding, local_transform, None);
+        fast_blur(&mut sub_pix, blur_radius);
+        pixmap.draw_pixmap(
+            sub_x0,
+            sub_y0,
+            sub_pix.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+    }
 }
+
+
+fn fast_blur(pixmap: &mut Pixmap, radius: f32) {
+    let r = radius.round().max(1.0) as usize;
+    let w = pixmap.width() as usize;
+    let h = pixmap.height() as usize;
+    if w == 0 || h == 0 || r == 0 {
+        return;
+    }
+    let data = pixmap.data_mut();
+    for _ in 0..3 {
+        let temp = data.to_vec();
+        for y in 0..h {
+            let row_offset = y * w * 4;
+            for x in 0..w {
+                let start_x = x.saturating_sub(r);
+                let end_x = (x + r).min(w - 1);
+                let count = (end_x - start_x + 1) as u32;
+                let mut sum_r = 0u32;
+                let mut sum_g = 0u32;
+                let mut sum_b = 0u32;
+                let mut sum_a = 0u32;
+                for kx in start_x..=end_x {
+                    let idx = row_offset + kx * 4;
+                    sum_r += temp[idx] as u32;
+                    sum_g += temp[idx + 1] as u32;
+                    sum_b += temp[idx + 2] as u32;
+                    sum_a += temp[idx + 3] as u32;
+                }
+                let out_idx = row_offset + x * 4;
+                data[out_idx] = (sum_r / count) as u8;
+                data[out_idx + 1] = (sum_g / count) as u8;
+                data[out_idx + 2] = (sum_b / count) as u8;
+                data[out_idx + 3] = (sum_a / count) as u8;
+            }
+        }
+        let temp_v = data.to_vec();
+        for x in 0..w {
+            for y in 0..h {
+                let start_y = y.saturating_sub(r);
+                let end_y = (y + r).min(h - 1);
+                let count = (end_y - start_y + 1) as u32;
+                let mut sum_r = 0u32;
+                let mut sum_g = 0u32;
+                let mut sum_b = 0u32;
+                let mut sum_a = 0u32;
+                for ky in start_y..=end_y {
+                    let idx = (ky * w + x) * 4;
+                    sum_r += temp_v[idx] as u32;
+                    sum_g += temp_v[idx + 1] as u32;
+                    sum_b += temp_v[idx + 2] as u32;
+                    sum_a += temp_v[idx + 3] as u32;
+                }
+                let out_idx = (y * w + x) * 4;
+                data[out_idx] = (sum_r / count) as u8;
+                data[out_idx + 1] = (sum_g / count) as u8;
+                data[out_idx + 2] = (sum_b / count) as u8;
+                data[out_idx + 3] = (sum_a / count) as u8;
+            }
+        }
+    }
+}
+
 
 fn render_annotation(
     pixmap: &mut Pixmap,
@@ -791,7 +906,8 @@ fn render_svg_markup(
     transform: Transform,
     pixmap: &mut Pixmap,
 ) -> Result<(), String> {
-    let options = resvg::usvg::Options::default();
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb = crate::fonts::get_shared_font_database();
     let tree = resvg::usvg::Tree::from_str(svg, &options)
         .map_err(|e| format!("parse SVG: {e}"))?;
     resvg::render(&tree, transform, &mut pixmap.as_mut());

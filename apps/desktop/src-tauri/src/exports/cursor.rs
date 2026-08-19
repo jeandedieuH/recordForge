@@ -64,21 +64,58 @@ impl Rgba {
 }
 
 /// A pixel-aligned rectangle used to clip all cursor drawing to the fitted
-/// recorded video screen. The full canvas is used when a zoom effect is active.
+/// recorded video screen. Respects canvas border_radius for rounded video corners.
 #[derive(Debug, Clone, Copy)]
 struct ClipRect {
     x: u32,
     y: u32,
     w: u32,
     h: u32,
+    border_radius: u32,
 }
 
 impl ClipRect {
     fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x as i32
-            && px < (self.x + self.w) as i32
-            && py >= self.y as i32
-            && py < (self.y + self.h) as i32
+        if px < self.x as i32
+            || px >= (self.x + self.w) as i32
+            || py < self.y as i32
+            || py >= (self.y + self.h) as i32
+        {
+            return false;
+        }
+        if self.border_radius == 0 {
+            return true;
+        }
+        let r = self.border_radius.min(self.w / 2).min(self.h / 2) as i32;
+        if r <= 0 {
+            return true;
+        }
+        let left = self.x as i32;
+        let right = (self.x + self.w) as i32 - 1;
+        let top = self.y as i32;
+        let bottom = (self.y + self.h) as i32 - 1;
+
+        if px < left + r && py < top + r {
+            let dx = (left + r) - px;
+            let dy = (top + r) - py;
+            return dx * dx + dy * dy <= r * r;
+        }
+        if px > right - r && py < top + r {
+            let dx = px - (right - r);
+            let dy = (top + r) - py;
+            return dx * dx + dy * dy <= r * r;
+        }
+        if px < left + r && py > bottom - r {
+            let dx = (left + r) - px;
+            let dy = py - (bottom - r);
+            return dx * dx + dy * dy <= r * r;
+        }
+        if px > right - r && py > bottom - r {
+            let dx = px - (right - r);
+            let dy = py - (bottom - r);
+            return dx * dx + dy * dy <= r * r;
+        }
+        true
     }
 }
 
@@ -153,6 +190,7 @@ impl CursorRenderer {
             y: (padding + (content_height - fit_height) / 2.0).round() as u32,
             w: fit_width.round() as u32,
             h: fit_height.round() as u32,
+            border_radius: canvas.border_radius,
         };
 
         let options = cursor_engine::CursorEngineOptions::default();
@@ -254,23 +292,8 @@ impl CursorRenderer {
         self.draw_cursor(frame, x, y, cursor_frame.opacity, &shape_id, &clip);
     }
 
-    fn zoom_active(&self, output_ms: u64) -> bool {
-        self.zoom_segments.iter().any(|segment| {
-            segment.enabled && output_ms >= segment.start_ms && output_ms < segment.end_ms
-        })
-    }
-
-    fn clip_for_output(&self, output_ms: u64) -> ClipRect {
-        if self.zoom_active(output_ms) {
-            ClipRect {
-                x: 0,
-                y: 0,
-                w: self.canvas_width,
-                h: self.canvas_height,
-            }
-        } else {
-            self.video_screen
-        }
+    fn clip_for_output(&self, _output_ms: u64) -> ClipRect {
+        self.video_screen
     }
 
     fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {

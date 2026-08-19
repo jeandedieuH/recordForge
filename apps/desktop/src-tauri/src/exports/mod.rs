@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, instrument, warn};
 
+use tiny_skia::{Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, Rect, Transform};
+
 mod annotations;
 mod captions;
 mod cursor;
@@ -863,6 +865,33 @@ fn render_timeline_composition(
         None
     };
 
+    let shadow_input_index = if canvas.shadow {
+        let shadow_path = generate_shadow_plate_png(
+            canvas.width,
+            canvas.height,
+            screen_x,
+            screen_y,
+            screen_w,
+            screen_h,
+            canvas.border_radius,
+            canvas.shadow_color.as_deref(),
+            canvas.shadow_blur,
+            canvas.shadow_offset_x,
+            canvas.shadow_offset_y,
+        );
+        if let Some(sp) = &shadow_path {
+            let idx = input_assets.len();
+            input_assets.push(("canvas:shadow".to_string(), sp.clone()));
+            temp_mask_guards.push(TempMaskFile(sp.clone()));
+            Some(idx)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+
     let mut camera_mask_indices = HashMap::new();
     for (index, overlay) in plan.overlays.iter().enumerate() {
         if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
@@ -1015,12 +1044,20 @@ fn render_timeline_composition(
 
     let base_label = "canvas_base";
     if is_fullscreen_canvas {
-        // Fast-path: screen video directly matches the canvas with no background,
-        // padding, shadow, or corner rounding. Bypass solid background plate generation,
-        // RGBA format conversion, and software overlay blending completely.
-        filters.push(format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},setsar=1[{base_label}]"
-        ));
+        if plan.zoom_segments.iter().any(|segment| segment.enabled) {
+            let width_expression = zoom_crop_expression(plan, canvas, "width");
+            let height_expression = zoom_crop_expression(plan, canvas, "height");
+            let x_expression = zoom_crop_expression(plan, canvas, "x");
+            let y_expression = zoom_crop_expression(plan, canvas, "y");
+            filters.push(format!(
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={}:{}[{base_label}]",
+                canvas.width, canvas.height
+            ));
+        } else {
+            filters.push(format!(
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},setsar=1[{base_label}]"
+            ));
+        }
     } else {
         // 1. Generate the background plate [bg_plate]
         if let Some(bg_idx) = bg_input_index {
@@ -1048,16 +1085,35 @@ fn render_timeline_composition(
             ));
             filters.push(bg_filter);
         } else {
-            filters.push(format!(
-                "color=c={background}:s={}x{}:r={}:d={}[bg_plate]",
+            let mut solid_filter = format!(
+                "color=c={background}:s={}x{}:r={}:d={}",
                 canvas.width, canvas.height, canvas.fps, plan_duration
-            ));
+            );
+            let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
+            if bg_dim > 0.0 {
+                solid_filter.push_str(&format!(
+                    ",drawbox=x=0:y=0:w={}:h={}:color=black@{:.3}:t=fill",
+                    canvas.width, canvas.height, bg_dim
+                ));
+            }
+            solid_filter.push_str("[bg_plate]");
+            filters.push(solid_filter);
         }
 
         // 2. Crop and format the fitted video layer [screen_fitted]
-        let mut screen_filter = format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
-        );
+        let mut screen_filter = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
+            let width_expression = zoom_crop_expression(plan, canvas, "width");
+            let height_expression = zoom_crop_expression(plan, canvas, "height");
+            let x_expression = zoom_crop_expression(plan, canvas, "x");
+            let y_expression = zoom_crop_expression(plan, canvas, "y");
+            format!(
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={screen_w:.0}:{screen_h:.0},setsar=1"
+            )
+        } else {
+            format!(
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
+            )
+        };
         if let Some(mask_idx) = canvas_mask_idx {
             let raw_label = "screen_unmasked";
             let mask_label = "screen_mask_loop";
@@ -1074,14 +1130,11 @@ fn render_timeline_composition(
 
         // 3. Composite shadow and screen layer onto background plate [canvas_base]
         let mut bg_current = "[bg_plate]".to_string();
-        if canvas.shadow {
-            let shadow_color =
-                safe_filter_color(canvas.shadow_color.as_deref().unwrap_or("#000000"));
-            let shadow_blur = canvas.shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
-            let shadow_x = (screen_x + canvas.shadow_offset_x.unwrap_or(0.0)).max(0.0);
-            let shadow_y = (screen_y + canvas.shadow_offset_y.unwrap_or(0.0)).max(0.0);
+        if let Some(shadow_idx) = shadow_input_index {
             filters.push(format!(
-                "{bg_current}drawbox=x={shadow_x:.0}:y={shadow_y:.0}:w={screen_w:.0}:h={screen_h:.0}:color={shadow_color}@0.3:t={shadow_blur:.2}[bg_with_shadow]"
+                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[shadow_loop];\
+                 {bg_current}[shadow_loop]overlay=x=0:y=0:shortest=1:format=auto[bg_with_shadow]",
+                canvas.width, canvas.height, canvas.fps
             ));
             bg_current = "[bg_with_shadow]".to_string();
         }
@@ -1095,20 +1148,7 @@ fn render_timeline_composition(
         ));
     }
 
-    let composed_label = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-        let width_expression = zoom_crop_expression(plan, canvas, "width");
-        let height_expression = zoom_crop_expression(plan, canvas, "height");
-        let x_expression = zoom_crop_expression(plan, canvas, "x");
-        let y_expression = zoom_crop_expression(plan, canvas, "y");
-        let label = "canvas_zoom";
-        filters.push(format!(
-            "[{base_label}]crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={}:{}[{label}]",
-            canvas.width, canvas.height
-        ));
-        label.to_string()
-    } else {
-        base_label.to_string()
-    };
+    let composed_label = base_label.to_string();
 
     let mut current_label = composed_label;
     for (index, overlay) in plan.overlays.iter().enumerate() {
@@ -2365,6 +2405,297 @@ fn safe_filter_color(value: &str) -> String {
         _ => "#070b14".into(),
     }
 }
+fn parse_color_hex(hex: &str, default_alpha: f32) -> Color {
+    let raw = hex.trim().trim_start_matches('#');
+    if raw.len() == 6 {
+        let r = u8::from_str_radix(&raw[0..2], 16).unwrap_or(0);
+        let g = u8::from_str_radix(&raw[2..4], 16).unwrap_or(0);
+        let b = u8::from_str_radix(&raw[4..6], 16).unwrap_or(0);
+        Color::from_rgba8(r, g, b, (default_alpha * 255.0).round() as u8)
+    } else if raw.len() == 8 {
+        let r = u8::from_str_radix(&raw[0..2], 16).unwrap_or(0);
+        let g = u8::from_str_radix(&raw[2..4], 16).unwrap_or(0);
+        let b = u8::from_str_radix(&raw[4..6], 16).unwrap_or(0);
+        let a = u8::from_str_radix(&raw[6..8], 16).unwrap_or(255);
+        Color::from_rgba8(r, g, b, ((a as f32 / 255.0) * default_alpha * 255.0).round() as u8)
+    } else if raw.len() == 3 {
+        let r = u8::from_str_radix(&format!("{}{}", &raw[0..1], &raw[0..1]), 16).unwrap_or(0);
+        let g = u8::from_str_radix(&format!("{}{}", &raw[1..2], &raw[1..2]), 16).unwrap_or(0);
+        let b = u8::from_str_radix(&format!("{}{}", &raw[2..3], &raw[2..3]), 16).unwrap_or(0);
+        Color::from_rgba8(r, g, b, (default_alpha * 255.0).round() as u8)
+    } else {
+        Color::from_rgba8(0, 0, 0, (default_alpha * 255.0).round() as u8)
+    }
+}
+
+fn build_rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<SkiaPath> {
+    let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+    let mut pb = PathBuilder::new();
+    if r <= 0.0 {
+        pb.push_rect(Rect::from_xywh(x, y, w, h)?);
+    } else {
+        pb.move_to(x + r, y);
+        pb.line_to(x + w - r, y);
+        pb.quad_to(x + w, y, x + w, y + r);
+        pb.line_to(x + w, y + h - r);
+        pb.quad_to(x + w, y + h, x + w - r, y + h);
+        pb.line_to(x + r, y + h);
+        pb.quad_to(x, y + h, x, y + h - r);
+        pb.line_to(x, y + r);
+        pb.quad_to(x, y, x + r, y);
+        pb.close();
+    }
+    pb.finish()
+}
+
+fn fast_blur_pixmap(pixmap: &mut Pixmap, radius: f32) {
+    let r = radius.round().max(1.0) as usize;
+    let w = pixmap.width() as usize;
+    let h = pixmap.height() as usize;
+    if w == 0 || h == 0 || r == 0 {
+        return;
+    }
+    let data = pixmap.data_mut();
+    for _ in 0..3 {
+        let temp = data.to_vec();
+        for y in 0..h {
+            let row_offset = y * w * 4;
+            for x in 0..w {
+                let start_x = x.saturating_sub(r);
+                let end_x = (x + r).min(w - 1);
+                let count = (end_x - start_x + 1) as u32;
+                let mut sum_r = 0u32;
+                let mut sum_g = 0u32;
+                let mut sum_b = 0u32;
+                let mut sum_a = 0u32;
+                for kx in start_x..=end_x {
+                    let idx = row_offset + kx * 4;
+                    sum_r += temp[idx] as u32;
+                    sum_g += temp[idx + 1] as u32;
+                    sum_b += temp[idx + 2] as u32;
+                    sum_a += temp[idx + 3] as u32;
+                }
+                let out_idx = row_offset + x * 4;
+                data[out_idx] = (sum_r / count) as u8;
+                data[out_idx + 1] = (sum_g / count) as u8;
+                data[out_idx + 2] = (sum_b / count) as u8;
+                data[out_idx + 3] = (sum_a / count) as u8;
+            }
+        }
+        let temp_v = data.to_vec();
+        for x in 0..w {
+            for y in 0..h {
+                let start_y = y.saturating_sub(r);
+                let end_y = (y + r).min(h - 1);
+                let count = (end_y - start_y + 1) as u32;
+                let mut sum_r = 0u32;
+                let mut sum_g = 0u32;
+                let mut sum_b = 0u32;
+                let mut sum_a = 0u32;
+                for ky in start_y..=end_y {
+                    let idx = (ky * w + x) * 4;
+                    sum_r += temp_v[idx] as u32;
+                    sum_g += temp_v[idx + 1] as u32;
+                    sum_b += temp_v[idx + 2] as u32;
+                    sum_a += temp_v[idx + 3] as u32;
+                }
+                let out_idx = (y * w + x) * 4;
+                data[out_idx] = (sum_r / count) as u8;
+                data[out_idx + 1] = (sum_g / count) as u8;
+                data[out_idx + 2] = (sum_b / count) as u8;
+                data[out_idx + 3] = (sum_a / count) as u8;
+            }
+        }
+    }
+}
+
+pub(crate) fn generate_shadow_plate_png(
+    canvas_w: u32,
+    canvas_h: u32,
+    screen_x: f64,
+    screen_y: f64,
+    screen_w: f64,
+    screen_h: f64,
+    border_radius: u32,
+    shadow_color: Option<&str>,
+    shadow_blur: Option<f64>,
+    shadow_offset_x: Option<f64>,
+    shadow_offset_y: Option<f64>,
+) -> Option<PathBuf> {
+    let mut pixmap = Pixmap::new(canvas_w, canvas_h)?;
+    let blur = shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
+    let off_x = shadow_offset_x.unwrap_or(0.0);
+    let off_y = shadow_offset_y.unwrap_or(blur / 2.0);
+    let x = (screen_x + off_x) as f32;
+    let y = (screen_y + off_y) as f32;
+    let w = screen_w as f32;
+    let h = screen_h as f32;
+    let r = (border_radius as f32).min(w / 2.0).min(h / 2.0);
+
+    let hex_color = shadow_color.unwrap_or("#000000");
+    let color = parse_color_hex(hex_color, 0.4);
+
+    let path = build_rounded_rect_path(x, y, w, h, r)?;
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    fast_blur_pixmap(&mut pixmap, (blur / 2.0).clamp(1.0, 32.0) as f32);
+
+    let temp_path = std::env::temp_dir().join(format!("recordforge_bg_shadow_{}.png", uuid::Uuid::new_v4()));
+    pixmap.save_png(&temp_path).ok()?;
+    Some(temp_path)
+}
+
+fn parse_css_gradient_to_svg(
+    gradient_str: &str,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    let trimmed = gradient_str.trim();
+    if trimmed.starts_with("linear-gradient(") && trimmed.ends_with(')') {
+        let inner = &trimmed[16..trimmed.len() - 1].trim();
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut paren_depth: i32 = 0;
+        for c in inner.chars() {
+            match c {
+                '(' => {
+                    paren_depth += 1;
+                    current.push(c);
+                }
+                ')' => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    current.push(c);
+                }
+                ',' if paren_depth == 0 => {
+                    parts.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(c),
+            }
+        }
+        if !current.trim().is_empty() {
+            parts.push(current.trim().to_string());
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        let first = parts[0].trim().to_lowercase();
+        let (angle_deg, stops_start_idx) = if first.ends_with("deg") {
+            let deg: f64 = first.trim_end_matches("deg").trim().parse().unwrap_or(180.0);
+            (deg, 1)
+        } else if first == "to bottom" {
+            (180.0, 1)
+        } else if first == "to top" {
+            (0.0, 1)
+        } else if first == "to right" {
+            (90.0, 1)
+        } else if first == "to left" {
+            (270.0, 1)
+        } else if first == "to bottom right" || first == "to right bottom" {
+            (135.0, 1)
+        } else if first == "to bottom left" || first == "to left bottom" {
+            (225.0, 1)
+        } else if first == "to top right" || first == "to right top" {
+            (45.0, 1)
+        } else if first == "to top left" || first == "to left top" {
+            (315.0, 1)
+        } else {
+            (180.0, 0)
+        };
+
+        let rad = (angle_deg - 90.0) * std::f64::consts::PI / 180.0;
+        let x1 = 50.0 - 50.0 * rad.cos();
+        let y1 = 50.0 - 50.0 * rad.sin();
+        let x2 = 50.0 + 50.0 * rad.cos();
+        let y2 = 50.0 + 50.0 * rad.sin();
+
+        let stop_parts = &parts[stops_start_idx..];
+        if stop_parts.is_empty() {
+            return None;
+        }
+
+        let mut stops_xml = String::new();
+        let total_stops = stop_parts.len();
+        for (i, stop_str) in stop_parts.iter().enumerate() {
+            let stop_trimmed = stop_str.trim();
+            let (color, offset) = if let Some((c, off)) = stop_trimmed.rsplit_once(' ') {
+                if off.ends_with('%') {
+                    (c.trim(), off.trim().to_string())
+                } else {
+                    let pct = (i as f64 / (total_stops - 1).max(1) as f64) * 100.0;
+                    (stop_trimmed, format!("{pct:.1}%"))
+                }
+            } else {
+                let pct = (i as f64 / (total_stops - 1).max(1) as f64) * 100.0;
+                (stop_trimmed, format!("{pct:.1}%"))
+            };
+
+            let (hex_color, opacity) = if color.starts_with("rgba(") && color.ends_with(')') {
+                let inner = &color[5..color.len() - 1];
+                let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if nums.len() == 4 {
+                    let r: u8 = nums[0].parse().unwrap_or(0);
+                    let g: u8 = nums[1].parse().unwrap_or(0);
+                    let b: u8 = nums[2].parse().unwrap_or(0);
+                    let a: f64 = nums[3].parse().unwrap_or(1.0);
+                    (format!("#{r:02x}{g:02x}{b:02x}"), a)
+                } else {
+                    (color.to_string(), 1.0)
+                }
+            } else if color.starts_with("rgb(") && color.ends_with(')') {
+                let inner = &color[4..color.len() - 1];
+                let nums: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if nums.len() == 3 {
+                    let r: u8 = nums[0].parse().unwrap_or(0);
+                    let g: u8 = nums[1].parse().unwrap_or(0);
+                    let b: u8 = nums[2].parse().unwrap_or(0);
+                    (format!("#{r:02x}{g:02x}{b:02x}"), 1.0)
+                } else {
+                    (color.to_string(), 1.0)
+                }
+            } else {
+                (color.to_string(), 1.0)
+            };
+
+            stops_xml.push_str(&format!(
+                r##"<stop offset="{offset}" stop-color="{hex_color}" stop-opacity="{opacity}" />"##
+            ));
+        }
+
+        Some(format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">
+  <defs>
+    <linearGradient id="rf-bg-grad" x1="{x1:.2}%" y1="{y1:.2}%" x2="{x2:.2}%" y2="{y2:.2}%">
+      {stops_xml}
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#rf-bg-grad)" />
+</svg>"##
+        ))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn generate_background_plate_png(
+    background: &str,
+    width: u32,
+    height: u32,
+) -> Option<PathBuf> {
+    let svg = parse_css_gradient_to_svg(background, width, height)?;
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb = overlay_engine::get_shared_font_database();
+    let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
+    let mut pixmap = Pixmap::new(width, height)?;
+    resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+    let temp_path = std::env::temp_dir().join(format!("recordforge_bg_grad_{}.png", uuid::Uuid::new_v4()));
+    pixmap.save_png(&temp_path).ok()?;
+    Some(temp_path)
+}
 
 pub(crate) fn resolve_background_image(
     background: &str,
@@ -2379,10 +2710,17 @@ pub(crate) fn resolve_background_image(
         || trimmed.starts_with("rgba(")
         || trimmed.starts_with("hsl(")
         || trimmed.starts_with("hsla(")
-        || trimmed.starts_with("linear-gradient")
         || trimmed.starts_with("radial-gradient")
         || trimmed.starts_with("conic-gradient")
     {
+        return None;
+    }
+
+    // Try generating CSS linear gradients to a temporary PNG
+    if trimmed.starts_with("linear-gradient") {
+        if let Some(grad_path) = generate_background_plate_png(trimmed, 1920, 1080) {
+            return Some(grad_path);
+        }
         return None;
     }
 
@@ -2480,7 +2818,7 @@ pub(crate) fn resolve_background_image(
         search_dirs.push(root.join("assets").join("backgrounds"));
         search_dirs.push(root.join("resources").join("backgrounds"));
         search_dirs.push(root.join("backgrounds"));
-        search_dirs.push(root.to_path_buf());
+        search_dirs.push(root.join("public"));
     }
 
     for dir in &search_dirs {
@@ -2531,25 +2869,21 @@ pub(crate) fn clamped_zoom_target(
     let content_height = (canvas_height as f64 - padding * 2.0).max(1.0);
     let scale = segment.scale.clamp(1.0, 8.0);
 
-    // Clamp the declared target to the padded safe area in full-canvas coordinates.
     let target_width = segment.target.width.max(1.0).min(content_width);
     let target_height = segment.target.height.max(1.0).min(content_height);
-    let target_x = segment
-        .target
-        .x
-        .clamp(padding, canvas_width as f64 - padding - target_width);
-    let target_y = segment
-        .target
-        .y
-        .clamp(padding, canvas_height as f64 - padding - target_height);
 
-    // Apply the additional zoom scale, keeping the final crop centered within
-    // the safe target and clamped back to the padded safe area.
-    let final_width = (target_width / scale).max(1.0);
-    let final_height = (target_height / scale).max(1.0);
-    let final_x = (target_x + (target_width - final_width) / 2.0)
+    let (final_width, final_height) = if (target_width - content_width).abs() < 1.0 && scale > 1.01 {
+        ((content_width / scale).max(1.0), (content_height / scale).max(1.0))
+    } else {
+        (target_width, target_height)
+    };
+
+    let target_cx = segment.target.x + segment.target.width / 2.0;
+    let target_cy = segment.target.y + segment.target.height / 2.0;
+
+    let final_x = (target_cx - final_width / 2.0)
         .clamp(padding, canvas_width as f64 - padding - final_width);
-    let final_y = (target_y + (target_height - final_height) / 2.0)
+    let final_y = (target_cy - final_height / 2.0)
         .clamp(padding, canvas_height as f64 - padding - final_height);
 
     RenderCropFloat {
@@ -3562,16 +3896,23 @@ mod tests {
         std::fs::write(&file_path, b"fake jpg content").unwrap();
         asset_paths.insert("asset-bg-1".into(), file_path.clone());
 
-        // Solid colors and gradients return None
+        // Solid colors return None
         assert!(resolve_background_image("#1e1b4b", &asset_paths).is_none());
-        assert!(resolve_background_image(
-            "linear-gradient(135deg, #111 0%, #222 100%)",
-            &asset_paths
-        )
-        .is_none());
         assert!(
             resolve_background_image("radial-gradient(circle, #fff, #000)", &asset_paths).is_none()
         );
+
+        // Linear gradients generate a rendered background plate file
+        let resolved_gradient = resolve_background_image(
+            "linear-gradient(135deg, #111 0%, #222 100%)",
+            &asset_paths,
+        );
+        assert!(resolved_gradient.is_some());
+        if let Some(path) = resolved_gradient {
+            assert!(path.is_file());
+            let _ = std::fs::remove_file(path);
+        }
+
 
         // Asset ID lookup returns file path
         let resolved_asset = resolve_background_image("asset-bg-1", &asset_paths);

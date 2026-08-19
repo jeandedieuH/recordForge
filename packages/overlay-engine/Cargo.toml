@@ -12,14 +12,17 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-native-render = ["dep:tiny-skia", "dep:resvg"]
+native-render = ["dep:tiny-skia", "dep:resvg", "dep:fontdb"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tiny-skia = { version = "0.11.4", optional = true }
-resvg = { version = "0.45.1", default-features = false, optional = true }
+resvg = { version = "0.45.1", default-features = false, features = ["text"], optional = true }
+fontdb = { version = "0.23.0", features = ["memmap"], optional = true }
+
+
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2.99" }

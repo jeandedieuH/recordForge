@@ -31,8 +31,9 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 cursor-engine = { path = "../../../packages/cursor-engine" }
 overlay-engine = { path = "../../../packages/overlay-engine", features = ["native-render"] }
-resvg = { version = "0.45.1", default-features = false }
+resvg = { version = "0.45.1", default-features = false, features = ["text"] }
 tiny-skia = "0.11.4"
+fontdb = { version = "0.23.0", features = ["memmap"] }
 base64 = "0.22"
 hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

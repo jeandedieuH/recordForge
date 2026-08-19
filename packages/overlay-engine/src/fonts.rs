@@ -58,3 +58,24 @@ impl FontCache {
         &self.specs
     }
 }
+
+#[cfg(feature = "native-render")]
+use std::sync::{Arc, OnceLock};
+
+#[cfg(feature = "native-render")]
+static SHARED_FONT_DB: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
+
+#[cfg(feature = "native-render")]
+pub fn get_shared_font_database() -> Arc<resvg::usvg::fontdb::Database> {
+    SHARED_FONT_DB
+        .get_or_init(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            db.set_sans_serif_family("Arial");
+            db.set_serif_family("Times New Roman");
+            db.set_monospace_family("Courier New");
+            Arc::new(db)
+        })
+        .clone()
+}
+

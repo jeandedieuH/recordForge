@@ -21,6 +21,8 @@ pub use animation::{
     OverlayAnimationOutType, OverlayAnimationType, OverlayEasing,
 };
 pub use fonts::{default_font_bundle, FontCache, FontSpec};
+#[cfg(feature = "native-render")]
+pub use fonts::get_shared_font_database;
 pub use images::{ImageAssetRef, ImageCachePolicy, ImageFit};
 #[cfg(target_arch = "wasm32")]
 pub use preview_adapter::WasmOverlayEngine;
