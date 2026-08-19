@@ -1455,32 +1455,8 @@ fn render_timeline_composition(
             .arg("-i")
             .arg("-");
     }
-    let filter_script = filters.join(";\n");
-    let safe_project_id: String = project_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let filter_script_path = std::env::temp_dir().join(format!(
-        "rf-filtergraph-{}-{}.txt",
-        safe_project_id,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&filter_script_path, &filter_script)
-        .map_err(|err| InternalError::Storage(format!("write filtergraph script: {err}")))?;
-    temp_mask_guards.push(TempMaskFile(filter_script_path.clone()));
-
     command
-        .arg("-filter_complex_script")
-        .arg(&filter_script_path)
+        .args(["-filter_complex", &filters.join(";")])
         .args(["-map", &format!("[{current_label}]")]);
     if audio_labels.is_empty() {
         command.arg("-an");
@@ -2519,18 +2495,24 @@ pub(crate) fn resolve_background_image(
     None
 }
 
-fn zoom_easing_expression(progress: &str, easing: &str) -> String {
+fn compact_num(val: f64) -> String {
+    if val.fract().abs() < 1e-6 {
+        format!("{:.0}", val)
+    } else {
+        let s = format!("{:.3}", val);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+fn zoom_easing_expression(p: &str, easing: &str) -> String {
     match easing {
-        "linear" => progress.to_string(),
-        "ease-in" => format!("({progress})*({progress})"),
-        "ease-out" => format!("1-(1-({progress}))*(1-({progress}))"),
-        "snappy" => format!("1-pow(1-({progress}),3)"),
-        "cinematic" => format!("({progress})*({progress})*(3-2*({progress}))"),
-        "smooth" => format!("pow({progress},3)*(({progress})*(({progress})*6-15)+10)"),
-        "spring" => format!("(pow(2,-10*({progress}))*sin((({progress})-0.1)*15.708)+1)"),
-        _ => format!(
-            "if(lte(({progress}),0.5),2*({progress})*({progress}),1-pow(-2*({progress})+2,2)/2)"
-        ),
+        "linear" => p.to_string(),
+        "ease-in" => format!("{p}*{p}"),
+        "ease-out" => format!("({p})*(2-({p}))"),
+        "snappy" => format!("({p})*(3-({p})*(3-({p})))"),
+        "cinematic" | "smooth" => format!("({p})*({p})*(3-2*({p}))"),
+        "spring" => format!("pow(2,-10*({p}))*sin((({p})-0.1)*15.708)+1"),
+        _ => format!("if(lte({p},0.5),2*({p})*({p}),1-pow(-2*({p})+2,2)/2)"),
     }
 }
 
@@ -2584,7 +2566,9 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         "height" => canvas.height as f64,
         _ => 0.0,
     };
-    let mut expression = format!("{full:.3}");
+    let full_str = compact_num(full);
+    let mut expression = full_str.clone();
+
     for segment in plan
         .zoom_segments
         .iter()
@@ -2607,7 +2591,7 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
         let out_start_s = end_s - trans_out_s;
 
         let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
-        let target_value = match axis {
+        let target_val = match axis {
             "width" => target.width,
             "height" => target.height,
             "x" => target.x,
@@ -2615,81 +2599,65 @@ fn zoom_crop_expression(plan: &RenderPlan, canvas: &cursor::RenderCanvas, axis: 
             _ => full,
         };
 
-        let progress_in = format!("((t-{start_s:.3})/{trans_in_s:.3})");
+        let delta = target_val - full;
+        if delta.abs() < 1e-4 {
+            continue;
+        }
+
+        let start_str = compact_num(start_s);
+        let end_str = compact_num(end_s);
+        let in_end_str = compact_num(in_end_s);
+        let out_start_str = compact_num(out_start_s);
+        let trans_in_str = compact_num(trans_in_s);
+        let trans_out_str = compact_num(trans_out_s);
+        let target_str = compact_num(target_val);
+        let delta_str = compact_num(delta);
+
+        let progress_in = if start_s.abs() < 1e-6 {
+            format!("t/{trans_in_str}")
+        } else {
+            format!("(t-{start_str})/{trans_in_str}")
+        };
         let eased_in = zoom_easing_expression(&progress_in, &segment.easing);
-        let interpolated_in = if axis == "x" || axis == "y" {
-            let center_full = if axis == "x" {
-                canvas.width as f64 / 2.0
-            } else {
-                canvas.height as f64 / 2.0
-            };
-            let center_target = if axis == "x" {
-                target.x + target.width / 2.0
-            } else {
-                target.y + target.height / 2.0
-            };
-            let dim_full = if axis == "x" {
-                canvas.width as f64
-            } else {
-                canvas.height as f64
-            };
-            let dim_target = if axis == "x" {
-                target.width
-            } else {
-                target.height
-            };
-            let center_eased = format!(
-                "({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_in})"
-            );
-            let dim_eased =
-                format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_in})");
-            format!("({center_eased})-({dim_eased})/2")
-        } else {
-            format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased_in})")
-        };
 
-        let progress_out = format!("(({end_s:.3}-t)/{trans_out_s:.3})");
+        let progress_out = format!("({end_str}-t)/{trans_out_str}");
         let eased_out = zoom_easing_expression(&progress_out, &segment.easing);
-        let interpolated_out = if axis == "x" || axis == "y" {
-            let center_full = if axis == "x" {
-                canvas.width as f64 / 2.0
-            } else {
-                canvas.height as f64 / 2.0
-            };
-            let center_target = if axis == "x" {
-                target.x + target.width / 2.0
-            } else {
-                target.y + target.height / 2.0
-            };
-            let dim_full = if axis == "x" {
-                canvas.width as f64
-            } else {
-                canvas.height as f64
-            };
-            let dim_target = if axis == "x" {
-                target.width
-            } else {
-                target.height
-            };
-            let center_eased = format!(
-                "({center_full:.3})+(({center_target:.3})-({center_full:.3}))*({eased_out})"
-            );
-            let dim_eased =
-                format!("({dim_full:.3})+(({dim_target:.3})-({dim_full:.3}))*({eased_out})");
-            format!("({center_eased})-({dim_eased})/2")
+
+        let interpolated_in = if full.abs() < 1e-6 {
+            format!("{delta_str}*{eased_in}")
+        } else if delta > 0.0 {
+            format!("{full_str}+{delta_str}*{eased_in}")
         } else {
-            format!("({full:.3})+(({target_value:.3})-({full:.3}))*({eased_out})")
+            format!("{full_str}{delta_str}*{eased_in}")
         };
 
-        let val_hold = format!("{target_value:.3}");
+        let interpolated_out = if full.abs() < 1e-6 {
+            format!("{delta_str}*{eased_out}")
+        } else if delta > 0.0 {
+            format!("{full_str}+{delta_str}*{eased_out}")
+        } else {
+            format!("{full_str}{delta_str}*{eased_out}")
+        };
 
-        let segment_expr = format!(
-            "if(lt(t,{in_end_s:.3}),{interpolated_in},if(lte(t,{out_start_s:.3}),{val_hold},{interpolated_out}))"
-        );
+        let segment_expr = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
+            target_str
+        } else if trans_in_s < 1e-4 {
+            format!("if(lte(t,{out_start_str}),{target_str},{interpolated_out})")
+        } else if trans_out_s < 1e-4 {
+            format!("if(lt(t,{in_end_str}),{interpolated_in},{target_str})")
+        } else {
+            format!("if(lt(t,{in_end_str}),{interpolated_in},if(lte(t,{out_start_str}),{target_str},{interpolated_out}))")
+        };
 
-        expression =
-            format!("if(gte(t,{start_s:.3})*lt(t,{end_s:.3}),{segment_expr},{expression})");
+        let cond = if start_s.abs() < 1e-6 {
+            format!("lt(t,{end_str})")
+        } else {
+            format!("gte(t,{start_str})*lt(t,{end_str})")
+        };
+
+        expression = format!("if({cond},{segment_expr},{expression})");
     }
+
     expression
 }
 
@@ -3194,7 +3162,7 @@ mod tests {
             },
             "width",
         );
-        assert!(crop.contains("lt(t,1.000)"));
+        assert!(crop.contains("lt(t,1)"));
     }
 
     #[test]
@@ -3236,7 +3204,7 @@ mod tests {
         );
         // The content area for a 48px padded 1920x1080 canvas is 1824x984,
         // so the final crop width should be clamped to 1824, not 4000.
-        assert!(crop.contains("1824.000"));
+        assert!(crop.contains("1824"));
         assert!(!crop.contains("4000"));
     }
 
@@ -3804,29 +3772,69 @@ mod tests {
     }
 
     #[test]
-    fn test_large_filtergraph_script_generation_and_cleanup() {
+    fn test_temp_mask_file_cleanup() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let script_path = temp_dir.path().join("rf-filtergraph-test.txt");
+        let mask_path = temp_dir.path().join("rf-mask-test.png");
 
-        // Simulate a massive filter graph with multiple zoom equations exceeding 32KB
-        let mut filters = Vec::new();
-        for i in 0..500 {
-            filters.push(format!("[in{i}]scale=1920:1080,crop=w='if(gte(t,1.0),1920,1280)':h='if(gte(t,1.0),1080,720)':x=0:y=0[out{i}]"));
-        }
-        let filter_script = filters.join(";\n");
-        assert!(
-            filter_script.len() > 32_767,
-            "filter script must exceed Windows 32KB command line limit"
-        );
-
-        std::fs::write(&script_path, &filter_script).expect("write filter script");
-        assert!(script_path.exists());
+        std::fs::write(&mask_path, b"test-mask-data").expect("write temp mask file");
+        assert!(mask_path.exists());
 
         {
-            let _guard = TempMaskFile(script_path.clone());
-            assert!(script_path.exists());
+            let _guard = TempMaskFile(mask_path.clone());
+            assert!(mask_path.exists());
         }
         // Guard drop should remove the temp file
-        assert!(!script_path.exists());
+        assert!(!mask_path.exists());
+    }
+
+    #[test]
+    fn test_zoom_crop_expression_compactness_for_many_segments() {
+        let mut zoom_segments = Vec::new();
+        for i in 0..30 {
+            zoom_segments.push(RenderPlanZoomSegment {
+                id: format!("zoom-{i}"),
+                start_ms: i * 2000,
+                end_ms: i * 2000 + 1500,
+                target: RenderCropFloat {
+                    x: 100.0 + (i as f64 * 10.0),
+                    y: 100.0 + (i as f64 * 5.0),
+                    width: 960.0,
+                    height: 540.0,
+                },
+                scale: 1.5,
+                easing: "smooth".into(),
+                transition_in_ms: 300,
+                transition_out_ms: 300,
+                enabled: true,
+                mode: "auto".into(),
+                source: "click".into(),
+                preset: "product-demo".into(),
+                follow_deadzone_percent: None,
+                follow_smoothing_alpha: None,
+                label: None,
+            });
+        }
+        let plan = RenderPlan {
+            zoom_segments,
+            ..valid_plan()
+        };
+        let canvas = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            ..Default::default()
+        };
+
+        let w_expr = zoom_crop_expression(&plan, &canvas, "width");
+        let h_expr = zoom_crop_expression(&plan, &canvas, "height");
+        let x_expr = zoom_crop_expression(&plan, &canvas, "x");
+        let y_expr = zoom_crop_expression(&plan, &canvas, "y");
+
+        let total_filter_len = w_expr.len() + h_expr.len() + x_expr.len() + y_expr.len();
+        // Ensure that 30 dynamic zoom segments total well under the Windows 32,767 char limit
+        assert!(
+            total_filter_len < 25_000,
+            "Total crop expressions length ({total_filter_len}) must be well below 25KB"
+        );
     }
 }
