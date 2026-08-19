@@ -705,7 +705,9 @@ pub fn build_text_preset_svg(
     // Primary main title
     let primary_fs = text.font_size.clamp(12.0, 120.0);
     let primary_line_h = primary_fs * 1.15;
-    let max_primary_chars = ((text.width - text.backdrop_padding_x * 2.0).max(20.0) / (primary_fs * 0.58)).max(3.0) as usize;
+    let max_primary_chars = ((text.width - text.backdrop_padding_x * 2.0).max(20.0)
+        / (primary_fs * 0.58))
+        .max(3.0) as usize;
     let primary_lines = wrap_text_to_lines(&text.primary_text, max_primary_chars);
     for line in &primary_lines {
         content_markup.push_str(&format!(
@@ -728,7 +730,9 @@ pub fn build_text_preset_svg(
         if !subtitle.trim().is_empty() {
             let sub_fs = (text.font_size * 0.5).clamp(11.0, 48.0);
             let sub_line_h = sub_fs * 1.2;
-            let max_sub_chars = ((text.width - text.backdrop_padding_x * 2.0).max(20.0) / (sub_fs * 0.58)).max(3.0) as usize;
+            let max_sub_chars = ((text.width - text.backdrop_padding_x * 2.0).max(20.0)
+                / (sub_fs * 0.58))
+                .max(3.0) as usize;
             let sub_lines = wrap_text_to_lines(subtitle, max_sub_chars);
             for line in &sub_lines {
                 content_markup.push_str(&format!(
@@ -1216,7 +1220,11 @@ mod tests {
 
         let mut pixmap = Pixmap::new(1920, 1080).unwrap();
         let res = render_svg_to_pixmap(&svg, &mut pixmap);
-        assert!(res.is_ok(), "multiline text preset render failed: {:?}", res);
+        assert!(
+            res.is_ok(),
+            "multiline text preset render failed: {:?}",
+            res
+        );
     }
 
     #[test]

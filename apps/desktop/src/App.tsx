@@ -1,4 +1,5 @@
 import { useEffect } from "react"
+import { getCurrentWindow } from "@tauri-apps/api/window"
 import { AppShell } from "./app/app-shell"
 import { AppErrorBoundary } from "./components/error-boundary"
 import {
@@ -8,6 +9,7 @@ import {
   RegionPickerWindow,
 } from "./features/recorder"
 import { useRecorderPolling, useRecorderStatusEvents } from "./hooks/use-recorder"
+import { isTauri } from "./lib/settings"
 import { useRecorderStore } from "./stores/recorder-store"
 
 function BoundaryWindow() {
@@ -54,6 +56,22 @@ function App() {
       delete root.dataset.boundary
       delete root.dataset.countdown
       delete root.dataset.regionPicker
+    }
+  }, [isBoundary, isCountdown, isFloating, isRegionPicker])
+
+  // Reveal the main window smoothly on startup once React has mounted and the
+  // initial DOM/theme is ready. This eliminates any transparent/empty window flash.
+  useEffect(() => {
+    if (!isTauri()) return
+    const isAuxiliary = isFloating || isBoundary || isCountdown || isRegionPicker
+    if (!isAuxiliary) {
+      const animFrame = requestAnimationFrame(() => {
+        const appWindow = getCurrentWindow()
+        void appWindow.show().then(() => {
+          void appWindow.setFocus()
+        })
+      })
+      return () => cancelAnimationFrame(animFrame)
     }
   }, [isBoundary, isCountdown, isFloating, isRegionPicker])
 

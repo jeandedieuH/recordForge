@@ -371,7 +371,10 @@ pub fn escape_ffmetadata_value(val: &str) -> String {
 pub fn generate_ffmetadata(project_name: &str, chapters: &[RenderPlanChapter]) -> String {
     let mut meta = String::from(";FFMETADATA1\n");
     if !project_name.trim().is_empty() {
-        meta.push_str(&format!("title={}\n", escape_ffmetadata_value(project_name)));
+        meta.push_str(&format!(
+            "title={}\n",
+            escape_ffmetadata_value(project_name)
+        ));
     }
     for chapter in chapters {
         if chapter.end_ms <= chapter.start_ms {
@@ -381,7 +384,10 @@ pub fn generate_ffmetadata(project_name: &str, chapters: &[RenderPlanChapter]) -
         meta.push_str("TIMEBASE=1/1000\n");
         meta.push_str(&format!("START={}\n", chapter.start_ms));
         meta.push_str(&format!("END={}\n", chapter.end_ms));
-        meta.push_str(&format!("title={}\n", escape_ffmetadata_value(&chapter.title)));
+        meta.push_str(&format!(
+            "title={}\n",
+            escape_ffmetadata_value(&chapter.title)
+        ));
     }
     meta
 }
@@ -615,7 +621,8 @@ pub fn run_render_plan(
         write_caption_sidecar(&partial_path, &plan.captions)?;
     }
 
-    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty() {
+    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty()
+    {
         update_progress(
             &db,
             app,
@@ -654,7 +661,8 @@ pub fn run_render_plan(
             return Err(error);
         }
     }
-    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty() {
+    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty()
+    {
         let partial_sidecar = partial_path.with_extension("chapters.txt");
         let final_sidecar = output_path.with_extension("chapters.txt");
         if let Err(error) = crate::capture::disk::atomic_replace(&partial_sidecar, &final_sidecar) {
@@ -791,7 +799,8 @@ fn render_timeline_composition(
     } else {
         None
     };
-    let chapters_input_index = if (settings.chapter_mode == "embed" || settings.chapter_mode == "both")
+    let chapters_input_index = if (settings.chapter_mode == "embed"
+        || settings.chapter_mode == "both")
         && !plan.chapters.is_empty()
     {
         let meta_content = generate_ffmetadata(project_id, &plan.chapters);
@@ -1446,8 +1455,32 @@ fn render_timeline_composition(
             .arg("-i")
             .arg("-");
     }
+    let filter_script = filters.join(";\n");
+    let safe_project_id: String = project_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let filter_script_path = std::env::temp_dir().join(format!(
+        "rf-filtergraph-{}-{}.txt",
+        safe_project_id,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&filter_script_path, &filter_script)
+        .map_err(|err| InternalError::Storage(format!("write filtergraph script: {err}")))?;
+    temp_mask_guards.push(TempMaskFile(filter_script_path.clone()));
+
     command
-        .args(["-filter_complex", &filters.join(";")])
+        .arg("-filter_complex_script")
+        .arg(&filter_script_path)
         .args(["-map", &format!("[{current_label}]")]);
     if audio_labels.is_empty() {
         command.arg("-an");
@@ -1913,10 +1946,9 @@ impl RenderPlan {
             .captions
             .iter()
             .any(|caption| caption.start_ms >= caption.end_ms || caption.end_ms > self.duration_ms)
-            || self
-                .chapters
-                .iter()
-                .any(|chapter| chapter.start_ms >= chapter.end_ms || chapter.end_ms > self.duration_ms)
+            || self.chapters.iter().any(|chapter| {
+                chapter.start_ms >= chapter.end_ms || chapter.end_ms > self.duration_ms
+            })
             || self
                 .masks
                 .iter()
@@ -2318,13 +2350,13 @@ fn validate_canvas(canvas: &cursor::RenderCanvas) -> Result<()> {
     }
     if canvas
         .background_blur
-        .is_some_and(|b| !b.is_finite() || b < 0.0 || b > 200.0)
+        .is_some_and(|b| !b.is_finite() || !(0.0..=200.0).contains(&b))
     {
         return Err(InternalError::Media("render canvas background blur is invalid".into()).into());
     }
     if canvas
         .background_dim
-        .is_some_and(|d| !d.is_finite() || d < 0.0 || d > 1.0)
+        .is_some_and(|d| !d.is_finite() || !(0.0..=1.0).contains(&d))
     {
         return Err(InternalError::Media("render canvas background dim is invalid".into()).into());
     }
@@ -2414,7 +2446,7 @@ pub(crate) fn resolve_background_image(
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or(path_str);
-    let trimmed_leading = path_str.trim_start_matches(|c| c == '/' || c == '\\');
+    let trimmed_leading = path_str.trim_start_matches(['/', '\\']);
 
     let mut candidate_names = vec![filename.to_string(), trimmed_leading.to_string()];
     if !filename.contains('.') {
@@ -3769,5 +3801,32 @@ mod tests {
             range: None,
         };
         assert!(validate_export_settings(&settings, &p).is_err());
+    }
+
+    #[test]
+    fn test_large_filtergraph_script_generation_and_cleanup() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("rf-filtergraph-test.txt");
+
+        // Simulate a massive filter graph with multiple zoom equations exceeding 32KB
+        let mut filters = Vec::new();
+        for i in 0..500 {
+            filters.push(format!("[in{i}]scale=1920:1080,crop=w='if(gte(t,1.0),1920,1280)':h='if(gte(t,1.0),1080,720)':x=0:y=0[out{i}]"));
+        }
+        let filter_script = filters.join(";\n");
+        assert!(
+            filter_script.len() > 32_767,
+            "filter script must exceed Windows 32KB command line limit"
+        );
+
+        std::fs::write(&script_path, &filter_script).expect("write filter script");
+        assert!(script_path.exists());
+
+        {
+            let _guard = TempMaskFile(script_path.clone());
+            assert!(script_path.exists());
+        }
+        // Guard drop should remove the temp file
+        assert!(!script_path.exists());
     }
 }
