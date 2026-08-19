@@ -6,14 +6,19 @@ import type {
   MediaJob,
   ProjectExportSettings,
   RenderCaptionMode,
+  RenderChapterMode,
   TimelineCanvas,
+  TimelineMarker,
 } from "@recordforge/contracts"
+import { formatYouTubeChapters } from "@recordforge/editor-core"
 import {
   ArrowLeft,
+  Bookmark,
   Check,
   ChevronDown,
   ChevronUp,
   Cloud,
+  Copy,
   Film,
   FolderOpen,
   Pause,
@@ -42,6 +47,9 @@ interface ExportViewProps {
   exportSettings?: ProjectExportSettings
   captionMode?: RenderCaptionMode
   onCaptionModeChange?: (mode: RenderCaptionMode) => void
+  chapterMode?: RenderChapterMode
+  onChapterModeChange?: (mode: RenderChapterMode) => void
+  markers?: TimelineMarker[]
   onPresetChange?: (preset: ExportPreset) => void
   onCodecChange?: (codec: "h264" | "hevc") => void
   onEncoderChange?: (encoder: ExportEncoderPreference) => void
@@ -158,6 +166,9 @@ export function ExportView({
   exportSettings,
   captionMode = "burn-in",
   onCaptionModeChange,
+  chapterMode = "embed",
+  onChapterModeChange,
+  markers = [],
   onPresetChange,
   onCodecChange,
   onEncoderChange,
@@ -177,10 +188,27 @@ export function ExportView({
   )
   const [isStarting, setIsStarting] = useState(false)
   const [videoAccordionOpen, setVideoAccordionOpen] = useState(true)
+  const [chaptersAccordionOpen, setChaptersAccordionOpen] = useState(true)
   const [audioAccordionOpen, setAudioAccordionOpen] = useState(false)
+  const [copiedTimestamps, setCopiedTimestamps] = useState(false)
   const [rangeStart, setRangeStart] = useState(exportSettings?.range?.startMs ?? 0)
   const [rangeEnd, setRangeEnd] = useState(exportSettings?.range?.endMs ?? durationMs)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+
+  const youtubeChapterText = useMemo(() => {
+    return formatYouTubeChapters(markers, durationMs, projectName || "Intro")
+  }, [markers, durationMs, projectName])
+
+  async function handleCopyYouTubeChapters() {
+    if (!youtubeChapterText) return
+    try {
+      await navigator.clipboard.writeText(youtubeChapterText)
+      setCopiedTimestamps(true)
+      setTimeout(() => setCopiedTimestamps(false), 2000)
+    } catch {
+      // Ignore clipboard write failure
+    }
+  }
 
   useEffect(() => {
     const nextPreset = normalizePreset(exportSettings?.preset)
@@ -488,6 +516,92 @@ export function ExportView({
                 Canvas transforms, camera, cursor, captions, masks, audio fades, speed, and timeline
                 gaps are resolved from the saved project.
               </p>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="overflow-hidden rounded-xl border border-border bg-surface">
+          <button
+            type="button"
+            onClick={() => setChaptersAccordionOpen((previous) => !previous)}
+            className="flex w-full items-center justify-between p-4 text-xs font-bold uppercase tracking-wider text-muted-foreground hover:bg-overlay"
+          >
+            <span className="flex items-center gap-2 font-label">
+              <Bookmark className="size-4 text-primary" aria-hidden />
+              Chapters and Markers
+            </span>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-[10px] font-normal">
+                {markers.length} {markers.length === 1 ? "marker" : "markers"}
+              </Badge>
+              {chaptersAccordionOpen ? (
+                <ChevronUp className="size-4" />
+              ) : (
+                <ChevronDown className="size-4" />
+              )}
+            </div>
+          </button>
+          {chaptersAccordionOpen ? (
+            <div className="flex flex-col gap-5 border-t border-border p-5">
+              <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                Chapter delivery
+                <Select
+                  value={chapterMode}
+                  onValueChange={(value) => onChapterModeChange?.(value as RenderChapterMode)}
+                  disabled={isRunning}
+                >
+                  <SelectTrigger
+                    aria-label="Chapter export mode"
+                    className="border-border bg-background text-xs text-foreground"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="embed">Embed in MP4 metadata (Recommended)</SelectItem>
+                    <SelectItem value="sidecar">Write YouTube chapter file (.chapters.txt)</SelectItem>
+                    <SelectItem value="both">Embed MP4 & write YouTube chapter file</SelectItem>
+                    <SelectItem value="none">Do not export chapters</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+
+              {youtubeChapterText ? (
+                <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-3.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-foreground">
+                      YouTube Timestamps
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1.5 text-xs"
+                      onClick={() => void handleCopyYouTubeChapters()}
+                    >
+                      {copiedTimestamps ? (
+                        <>
+                          <Check className="size-3.5 text-success" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="size-3.5" />
+                          <span>Copy timestamps</span>
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  <pre className="max-h-36 overflow-y-auto whitespace-pre-wrap rounded border border-border/60 bg-background p-2.5 font-mono text-[11px] text-subtle-foreground select-text">
+                    {youtubeChapterText}
+                  </pre>
+                  <p className="text-[11px] text-muted-foreground">
+                    Paste these timestamps into your YouTube video description to enable YouTube video chapters.
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-border bg-surface-dim p-3.5 text-xs text-subtle-foreground">
+                  No markers found on timeline. Add markers (using the Marker tool or &quot;M&quot; shortcut) to generate chapter marks and YouTube timestamps.
+                </div>
+              )}
             </div>
           ) : null}
         </div>

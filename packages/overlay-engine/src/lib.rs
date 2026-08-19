@@ -435,4 +435,107 @@ mod tests {
         let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
         assert!(non_transparent, "text preset renders to pixmap");
     }
+
+    #[test]
+    #[cfg(feature = "native-render")]
+    fn renders_multiline_text_and_annotations_to_pixmap() {
+        let text_item = OverlayItem::Text {
+            base: OverlayItemBase {
+                id: "text-multiline-1".to_string(),
+                start_ms: 0,
+                end_ms: 5000,
+                transform: OverlayTransform {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 500.0,
+                    height: 220.0,
+                    z_index: 10,
+                    ..Default::default()
+                },
+                animation: OverlayAnimation::default(),
+                enabled: true,
+            },
+            details: TextDetails {
+                preset_id: "solid-title".to_string(),
+                category: "title".to_string(),
+                primary_text: "Line 1 Main Title\nLine 2 Main Title\nLine 3 Main Title".to_string(),
+                secondary_text: Some("Subtitle Line 1\nSubtitle Line 2".to_string()),
+                tag_text: Some("FEATURE".to_string()),
+                alignment: "left".to_string(),
+                font_family: "sans".to_string(),
+                font_size: 28.0,
+                font_weight: "700".to_string(),
+                text_color: "#ffffff".to_string(),
+                secondary_text_color: "#94a3b8".to_string(),
+                accent_color: "#38bdf8".to_string(),
+                backdrop_style: "solid".to_string(),
+                backdrop_color: "#0f172a".to_string(),
+                backdrop_opacity: 0.9,
+                backdrop_blur: 0.0,
+                backdrop_border_radius: 12.0,
+                backdrop_padding_x: 20.0,
+                backdrop_padding_y: 16.0,
+                shadow_enabled: false,
+                shadow_color: "#000000".to_string(),
+                shadow_blur: 0.0,
+            },
+        };
+
+        let callout_item = OverlayItem::Annotation {
+            base: OverlayItemBase {
+                id: "callout-multiline-1".to_string(),
+                start_ms: 0,
+                end_ms: 5000,
+                transform: OverlayTransform {
+                    x: 650.0,
+                    y: 100.0,
+                    width: 320.0,
+                    height: 180.0,
+                    z_index: 11,
+                    ..Default::default()
+                },
+                animation: OverlayAnimation::default(),
+                enabled: true,
+            },
+            details: AnnotationDetails {
+                annotation_type: "callout".to_string(),
+                end_x: None,
+                end_y: None,
+                stroke_color: "#38bdf8".to_string(),
+                stroke_width: 3.0,
+                stroke_style: "solid".to_string(),
+                fill_color: "#0f172a".to_string(),
+                fill_opacity: 0.9,
+                corner_radius: 12.0,
+                arrow_end_head: "none".to_string(),
+                arrow_start_head: "none".to_string(),
+                shadow_enabled: false,
+                shadow_color: "#000000".to_string(),
+                shadow_blur: 0.0,
+                text: Some("Callout Line 1\nCallout Line 2\nCallout Line 3".to_string()),
+                text_color: "#ffffff".to_string(),
+                font_size: 16.0,
+            },
+        };
+
+        let plan = OverlayRenderPlan {
+            version: 1,
+            canvas: OverlayCanvas {
+                width: 1920,
+                height: 1080,
+            },
+            items: vec![text_item, callout_item],
+            assets: Vec::new(),
+            fonts: Vec::new(),
+        };
+
+        let engine = OverlayEngine::from_render_plan(plan).expect("plan is valid");
+        let mut pixmap = tiny_skia::Pixmap::new(1920, 1080).expect("create pixmap");
+        engine
+            .render_to_pixmap(1000, &mut pixmap)
+            .expect("render multiline items succeeds");
+
+        let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(non_transparent, "multiline items render to pixmap");
+    }
 }

@@ -149,8 +149,8 @@ export type ClipTransform = z.infer<typeof clipTransformSchema>
 // generated suggestions from user-authored ranges.
 export const manualZoomSegmentSchema = z.object({
   id: z.string(),
-  startMs: z.number().int().min(0),
-  durationMs: z.number().int().min(1),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  durationMs: z.number().transform(Math.round).pipe(z.number().int().min(1)),
   target: zoomTargetSchema,
   scale: z.number().min(1).max(8).default(1.5),
   easing: zoomEasingSchema.default("smooth"),
@@ -176,10 +176,10 @@ export const timelineClipBaseSchema = z.object({
   assetId: z.string(),
   // Stream index keeps multiplexed video and audio sources independently editable.
   streamIndex: z.number().int().min(0).optional(),
-  startMs: z.number().int().min(0),
-  durationMs: z.number().int().min(0),
-  sourceInMs: z.number().int().min(0),
-  sourceOutMs: z.number().int().min(0),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  durationMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  sourceOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   speed: z.number().positive().default(1),
 })
 
@@ -567,7 +567,7 @@ export type TimelineTrack = z.infer<typeof timelineTrackSchema>
 // Marker / chapter point on the timeline.
 export const timelineMarkerSchema = z.object({
   id: z.string(),
-  timeMs: z.number().int().min(0),
+  timeMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   label: z.string(),
   color: z.string().default("#f59e0b"),
 })
@@ -637,12 +637,27 @@ export type ExportRange = z.infer<typeof exportRangeSchema>
 export const exportEncoderSchema = z.enum(["auto", "software"])
 export type ExportEncoderPreference = z.infer<typeof exportEncoderSchema>
 
+// Chapter export mode for embedding MP4 chapters or writing a YouTube timestamp sidecar.
+export const renderChapterModeSchema = z.enum(["embed", "sidecar", "both", "none"])
+export type RenderChapterMode = z.infer<typeof renderChapterModeSchema>
+export const exportChapterModeSchema = renderChapterModeSchema
+export type ExportChapterMode = RenderChapterMode
+
+export const renderPlanChapterSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().positive(),
+})
+export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
+
 export const exportSettingsSchema = z.object({
   preset: exportPresetSchema.default("default-mp4"),
   codec: z.enum(["h264", "hevc"]).default("h264"),
   encoder: exportEncoderSchema.default("auto"),
   container: z.literal("mp4").default("mp4"),
   captionMode: renderCaptionModeSchema.default("burn-in"),
+  chapterMode: renderChapterModeSchema.default("embed"),
   range: exportRangeSchema.nullish(),
 })
 export type ExportSettings = z.infer<typeof exportSettingsSchema>
@@ -884,6 +899,8 @@ export const renderPlanSchema = z
     overlays: z.array(renderPlanOverlaySchema).default([]),
     captions: z.array(renderPlanCaptionSchema).default([]),
     captionMode: renderCaptionModeSchema.default("burn-in"),
+    chapters: z.array(renderPlanChapterSchema).default([]),
+    chapterMode: renderChapterModeSchema.default("embed"),
     masks: z.array(renderPlanMaskSchema).default([]),
     zoomSegments: z.array(renderPlanZoomSegmentSchema).default([]),
     cursorEffects: z.array(renderPlanCursorEffectSchema).default([]),
@@ -941,6 +958,7 @@ export const renderPlanSchema = z
     }
     for (const [key, effects] of [
       ["captions", plan.captions],
+      ["chapters", plan.chapters],
       ["masks", plan.masks],
       ["zoomSegments", plan.zoomSegments],
     ] as const) {

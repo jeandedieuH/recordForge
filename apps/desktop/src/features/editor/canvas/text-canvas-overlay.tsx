@@ -139,7 +139,7 @@ export function TextCanvasOverlay({
               {/* Primary Main Title */}
               <div
                 className={cn(
-                  "font-bold leading-tight drop-shadow-sm",
+                  "font-bold leading-tight drop-shadow-sm whitespace-pre-wrap break-words",
                   clip.fontFamily === "serif" && "font-serif",
                   clip.fontFamily === "mono" && "font-mono",
                 )}
@@ -156,7 +156,7 @@ export function TextCanvasOverlay({
               {clip.secondaryText ? (
                 <div
                   className={cn(
-                    "mt-1 opacity-90 leading-snug",
+                    "mt-1 opacity-90 leading-snug whitespace-pre-wrap break-words",
                     clip.fontFamily === "serif" && "font-serif",
                     clip.fontFamily === "mono" && "font-mono",
                   )}

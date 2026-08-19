@@ -13,13 +13,13 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  Input,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
   Switch,
+  Textarea,
   ToggleGroup,
   ToggleGroupItem,
   cn,
@@ -375,12 +375,12 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
         <InspectorSection title="Text Content">
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             <span>Label / Note Text</span>
-            <Input
-              type="text"
+            <Textarea
               value={clip.text ?? ""}
               onChange={(e) => onChange({ text: e.target.value })}
               placeholder="Enter callout text..."
-              className="h-8 text-xs font-medium"
+              rows={3}
+              className="min-h-16 text-xs font-medium resize-y"
             />
           </label>
 

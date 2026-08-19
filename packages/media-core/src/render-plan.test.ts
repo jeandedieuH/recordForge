@@ -845,4 +845,42 @@ describe("render-plan", () => {
       expect.objectContaining({ id: "asset-logo", kind: "image", width: 400, height: 120 }),
     ])
   })
+
+  it("builds contiguous chapters from timeline markers and respects chapterMode", () => {
+    const state = makeTimeline()
+    state.markers = [
+      { id: "m1", timeMs: 5_000, label: "Topic A", color: "#f59e0b" },
+      { id: "m2", timeMs: 12_000, label: "Topic B", color: "#f59e0b" },
+    ]
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      chapterMode: "both",
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.chapterMode).toBe("both")
+    expect(plan.value.chapters).toEqual([
+      {
+        id: "chapter-intro",
+        title: "Test",
+        startMs: 0,
+        endMs: 5_000,
+      },
+      {
+        id: "m1",
+        title: "Topic A",
+        startMs: 5_000,
+        endMs: 12_000,
+      },
+      {
+        id: "m2",
+        title: "Topic B",
+        startMs: 12_000,
+        endMs: 20_000,
+      },
+    ])
+  })
 })

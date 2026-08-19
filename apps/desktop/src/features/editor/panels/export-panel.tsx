@@ -1,5 +1,6 @@
-import { getTotalDuration } from "@recordforge/editor-core"
-import { FileOutput } from "lucide-react"
+import { useState } from "react"
+import { formatYouTubeChapters, getTotalDuration } from "@recordforge/editor-core"
+import { Bookmark, Check, Copy, FileOutput } from "lucide-react"
 import { Badge, Button, EmptyState } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useEditorStore } from "../../../stores/editor-store"
@@ -13,10 +14,32 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
   const recording = useTimelineStore((state) => state.recording)
   const missingAssets = useTimelineStore((state) => state.missingAssets)
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
+  const chapterMode = useTimelineStore(
+    (state) => state.project?.exportSettings.chapterMode ?? "embed",
+  )
   const saveStatus = useEditorStore((state) => state.saveStatus)
+  const [copiedTimestamps, setCopiedTimestamps] = useState(false)
 
   const durationMs = timeline ? getTotalDuration(timeline) : 0
   const isExporting = activeExportJob?.status === "running" || activeExportJob?.status === "pending"
+  const markerCount = timeline?.markers?.length ?? 0
+
+  async function handleCopyYouTubeChapters() {
+    if (!timeline || markerCount === 0) return
+    const text = formatYouTubeChapters(
+      timeline.markers,
+      durationMs,
+      recording?.name ?? timeline.name,
+    )
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedTimestamps(true)
+      setTimeout(() => setCopiedTimestamps(false), 2000)
+    } catch {
+      // Ignore clipboard error
+    }
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
@@ -38,6 +61,12 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
             <span className="font-mono tabular-nums text-foreground">
               {formatDuration(durationMs)}
             </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-subtle-foreground">Chapters / Markers</span>
+            <Badge variant="outline">
+              {markerCount} {markerCount === 1 ? "marker" : "markers"}
+            </Badge>
           </div>
           <div className="flex items-center justify-between">
             <span className="text-subtle-foreground">Preset</span>
@@ -66,6 +95,40 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
           className="border border-dashed border-border bg-surface-dim p-4"
         />
       )}
+
+      {markerCount > 0 ? (
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 font-medium text-foreground">
+              <Bookmark className="size-3.5 text-primary" />
+              YouTube Timestamps
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 gap-1 px-2 text-[11px]"
+              onClick={() => void handleCopyYouTubeChapters()}
+            >
+              {copiedTimestamps ? (
+                <>
+                  <Check className="size-3 text-success" />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="size-3" />
+                  <span>Copy</span>
+                </>
+              )}
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {chapterMode === "none"
+              ? "Chapters disabled in export settings."
+              : `Configured for ${chapterMode === "both" ? "embed & sidecar" : chapterMode}.`}
+          </p>
+        </div>
+      ) : null}
 
       {missingAssets.length > 0 ? (
         <div

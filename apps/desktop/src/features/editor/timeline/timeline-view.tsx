@@ -1302,7 +1302,8 @@ export function TimelineView({
   }
 
   function addMarkerAtTime(timeMs: number) {
-    execute(createAddMarkerCommand(timeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`))
+    const roundedTimeMs = Math.max(0, Math.round(timeMs))
+    execute(createAddMarkerCommand(roundedTimeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`))
   }
 
   function cycleTrackHeight(track: TimelineTrack) {

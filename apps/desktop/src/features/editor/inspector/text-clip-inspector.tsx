@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
   Switch,
+  Textarea,
   ToggleGroup,
   ToggleGroupItem,
   cn,
@@ -186,23 +187,23 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
       <InspectorSection title="Text Content">
         <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
           <span>Primary Title</span>
-          <Input
-            type="text"
+          <Textarea
             value={clip.primaryText}
             onChange={(e) => onChange({ primaryText: e.target.value })}
             placeholder="Main Title..."
-            className="h-8 text-xs font-bold"
+            rows={2}
+            className="min-h-14 text-xs font-bold resize-y"
           />
         </label>
 
         <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
           <span>Subtitle / Description</span>
-          <Input
-            type="text"
+          <Textarea
             value={clip.secondaryText ?? ""}
             onChange={(e) => onChange({ secondaryText: e.target.value })}
             placeholder="Subtitle text (optional)..."
-            className="h-8 text-xs"
+            rows={2}
+            className="min-h-14 text-xs resize-y"
           />
         </label>
 

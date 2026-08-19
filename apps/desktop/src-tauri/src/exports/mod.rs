@@ -51,6 +51,16 @@ pub struct RenderPlanGap {
     pub end_ms: u64,
 }
 
+/// A single chapter span in the final export.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanChapter {
+    pub id: String,
+    pub title: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
 /// Render plan sent from the TypeScript timeline editor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -66,6 +76,10 @@ pub struct RenderPlan {
     pub captions: Vec<RenderPlanCaption>,
     #[serde(default = "default_caption_mode")]
     pub caption_mode: String,
+    #[serde(default)]
+    pub chapters: Vec<RenderPlanChapter>,
+    #[serde(default = "default_chapter_mode")]
+    pub chapter_mode: String,
     #[serde(default)]
     pub masks: Vec<RenderPlanMask>,
     #[serde(default)]
@@ -310,6 +324,8 @@ pub struct ExportSettings {
     pub container: String,
     #[serde(default = "default_caption_mode")]
     pub caption_mode: String,
+    #[serde(default = "default_chapter_mode")]
+    pub chapter_mode: String,
     #[serde(default)]
     pub range: Option<ExportRange>,
 }
@@ -328,6 +344,66 @@ fn default_export_encoder() -> String {
 
 fn default_export_container() -> String {
     "mp4".into()
+}
+
+fn default_chapter_mode() -> String {
+    "embed".into()
+}
+
+pub fn escape_ffmetadata_value(val: &str) -> String {
+    let mut escaped = String::with_capacity(val.len());
+    for ch in val.chars() {
+        match ch {
+            '=' | ';' | '#' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            '\n' => {
+                escaped.push_str("\\\n");
+            }
+            '\r' => {}
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+pub fn generate_ffmetadata(project_name: &str, chapters: &[RenderPlanChapter]) -> String {
+    let mut meta = String::from(";FFMETADATA1\n");
+    if !project_name.trim().is_empty() {
+        meta.push_str(&format!("title={}\n", escape_ffmetadata_value(project_name)));
+    }
+    for chapter in chapters {
+        if chapter.end_ms <= chapter.start_ms {
+            continue;
+        }
+        meta.push_str("\n[CHAPTER]\n");
+        meta.push_str("TIMEBASE=1/1000\n");
+        meta.push_str(&format!("START={}\n", chapter.start_ms));
+        meta.push_str(&format!("END={}\n", chapter.end_ms));
+        meta.push_str(&format!("title={}\n", escape_ffmetadata_value(&chapter.title)));
+    }
+    meta
+}
+
+pub fn generate_youtube_chapters(chapters: &[RenderPlanChapter]) -> String {
+    let max_time = chapters.iter().map(|c| c.end_ms).max().unwrap_or(0);
+    let force_hours = max_time >= 3_600_000;
+    let mut lines = Vec::with_capacity(chapters.len());
+    for chapter in chapters {
+        let total_seconds = chapter.start_ms / 1000;
+        let hours = total_seconds / 3600;
+        let minutes = (total_seconds % 3600) / 60;
+        let seconds = total_seconds % 60;
+        let stamp = if hours > 0 || force_hours {
+            format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+        } else {
+            format!("{:02}:{:02}", minutes, seconds)
+        };
+        let sanitized_title = chapter.title.replace(['\r', '\n'], " ");
+        lines.push(format!("{} {}", stamp, sanitized_title.trim()));
+    }
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -539,6 +615,21 @@ pub fn run_render_plan(
         write_caption_sidecar(&partial_path, &plan.captions)?;
     }
 
+    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty() {
+        update_progress(
+            &db,
+            app,
+            job_id,
+            0.87,
+            "chapters",
+            Some("writing chapter sidecar"),
+        )?;
+        let sidecar_content = generate_youtube_chapters(&plan.chapters);
+        let sidecar_path = partial_path.with_extension("chapters.txt");
+        std::fs::write(&sidecar_path, sidecar_content.as_bytes())
+            .map_err(|err| InternalError::Storage(format!("write chapter sidecar: {err}")))?;
+    }
+
     update_progress(
         &db,
         app,
@@ -557,6 +648,15 @@ pub fn run_render_plan(
     if plan.caption_mode == "sidecar" {
         let partial_sidecar = partial_path.with_extension("srt");
         let final_sidecar = output_path.with_extension("srt");
+        if let Err(error) = crate::capture::disk::atomic_replace(&partial_sidecar, &final_sidecar) {
+            let _ = std::fs::remove_file(output_path);
+            let _ = std::fs::remove_file(&final_sidecar);
+            return Err(error);
+        }
+    }
+    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty() {
+        let partial_sidecar = partial_path.with_extension("chapters.txt");
+        let final_sidecar = output_path.with_extension("chapters.txt");
         if let Err(error) = crate::capture::disk::atomic_replace(&partial_sidecar, &final_sidecar) {
             let _ = std::fs::remove_file(output_path);
             let _ = std::fs::remove_file(&final_sidecar);
@@ -687,6 +787,20 @@ fn render_timeline_composition(
     let bg_input_index = if let Some(bg_path) = &bg_image_path {
         let idx = input_assets.len();
         input_assets.push(("canvas:background".to_string(), bg_path.clone()));
+        Some(idx)
+    } else {
+        None
+    };
+    let chapters_input_index = if (settings.chapter_mode == "embed" || settings.chapter_mode == "both")
+        && !plan.chapters.is_empty()
+    {
+        let meta_content = generate_ffmetadata(project_id, &plan.chapters);
+        let meta_path = std::env::temp_dir().join(format!("rf-chapters-{}.ffmeta", project_id));
+        std::fs::write(&meta_path, meta_content.as_bytes())
+            .map_err(|err| InternalError::Storage(format!("write ffmetadata: {err}")))?;
+        let idx = input_assets.len();
+        input_assets.push(("meta:chapters".to_string(), meta_path.clone()));
+        temp_mask_guards.push(TempMaskFile(meta_path));
         Some(idx)
     } else {
         None
@@ -1351,6 +1465,9 @@ fn render_timeline_composition(
     if !audio_labels.is_empty() {
         command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
     }
+    if let Some(idx) = chapters_input_index {
+        command.args(["-map_chapters", &idx.to_string()]);
+    }
     command
         .arg("-shortest")
         .args(["-movflags", "+faststart"])
@@ -1797,6 +1914,10 @@ impl RenderPlan {
             .iter()
             .any(|caption| caption.start_ms >= caption.end_ms || caption.end_ms > self.duration_ms)
             || self
+                .chapters
+                .iter()
+                .any(|chapter| chapter.start_ms >= chapter.end_ms || chapter.end_ms > self.duration_ms)
+            || self
                 .masks
                 .iter()
                 .any(|mask| mask.start_ms >= mask.end_ms || mask.end_ms > self.duration_ms)
@@ -1846,6 +1967,18 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
     if settings.caption_mode != plan.caption_mode {
         return Err(InternalError::Media(
             "export caption settings do not match the render plan".into(),
+        )
+        .into());
+    }
+    if !matches!(
+        settings.chapter_mode.as_str(),
+        "embed" | "sidecar" | "both" | "none"
+    ) {
+        return Err(InternalError::Media("export chapter mode is unsupported".into()).into());
+    }
+    if settings.chapter_mode != plan.chapter_mode {
+        return Err(InternalError::Media(
+            "export chapter settings do not match the render plan".into(),
         )
         .into());
     }
@@ -2144,6 +2277,7 @@ pub(crate) fn cleanup_export_files(output_path: &Path) {
     let _ = std::fs::remove_file(&partial);
     let _ = std::fs::remove_file(cursor_partial_output_path(output_path));
     let _ = std::fs::remove_file(partial.with_extension("srt"));
+    let _ = std::fs::remove_file(partial.with_extension("chapters.txt"));
     let _ = std::fs::remove_file(cursor_partial_output_path(&partial));
 }
 
@@ -2838,6 +2972,8 @@ mod tests {
             overlays: Vec::new(),
             captions: Vec::new(),
             caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
             masks: Vec::new(),
             zoom_segments: Vec::new(),
             cursor_effects: Vec::new(),
@@ -3120,6 +3256,7 @@ mod tests {
                 encoder: "auto".into(),
                 container: "mp4".into(),
                 caption_mode: "burn-in".into(),
+                chapter_mode: "embed".into(),
                 range: None,
             };
             assert!(validate_export_settings(&settings, &plan).is_ok());
@@ -3130,6 +3267,7 @@ mod tests {
             encoder: "software".into(),
             container: "mp4".into(),
             caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
             range: None,
         };
         assert_eq!(audio_bitrate(&settings_4k), "192k");
@@ -3144,6 +3282,7 @@ mod tests {
             encoder: "nvenc".into(),
             container: "mp4".into(),
             caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
             range: None,
         };
         assert!(validate_export_settings(&settings, &plan).is_err());
@@ -3508,5 +3647,127 @@ mod tests {
         let circle_bytes = circle_png.unwrap();
         assert!(!circle_bytes.is_empty());
         assert_eq!(&circle_bytes[0..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn test_generate_ffmetadata_and_escaping() {
+        let chapters = vec![
+            RenderPlanChapter {
+                id: "c1".into(),
+                title: "Intro = Section; #1 \\ Test".into(),
+                start_ms: 0,
+                end_ms: 5000,
+            },
+            RenderPlanChapter {
+                id: "c2".into(),
+                title: "Part 2\nDetails".into(),
+                start_ms: 5000,
+                end_ms: 15000,
+            },
+        ];
+        let meta = generate_ffmetadata("My Project #1", &chapters);
+        assert!(meta.starts_with(";FFMETADATA1\n"));
+        assert!(meta.contains("title=My Project \\#1"));
+        assert!(meta.contains("[CHAPTER]"));
+        assert!(meta.contains("START=0\nEND=5000\ntitle=Intro \\= Section\\; \\#1 \\\\ Test"));
+        assert!(meta.contains("START=5000\nEND=15000\ntitle=Part 2\\\nDetails"));
+    }
+
+    #[test]
+    fn test_generate_youtube_chapters() {
+        let chapters = vec![
+            RenderPlanChapter {
+                id: "c1".into(),
+                title: "Intro".into(),
+                start_ms: 0,
+                end_ms: 75000,
+            },
+            RenderPlanChapter {
+                id: "c2".into(),
+                title: "Feature Demo".into(),
+                start_ms: 75000,
+                end_ms: 180000,
+            },
+        ];
+        let yt = generate_youtube_chapters(&chapters);
+        assert_eq!(yt, "00:00 Intro\n01:15 Feature Demo");
+
+        let long_chapters = vec![
+            RenderPlanChapter {
+                id: "c1".into(),
+                title: "Start".into(),
+                start_ms: 0,
+                end_ms: 3600000,
+            },
+            RenderPlanChapter {
+                id: "c2".into(),
+                title: "One hour in".into(),
+                start_ms: 3725000,
+                end_ms: 4000000,
+            },
+        ];
+        let long_yt = generate_youtube_chapters(&long_chapters);
+        assert_eq!(long_yt, "00:00:00 Start\n01:02:05 One hour in");
+    }
+
+    #[test]
+    fn test_validate_plan_with_chapters() {
+        let mut plan = valid_plan();
+        plan.chapters = vec![
+            RenderPlanChapter {
+                id: "c1".into(),
+                title: "Intro".into(),
+                start_ms: 0,
+                end_ms: 1500,
+            },
+            RenderPlanChapter {
+                id: "c2".into(),
+                title: "Outro".into(),
+                start_ms: 1500,
+                end_ms: 3000,
+            },
+        ];
+        assert!(plan.validate().is_ok());
+
+        // Invalid: end_ms > duration_ms
+        plan.chapters[1].end_ms = 4000;
+        assert!(plan.validate().is_err());
+
+        // Invalid: start_ms >= end_ms
+        plan.chapters[1].start_ms = 4000;
+        plan.chapters[1].end_ms = 3000;
+        assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_export_settings_chapter_modes() {
+        let plan = valid_plan();
+        for mode in ["embed", "sidecar", "both", "none"] {
+            let mut p = plan.clone();
+            p.chapter_mode = mode.into();
+            let settings = ExportSettings {
+                preset: "default-mp4".into(),
+                codec: "h264".into(),
+                encoder: "auto".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: mode.into(),
+                range: None,
+            };
+            assert!(validate_export_settings(&settings, &p).is_ok());
+        }
+
+        let mut p = plan.clone();
+        p.chapter_mode = "embed".into();
+        let settings = ExportSettings {
+            preset: "default-mp4".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "invalid_mode".into(),
+            range: None,
+        };
+        assert!(validate_export_settings(&settings, &p).is_err());
     }
 }

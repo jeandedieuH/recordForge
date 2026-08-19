@@ -215,6 +215,7 @@ mod tests {
             encoder: encoder.into(),
             container: "mp4".into(),
             caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
             range: None,
         }
     }

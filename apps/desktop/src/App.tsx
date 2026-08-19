@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 import { AppShell } from "./app/app-shell"
+import { AppErrorBoundary } from "./components/error-boundary"
 import {
   CaptureBoundaryOverlay,
   CountdownWindow,
@@ -56,10 +57,21 @@ function App() {
     }
   }, [isBoundary, isCountdown, isFloating, isRegionPicker])
 
-  if (isCountdown) return <CountdownWindow />
-  if (isBoundary) return <BoundaryWindow />
-  if (isRegionPicker) return <RegionPickerWindow />
-  return isFloating ? <FloatingControls /> : <AppShell />
+  return (
+    <AppErrorBoundary>
+      {isCountdown ? (
+        <CountdownWindow />
+      ) : isBoundary ? (
+        <BoundaryWindow />
+      ) : isRegionPicker ? (
+        <RegionPickerWindow />
+      ) : isFloating ? (
+        <FloatingControls />
+      ) : (
+        <AppShell />
+      )}
+    </AppErrorBoundary>
+  )
 }
 
 export default App

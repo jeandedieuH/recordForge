@@ -1,5 +1,7 @@
+use std::str::FromStr;
+
 use tauri::Manager;
-use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use crate::capture::manifest::RecorderState;
 use crate::errors::{InternalError, Result};
@@ -9,17 +11,11 @@ fn map_tauri_err(e: tauri::Error) -> InternalError {
     InternalError::Unknown(format!("{e:?}"))
 }
 
-fn map_shortcut_err(e: tauri_plugin_global_shortcut::Error) -> InternalError {
-    InternalError::Unknown(format!("{e:?}"))
-}
-
 /// Register global shortcuts for common recorder actions.
 pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
     app.handle()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcuts(["ctrl+shift+r", "ctrl+shift+p", "ctrl+shift+m"])
-                .map_err(map_shortcut_err)?
                 .with_handler(|app, shortcut, event| {
                     if event.state == ShortcutState::Pressed {
                         if shortcut.matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyR) {
@@ -38,6 +34,33 @@ pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
                 .build(),
         )
         .map_err(map_tauri_err)?;
+
+    // Register shortcuts individually so a conflict on one shortcut (e.g. key already registered
+    // by another running application or instance) does not prevent other shortcuts or the app from working.
+    let global_shortcut = app.global_shortcut();
+    for shortcut_str in ["ctrl+shift+r", "ctrl+shift+p", "ctrl+shift+m"] {
+        match Shortcut::from_str(shortcut_str) {
+            Ok(shortcut) => {
+                if let Err(err) = global_shortcut.register(shortcut) {
+                    tracing::warn!(
+                        shortcut = shortcut_str,
+                        error = ?err,
+                        "failed to register global shortcut (may already be in use by another application)"
+                    );
+                } else {
+                    tracing::debug!(shortcut = shortcut_str, "registered global shortcut");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    shortcut = shortcut_str,
+                    error = ?err,
+                    "failed to parse global shortcut definition"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -144,7 +144,7 @@ export type RecordingCompleted = z.infer<typeof recordingCompletedSchema>
 export const recordingMarkerSchema = z.object({
   id: z.string(),
   label: z.string(),
-  timestampMs: z.number().int().min(0),
+  timestampMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   createdAt: z.string().datetime({ offset: true }),
 })
 

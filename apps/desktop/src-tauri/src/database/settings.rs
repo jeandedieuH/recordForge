@@ -9,6 +9,8 @@ const ALLOWED_KEYS: &[&str] = &[
     "windowTransparency",
     "countdownSeconds",
     "startMinimized",
+    "minimizeToTray",
+    "defaultOutputFolder",
     "sidebarCollapsed",
     "hardwareCheckDone",
     "cursorPresets",
@@ -52,6 +54,8 @@ mod tests {
     fn test_allowed_keys_includes_recording_preferences() {
         assert!(validate_key("recordingPreferences").is_ok());
         assert!(validate_key("theme").is_ok());
+        assert!(validate_key("minimizeToTray").is_ok());
+        assert!(validate_key("defaultOutputFolder").is_ok());
         assert!(validate_key("invalidKey").is_err());
     }
 

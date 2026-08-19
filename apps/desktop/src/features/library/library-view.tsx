@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
+import { join } from "@tauri-apps/api/path"
 import { LayoutGrid, List } from "lucide-react"
 import { Button, Input } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
+import { getSetting, isTauri } from "../../lib/settings"
 import { useRecorderStore } from "../../stores/recorder-store"
 import { useEditorStore } from "../../stores/editor-store"
 import { useJobsStore } from "../../stores/jobs-store"
@@ -76,9 +78,20 @@ export function LibraryView() {
 
   async function handleExport(recording: LibraryRecording) {
     try {
+      let defaultPath = recording.name
+      if (isTauri()) {
+        const defaultFolder = await getSetting("defaultOutputFolder").catch(() => null)
+        if (defaultFolder) {
+          try {
+            defaultPath = await join(defaultFolder, recording.name)
+          } catch {
+            defaultPath = `${defaultFolder}\\${recording.name}`
+          }
+        }
+      }
       const outputPath = await save({
         title: "Export recording",
-        defaultPath: recording.name,
+        defaultPath,
         filters: [{ name: "MP4", extensions: ["mp4"] }],
       })
       if (!outputPath) return

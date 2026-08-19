@@ -281,6 +281,50 @@ fn escape_xml(input: &str) -> String {
 }
 
 #[cfg(test)]
+fn wrap_text_to_lines(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let max_len = max_chars.max(1);
+
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim_end_matches('\r');
+        if trimmed.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        if words.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        for word in words {
+            if current.is_empty() {
+                current = word.to_string();
+                continue;
+            }
+            if current.chars().count() + 1 + word.chars().count() <= max_len {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(current);
+                current = word.to_string();
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+
+    if lines.is_empty() {
+        vec![text.to_string()]
+    } else {
+        lines
+    }
+}
+
+#[cfg(test)]
 fn stroke_dasharray_attr(style: &str, _width: f64) -> &'static str {
     match style {
         "dashed" => " stroke-dasharray=\"8 6\"",
@@ -441,14 +485,35 @@ pub fn build_annotation_svg(
                 fill_op = ann.fill_opacity.max(0.85),
             );
             let text_elem = if let Some(text) = &ann.text {
-                format!(
-                    r##"<text x="{tx}" y="{ty}" fill="{tc}" font-family="sans-serif" font-size="{fs}" font-weight="600" text-anchor="middle" dominant-baseline="central">{txt}</text>"##,
-                    tx = x + w / 2.0,
-                    ty = y + h / 2.0,
-                    tc = ann.text_color,
-                    fs = ann.font_size.clamp(10.0, 72.0),
-                    txt = escape_xml(text),
-                )
+                let fs = ann.font_size.clamp(10.0, 72.0);
+                let padding = fs * 1.5;
+                let max_chars = ((w - padding).max(20.0) / (fs * 0.58)).max(3.0) as usize;
+                let lines = wrap_text_to_lines(text, max_chars);
+                if lines.is_empty() {
+                    String::new()
+                } else {
+                    let line_h = fs * 1.25;
+                    let total_h = (lines.len().saturating_sub(1) as f64) * line_h;
+                    let start_y = y + h / 2.0 - total_h / 2.0;
+                    let mut tspans = String::new();
+                    for (idx, line) in lines.iter().enumerate() {
+                        let dy = if idx == 0 { 0.0 } else { line_h };
+                        tspans.push_str(&format!(
+                            r##"<tspan x="{tx}" dy="{dy}">{txt}</tspan>"##,
+                            tx = x + w / 2.0,
+                            dy = dy,
+                            txt = escape_xml(line),
+                        ));
+                    }
+                    format!(
+                        r##"<text x="{tx}" y="{ty}" fill="{tc}" font-family="sans-serif" font-size="{fs}" font-weight="600" text-anchor="middle" dominant-baseline="central">{tspans}</text>"##,
+                        tx = x + w / 2.0,
+                        ty = start_y,
+                        tc = ann.text_color,
+                        fs = fs,
+                        tspans = tspans,
+                    )
+                }
             } else {
                 String::new()
             };
@@ -492,14 +557,35 @@ pub fn build_annotation_svg(
                 filter_attr = filter_attr,
             );
             let text_elem = if let Some(text) = &ann.text {
-                format!(
-                    r##"<text x="{tx}" y="{ty}" fill="{tc}" font-family="sans-serif" font-size="{fs}" font-weight="700" text-anchor="middle" dominant-baseline="central">{txt}</text>"##,
-                    tx = x + w / 2.0,
-                    ty = y + h / 2.0,
-                    tc = ann.text_color,
-                    fs = ann.font_size.clamp(10.0, 48.0),
-                    txt = escape_xml(text),
-                )
+                let fs = ann.font_size.clamp(10.0, 48.0);
+                let padding = 24.0;
+                let max_chars = ((w - padding).max(20.0) / (fs * 0.58)).max(3.0) as usize;
+                let lines = wrap_text_to_lines(text, max_chars);
+                if lines.is_empty() {
+                    String::new()
+                } else {
+                    let line_h = fs * 1.25;
+                    let total_h = (lines.len().saturating_sub(1) as f64) * line_h;
+                    let start_y = y + h / 2.0 - total_h / 2.0;
+                    let mut tspans = String::new();
+                    for (idx, line) in lines.iter().enumerate() {
+                        let dy = if idx == 0 { 0.0 } else { line_h };
+                        tspans.push_str(&format!(
+                            r##"<tspan x="{tx}" dy="{dy}">{txt}</tspan>"##,
+                            tx = x + w / 2.0,
+                            dy = dy,
+                            txt = escape_xml(line),
+                        ));
+                    }
+                    format!(
+                        r##"<text x="{tx}" y="{ty}" fill="{tc}" font-family="sans-serif" font-size="{fs}" font-weight="700" text-anchor="middle" dominant-baseline="central">{tspans}</text>"##,
+                        tx = x + w / 2.0,
+                        ty = start_y,
+                        tc = ann.text_color,
+                        fs = fs,
+                        tspans = tspans,
+                    )
+                }
             } else {
                 String::new()
             };
@@ -617,33 +703,46 @@ pub fn build_text_preset_svg(
     }
 
     // Primary main title
-    content_markup.push_str(&format!(
-        r##"<text x="{x}" y="{y}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="{weight}" text-anchor="{anchor}">{txt}</text>"##,
-        x = text_x,
-        y = cursor_y,
-        color = text.text_color,
-        ff = font_family,
-        fs = text.font_size.clamp(12.0, 120.0),
-        weight = text.font_weight,
-        anchor = text_anchor,
-        txt = escape_xml(&text.primary_text),
-    ));
-    cursor_y += text.font_size * 0.8 + 6.0;
+    let primary_fs = text.font_size.clamp(12.0, 120.0);
+    let primary_line_h = primary_fs * 1.15;
+    let max_primary_chars = ((text.width - text.backdrop_padding_x * 2.0).max(20.0) / (primary_fs * 0.58)).max(3.0) as usize;
+    let primary_lines = wrap_text_to_lines(&text.primary_text, max_primary_chars);
+    for line in &primary_lines {
+        content_markup.push_str(&format!(
+            r##"<text x="{x}" y="{y}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="{weight}" text-anchor="{anchor}">{txt}</text>"##,
+            x = text_x,
+            y = cursor_y,
+            color = text.text_color,
+            ff = font_family,
+            fs = primary_fs,
+            weight = text.font_weight,
+            anchor = text_anchor,
+            txt = escape_xml(line),
+        ));
+        cursor_y += primary_line_h;
+    }
+    cursor_y += 6.0;
 
     // Secondary subtitle
     if let Some(subtitle) = &text.secondary_text {
         if !subtitle.trim().is_empty() {
             let sub_fs = (text.font_size * 0.5).clamp(11.0, 48.0);
-            content_markup.push_str(&format!(
-                r##"<text x="{x}" y="{y}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.85">{txt}</text>"##,
-                x = text_x,
-                y = cursor_y,
-                color = text.secondary_text_color,
-                ff = font_family,
-                fs = sub_fs,
-                anchor = text_anchor,
-                txt = escape_xml(subtitle),
-            ));
+            let sub_line_h = sub_fs * 1.2;
+            let max_sub_chars = ((text.width - text.backdrop_padding_x * 2.0).max(20.0) / (sub_fs * 0.58)).max(3.0) as usize;
+            let sub_lines = wrap_text_to_lines(subtitle, max_sub_chars);
+            for line in &sub_lines {
+                content_markup.push_str(&format!(
+                    r##"<text x="{x}" y="{y}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.85">{txt}</text>"##,
+                    x = text_x,
+                    y = cursor_y,
+                    color = text.secondary_text_color,
+                    ff = font_family,
+                    fs = sub_fs,
+                    anchor = text_anchor,
+                    txt = escape_xml(line),
+                ));
+                cursor_y += sub_line_h;
+            }
         }
     }
 
@@ -1027,6 +1126,97 @@ mod tests {
         let mut pixmap = Pixmap::new(1920, 1080).unwrap();
         let res = render_svg_to_pixmap(&svg, &mut pixmap);
         assert!(res.is_ok(), "render failed: {:?}", res);
+    }
+
+    #[test]
+    fn test_build_annotation_svg_multiline() {
+        let ann = RenderPlanAnnotation {
+            id: "callout-multiline".into(),
+            start_ms: 0,
+            end_ms: 5000,
+            annotation_type: "callout".into(),
+            x: 100.0,
+            y: 100.0,
+            width: 300.0,
+            height: 160.0,
+            end_x: None,
+            end_y: None,
+            stroke_color: "#38bdf8".into(),
+            stroke_width: 3.0,
+            stroke_style: "solid".into(),
+            fill_color: "#0f172a".into(),
+            fill_opacity: 0.9,
+            corner_radius: 12.0,
+            arrow_end_head: "none".into(),
+            arrow_start_head: "none".into(),
+            shadow_enabled: false,
+            shadow_color: "#000000".into(),
+            shadow_blur: 0.0,
+            text: Some("Line One\nLine Two\nLine Three".into()),
+            text_color: "#ffffff".into(),
+            font_size: 16.0,
+            animation_in: "fade".into(),
+            animation_out: "fade".into(),
+            enabled: true,
+        };
+
+        let svg = build_annotation_svg(&ann, 1920, 1080, 1000);
+        assert!(svg.contains("<tspan"));
+        assert!(svg.contains("Line One"));
+        assert!(svg.contains("Line Two"));
+        assert!(svg.contains("Line Three"));
+
+        let mut pixmap = Pixmap::new(1920, 1080).unwrap();
+        let res = render_svg_to_pixmap(&svg, &mut pixmap);
+        assert!(res.is_ok(), "multiline callout render failed: {:?}", res);
+    }
+
+    #[test]
+    fn test_build_text_preset_svg_multiline() {
+        let text = RenderPlanText {
+            id: "text-multiline".into(),
+            start_ms: 500,
+            end_ms: 6000,
+            preset_id: Some("glass-title".into()),
+            category: "title".into(),
+            primary_text: "Line 1 Main Title\nLine 2 Main Title".into(),
+            secondary_text: Some("Subtitle Line 1\nSubtitle Line 2".into()),
+            tag_text: Some("TAG".into()),
+            x: 80.0,
+            y: 100.0,
+            width: 500.0,
+            height: 200.0,
+            alignment: "left".into(),
+            font_family: "sans".into(),
+            font_size: 32.0,
+            font_weight: "700".into(),
+            text_color: "#ffffff".into(),
+            secondary_text_color: "#94a3b8".into(),
+            accent_color: "#38bdf8".into(),
+            backdrop_style: "solid".into(),
+            backdrop_color: "#0f172a".into(),
+            backdrop_opacity: 0.9,
+            backdrop_blur: 0.0,
+            backdrop_border_radius: 8.0,
+            backdrop_padding_x: 20.0,
+            backdrop_padding_y: 16.0,
+            shadow_enabled: false,
+            shadow_color: "black".into(),
+            shadow_blur: 0.0,
+            animation_in: "fade".into(),
+            animation_out: "fade".into(),
+            enabled: true,
+        };
+
+        let svg = build_text_preset_svg(&text, 1920, 1080, 1500);
+        assert!(svg.contains("Line 1 Main Title"));
+        assert!(svg.contains("Line 2 Main Title"));
+        assert!(svg.contains("Subtitle Line 1"));
+        assert!(svg.contains("Subtitle Line 2"));
+
+        let mut pixmap = Pixmap::new(1920, 1080).unwrap();
+        let res = render_svg_to_pixmap(&svg, &mut pixmap);
+        assert!(res.is_ok(), "multiline text preset render failed: {:?}", res);
     }
 
     #[test]

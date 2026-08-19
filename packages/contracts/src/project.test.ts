@@ -150,6 +150,7 @@ describe("project contract", () => {
       encoder: "auto",
       container: "mp4",
       captionMode: "burn-in",
+      chapterMode: "embed",
     })
 
     expect(projectExportSettingsSchema.parse({ preset: "smooth-60fps" }).preset).toBe(

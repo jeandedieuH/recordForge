@@ -125,6 +125,11 @@ export {
 export { Badge, badgeVariants, type BadgeProps } from "./components/feedback/badge"
 export { EmptyState, type EmptyStateProps } from "./components/feedback/empty-state"
 export {
+  ErrorBoundary,
+  type ErrorBoundaryProps,
+  type ErrorFallbackProps,
+} from "./components/feedback/error-boundary"
+export {
   Progress,
   StageProgress,
   type ProgressProps,

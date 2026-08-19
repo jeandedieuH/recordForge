@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
 import { save } from "@tauri-apps/plugin-dialog"
+import { join } from "@tauri-apps/api/path"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -29,6 +30,7 @@ import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
 import { useTimelineStore } from "../stores/timeline-store"
 import { useRecorderStore } from "../hooks/use-recorder"
+import { ViewErrorBoundary } from "../components/error-boundary"
 import { Sidebar, type View } from "./sidebar"
 import { Titlebar } from "./titlebar"
 
@@ -65,12 +67,17 @@ export function AppShell() {
   const pendingAction = useRecorderStore((state) => state.pendingAction)
   const timelineRecording = useTimelineStore((state) => state.recording)
   const timelineCanvas = useTimelineStore((state) => state.engine?.history.present.canvas)
-  const timelineDurationMs = useTimelineStore((state) => state.view.durationMs)
+  const timelineDurationMs = useTimelineStore((state) => state.view?.durationMs ?? 0)
   const exportSettings = useTimelineStore((state) => state.project?.exportSettings)
   const captionMode = useTimelineStore(
-    (state) => state.project?.exportSettings.captionMode ?? "burn-in",
+    (state) => state.project?.exportSettings?.captionMode ?? "burn-in",
+  )
+  const chapterMode = useTimelineStore(
+    (state) => state.project?.exportSettings?.chapterMode ?? "embed",
   )
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
+  const setChapterMode = useTimelineStore((state) => state.setChapterMode)
+  const timelineMarkers = useTimelineStore((state) => state.engine?.history.present.markers)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
   const setExportCodec = useTimelineStore((state) => state.setExportCodec)
   const setExportEncoder = useTimelineStore((state) => state.setExportEncoder)
@@ -92,11 +99,13 @@ export function AppShell() {
   const hardwareEncoderName = useMemo(() => {
     const priority = ["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"]
     const available = new Set(
-      detectedEncoders.filter((encoder) => encoder.available).map((encoder) => encoder.id),
+      (detectedEncoders ?? [])
+        .filter((encoder) => encoder?.available)
+        .map((encoder) => encoder?.id),
     )
     const best = priority.find((id) => available.has(id))
     if (!best) return null
-    return detectedEncoders.find((encoder) => encoder.id === best)?.name ?? null
+    return detectedEncoders?.find((encoder) => encoder?.id === best)?.name ?? null
   }, [detectedEncoders])
 
   // Load the detected encoder list once so the export view can advertise
@@ -254,9 +263,20 @@ export function AppShell() {
   async function handleStartExport() {
     if (!timelineRecording) return
     try {
+      let defaultPath = `${timelineRecording.name}-edited.mp4`
+      if (isTauri()) {
+        const defaultFolder = await getSetting("defaultOutputFolder").catch(() => null)
+        if (defaultFolder) {
+          try {
+            defaultPath = await join(defaultFolder, `${timelineRecording.name}-edited.mp4`)
+          } catch {
+            defaultPath = `${defaultFolder}\\${timelineRecording.name}-edited.mp4`
+          }
+        }
+      }
       const outputPath = await save({
         title: "Export edited recording",
-        defaultPath: `${timelineRecording.name}-edited.mp4`,
+        defaultPath,
         filters: [{ name: "MP4 video", extensions: ["mp4"] }],
       })
       if (!outputPath) return
@@ -308,50 +328,89 @@ export function AppShell() {
                 </button>
               </div>
             ) : null}
-            {activeView === "library" ? <LibraryView /> : null}
+            {activeView === "library" ? (
+              <ViewErrorBoundary viewName="Library" resetKey={activeView}>
+                <LibraryView />
+              </ViewErrorBoundary>
+            ) : null}
             {activeView === "projects" ? (
-              <ProjectsView
-                onOpenProject={(recId) => {
-                  openEditor(recId)
-                  setActiveView("editor")
-                }}
-                onNavigateToLibrary={() => setActiveView("library")}
-              />
+              <ViewErrorBoundary
+                viewName="Projects"
+                resetKey={activeView}
+                onNavigateHome={() => setActiveView("library")}
+              >
+                <ProjectsView
+                  onOpenProject={(recId) => {
+                    openEditor(recId)
+                    setActiveView("editor")
+                  }}
+                  onNavigateToLibrary={() => setActiveView("library")}
+                />
+              </ViewErrorBoundary>
             ) : null}
             {activeView === "storage" ? (
-              <StorageView onNavigateToSettings={() => setActiveView("settings")} />
+              <ViewErrorBoundary
+                viewName="Storage"
+                resetKey={activeView}
+                onNavigateHome={() => setActiveView("library")}
+              >
+                <StorageView onNavigateToSettings={() => setActiveView("settings")} />
+              </ViewErrorBoundary>
             ) : null}
             {activeView === "editor" ? (
-              <EditorView
-                recordingId={editorRecordingId ?? "rec-1"}
-                onClose={handleCloseEditor}
-                onOpenExport={() => setActiveView("export")}
-              />
+              <ViewErrorBoundary
+                viewName="Editor"
+                resetKey={activeView}
+                onNavigateHome={() => setActiveView("library")}
+              >
+                <EditorView
+                  recordingId={editorRecordingId ?? "rec-1"}
+                  onClose={handleCloseEditor}
+                  onOpenExport={() => setActiveView("export")}
+                />
+              </ViewErrorBoundary>
             ) : null}
             {activeView === "export" ? (
-              <ExportView
-                projectName={timelineRecording?.name}
-                canvas={timelineCanvas}
-                durationMs={timelineDurationMs}
-                exportSettings={exportSettings}
-                captionMode={captionMode}
-                onCaptionModeChange={setCaptionMode}
-                onPresetChange={setExportPreset}
-                onCodecChange={setExportCodec}
-                onEncoderChange={setExportEncoder}
-                hardwareEncoderName={hardwareEncoderName}
-                onRangeChange={setExportRange}
-                exportJob={activeExportJob}
-                error={timelineError}
-                onDismissError={clearTimelineError}
-                onCancelExport={cancelExport}
-                onRetryExport={retryExport}
-                onRevealExport={revealExport}
-                onBack={() => setActiveView("editor")}
-                onStartExport={handleStartExport}
-              />
+              <ViewErrorBoundary
+                viewName="Export"
+                resetKey={activeView}
+                onNavigateHome={() => setActiveView("library")}
+              >
+                <ExportView
+                  projectName={timelineRecording?.name}
+                  canvas={timelineCanvas}
+                  durationMs={timelineDurationMs}
+                  exportSettings={exportSettings}
+                  captionMode={captionMode}
+                  onCaptionModeChange={setCaptionMode}
+                  chapterMode={chapterMode}
+                  onChapterModeChange={setChapterMode}
+                  markers={timelineMarkers}
+                  onPresetChange={setExportPreset}
+                  onCodecChange={setExportCodec}
+                  onEncoderChange={setExportEncoder}
+                  hardwareEncoderName={hardwareEncoderName}
+                  onRangeChange={setExportRange}
+                  exportJob={activeExportJob}
+                  error={timelineError}
+                  onDismissError={clearTimelineError}
+                  onCancelExport={cancelExport}
+                  onRetryExport={retryExport}
+                  onRevealExport={revealExport}
+                  onBack={() => setActiveView("editor")}
+                  onStartExport={handleStartExport}
+                />
+              </ViewErrorBoundary>
             ) : null}
-            {activeView === "settings" ? <SettingsView /> : null}
+            {activeView === "settings" ? (
+              <ViewErrorBoundary
+                viewName="Settings"
+                resetKey={activeView}
+                onNavigateHome={() => setActiveView("library")}
+              >
+                <SettingsView />
+              </ViewErrorBoundary>
+            ) : null}
           </main>
         </div>
 

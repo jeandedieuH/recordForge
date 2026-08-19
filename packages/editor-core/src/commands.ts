@@ -728,9 +728,10 @@ function applyAddMarker(
   state: TimelineState,
   command: AddMarkerCommand,
 ): CommandResult<TimelineState> {
+  const roundedTime = Math.max(0, Math.round(command.timeMs))
   const marker = {
-    id: command.markerId ?? `marker:${command.timeMs}:${command.label}`,
-    timeMs: command.timeMs,
+    id: command.markerId ?? `marker:${roundedTime}:${command.label}`,
+    timeMs: roundedTime,
     label: command.label,
     color: command.color,
   }
@@ -756,7 +757,7 @@ function applyUpdateMarker(
   }
   const nextMarker = {
     ...marker,
-    ...(command.timeMs === undefined ? {} : { timeMs: command.timeMs }),
+    ...(command.timeMs === undefined ? {} : { timeMs: Math.max(0, Math.round(command.timeMs)) }),
     ...(command.label === undefined ? {} : { label: command.label }),
     ...(command.color === undefined ? {} : { color: command.color }),
   }
@@ -2177,11 +2178,13 @@ function applyAddZoomSegment(
   state: TimelineState,
   command: AddZoomSegmentCommand,
 ): CommandResult<TimelineState> {
-  const duration = command.endMs - command.startMs
+  const startMs = Math.max(0, Math.round(command.startMs))
+  const endMs = Math.max(startMs + 1, Math.round(command.endMs))
+  const duration = Math.max(1, endMs - startMs)
   const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
   const segment: ManualZoomSegment = {
-    id: command.segmentId ?? `zoom:${command.startMs}:${command.endMs}`,
-    startMs: command.startMs,
+    id: command.segmentId ?? `zoom:${startMs}:${endMs}`,
+    startMs,
     durationMs: duration,
     target: clampZoomTarget(command.target, state.canvas),
     scale: command.scale ?? 1.5,
@@ -2433,7 +2436,7 @@ export function createAddMarkerCommand(
     kind: "add-marker",
     name: "Add marker",
     markerId: crypto.randomUUID(),
-    timeMs,
+    timeMs: Math.max(0, Math.round(timeMs)),
     label,
     color,
   }
@@ -2443,11 +2446,14 @@ export function createUpdateMarkerCommand(
   markerId: string,
   update: Pick<UpdateMarkerCommand, "timeMs" | "label" | "color">,
 ): CommandRecord {
+  const roundedTimeMs =
+    update.timeMs !== undefined ? Math.max(0, Math.round(update.timeMs)) : undefined
   return {
     kind: "update-marker",
     name: "Update marker",
     markerId,
     ...update,
+    ...(roundedTimeMs !== undefined ? { timeMs: roundedTimeMs } : {}),
     coalesce: update.timeMs !== undefined,
     coalesceKey: update.timeMs !== undefined ? `marker:${markerId}` : undefined,
   }

@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react"
 import type { TimelineMarker } from "@recordforge/contracts"
-import { createDeleteMarkerCommand, createUpdateMarkerCommand } from "@recordforge/editor-core"
-import { Flag as FlagIcon } from "lucide-react"
+import {
+  createDeleteMarkerCommand,
+  createUpdateMarkerCommand,
+  formatYouTubeChapters,
+  getTotalDuration,
+} from "@recordforge/editor-core"
+import { Check, Copy, Flag as FlagIcon } from "lucide-react"
 import { Button, Input } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
@@ -12,8 +17,11 @@ interface MarkerInspectorProps {
 
 export function MarkerInspector({ marker, onClear }: MarkerInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
+  const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const recording = useTimelineStore((state) => state.recording)
   const [markerLabel, setMarkerLabel] = useState(marker.label)
   const [markerTimeText, setMarkerTimeText] = useState(String(marker.timeMs))
+  const [copiedTimestamps, setCopiedTimestamps] = useState(false)
 
   useEffect(() => {
     setMarkerLabel(marker.label)
@@ -24,6 +32,24 @@ export function MarkerInspector({ marker, onClear }: MarkerInspectorProps) {
     const timeMs = Number.parseInt(markerTimeText, 10)
     if (Number.isFinite(timeMs) && timeMs >= 0) {
       execute(createUpdateMarkerCommand(marker.id, { timeMs }))
+    }
+  }
+
+  async function handleCopyYouTubeChapters() {
+    if (!timeline || !timeline.markers || timeline.markers.length === 0) return
+    const durationMs = getTotalDuration(timeline)
+    const text = formatYouTubeChapters(
+      timeline.markers,
+      durationMs,
+      recording?.name ?? timeline.name,
+    )
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedTimestamps(true)
+      setTimeout(() => setCopiedTimestamps(false), 2000)
+    } catch {
+      // Ignore clipboard error
     }
   }
 
@@ -57,16 +83,36 @@ export function MarkerInspector({ marker, onClear }: MarkerInspectorProps) {
           {formatMarkerTime(marker.timeMs)}
         </p>
       </div>
-      <Button
-        variant="destructive"
-        size="sm"
-        onClick={() => {
-          execute(createDeleteMarkerCommand(marker.id))
-          onClear()
-        }}
-      >
-        Delete marker
-      </Button>
+      <div className="flex flex-col gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => void handleCopyYouTubeChapters()}
+        >
+          {copiedTimestamps ? (
+            <>
+              <Check className="size-3.5 text-success" />
+              <span>Copied YouTube timestamps</span>
+            </>
+          ) : (
+            <>
+              <Copy className="size-3.5" />
+              <span>Copy all as YouTube timestamps</span>
+            </>
+          )}
+        </Button>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() => {
+            execute(createDeleteMarkerCommand(marker.id))
+            onClear()
+          }}
+        >
+          Delete marker
+        </Button>
+      </div>
     </div>
   )
 }

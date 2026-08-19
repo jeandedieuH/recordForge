@@ -129,12 +129,25 @@ function renderAnnotation(
     context.font = `700 ${item.fontSize}px ${fontFamily("sans")}`
     context.textAlign = "center"
     context.textBaseline = "middle"
-    context.fillText(
-      item.text,
-      transform.x + transform.width / 2,
-      transform.y + transform.height / 2,
-      Math.max(1, transform.width - item.fontSize),
+    const maxLineWidth = Math.max(
+      20,
+      transform.width - (item.annotationType === "badge" ? 24 : item.fontSize * 1.5),
     )
+    const lines = wrapTextToLines(item.text, maxLineWidth, (str) =>
+      typeof context.measureText === "function"
+        ? context.measureText(str).width
+        : str.length * item.fontSize * 0.6,
+    )
+    const lineHeight = item.fontSize * 1.25
+    const totalHeight = (lines.length - 1) * lineHeight
+    const startY = transform.y + transform.height / 2 - totalHeight / 2
+    lines.forEach((line, index) => {
+      context.fillText(
+        line,
+        transform.x + transform.width / 2,
+        startY + index * lineHeight,
+      )
+    })
   }
   context.restore()
 }
@@ -202,19 +215,39 @@ function renderText(
   context.fillStyle = item.textColor
   context.font = `${item.fontWeight} ${item.fontSize}px ${fontFamily(item.fontFamily)}`
   const primaryText = revealText(item.primaryText, item.textProgress)
-  context.fillText(
-    primaryText,
-    textX,
-    transform.y + paddingY,
-    Math.max(1, transform.width - paddingX * 2),
+  const maxPrimaryWidth = Math.max(20, transform.width - paddingX * 2)
+  const primaryLines = wrapTextToLines(primaryText, maxPrimaryWidth, (str) =>
+    typeof context.measureText === "function"
+      ? context.measureText(str).width
+      : str.length * item.fontSize * 0.6,
   )
+  const primaryLineHeight = item.fontSize * 1.2
+  let currentY = transform.y + paddingY
+  for (const line of primaryLines) {
+    context.fillText(
+      line,
+      textX,
+      currentY,
+    )
+    currentY += primaryLineHeight
+  }
 
-  let nextY = transform.y + paddingY + item.fontSize * 1.2
+  let nextY = currentY
   if (item.secondaryText) {
     context.fillStyle = item.secondaryTextColor
-    context.font = `${Math.max(12, Math.round(item.fontSize * 0.55))}px ${fontFamily(item.fontFamily)}`
-    context.fillText(item.secondaryText, textX, nextY, Math.max(1, transform.width - paddingX * 2))
-    nextY += Math.max(12, Math.round(item.fontSize * 0.55)) * 1.25
+    const subFs = Math.max(12, Math.round(item.fontSize * 0.55))
+    context.font = `${subFs}px ${fontFamily(item.fontFamily)}`
+    const subLineHeight = subFs * 1.25
+    const maxSubWidth = Math.max(20, transform.width - paddingX * 2)
+    const secondaryLines = wrapTextToLines(item.secondaryText, maxSubWidth, (str) =>
+      typeof context.measureText === "function"
+        ? context.measureText(str).width
+        : str.length * subFs * 0.6,
+    )
+    for (const line of secondaryLines) {
+      context.fillText(line, textX, nextY)
+      nextY += subLineHeight
+    }
   }
 
   if (item.tagText) {
@@ -224,7 +257,6 @@ function renderText(
       item.tagText.toUpperCase(),
       textX,
       nextY,
-      Math.max(1, transform.width - paddingX * 2),
     )
   }
   context.restore()
@@ -486,4 +518,43 @@ function revealText(text: string, progress: number): string {
   if (progress >= 1) return text
   if (progress <= 0) return ""
   return text.slice(0, Math.max(0, Math.ceil(text.length * progress)))
+}
+
+export function wrapTextToLines(
+  text: string,
+  maxWidth: number,
+  measureWidth?: (line: string) => number,
+): string[] {
+  if (!text) return []
+  const paragraphs = text.split(/\r?\n/)
+  const result: string[] = []
+
+  for (const paragraph of paragraphs) {
+    if (!paragraph || maxWidth <= 0 || !measureWidth) {
+      result.push(paragraph)
+      continue
+    }
+
+    const words = paragraph.split(" ")
+    let currentLine = ""
+
+    for (const word of words) {
+      if (!currentLine) {
+        currentLine = word
+        continue
+      }
+      const testLine = `${currentLine} ${word}`
+      if (measureWidth(testLine) <= maxWidth) {
+        currentLine = testLine
+      } else {
+        result.push(currentLine)
+        currentLine = word
+      }
+    }
+    if (currentLine) {
+      result.push(currentLine)
+    }
+  }
+
+  return result
 }

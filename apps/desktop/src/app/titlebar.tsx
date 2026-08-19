@@ -17,12 +17,12 @@ export function Titlebar({ view, onOpenRecord }: TitlebarProps) {
 
   useEffect(() => {
     if (!appWindow) return
-    void appWindow.isMaximized().then(setIsMaximized)
-    const unlisten = appWindow.onResized(() => {
-      void appWindow.isMaximized().then(setIsMaximized)
+    void appWindow.isMaximized().then(setIsMaximized).catch(() => {})
+    const unlistenPromise = appWindow.onResized(() => {
+      void appWindow.isMaximized().then(setIsMaximized).catch(() => {})
     })
     return () => {
-      void unlisten.then((fn) => fn())
+      void unlistenPromise.then((fn) => fn()).catch(() => {})
     }
   }, [appWindow])
 

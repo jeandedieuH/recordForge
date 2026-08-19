@@ -5,6 +5,7 @@ import {
   recordingMarkerSchema,
   recordingStatusSchema,
 } from "@recordforge/contracts"
+import { isTauri } from "../lib/settings"
 import { useRecorderStore } from "../stores/recorder-store"
 
 // Re-export the recorder Zustand store so the rest of the app can subscribe
@@ -19,6 +20,7 @@ export function useRecorderPolling(intervalMs = 1000) {
   const refreshStatus = useRecorderStore((s) => s.refreshStatus)
 
   useEffect(() => {
+    if (!isTauri()) return
     // Initial fetch on mount
     refreshStatus().catch(() => {})
 
@@ -47,6 +49,7 @@ export function useRecorderStatusEvents() {
   const refreshStatus = useRecorderStore((s) => s.refreshStatus)
 
   useEffect(() => {
+    if (!isTauri()) return
     // `listen` returns an unlisten function; the Tauri event payload is wrapped
     // in an `event.payload` field.
     const unlisteners: Array<() => void> = []

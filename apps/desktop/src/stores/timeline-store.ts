@@ -27,6 +27,7 @@ import {
   type TimelineCommand,
   type TimelineSelection,
   type RenderCaptionMode,
+  type RenderChapterMode,
   type TimelineState,
   undoCommand,
 } from "@recordforge/editor-core"
@@ -119,6 +120,7 @@ interface TimelineStore {
   setTrackHeight: (trackId: string, height: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
+  setChapterMode: (mode: RenderChapterMode) => void
   setExportPreset: (preset: ExportPreset) => void
   setExportCodec: (codec: "h264" | "hevc") => void
   setExportEncoder: (encoder: ExportEncoderPreference) => void
@@ -886,6 +888,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
+  setChapterMode: (mode) => {
+    const project = get().project
+    if (!project || project.exportSettings.chapterMode === mode) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, chapterMode: mode },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
   setExportPreset: (preset) => {
     const project = get().project
     if (!project || project.exportSettings.preset === preset) return
@@ -1011,6 +1024,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       projectId: currentProject.id,
       settings: currentProject.exportSettings,
       captionMode: currentProject.exportSettings.captionMode,
+      chapterMode: currentProject.exportSettings.chapterMode,
       assets: currentProject.assets,
     })
     if (!plan.ok) {

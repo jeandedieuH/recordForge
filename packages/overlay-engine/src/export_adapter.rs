@@ -469,20 +469,39 @@ fn render_annotation(
         && item.text.as_ref().is_some_and(|text| !text.is_empty())
     {
         if let Some(text) = &item.text {
-            let svg = format!(
-                r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">
-                    <text x="{tx}" y="{ty}" fill="{tc}" font-family="{ff}" font-size="{fs}" font-weight="700" text-anchor="middle" dominant-baseline="central">{txt}</text>
-                </svg>"##,
-                w = pixmap.width(),
-                h = pixmap.height(),
-                tx = x + w / 2.0,
-                ty = y + h / 2.0,
-                tc = item.text_color,
-                ff = resolve_font_family("sans"),
-                fs = item.font_size.clamp(10.0, 72.0),
-                txt = escape_xml(text),
-            );
-            let _ = render_svg_markup(&svg, ts, pixmap);
+            let fs = item.font_size.clamp(10.0, 72.0) as f32;
+            let padding = if item.annotation_type == "badge" { 24.0 } else { fs * 1.5 };
+            let max_chars = ((w - padding).max(20.0) / (fs * 0.58)).max(3.0) as usize;
+            let lines = wrap_text_to_lines(text, max_chars);
+            if !lines.is_empty() {
+                let line_h = fs * 1.25;
+                let total_h = (lines.len().saturating_sub(1) as f32) * line_h;
+                let start_y = (y + h / 2.0) - total_h / 2.0;
+                let mut tspans = String::new();
+                for (idx, line) in lines.iter().enumerate() {
+                    let dy = if idx == 0 { 0.0 } else { line_h };
+                    tspans.push_str(&format!(
+                        r##"<tspan x="{tx}" dy="{dy}">{txt}</tspan>"##,
+                        tx = x + w / 2.0,
+                        dy = dy,
+                        txt = escape_xml(line),
+                    ));
+                }
+                let svg = format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">
+                        <text x="{tx}" y="{ty}" fill="{tc}" font-family="{ff}" font-size="{fs}" font-weight="700" text-anchor="middle" dominant-baseline="central">{tspans}</text>
+                    </svg>"##,
+                    w = pixmap.width(),
+                    h = pixmap.height(),
+                    tx = x + w / 2.0,
+                    ty = start_y,
+                    tc = item.text_color,
+                    ff = resolve_font_family("sans"),
+                    fs = fs,
+                    tspans = tspans,
+                );
+                let _ = render_svg_markup(&svg, ts, pixmap);
+            }
         }
     }
 
@@ -590,33 +609,46 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
     }
 
     // Primary text
-    content_markup.push_str(&format!(
-        r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="{weight}" text-anchor="{anchor}">{txt}</text>"##,
-        tx = text_x,
-        ty = cursor_y,
-        color = item.text_color,
-        ff = font_family,
-        fs = item.font_size.clamp(12.0, 120.0),
-        weight = item.font_weight,
-        anchor = text_anchor,
-        txt = escape_xml(&primary_text),
-    ));
-    cursor_y += item.font_size as f32 * 0.8 + 6.0;
+    let primary_fs = item.font_size.clamp(12.0, 120.0) as f32;
+    let primary_line_h = primary_fs * 1.15;
+    let max_primary_chars = ((w - item.backdrop_padding_x as f32 * 2.0).max(20.0) / (primary_fs * 0.58)).max(3.0) as usize;
+    let primary_lines = wrap_text_to_lines(&primary_text, max_primary_chars);
+    for line in &primary_lines {
+        content_markup.push_str(&format!(
+            r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="{weight}" text-anchor="{anchor}">{txt}</text>"##,
+            tx = text_x,
+            ty = cursor_y,
+            color = item.text_color,
+            ff = font_family,
+            fs = primary_fs,
+            weight = item.font_weight,
+            anchor = text_anchor,
+            txt = escape_xml(line),
+        ));
+        cursor_y += primary_line_h;
+    }
+    cursor_y += 6.0;
 
     // Secondary text
     if let Some(subtitle) = &item.secondary_text {
         if !subtitle.trim().is_empty() {
-            let sub_fs = (item.font_size * 0.55).clamp(11.0, 48.0);
-            content_markup.push_str(&format!(
-                r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.85">{txt}</text>"##,
-                tx = text_x,
-                ty = cursor_y,
-                color = item.secondary_text_color,
-                ff = font_family,
-                fs = sub_fs,
-                anchor = text_anchor,
-                txt = escape_xml(subtitle),
-            ));
+            let sub_fs = (item.font_size * 0.55).clamp(11.0, 48.0) as f32;
+            let sub_line_h = sub_fs * 1.2;
+            let max_sub_chars = ((w - item.backdrop_padding_x as f32 * 2.0).max(20.0) / (sub_fs * 0.58)).max(3.0) as usize;
+            let sub_lines = wrap_text_to_lines(subtitle, max_sub_chars);
+            for line in &sub_lines {
+                content_markup.push_str(&format!(
+                    r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.85">{txt}</text>"##,
+                    tx = text_x,
+                    ty = cursor_y,
+                    color = item.secondary_text_color,
+                    ff = font_family,
+                    fs = sub_fs,
+                    anchor = text_anchor,
+                    txt = escape_xml(line),
+                ));
+                cursor_y += sub_line_h;
+            }
         }
     }
 
@@ -785,4 +817,47 @@ fn escape_xml(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+fn wrap_text_to_lines(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let max_len = max_chars.max(1);
+
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim_end_matches('\r');
+        if trimmed.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        if words.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        for word in words {
+            if current.is_empty() {
+                current = word.to_string();
+                continue;
+            }
+            if current.chars().count() + 1 + word.chars().count() <= max_len {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(current);
+                current = word.to_string();
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+
+    if lines.is_empty() {
+        vec![text.to_string()]
+    } else {
+        lines
+    }
 }

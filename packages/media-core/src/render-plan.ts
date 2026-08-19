@@ -12,6 +12,7 @@ import type {
   RenderPlanImage,
   RenderPlanMask,
   RenderCaptionMode,
+  RenderChapterMode,
   RenderPlanOverlay,
   RenderPlanText,
   RenderPlanZoomSegment,
@@ -21,7 +22,11 @@ import type {
   TimelineClip,
   TimelineState,
 } from "@recordforge/domain"
-import { clampZoomTarget, getManualZoomSegments } from "@recordforge/editor-core"
+import {
+  clampZoomTarget,
+  getManualZoomSegments,
+  timelineMarkersToChapters,
+} from "@recordforge/editor-core"
 import {
   annotationClipSchema,
   imageClipSchema,
@@ -724,6 +729,7 @@ export interface BuildRenderPlanInput {
   state: TimelineState
   projectId: string
   captionMode?: RenderCaptionMode
+  chapterMode?: RenderChapterMode
   settings?: ProjectExportSettings
   range?: ExportRange
   assets?: ProjectAsset[]
@@ -794,6 +800,12 @@ export function buildRenderPlan(
   )
   const durationMs = range ? range.endMs - range.startMs : screenDurationMs
   const gaps = toGaps(segments, durationMs)
+  const chapters = timelineMarkersToChapters(
+    state.markers,
+    durationMs,
+    range,
+    state.name || "Intro",
+  )
 
   if (captions.some((caption) => caption.endMs > durationMs)) {
     return {
@@ -847,6 +859,8 @@ export function buildRenderPlan(
       overlays,
       captions,
       captionMode: input.captionMode ?? input.settings?.captionMode ?? "burn-in",
+      chapters,
+      chapterMode: input.chapterMode ?? input.settings?.chapterMode ?? "embed",
       masks,
       zoomSegments,
       cursorEffects,

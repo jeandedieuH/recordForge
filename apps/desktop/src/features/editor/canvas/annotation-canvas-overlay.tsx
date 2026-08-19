@@ -2,6 +2,7 @@ import { useRef, useState } from "react"
 import type { AnnotationClip, AnnotationType } from "@recordforge/contracts"
 import { createAnnotationClip } from "@recordforge/editor-core"
 import type { OverlayHandle } from "@recordforge/editor-core"
+import { wrapTextToLines } from "@recordforge/overlay-core"
 import type { OverlayInteraction } from "./use-overlay-interaction"
 import { cn } from "@recordforge/ui"
 
@@ -343,17 +344,41 @@ export function AnnotationCanvasOverlay({
                     fill={clip.fillColor}
                     fillOpacity={clip.fillOpacity}
                   />
-                  <text
-                    x={clip.x + clip.width / 2}
-                    y={clip.y + clip.height / 2 + (clip.fontSize ?? 16) * 0.35}
-                    textAnchor="middle"
-                    fill={clip.textColor ?? "#ffffff"}
-                    fontSize={clip.fontSize ?? 16}
-                    fontWeight="bold"
-                    fontFamily="sans-serif"
-                  >
-                    {clip.text}
-                  </text>
+                  {clip.text ? (
+                    (() => {
+                      const fontSize = clip.fontSize ?? 16
+                      const maxLineWidth = Math.max(20, clip.width - fontSize * 1.5)
+                      const lines = wrapTextToLines(
+                        clip.text,
+                        maxLineWidth,
+                        (str) => str.length * fontSize * 0.58,
+                      )
+                      const lineHeight = fontSize * 1.25
+                      const totalHeight = (lines.length - 1) * lineHeight
+                      const startY = clip.y + clip.height / 2 + fontSize * 0.35 - totalHeight / 2
+                      return (
+                        <text
+                          x={clip.x + clip.width / 2}
+                          y={startY}
+                          textAnchor="middle"
+                          fill={clip.textColor ?? "#ffffff"}
+                          fontSize={fontSize}
+                          fontWeight="bold"
+                          fontFamily="sans-serif"
+                        >
+                          {lines.map((line, idx) => (
+                            <tspan
+                              key={idx}
+                              x={clip.x + clip.width / 2}
+                              dy={idx === 0 ? 0 : lineHeight}
+                            >
+                              {line}
+                            </tspan>
+                          ))}
+                        </text>
+                      )
+                    })()
+                  ) : null}
                 </g>
               )}
 
@@ -370,18 +395,42 @@ export function AnnotationCanvasOverlay({
                     fill={clip.fillColor}
                     fillOpacity={clip.fillOpacity}
                   />
-                  <text
-                    x={clip.x + clip.width / 2}
-                    y={clip.y + clip.height / 2 + 5}
-                    textAnchor="middle"
-                    fill={clip.textColor ?? "#ffffff"}
-                    fontSize={clip.fontSize ?? 14}
-                    fontWeight="bold"
-                    letterSpacing="1px"
-                    fontFamily="sans-serif"
-                  >
-                    {clip.text}
-                  </text>
+                  {clip.text ? (
+                    (() => {
+                      const fontSize = clip.fontSize ?? 14
+                      const maxLineWidth = Math.max(20, clip.width - 24)
+                      const lines = wrapTextToLines(
+                        clip.text,
+                        maxLineWidth,
+                        (str) => str.length * fontSize * 0.58,
+                      )
+                      const lineHeight = fontSize * 1.25
+                      const totalHeight = (lines.length - 1) * lineHeight
+                      const startY = clip.y + clip.height / 2 + 5 - totalHeight / 2
+                      return (
+                        <text
+                          x={clip.x + clip.width / 2}
+                          y={startY}
+                          textAnchor="middle"
+                          fill={clip.textColor ?? "#ffffff"}
+                          fontSize={fontSize}
+                          fontWeight="bold"
+                          letterSpacing="1px"
+                          fontFamily="sans-serif"
+                        >
+                          {lines.map((line, idx) => (
+                            <tspan
+                              key={idx}
+                              x={clip.x + clip.width / 2}
+                              dy={idx === 0 ? 0 : lineHeight}
+                            >
+                              {line}
+                            </tspan>
+                          ))}
+                        </text>
+                      )
+                    })()
+                  ) : null}
                 </g>
               )}
 

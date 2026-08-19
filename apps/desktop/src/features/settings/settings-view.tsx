@@ -23,6 +23,8 @@ import {
   SelectValue,
   Switch,
 } from "@recordforge/ui"
+import { open } from "@tauri-apps/plugin-dialog"
+import { join, videoDir } from "@tauri-apps/api/path"
 import { useThemeStore } from "../../stores/theme-store"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, isTauri, setSetting } from "../../lib/settings"
@@ -37,9 +39,9 @@ export function SettingsView() {
   const { theme, setTheme, micaEnabled, setMicaEnabled, micaActive } = useThemeStore()
   const { selectedProfileId, setSelectedProfileId } = useRecorderStore()
 
-  const [savePath, setSavePath] = useState("C:\\Users\\User\\Videos\\recordForge")
+  const [savePath, setSavePath] = useState("")
   const [countdownSec, setCountdownSec] = useState("3")
-  const [startMinimized, setStartMinimized] = useState(false)
+  const [minimizeToTray, setMinimizeToTray] = useState(false)
   const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
 
   useEffect(() => {
@@ -47,16 +49,29 @@ export function SettingsView() {
       let countdown: string | null = null
       let minimized: string | null = null
       let cursorRaw: string | null = null
+      let folder: string | null = null
 
       if (isTauri()) {
         const results = await Promise.all([
           getSetting("countdownSeconds").catch(() => null),
+          getSetting("minimizeToTray").catch(() => null),
           getSetting("startMinimized").catch(() => null),
           getSetting("defaultCursorSettings").catch(() => null),
+          getSetting("defaultOutputFolder").catch(() => null),
         ])
         countdown = results[0]
-        minimized = results[1]
-        cursorRaw = results[2]
+        minimized = results[1] ?? results[2]
+        cursorRaw = results[3]
+        folder = results[4]
+
+        if (!folder) {
+          try {
+            const vDir = await videoDir()
+            folder = await join(vDir, "recordForge")
+          } catch {
+            folder = "C:\\recordForge"
+          }
+        }
       }
 
       if (!cursorRaw) {
@@ -67,7 +82,10 @@ export function SettingsView() {
         setCountdownSec(countdown)
       }
       if (minimized !== null) {
-        setStartMinimized(minimized === "true")
+        setMinimizeToTray(minimized === "true")
+      }
+      if (folder) {
+        setSavePath(folder)
       }
       if (cursorRaw) {
         try {
@@ -88,9 +106,35 @@ export function SettingsView() {
     if (isTauri()) void setSetting("countdownSeconds", value)
   }
 
-  function handleStartMinimizedChange(value: boolean) {
-    setStartMinimized(value)
-    if (isTauri()) void setSetting("startMinimized", String(value))
+  function handleSavePathChange(value: string) {
+    setSavePath(value)
+    if (isTauri()) void setSetting("defaultOutputFolder", value)
+  }
+
+  async function handleBrowseOutputFolder() {
+    if (!isTauri()) return
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        defaultPath: savePath || undefined,
+        title: "Select Default Output Folder",
+      })
+      if (selected && typeof selected === "string") {
+        setSavePath(selected)
+        await setSetting("defaultOutputFolder", selected)
+      }
+    } catch (err) {
+      console.warn("Failed to select output folder:", err)
+    }
+  }
+
+  function handleMinimizeToTrayChange(value: boolean) {
+    setMinimizeToTray(value)
+    if (isTauri()) {
+      void setSetting("minimizeToTray", String(value))
+      void setSetting("startMinimized", String(value))
+    }
   }
 
   function handleCursorChange(updated: Partial<CursorSettings>) {
@@ -285,10 +329,15 @@ export function SettingsView() {
             <div className="flex items-center gap-2">
               <Input
                 value={savePath}
-                onChange={(e) => setSavePath(e.target.value)}
+                onChange={(e) => handleSavePathChange(e.target.value)}
+                placeholder="Select or enter output folder..."
                 className="flex-1 font-mono text-xs"
               />
-              <Button variant="secondary" className="h-9 px-4 text-xs">
+              <Button
+                variant="secondary"
+                onClick={() => void handleBrowseOutputFolder()}
+                className="h-9 px-4 text-xs cursor-pointer"
+              >
                 <Folder className="mr-1.5 size-3.5" /> Browse
               </Button>
             </div>
@@ -305,7 +354,7 @@ export function SettingsView() {
                   Keep RecordForge running in the notification area when window is closed.
                 </p>
               </div>
-              <Switch checked={startMinimized} onCheckedChange={handleStartMinimizedChange} />
+              <Switch checked={minimizeToTray} onCheckedChange={handleMinimizeToTrayChange} />
             </div>
           </div>
         </div>

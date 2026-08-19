@@ -17,6 +17,7 @@ pub mod validation;
 pub mod window;
 pub mod window_effects;
 
+use tauri::Manager;
 use tracing::{info, instrument};
 
 use errors::Result;
@@ -59,6 +60,35 @@ pub fn run() {
             // (falls back to opaque on failure or when disabled).
             window_effects::apply_startup_effects(app);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    let app = window.app_handle();
+                    let state = app.state::<state::AppState>();
+                    let minimize_to_tray = state
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|db| {
+                            crate::database::settings::get_setting(&db, "minimizeToTray")
+                                .ok()
+                                .flatten()
+                                .or_else(|| {
+                                    crate::database::settings::get_setting(&db, "startMinimized")
+                                        .ok()
+                                        .flatten()
+                                })
+                        })
+                        .map(|val| val == "true")
+                        .unwrap_or(false);
+
+                    if minimize_to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             greet,
