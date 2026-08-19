@@ -1598,6 +1598,7 @@ export function TimelineView({
                 <CameraPreview
                   clips={cameraClips}
                   outputs={cameraVideoOutputs}
+                  workDir={recording?.workDir}
                   playheadMs={view.playheadMs}
                   isPlaying={view.isPlaying}
                   playbackRate={view.playbackRate}
@@ -1797,6 +1798,7 @@ export function TimelineView({
           thumbnailResource={effectiveThumbnailResource}
           videoThumbnailResources={videoThumbnailResources}
           waveformResources={waveformResources}
+          workDir={recording?.workDir}
           onSeek={seek}
           onPause={pause}
           onSetScroll={setScroll}

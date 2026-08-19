@@ -29,15 +29,29 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**", "$APPDATA/sessions/**/*"]
+        "scope": [
+          "$APPDATA/**",
+          "$APPDATA/**/*",
+          "$APPLOCALDATA/**",
+          "$APPLOCALDATA/**/*",
+          "$RESOURCE/**",
+          "$RESOURCE/**/*",
+          "$TEMP/**",
+          "$TEMP/**/*",
+          "$DOWNLOAD/**",
+          "$DOWNLOAD/**/*",
+          "$HOME/**",
+          "$HOME/**/*",
+          "**"
+        ]
       },
       "csp": {
         "default-src": "'self'",
         "script-src": "'self' 'wasm-unsafe-eval'",
         "style-src": "'self' 'unsafe-inline'",
-        "img-src": "'self' data: blob: http://asset.localhost: asset:",
-        "media-src": "'self' blob: http://asset.localhost: asset:",
-        "connect-src": "'self' ipc: http://ipc.localhost http://asset.localhost: asset:"
+        "img-src": "'self' data: blob: http://asset.localhost https://asset.localhost asset:",
+        "media-src": "'self' data: blob: http://asset.localhost https://asset.localhost asset:",
+        "connect-src": "'self' ipc: http://ipc.localhost https://ipc.localhost http://asset.localhost https://asset.localhost asset:"
       }
     },
     "withGlobalTauri": false

@@ -69,11 +69,18 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
   const view = useTimelineStore((state) => state.view)
 
-  const thumbnailResource = useThumbnailManifest(activeJob?.outputs?.thumbnailManifestPath ?? null)
+  const thumbnailResource = useThumbnailManifest(
+    activeJob?.outputs?.thumbnailManifestPath ?? null,
+    recording?.workDir,
+  )
   const videoThumbnailResources = useVideoTrackThumbnailResources(
     activeJob?.outputs?.videoTracks ?? [],
+    recording?.workDir,
   )
-  const waveformResources = useWaveformResources(activeJob?.outputs?.audioTracks ?? [])
+  const waveformResources = useWaveformResources(
+    activeJob?.outputs?.audioTracks ?? [],
+    recording?.workDir,
+  )
 
   // Persist the active task whenever it changes.
   useEffect(() => {

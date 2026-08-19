@@ -270,6 +270,7 @@ pub struct ProjectSummary {
     pub updated_at: String,
     pub duration_ms: u64,
     pub thumbnail_path: Option<String>,
+    pub work_dir: Option<String>,
     pub track_count: usize,
     pub clip_count: usize,
     pub width: Option<u32>,
@@ -291,6 +292,7 @@ pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>> 
         if let Ok(project) = serde_json::from_str::<ProjectFile>(&record.project_json) {
             let recording = get_recording(&db, &record.recording_id).ok();
             let thumbnail_path = recording.as_ref().and_then(|r| r.thumbnail_path.clone());
+            let work_dir = recording.as_ref().map(|r| r.work_dir.clone());
             let track_count = project.tracks.as_array().map(|t| t.len()).unwrap_or(0);
             let clip_count = project
                 .tracks
@@ -340,6 +342,7 @@ pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>> 
                 updated_at: record.updated_at,
                 duration_ms,
                 thumbnail_path,
+                work_dir,
                 track_count,
                 clip_count,
                 width,
@@ -419,6 +422,7 @@ pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>> 
                             updated_at: project.updated_at,
                             duration_ms,
                             thumbnail_path: rec.thumbnail_path.clone(),
+                            work_dir: Some(rec.work_dir.clone()),
                             track_count,
                             clip_count,
                             width,

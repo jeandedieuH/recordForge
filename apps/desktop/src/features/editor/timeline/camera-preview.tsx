@@ -6,6 +6,7 @@ import { toAssetUrl } from "../media/derivative-resources"
 interface CameraPreviewProps {
   clips: CameraClip[]
   outputs: MediaVideoTrackOutput[]
+  workDir?: string | null
   playheadMs: number
   isPlaying: boolean
   playbackRate: number
@@ -46,6 +47,7 @@ function mixBorderColor(color: string | undefined, opacity: number | undefined):
 export function CameraPreview({
   clips,
   outputs,
+  workDir,
   playheadMs,
   isPlaying,
   playbackRate,
@@ -152,7 +154,7 @@ export function CameraPreview({
     <>
       {clips.map((clip) => {
         const output = outputsByStream.get(clip.streamIndex ?? -1)
-        const source = output ? toAssetUrl(output.videoPath) : null
+        const source = output ? toAssetUrl(output.videoPath, workDir) : null
         const transform = clip.transform
         if (!source || transform.visible === false) return null
         const isActive = isClipActive(clip, playheadMs)

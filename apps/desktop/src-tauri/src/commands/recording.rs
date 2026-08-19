@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 use tracing::{info, instrument, warn};
@@ -673,35 +673,53 @@ pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecordin
 
     let ffmpeg_path = state.ffmpeg_path.to_string_lossy().to_string();
     for rec in &mut recordings {
-        let needs_thumb = rec
-            .thumbnail_path
-            .as_deref()
-            .is_none_or(|p| !Path::new(p).is_file());
+        let work_dir = if !rec.work_dir.is_empty() {
+            Some(PathBuf::from(&rec.work_dir))
+        } else {
+            rec.output_path
+                .as_ref()
+                .and_then(|out| Path::new(out).parent().map(|p| p.to_path_buf()))
+        };
+
+        let needs_thumb = rec.thumbnail_path.as_deref().is_none_or(|p| {
+            let p_path = Path::new(p);
+            if p_path.is_absolute() {
+                !p_path.is_file()
+            } else if let Some(dir) = &work_dir {
+                !dir.join(p_path).is_file()
+            } else {
+                !p_path.is_file()
+            }
+        });
+
         if needs_thumb {
             if let Some(output_str) = &rec.output_path {
-                let output_path = Path::new(output_str);
+                let raw_output = Path::new(output_str);
+                let output_path = if raw_output.is_absolute() {
+                    raw_output.to_path_buf()
+                } else if let Some(dir) = &work_dir {
+                    dir.join(raw_output)
+                } else {
+                    raw_output.to_path_buf()
+                };
+
                 if output_path.is_file() {
-                    let work_dir = if !rec.work_dir.is_empty() {
-                        Path::new(&rec.work_dir).to_path_buf()
-                    } else if let Some(parent) = output_path.parent() {
-                        parent.to_path_buf()
-                    } else {
-                        continue;
-                    };
-                    let poster_path = work_dir.join("poster.jpg");
-                    if crate::media::thumbnails::generate_poster_frame(
-                        &ffmpeg_path,
-                        output_path,
-                        &poster_path,
-                    )
-                    .is_ok()
-                    {
-                        let poster_str = poster_path.to_string_lossy().to_string();
-                        let _ = db.execute(
-                            "UPDATE recordings SET thumbnail_path = ?1 WHERE id = ?2",
-                            rusqlite::params![poster_str, rec.id],
-                        );
-                        rec.thumbnail_path = Some(poster_str);
+                    if let Some(dir) = &work_dir {
+                        let poster_path = dir.join("poster.jpg");
+                        if crate::media::thumbnails::generate_poster_frame(
+                            &ffmpeg_path,
+                            &output_path,
+                            &poster_path,
+                        )
+                        .is_ok()
+                        {
+                            let poster_str = poster_path.to_string_lossy().to_string();
+                            let _ = db.execute(
+                                "UPDATE recordings SET thumbnail_path = ?1 WHERE id = ?2",
+                                rusqlite::params![poster_str, rec.id],
+                            );
+                            rec.thumbnail_path = Some(poster_str);
+                        }
                     }
                 }
             }

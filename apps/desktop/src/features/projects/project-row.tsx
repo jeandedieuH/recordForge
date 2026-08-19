@@ -43,7 +43,9 @@ export function ProjectRow({
   const [renameValue, setRenameValue] = useState(project.name)
 
   const thumbnailSrc =
-    !imageError && project.thumbnailPath ? toAssetUrl(project.thumbnailPath) : null
+    !imageError && project.thumbnailPath
+      ? toAssetUrl(project.thumbnailPath, project.workDir)
+      : null
 
   function handleSaveRename() {
     const trimmed = renameValue.trim()

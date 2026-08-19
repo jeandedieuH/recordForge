@@ -232,6 +232,7 @@ export const projectSummarySchema = z.object({
   updatedAt: z.string(),
   durationMs: z.number().int().min(0).default(0),
   thumbnailPath: z.string().nullish(),
+  workDir: z.string().nullish(),
   trackCount: z.number().int().min(0).default(0),
   clipCount: z.number().int().min(0).default(0),
   width: z.number().int().min(0).nullish(),

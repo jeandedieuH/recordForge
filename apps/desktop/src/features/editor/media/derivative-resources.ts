@@ -24,8 +24,12 @@ function derivativeError(): string {
 
 // Derivative JSON is fetched through Tauri's scoped asset protocol, so the
 // editor never decodes the full recording just to render timeline metadata.
-async function fetchDerivative<T>(path: string, schema: z.ZodType<T>): Promise<T> {
-  const assetUrl = toAssetUrl(path)
+async function fetchDerivative<T>(
+  path: string,
+  schema: z.ZodType<T>,
+  workDir?: string | null,
+): Promise<T> {
+  const assetUrl = toAssetUrl(path, workDir)
   if (!assetUrl) throw new Error(derivativeError())
 
   const response = await fetch(assetUrl)
@@ -41,6 +45,7 @@ async function fetchDerivative<T>(path: string, schema: z.ZodType<T>): Promise<T
 export function useDerivativeResource<T>(
   path: string | null,
   schema: z.ZodType<T>,
+  workDir?: string | null,
 ): DerivativeResource<T> & { retry: () => void } {
   const [retryToken, setRetryToken] = useState(0)
   const [resource, setResource] = useState<DerivativeResource<T>>(() =>
@@ -60,7 +65,7 @@ export function useDerivativeResource<T>(
 
     setResource({ status: "loading" })
 
-    fetchDerivative(path, schema)
+    fetchDerivative(path, schema, workDir)
       .then((data) => {
         if (isMounted) setResource({ status: "content", data })
       })
@@ -73,13 +78,13 @@ export function useDerivativeResource<T>(
     return () => {
       isMounted = false
     }
-  }, [path, schema, retryToken])
+  }, [path, schema, workDir, retryToken])
 
   return { ...resource, retry }
 }
 
-export function useThumbnailManifest(path: string | null) {
-  return useDerivativeResource(path, thumbnailManifestSchema)
+export function useThumbnailManifest(path: string | null, workDir?: string | null) {
+  return useDerivativeResource(path, thumbnailManifestSchema, workDir)
 }
 
 export interface WaveformResources {
@@ -88,7 +93,10 @@ export interface WaveformResources {
   retry: () => void
 }
 
-export function useWaveformResources(outputs: MediaAudioTrackOutput[]): WaveformResources {
+export function useWaveformResources(
+  outputs: MediaAudioTrackOutput[],
+  workDir?: string | null,
+): WaveformResources {
   const requests = useMemo(
     () =>
       outputs.map((output) => ({
@@ -134,7 +142,7 @@ export function useWaveformResources(outputs: MediaAudioTrackOutput[]): Waveform
     void Promise.all(
       requests.map(async (request): Promise<[number, DerivativeResource<WaveformData>]> => {
         try {
-          const data = await fetchDerivative(request.path, waveformDataSchema)
+          const data = await fetchDerivative(request.path, waveformDataSchema, workDir)
           return [request.streamIndex, { status: "content", data }]
         } catch {
           return [request.streamIndex, { status: "error", message: derivativeError() }]
@@ -147,7 +155,7 @@ export function useWaveformResources(outputs: MediaAudioTrackOutput[]): Waveform
     return () => {
       isMounted = false
     }
-  }, [requests, requestsKey, retryToken])
+  }, [requests, requestsKey, workDir, retryToken])
 
   const status = useMemo<WaveformResources["status"]>(() => {
     if (requests.length === 0) return "missing"
@@ -169,6 +177,7 @@ export interface VideoTrackThumbnailResources {
 
 export function useVideoTrackThumbnailResources(
   outputs: MediaVideoTrackOutput[],
+  workDir?: string | null,
 ): VideoTrackThumbnailResources {
   const requests = useMemo(
     () =>
@@ -215,7 +224,7 @@ export function useVideoTrackThumbnailResources(
     void Promise.all(
       requests.map(async (request): Promise<[number, DerivativeResource<ThumbnailManifest>]> => {
         try {
-          const data = await fetchDerivative(request.path, thumbnailManifestSchema)
+          const data = await fetchDerivative(request.path, thumbnailManifestSchema, workDir)
           return [request.streamIndex, { status: "content", data }]
         } catch {
           return [request.streamIndex, { status: "error", message: derivativeError() }]
@@ -228,7 +237,7 @@ export function useVideoTrackThumbnailResources(
     return () => {
       isMounted = false
     }
-  }, [requests, requestsKey, retryToken])
+  }, [requests, requestsKey, workDir, retryToken])
 
   const status = useMemo<VideoTrackThumbnailResources["status"]>(() => {
     if (requests.length === 0) return "missing"

@@ -61,6 +61,7 @@ export interface TimelineLanesProps {
   thumbnailResource: DerivativeResource<ThumbnailManifest>
   videoThumbnailResources?: VideoTrackThumbnailResources
   waveformResources: WaveformResources
+  workDir?: string | null
   onSeek: (ms: number) => void
   onPause?: () => void
   onSetScroll: (ms: number) => void
@@ -139,6 +140,7 @@ export function TimelineLanes({
   thumbnailResource,
   videoThumbnailResources,
   waveformResources,
+  workDir,
   onSeek,
   onPause,
   onSetScroll,
@@ -494,7 +496,7 @@ export function TimelineLanes({
   }
 
   const thumbnailData = thumbnailResource.status === "content" ? thumbnailResource.data : null
-  const spriteUrl = thumbnailData ? toAssetUrl(thumbnailData.spritePath) : null
+  const spriteUrl = thumbnailData ? toAssetUrl(thumbnailData.spritePath, workDir) : null
   const snapTargets = useMemo(
     () => buildSnapTargets(timeline, { playheadMs: view.playheadMs, cursorClickTimesMs }),
     [timeline, view.playheadMs, cursorClickTimesMs],
@@ -730,7 +732,7 @@ export function TimelineLanes({
                   ).find((r) => r.status === "content")
                   if (cameraStreamThumb && cameraStreamThumb.status === "content") {
                     trackThumbnailData = cameraStreamThumb.data
-                    trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath)
+                    trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath, workDir)
                   }
                 }
 
