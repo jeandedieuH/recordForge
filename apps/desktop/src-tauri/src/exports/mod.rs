@@ -3250,6 +3250,54 @@ fn rasterize_svg_bytes_to_png(svg_bytes: &[u8], width: u32, height: u32) -> Opti
     Some(temp_path)
 }
 
+fn find_candidate_file_in_dir(
+    dir: &Path,
+    candidate_names: &[String],
+    max_depth: usize,
+) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    for name in candidate_names {
+        let direct = dir.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+    }
+    if max_depth == 0 {
+        return None;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                    for candidate in candidate_names {
+                        let cand_name = Path::new(candidate)
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or(candidate.as_str());
+                        if filename.eq_ignore_ascii_case(cand_name) {
+                            return Some(path);
+                        }
+                    }
+                }
+            } else if path.is_dir() {
+                let dir_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                if !dir_name.starts_with('.') && dir_name != "node_modules" && dir_name != "target"
+                {
+                    if let Some(found) =
+                        find_candidate_file_in_dir(&path, candidate_names, max_depth - 1)
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[allow(dead_code)]
 pub(crate) fn resolve_background_image(
     background: &str,
@@ -3290,6 +3338,7 @@ pub(crate) fn resolve_background_image_with_resource_dir(
     } else {
         trimmed
     };
+    path_str = path_str.trim_matches(|c| c == '"' || c == '\'').trim();
 
     if path_str.starts_with("data:image/") {
         if let Some((mime, rest)) = path_str.split_once(',') {
@@ -3317,8 +3366,24 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                 if is_svg || bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
                     return rasterize_svg_bytes_to_png(&bytes, 1920, 1080);
                 } else {
+                    let ext = if mime.contains("jpeg")
+                        || mime.contains("jpg")
+                        || bytes.starts_with(b"\xFF\xD8\xFF")
+                    {
+                        "jpg"
+                    } else if mime.contains("webp")
+                        || (bytes.len() >= 12
+                            && &bytes[0..4] == b"RIFF"
+                            && &bytes[8..12] == b"WEBP")
+                    {
+                        "webp"
+                    } else if mime.contains("gif") || bytes.starts_with(b"GIF8") {
+                        "gif"
+                    } else {
+                        "png"
+                    };
                     let temp_path = std::env::temp_dir()
-                        .join(format!("recordforge_bg_{}.png", uuid::Uuid::new_v4()));
+                        .join(format!("recordforge_bg_{}.{}", uuid::Uuid::new_v4(), ext));
                     if std::fs::write(&temp_path, bytes).is_ok() {
                         return Some(temp_path);
                     }
@@ -3362,6 +3427,11 @@ pub(crate) fn resolve_background_image_with_resource_dir(
             return Some(path.clone());
         }
     }
+    if let Some(path) = asset_paths.get(trimmed) {
+        if path.is_file() {
+            return Some(path.clone());
+        }
+    }
 
     let direct = PathBuf::from(clean_str);
     if direct.is_file() {
@@ -3401,13 +3471,26 @@ pub(crate) fn resolve_background_image_with_resource_dir(
     let mut search_dirs = Vec::new();
     if let Some(res) = resource_dir {
         search_dirs.push(res.join("backgrounds"));
-        search_dirs.push(res.join("assets").join("backgrounds"));
         search_dirs.push(res.join("public").join("backgrounds"));
+        search_dirs.push(res.join("assets").join("backgrounds"));
         search_dirs.push(res.join("dist").join("backgrounds"));
+        search_dirs.push(res.join("_up_").join("public").join("backgrounds"));
+        search_dirs.push(
+            res.join("_up_")
+                .join("_up_")
+                .join("_up_")
+                .join("assets")
+                .join("backgrounds"),
+        );
+        search_dirs.push(res.join("_up_").join("assets").join("backgrounds"));
+        search_dirs.push(res.join("_up_").join("dist").join("backgrounds"));
         search_dirs.push(res.to_path_buf());
     }
 
     let mut base_roots = Vec::new();
+    if let Some(res) = resource_dir {
+        base_roots.push(res.to_path_buf());
+    }
     if let Ok(cwd) = std::env::current_dir() {
         let mut cur = Some(cwd.as_path());
         let mut depth = 0;
@@ -3456,6 +3539,14 @@ pub(crate) fn resolve_background_image_with_resource_dir(
         search_dirs.push(root.join("assets").join("backgrounds"));
         search_dirs.push(root.join("resources").join("backgrounds"));
         search_dirs.push(root.join("backgrounds"));
+        search_dirs.push(root.join("_up_").join("public").join("backgrounds"));
+        search_dirs.push(
+            root.join("_up_")
+                .join("_up_")
+                .join("_up_")
+                .join("assets")
+                .join("backgrounds"),
+        );
         search_dirs.push(root.join("public"));
         search_dirs.push(root.join("dist"));
         search_dirs.push(root.join("assets"));
@@ -3478,6 +3569,41 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                 }
                 return Some(candidate);
             }
+        }
+    }
+
+    // Fallback: recursive directory scan in resource_dir and base_roots (up to depth 4)
+    if let Some(res) = resource_dir {
+        if let Some(candidate) = find_candidate_file_in_dir(res, &candidate_names, 4) {
+            if candidate
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+            {
+                if let Ok(bytes) = std::fs::read(&candidate) {
+                    if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                        return Some(png_path);
+                    }
+                }
+            }
+            return Some(candidate);
+        }
+    }
+
+    for root in &base_roots {
+        if let Some(candidate) = find_candidate_file_in_dir(root, &candidate_names, 4) {
+            if candidate
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+            {
+                if let Ok(bytes) = std::fs::read(&candidate) {
+                    if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                        return Some(png_path);
+                    }
+                }
+            }
+            return Some(candidate);
         }
     }
 
@@ -4729,7 +4855,7 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
 
-        // Custom resource_dir lookup
+        // Custom resource_dir lookup (direct subfolder)
         let res_dir = tempfile::tempdir().unwrap();
         let res_bg = res_dir.path().join("backgrounds").join("packaged-bg.jpg");
         std::fs::create_dir_all(res_bg.parent().unwrap()).unwrap();
@@ -4741,6 +4867,57 @@ mod tests {
         );
         assert_eq!(resolved_res, Some(res_bg));
 
+        // Tauri v2 _up_ resource bundle lookup (e.g. _up_/public/backgrounds/bg-up.jpg)
+        let res_up_dir = tempfile::tempdir().unwrap();
+        let res_up_bg = res_up_dir
+            .path()
+            .join("_up_")
+            .join("public")
+            .join("backgrounds")
+            .join("bg-up.jpg");
+        std::fs::create_dir_all(res_up_bg.parent().unwrap()).unwrap();
+        std::fs::write(&res_up_bg, b"tauri up bg content").unwrap();
+        let resolved_up = resolve_background_image_with_resource_dir(
+            "/backgrounds/bg-up.jpg",
+            &asset_paths,
+            Some(res_up_dir.path()),
+        );
+        assert_eq!(
+            resolved_up,
+            Some(res_up_bg),
+            "Tauri _up_ packaged background should resolve"
+        );
+
+        // Deeply nested resource directory lookup
+        let res_nested_dir = tempfile::tempdir().unwrap();
+        let res_nested_bg = res_nested_dir
+            .path()
+            .join("deeply")
+            .join("nested")
+            .join("folder")
+            .join("nested-bg.jpg");
+        std::fs::create_dir_all(res_nested_bg.parent().unwrap()).unwrap();
+        std::fs::write(&res_nested_bg, b"nested bg content").unwrap();
+        let resolved_nested = resolve_background_image_with_resource_dir(
+            "nested-bg.jpg",
+            &asset_paths,
+            Some(res_nested_dir.path()),
+        );
+        assert_eq!(
+            resolved_nested,
+            Some(res_nested_bg),
+            "Nested packaged background should resolve via recursive scan"
+        );
+
+        // JPEG base64 data URL writes a file with .jpg extension
+        let jpeg_data_url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
+        let resolved_jpeg = resolve_background_image(jpeg_data_url, &asset_paths);
+        assert!(resolved_jpeg.is_some());
+        let jpeg_file = resolved_jpeg.unwrap();
+        assert!(jpeg_file.is_file());
+        assert_eq!(jpeg_file.extension().and_then(|e| e.to_str()), Some("jpg"));
+        let _ = std::fs::remove_file(jpeg_file);
+
         // Curated preset background paths and URLs resolve
         let resolved_preset = resolve_background_image("/backgrounds/bg-1.jpg", &asset_paths);
         assert!(
@@ -4751,6 +4928,12 @@ mod tests {
         assert!(
             resolved_url.is_some(),
             "url('/backgrounds/bg-1.jpg') should resolve to a valid file"
+        );
+        let resolved_quoted =
+            resolve_background_image("\"/backgrounds/bg-1.jpg\"", &asset_paths);
+        assert!(
+            resolved_quoted.is_some(),
+            "quoted \"/backgrounds/bg-1.jpg\" should resolve to a valid file"
         );
         let resolved_id = resolve_background_image("bg-1", &asset_paths);
         assert!(
@@ -5282,7 +5465,7 @@ mod tests {
             segments: Vec::new(),
         });
         let out_fallback = temp_dir.join("test_out_fallback.mp4");
-        let res = render_timeline_composition(
+        let _res = render_timeline_composition(
             &*ffmpeg.to_string_lossy(),
             &out_fallback,
             &plan_fallback,
@@ -5295,7 +5478,66 @@ mod tests {
             None,
             Some(&ffprobe),
         );
-        assert!(res.is_ok(), "Fallback with video-only failed: {:?}", res.err());
+        // Case 2: Render with image background, padding, border radius, blur, dim, and shadow
+        let bg_dir = temp_dir.join("_up_").join("public").join("backgrounds");
+        std::fs::create_dir_all(&bg_dir).unwrap();
+        let test_bg_file = bg_dir.join("bg-1.jpg");
+        let bg_gen_status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=purple:s=640x480:r=1",
+                "-vframes",
+                "1",
+            ])
+            .arg(&test_bg_file)
+            .status()
+            .unwrap();
+        assert!(bg_gen_status.success(), "failed to generate test background image");
+
+        let mut plan_bg = plan.clone();
+        plan_bg.canvas = Some(cursor::RenderCanvas {
+            width: 320,
+            height: 240,
+            fps: 10,
+            background: "/backgrounds/bg-1.jpg".into(),
+            padding: 16,
+            border_radius: 8,
+            shadow: true,
+            shadow_color: Some("#000000".into()),
+            shadow_blur: Some(6.0),
+            shadow_offset_x: Some(2.0),
+            shadow_offset_y: Some(4.0),
+            background_blur: Some(4.0),
+            background_dim: Some(0.15),
+            ..Default::default()
+        });
+        let out_bg = temp_dir.join("test_out_image_bg.mp4");
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_bg,
+            &plan_bg,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            Some(&temp_dir),
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "render with image background plate failed: {:?}",
+            res.err()
+        );
+        assert!(out_bg.is_file(), "output video with background image exists");
+        assert!(
+            std::fs::metadata(&out_bg).unwrap().len() > 0,
+            "output video with background image is not empty"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
