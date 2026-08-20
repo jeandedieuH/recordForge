@@ -1311,6 +1311,43 @@ fn render_timeline_composition(
     let composed_label = base_label.to_string();
 
     let mut current_label = composed_label;
+
+    // The overlay layer (cursor telemetry, vector annotations, styled text presets, graphics)
+    // rides directly on the screen/canvas base so that camera video overlays,
+    // privacy masks, and captions render cleanly on top.
+    let cursor_renderers = build_cursor_renderers(
+        plan,
+        project_id,
+        asset_paths,
+        canvas,
+        (screen_x, screen_y, screen_w, screen_h),
+    )?;
+    let has_overlay_plan = plan.overlay_render_plan.is_some();
+    let has_annotations = !plan.annotations.is_empty();
+    let has_texts = !plan.texts.is_empty();
+    let has_images = !plan.images.is_empty();
+    let mut cursor_plan = None;
+    if !cursor_renderers.is_empty()
+        || has_overlay_plan
+        || has_annotations
+        || has_texts
+        || has_images
+    {
+        let cursor_input_index = input_assets.len();
+        let cursor_label = "with_overlay";
+        filters.push(format!(
+            "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=yuv420[{cursor_label}]"
+        ));
+        current_label = cursor_label.to_string();
+        cursor_plan = Some(prepare_cursor_frame_plan(
+            canvas,
+            plan.duration_ms,
+            cursor_renderers,
+            plan,
+            asset_paths,
+        )?);
+    }
+
     for (index, overlay) in plan.overlays.iter().enumerate() {
         if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
             continue;
@@ -1528,41 +1565,6 @@ fn render_timeline_composition(
             canvas.height,
         )?);
         current_label = next_label;
-    }
-
-    // The overlay layer (cursor telemetry, vector annotations, styled text presets, graphics)
-    // rides on top of every other video filter in a single rawvideo stream.
-    let cursor_renderers = build_cursor_renderers(
-        plan,
-        project_id,
-        asset_paths,
-        canvas,
-        (screen_x, screen_y, screen_w, screen_h),
-    )?;
-    let has_overlay_plan = plan.overlay_render_plan.is_some();
-    let has_annotations = !plan.annotations.is_empty();
-    let has_texts = !plan.texts.is_empty();
-    let has_images = !plan.images.is_empty();
-    let mut cursor_plan = None;
-    if !cursor_renderers.is_empty()
-        || has_overlay_plan
-        || has_annotations
-        || has_texts
-        || has_images
-    {
-        let cursor_input_index = input_assets.len();
-        let cursor_label = "with_overlay";
-        filters.push(format!(
-            "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=yuv420[{cursor_label}]"
-        ));
-        current_label = cursor_label.to_string();
-        cursor_plan = Some(prepare_cursor_frame_plan(
-            canvas,
-            plan.duration_ms,
-            cursor_renderers,
-            plan,
-            asset_paths,
-        )?);
     }
 
     let final_label = "export_output";

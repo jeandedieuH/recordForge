@@ -96,7 +96,7 @@ export function CustomCursorOverlay({
   return (
     <div
       aria-hidden={!isCursorVisible}
-      className="pointer-events-none absolute z-20 overflow-hidden rounded-lg"
+      className="pointer-events-none absolute z-10 overflow-hidden rounded-lg"
       style={{
         left: offsetX,
         top: offsetY,

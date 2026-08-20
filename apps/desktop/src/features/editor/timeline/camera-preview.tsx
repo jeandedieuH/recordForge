@@ -204,7 +204,7 @@ export function CameraPreview({
             aria-label={isLocked ? "Camera overlay, locked" : "Camera overlay, drag to move"}
             aria-disabled={isLocked}
             className={cn(
-              "absolute z-10 overflow-hidden",
+              "absolute z-20 overflow-hidden",
               !isLocked && onUpdateTransform && isActive && "cursor-grab active:cursor-grabbing",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
             )}
