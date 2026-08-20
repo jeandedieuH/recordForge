@@ -133,6 +133,16 @@ export const recordingStatusSchema = z.object({
 
 export type RecordingStatus = z.infer<typeof recordingStatusSchema>
 
+// Broadcast during session finalization to report step and percentage progress.
+export const finalizationProgressSchema = z.object({
+  sessionId: z.string(),
+  step: z.string(),
+  stageLabel: z.string(),
+  percent: z.number().min(0).max(100),
+})
+
+export type FinalizationProgress = z.infer<typeof finalizationProgressSchema>
+
 // Broadcast after Rust persists a completed recording so every window can open it.
 export const recordingCompletedSchema = z.object({
   recordingId: z.string(),

@@ -345,6 +345,7 @@ function toTexts(state: TimelineState, range: ExportRange | undefined): RenderPl
               shadowBlur: clip.shadowBlur,
               animationIn: clip.animationIn,
               animationOut: clip.animationOut,
+              autoScaleText: clip.autoScaleText ?? true,
               enabled: clip.enabled !== false,
             },
           ]
@@ -525,6 +526,7 @@ function toOverlayRenderPlan(
             shadowEnabled: normalized.shadowEnabled,
             shadowColor: normalized.shadowColor,
             shadowBlur: normalized.shadowBlur,
+            autoScaleText: normalized.autoScaleText ?? true,
           },
         })
         return

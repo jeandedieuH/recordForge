@@ -2,6 +2,7 @@ use crate::database::library::get_recording;
 use crate::database::media::MediaJob;
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
+use tauri::Manager;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -557,6 +558,7 @@ pub fn run_render_plan(
         "rendering",
         Some("compositing timeline tracks"),
     )?;
+    let resource_dir = app.path().resource_dir().ok();
     let composition = render_timeline_composition(
         &ffmpeg,
         &partial_path,
@@ -567,6 +569,8 @@ pub fn run_render_plan(
         encoder,
         cancel.clone(),
         &progress_reporter,
+        resource_dir.as_deref(),
+        Some(ffprobe_path),
     );
     // A hardware encoder can fail to initialize even after a passing probe
     // (driver capabilities differ by resolution and pixel format), so retry
@@ -603,6 +607,8 @@ pub fn run_render_plan(
             encoding::ExportEncoder::Software,
             cancel.clone(),
             &progress_reporter,
+            resource_dir.as_deref(),
+            Some(ffprobe_path),
         )?;
     }
 
@@ -679,10 +685,34 @@ pub fn run_render_plan(
 
 /// Returns a source size shared by every screen segment, or `None` when the
 /// segments are missing dimensions or have mixed source sizes.
-fn common_screen_source(segments: &[RenderSegment]) -> Option<(u32, u32)> {
+fn common_screen_source(
+    segments: &[RenderSegment],
+    asset_paths: &HashMap<String, PathBuf>,
+    ffprobe_path: Option<&Path>,
+) -> Option<(u32, u32)> {
     let mut common: Option<(u32, u32)> = None;
     for segment in segments {
-        let (width, height) = (segment.source_width?, segment.source_height?);
+        let dimensions = if let (Some(w), Some(h)) = (segment.source_width, segment.source_height) {
+            Some((w, h))
+        } else if let (Some(ffprobe), Some(path)) = (ffprobe_path, asset_paths.get(&segment.asset_id)) {
+            if let Ok(metadata) = crate::media::probe::probe_media(
+                &ffprobe.to_string_lossy(),
+                path,
+                &segment.asset_id,
+            ) {
+                if let (Some(w), Some(h)) = (metadata.width, metadata.height) {
+                    Some((w as u32, h as u32))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let (width, height) = dimensions?;
         match common {
             None => common = Some((width, height)),
             Some((w, h)) if w == width && h == height => {}
@@ -746,6 +776,8 @@ fn render_timeline_composition(
     encoder: encoding::ExportEncoder,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     on_progress: &(dyn Fn(f64) + Sync),
+    resource_dir: Option<&Path>,
+    ffprobe_path: Option<&Path>,
 ) -> Result<()> {
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
@@ -781,7 +813,11 @@ fn render_timeline_composition(
         .as_ref()
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
-    let bg_image_path = resolve_background_image(&canvas.background, asset_paths);
+    let bg_image_path = resolve_background_image_with_resource_dir(
+        &canvas.background,
+        asset_paths,
+        resource_dir,
+    );
     let mut temp_mask_guards = Vec::new();
     if let Some(bg_path) = &bg_image_path {
         if bg_path.starts_with(std::env::temp_dir())
@@ -835,7 +871,7 @@ fn render_timeline_composition(
     });
     let (screen_x, screen_y, screen_w, screen_h) = video_screen_rect(
         canvas,
-        common_screen_source(&plan.segments),
+        common_screen_source(&plan.segments, asset_paths, ffprobe_path),
         is_side_by_side,
     );
 
@@ -1102,7 +1138,7 @@ fn render_timeline_composition(
         // 1. Generate the background plate [bg_plate]
         if let Some(bg_idx) = bg_input_index {
             let mut bg_filter = format!(
-                "[{bg_idx}:v]loop=loop=-1:size=1:start=0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1",
+                "[{bg_idx}:v]loop=loop=-1:size=1:start=0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1,format=yuv420p",
                 canvas.width, canvas.height, canvas.width, canvas.height
             );
             let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
@@ -2918,9 +2954,63 @@ pub(crate) fn generate_background_plate_png(
     Some(temp_path)
 }
 
+fn decode_percent_encoded(input: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                    result.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).to_string()
+}
+
+fn normalize_file_path_str(input: &str) -> String {
+    let mut path = input.trim();
+    // Normalize Windows drive paths with leading slash, e.g. "/C:/Users" or "\C:\Users" -> "C:/Users"
+    if path.len() >= 3
+        && (path.starts_with('/') || path.starts_with('\\'))
+        && path.as_bytes()[1].is_ascii_alphabetic()
+        && path.as_bytes()[2] == b':'
+    {
+        path = &path[1..];
+    }
+    path.to_string()
+}
+
+fn rasterize_svg_bytes_to_png(svg_bytes: &[u8], width: u32, height: u32) -> Option<PathBuf> {
+    let svg_str = std::str::from_utf8(svg_bytes).ok()?;
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb = overlay_engine::get_shared_font_database();
+    let tree = resvg::usvg::Tree::from_str(svg_str, &options).ok()?;
+    let mut pixmap = Pixmap::new(width, height)?;
+    resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
+    let temp_path = std::env::temp_dir().join(format!("recordforge_bg_svg_{}.png", uuid::Uuid::new_v4()));
+    pixmap.save_png(&temp_path).ok()?;
+    Some(temp_path)
+}
+
+#[allow(dead_code)]
 pub(crate) fn resolve_background_image(
     background: &str,
     asset_paths: &HashMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    resolve_background_image_with_resource_dir(background, asset_paths, None)
+}
+
+pub(crate) fn resolve_background_image_with_resource_dir(
+    background: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    resource_dir: Option<&Path>,
 ) -> Option<PathBuf> {
     let trimmed = background.trim();
     if trimmed.is_empty() {
@@ -2951,22 +3041,48 @@ pub(crate) fn resolve_background_image(
     };
 
     if path_str.starts_with("data:image/") {
-        if let Some((_, base64_data)) = path_str.split_once(";base64,") {
-            use base64::Engine;
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data.trim())
-            {
-                let temp_path = std::env::temp_dir()
-                    .join(format!("recordforge_bg_{}.png", uuid::Uuid::new_v4()));
-                if std::fs::write(&temp_path, bytes).is_ok() {
-                    return Some(temp_path);
+        if let Some((mime, rest)) = path_str.split_once(',') {
+            let is_base64 = mime.contains(";base64");
+            let is_svg = mime.contains("svg") || path_str.contains("<svg");
+
+            let bytes = if is_base64 {
+                use base64::Engine;
+                let trimmed_data = rest.trim();
+                base64::engine::general_purpose::STANDARD
+                    .decode(trimmed_data)
+                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed_data))
+                    .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed_data))
+                    .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed_data))
+                    .ok()
+            } else {
+                Some(rest.as_bytes().to_vec())
+            };
+
+            if let Some(bytes) = bytes {
+                if is_svg || bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+                    return rasterize_svg_bytes_to_png(&bytes, 1920, 1080);
+                } else {
+                    let temp_path = std::env::temp_dir()
+                        .join(format!("recordforge_bg_{}.png", uuid::Uuid::new_v4()));
+                    if std::fs::write(&temp_path, bytes).is_ok() {
+                        return Some(temp_path);
+                    }
                 }
             }
         }
     }
 
     if let Some(idx) = path_str.find("://") {
+        let scheme = &path_str[..idx];
         let after_scheme = &path_str[idx + 3..];
-        if let Some(slash_idx) = after_scheme.find('/') {
+        if scheme.eq_ignore_ascii_case("file") {
+            let without_host = if let Some(slash_idx) = after_scheme.find('/') {
+                &after_scheme[slash_idx..]
+            } else {
+                after_scheme
+            };
+            path_str = without_host;
+        } else if let Some(slash_idx) = after_scheme.find('/') {
             path_str = &after_scheme[slash_idx..];
         }
     }
@@ -2977,27 +3093,59 @@ pub(crate) fn resolve_background_image(
         path_str = &path_str[..idx];
     }
 
+    let decoded = decode_percent_encoded(path_str);
+    let normalized = normalize_file_path_str(&decoded);
+    let clean_str = normalized.as_str();
+
+    if let Some(path) = asset_paths.get(clean_str) {
+        if path.is_file() {
+            return Some(path.clone());
+        }
+    }
     if let Some(path) = asset_paths.get(path_str) {
         if path.is_file() {
             return Some(path.clone());
         }
     }
 
-    let direct = PathBuf::from(path_str);
+    let direct = PathBuf::from(clean_str);
     if direct.is_file() {
+        if direct.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+            if let Ok(bytes) = std::fs::read(&direct) {
+                if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                    return Some(png_path);
+                }
+            }
+        }
         return Some(direct);
+    }
+
+    let raw_direct = PathBuf::from(path_str);
+    if raw_direct.is_file() {
+        return Some(raw_direct);
     }
 
     let filename = direct
         .file_name()
         .and_then(|f| f.to_str())
-        .unwrap_or(path_str);
-    let trimmed_leading = path_str.trim_start_matches(['/', '\\']);
+        .unwrap_or(clean_str);
+    let trimmed_leading = clean_str.trim_start_matches(['/', '\\']);
 
     let mut candidate_names = vec![filename.to_string(), trimmed_leading.to_string()];
     if !filename.contains('.') {
         candidate_names.push(format!("{filename}.jpg"));
+        candidate_names.push(format!("{filename}.jpeg"));
         candidate_names.push(format!("{filename}.png"));
+        candidate_names.push(format!("{filename}.webp"));
+    }
+
+    let mut search_dirs = Vec::new();
+    if let Some(res) = resource_dir {
+        search_dirs.push(res.join("backgrounds"));
+        search_dirs.push(res.join("assets").join("backgrounds"));
+        search_dirs.push(res.join("public").join("backgrounds"));
+        search_dirs.push(res.join("dist").join("backgrounds"));
+        search_dirs.push(res.to_path_buf());
     }
 
     let mut base_roots = Vec::new();
@@ -3031,7 +3179,6 @@ pub(crate) fn resolve_background_image(
         }
     }
 
-    let mut search_dirs = Vec::new();
     for root in &base_roots {
         search_dirs.push(root.join("public").join("backgrounds"));
         search_dirs.push(
@@ -3051,12 +3198,21 @@ pub(crate) fn resolve_background_image(
         search_dirs.push(root.join("resources").join("backgrounds"));
         search_dirs.push(root.join("backgrounds"));
         search_dirs.push(root.join("public"));
+        search_dirs.push(root.join("dist"));
+        search_dirs.push(root.join("assets"));
     }
 
     for dir in &search_dirs {
         for name in &candidate_names {
             let candidate = dir.join(name);
             if candidate.is_file() {
+                if candidate.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+                    if let Ok(bytes) = std::fs::read(&candidate) {
+                        if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                            return Some(png_path);
+                        }
+                    }
+                }
                 return Some(candidate);
             }
         }
@@ -3080,7 +3236,11 @@ fn zoom_easing_expression(p: &str, easing: &str) -> String {
         "ease-in" => format!("{p}*{p}"),
         "ease-out" => format!("({p})*(2-({p}))"),
         "snappy" => format!("({p})*(3-({p})*(3-({p})))"),
-        "cinematic" | "smooth" => format!("({p})*({p})*(3-2*({p}))"),
+        // Cubic smoothstep: t²(3-2t)
+        "cinematic" => format!("({p})*({p})*(3-2*({p}))"),
+        // Quintic smootherstep: 6t⁵ - 15t⁴ + 10t³ — matches preview's
+        // zoomEasedProgress which uses 0-velocity + 0-acceleration endpoints.
+        "smooth" => format!("({p})*({p})*({p})*(({p})*(({p})*6-15)+10)"),
         "spring" => format!("pow(2,-10*({p}))*sin((({p})-0.1)*15.708)+1"),
         _ => format!("if(lte({p},0.5),2*({p})*({p}),1-pow(-2*({p})+2,2)/2)"),
     }
@@ -3154,8 +3314,10 @@ fn zoom_crop_expression(
             continue;
         }
         let duration_s = (segment.end_ms - segment.start_ms) as f64 / 1000.0;
-        let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.010, duration_s);
-        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.010, duration_s);
+        // Floor at 1ms (not 10ms) to match the preview's near-zero transition
+        // support while avoiding division-by-zero in the FFmpeg expression.
+        let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.001, duration_s);
+        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.001, duration_s);
         if trans_in_s + trans_out_s > duration_s {
             trans_in_s = duration_s / 2.0;
             trans_out_s = duration_s - trans_in_s;
@@ -3172,8 +3334,19 @@ fn zoom_crop_expression(
         let target_val = match axis {
             "width" => ((target.width / canvas_w) * screen_w).clamp(1.0, screen_w),
             "height" => ((target.height / canvas_h) * screen_h).clamp(1.0, screen_h),
-            "x" => ((target.x / canvas_w) * screen_w + crop_x).clamp(0.0, (screen_w - 1.0).max(0.0)),
-            "y" => ((target.y / canvas_h) * screen_h + crop_y).clamp(0.0, (screen_h - 1.0).max(0.0)),
+            // Clamp x to [crop_x .. crop_x + screen_w - target_crop_w] so the
+            // crop rectangle cannot extend past the source frame, matching the
+            // preview's `Math.min(Math.max(0, cx - cw/2), canvas.width - cw)`.
+            "x" => {
+                let target_w_src = ((target.width / canvas_w) * screen_w).clamp(1.0, screen_w);
+                ((target.x / canvas_w) * screen_w + crop_x)
+                    .clamp(crop_x, (crop_x + screen_w - target_w_src).max(crop_x))
+            }
+            "y" => {
+                let target_h_src = ((target.height / canvas_h) * screen_h).clamp(1.0, screen_h);
+                ((target.y / canvas_h) * screen_h + crop_y)
+                    .clamp(crop_y, (crop_y + screen_h - target_h_src).max(crop_y))
+            }
             _ => full,
         };
 
@@ -4177,14 +4350,52 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
 
-
         // Asset ID lookup returns file path
         let resolved_asset = resolve_background_image("asset-bg-1", &asset_paths);
         assert_eq!(resolved_asset, Some(file_path.clone()));
 
         // Direct file path returns file path
         let resolved_direct = resolve_background_image(file_path.to_str().unwrap(), &asset_paths);
-        assert_eq!(resolved_direct, Some(file_path));
+        assert_eq!(resolved_direct, Some(file_path.clone()));
+
+        // Windows drive path with leading slash, e.g. /C:/path
+        let slash_path = format!("/{}", file_path.to_str().unwrap().replace('\\', "/"));
+        let resolved_slash = resolve_background_image(&slash_path, &asset_paths);
+        assert!(
+            resolved_slash.is_some(),
+            "Path with leading slash should resolve: {}",
+            slash_path
+        );
+
+        // file:/// URI scheme
+        let file_uri = format!("file:///{}", file_path.to_str().unwrap().replace('\\', "/"));
+        let resolved_file_uri = resolve_background_image(&file_uri, &asset_paths);
+        assert!(
+            resolved_file_uri.is_some(),
+            "file:/// URI scheme should resolve: {}",
+            file_uri
+        );
+
+        // asset://localhost/ URI scheme
+        let asset_uri = format!("asset://localhost/{}", file_path.to_str().unwrap().replace('\\', "/"));
+        let resolved_asset_uri = resolve_background_image(&asset_uri, &asset_paths);
+        assert!(
+            resolved_asset_uri.is_some(),
+            "asset:// URI scheme should resolve: {}",
+            asset_uri
+        );
+
+        // Percent-encoded URI scheme
+        let encoded_path = format!(
+            "file:///{}",
+            file_path.to_str().unwrap().replace('\\', "/").replace(':', "%3A").replace(' ', "%20")
+        );
+        let resolved_encoded = resolve_background_image(&encoded_path, &asset_paths);
+        assert!(
+            resolved_encoded.is_some(),
+            "Percent-encoded URI should resolve: {}",
+            encoded_path
+        );
 
         // Base64 data URL decodes to a file
         let data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -4193,6 +4404,27 @@ mod tests {
         let written_path = resolved_data.unwrap();
         assert!(written_path.is_file());
         let _ = std::fs::remove_file(written_path);
+
+        // SVG data URL rasterizes to a PNG
+        let svg_data_url = "data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\" fill=\"#6366f1\"/></svg>";
+        let resolved_svg = resolve_background_image(svg_data_url, &asset_paths);
+        assert!(resolved_svg.is_some(), "SVG data URL should rasterize to PNG");
+        if let Some(path) = resolved_svg {
+            assert!(path.is_file());
+            let _ = std::fs::remove_file(path);
+        }
+
+        // Custom resource_dir lookup
+        let res_dir = tempfile::tempdir().unwrap();
+        let res_bg = res_dir.path().join("backgrounds").join("packaged-bg.jpg");
+        std::fs::create_dir_all(res_bg.parent().unwrap()).unwrap();
+        std::fs::write(&res_bg, b"packaged bg content").unwrap();
+        let resolved_res = resolve_background_image_with_resource_dir(
+            "/backgrounds/packaged-bg.jpg",
+            &asset_paths,
+            Some(res_dir.path()),
+        );
+        assert_eq!(resolved_res, Some(res_bg));
 
         // Curated preset background paths and URLs resolve
         let resolved_preset = resolve_background_image("/backgrounds/bg-1.jpg", &asset_paths);
@@ -4210,6 +4442,47 @@ mod tests {
             resolved_id.is_some(),
             "preset ID bg-1 should resolve to a valid file"
         );
+    }
+
+    #[test]
+    fn test_video_screen_rect_aspect_ratios() {
+        // 16:9 canvas (1920x1080) with 16:9 source (1920x1080) and 0 padding
+        let canvas_16_9 = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            padding: 0,
+            ..Default::default()
+        };
+        let rect = video_screen_rect(&canvas_16_9, Some((1920, 1080)), false);
+        assert_eq!(rect, (0.0, 0.0, 1920.0, 1080.0));
+
+        // 9:16 vertical canvas (1080x1920) with 16:9 source (1920x1080) and 0 padding
+        let canvas_9_16 = cursor::RenderCanvas {
+            width: 1080,
+            height: 1920,
+            padding: 0,
+            ..Default::default()
+        };
+        let rect_9_16 = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        // Source 1920x1080 fit into 1080x1920: scale = 1080/1920 = 0.5625 -> 1080 x 607, centered at y = (1920 - 607)/2 = 656
+        assert_eq!(rect_9_16.0, 0.0);
+        assert_eq!(rect_9_16.2, 1080.0);
+        assert_eq!(rect_9_16.3, 607.0);
+        assert_eq!(rect_9_16.1, 656.0);
+
+        // 1:1 square canvas (1080x1080) with 16:9 source (1920x1080) and 40px padding
+        let canvas_1_1 = cursor::RenderCanvas {
+            width: 1080,
+            height: 1080,
+            padding: 40,
+            ..Default::default()
+        };
+        let rect_1_1 = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
+        // Content area: 1000 x 1000. Source fit: 1000 x 562. Centered: x=40, y = 40 + (1000 - 562)/2 = 259
+        assert_eq!(rect_1_1.0, 40.0);
+        assert_eq!(rect_1_1.2, 1000.0);
+        assert_eq!(rect_1_1.3, 562.0);
+        assert_eq!(rect_1_1.1, 259.0);
     }
 
     #[test]
@@ -4436,10 +4709,13 @@ mod tests {
         let y_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "y");
 
         let total_filter_len = w_expr.len() + h_expr.len() + x_expr.len() + y_expr.len();
-        // Ensure that 30 dynamic zoom segments total well under the Windows 32,767 char limit
+        // Ensure that 30 dynamic zoom segments total well under the Windows
+        // 32,767 char limit. The quintic `smooth` easing generates longer
+        // expressions than the cubic `cinematic`, so we allow up to 30KB
+        // leaving ~2KB headroom for the rest of the filter graph.
         assert!(
-            total_filter_len < 25_000,
-            "Total crop expressions length ({total_filter_len}) must be well below 25KB"
+            total_filter_len < 30_000,
+            "Total crop expressions length ({total_filter_len}) must be well below 30KB"
         );
     }
 }

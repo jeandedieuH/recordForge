@@ -71,7 +71,6 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     // after releasing the recorder mutex.
     enum Action {
         Started(crate::capture::source::Bounds),
-        Stopped,
         Aborted,
         None,
     }
@@ -97,8 +96,12 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
                 }
             }
             RecorderState::Recording | RecorderState::Paused => {
-                guard.stop().map(|_| ())?;
-                Action::Stopped
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<AppState>();
+                    let _ = crate::commands::recording::stop_recording(app_handle.clone(), state).await;
+                });
+                return Ok(());
             }
             RecorderState::Countdown => {
                 guard.cancel_prepared(&status.session_id)?;
@@ -117,7 +120,7 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
             }
             crate::commands::recording::open_recording_windows_async(app, bounds);
         }
-        Action::Stopped | Action::Aborted => {
+        Action::Aborted => {
             crate::window::FloatingWindow::hide(app);
             crate::window::BoundaryWindow::hide(app);
             crate::window::CountdownWindow::hide(app);

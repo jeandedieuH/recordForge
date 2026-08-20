@@ -414,6 +414,7 @@ mod tests {
                 shadow_enabled: true,
                 shadow_color: "rgba(0,0,0,0.5)".to_string(),
                 shadow_blur: 12.0,
+                auto_scale_text: true,
             },
         };
 
@@ -480,6 +481,7 @@ mod tests {
                 shadow_enabled: false,
                 shadow_color: "#000000".to_string(),
                 shadow_blur: 0.0,
+                auto_scale_text: true,
             },
         };
 

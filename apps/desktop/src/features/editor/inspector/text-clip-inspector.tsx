@@ -264,8 +264,8 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               Weight
             </label>
             <Select
-              value={String(clip.fontWeight ?? 700)}
-              onValueChange={(val) => onChange({ fontWeight: Number(val) as any })}
+              value={String(clip.fontWeight ?? "700")}
+              onValueChange={(val) => onChange({ fontWeight: val as any })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -302,6 +302,17 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               </ToggleGroupItem>
             </ToggleGroup>
           </div>
+        </div>
+
+        <div className="flex items-center justify-between mt-2 pt-2 border-t border-border/50">
+          <div className="flex flex-col">
+            <span className="text-xs font-medium text-foreground">Auto-Scale to Box</span>
+            <span className="text-[10px] text-muted-foreground">Scale text on overflow</span>
+          </div>
+          <Switch
+            checked={clip.autoScaleText ?? true}
+            onCheckedChange={(autoScaleText) => onChange({ autoScaleText })}
+          />
         </div>
       </InspectorSection>
 

@@ -21,6 +21,13 @@ function isActive(clip: TextClip, playheadMs: number): boolean {
   )
 }
 
+function resolveOverlayFontFamily(family?: string): string {
+  if (family === "serif") return '"Source Serif 4", Georgia, serif'
+  if (family === "mono") return '"JetBrains Mono", Consolas, monospace'
+  if (family === "heading" || family === "outfit") return "Outfit, Inter, sans-serif"
+  return "Inter, Segoe UI, sans-serif"
+}
+
 export function TextCanvasOverlay({
   clips,
   playheadMs,
@@ -55,6 +62,42 @@ export function TextCanvasOverlay({
         const widthPercent = (clip.width / canvasWidth) * 100
         const heightPercent = (clip.height / canvasHeight) * 100
 
+        const paddingX = Math.min(clip.width / 3, clip.backdropPaddingX ?? 20)
+        const paddingY = Math.min(clip.height / 3, clip.backdropPaddingY ?? 12)
+        const availableW = Math.max(20, clip.width - paddingX * 2)
+        const availableH = Math.max(10, clip.height - paddingY * 2)
+
+        const basePrimaryFs = clip.fontSize
+        const basePrimaryLineH = basePrimaryFs * 1.25
+        const primaryCharsPerLine = Math.max(3, Math.floor(availableW / (basePrimaryFs * 0.58)))
+        const primaryLineCount = clip.primaryText
+          .split("\n")
+          .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / primaryCharsPerLine)), 0)
+        const basePrimaryH = primaryLineCount * basePrimaryLineH
+
+        const hasTag = Boolean(clip.tagText?.trim())
+        const baseTagFs = Math.max(10, Math.min(18, Math.round(basePrimaryFs * 0.35)))
+        const baseTagH = hasTag ? baseTagFs * 1.2 + 6 : 0
+
+        const hasSub = Boolean(clip.secondaryText?.trim())
+        const baseSubFs = Math.max(11, Math.min(48, Math.round(basePrimaryFs * 0.55)))
+        const baseSubLineH = baseSubFs * 1.3
+        const subCharsPerLine = Math.max(3, Math.floor(availableW / (baseSubFs * 0.58)))
+        const subLineCount = (clip.secondaryText ?? "")
+          .split("\n")
+          .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.length / subCharsPerLine)), 0)
+        const baseSubH = hasSub ? subLineCount * baseSubLineH + 5 : 0
+
+        const initialTotalContentH = baseTagH + basePrimaryH + baseSubH
+        const scale =
+          clip.autoScaleText !== false && initialTotalContentH > availableH && initialTotalContentH > 0
+            ? Math.min(1, Math.max(0.55, availableH / initialTotalContentH))
+            : 1
+
+        const primaryFs = Math.max(10, Math.round(basePrimaryFs * scale))
+        const subFs = Math.max(9, Math.round(baseSubFs * scale))
+        const tagFs = Math.max(9, Math.round(baseTagFs * scale))
+
         // Backdrop visual styles
         const backdropStyle: React.CSSProperties = {
           backgroundColor:
@@ -66,7 +109,7 @@ export function TextCanvasOverlay({
           backdropFilter:
             clip.backdropStyle === "glass" ? `blur(${clip.backdropBlur ?? 16}px)` : undefined,
           borderRadius: `${clip.backdropBorderRadius}px`,
-          padding: `${clip.backdropPaddingY ?? 12}px ${clip.backdropPaddingX ?? 20}px`,
+          padding: `${paddingY}px ${paddingX}px`,
           boxShadow: clip.shadowEnabled ? clip.shadowColor : undefined,
           border:
             clip.backdropStyle === "glass" || clip.backdropStyle === "outline"
@@ -125,11 +168,12 @@ export function TextCanvasOverlay({
               {/* Tag / Badge */}
               {clip.tagText ? (
                 <span
-                  className="mb-1 inline-flex w-fit items-center rounded px-2 py-0.5 text-[11px] font-bold uppercase tracking-wider"
+                  className="mb-1 inline-flex w-fit items-center rounded px-2 py-0.5 font-bold uppercase tracking-wider"
                   style={{
                     backgroundColor: `${clip.accentColor}25`,
                     color: clip.accentColor,
                     border: `1px solid ${clip.accentColor}50`,
+                    fontSize: `${tagFs}px`,
                   }}
                 >
                   {clip.tagText}
@@ -138,15 +182,12 @@ export function TextCanvasOverlay({
 
               {/* Primary Main Title */}
               <div
-                className={cn(
-                  "font-bold leading-tight drop-shadow-sm whitespace-pre-wrap break-words",
-                  clip.fontFamily === "serif" && "font-serif",
-                  clip.fontFamily === "mono" && "font-mono",
-                )}
+                className="font-bold leading-tight drop-shadow-sm whitespace-pre-wrap break-words"
                 style={{
                   color: clip.textColor,
-                  fontSize: `${clip.fontSize}px`,
+                  fontSize: `${primaryFs}px`,
                   fontWeight: clip.fontWeight,
+                  fontFamily: resolveOverlayFontFamily(clip.fontFamily),
                 }}
               >
                 {clip.primaryText}
@@ -155,14 +196,11 @@ export function TextCanvasOverlay({
               {/* Secondary Subtitle */}
               {clip.secondaryText ? (
                 <div
-                  className={cn(
-                    "mt-1 opacity-90 leading-snug whitespace-pre-wrap break-words",
-                    clip.fontFamily === "serif" && "font-serif",
-                    clip.fontFamily === "mono" && "font-mono",
-                  )}
+                  className="mt-1 opacity-90 leading-snug whitespace-pre-wrap break-words"
                   style={{
                     color: clip.secondaryTextColor ?? "#94a3b8",
-                    fontSize: `${Math.max(12, Math.round(clip.fontSize * 0.55))}px`,
+                    fontSize: `${subFs}px`,
+                    fontFamily: resolveOverlayFontFamily(clip.fontFamily),
                   }}
                 >
                   {clip.secondaryText}

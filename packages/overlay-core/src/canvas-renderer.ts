@@ -181,8 +181,13 @@ function renderText(
   context.shadowBlur = 0
   context.textBaseline = "top"
 
-  const paddingX = item.backdropPaddingX
-  const paddingY = item.backdropPaddingY
+  const paddingX = Math.min(transform.width / 3, item.backdropPaddingX)
+  const paddingY = Math.min(transform.height / 3, item.backdropPaddingY)
+  const radius =
+    item.backdropStyle === "pill"
+      ? transform.height / 2
+      : Math.min(transform.height / 2, item.backdropBorderRadius)
+
   if (item.backdropStyle !== "none") {
     const backdropPath = new Path2D()
     appendRoundedRect(
@@ -191,7 +196,7 @@ function renderText(
       transform.y,
       transform.width,
       transform.height,
-      item.backdropBorderRadius,
+      radius,
     )
     context.fillStyle = withOpacity(item.backdropColor, item.backdropOpacity)
     applyShadow(context, item.shadowEnabled, item.shadowColor, item.shadowBlur)
@@ -206,59 +211,146 @@ function renderText(
     }
     if (item.backdropStyle === "accent-bar") {
       context.fillStyle = item.accentColor
-      context.fillRect(transform.x, transform.y, Math.max(2, paddingX / 2), transform.height)
+      const barW = Math.max(3, Math.min(8, paddingX / 2))
+      context.fillRect(transform.x, transform.y, barW, transform.height)
     }
   }
+
+  // Clip text to backdrop card bounds
+  clipRoundedRect(context, transform, radius)
 
   const textX = textPositionX(item.alignment, transform.x, transform.width, paddingX)
   context.textAlign = item.alignment
-  context.fillStyle = item.textColor
-  context.font = `${item.fontWeight} ${item.fontSize}px ${fontFamily(item.fontFamily)}`
+
+  const usableWidth = Math.max(20, transform.width - paddingX * 2)
+  const availableH = Math.max(10, transform.height - paddingY * 2)
+
+  // Initial base font sizes & metrics
+  const basePrimaryFs = Math.max(12, Math.min(120, item.fontSize))
+  const basePrimaryLineHeight = basePrimaryFs * 1.25
   const primaryText = revealText(item.primaryText, item.textProgress)
-  const maxPrimaryWidth = Math.max(20, transform.width - paddingX * 2)
-  const primaryLines = wrapTextToLines(primaryText, maxPrimaryWidth, (str) =>
+  const basePrimaryLines = wrapTextToLines(primaryText, usableWidth, (str) =>
     typeof context.measureText === "function"
       ? context.measureText(str).width
-      : str.length * item.fontSize * 0.6,
+      : str.length * basePrimaryFs * 0.58,
   )
-  const primaryLineHeight = item.fontSize * 1.2
-  let currentY = transform.y + paddingY
-  for (const line of primaryLines) {
-    context.fillText(
-      line,
-      textX,
-      currentY,
+  const basePrimaryH = basePrimaryLines.length * basePrimaryLineHeight
+
+  // Optional tag
+  const hasTag = Boolean(item.tagText?.trim())
+  const baseTagFs = Math.max(10, Math.min(18, Math.round(basePrimaryFs * 0.35)))
+  const baseTagLineHeight = baseTagFs * 1.2
+  const baseTagGap = 6
+  const baseTagH = hasTag ? baseTagLineHeight + baseTagGap : 0
+
+  // Optional secondary subtitle
+  const hasSub = Boolean(item.secondaryText?.trim())
+  const baseSubFs = Math.max(11, Math.min(48, Math.round(basePrimaryFs * 0.55)))
+  const baseSubLineHeight = baseSubFs * 1.3
+  const baseSubtitleGap = 5
+  const baseSubLines =
+    hasSub && item.secondaryText
+      ? wrapTextToLines(item.secondaryText, usableWidth, (str) =>
+          typeof context.measureText === "function"
+            ? context.measureText(str).width
+            : str.length * baseSubFs * 0.58,
+        )
+      : []
+  const baseSubH =
+    hasSub && baseSubLines.length > 0
+      ? baseSubLines.length * baseSubLineHeight + baseSubtitleGap
+      : 0
+
+  const initialTotalContentH = baseTagH + basePrimaryH + baseSubH
+
+  // Determine scale factor if autoScaleText is enabled
+  const scale =
+    item.autoScaleText && initialTotalContentH > availableH && initialTotalContentH > 0
+      ? Math.min(1, Math.max(0.55, availableH / initialTotalContentH))
+      : 1
+
+  let primaryFs = basePrimaryFs
+  let primaryLineHeight = basePrimaryLineHeight
+  let primaryLines = basePrimaryLines
+  let primaryH = basePrimaryH
+
+  let tagFs = baseTagFs
+  let tagLineHeight = baseTagLineHeight
+  let tagGap = baseTagGap
+
+  let subFs = baseSubFs
+  let subLineHeight = baseSubLineHeight
+  let subtitleGap = baseSubtitleGap
+  let secondaryLines = baseSubLines
+  let subH = baseSubH
+
+  if (Math.abs(scale - 1) > 0.001) {
+    primaryFs = Math.max(10, Math.min(120, basePrimaryFs * scale))
+    primaryLineHeight = primaryFs * 1.25
+    primaryLines = wrapTextToLines(primaryText, usableWidth, (str) =>
+      typeof context.measureText === "function"
+        ? context.measureText(str).width
+        : str.length * primaryFs * 0.58,
     )
+    primaryH = primaryLines.length * primaryLineHeight
+
+    tagFs = Math.max(9, Math.min(18, Math.round(primaryFs * 0.35)))
+    tagLineHeight = tagFs * 1.2
+    tagGap = baseTagGap * scale
+
+    subFs = Math.max(9, Math.min(48, Math.round(primaryFs * 0.55)))
+    subLineHeight = subFs * 1.3
+    subtitleGap = baseSubtitleGap * scale
+    secondaryLines =
+      hasSub && item.secondaryText
+        ? wrapTextToLines(item.secondaryText, usableWidth, (str) =>
+            typeof context.measureText === "function"
+              ? context.measureText(str).width
+              : str.length * subFs * 0.58,
+          )
+        : []
+    subH =
+      hasSub && secondaryLines.length > 0
+        ? secondaryLines.length * subLineHeight + subtitleGap
+        : 0
+  }
+
+  const tagH = hasTag ? tagLineHeight + tagGap : 0
+  const totalContentH = tagH + primaryH + subH
+
+  // Vertically center inside card
+  let currentY =
+    totalContentH < transform.height
+      ? Math.max(transform.y + paddingY, transform.y + (transform.height - totalContentH) / 2)
+      : transform.y + paddingY
+
+  // 1. Render tag text at top
+  if (hasTag && item.tagText) {
+    context.fillStyle = item.accentColor
+    context.font = `700 ${tagFs}px ${fontFamily(item.fontFamily)}`
+    context.fillText(item.tagText.toUpperCase(), textX, currentY)
+    currentY += tagLineHeight + tagGap
+  }
+
+  // 2. Render primary text
+  context.fillStyle = item.textColor
+  context.font = `${item.fontWeight} ${primaryFs}px ${fontFamily(item.fontFamily)}`
+  for (const line of primaryLines) {
+    context.fillText(line, textX, currentY)
     currentY += primaryLineHeight
   }
 
-  let nextY = currentY
-  if (item.secondaryText) {
+  // 3. Render secondary text
+  if (hasSub && secondaryLines.length > 0) {
+    currentY += subtitleGap
     context.fillStyle = item.secondaryTextColor
-    const subFs = Math.max(12, Math.round(item.fontSize * 0.55))
-    context.font = `${subFs}px ${fontFamily(item.fontFamily)}`
-    const subLineHeight = subFs * 1.25
-    const maxSubWidth = Math.max(20, transform.width - paddingX * 2)
-    const secondaryLines = wrapTextToLines(item.secondaryText, maxSubWidth, (str) =>
-      typeof context.measureText === "function"
-        ? context.measureText(str).width
-        : str.length * subFs * 0.6,
-    )
+    context.font = `500 ${subFs}px ${fontFamily(item.fontFamily)}`
     for (const line of secondaryLines) {
-      context.fillText(line, textX, nextY)
-      nextY += subLineHeight
+      context.fillText(line, textX, currentY)
+      currentY += subLineHeight
     }
   }
 
-  if (item.tagText) {
-    context.fillStyle = item.accentColor
-    context.font = `700 ${Math.max(10, Math.round(item.fontSize * 0.4))}px ${fontFamily("sans")}`
-    context.fillText(
-      item.tagText.toUpperCase(),
-      textX,
-      nextY,
-    )
-  }
   context.restore()
 }
 
@@ -398,6 +490,7 @@ function clipRoundedRect(
   transform: OverlayTransform,
   radius: number,
 ): void {
+  if (typeof context.clip !== "function") return
   const path = new Path2D()
   appendRoundedRect(path, transform.x, transform.y, transform.width, transform.height, radius)
   context.clip(path)
@@ -497,10 +590,10 @@ function withOpacity(color: string, opacity: number): string {
 }
 
 function fontFamily(family: string): string {
-  if (family === "serif") return '"Source Serif 4", serif'
-  if (family === "mono") return '"JetBrains Mono", monospace'
-  if (family === "heading") return "Outfit, sans-serif"
-  return "Inter, sans-serif"
+  if (family === "serif") return '"Source Serif 4", Georgia, serif'
+  if (family === "mono") return '"JetBrains Mono", Consolas, monospace'
+  if (family === "heading" || family === "outfit") return "Outfit, Inter, sans-serif"
+  return "Inter, Segoe UI, sans-serif"
 }
 
 function textPositionX(

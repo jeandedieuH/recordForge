@@ -317,15 +317,6 @@ fn build_menu(
 
 fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
     // Menu events arrive on the main thread, but recorder transport actions
-    // can block for seconds (FFmpeg teardown, probing, muxing). Run them on
-    // the async runtime so tray interactions never freeze window input.
-    let run_async = |app: &tauri::AppHandle, action: fn(tauri::AppHandle)| {
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            action(app);
-        });
-    };
-
     match event.id().as_ref() {
         "show" => {
             if let Some(window) = app.get_webview_window("main") {
@@ -339,9 +330,24 @@ fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
                 let _ = window.hide();
             }
         }
-        "start" => run_async(app, tray_start),
-        "pause" => run_async(app, tray_toggle_pause_resume),
-        "stop" => run_async(app, tray_stop_recording),
+        "start" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tray_start(app);
+            });
+        }
+        "pause" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tray_toggle_pause_resume(app);
+            });
+        }
+        "stop" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tray_stop_recording(app).await;
+            });
+        }
         "marker" => {
             let state = app.state::<AppState>();
             let _ = crate::commands::recording::insert_marker_broadcast(
@@ -382,11 +388,11 @@ fn tray_toggle_pause_resume(app: tauri::AppHandle) {
     crate::commands::recording::emit_current_status(&app, &state);
 }
 
-fn tray_stop_recording(app: tauri::AppHandle) {
+async fn tray_stop_recording(app: tauri::AppHandle) {
     let state = app.state::<AppState>();
     // Delegate to the shared stop command so the tray gets full parity with
     // the UI: completion event, countdown cleanup, window restore.
-    let _ = crate::commands::recording::stop_recording(app.clone(), state);
+    let _ = crate::commands::recording::stop_recording(app.clone(), state).await;
 }
 
 fn recorder_is_active(app: &tauri::AppHandle) -> bool {

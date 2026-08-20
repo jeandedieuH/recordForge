@@ -98,6 +98,7 @@ fn display_item_at_time(item: &OverlayItem, time_ms: u64) -> Option<DisplayItem>
                 shadow_enabled: details.shadow_enabled,
                 shadow_color: details.shadow_color.clone(),
                 shadow_blur: details.shadow_blur,
+                auto_scale_text: details.auto_scale_text,
             },
         },
         OverlayItem::Image { details, .. } => DisplayItem::Image {

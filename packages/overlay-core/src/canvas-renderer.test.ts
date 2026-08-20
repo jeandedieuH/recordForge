@@ -49,6 +49,7 @@ describe("overlay canvas renderer", () => {
       restore,
       fill,
       stroke,
+      clip: vi.fn(),
       setLineDash,
       translate: vi.fn(),
       rotate: vi.fn(),
@@ -94,6 +95,7 @@ describe("overlay canvas renderer", () => {
             shadowEnabled: false,
             shadowColor: "black",
             shadowBlur: 0,
+            autoScaleText: true,
           },
           {
             kind: "annotation",

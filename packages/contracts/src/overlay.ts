@@ -92,6 +92,7 @@ export const overlayTextItemSchema = overlayRenderItemBaseSchema.extend({
   shadowEnabled: z.boolean(),
   shadowColor: z.string(),
   shadowBlur: z.number().min(0),
+  autoScaleText: z.boolean().default(true),
 })
 
 export type OverlayTextItem = z.infer<typeof overlayTextItemSchema>
@@ -203,6 +204,7 @@ export const overlayDisplayTextSchema = overlayDisplayItemBaseSchema.extend({
   shadowEnabled: z.boolean(),
   shadowColor: z.string(),
   shadowBlur: z.number().min(0),
+  autoScaleText: z.boolean().default(true),
 })
 
 export const overlayDisplayImageSchema = overlayDisplayItemBaseSchema.extend({

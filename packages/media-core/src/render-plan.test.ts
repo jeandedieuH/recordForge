@@ -670,6 +670,7 @@ describe("render-plan", () => {
               outDurationMs: 350,
               easing: "expo-out",
             },
+            autoScaleText: true,
             enabled: true,
             locked: false,
           },

@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { listen } from "@tauri-apps/api/event"
 import {
+  finalizationProgressSchema,
   recordingCompletedSchema,
   recordingMarkerSchema,
   recordingStatusSchema,
@@ -44,6 +45,7 @@ export function useRecorderPolling(intervalMs = 1000) {
 // Mount this once near the root of each window that shows recorder state.
 export function useRecorderStatusEvents() {
   const setStatus = useRecorderStore((s) => s.setStatus)
+  const setFinalizationProgress = useRecorderStore((s) => s.setFinalizationProgress)
   const setCompletedRecordingId = useRecorderStore((s) => s.setCompletedRecordingId)
   const appendMarker = useRecorderStore((s) => s.appendMarker)
   const refreshStatus = useRecorderStore((s) => s.refreshStatus)
@@ -73,6 +75,13 @@ export function useRecorderStatusEvents() {
     )
 
     track(
+      listen<unknown>("recorder-finalization-progress", (event) => {
+        const parsed = finalizationProgressSchema.safeParse(event.payload)
+        if (parsed.success) setFinalizationProgress(parsed.data)
+      }),
+    )
+
+    track(
       listen<unknown>("recorder-marker", (event) => {
         const parsed = recordingMarkerSchema.safeParse(event.payload)
         if (parsed.success) appendMarker(parsed.data)
@@ -90,5 +99,5 @@ export function useRecorderStatusEvents() {
       active = false
       for (const unlisten of unlisteners) unlisten()
     }
-  }, [refreshStatus, setCompletedRecordingId, setStatus, appendMarker])
+  }, [refreshStatus, setCompletedRecordingId, setFinalizationProgress, setStatus, appendMarker])
 }

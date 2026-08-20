@@ -421,6 +421,9 @@ const FONT_WEIGHT_MAP: Record<string, string> = {
 
 export const textFontWeightSchema = z.preprocess(
   (val) => {
+    if (typeof val === "number") {
+      return String(val)
+    }
     if (typeof val === "string") {
       const lower = val.toLowerCase()
       if (FONT_WEIGHT_MAP[lower]) return FONT_WEIGHT_MAP[lower]
@@ -481,6 +484,7 @@ export const textClipSchema = timelineClipBaseSchema.extend({
   animationIn: textAnimationSchema.default("fade"),
   animationOut: textAnimationSchema.default("fade"),
   overlayAnimation: overlayAnimationSchema.default({}),
+  autoScaleText: z.boolean().default(true),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
 })
@@ -856,6 +860,7 @@ export const renderPlanTextSchema = z.object({
   shadowBlur: z.number().min(0),
   animationIn: textAnimationSchema,
   animationOut: textAnimationSchema,
+  autoScaleText: z.boolean().default(true),
   enabled: z.boolean().default(true),
 })
 

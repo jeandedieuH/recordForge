@@ -111,6 +111,7 @@ fn parity_test_renders_fixture_project_overlays() {
                                         shadow_enabled: clip["shadowEnabled"].as_bool().unwrap_or(false),
                                         shadow_color: clip["shadowColor"].as_str().unwrap_or("rgba(0,0,0,0.5)").to_string(),
                                         shadow_blur: clip["shadowBlur"].as_f64().unwrap_or(8.0),
+                                        auto_scale_text: clip["autoScaleText"].as_bool().unwrap_or(true),
                                     },
                                 });
                             }

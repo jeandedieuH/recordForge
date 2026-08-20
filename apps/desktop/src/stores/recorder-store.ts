@@ -5,6 +5,7 @@ import type {
   CaptureSource,
   DiagnosticsReport,
   EncoderInfo,
+  FinalizationProgress,
   RecordingConfig,
   RecordingMarker,
   RecordingPreferences,
@@ -106,6 +107,8 @@ interface RecorderStore {
   saveMessage: string | null
   // The durable library ID created by the latest successful stop.
   completedRecordingId: string | null
+  // Step-by-step progress during recording finalization.
+  finalizationProgress: FinalizationProgress | null
 
   loadPreferences: () => Promise<RecordingPreferences>
   savePreferences: (updates: Partial<RecordingPreferences>) => Promise<void>
@@ -127,6 +130,7 @@ interface RecorderStore {
   // session changes so long-lived windows (floating toolbar) don't carry a
   // stale count into the next recording.
   setStatus: (status: RecordingStatus) => void
+  setFinalizationProgress: (progress: FinalizationProgress | null) => void
   // Append a marker broadcast by the Rust `recorder-marker` event. Deduplicates
   // by id because the invoking window also appends locally after its IPC call.
   appendMarker: (marker: RecordingMarker) => void
@@ -183,6 +187,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   error: null,
   saveMessage: null,
   completedRecordingId: null,
+  finalizationProgress: null,
 
   loadPreferences: async () => {
     const prefs = await readStoredPreferences()
@@ -366,7 +371,9 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       status,
       error: null,
       markers: status.sessionId !== prev.status?.sessionId ? [] : prev.markers,
+      finalizationProgress: status.state !== "finalizing" ? null : prev.finalizationProgress,
     })),
+  setFinalizationProgress: (finalizationProgress) => set({ finalizationProgress }),
   appendMarker: (marker) =>
     set((prev) =>
       prev.markers.some((existing) => existing.id === marker.id)
@@ -604,12 +611,18 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         isLoading: false,
         pendingAction: null,
         completedRecordingId,
+        finalizationProgress: null,
         saveMessage: completedRecordingId
           ? `Recording saved (${seconds}s, ${sizeMb} MB). Opening the editor…`
           : `Recording saved (${seconds}s, ${sizeMb} MB). Open it from the Library.`,
       })
     } catch (error) {
-      set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
+      set({
+        error: toErrorMessage(error),
+        isLoading: false,
+        pendingAction: null,
+        finalizationProgress: null,
+      })
     }
   },
 
@@ -636,10 +649,16 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         pendingAction: null,
         markers: [],
         completedRecordingId: null,
+        finalizationProgress: null,
         saveMessage: "Recording discarded. Nothing was saved.",
       })
     } catch (error) {
-      set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
+      set({
+        error: toErrorMessage(error),
+        isLoading: false,
+        pendingAction: null,
+        finalizationProgress: null,
+      })
     }
   },
 

@@ -63,6 +63,7 @@ export interface TextPresetDefinition {
   animationIn: TextAnimation
   animationOut: TextAnimation
   overlayAnimation?: Partial<OverlayAnimation>
+  autoScaleText?: boolean
   rotation?: number
   anchorX?: number
   anchorY?: number
@@ -102,6 +103,7 @@ export const textPresetValuesSchema = z.object({
   animationIn: textAnimationSchema,
   animationOut: textAnimationSchema,
   overlayAnimation: overlayAnimationSchema.partial().optional(),
+  autoScaleText: z.boolean().optional(),
   rotation: z.number().optional(),
   anchorX: z.number().min(0).max(1).optional(),
   anchorY: z.number().min(0).max(1).optional(),
@@ -235,6 +237,7 @@ export function createTextClipFromDefinition(
     animationIn: preset.animationIn,
     animationOut: preset.animationOut,
     overlayAnimation: animation,
+    autoScaleText: preset.autoScaleText ?? true,
     enabled: true,
     locked: false,
   }

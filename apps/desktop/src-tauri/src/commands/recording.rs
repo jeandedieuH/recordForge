@@ -449,7 +449,7 @@ pub fn resume_recording(
 
 #[tauri::command]
 #[instrument]
-pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
+pub async fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
     // A pending countdown has captured nothing yet: stopping cancels the
     // pending start instead of running finalization over an empty session
     // (which would fail with "no valid recording segments").
@@ -483,14 +483,31 @@ pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         return cancel_result.map(|_| RecordingStats::default());
     }
 
-    let (session_id, result) = {
-        let guard = state
-            .recorder
+    // Hide boundary and countdown windows immediately as capture is concluding
+    BoundaryWindow::hide(&app);
+    CountdownWindow::hide(&app);
+
+    let app_handle = app.clone();
+    let recorder = state.recorder.clone();
+    let stop_result = tauri::async_runtime::spawn_blocking(move || {
+        let guard = recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
         let session_id = guard.status()?.session_id;
-        (session_id, guard.stop())
+        let app_cb = app_handle.clone();
+        let result = guard.stop_with_progress(move |progress| {
+            let _ = crate::events::emit_finalization_progress(&app_cb, &progress);
+        });
+        Ok::<_, crate::errors::AppError>((session_id, result))
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("stop recording worker thread panicked: {e}")))?;
+
+    let (session_id, result) = match stop_result {
+        Ok((s_id, res)) => (s_id, res),
+        Err(err) => (String::new(), Err(err)),
     };
+
     if result.is_ok() {
         if let Ok(db) = state.db.lock() {
             if let Ok(recordings) = library_list_recordings(&db) {
@@ -507,8 +524,6 @@ pub fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         }
     }
     FloatingWindow::hide(&app);
-    BoundaryWindow::hide(&app);
-    CountdownWindow::hide(&app);
     if let Err(error) = MainWindow::restore(&app) {
         tracing::error!(error = ?error, "failed to restore main window after stop");
     }
@@ -564,26 +579,32 @@ pub(crate) fn insert_marker_broadcast(
 /// app-managed sessions root, so React cannot aim it at arbitrary paths.
 #[tauri::command]
 #[instrument]
-pub fn discard_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
-    let result = {
-        let guard = state
-            .recorder
+pub async fn discard_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
+    BoundaryWindow::hide(&app);
+    CountdownWindow::hide(&app);
+
+    let recorder = state.recorder.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let guard = recorder
             .lock()
             .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
         guard.discard()
-    };
-    if let Err(error) = &result {
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("discard recording worker thread panicked: {e}")))?;
+
+    let final_result = result;
+
+    if let Err(error) = &final_result {
         tracing::error!(error = ?error, "failed to delete discarded session data");
     }
 
     FloatingWindow::hide(&app);
-    BoundaryWindow::hide(&app);
-    CountdownWindow::hide(&app);
     if let Err(error) = MainWindow::restore(&app) {
         tracing::error!(error = ?error, "failed to restore main window after discard");
     }
     emit_current_status(&app, &state);
-    result
+    final_result
 }
 
 #[tauri::command]
@@ -631,35 +652,46 @@ pub fn scan_recovery_sessions(state: State<'_, AppState>) -> Result<Vec<Recovery
 
 #[tauri::command]
 #[instrument]
-pub fn recover_session(session_id: String, state: State<'_, AppState>) -> Result<LibraryRecording> {
+pub async fn recover_session(session_id: String, state: State<'_, AppState>) -> Result<LibraryRecording> {
     // Validate the session ID as a UUID and ensure its directory stays inside
     // the sessions root before any recovery work begins.
     let work_dir = state.path_policy.validate_session_dir(&session_id)?;
+    let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
+    let ffprobe = state.ffprobe_path.to_string_lossy().to_string();
+    let db = state.db.clone();
 
-    let mut db = state
-        .db
-        .lock()
-        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    recovery_recover_session(
-        &work_dir,
-        &state.ffmpeg_path.to_string_lossy(),
-        &state.ffprobe_path.to_string_lossy(),
-        &mut db,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut db = db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        recovery_recover_session(&work_dir, &ffmpeg, &ffprobe, &mut db)
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("recover session worker thread panicked: {e}")))?
 }
 
 #[tauri::command]
 #[instrument]
-pub fn delete_recovery_session(session_id: String, state: State<'_, AppState>) -> Result<()> {
-    recovery_delete_session(&session_id, &state.sessions_dir)
+pub async fn delete_recovery_session(session_id: String, state: State<'_, AppState>) -> Result<()> {
+    let sessions_dir = state.sessions_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        recovery_delete_session(&session_id, &sessions_dir)
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("delete recovery session worker thread panicked: {e}")))?
 }
 
 #[tauri::command]
 #[instrument]
-pub fn run_encoder_benchmark(state: State<'_, AppState>) -> Result<BenchmarkReport> {
-    let encoders = detect_encoders(&state.ffmpeg_path.to_string_lossy())?;
-    let profiles = capture::config::builtin_profiles();
-    run_benchmark(&state.ffmpeg_path.to_string_lossy(), profiles, encoders)
+pub async fn run_encoder_benchmark(state: State<'_, AppState>) -> Result<BenchmarkReport> {
+    let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let encoders = detect_encoders(&ffmpeg)?;
+        let profiles = capture::config::builtin_profiles();
+        run_benchmark(&ffmpeg, profiles, encoders)
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("benchmark worker thread panicked: {e}")))?
 }
 
 #[tauri::command]
@@ -732,12 +764,17 @@ pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecordin
 
 #[tauri::command]
 #[instrument]
-pub fn delete_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    library_delete_recording(&db, &recording_id, state.path_policy.app_data_dir())
+pub async fn delete_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let db = state.db.clone();
+    let app_data_dir = state.path_policy.app_data_dir().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        library_delete_recording(&db, &recording_id, &app_data_dir)
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("delete recording worker thread panicked: {e}")))?
 }
 
 #[tauri::command]
@@ -848,69 +885,70 @@ pub struct TrimOptions {
 
 #[tauri::command]
 #[instrument]
-pub fn trim_recording(
+pub async fn trim_recording(
     options: TrimOptions,
     state: State<'_, AppState>,
 ) -> Result<LibraryRecording> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    let original = get_recording(&db, &options.recording_id)?;
-    let source_path = original
-        .output_path
-        .as_ref()
-        .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
+    let db_arc = state.db.clone();
+    let ffmpeg_path = state.ffmpeg_path.to_string_lossy().to_string();
+    let path_policy = state.path_policy.clone();
 
-    // Validate that both the source file and the work directory belong to the
-    // app data area before writing a trimmed file next to the original.
-    state
-        .path_policy
-        .validate_recording_path(Path::new(source_path))?;
-    let work_dir = state
-        .path_policy
-        .validate_recording_path(Path::new(&original.work_dir))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = db_arc
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let original = get_recording(&db, &options.recording_id)?;
+        let source_path = original
+            .output_path
+            .as_ref()
+            .ok_or_else(|| InternalError::Media("recording has no output path".into()))?;
 
-    let suffix = uuid::Uuid::new_v4().to_string();
-    let short = &suffix[..suffix.len().min(8)];
-    let trimmed_path = work_dir.join(format!("trim_{short}.mp4"));
+        // Validate that both the source file and the work directory belong to the
+        // app data area before writing a trimmed file next to the original.
+        path_policy.validate_recording_path(Path::new(source_path))?;
+        let work_dir = path_policy.validate_recording_path(Path::new(&original.work_dir))?;
 
-    let trimmed_size = capture::media::trim_recording(
-        &state.ffmpeg_path.to_string_lossy(),
-        Path::new(source_path),
-        &trimmed_path,
-        options.start_ms,
-        options.end_ms,
-    )?;
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let short = &suffix[..suffix.len().min(8)];
+        let trimmed_path = work_dir.join(format!("trim_{short}.mp4"));
 
-    let trimmed_webcam_path = if let Some(webcam_path) = original.webcam_path.as_deref() {
-        state
-            .path_policy
-            .validate_recording_path(Path::new(webcam_path))?;
-        let path = work_dir.join(format!("trim_{short}_webcam.mp4"));
-        capture::media::trim_recording(
-            &state.ffmpeg_path.to_string_lossy(),
-            Path::new(webcam_path),
-            &path,
+        let trimmed_size = capture::media::trim_recording(
+            &ffmpeg_path,
+            Path::new(source_path),
+            &trimmed_path,
             options.start_ms,
             options.end_ms,
         )?;
-        Some(path)
-    } else {
-        None
-    };
 
-    let duration_ms = options.end_ms - options.start_ms;
-    insert_trimmed_recording(
-        &db,
-        &original,
-        &trimmed_path,
-        trimmed_webcam_path.as_deref(),
-        trimmed_size,
-        duration_ms,
-        options.start_ms,
-        options.end_ms,
-    )
+        let trimmed_webcam_path = if let Some(webcam_path) = original.webcam_path.as_deref() {
+            path_policy.validate_recording_path(Path::new(webcam_path))?;
+            let path = work_dir.join(format!("trim_{short}_webcam.mp4"));
+            capture::media::trim_recording(
+                &ffmpeg_path,
+                Path::new(webcam_path),
+                &path,
+                options.start_ms,
+                options.end_ms,
+            )?;
+            Some(path)
+        } else {
+            None
+        };
+
+        let duration_ms = options.end_ms - options.start_ms;
+        insert_trimmed_recording(
+            &db,
+            &original,
+            &trimmed_path,
+            trimmed_webcam_path.as_deref(),
+            trimmed_size,
+            duration_ms,
+            options.start_ms,
+            options.end_ms,
+        )
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("trim recording worker thread panicked: {e}")))?
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

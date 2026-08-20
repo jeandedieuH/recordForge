@@ -14,6 +14,7 @@ pub mod event_names {
     pub const RECORDING_COMPLETED: &str = "recording-completed";
     pub const RECORDER_MARKER: &str = "recorder-marker";
     pub const REQUEST_DISCARD_CONFIRMATION: &str = "request-discard-confirmation";
+    pub const RECORDER_FINALIZATION_PROGRESS: &str = "recorder-finalization-progress";
 }
 
 /// Publishes Tauri events to the React UI.
@@ -56,6 +57,18 @@ pub fn emit_recorder_status(handle: &tauri::AppHandle, status: &RecordingStatus)
     // reachable; the menu must track the recorder state either way.
     crate::tray::refresh_tray_menu(handle);
     emit_result
+}
+
+/// Broadcast finalization step & percentage progress to all windows.
+pub fn emit_finalization_progress(
+    handle: &tauri::AppHandle,
+    progress: &crate::capture::session::FinalizationProgress,
+) -> Result<()> {
+    handle
+        .emit(event_names::RECORDER_FINALIZATION_PROGRESS, progress)
+        .map_err(|e| {
+            crate::errors::InternalError::Unknown(format!("emit finalization progress: {e}")).into()
+        })
 }
 
 /// Ask the main window to show its discard-confirmation UI.

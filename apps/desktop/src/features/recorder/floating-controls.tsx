@@ -75,6 +75,7 @@ export function FloatingControls() {
     status,
     markers,
     pendingAction,
+    finalizationProgress,
     error,
     refreshStatus,
     pause,
@@ -113,8 +114,12 @@ export function FloatingControls() {
   const isRecording = status?.state === "recording"
   const isPaused = status?.state === "paused"
   const isActive = isRecording || isPaused
+  const isFinalizing =
+    pendingAction === "stop" || status?.state === "finalizing" || Boolean(finalizationProgress)
   const duration = status?.recordedMs ?? 0
   const label = stateLabel(status?.state)
+  const stageLabel = finalizationProgress?.stageLabel || "Assembling video…"
+  const progressPercent = Math.max(8, Math.min(100, finalizationProgress?.percent ?? 15))
 
   async function handleMarker() {
     await addMarker("Marker")
@@ -180,90 +185,128 @@ export function FloatingControls() {
   return (
     <div className="flex h-full w-full items-center justify-center px-3 py-2 select-none">
       <div className="flex h-full w-full items-center gap-3 overflow-hidden rounded-2xl border border-border-strong/90 bg-surface px-3 shadow-[0_4px_16px_rgba(0,0,0,0.45)]">
-        {/* Grip handle + Status + timer. Entire region supports native Tauri window drag. */}
-        <div
-          data-tauri-drag-region
-          className="flex min-w-0 flex-1 cursor-grab active:cursor-grabbing items-center gap-2.5 pl-0.5"
-          title="Drag to move toolbar"
-          onMouseDown={handleDragStart}
-        >
-          {/* Visual Grip Handle */}
+        {isFinalizing ? (
+          /* Finalization Progress: Stage label and percentage bar */
           <div
             data-tauri-drag-region
-            className="flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:text-foreground"
-            aria-hidden
+            className="flex min-w-0 flex-1 cursor-grab active:cursor-grabbing items-center gap-3 pl-1 pr-1"
+            title="Finalizing recording…"
+            onMouseDown={handleDragStart}
           >
-            <GripVertical className="size-4" />
-          </div>
-
-          <div
-            data-tauri-drag-region
-            className={`flex size-9 shrink-0 items-center justify-center rounded-xl border ${
-              isRecording
-                ? "border-recording/30 bg-recording/15 text-recording"
-                : isPaused
-                  ? "border-warning/30 bg-warning/15 text-warning"
-                  : "border-border bg-overlay text-muted-foreground"
-            }`}
-          >
-            {isPaused ? (
-              <Pause className="size-4" aria-hidden />
-            ) : (
-              <span
-                className={`size-3 rounded-full ${
-                  isRecording ? "animate-rec-pulse bg-recording" : "bg-muted-foreground/50"
-                }`}
-              />
-            )}
-          </div>
-
-          <div data-tauri-drag-region className="min-w-0 flex-1">
             <div
               data-tauri-drag-region
-              className="flex items-center gap-2 text-[11px] font-semibold leading-none text-foreground"
+              className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-recording/30 bg-recording/10 text-recording"
             >
-              <span>{label}</span>
-              <span className="text-subtle-foreground">·</span>
-              <span className="truncate font-normal text-muted-foreground">
-                {status?.sourceName || "Screen capture"}
-              </span>
-              <span className="flex shrink-0 items-center gap-1">
-                <InputChip
-                  active={!!status?.microphoneActive}
-                  label="microphone"
-                  icon={<Mic className="size-3" aria-hidden />}
-                />
-                <InputChip
-                  active={!!status?.systemAudioActive}
-                  label="system audio"
-                  icon={<Volume2 className="size-3" aria-hidden />}
-                />
-                <InputChip
-                  active={!!status?.webcamActive}
-                  label="camera"
-                  icon={<Video className="size-3" aria-hidden />}
-                />
-              </span>
+              <Loader2 className="size-4 animate-spin" aria-hidden />
             </div>
-            <div data-tauri-drag-region className="mt-1 flex items-baseline gap-2">
-              <span
-                className="tnum font-mono text-lg font-semibold leading-none tracking-tight text-foreground"
-                data-testid="floating-timer"
+
+            <div data-tauri-drag-region className="min-w-0 flex-1">
+              <div
+                data-tauri-drag-region
+                className="flex items-center justify-between gap-2 text-[11px] font-semibold leading-none text-foreground"
               >
-                {formatDuration(duration)}
-              </span>
-              {markers.length > 0 ? (
-                <span
-                  className="flex items-center gap-1 rounded-md bg-overlay px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-                  title={`${markers.length} marker${markers.length === 1 ? "" : "s"} placed`}
-                >
-                  <Flag className="size-3" aria-hidden />
-                  <span className="tnum">{markers.length}</span>
+                <span className="truncate">{stageLabel}</span>
+                <span className="tnum font-mono text-[11px] font-medium text-muted-foreground shrink-0">
+                  {finalizationProgress ? `${finalizationProgress.percent}%` : "15%"}
                 </span>
-              ) : null}
+              </div>
+              <div
+                data-tauri-drag-region
+                className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-overlay border border-border/40"
+              >
+                <div
+                  className="h-full rounded-full bg-recording transition-all duration-300 ease-out"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          /* Grip handle + Status + timer. Entire region supports native Tauri window drag. */
+          <div
+            data-tauri-drag-region
+            className="flex min-w-0 flex-1 cursor-grab active:cursor-grabbing items-center gap-2.5 pl-0.5"
+            title="Drag to move toolbar"
+            onMouseDown={handleDragStart}
+          >
+            {/* Visual Grip Handle */}
+            <div
+              data-tauri-drag-region
+              className="flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:text-foreground"
+              aria-hidden
+            >
+              <GripVertical className="size-4" />
+            </div>
+
+            <div
+              data-tauri-drag-region
+              className={`flex size-9 shrink-0 items-center justify-center rounded-xl border ${
+                isRecording
+                  ? "border-recording/30 bg-recording/15 text-recording"
+                  : isPaused
+                    ? "border-warning/30 bg-warning/15 text-warning"
+                    : "border-border bg-overlay text-muted-foreground"
+              }`}
+            >
+              {isPaused ? (
+                <Pause className="size-4" aria-hidden />
+              ) : (
+                <span
+                  className={`size-3 rounded-full ${
+                    isRecording ? "animate-rec-pulse bg-recording" : "bg-muted-foreground/50"
+                  }`}
+                />
+              )}
+            </div>
+
+            <div data-tauri-drag-region className="min-w-0 flex-1">
+              <div
+                data-tauri-drag-region
+                className="flex items-center gap-2 text-[11px] font-semibold leading-none text-foreground"
+              >
+                <span>{label}</span>
+                <span className="text-subtle-foreground">·</span>
+                <span className="truncate font-normal text-muted-foreground">
+                  {status?.sourceName || "Screen capture"}
+                </span>
+                <span className="flex shrink-0 items-center gap-1">
+                  <InputChip
+                    active={!!status?.microphoneActive}
+                    label="microphone"
+                    icon={<Mic className="size-3" aria-hidden />}
+                  />
+                  <InputChip
+                    active={!!status?.systemAudioActive}
+                    label="system audio"
+                    icon={<Volume2 className="size-3" aria-hidden />}
+                  />
+                  <InputChip
+                    active={!!status?.webcamActive}
+                    label="camera"
+                    icon={<Video className="size-3" aria-hidden />}
+                  />
+                </span>
+              </div>
+              <div data-tauri-drag-region className="mt-1 flex items-baseline gap-2">
+                <span
+                  className="tnum font-mono text-lg font-semibold leading-none tracking-tight text-foreground"
+                  data-testid="floating-timer"
+                >
+                  {formatDuration(duration)}
+                </span>
+                {markers.length > 0 ? (
+                  <span
+                    className="flex items-center gap-1 rounded-md bg-overlay px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                    title={`${markers.length} marker${markers.length === 1 ? "" : "s"} placed`}
+                  >
+                    <Flag className="size-3" aria-hidden />
+                    <span className="tnum">{markers.length}</span>
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Actions Zone */}
         {moreActionsOpen ? (

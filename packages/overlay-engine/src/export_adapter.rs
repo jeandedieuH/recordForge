@@ -636,15 +636,17 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
     let y = t.y as f32;
     let w = t.width.max(20.0) as f32;
     let h = t.height.max(20.0) as f32;
+    let padding_x = (item.backdrop_padding_x as f32).min(w / 3.0);
+    let padding_y = (item.backdrop_padding_y as f32).min(h / 3.0);
+
+    let radius = if item.backdrop_style == "pill" {
+        h / 2.0
+    } else {
+        (item.backdrop_border_radius as f32).min(h / 2.0)
+    };
 
     // Backdrop
     if item.backdrop_style != "none" {
-        let radius = if item.backdrop_style == "pill" {
-            h / 2.0
-        } else {
-            item.backdrop_border_radius as f32
-        };
-
         if let Some(backdrop_path) = build_rounded_rect_path(x, y, w, h, radius) {
             if item.shadow_enabled {
                 draw_shadow_path(
@@ -676,7 +678,7 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
             }
 
             if item.backdrop_style == "accent-bar" {
-                let bar_w = (item.backdrop_padding_x as f32 / 2.0).max(3.0);
+                let bar_w = (padding_x / 2.0).max(3.0).min(8.0);
                 if let Some(bar_path) = build_rounded_rect_path(x, y, bar_w, h, 2.0) {
                     let bar_color = parse_color(&item.accent_color, opacity);
                     let mut bar_paint = Paint::default();
@@ -700,41 +702,155 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
 
     let text_x = match item.alignment.as_str() {
         "center" => x + w / 2.0,
-        "right" => x + w - item.backdrop_padding_x as f32,
-        _ => x + item.backdrop_padding_x as f32,
+        "right" => x + w - padding_x,
+        _ => x + padding_x,
+    };
+
+    let usable_w = (w - padding_x * 2.0).max(20.0);
+    let available_h = (h - padding_y * 2.0).max(10.0);
+
+    // Initial base font sizes & metrics
+    let base_primary_fs = (item.font_size as f32).clamp(12.0, 120.0);
+    let base_primary_line_h = base_primary_fs * 1.25;
+    let base_max_primary_chars = (usable_w / (base_primary_fs * 0.58)).max(3.0) as usize;
+    let base_primary_lines = wrap_text_to_lines(&primary_text, base_max_primary_chars);
+    let base_primary_h = (base_primary_lines.len() as f32) * base_primary_line_h;
+
+    // Optional tag / badge above title
+    let has_tag = item
+        .tag_text
+        .as_ref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    let base_tag_fs = (base_primary_fs * 0.35).clamp(10.0, 18.0);
+    let base_tag_line_h = base_tag_fs * 1.2;
+    let base_tag_gap = 6.0;
+    let base_tag_h = if has_tag { base_tag_line_h + base_tag_gap } else { 0.0 };
+
+    // Optional secondary subtitle
+    let has_sub = item
+        .secondary_text
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let base_sub_fs = (base_primary_fs * 0.55).clamp(11.0, 48.0);
+    let base_sub_line_h = base_sub_fs * 1.3;
+    let base_subtitle_gap = 5.0;
+    let base_max_sub_chars = (usable_w / (base_sub_fs * 0.58)).max(3.0) as usize;
+    let base_sub_lines = if let Some(subtitle) = &item.secondary_text {
+        if !subtitle.trim().is_empty() {
+            wrap_text_to_lines(subtitle, base_max_sub_chars)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let base_sub_h = if has_sub && !base_sub_lines.is_empty() {
+        (base_sub_lines.len() as f32) * base_sub_line_h + base_subtitle_gap
+    } else {
+        0.0
+    };
+
+    let initial_total_content_h = base_tag_h + base_primary_h + base_sub_h;
+
+    // Determine scale factor if auto_scale_text is enabled
+    let scale = if item.auto_scale_text && initial_total_content_h > available_h && initial_total_content_h > 0.0 {
+        (available_h / initial_total_content_h).clamp(0.55, 1.0)
+    } else {
+        1.0
+    };
+
+    let (primary_fs, primary_line_h, primary_lines, primary_h, tag_fs, tag_line_h, tag_gap, sub_fs, sub_line_h, subtitle_gap, sub_lines, sub_h) =
+        if (scale - 1.0).abs() > 0.001 {
+            let p_fs = (base_primary_fs * scale).clamp(10.0, 120.0);
+            let p_line_h = p_fs * 1.25;
+            let p_max_chars = (usable_w / (p_fs * 0.58)).max(3.0) as usize;
+            let p_lines = wrap_text_to_lines(&primary_text, p_max_chars);
+            let p_h = (p_lines.len() as f32) * p_line_h;
+
+            let t_fs = (p_fs * 0.35).clamp(9.0, 18.0);
+            let t_line_h = t_fs * 1.2;
+            let t_gap = base_tag_gap * scale;
+
+            let s_fs = (p_fs * 0.55).clamp(9.0, 48.0);
+            let s_line_h = s_fs * 1.3;
+            let s_gap = base_subtitle_gap * scale;
+            let s_max_chars = (usable_w / (s_fs * 0.58)).max(3.0) as usize;
+            let s_lines = if let Some(subtitle) = &item.secondary_text {
+                if !subtitle.trim().is_empty() {
+                    wrap_text_to_lines(subtitle, s_max_chars)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            let s_h = if has_sub && !s_lines.is_empty() {
+                (s_lines.len() as f32) * s_line_h + s_gap
+            } else {
+                0.0
+            };
+
+            (p_fs, p_line_h, p_lines, p_h, t_fs, t_line_h, t_gap, s_fs, s_line_h, s_gap, s_lines, s_h)
+        } else {
+            let t_gap = base_tag_gap;
+            (
+                base_primary_fs,
+                base_primary_line_h,
+                base_primary_lines,
+                base_primary_h,
+                base_tag_fs,
+                base_tag_line_h,
+                t_gap,
+                base_sub_fs,
+                base_sub_line_h,
+                base_subtitle_gap,
+                base_sub_lines,
+                base_sub_h,
+            )
+        };
+
+    let tag_h = if has_tag { tag_line_h + tag_gap } else { 0.0 };
+    let total_content_h = tag_h + primary_h + sub_h;
+
+    // Vertically center content inside card
+    let content_top = if total_content_h < h {
+        let centered = y + (h - total_content_h) / 2.0;
+        centered.max(y + padding_y)
+    } else {
+        y + padding_y
     };
 
     let mut content_markup = String::new();
-    let mut cursor_y = y + item.backdrop_padding_y as f32 + item.font_size as f32 * 0.8;
+    let mut cursor_y = content_top;
 
-    // Optional tag text
+    // Render tag text if present
     if let Some(tag) = &item.tag_text {
         if !tag.trim().is_empty() {
-            let tag_fs = (item.font_size * 0.35).clamp(10.0, 18.0);
+            let tag_str = tag.trim().to_uppercase();
+            let tag_base_y = cursor_y + tag_fs * 0.85;
             content_markup.push_str(&format!(
-                r##"<text x="{tx}" y="{ty}" fill="{accent}" font-family="{ff}" font-size="{fs}" font-weight="700" letter-spacing="1.5" text-anchor="{anchor}">{tag}</text>"##,
+                r##"<text x="{tx}" y="{ty}" fill="{accent}" font-family="{ff}" font-size="{fs}" font-weight="700" letter-spacing="1.2" text-anchor="{anchor}">{tag_esc}</text>"##,
                 tx = text_x,
-                ty = cursor_y,
+                ty = tag_base_y,
                 accent = item.accent_color,
                 ff = font_family,
                 fs = tag_fs,
                 anchor = text_anchor,
-                tag = escape_xml(&tag.to_uppercase()),
+                tag_esc = escape_xml(&tag_str),
             ));
-            cursor_y += tag_fs as f32 + 8.0;
+            cursor_y += tag_line_h + tag_gap;
         }
     }
 
-    // Primary text
-    let primary_fs = item.font_size.clamp(12.0, 120.0) as f32;
-    let primary_line_h = primary_fs * 1.15;
-    let max_primary_chars = ((w - item.backdrop_padding_x as f32 * 2.0).max(20.0) / (primary_fs * 0.58)).max(3.0) as usize;
-    let primary_lines = wrap_text_to_lines(&primary_text, max_primary_chars);
+    // Render primary text lines
     for line in &primary_lines {
+        let baseline = cursor_y + primary_fs * 0.82;
         content_markup.push_str(&format!(
             r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="{weight}" text-anchor="{anchor}">{txt}</text>"##,
             tx = text_x,
-            ty = cursor_y,
+            ty = baseline,
             color = item.text_color,
             ff = font_family,
             fs = primary_fs,
@@ -744,39 +860,46 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
         ));
         cursor_y += primary_line_h;
     }
-    cursor_y += 6.0;
 
-    // Secondary text
-    if let Some(subtitle) = &item.secondary_text {
-        if !subtitle.trim().is_empty() {
-            let sub_fs = (item.font_size * 0.55).clamp(11.0, 48.0) as f32;
-            let sub_line_h = sub_fs * 1.2;
-            let max_sub_chars = ((w - item.backdrop_padding_x as f32 * 2.0).max(20.0) / (sub_fs * 0.58)).max(3.0) as usize;
-            let sub_lines = wrap_text_to_lines(subtitle, max_sub_chars);
-            for line in &sub_lines {
-                content_markup.push_str(&format!(
-                    r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.85">{txt}</text>"##,
-                    tx = text_x,
-                    ty = cursor_y,
-                    color = item.secondary_text_color,
-                    ff = font_family,
-                    fs = sub_fs,
-                    anchor = text_anchor,
-                    txt = escape_xml(line),
-                ));
-                cursor_y += sub_line_h;
-            }
+    // Render secondary subtitle lines
+    if has_sub && !sub_lines.is_empty() {
+        cursor_y += subtitle_gap;
+        for line in &sub_lines {
+            let baseline = cursor_y + sub_fs * 0.82;
+            content_markup.push_str(&format!(
+                r##"<text x="{tx}" y="{ty}" fill="{color}" font-family="{ff}" font-size="{fs}" font-weight="500" text-anchor="{anchor}" opacity="0.88">{txt}</text>"##,
+                tx = text_x,
+                ty = baseline,
+                color = item.secondary_text_color,
+                ff = font_family,
+                fs = sub_fs,
+                anchor = text_anchor,
+                txt = escape_xml(line),
+            ));
+            cursor_y += sub_line_h;
         }
     }
 
+    let clip_id = format!("clip-text-{}", item.id.replace(|c: char| !c.is_alphanumeric(), "-"));
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{cw}" height="{ch}" viewBox="0 0 {cw} {ch}">
-            <g opacity="{opacity}">
+            <defs>
+                <clipPath id="{clip_id}">
+                    <rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{radius}" ry="{radius}" />
+                </clipPath>
+            </defs>
+            <g clip-path="url(#{clip_id})" opacity="{opacity}">
                 {content}
             </g>
         </svg>"##,
         cw = pixmap.width(),
         ch = pixmap.height(),
+        clip_id = clip_id,
+        x = x,
+        y = y,
+        w = w,
+        h = h,
+        radius = radius,
         opacity = opacity,
         content = content_markup,
     );

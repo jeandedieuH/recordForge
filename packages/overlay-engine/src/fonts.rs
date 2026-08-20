@@ -39,7 +39,7 @@ pub fn resolve_font_family(family: &str) -> &'static str {
     match family {
         "serif" => "Source Serif 4, Georgia, serif",
         "mono" => "JetBrains Mono, Consolas, monospace",
-        "heading" => "Outfit, Inter, Arial, sans-serif",
+        "heading" | "outfit" => "Outfit, Inter, Arial, sans-serif",
         _ => "Inter, Segoe UI, Arial, sans-serif",
     }
 }

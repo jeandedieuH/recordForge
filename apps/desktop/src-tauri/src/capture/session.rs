@@ -129,6 +129,25 @@ fn signed_start_offset_ms(a: std::time::Instant, b: std::time::Instant) -> i64 {
     }
 }
 
+/// Compute the webcam segment start offset relative to the master screen timeline.
+///
+/// Master timeline starts at `screen_spawn + screen_head_trim`.
+/// The webcam's first frame was captured at `webcam_spawn + webcam_head_trim`.
+/// The offset on the master timeline is:
+/// `(webcam_spawn - screen_spawn) + webcam_head_trim - screen_head_trim`.
+///
+/// Positive offset: webcam started after master timeline (needs leading padding).
+/// Negative offset: webcam started before master timeline (needs head trimming).
+fn compute_webcam_start_offset_ms(
+    spawn_offset_ms: i64,
+    webcam_head_trim_ms: u64,
+    screen_head_trim_ms: u64,
+) -> i64 {
+    spawn_offset_ms
+        .saturating_add(webcam_head_trim_ms as i64)
+        .saturating_sub(screen_head_trim_ms as i64)
+}
+
 /// The segment's rendered video timeline. FFmpeg only starts producing frames
 /// several hundred milliseconds after spawn (input and encoder init), while
 /// the audio workers and cursor tracker clock against the spawn instant. Every
@@ -750,16 +769,47 @@ impl Recorder {
             return;
         };
         let path = webcam.output_path().to_path_buf();
-        // The webcam's wall-clock offset is relative to the screen process
-        // spawn; shift it onto the video timeline like every other track.
-        let offset_ms = signed_start_offset_ms(webcam.started_at(), screen.started_at())
-            .saturating_sub(timeline.head_trim_ms() as i64);
         let index = session.segment_index;
-        if let Err(error) = webcam.stop() {
-            session.webcam_capture_failed = true;
-            error!(%error, "failed to stop webcam sidecar");
-            return;
-        }
+        let stats = match webcam.stop() {
+            Ok(stats) => stats,
+            Err(error) => {
+                session.webcam_capture_failed = true;
+                error!(%error, "failed to stop webcam sidecar");
+                return;
+            }
+        };
+
+        // Align the webcam stream to the master screen/audio timeline:
+        // FFmpeg webcam sidecars take several hundred milliseconds (DirectShow
+        // initialization and encoder setup) to capture their first frame.
+        // We probe the real webcam duration, calculate its startup gap, and
+        // compute the exact offset relative to the screen's first frame.
+        let wall_span_ms = if stats.quit_span_ms > 0 {
+            stats.quit_span_ms
+        } else {
+            stats.duration_ms
+        };
+        let probed_webcam = self.probe_video_duration_ms(&path);
+        let webcam_timeline =
+            compute_segment_timeline(wall_span_ms, stats.duration_ms, probed_webcam);
+
+        let spawn_offset_ms = signed_start_offset_ms(webcam.started_at(), screen.started_at());
+        let offset_ms = compute_webcam_start_offset_ms(
+            spawn_offset_ms,
+            webcam_timeline.head_trim_ms(),
+            timeline.head_trim_ms(),
+        );
+
+        info!(
+            segment_index = index,
+            spawn_offset_ms,
+            webcam_wall_span_ms = wall_span_ms,
+            probed_webcam_ms = probed_webcam.unwrap_or(0),
+            webcam_head_trim_ms = webcam_timeline.head_trim_ms(),
+            screen_head_trim_ms = timeline.head_trim_ms(),
+            final_offset_ms = offset_ms,
+            "aligned webcam segment to screen timeline"
+        );
 
         let Some(file_name) = path
             .file_name()
@@ -1048,6 +1098,14 @@ impl Recorder {
 
     #[instrument(skip(self))]
     pub fn stop(&self) -> crate::errors::Result<RecordingStats> {
+        self.stop_with_progress(|_| {})
+    }
+
+    #[instrument(skip(self, progress))]
+    pub fn stop_with_progress<F>(&self, progress: F) -> crate::errors::Result<RecordingStats>
+    where
+        F: Fn(FinalizationProgress) + Send + Sync,
+    {
         let mut guard = self
             .current
             .lock()
@@ -1055,6 +1113,14 @@ impl Recorder {
         let session = guard
             .as_mut()
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
+
+        let session_id = session.session_id.clone();
+        progress(FinalizationProgress {
+            session_id: session_id.clone(),
+            step: "stopping_captures".into(),
+            stage_label: "Stopping capture processes...".into(),
+            percent: 15,
+        });
 
         let mut timeline = SegmentTimeline {
             head_trim: Duration::ZERO,
@@ -1108,8 +1174,14 @@ impl Recorder {
         }
 
         session.total_recorded_ms += final_stats.duration_ms;
-        match self.finalize_session(session, final_stats) {
+        match self.finalize_session(session, final_stats, &progress) {
             Ok(stats) => {
+                progress(FinalizationProgress {
+                    session_id: session_id.clone(),
+                    step: "completed".into(),
+                    stage_label: "Recording finalized".into(),
+                    percent: 100,
+                });
                 guard.take();
                 Ok(stats)
             }
@@ -1133,11 +1205,16 @@ impl Recorder {
 
     /// Concatenate validated segments, publish the output, and register the
     /// recording in the library. On success the manifest is marked Completed.
-    fn finalize_session(
+    fn finalize_session<F>(
         &self,
         session: &mut ActiveSession,
         mut final_stats: RecordingStats,
-    ) -> crate::errors::Result<RecordingStats> {
+        progress: &F,
+    ) -> crate::errors::Result<RecordingStats>
+    where
+        F: Fn(FinalizationProgress) + Send + Sync,
+    {
+        let session_id = session.session_id.clone();
         let total = session.total_recorded_ms;
         let webcam_output = self.finalize_webcam_asset(session);
         {
@@ -1152,6 +1229,13 @@ impl Recorder {
             manifest.write()?;
         }
 
+        progress(FinalizationProgress {
+            session_id: session_id.clone(),
+            step: "validating_segments".into(),
+            stage_label: "Validating video segments...".into(),
+            percent: 30,
+        });
+
         let segment_files = self.validated_segments(session)?;
         if segment_files.is_empty() {
             return Err(crate::errors::InternalError::Capture(
@@ -1159,6 +1243,13 @@ impl Recorder {
             )
             .into());
         }
+
+        progress(FinalizationProgress {
+            session_id: session_id.clone(),
+            step: "assembling_video".into(),
+            stage_label: "Assembling video...".into(),
+            percent: 50,
+        });
 
         let output = session.work_dir.join("output.mp4");
         let partial_output = session.work_dir.join("output.partial.mp4");
@@ -1188,6 +1279,13 @@ impl Recorder {
         }
         disk::sync_file(&output)?;
 
+        progress(FinalizationProgress {
+            session_id: session_id.clone(),
+            step: "generating_poster".into(),
+            stage_label: "Generating thumbnail & metadata...".into(),
+            percent: 80,
+        });
+
         let mut metadata = crate::media::probe::probe_media(
             &self.ffprobe_path.to_string_lossy(),
             &output,
@@ -1215,6 +1313,13 @@ impl Recorder {
         } else {
             None
         };
+
+        progress(FinalizationProgress {
+            session_id: session_id.clone(),
+            step: "saving_library".into(),
+            stage_label: "Saving to library...".into(),
+            percent: 92,
+        });
 
         let manifest_clone = {
             let mut manifest = session.manifest.lock().map_err(|_| {
@@ -1486,6 +1591,16 @@ pub struct RecordingStatus {
     pub error: Option<String>,
 }
 
+/// Step and percentage progress emitted during recording session finalization.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizationProgress {
+    pub session_id: String,
+    pub step: String,
+    pub stage_label: String,
+    pub percent: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,6 +1639,28 @@ mod tests {
         let longer_video = compute_segment_timeline(265_040, 265_061, Some(265_100));
         assert_eq!(longer_video.head_trim_ms(), 0);
         assert_eq!(longer_video.duration, Duration::from_millis(265_100));
+    }
+
+    #[test]
+    fn webcam_start_offset_accounts_for_camera_and_screen_startup_gaps() {
+        // Camera spawned 150ms after screen, but camera DirectShow init took 800ms
+        // while screen took 500ms. Camera first frame is 150 + 800 - 500 = +450ms
+        // relative to master timeline (needs 450ms black padding).
+        let offset = compute_webcam_start_offset_ms(150, 800, 500);
+        assert_eq!(offset, 450);
+
+        // Camera started faster than screen: screen took 900ms, camera took 200ms
+        // with 100ms spawn delay. Offset is 100 + 200 - 900 = -600ms (needs 600ms trim).
+        let early_offset = compute_webcam_start_offset_ms(100, 200, 900);
+        assert_eq!(early_offset, -600);
+
+        // Equal startup gaps: offset matches process spawn delta.
+        let equal_offset = compute_webcam_start_offset_ms(200, 400, 400);
+        assert_eq!(equal_offset, 200);
+
+        // Fallback without probes (0ms trims): offset is purely spawn delta.
+        let fallback_offset = compute_webcam_start_offset_ms(180, 0, 0);
+        assert_eq!(fallback_offset, 180);
     }
 
     #[test]

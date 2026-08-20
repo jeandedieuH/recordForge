@@ -303,8 +303,10 @@ impl CursorRenderer {
             return (x, y);
         };
         let duration = (segment.end_ms - segment.start_ms).max(1) as f64;
-        let mut trans_in = (segment.transition_in_ms as f64).clamp(10.0, duration);
-        let mut trans_out = (segment.transition_out_ms as f64).clamp(10.0, duration);
+        // Floor at 1ms (not 10ms) to match the preview's near-zero transition
+        // support, staying consistent with the FFmpeg expression builder.
+        let mut trans_in = (segment.transition_in_ms as f64).clamp(1.0, duration);
+        let mut trans_out = (segment.transition_out_ms as f64).clamp(1.0, duration);
         if trans_in + trans_out > duration {
             trans_in = duration / 2.0;
             trans_out = duration - trans_in;
