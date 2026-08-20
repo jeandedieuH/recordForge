@@ -127,7 +127,7 @@ function clampRect(rect: MaskRect, canvas: TimelineCanvas): MaskRect {
   }
 }
 
-function resolveFollowCursorTarget(
+export function resolveFollowCursorTarget(
   segment: ManualZoomSegment,
   state: TimelineState,
   timeMs: number,

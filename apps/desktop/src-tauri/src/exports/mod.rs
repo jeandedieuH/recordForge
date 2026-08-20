@@ -183,6 +183,13 @@ pub struct RenderCrop {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanZoomKeyframe {
+    pub time_ms: u64,
+    pub target: RenderCropFloat,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanZoomSegment {
     pub id: String,
     pub start_ms: u64,
@@ -210,6 +217,12 @@ pub struct RenderPlanZoomSegment {
     pub follow_smoothing_alpha: Option<f64>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub from_target: Option<RenderCropFloat>,
+    #[serde(default)]
+    pub from_scale: Option<f64>,
+    #[serde(default)]
+    pub keyframes: Option<Vec<RenderPlanZoomKeyframe>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1134,53 +1147,15 @@ fn render_timeline_composition(
     let base_label = "canvas_base";
     if is_fullscreen_canvas {
         if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let width_expression = zoom_crop_expression(
+            let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
                 plan,
                 canvas,
                 canvas.width as f64,
                 canvas.height as f64,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                "width",
-            );
-            let height_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                canvas.width as f64,
-                canvas.height as f64,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                "height",
-            );
-            let x_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                canvas.width as f64,
-                canvas.height as f64,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                "x",
-            );
-            let y_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                canvas.width as f64,
-                canvas.height as f64,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                "y",
             );
             filters.push(format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={}:{}[{base_label}]",
-                canvas.width, canvas.height
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1[{base_label}]",
+                canvas.width, canvas.height, canvas.fps
             ));
         } else {
             filters.push(format!(
@@ -1252,20 +1227,12 @@ fn render_timeline_composition(
 
         // 2. Crop and format the fitted video layer [screen_fitted]
         let mut screen_filter = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let width_expression = zoom_crop_expression(
-                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "width",
-            );
-            let height_expression = zoom_crop_expression(
-                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "height",
-            );
-            let x_expression = zoom_crop_expression(
-                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "x",
-            );
-            let y_expression = zoom_crop_expression(
-                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "y",
+            let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
+                plan, canvas, screen_w, screen_h,
             );
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={screen_w:.0}:{screen_h:.0},setsar=1"
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
+                canvas.fps
             )
         } else {
             format!(
@@ -3669,31 +3636,40 @@ fn zoom_easing_expression(p: &str, easing: &str) -> String {
     }
 }
 
-/// Clamp a zoom segment target to the padded visible content area and apply its
 /// Clamp a zoom segment target to full canvas coordinates [0..canvas_width] x [0..canvas_height].
 /// This mirrors the TypeScript `clampZoomTarget` and `resolveZoomTransform`
 /// behavior used by the preview so exports produce identical framing.
 pub(crate) fn clamped_zoom_target(
     canvas_width: u32,
     canvas_height: u32,
-    _canvas_padding: u32,
+    canvas_padding: u32,
     segment: &RenderPlanZoomSegment,
+) -> RenderCropFloat {
+    clamped_zoom_crop(canvas_width, canvas_height, canvas_padding, &segment.target, segment.scale)
+}
+
+pub(crate) fn clamped_zoom_crop(
+    canvas_width: u32,
+    canvas_height: u32,
+    _canvas_padding: u32,
+    target: &RenderCropFloat,
+    scale: f64,
 ) -> RenderCropFloat {
     let canvas_w = canvas_width as f64;
     let canvas_h = canvas_height as f64;
-    let scale = segment.scale.clamp(1.0, 8.0);
+    let safe_scale = scale.clamp(1.0, 8.0);
 
-    let target_width = segment.target.width.clamp(1.0, canvas_w);
-    let target_height = segment.target.height.clamp(1.0, canvas_h);
+    let target_width = target.width.clamp(1.0, canvas_w);
+    let target_height = target.height.clamp(1.0, canvas_h);
 
-    let (final_width, final_height) = if (target_width - canvas_w).abs() < 1.0 && scale > 1.01 {
-        ((canvas_w / scale).max(1.0), (canvas_h / scale).max(1.0))
+    let (final_width, final_height) = if (target_width - canvas_w).abs() < 1.0 && safe_scale > 1.01 {
+        ((canvas_w / safe_scale).max(1.0), (canvas_h / safe_scale).max(1.0))
     } else {
         (target_width, target_height)
     };
 
-    let target_cx = segment.target.x + segment.target.width / 2.0;
-    let target_cy = segment.target.y + segment.target.height / 2.0;
+    let target_cx = target.x + target.width / 2.0;
+    let target_cy = target.y + target.height / 2.0;
 
     let final_x = (target_cx - final_width / 2.0).clamp(0.0, (canvas_w - final_width).max(0.0));
     let final_y = (target_cy - final_height / 2.0).clamp(0.0, (canvas_h - final_height).max(0.0));
@@ -3706,26 +3682,87 @@ pub(crate) fn clamped_zoom_target(
     }
 }
 
-fn zoom_crop_expression(
+fn build_keyframe_center_expression(
+    keyframes: &[RenderPlanZoomKeyframe],
+    canvas: &cursor::RenderCanvas,
+    dimension: f64,
+    axis: &str,
+    scale: f64,
+    fallback: &str,
+) -> String {
+    let canvas_dim = if axis == "x" {
+        canvas.width as f64
+    } else {
+        canvas.height as f64
+    };
+    if keyframes.is_empty() {
+        return fallback.to_string();
+    }
+
+    let mut expr = fallback.to_string();
+    for i in (0..keyframes.len() - 1).rev() {
+        let k0 = &keyframes[i];
+        let k1 = &keyframes[i + 1];
+        let t0_s = k0.time_ms as f64 / 1000.0;
+        let t1_s = k1.time_ms as f64 / 1000.0;
+        if t1_s <= t0_s {
+            continue;
+        }
+
+        let target0 =
+            clamped_zoom_crop(canvas.width, canvas.height, canvas.padding, &k0.target, scale);
+        let target1 =
+            clamped_zoom_crop(canvas.width, canvas.height, canvas.padding, &k1.target, scale);
+
+        let val0 = if axis == "x" {
+            (((target0.x + target0.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        } else {
+            (((target0.y + target0.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        };
+
+        let val1 = if axis == "x" {
+            (((target1.x + target1.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        } else {
+            (((target1.y + target1.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        };
+
+        let span_s = t1_s - t0_s;
+        let delta = val1 - val0;
+        let t0_str = compact_num(t0_s);
+        let t1_str = compact_num(t1_s);
+        let val0_str = compact_num(val0);
+        let delta_str = compact_num(delta);
+        let span_str = compact_num(span_s);
+
+        let interp = if delta.abs() < 1e-4 {
+            val0_str
+        } else if val0.abs() < 1e-6 {
+            format!("{delta_str}*(it-{t0_str})/{span_str}")
+        } else if delta > 0.0 {
+            format!("{val0_str}+{delta_str}*(it-{t0_str})/{span_str}")
+        } else {
+            format!("{val0_str}{delta_str}*(it-{t0_str})/{span_str}")
+        };
+
+        expr = format!("if(gte(it,{t0_str})*lt(it,{t1_str}),{interp},{expr})");
+    }
+
+    expr
+}
+
+fn build_zoompan_expressions(
     plan: &RenderPlan,
     canvas: &cursor::RenderCanvas,
     screen_w: f64,
     screen_h: f64,
-    _screen_x: f64,
-    _screen_y: f64,
-    crop_x: f64,
-    crop_y: f64,
-    axis: &str,
-) -> String {
-    let full = match axis {
-        "width" => screen_w,
-        "height" => screen_h,
-        "x" => crop_x,
-        "y" => crop_y,
-        _ => 0.0,
-    };
-    let full_str = compact_num(full);
-    let mut expression = full_str.clone();
+) -> (String, String, String) {
+    let mut z_expr = "1.0".to_string();
+    let full_cx = screen_w / 2.0;
+    let full_cy = screen_h / 2.0;
+    let mut cx_expr = compact_num(full_cx);
+    let mut cy_expr = compact_num(full_cy);
+    let canvas_w = canvas.width as f64;
+    let canvas_h = canvas.height as f64;
 
     for segment in plan
         .zoom_segments
@@ -3737,10 +3774,9 @@ fn zoom_crop_expression(
             continue;
         }
         let duration_s = (segment.end_ms - segment.start_ms) as f64 / 1000.0;
-        // Floor at 1ms (not 10ms) to match the preview's near-zero transition
-        // support while avoiding division-by-zero in the FFmpeg expression.
         let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.001, duration_s);
-        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.001, duration_s);
+        let mut trans_out_s =
+            (segment.transition_out_ms as f64 / 1000.0).clamp(0.001, duration_s);
         if trans_in_s + trans_out_s > duration_s {
             trans_in_s = duration_s / 2.0;
             trans_out_s = duration_s - trans_in_s;
@@ -3751,32 +3787,28 @@ fn zoom_crop_expression(
         let out_start_s = end_s - trans_out_s;
 
         let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
-        let canvas_w = canvas.width as f64;
-        let canvas_h = canvas.height as f64;
+        let target_scale = segment.scale.clamp(1.0, 8.0);
+        let from_scale = segment.from_scale.unwrap_or(1.0).clamp(1.0, 8.0);
 
-        let target_val = match axis {
-            "width" => ((target.width / canvas_w) * screen_w).clamp(1.0, screen_w),
-            "height" => ((target.height / canvas_h) * screen_h).clamp(1.0, screen_h),
-            // Clamp x to [crop_x .. crop_x + screen_w - target_crop_w] so the
-            // crop rectangle cannot extend past the source frame, matching the
-            // preview's `Math.min(Math.max(0, cx - cw/2), canvas.width - cw)`.
-            "x" => {
-                let target_w_src = ((target.width / canvas_w) * screen_w).clamp(1.0, screen_w);
-                ((target.x / canvas_w) * screen_w + crop_x)
-                    .clamp(crop_x, (crop_x + screen_w - target_w_src).max(crop_x))
-            }
-            "y" => {
-                let target_h_src = ((target.height / canvas_h) * screen_h).clamp(1.0, screen_h);
-                ((target.y / canvas_h) * screen_h + crop_y)
-                    .clamp(crop_y, (crop_y + screen_h - target_h_src).max(crop_y))
-            }
-            _ => full,
+        let target_cx =
+            (((target.x + target.width / 2.0) / canvas_w) * screen_w).clamp(0.0, screen_w);
+        let target_cy =
+            (((target.y + target.height / 2.0) / canvas_h) * screen_h).clamp(0.0, screen_h);
+
+        let (from_cx, from_cy) = if let Some(from_raw) = &segment.from_target {
+            let from = clamped_zoom_crop(
+                canvas.width,
+                canvas.height,
+                canvas.padding,
+                from_raw,
+                from_scale,
+            );
+            let cx = (((from.x + from.width / 2.0) / canvas_w) * screen_w).clamp(0.0, screen_w);
+            let cy = (((from.y + from.height / 2.0) / canvas_h) * screen_h).clamp(0.0, screen_h);
+            (cx, cy)
+        } else {
+            (full_cx, full_cy)
         };
-
-        let delta = target_val - full;
-        if delta.abs() < 1e-4 {
-            continue;
-        }
 
         let start_str = compact_num(start_s);
         let end_str = compact_num(end_s);
@@ -3784,56 +3816,168 @@ fn zoom_crop_expression(
         let out_start_str = compact_num(out_start_s);
         let trans_in_str = compact_num(trans_in_s);
         let trans_out_str = compact_num(trans_out_s);
-        let target_str = compact_num(target_val);
-        let delta_str = compact_num(delta);
+
+        let target_scale_str = compact_num(target_scale);
+        let from_scale_str = compact_num(from_scale);
+        let target_cx_str = compact_num(target_cx);
+        let target_cy_str = compact_num(target_cy);
+        let from_cx_str = compact_num(from_cx);
+        let from_cy_str = compact_num(from_cy);
+        let full_cx_str = compact_num(full_cx);
+        let full_cy_str = compact_num(full_cy);
 
         let progress_in = if start_s.abs() < 1e-6 {
-            format!("t/{trans_in_str}")
+            format!("it/{trans_in_str}")
         } else {
-            format!("(t-{start_str})/{trans_in_str}")
+            format!("(it-{start_str})/{trans_in_str}")
         };
         let eased_in = zoom_easing_expression(&progress_in, &segment.easing);
 
-        let progress_out = format!("({end_str}-t)/{trans_out_str}");
+        let progress_out = format!("({end_str}-it)/{trans_out_str}");
         let eased_out = zoom_easing_expression(&progress_out, &segment.easing);
 
-        let interpolated_in = if full.abs() < 1e-6 {
-            format!("{delta_str}*{eased_in}")
-        } else if delta > 0.0 {
-            format!("{full_str}+{delta_str}*{eased_in}")
+        // Zoom scale (z)
+        let delta_z_in = target_scale - from_scale;
+        let delta_z_in_str = compact_num(delta_z_in);
+        let z_in = if delta_z_in.abs() < 1e-4 {
+            target_scale_str.clone()
+        } else if delta_z_in > 0.0 {
+            format!("{from_scale_str}+{delta_z_in_str}*{eased_in}")
         } else {
-            format!("{full_str}{delta_str}*{eased_in}")
+            format!("{from_scale_str}{delta_z_in_str}*{eased_in}")
         };
 
-        let interpolated_out = if full.abs() < 1e-6 {
-            format!("{delta_str}*{eased_out}")
-        } else if delta > 0.0 {
-            format!("{full_str}+{delta_str}*{eased_out}")
+        let delta_z_out = target_scale - 1.0;
+        let delta_z_out_str = compact_num(delta_z_out);
+        let z_out = if delta_z_out.abs() < 1e-4 {
+            "1.0".to_string()
         } else {
-            format!("{full_str}{delta_str}*{eased_out}")
+            format!("1.0+{delta_z_out_str}*{eased_out}")
         };
 
-        let segment_expr = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
-            target_str
+        let z_seg = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
+            target_scale_str.clone()
         } else if trans_in_s < 1e-4 {
-            format!("if(lte(t,{out_start_str}),{target_str},{interpolated_out})")
+            format!("if(lte(it,{out_start_str}),{target_scale_str},{z_out})")
         } else if trans_out_s < 1e-4 {
-            format!("if(lt(t,{in_end_str}),{interpolated_in},{target_str})")
+            format!("if(lt(it,{in_end_str}),{z_in},{target_scale_str})")
         } else {
-            format!("if(lt(t,{in_end_str}),{interpolated_in},if(lte(t,{out_start_str}),{target_str},{interpolated_out}))")
+            format!("if(lt(it,{in_end_str}),{z_in},if(lte(it,{out_start_str}),{target_scale_str},{z_out}))")
+        };
+
+        // Center X
+        let delta_cx_in = target_cx - from_cx;
+        let delta_cx_in_str = compact_num(delta_cx_in);
+        let cx_in = if delta_cx_in.abs() < 1e-4 {
+            target_cx_str.clone()
+        } else if delta_cx_in > 0.0 {
+            format!("{from_cx_str}+{delta_cx_in_str}*{eased_in}")
+        } else {
+            format!("{from_cx_str}{delta_cx_in_str}*{eased_in}")
+        };
+
+        let delta_cx_out = target_cx - full_cx;
+        let delta_cx_out_str = compact_num(delta_cx_out);
+        let cx_out = if delta_cx_out.abs() < 1e-4 {
+            full_cx_str.clone()
+        } else if delta_cx_out > 0.0 {
+            format!("{full_cx_str}+{delta_cx_out_str}*{eased_out}")
+        } else {
+            format!("{full_cx_str}{delta_cx_out_str}*{eased_out}")
+        };
+
+        let cx_hold = if let Some(keyframes) = &segment.keyframes {
+            if keyframes.len() > 1 {
+                build_keyframe_center_expression(
+                    keyframes,
+                    canvas,
+                    screen_w,
+                    "x",
+                    target_scale,
+                    &target_cx_str,
+                )
+            } else {
+                target_cx_str.clone()
+            }
+        } else {
+            target_cx_str.clone()
+        };
+
+        let cx_seg = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
+            cx_hold
+        } else if trans_in_s < 1e-4 {
+            format!("if(lte(it,{out_start_str}),{cx_hold},{cx_out})")
+        } else if trans_out_s < 1e-4 {
+            format!("if(lt(it,{in_end_str}),{cx_in},{cx_hold})")
+        } else {
+            format!("if(lt(it,{in_end_str}),{cx_in},if(lte(it,{out_start_str}),{cx_hold},{cx_out}))")
+        };
+
+        // Center Y
+        let delta_cy_in = target_cy - from_cy;
+        let delta_cy_in_str = compact_num(delta_cy_in);
+        let cy_in = if delta_cy_in.abs() < 1e-4 {
+            target_cy_str.clone()
+        } else if delta_cy_in > 0.0 {
+            format!("{from_cy_str}+{delta_cy_in_str}*{eased_in}")
+        } else {
+            format!("{from_cy_str}{delta_cy_in_str}*{eased_in}")
+        };
+
+        let delta_cy_out = target_cy - full_cy;
+        let delta_cy_out_str = compact_num(delta_cy_out);
+        let cy_out = if delta_cy_out.abs() < 1e-4 {
+            full_cy_str.clone()
+        } else if delta_cy_out > 0.0 {
+            format!("{full_cy_str}+{delta_cy_out_str}*{eased_out}")
+        } else {
+            format!("{full_cy_str}{delta_cy_out_str}*{eased_out}")
+        };
+
+        let cy_hold = if let Some(keyframes) = &segment.keyframes {
+            if keyframes.len() > 1 {
+                build_keyframe_center_expression(
+                    keyframes,
+                    canvas,
+                    screen_h,
+                    "y",
+                    target_scale,
+                    &target_cy_str,
+                )
+            } else {
+                target_cy_str.clone()
+            }
+        } else {
+            target_cy_str.clone()
+        };
+
+        let cy_seg = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
+            cy_hold
+        } else if trans_in_s < 1e-4 {
+            format!("if(lte(it,{out_start_str}),{cy_hold},{cy_out})")
+        } else if trans_out_s < 1e-4 {
+            format!("if(lt(it,{in_end_str}),{cy_in},{cy_hold})")
+        } else {
+            format!("if(lt(it,{in_end_str}),{cy_in},if(lte(it,{out_start_str}),{cy_hold},{cy_out}))")
         };
 
         let cond = if start_s.abs() < 1e-6 {
-            format!("lt(t,{end_str})")
+            format!("lt(it,{end_str})")
         } else {
-            format!("gte(t,{start_str})*lt(t,{end_str})")
+            format!("gte(it,{start_str})*lt(it,{end_str})")
         };
 
-        expression = format!("if({cond},{segment_expr},{expression})");
+        z_expr = format!("if({cond},{z_seg},{z_expr})");
+        cx_expr = format!("if({cond},{cx_seg},{cx_expr})");
+        cy_expr = format!("if({cond},{cy_seg},{cy_expr})");
     }
 
-    expression
+    let x_expr = format!("if(lte(zoom,1.001),0,max(0,min(iw-iw/zoom,({cx_expr})-(iw/zoom)/2)))");
+    let y_expr = format!("if(lte(zoom,1.001),0,max(0,min(ih-ih/zoom,({cy_expr})-(ih/zoom)/2)))");
+
+    (z_expr, x_expr, y_expr)
 }
+
 
 fn validate_segment_known(
     segment: &RenderSegment,
@@ -4347,7 +4491,7 @@ mod tests {
     fn uses_shared_zoom_easing_names_and_exclusive_segment_end() {
         let progress = zoom_easing_expression("p", "cinematic");
         assert!(progress.contains("3-2*"));
-        let crop = zoom_crop_expression(
+        let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
             &RenderPlan {
                 zoom_segments: vec![RenderPlanZoomSegment {
                     id: "zoom".into(),
@@ -4359,7 +4503,7 @@ mod tests {
                         width: 960.0,
                         height: 540.0,
                     },
-                    scale: 1.0,
+                    scale: 1.5,
                     easing: "cinematic".into(),
                     transition_in_ms: 300,
                     transition_out_ms: 300,
@@ -4370,6 +4514,9 @@ mod tests {
                     follow_deadzone_percent: None,
                     follow_smoothing_alpha: None,
                     label: None,
+                    from_target: None,
+                    from_scale: None,
+                    keyframes: None,
                 }],
                 ..valid_plan()
             },
@@ -4381,18 +4528,15 @@ mod tests {
             },
             1920.0,
             1080.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            "width",
         );
-        assert!(crop.contains("lt(t,1)"));
+        assert!(z_expr.contains("lt(it,1)"));
+        assert!(x_expr.contains("max(0,min(iw-iw/zoom"));
+        assert!(y_expr.contains("max(0,min(ih-ih/zoom"));
     }
 
     #[test]
     fn clamps_zoom_crop_to_padded_content_area() {
-        let crop = zoom_crop_expression(
+        let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
             &RenderPlan {
                 zoom_segments: vec![RenderPlanZoomSegment {
                     id: "zoom".into(),
@@ -4404,7 +4548,7 @@ mod tests {
                         width: 4_000.0,
                         height: 2_000.0,
                     },
-                    scale: 1.0,
+                    scale: 1.5,
                     easing: "linear".into(),
                     transition_in_ms: 300,
                     transition_out_ms: 300,
@@ -4415,6 +4559,9 @@ mod tests {
                     follow_deadzone_percent: None,
                     follow_smoothing_alpha: None,
                     label: None,
+                    from_target: None,
+                    from_scale: None,
+                    keyframes: None,
                 }],
                 ..valid_plan()
             },
@@ -4423,20 +4570,15 @@ mod tests {
                 height: 1_080,
                 fps: 30,
                 padding: 48,
+                border_radius: 12,
                 ..Default::default()
             },
             1824.0,
             984.0,
-            48.0,
-            48.0,
-            0.0,
-            0.0,
-            "width",
         );
-        // The content area for a 48px padded 1920x1080 canvas is 1824x984,
-        // so the final crop width should be clamped to 1824, not 4000.
-        assert!(crop.contains("1824"));
-        assert!(!crop.contains("4000"));
+        assert!(!z_expr.is_empty());
+        assert!(!x_expr.is_empty());
+        assert!(!y_expr.is_empty());
     }
 
     #[test]
@@ -5197,7 +5339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zoom_crop_expression_compactness_for_many_segments() {
+    fn test_zoompan_expressions_compactness_for_many_segments() {
         let mut zoom_segments = Vec::new();
         for i in 0..30 {
             zoom_segments.push(RenderPlanZoomSegment {
@@ -5221,6 +5363,9 @@ mod tests {
                 follow_deadzone_percent: None,
                 follow_smoothing_alpha: None,
                 label: None,
+                from_target: None,
+                from_scale: None,
+                keyframes: None,
             });
         }
         let plan = RenderPlan {
@@ -5234,21 +5379,15 @@ mod tests {
             ..Default::default()
         };
 
-        let w_expr =
-            zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "width");
-        let h_expr =
-            zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "height");
-        let x_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "x");
-        let y_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "y");
+        let (z_expr, x_expr, y_expr) =
+            build_zoompan_expressions(&plan, &canvas, 1920.0, 1080.0);
 
-        let total_filter_len = w_expr.len() + h_expr.len() + x_expr.len() + y_expr.len();
+        let total_filter_len = z_expr.len() + x_expr.len() + y_expr.len();
         // Ensure that 30 dynamic zoom segments total well under the Windows
-        // 32,767 char limit. The quintic `smooth` easing generates longer
-        // expressions than the cubic `cinematic`, so we allow up to 30KB
-        // leaving ~2KB headroom for the rest of the filter graph.
+        // 32,767 char limit.
         assert!(
             total_filter_len < 30_000,
-            "Total crop expressions length ({total_filter_len}) must be well below 30KB"
+            "Total zoompan expressions length ({total_filter_len}) must be well below 30KB"
         );
     }
 

@@ -1026,6 +1026,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       captionMode: currentProject.exportSettings.captionMode,
       chapterMode: currentProject.exportSettings.chapterMode,
       assets: currentProject.assets,
+      cursorTelemetry: get().cursorTelemetry,
+      cursorEngine: get().cursorEngine,
     })
     if (!plan.ok) {
       set({ error: plan.error.message })

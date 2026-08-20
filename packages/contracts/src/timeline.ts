@@ -764,6 +764,13 @@ export const renderPlanMaskSchema = z.object({
 
 export type RenderPlanMask = z.infer<typeof renderPlanMaskSchema>
 
+export const renderPlanZoomKeyframeSchema = z.object({
+  timeMs: z.number().int().min(0),
+  target: zoomTargetSchema,
+})
+
+export type RenderPlanZoomKeyframe = z.infer<typeof renderPlanZoomKeyframeSchema>
+
 export const renderPlanZoomSegmentSchema = z.object({
   id: z.string(),
   startMs: z.number().int().min(0),
@@ -780,6 +787,9 @@ export const renderPlanZoomSegmentSchema = z.object({
   followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
   followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
   label: z.string().optional(),
+  fromTarget: zoomTargetSchema.optional(),
+  fromScale: z.number().min(1).max(8).optional(),
+  keyframes: z.array(renderPlanZoomKeyframeSchema).optional(),
 })
 
 export type RenderPlanZoomSegment = z.infer<typeof renderPlanZoomSegmentSchema>

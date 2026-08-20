@@ -5,7 +5,7 @@ use cursor_engine::CursorTelemetryFile;
 use resvg::tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 use resvg::usvg;
 
-use super::{clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
+use super::{clamped_zoom_crop, clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
 
 // Re-export the canonical cursor settings so the renderer and engine share the
 // same type and defaults.
@@ -152,6 +152,73 @@ pub struct CursorRenderer {
     cursor_cache: HashMap<String, RasterizedCursor>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ZoomTransformState {
+    pub progress: f64,
+    pub scale: f64,
+    pub crop_x: f64,
+    pub crop_y: f64,
+    pub crop_w: f64,
+    pub crop_h: f64,
+}
+
+fn ease_progress(progress: f64, easing: &str) -> f64 {
+    let p = progress.clamp(0.0, 1.0);
+    match easing {
+        "linear" => p,
+        "ease-in" => p * p,
+        "ease-out" => 1.0 - (1.0 - p).powi(2),
+        "snappy" => 1.0 - (1.0 - p).powi(3),
+        "cinematic" => p * p * (3.0 - 2.0 * p),
+        "smooth" => p * p * p * (p * (p * 6.0 - 15.0) + 10.0),
+        "spring" => {
+            let period = 0.4;
+            (2.0f64.powf(-10.0 * p)
+                * (((p - period / 4.0) * (2.0 * std::f64::consts::PI)) / period).sin()
+                + 1.0)
+                .clamp(0.0, 1.5)
+        }
+        _ => {
+            if p < 0.5 {
+                2.0 * p * p
+            } else {
+                1.0 - (-2.0 * p + 2.0).powi(2) / 2.0
+            }
+        }
+    }
+}
+
+fn find_keyframe_target(
+    keyframes: &[super::RenderPlanZoomKeyframe],
+    time_ms: u64,
+    fallback: &super::RenderCropFloat,
+) -> super::RenderCropFloat {
+    if keyframes.is_empty() {
+        return fallback.clone();
+    }
+    if time_ms <= keyframes[0].time_ms {
+        return keyframes[0].target.clone();
+    }
+    if time_ms >= keyframes[keyframes.len() - 1].time_ms {
+        return keyframes[keyframes.len() - 1].target.clone();
+    }
+    for i in 0..keyframes.len() - 1 {
+        let k0 = &keyframes[i];
+        let k1 = &keyframes[i + 1];
+        if time_ms >= k0.time_ms && time_ms <= k1.time_ms {
+            let span = (k1.time_ms - k0.time_ms).max(1) as f64;
+            let alpha = ((time_ms - k0.time_ms) as f64 / span).clamp(0.0, 1.0);
+            return super::RenderCropFloat {
+                x: k0.target.x + (k1.target.x - k0.target.x) * alpha,
+                y: k0.target.y + (k1.target.y - k0.target.y) * alpha,
+                width: k0.target.width + (k1.target.width - k0.target.width) * alpha,
+                height: k0.target.height + (k1.target.height - k0.target.height) * alpha,
+            };
+        }
+    }
+    fallback.clone()
+}
+
 impl CursorRenderer {
     #[cfg(test)]
     pub fn new(
@@ -290,41 +357,61 @@ impl CursorRenderer {
             return;
         }
 
+        let transform = self.resolve_zoom_transform(output_ms);
+        let effective_cursor_scale = self.cursor_scale * transform.scale;
+
         let (px, py) = self.fit_source_point(cursor_frame.source_x, cursor_frame.source_y);
         let (x, y) = self.apply_zoom(output_ms, px, py);
         let clip = self.clip_for_output(output_ms);
 
         if self.settings.spotlight_mode {
-            self.render_spotlight(frame, x, y, &clip);
+            self.render_spotlight(frame, x, y, effective_cursor_scale, &clip);
         }
 
         if self.settings.click_feedback != "none" {
             for click in &cursor_frame.active_clicks {
                 let (cx_raw, cy_raw) = self.fit_source_point(click.source_x, click.source_y);
                 let (cx, cy) = self.apply_zoom(output_ms, cx_raw, cy_raw);
-                self.render_click_feedback(frame, cx, cy, click, &clip);
+                self.render_click_feedback(frame, cx, cy, click, effective_cursor_scale, &clip);
             }
         }
 
         let shape_id = self.resolve_cursor_shape_id(&cursor_frame.shape_id);
         // Apply the idle fade opacity computed by the canonical engine. The
         // cached asset is rendered at full opacity and modulated per-frame.
-        self.draw_cursor(frame, x, y, cursor_frame.opacity, &shape_id, &clip);
+        self.draw_cursor(
+            frame,
+            x,
+            y,
+            cursor_frame.opacity,
+            &shape_id,
+            effective_cursor_scale,
+            &clip,
+        );
     }
 
     fn clip_for_output(&self, _output_ms: u64) -> ClipRect {
         self.video_screen
     }
 
-    fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {
+    pub fn resolve_zoom_transform(&self, output_ms: u64) -> ZoomTransformState {
+        let canvas_w = self.canvas_width as f64;
+        let canvas_h = self.canvas_height as f64;
+
         let Some(segment) = self.zoom_segments.iter().find(|segment| {
             segment.enabled && output_ms >= segment.start_ms && output_ms < segment.end_ms
         }) else {
-            return (x, y);
+            return ZoomTransformState {
+                progress: 0.0,
+                scale: 1.0,
+                crop_x: 0.0,
+                crop_y: 0.0,
+                crop_w: canvas_w,
+                crop_h: canvas_h,
+            };
         };
+
         let duration = (segment.end_ms - segment.start_ms).max(1) as f64;
-        // Floor at 1ms (not 10ms) to match the preview's near-zero transition
-        // support, staying consistent with the FFmpeg expression builder.
         let mut trans_in = (segment.transition_in_ms as f64).clamp(1.0, duration);
         let mut trans_out = (segment.transition_out_ms as f64).clamp(1.0, duration);
         if trans_in + trans_out > duration {
@@ -333,51 +420,114 @@ impl CursorRenderer {
         }
 
         let elapsed = output_ms.saturating_sub(segment.start_ms) as f64;
+        let mut is_panned_from_prev = false;
+
         let progress = if elapsed <= 0.0 {
+            if segment.from_target.is_some() {
+                is_panned_from_prev = true;
+            }
             0.0
         } else if elapsed < trans_in {
-            (elapsed / trans_in.max(1.0)).clamp(0.0, 1.0)
+            if segment.from_target.is_some() {
+                is_panned_from_prev = true;
+            }
+            let raw = (elapsed / trans_in.max(1.0)).clamp(0.0, 1.0);
+            ease_progress(raw, &segment.easing)
         } else if elapsed <= duration - trans_out {
             1.0
         } else if elapsed <= duration {
-            ((duration - elapsed) / trans_out.max(1.0)).clamp(0.0, 1.0)
+            let remaining = duration - elapsed;
+            let raw = (remaining / trans_out.max(1.0)).clamp(0.0, 1.0);
+            ease_progress(raw, &segment.easing)
         } else {
             0.0
         };
 
-        let eased = match segment.easing.as_str() {
-            "linear" => progress,
-            "ease-in" => progress * progress,
-            "ease-out" => 1.0 - (1.0 - progress).powi(2),
-            "snappy" => 1.0 - (1.0 - progress).powi(3),
-            "cinematic" => progress * progress * (3.0 - 2.0 * progress),
-            "smooth" => {
-                progress * progress * progress * (progress * (progress * 6.0 - 15.0) + 10.0)
+        let target = if let Some(keyframes) = &segment.keyframes {
+            if !keyframes.is_empty() {
+                let kf = find_keyframe_target(keyframes, output_ms, &segment.target);
+                clamped_zoom_crop(
+                    self.canvas_width,
+                    self.canvas_height,
+                    self.canvas_padding,
+                    &kf,
+                    segment.scale,
+                )
+            } else {
+                clamped_zoom_target(
+                    self.canvas_width,
+                    self.canvas_height,
+                    self.canvas_padding,
+                    segment,
+                )
             }
-            "spring" => {
-                let p = 0.4;
-                (2.0f64.powf(-10.0 * progress)
-                    * (((progress - p / 4.0) * (2.0 * std::f64::consts::PI)) / p).sin()
-                    + 1.0)
-                    .clamp(0.0, 1.5)
-            }
-            _ => {
-                if progress < 0.5 {
-                    2.0 * progress * progress
-                } else {
-                    1.0 - (-2.0 * progress + 2.0).powi(2) / 2.0
-                }
-            }
+        } else {
+            clamped_zoom_target(
+                self.canvas_width,
+                self.canvas_height,
+                self.canvas_padding,
+                segment,
+            )
         };
 
-        // Use the same normalized crop transform as the editor preview and FFmpeg
-        // so the cursor tracks the video frame with sub-pixel precision.
-        let target = clamped_zoom_target(
-            self.canvas_width,
-            self.canvas_height,
-            self.canvas_padding,
-            segment,
-        );
+        let full_cx = canvas_w / 2.0;
+        let full_cy = canvas_h / 2.0;
+        let target_cx = target.x + target.width / 2.0;
+        let target_cy = target.y + target.height / 2.0;
+
+        let (crop_w, crop_h, cur_cx, cur_cy) = if is_panned_from_prev {
+            if let Some(from_raw) = &segment.from_target {
+                let from = clamped_zoom_crop(
+                    self.canvas_width,
+                    self.canvas_height,
+                    self.canvas_padding,
+                    from_raw,
+                    segment.from_scale.unwrap_or(segment.scale),
+                );
+                let from_cx = from.x + from.width / 2.0;
+                let from_cy = from.y + from.height / 2.0;
+                (
+                    from.width + (target.width - from.width) * progress,
+                    from.height + (target.height - from.height) * progress,
+                    from_cx + (target_cx - from_cx) * progress,
+                    from_cy + (target_cy - from_cy) * progress,
+                )
+            } else {
+                (
+                    canvas_w + (target.width - canvas_w) * progress,
+                    canvas_h + (target.height - canvas_h) * progress,
+                    full_cx + (target_cx - full_cx) * progress,
+                    full_cy + (target_cy - full_cy) * progress,
+                )
+            }
+        } else {
+            (
+                canvas_w + (target.width - canvas_w) * progress,
+                canvas_h + (target.height - canvas_h) * progress,
+                full_cx + (target_cx - full_cx) * progress,
+                full_cy + (target_cy - full_cy) * progress,
+            )
+        };
+
+        let crop_x = (cur_cx - crop_w / 2.0).clamp(0.0, (canvas_w - crop_w).max(0.0));
+        let crop_y = (cur_cy - crop_h / 2.0).clamp(0.0, (canvas_h - crop_h).max(0.0));
+        let scale = canvas_w / crop_w.max(1.0);
+
+        ZoomTransformState {
+            progress,
+            scale,
+            crop_x,
+            crop_y,
+            crop_w,
+            crop_h,
+        }
+    }
+
+    fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {
+        let transform = self.resolve_zoom_transform(output_ms);
+        if transform.scale <= 1.0001 && transform.progress < 1e-4 {
+            return (x, y);
+        }
         let canvas_w = self.canvas_width as f64;
         let canvas_h = self.canvas_height as f64;
         let screen_w = self.video_screen.w as f64;
@@ -385,22 +535,10 @@ impl CursorRenderer {
         let screen_x = self.video_screen.x as f64;
         let screen_y = self.video_screen.y as f64;
 
-        let full_cx = canvas_w / 2.0;
-        let full_cy = canvas_h / 2.0;
-        let target_cx = target.x + target.width / 2.0;
-        let target_cy = target.y + target.height / 2.0;
-
-        let cur_cx = full_cx + (target_cx - full_cx) * eased;
-        let cur_cy = full_cy + (target_cy - full_cy) * eased;
-        let crop_width = canvas_w + (target.width - canvas_w) * eased;
-        let crop_height = canvas_h + (target.height - canvas_h) * eased;
-        let crop_x = (cur_cx - crop_width / 2.0).clamp(0.0, canvas_w - crop_width);
-        let crop_y = (cur_cy - crop_height / 2.0).clamp(0.0, canvas_h - crop_height);
-
-        let norm_crop_x = crop_x / canvas_w;
-        let norm_crop_y = crop_y / canvas_h;
-        let norm_crop_w = (crop_width / canvas_w).max(1e-4);
-        let norm_crop_h = (crop_height / canvas_h).max(1e-4);
+        let norm_crop_x = transform.crop_x / canvas_w;
+        let norm_crop_y = transform.crop_y / canvas_h;
+        let norm_crop_w = (transform.crop_w / canvas_w).max(1e-4);
+        let norm_crop_h = (transform.crop_h / canvas_h).max(1e-4);
 
         let rel_x = x - screen_x;
         let rel_y = y - screen_y;
@@ -414,7 +552,14 @@ impl CursorRenderer {
         )
     }
 
-    fn render_spotlight(&self, frame: &mut [u8], x: f64, y: f64, clip: &ClipRect) {
+    fn render_spotlight(
+        &self,
+        frame: &mut [u8],
+        x: f64,
+        y: f64,
+        cursor_scale: f64,
+        clip: &ClipRect,
+    ) {
         let dim = parse_color(&self.settings.shadow_color, Rgba::opaque(0, 0, 0))
             .with_alpha(self.settings.spotlight_dim_opacity);
         fill_rect(
@@ -430,7 +575,7 @@ impl CursorRenderer {
         );
         // The spotlight radius scales with the cursor so it stays proportional
         // to the fitted video, matching the preview overlay.
-        let radius = self.settings.spotlight_radius.max(0.0) * self.cursor_scale;
+        let radius = self.settings.spotlight_radius.max(0.0) * cursor_scale;
         clear_circle(
             frame,
             self.canvas_width,
@@ -448,13 +593,14 @@ impl CursorRenderer {
         x: f64,
         y: f64,
         click: &cursor_engine::CursorClickEffect,
+        cursor_scale: f64,
         clip: &ClipRect,
     ) {
         let progress = click.progress.clamp(0.0, 1.0);
         // The preview scales the click effect with the cursor scale and then
         // expands it from 25% to 100% over the effect duration.
         let effect_scale = 0.25 + progress * 0.75;
-        let click_size = self.settings.click_size.max(10.0) * self.cursor_scale;
+        let click_size = self.settings.click_size.max(10.0) * cursor_scale;
         let radius = (click_size / 2.0 * effect_scale).max(1.0);
         let color = parse_color(&self.settings.click_color, Rgba::opaque(96, 165, 250));
         let alpha = 0.75 * click.intensity;
@@ -489,7 +635,7 @@ impl CursorRenderer {
                 x,
                 y,
                 radius,
-                (3.0 * effect_scale).max(1.0),
+                (3.0 * effect_scale * (cursor_scale / self.cursor_scale.max(0.01))).max(1.0),
                 color.with_alpha(alpha),
                 clip,
             ),
@@ -504,13 +650,20 @@ impl CursorRenderer {
         y: f64,
         opacity: f64,
         shape_id: &str,
+        cursor_scale: f64,
         clip: &ClipRect,
     ) {
         let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
-        if !self.cursor_cache.contains_key(&asset.id) {
-            match self.rasterize_cursor_asset(asset) {
+        let cache_key = if (cursor_scale - self.cursor_scale).abs() < 1e-4 {
+            asset.id.clone()
+        } else {
+            let scale_bin = (cursor_scale * 100.0).round() as u32;
+            format!("{}:{}", asset.id, scale_bin)
+        };
+        if !self.cursor_cache.contains_key(&cache_key) {
+            match self.rasterize_cursor_asset(asset, cursor_scale) {
                 Ok(cursor) => {
-                    self.cursor_cache.insert(asset.id.clone(), cursor);
+                    self.cursor_cache.insert(cache_key.clone(), cursor);
                 }
                 Err(error) => {
                     tracing::warn!(%error, asset_id = %asset.id, "failed to rasterize cursor asset; skipping cursor");
@@ -518,7 +671,7 @@ impl CursorRenderer {
                 }
             }
         }
-        if let Some(cursor) = self.cursor_cache.get(&asset.id) {
+        if let Some(cursor) = self.cursor_cache.get(&cache_key) {
             self.blit_cursor(frame, cursor, x, y, opacity, clip);
         }
     }
@@ -570,6 +723,7 @@ impl CursorRenderer {
     fn rasterize_cursor_asset(
         &self,
         asset: &cursor_engine::assets::CursorAsset,
+        cursor_scale: f64,
     ) -> Result<RasterizedCursor, String> {
         let view_box: Vec<f64> = asset
             .view_box
@@ -581,8 +735,8 @@ impl CursorRenderer {
             _ => (0.0, 0.0, asset.width, asset.height),
         };
 
-        let rendered_width = (asset.width * self.cursor_scale).max(1.0);
-        let rendered_height = (asset.height * self.cursor_scale).max(1.0);
+        let rendered_width = (asset.width * cursor_scale).max(1.0);
+        let rendered_height = (asset.height * cursor_scale).max(1.0);
         let unit_scale_x = rendered_width / vb_w;
         let unit_scale_y = rendered_height / vb_h;
         let unit_scale = unit_scale_x.min(unit_scale_y);
@@ -1341,6 +1495,9 @@ mod tests {
             follow_deadzone_percent: None,
             follow_smoothing_alpha: None,
             label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
         };
         let renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),
@@ -1361,6 +1518,142 @@ mod tests {
         let (no_zoom_x, no_zoom_y) = renderer.apply_zoom(1_001, 120.0, 120.0);
         assert!((no_zoom_x - 120.0).abs() < 0.01);
         assert!((no_zoom_y - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn apply_zoom_interpolates_keyframes_accurately() {
+        let zoom = RenderPlanZoomSegment {
+            id: "zoom-follow".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            target: RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 0,
+            transition_out_ms: 0,
+            enabled: true,
+            mode: "follow-cursor".into(),
+            source: "manual".into(),
+            preset: "manual-only".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: Some(vec![
+                crate::exports::RenderPlanZoomKeyframe {
+                    time_ms: 0,
+                    target: RenderCropFloat {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 100.0,
+                    },
+                },
+                crate::exports::RenderPlanZoomKeyframe {
+                    time_ms: 1_000,
+                    target: RenderCropFloat {
+                        x: 100.0,
+                        y: 100.0,
+                        width: 100.0,
+                        height: 100.0,
+                    },
+                },
+            ]),
+        };
+        let renderer = CursorRenderer::new_with_zoom(
+            CursorSettings::default(),
+            make_v2_telemetry(),
+            &segments(),
+            &[zoom],
+            &test_canvas(200, 200, 0),
+            None,
+        )
+        .expect("valid cursor renderer");
+
+        let transform_mid = renderer.resolve_zoom_transform(500);
+        assert!((transform_mid.crop_x - 50.0).abs() < 0.1);
+        assert!((transform_mid.crop_y - 50.0).abs() < 0.1);
+        assert!((transform_mid.scale - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn apply_zoom_pans_seamlessly_from_previous_segment() {
+        let zoom1 = RenderPlanZoomSegment {
+            id: "zoom-1".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            target: RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 200,
+            transition_out_ms: 200,
+            enabled: true,
+            mode: "manual".into(),
+            source: "manual".into(),
+            preset: "manual-only".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+        };
+        let zoom2 = RenderPlanZoomSegment {
+            id: "zoom-2".into(),
+            start_ms: 1_000,
+            end_ms: 2_000,
+            target: RenderCropFloat {
+                x: 100.0,
+                y: 100.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 400,
+            transition_out_ms: 200,
+            enabled: true,
+            mode: "manual".into(),
+            source: "manual".into(),
+            preset: "manual-only".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: Some(RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }),
+            from_scale: Some(2.0),
+            keyframes: None,
+        };
+        let renderer = CursorRenderer::new_with_zoom(
+            CursorSettings::default(),
+            make_v2_telemetry(),
+            &segments(),
+            &[zoom1, zoom2],
+            &test_canvas(200, 200, 0),
+            None,
+        )
+        .expect("valid cursor renderer");
+
+        // At 1200ms (halfway through 400ms transition), crop should be at (50, 50) with scale 2.0 (never dropping to 1.0)
+        let transform = renderer.resolve_zoom_transform(1200);
+        assert!((transform.crop_x - 50.0).abs() < 0.1);
+        assert!((transform.crop_y - 50.0).abs() < 0.1);
+        assert!((transform.scale - 2.0).abs() < 0.1);
     }
 
     #[test]

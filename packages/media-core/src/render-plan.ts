@@ -1,5 +1,6 @@
 import type {
   AppError,
+  CursorTelemetryFile,
   ExportRange,
   OverlayRenderPlan,
   ProjectAsset,
@@ -15,6 +16,7 @@ import type {
   RenderChapterMode,
   RenderPlanOverlay,
   RenderPlanText,
+  RenderPlanZoomKeyframe,
   RenderPlanZoomSegment,
   RenderSegment,
   OverlayRenderItem,
@@ -24,9 +26,15 @@ import type {
 } from "@recordforge/domain"
 import {
   clampZoomTarget,
+  findPreviousZoomSegment,
   getManualZoomSegments,
+  resolveFollowCursorTarget,
   timelineMarkersToChapters,
 } from "@recordforge/editor-core"
+import {
+  createCursorEngine,
+  type CursorEngine,
+} from "@recordforge/cursor-core"
 import {
   annotationClipSchema,
   imageClipSchema,
@@ -602,7 +610,11 @@ export function buildOverlayRenderPlan(
 function toZoomSegments(
   state: TimelineState,
   range: ExportRange | undefined,
+  options?: { cursorTelemetry?: CursorTelemetryFile | null; cursorEngine?: CursorEngine | null },
 ): RenderPlanZoomSegment[] {
+  const engine =
+    options?.cursorEngine ??
+    (options?.cursorTelemetry ? createCursorEngine(options.cursorTelemetry) : null)
   return getManualZoomSegments(state)
     .filter((segment) => segment.enabled)
     .flatMap((segment) => {
@@ -610,6 +622,29 @@ function toZoomSegments(
       if (!window) return []
       const duration = window.endMs - window.startMs
       const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
+      const prevSegment = findPreviousZoomSegment(state, segment)
+      const fromTarget = prevSegment ? clampZoomTarget(prevSegment.target, state.canvas) : undefined
+      const fromScale = prevSegment ? prevSegment.scale : undefined
+
+      // If mode is dynamic follow and telemetry engine is present, sample keyframes across duration
+      let keyframes: RenderPlanZoomKeyframe[] | undefined = undefined
+      if (engine && segment.mode !== "static" && segment.mode !== "manual") {
+        const samples: RenderPlanZoomKeyframe[] = []
+        const sampleStepMs = 100 // 10 samples per second
+        for (let t = window.startMs; t <= window.endMs; t += sampleStepMs) {
+          const followTarget = resolveFollowCursorTarget(segment, state, t, engine)
+          if (followTarget) {
+            samples.push({
+              timeMs: t,
+              target: clampZoomTarget(followTarget, state.canvas),
+            })
+          }
+        }
+        if (samples.length > 0) {
+          keyframes = samples
+        }
+      }
+
       return [
         {
           id: segment.id,
@@ -627,6 +662,9 @@ function toZoomSegments(
           followDeadzonePercent: segment.followDeadzonePercent,
           followSmoothingAlpha: segment.followSmoothingAlpha,
           label: segment.label,
+          fromTarget,
+          fromScale,
+          keyframes,
         },
       ]
     })
@@ -735,6 +773,8 @@ export interface BuildRenderPlanInput {
   settings?: ProjectExportSettings
   range?: ExportRange
   assets?: ProjectAsset[]
+  cursorTelemetry?: CursorTelemetryFile | null
+  cursorEngine?: CursorEngine | null
 }
 
 // Build a render plan from timeline metadata only. Rust resolves project assets
@@ -788,7 +828,10 @@ export function buildRenderPlan(
 
   const cameraTrack = state.tracks.find((track) => track.kind === "camera")
   const audioTracks = buildAudioTracks(state, range)
-  const zoomSegments = toZoomSegments(state, range)
+  const zoomSegments = toZoomSegments(state, range, {
+    cursorTelemetry: input.cursorTelemetry,
+    cursorEngine: input.cursorEngine,
+  })
   const cursorEffects = toCursorEffects(state, range, input.assets)
   const captions = toCaptions(state, range)
   const masks = toMasks(state, range)

@@ -8,6 +8,7 @@ import {
   type TimelineState,
 } from "@recordforge/domain"
 import { buildOverlayRenderPlan, buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
+import { normalizeCursorTelemetry } from "@recordforge/cursor-core"
 
 function makeTimeline(clipCount = 1): TimelineState {
   return {
@@ -883,5 +884,131 @@ describe("render-plan", () => {
         endMs: 20_000,
       },
     ])
+  })
+
+  it("includes adjacent bridge fromTarget and fromScale on consecutive zoom segments", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-1",
+        startMs: 1000,
+        durationMs: 3000,
+        target: { x: 100, y: 100, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+      {
+        id: "zoom-2",
+        startMs: 4000,
+        durationMs: 3000,
+        target: { x: 400, y: 300, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+    ]
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.zoomSegments).toHaveLength(2)
+    expect(plan.value.zoomSegments[0].fromTarget).toBeUndefined()
+    expect(plan.value.zoomSegments[1].fromTarget).toEqual({
+      x: 100,
+      y: 100,
+      width: 800,
+      height: 450,
+    })
+    expect(plan.value.zoomSegments[1].fromScale).toBe(2)
+  })
+
+  it("samples dynamic follow keyframes when telemetry engine is provided for follow-cursor mode", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-follow",
+        startMs: 1000,
+        durationMs: 1000,
+        target: { x: 100, y: 100, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 200,
+        transitionOutMs: 200,
+        enabled: true,
+        locked: false,
+        mode: "follow-cursor",
+      },
+    ]
+
+    const telemetry = normalizeCursorTelemetry({
+      recordingId: "rec-1",
+      recordedAt: "2026-08-20T00:00:00Z",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        {
+          tMs: 0,
+          rawX: 200,
+          rawY: 200,
+          sourceX: 200,
+          sourceY: 200,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 1500,
+          rawX: 600,
+          rawY: 400,
+          sourceX: 600,
+          sourceY: 400,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 3000,
+          rawX: 800,
+          rawY: 600,
+          sourceX: 800,
+          sourceY: 600,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      cursorTelemetry: telemetry,
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.zoomSegments).toHaveLength(1)
+    const segment = plan.value.zoomSegments[0]
+    expect(segment.keyframes).toBeDefined()
+    expect(segment.keyframes!.length).toBeGreaterThanOrEqual(10)
+    expect(segment.keyframes![0].timeMs).toBe(1000)
+    expect(segment.keyframes![segment.keyframes!.length - 1].timeMs).toBe(2000)
   })
 })
