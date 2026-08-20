@@ -160,7 +160,7 @@ impl CursorRenderer {
         segments: &[RenderSegment],
         canvas: &RenderCanvas,
     ) -> Result<Self, String> {
-        Self::new_with_zoom(settings, telemetry, segments, &[], canvas)
+        Self::new_with_zoom(settings, telemetry, segments, &[], canvas, None)
     }
 
     pub fn new_with_zoom(
@@ -169,6 +169,7 @@ impl CursorRenderer {
         segments: &[RenderSegment],
         zoom_segments: &[RenderPlanZoomSegment],
         canvas: &RenderCanvas,
+        screen_rect: Option<(f64, f64, f64, f64)>,
     ) -> Result<Self, String> {
         if canvas.width == 0 || canvas.height == 0 {
             return Err("cursor canvas dimensions must be positive".into());
@@ -180,24 +181,36 @@ impl CursorRenderer {
             return Err("cursor renderer requires at least one video segment".into());
         }
 
-        let padding = canvas.padding as f64;
-        let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
-        let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
-        let fit_scale =
-            (content_width / telemetry.source_width).min(content_height / telemetry.source_height);
-        let fit_width = telemetry.source_width * fit_scale;
-        let fit_height = telemetry.source_height * fit_scale;
-        let video_screen = ClipRect {
-            x: (padding + (content_width - fit_width) / 2.0).round() as u32,
-            y: (padding + (content_height - fit_height) / 2.0).round() as u32,
-            w: fit_width.round() as u32,
-            h: fit_height.round() as u32,
-            border_radius: canvas.border_radius,
+        let video_screen = if let Some((sx, sy, sw, sh)) = screen_rect {
+            ClipRect {
+                x: sx.round().max(0.0) as u32,
+                y: sy.round().max(0.0) as u32,
+                w: sw.round().max(1.0) as u32,
+                h: sh.round().max(1.0) as u32,
+                border_radius: canvas.border_radius,
+            }
+        } else {
+            let padding = canvas.padding as f64;
+            let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
+            let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
+            let fit_scale = (content_width / telemetry.source_width)
+                .min(content_height / telemetry.source_height);
+            let fit_width = telemetry.source_width * fit_scale;
+            let fit_height = telemetry.source_height * fit_scale;
+            ClipRect {
+                x: (padding + (content_width - fit_width) / 2.0).floor() as u32,
+                y: (padding + (content_height - fit_height) / 2.0).floor() as u32,
+                w: fit_width.floor().max(1.0) as u32,
+                h: fit_height.floor().max(1.0) as u32,
+                border_radius: canvas.border_radius,
+            }
         };
 
         let options = cursor_engine::CursorEngineOptions::default();
         let engine = cursor_engine::CursorEngine::new(telemetry, options)
             .map_err(|e| format!("failed to build cursor engine: {e}"))?;
+        let fit_scale = (video_screen.w as f64 / engine.telemetry().source_width.max(1.0))
+            .min(video_screen.h as f64 / engine.telemetry().source_height.max(1.0));
         let cursor_scale = settings.scale.clamp(0.2, 5.0) * fit_scale;
 
         Ok(Self {
@@ -241,6 +254,23 @@ impl CursorRenderer {
         self.settings.preset.clone()
     }
 
+    /// Map source coordinates from telemetry into the pixel boundaries of the
+    /// fitted video screen on the canvas.
+    fn fit_source_point(&self, source_x: f64, source_y: f64) -> (f64, f64) {
+        let source_w = self.engine.telemetry().source_width.max(1.0);
+        let source_h = self.engine.telemetry().source_height.max(1.0);
+        let clamped_x = source_x.clamp(0.0, source_w);
+        let clamped_y = source_y.clamp(0.0, source_h);
+        let scale =
+            (self.video_screen.w as f64 / source_w).min(self.video_screen.h as f64 / source_h);
+        let offset_x = (self.video_screen.w as f64 - source_w * scale) / 2.0;
+        let offset_y = (self.video_screen.h as f64 - source_h * scale) / 2.0;
+        (
+            self.video_screen.x as f64 + offset_x + clamped_x * scale,
+            self.video_screen.y as f64 + offset_y + clamped_y * scale,
+        )
+    }
+
     pub fn render_frame(&mut self, output_ms: u64, frame: &mut [u8]) {
         let expected_len = self.canvas_width as usize * self.canvas_height as usize * 4;
         if frame.len() != expected_len {
@@ -260,14 +290,8 @@ impl CursorRenderer {
             return;
         }
 
-        let point = self.engine.fit(
-            cursor_frame.source_x,
-            cursor_frame.source_y,
-            self.canvas_width as f64,
-            self.canvas_height as f64,
-            self.canvas_padding as f64,
-        );
-        let (x, y) = self.apply_zoom(output_ms, point.x, point.y);
+        let (px, py) = self.fit_source_point(cursor_frame.source_x, cursor_frame.source_y);
+        let (x, y) = self.apply_zoom(output_ms, px, py);
         let clip = self.clip_for_output(output_ms);
 
         if self.settings.spotlight_mode {
@@ -276,14 +300,8 @@ impl CursorRenderer {
 
         if self.settings.click_feedback != "none" {
             for click in &cursor_frame.active_clicks {
-                let click_point = self.engine.fit(
-                    click.source_x,
-                    click.source_y,
-                    self.canvas_width as f64,
-                    self.canvas_height as f64,
-                    self.canvas_padding as f64,
-                );
-                let (cx, cy) = self.apply_zoom(output_ms, click_point.x, click_point.y);
+                let (cx_raw, cy_raw) = self.fit_source_point(click.source_x, click.source_y);
+                let (cx, cy) = self.apply_zoom(output_ms, cx_raw, cy_raw);
                 self.render_click_feedback(frame, cx, cy, click, &clip);
             }
         }
@@ -362,11 +380,10 @@ impl CursorRenderer {
         );
         let canvas_w = self.canvas_width as f64;
         let canvas_h = self.canvas_height as f64;
-        let padding = self.canvas_padding as f64;
-        let screen_w = (canvas_w - padding * 2.0).max(1.0);
-        let screen_h = (canvas_h - padding * 2.0).max(1.0);
-        let screen_x = padding;
-        let screen_y = padding;
+        let screen_w = self.video_screen.w as f64;
+        let screen_h = self.video_screen.h as f64;
+        let screen_x = self.video_screen.x as f64;
+        let screen_y = self.video_screen.y as f64;
 
         let full_cx = canvas_w / 2.0;
         let full_cy = canvas_h / 2.0;
@@ -724,8 +741,8 @@ pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
     static INV_ALPHA: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     let inv_lut = INV_ALPHA.get_or_init(|| {
         let mut lut = [0.0f32; 256];
-        for a in 1..255 {
-            lut[a] = 255.0 / a as f32;
+        for (a, val) in lut.iter_mut().enumerate().take(255).skip(1) {
+            *val = 255.0 / a as f32;
         }
         lut[255] = 1.0;
         lut
@@ -1331,6 +1348,7 @@ mod tests {
             &segments(),
             &[zoom],
             &test_canvas(200, 200, 20),
+            None,
         )
         .expect("valid cursor renderer");
 
@@ -1343,6 +1361,88 @@ mod tests {
         let (no_zoom_x, no_zoom_y) = renderer.apply_zoom(1_001, 120.0, 120.0);
         assert!((no_zoom_x - 120.0).abs() < 0.01);
         assert!((no_zoom_y - 120.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn side_by_side_places_cursor_strictly_inside_left_screen_bounds() {
+        // Canvas: 1920x1080 with 40px padding.
+        // Side-by-side screen is placed on the left: target_w = (1920 - 80)*0.68 = 1251, x = 40.
+        // Screen bounds: x: 40, y: 40 + (1000 - 704)/2 = 188, w: 1251, h: 704.
+        let screen_rect = (40.0, 188.0, 1251.0, 704.0);
+        let mut telemetry = make_v2_telemetry();
+        // Telemetry point at bottom-right corner of recorded source:
+        telemetry.events = vec![cursor_engine::CursorEvent {
+            t_ms: 0,
+            x: 100.0,
+            y: 100.0,
+            visible: true,
+            shape_id: Some("arrow".into()),
+            ..Default::default()
+        }];
+
+        let mut renderer = CursorRenderer::new_with_zoom(
+            CursorSettings::default(),
+            telemetry,
+            &segments(),
+            &[],
+            &test_canvas(1920, 1080, 40),
+            Some(screen_rect),
+        )
+        .expect("valid side-by-side renderer");
+
+        let (px, py) = renderer.fit_source_point(100.0, 100.0);
+        // Source is 100x100 (1:1). Target screen is 1251x704 (16:9).
+        // Fit scale = 704 / 100 = 7.04, fit_width = 704. Offset_x = (1251 - 704) / 2 = 273.5.
+        // Mapped x = 40 + 273.5 + 100 * 7.04 = 1017.5.
+        // Mapped y = 188 + 0 + 100 * 7.04 = 892.0.
+        assert!(
+            (px - 1017.5).abs() < 1.0,
+            "expected px near 1017.5, got {px}"
+        );
+        assert!((py - 892.0).abs() < 1.0, "expected py near 892.0, got {py}");
+
+        // Now test 16:9 source (1920x1080)
+        let mut telemetry_16_9 = make_v2_telemetry();
+        telemetry_16_9.source_width = 1920.0;
+        telemetry_16_9.source_height = 1080.0;
+        let renderer_16_9 = CursorRenderer::new_with_zoom(
+            CursorSettings::default(),
+            telemetry_16_9,
+            &segments(),
+            &[],
+            &test_canvas(1920, 1080, 40),
+            Some(screen_rect),
+        )
+        .expect("valid 16:9 side-by-side renderer");
+        let (px_16_9, py_16_9) = renderer_16_9.fit_source_point(1920.0, 1080.0);
+        // For 16:9 source matching 16:9 screen rect, (1920, 1080) maps exactly to (40 + 1251 = 1291, 188 + 704 = 892)
+        assert!(
+            (px_16_9 - 1291.0).abs() < 1.0,
+            "expected px_16_9 near 1291.0, got {px_16_9}"
+        );
+        assert!(
+            (py_16_9 - 892.0).abs() < 1.0,
+            "expected py_16_9 near 892.0, got {py_16_9}"
+        );
+
+        // Render frame: no pixels should bleed beyond the screen rect,
+        // and absolutely no pixels should be in the right camera half (x > 1350).
+        let mut frame = vec![0; 1920 * 1080 * 4];
+        renderer.render_frame(0, &mut frame);
+
+        let mut right_side_pixels = 0;
+        for py in 0..1080u32 {
+            for px in 1350..1920u32 {
+                let idx = (py as usize * 1920 + px as usize) * 4;
+                if frame[idx + 3] > 0 {
+                    right_side_pixels += 1;
+                }
+            }
+        }
+        assert_eq!(
+            right_side_pixels, 0,
+            "cursor rendered pixels on the camera/right side of the canvas in side-by-side mode"
+        );
     }
 
     #[test]

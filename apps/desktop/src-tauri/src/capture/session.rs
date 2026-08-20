@@ -895,13 +895,16 @@ impl Recorder {
             crate::errors::InternalError::Capture("recording is not in progress".into())
         })?;
         let screen_started_at = screen.started_at();
-        let stats = match screen.wait_for_stop(screen_quit.unwrap_or_else(std::time::Instant::now)) {
+        let stats = match screen.wait_for_stop(screen_quit.unwrap_or_else(std::time::Instant::now))
+        {
             Ok(stats) => stats,
             Err(error) => {
                 self.stop_audio_captures(&mut session.audio_captures);
                 if let Some(mut webcam) = webcam_capture {
                     session.webcam_capture_failed = true;
-                    if let Err(error) = webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now)) {
+                    if let Err(error) =
+                        webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now))
+                    {
                         tracing::warn!(error = %error, "failed to stop webcam sidecar during pause error");
                     }
                 }
@@ -921,7 +924,13 @@ impl Recorder {
         let timeline = self.segment_timeline(&screen, &stats);
         let mut stats = stats;
         stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
-        self.stop_webcam_segment(session, webcam_capture, webcam_quit, timeline, screen_started_at);
+        self.stop_webcam_segment(
+            session,
+            webcam_capture,
+            webcam_quit,
+            timeline,
+            screen_started_at,
+        );
         self.finalize_audio_tracks(
             &screen,
             &mut session.audio_captures,
@@ -1157,13 +1166,17 @@ impl Recorder {
         };
         let final_stats = if let Some(mut screen) = screen_capture {
             let screen_started_at = screen.started_at();
-            let stats = match screen.wait_for_stop(screen_quit.unwrap_or_else(std::time::Instant::now)) {
+            let stats = match screen
+                .wait_for_stop(screen_quit.unwrap_or_else(std::time::Instant::now))
+            {
                 Ok(stats) => stats,
                 Err(error) => {
                     self.stop_audio_captures(&mut session.audio_captures);
                     if let Some(mut webcam) = webcam_capture {
                         session.webcam_capture_failed = true;
-                        if let Err(error) = webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now)) {
+                        if let Err(error) = webcam
+                            .wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now))
+                        {
                             tracing::warn!(error = %error, "failed to stop webcam sidecar during stop error");
                         }
                     }
@@ -1200,7 +1213,9 @@ impl Recorder {
             self.stop_audio_captures(&mut session.audio_captures);
             if let Some(mut webcam) = webcam_capture {
                 session.webcam_capture_failed = true;
-                if let Err(error) = webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now)) {
+                if let Err(error) =
+                    webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now))
+                {
                     tracing::warn!(error = %error, "failed to stop webcam sidecar during stop cleanup");
                 }
             }
@@ -1457,7 +1472,10 @@ impl Recorder {
         )
         .ok()
         .map(|metadata| {
-            let video_stream = metadata.streams.iter().find(|stream| stream.kind == "video");
+            let video_stream = metadata
+                .streams
+                .iter()
+                .find(|stream| stream.kind == "video");
             let start_ms = video_stream.and_then(|stream| stream.start_ms);
             let duration_ms = video_stream
                 .and_then(|stream| stream.duration_ms)
@@ -1676,7 +1694,10 @@ mod tests {
         let probed_start_timeline =
             compute_segment_timeline(265_040, 265_061, Some(264_240), Some(800));
         assert_eq!(probed_start_timeline.head_trim_ms(), 800);
-        assert_eq!(probed_start_timeline.duration, Duration::from_millis(264_240));
+        assert_eq!(
+            probed_start_timeline.duration,
+            Duration::from_millis(264_240)
+        );
     }
 
     #[test]

@@ -1532,7 +1532,13 @@ fn render_timeline_composition(
 
     // The overlay layer (cursor telemetry, vector annotations, styled text presets, graphics)
     // rides on top of every other video filter in a single rawvideo stream.
-    let cursor_renderers = build_cursor_renderers(plan, project_id, asset_paths, canvas)?;
+    let cursor_renderers = build_cursor_renderers(
+        plan,
+        project_id,
+        asset_paths,
+        canvas,
+        (screen_x, screen_y, screen_w, screen_h),
+    )?;
     let has_overlay_plan = plan.overlay_render_plan.is_some();
     let has_annotations = !plan.annotations.is_empty();
     let has_texts = !plan.texts.is_empty();
@@ -1763,6 +1769,7 @@ fn build_cursor_renderers(
     project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
     canvas: &cursor::RenderCanvas,
+    screen_rect: (f64, f64, f64, f64),
 ) -> Result<Vec<(u64, u64, cursor::CursorRenderer)>> {
     let mut renderers = Vec::new();
     for effect in plan
@@ -1818,6 +1825,7 @@ fn build_cursor_renderers(
             &plan.segments,
             &plan.zoom_segments,
             canvas,
+            Some(screen_rect),
         )
         .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
         renderers.push((effect.start_ms, effect.end_ms, renderer));
@@ -3403,8 +3411,11 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                     } else {
                         "png"
                     };
-                    let temp_path = std::env::temp_dir()
-                        .join(format!("recordforge_bg_{}.{}", uuid::Uuid::new_v4(), ext));
+                    let temp_path = std::env::temp_dir().join(format!(
+                        "recordforge_bg_{}.{}",
+                        uuid::Uuid::new_v4(),
+                        ext
+                    ));
                     if std::fs::write(&temp_path, bytes).is_ok() {
                         return Some(temp_path);
                     }
@@ -4950,8 +4961,7 @@ mod tests {
             resolved_url.is_some(),
             "url('/backgrounds/bg-1.jpg') should resolve to a valid file"
         );
-        let resolved_quoted =
-            resolve_background_image("\"/backgrounds/bg-1.jpg\"", &asset_paths);
+        let resolved_quoted = resolve_background_image("\"/backgrounds/bg-1.jpg\"", &asset_paths);
         assert!(
             resolved_quoted.is_some(),
             "quoted \"/backgrounds/bg-1.jpg\" should resolve to a valid file"
@@ -5266,15 +5276,12 @@ mod tests {
     #[test]
     fn test_camera_border_generation_all_shapes() {
         for shape in ["rectangle", "rounded", "circle"] {
-            let border_bytes = generate_camera_border_png(
-                320,
-                240,
-                shape,
-                3.0,
-                Some("#38bdf8"),
-                Some(0.9),
+            let border_bytes =
+                generate_camera_border_png(320, 240, shape, 3.0, Some("#38bdf8"), Some(0.9));
+            assert!(
+                border_bytes.is_ok(),
+                "Border generation failed for shape {shape}"
             );
-            assert!(border_bytes.is_ok(), "Border generation failed for shape {shape}");
             let png_bytes = border_bytes.unwrap();
             assert!(!png_bytes.is_empty());
             assert_eq!(&png_bytes[0..8], b"\x89PNG\r\n\x1a\n");
@@ -5297,7 +5304,10 @@ mod tests {
                 Some(4.0),
                 Some(8.0),
             );
-            assert!(shadow_path.is_some(), "Shadow plate generation failed for shape {shape}");
+            assert!(
+                shadow_path.is_some(),
+                "Shadow plate generation failed for shape {shape}"
+            );
             let path = shadow_path.unwrap();
             assert!(path.exists());
             let _ = std::fs::remove_file(&path);
@@ -5315,7 +5325,8 @@ mod tests {
             Err(_) => return,
         };
 
-        let temp_dir = std::env::temp_dir().join(format!("rf-test-export-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-export-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let video_path = temp_dir.join("test_screen.mp4");
         let out_path = temp_dir.join("test_out.mp4");
@@ -5429,7 +5440,11 @@ mod tests {
             None,
             Some(&ffprobe),
         );
-        assert!(res.is_ok(), "audio+video composition failed: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "audio+video composition failed: {:?}",
+            res.err()
+        );
 
         // Case 1: Video-only input with empty audio_tracks
         let video_only_path = temp_dir.join("test_screen_video_only.mp4");
@@ -5472,7 +5487,11 @@ mod tests {
             None,
             Some(&ffprobe),
         );
-        assert!(res.is_ok(), "video-only with empty audio_tracks failed: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "video-only with empty audio_tracks failed: {:?}",
+            res.err()
+        );
 
         // Test with audio fallback referencing video-only asset
         let mut plan_fallback = plan.clone();
@@ -5516,7 +5535,10 @@ mod tests {
             .arg(&test_bg_file)
             .status()
             .unwrap();
-        assert!(bg_gen_status.success(), "failed to generate test background image");
+        assert!(
+            bg_gen_status.success(),
+            "failed to generate test background image"
+        );
 
         let mut plan_bg = plan.clone();
         plan_bg.canvas = Some(cursor::RenderCanvas {
@@ -5554,7 +5576,10 @@ mod tests {
             "render with image background plate failed: {:?}",
             res.err()
         );
-        assert!(out_bg.is_file(), "output video with background image exists");
+        assert!(
+            out_bg.is_file(),
+            "output video with background image exists"
+        );
         assert!(
             std::fs::metadata(&out_bg).unwrap().len() > 0,
             "output video with background image is not empty"
@@ -5584,7 +5609,10 @@ mod tests {
             "render with contain image background plate failed: {:?}",
             res_contain.err()
         );
-        assert!(out_contain.is_file(), "output video with contain background image exists");
+        assert!(
+            out_contain.is_file(),
+            "output video with contain background image exists"
+        );
         assert!(
             std::fs::metadata(&out_contain).unwrap().len() > 0,
             "output video with contain background image is not empty"
@@ -5593,5 +5621,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
-
-
