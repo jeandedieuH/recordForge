@@ -586,8 +586,7 @@ export function computeBackgroundImageLayerStyle(
 
   return {
     filter: safeBlur > 0 ? `blur(${safeBlur}px)` : undefined,
-    // Slight scale expansion compensates for CSS blur edge feathering
-    transform: safeBlur > 0 ? "scale(1.08)" : undefined,
+    transform: undefined,
     overlayOpacity: safeDim > 0 ? safeDim : undefined,
   }
 }

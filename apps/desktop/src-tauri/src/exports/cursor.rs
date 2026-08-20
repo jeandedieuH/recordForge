@@ -38,6 +38,8 @@ pub struct RenderCanvas {
     #[serde(default)]
     pub background_dim: Option<f64>,
     #[serde(default)]
+    pub background_fit: Option<String>,
+    #[serde(default)]
     pub aspect_ratio: Option<String>,
     pub cursor_settings: CursorSettings,
 }

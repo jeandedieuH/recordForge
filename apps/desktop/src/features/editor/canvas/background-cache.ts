@@ -41,6 +41,7 @@ async function preRenderBackgroundToUrl(
   canvasWidth: number,
   canvasHeight: number,
   downscaleFactor: number,
+  fit: "cover" | "contain" | "fill" = "cover",
 ): Promise<string> {
   const width = Math.max(64, Math.round(canvasWidth / downscaleFactor))
   const height = Math.max(64, Math.round(canvasHeight / downscaleFactor))
@@ -75,26 +76,66 @@ async function preRenderBackgroundToUrl(
     })
 
     if (img.naturalWidth > 0) {
-      if (blurRadius > 0) {
-        // Fast scaled box-blur simulation on offscreen canvas
-        ctx.filter = `blur(${Math.max(1, blurRadius / downscaleFactor)}px)`
-      }
-      // Cover fit
       const imgAspect = img.naturalWidth / img.naturalHeight
       const canvasAspect = width / height
-      let dw = width
-      let dh = height
-      let dx = 0
-      let dy = 0
-      if (imgAspect > canvasAspect) {
-        dw = height * imgAspect
-        dx = (width - dw) / 2
+
+      if (fit === "contain") {
+        // Draw soft blurred ambient underlay filling the canvas
+        ctx.save()
+        ctx.filter = `blur(${Math.max(8, (blurRadius + 24) / downscaleFactor)}px)`
+        let uw = width
+        let uh = height
+        let ux = 0
+        let uy = 0
+        if (imgAspect > canvasAspect) {
+          uw = height * imgAspect
+          ux = (width - uw) / 2
+        } else {
+          uh = width / imgAspect
+          uy = (height - uh) / 2
+        }
+        ctx.drawImage(img, ux, uy, uw, uh)
+        // Darken ambient underlay slightly for contrast
+        ctx.fillStyle = "rgba(0, 0, 0, 0.25)"
+        ctx.fillRect(0, 0, width, height)
+        ctx.restore()
+
+        // Draw crisp full uncropped image
+        if (blurRadius > 0) {
+          ctx.filter = `blur(${Math.max(1, blurRadius / downscaleFactor)}px)`
+        }
+        let dw = width
+        let dh = height
+        let dx = 0
+        let dy = 0
+        if (imgAspect > canvasAspect) {
+          dh = width / imgAspect
+          dy = (height - dh) / 2
+        } else {
+          dw = height * imgAspect
+          dx = (width - dw) / 2
+        }
+        ctx.drawImage(img, dx, dy, dw, dh)
+        ctx.filter = "none"
       } else {
-        dh = width / imgAspect
-        dy = (height - dh) / 2
+        // Cover fit
+        if (blurRadius > 0) {
+          ctx.filter = `blur(${Math.max(1, blurRadius / downscaleFactor)}px)`
+        }
+        let dw = width
+        let dh = height
+        let dx = 0
+        let dy = 0
+        if (imgAspect > canvasAspect) {
+          dw = height * imgAspect
+          dx = (width - dw) / 2
+        } else {
+          dh = width / imgAspect
+          dy = (height - dh) / 2
+        }
+        ctx.drawImage(img, dx, dy, dw, dh)
+        ctx.filter = "none"
       }
-      ctx.drawImage(img, dx, dy, dw, dh)
-      ctx.filter = "none"
     } else {
       // Fallback fill
       ctx.fillStyle = "#1e293b"
@@ -108,7 +149,7 @@ async function preRenderBackgroundToUrl(
         <foreignObject width="100%" height="100%">
           <div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;height:${height}px;background:${normalized};${
             blurRadius > 0
-              ? `filter:blur(${blurRadius / downscaleFactor}px);transform:scale(1.08);`
+              ? `filter:blur(${blurRadius / downscaleFactor}px);`
               : ""
           }"></div>
         </foreignObject>
@@ -153,12 +194,14 @@ export function usePreRenderedBackground(
   const background = canvasConfig?.background ?? "#000000"
   const blur = canvasConfig?.backgroundBlur ?? 0
   const dim = canvasConfig?.backgroundDim ?? 0
+  const fit = canvasConfig?.backgroundFit ?? "cover"
   const width = canvasConfig?.width ?? 1920
   const height = canvasConfig?.height ?? 1080
 
   const plan = getEffectiveBackgroundFilterPlan(background, blur, dim, width, height, mode)
+  const fullCacheKey = `${plan.cacheKey}_fit_${fit}`
   const [cachedUrl, setCachedUrl] = useState<string | null>(() => {
-    return plan.usePreRenderedFilter ? (backgroundCache.get(plan.cacheKey) ?? null) : null
+    return plan.usePreRenderedFilter ? (backgroundCache.get(fullCacheKey) ?? null) : null
   })
 
   useEffect(() => {
@@ -167,7 +210,7 @@ export function usePreRenderedBackground(
       return
     }
 
-    const hit = backgroundCache.get(plan.cacheKey)
+    const hit = backgroundCache.get(fullCacheKey)
     if (hit) {
       setCachedUrl(hit)
       return
@@ -181,10 +224,11 @@ export function usePreRenderedBackground(
       width,
       height,
       plan.downscaleFactor,
+      fit,
     )
       .then((dataUrl) => {
         if (isSubscribed) {
-          backgroundCache.set(plan.cacheKey, dataUrl)
+          backgroundCache.set(fullCacheKey, dataUrl)
           trimCache()
           setCachedUrl(dataUrl)
         }
@@ -197,7 +241,7 @@ export function usePreRenderedBackground(
       isSubscribed = false
     }
   }, [
-    plan.cacheKey,
+    fullCacheKey,
     plan.usePreRenderedFilter,
     background,
     plan.blurRadius,
@@ -205,6 +249,7 @@ export function usePreRenderedBackground(
     width,
     height,
     plan.downscaleFactor,
+    fit,
   ])
 
   if (!plan.usePreRenderedFilter) {
@@ -232,7 +277,7 @@ export function usePreRenderedBackground(
     isPreRendered: false,
     backgroundStyle: normalizeBackgroundCss(background),
     filter: plan.blurRadius > 0 ? `blur(${plan.blurRadius}px)` : undefined,
-    transform: plan.blurRadius > 0 ? "scale(1.08)" : undefined,
+    transform: undefined,
     overlayOpacity: plan.dimFactor > 0 ? plan.dimFactor : undefined,
   }
 }

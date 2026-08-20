@@ -1524,17 +1524,46 @@ export function TimelineView({
             >
               {/* Background Layer */}
               <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-[inherit] z-0">
-                <div
-                  className="size-full"
-                  style={{
-                    background: preRenderedBackground.backgroundStyle,
-                    backgroundSize: "cover",
-                    backgroundPosition: "center",
-                    backgroundRepeat: "no-repeat",
-                    filter: backgroundLayerStyle.filter,
-                    transform: backgroundLayerStyle.transform,
-                  }}
-                />
+                {timeline?.canvas.backgroundFit === "contain" && !preRenderedBackground.isPreRendered ? (
+                  <>
+                    {/* Ambient blurred underlay */}
+                    <div
+                      className="absolute inset-0 scale-110"
+                      style={{
+                        background: preRenderedBackground.backgroundStyle,
+                        backgroundSize: "cover",
+                        backgroundPosition: "center",
+                        backgroundRepeat: "no-repeat",
+                        filter: "blur(24px) brightness(0.65)",
+                      }}
+                    />
+                    {/* Main uncropped contain image */}
+                    <div
+                      className="relative size-full"
+                      style={{
+                        background: preRenderedBackground.backgroundStyle,
+                        backgroundSize: "contain",
+                        backgroundPosition: "center",
+                        backgroundRepeat: "no-repeat",
+                        filter: backgroundLayerStyle.filter,
+                        transform: backgroundLayerStyle.transform,
+                      }}
+                    />
+                  </>
+                ) : (
+                  <div
+                    className="size-full"
+                    style={{
+                      background: preRenderedBackground.backgroundStyle,
+                      backgroundSize:
+                        timeline?.canvas.backgroundFit === "contain" ? "contain" : "cover",
+                      backgroundPosition: "center",
+                      backgroundRepeat: "no-repeat",
+                      filter: backgroundLayerStyle.filter,
+                      transform: backgroundLayerStyle.transform,
+                    }}
+                  />
+                )}
                 {backgroundLayerStyle.overlayOpacity !== undefined && (
                   <div
                     className="absolute inset-0 bg-black pointer-events-none"

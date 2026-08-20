@@ -303,6 +303,8 @@ export function LayoutPanel() {
               onBlurChange={(blur) => execute(createUpdateCanvasCommand({ backgroundBlur: blur }))}
               backgroundDim={canvas.backgroundDim ?? 0}
               onDimChange={(dim) => execute(createUpdateCanvasCommand({ backgroundDim: dim }))}
+              backgroundFit={canvas.backgroundFit ?? "cover"}
+              onFitChange={(fit) => execute(createUpdateCanvasCommand({ backgroundFit: fit }))}
             />
           </TabsContent>
         </Tabs>

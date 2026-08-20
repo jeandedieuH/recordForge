@@ -1190,10 +1190,31 @@ fn render_timeline_composition(
     } else {
         // 1. Generate the background plate [bg_plate]
         if let Some(bg_idx) = bg_input_index {
-            let mut bg_filter = format!(
-                "[{bg_idx}:v]loop=loop=-1:size=1:start=0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1,format=yuv420p",
-                canvas.width, canvas.height, canvas.width, canvas.height
-            );
+            let fit_mode = canvas.background_fit.as_deref().unwrap_or("cover");
+            let mut bg_filter = match fit_mode {
+                "contain" | "fit" => {
+                    format!(
+                        "[{bg_idx}:v]loop=loop=-1:size=1:start=0,split=2[bg_underlay_src][bg_main_src];\
+                         [bg_underlay_src]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},boxblur=luma_radius=30:luma_power=2:chroma_radius=30:chroma_power=2,drawbox=x=0:y=0:w={}:h={}:color=black@0.25:t=fill,setsar=1[bg_underlay];\
+                         [bg_main_src]scale={}:{}:force_original_aspect_ratio=decrease,setsar=1[bg_main];\
+                         [bg_underlay][bg_main]overlay=(W-w)/2:(H-h)/2:format=auto,format=yuv420p",
+                        canvas.width,
+                        canvas.height,
+                        canvas.width,
+                        canvas.height,
+                        canvas.width,
+                        canvas.height,
+                        canvas.width,
+                        canvas.height
+                    )
+                }
+                _ => {
+                    format!(
+                        "[{bg_idx}:v]loop=loop=-1:size=1:start=0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1,format=yuv420p",
+                        canvas.width, canvas.height, canvas.width, canvas.height
+                    )
+                }
+            };
             let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
             if bg_blur > 0.0 {
                 let radius = (bg_blur.round() as u32).clamp(1, 50);
@@ -5537,6 +5558,36 @@ mod tests {
         assert!(
             std::fs::metadata(&out_bg).unwrap().len() > 0,
             "output video with background image is not empty"
+        );
+
+        // Case 3: Render with image background using contain fit mode (uncropped image with ambient blurred underlay)
+        let mut plan_contain = plan_bg.clone();
+        if let Some(canvas_mut) = plan_contain.canvas.as_mut() {
+            canvas_mut.background_fit = Some("contain".into());
+        }
+        let out_contain = temp_dir.join("test_out_image_bg_contain.mp4");
+        let res_contain = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_contain,
+            &plan_contain,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            Some(&temp_dir),
+            Some(&ffprobe),
+        );
+        assert!(
+            res_contain.is_ok(),
+            "render with contain image background plate failed: {:?}",
+            res_contain.err()
+        );
+        assert!(out_contain.is_file(), "output video with contain background image exists");
+        assert!(
+            std::fs::metadata(&out_contain).unwrap().len() > 0,
+            "output video with contain background image is not empty"
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);

@@ -136,10 +136,10 @@ describe("background-presets", () => {
       expect(style.overlayOpacity).toBeUndefined()
     })
 
-    it("applies blur filter and scale transform when blur > 0", () => {
+    it("applies blur filter when blur > 0", () => {
       const style = computeBackgroundImageLayerStyle(16, 0)
       expect(style.filter).toBe("blur(16px)")
-      expect(style.transform).toBe("scale(1.08)")
+      expect(style.transform).toBeUndefined()
       expect(style.overlayOpacity).toBeUndefined()
     })
 

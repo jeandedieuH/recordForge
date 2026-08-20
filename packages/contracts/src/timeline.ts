@@ -86,6 +86,9 @@ export type SmartZoomSettings = z.infer<typeof smartZoomSettingsSchema>
 export const defaultSmartZoomSettings: SmartZoomSettings = smartZoomSettingsSchema.parse({})
 
 // Canvas settings shared by the timeline, the preview, and the final render.
+export const backgroundFitSchema = z.enum(["cover", "contain", "fill"]).default("cover")
+export type BackgroundFit = z.infer<typeof backgroundFitSchema>
+
 export const timelineCanvasSchema = z.object({
   width: z.number().int().min(1),
   height: z.number().int().min(1),
@@ -103,6 +106,7 @@ export const timelineCanvasSchema = z.object({
   shadowOffsetY: z.number().optional(),
   backgroundBlur: z.number().min(0).max(100).optional(),
   backgroundDim: z.number().min(0).max(1).optional(),
+  backgroundFit: backgroundFitSchema.optional(),
   cursorSettings: cursorSettingsSchema.default(defaultCursorSettings),
 })
 

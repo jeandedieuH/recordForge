@@ -15,6 +15,8 @@ interface ImageBackgroundPickerProps {
   onBlurChange?: (blur: number) => void
   backgroundDim?: number
   onDimChange?: (dim: number) => void
+  backgroundFit?: "cover" | "contain" | "fill"
+  onFitChange?: (fit: "cover" | "contain" | "fill") => void
 }
 
 const CATEGORIES: { value: ImageBackgroundCategory | "all"; label: string }[] = [
@@ -34,6 +36,8 @@ export function ImageBackgroundPicker({
   onBlurChange,
   backgroundDim = 0,
   onDimChange,
+  backgroundFit = "cover",
+  onFitChange,
 }: ImageBackgroundPickerProps) {
   const [activeCategory, setActiveCategory] = useState<ImageBackgroundCategory | "all">("all")
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -166,6 +170,44 @@ export function ImageBackgroundPicker({
             Remove
           </Button>
         )}
+      </div>
+
+      {/* Sizing & Fit Mode */}
+      <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-surface-dim/50 p-2.5">
+        <div className="flex items-center justify-between text-[11px] text-subtle-foreground font-medium">
+          <span>Image Sizing</span>
+          <span className="text-[10px] text-foreground font-medium capitalize">
+            {backgroundFit === "contain" ? "Fit / Full Image" : "Fill / Cover"}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+          <button
+            type="button"
+            onClick={() => onFitChange?.("cover")}
+            className={cn(
+              "flex flex-col items-center gap-0.5 rounded-md border p-2 text-center transition-colors",
+              backgroundFit !== "contain"
+                ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
+            )}
+          >
+            <span className="text-xs font-medium">Fill / Cover</span>
+            <span className="text-[9px] opacity-75">Fills canvas, crops edges</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onFitChange?.("contain")}
+            className={cn(
+              "flex flex-col items-center gap-0.5 rounded-md border p-2 text-center transition-colors",
+              backgroundFit === "contain"
+                ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
+            )}
+          >
+            <span className="text-xs font-medium">Fit / Full Image</span>
+            <span className="text-[9px] opacity-75">No zoom, soft ambient blur</span>
+          </button>
+        </div>
       </div>
 
       {/* Image Filters: Blur & Dim */}
