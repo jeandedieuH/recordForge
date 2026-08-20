@@ -1053,7 +1053,16 @@ fn render_timeline_composition(
         let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
             InternalError::Media("render plan references an unknown asset".into())
         })?;
-        let input = input_stream_at(input_index, segment.stream_index, false)?;
+        let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
+            InternalError::Media("render plan references an unknown asset".into())
+        })?;
+        let input = resolve_video_stream_specifier(
+            ffprobe_path,
+            asset_path,
+            &segment.asset_id,
+            input_index,
+            segment.stream_index,
+        );
         let label = format!("screen{index}");
         let mut filter = format!(
             "{input}trim=start={}:end={},setpts=PTS-STARTPTS",
@@ -1289,7 +1298,16 @@ fn render_timeline_composition(
         let input_index = *input_indices.get(&overlay.asset_id).ok_or_else(|| {
             InternalError::Media("camera overlay references an unknown asset".into())
         })?;
-        let input = input_stream_at(input_index, overlay.stream_index, false)?;
+        let asset_path = asset_paths.get(&overlay.asset_id).ok_or_else(|| {
+            InternalError::Media("camera overlay references an unknown asset".into())
+        })?;
+        let input = resolve_video_stream_specifier(
+            ffprobe_path,
+            asset_path,
+            &overlay.asset_id,
+            input_index,
+            overlay.stream_index,
+        );
         if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
             return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
         }
@@ -1564,11 +1582,18 @@ fn render_timeline_composition(
             let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
                 InternalError::Media("audio track references an unknown asset".into())
             })?;
-            let input = input_stream_at(
+            let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
+                InternalError::Media("audio track references an unknown asset".into())
+            })?;
+            let Some(input) = resolve_audio_stream_specifier(
+                ffprobe_path,
+                asset_path,
+                &segment.asset_id,
                 input_index,
                 segment.stream_index.or(track.stream_index),
-                true,
-            )?;
+            ) else {
+                continue;
+            };
             let label = format!("audio{audio_segment_index}");
             let clip_duration_ms = segment
                 .output_end_ms
@@ -1671,7 +1696,7 @@ fn render_timeline_composition(
     temp_mask_guards.push(TempMaskFile(filter_script_path.clone()));
 
     command
-        .arg("-filter_complex_script")
+        .arg("-/filter_complex")
         .arg(&filter_script_path)
         .args(["-map", &format!("[{current_label}]")]);
     if audio_labels.is_empty() {
@@ -3826,20 +3851,65 @@ fn validate_segment(segment: &RenderSegment, _project_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn input_stream_at(input_index: usize, stream_index: Option<i32>, audio: bool) -> Result<String> {
-    if let Some(index) = stream_index {
-        if index < 0 {
-            return Err(
-                InternalError::Media("render plan has an invalid stream index".into()).into(),
-            );
+fn resolve_video_stream_specifier(
+    ffprobe_path: Option<&Path>,
+    asset_path: &Path,
+    asset_id: &str,
+    input_index: usize,
+    stream_index: Option<i32>,
+) -> String {
+    if let Some(ffprobe) = ffprobe_path {
+        if let Ok(meta) =
+            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
+        {
+            let video_streams: Vec<_> = meta.streams.iter().filter(|s| s.kind == "video").collect();
+            if let Some(idx) = stream_index {
+                if video_streams.iter().any(|s| s.index == idx) {
+                    return format!("[{input_index}:{idx}]");
+                }
+            }
+            if let Some(first_video) = video_streams.first() {
+                return format!("[{input_index}:{}]", first_video.index);
+            }
         }
-        return Ok(format!("[{input_index}:{index}]"));
     }
-    Ok(if audio {
-        format!("[{input_index}:a:0]")
+    if let Some(idx) = stream_index {
+        format!("[{input_index}:{idx}]")
     } else {
         format!("[{input_index}:v:0]")
-    })
+    }
+}
+
+fn resolve_audio_stream_specifier(
+    ffprobe_path: Option<&Path>,
+    asset_path: &Path,
+    asset_id: &str,
+    input_index: usize,
+    stream_index: Option<i32>,
+) -> Option<String> {
+    if let Some(ffprobe) = ffprobe_path {
+        if let Ok(meta) =
+            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
+        {
+            let audio_streams: Vec<_> = meta.streams.iter().filter(|s| s.kind == "audio").collect();
+            if audio_streams.is_empty() {
+                return None;
+            }
+            if let Some(idx) = stream_index {
+                if audio_streams.iter().any(|s| s.index == idx) {
+                    return Some(format!("[{input_index}:{idx}]"));
+                }
+            }
+            if let Some(first_audio) = audio_streams.first() {
+                return Some(format!("[{input_index}:{}]", first_audio.index));
+            }
+        }
+    }
+    if let Some(idx) = stream_index {
+        Some(format!("[{input_index}:{idx}]"))
+    } else {
+        Some(format!("[{input_index}:a:0]"))
+    }
 }
 
 fn seconds(milliseconds: u64) -> String {
@@ -5029,5 +5099,206 @@ mod tests {
             let _ = std::fs::remove_file(&path);
         }
     }
+
+    #[test]
+    fn test_render_timeline_composition_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir = std::env::temp_dir().join(format!("rf-test-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let video_path = temp_dir.join("test_screen.mp4");
+        let out_path = temp_dir.join("test_out.mp4");
+
+        // Generate a 1-second test video with video stream 0 and audio stream 1
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x240:r=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=mono",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&video_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to generate test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), video_path.clone());
+
+        let plan = RenderPlan {
+            project_id: "test-project-1".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: Some(vec![RenderPlanAudio {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(1),
+                role: Some("primary".into()),
+                muted: false,
+                volume: 1.0,
+                segments: vec![RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(1),
+                    volume: Some(1.0),
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 1000,
+                    output_start_ms: 0,
+                    output_end_ms: 1000,
+                    source_width: None,
+                    source_height: None,
+                }],
+            }]),
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "audio+video composition failed: {:?}", res.err());
+
+        // Case 1: Video-only input with empty audio_tracks
+        let video_only_path = temp_dir.join("test_screen_video_only.mp4");
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=green:s=320x240:r=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-an",
+            ])
+            .arg(&video_only_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to generate video-only test video");
+
+        let mut asset_paths_video_only = HashMap::new();
+        asset_paths_video_only.insert("asset-screen".to_string(), video_only_path.clone());
+
+        let mut plan_video_only = plan.clone();
+        // Test with audio_tracks: Some(vec![])
+        plan_video_only.audio_tracks = Some(Vec::new());
+        plan_video_only.audio = None;
+        let out_video_only = temp_dir.join("test_out_video_only.mp4");
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_video_only,
+            &plan_video_only,
+            "test-project-1",
+            &asset_paths_video_only,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "video-only with empty audio_tracks failed: {:?}", res.err());
+
+        // Test with audio fallback referencing video-only asset
+        let mut plan_fallback = plan.clone();
+        plan_fallback.audio_tracks = None;
+        plan_fallback.audio = Some(RenderPlanAudio {
+            asset_id: "asset-screen".into(),
+            stream_index: None,
+            role: None,
+            muted: false,
+            volume: 1.0,
+            segments: Vec::new(),
+        });
+        let out_fallback = temp_dir.join("test_out_fallback.mp4");
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_fallback,
+            &plan_fallback,
+            "test-project-1",
+            &asset_paths_video_only,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "Fallback with video-only failed: {:?}", res.err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
+
 
