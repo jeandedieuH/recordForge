@@ -1,5 +1,5 @@
-use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
 
 /// Encoder description returned to the TypeScript front end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +118,8 @@ pub fn probe_encoder(ffmpeg_path: &str, encoder: &str) -> bool {
 /// and satisfies hardware encoder minimum resolution requirements (e.g. NVENC).
 fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Result<ProbeResult> {
     let unique_suffix = uuid::Uuid::new_v4();
-    let output = std::env::temp_dir().join(format!("rf-encoder-probe-{encoder}-{unique_suffix}.mp4"));
+    let output =
+        std::env::temp_dir().join(format!("rf-encoder-probe-{encoder}-{unique_suffix}.mp4"));
 
     // Generate a fast synthetic color pattern and encode with the target encoder.
     let mut command = crate::process::create_command(ffmpeg_path);

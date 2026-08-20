@@ -76,11 +76,7 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
     }
 
     let action = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-        let status = guard.status()?;
+        let status = state.recorder.status()?;
 
         match status.state {
             RecorderState::Idle | RecorderState::Completed | RecorderState::Failed => {
@@ -89,7 +85,7 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
                 })?;
                 if let Some(config) = quick.as_ref() {
                     let bounds = config.source.bounds;
-                    guard.start(config.clone())?;
+                    state.recorder.start(config.clone())?;
                     Action::Started(bounds)
                 } else {
                     Action::None
@@ -99,17 +95,17 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<AppState>();
-                    let _ = crate::commands::recording::stop_recording(app_handle.clone(), state).await;
+                    let _ =
+                        crate::commands::recording::stop_recording(app_handle.clone(), state).await;
                 });
                 return Ok(());
             }
             RecorderState::Countdown => {
-                guard.cancel_prepared(&status.session_id)?;
+                state.recorder.cancel_prepared(&status.session_id)?;
                 Action::Aborted
             }
             _ => Action::None,
         }
-        // guard is dropped here — safe to do window operations below
     };
 
     // Open or close auxiliary windows outside the recorder lock
@@ -139,18 +135,13 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
 
 fn toggle_pause_resume(app: &tauri::AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-    let status = guard.status()?;
+    let status = state.recorder.status()?;
 
     let outcome = match status.state {
-        RecorderState::Recording => guard.pause().map(|_| ()),
-        RecorderState::Paused => guard.resume().map(|_| ()),
+        RecorderState::Recording => state.recorder.pause().map(|_| ()),
+        RecorderState::Paused => state.recorder.resume().map(|_| ()),
         _ => Ok(()),
     };
-    drop(guard);
 
     // Reflect the shortcut-driven change in the UI immediately.
     crate::commands::recording::emit_current_status(app, &state);

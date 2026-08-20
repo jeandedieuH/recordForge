@@ -126,7 +126,10 @@ pub struct RenderPlanText {
     pub font_family: String,
     #[serde(default = "default_title_font_size")]
     pub font_size: f64,
-    #[serde(default = "default_font_weight", deserialize_with = "deserialize_flexible_string")]
+    #[serde(
+        default = "default_font_weight",
+        deserialize_with = "deserialize_flexible_string"
+    )]
     pub font_weight: String,
     #[serde(default = "default_white")]
     pub text_color: String,
@@ -755,7 +758,11 @@ pub fn build_text_preset_svg(
     let base_tag_fs = (base_primary_fs * 0.35).clamp(10.0, 18.0);
     let base_tag_line_h = base_tag_fs * 1.2;
     let base_tag_gap = 6.0;
-    let base_tag_h = if has_tag { base_tag_line_h + base_tag_gap } else { 0.0 };
+    let base_tag_h = if has_tag {
+        base_tag_line_h + base_tag_gap
+    } else {
+        0.0
+    };
 
     // Secondary subtitle
     let has_sub = text
@@ -785,61 +792,79 @@ pub fn build_text_preset_svg(
     let initial_total_content_h = base_tag_h + base_primary_h + base_sub_h;
 
     // Determine scale factor if auto_scale_text is enabled
-    let scale = if text.auto_scale_text && initial_total_content_h > available_h && initial_total_content_h > 0.0 {
+    let scale = if text.auto_scale_text
+        && initial_total_content_h > available_h
+        && initial_total_content_h > 0.0
+    {
         (available_h / initial_total_content_h).clamp(0.55, 1.0)
     } else {
         1.0
     };
 
-    let (primary_fs, primary_line_h, primary_lines, primary_h, tag_fs, tag_line_h, tag_gap, sub_fs, sub_line_h, subtitle_gap, sub_lines, sub_h) =
-        if (scale - 1.0).abs() > 0.001 {
-            let p_fs = (base_primary_fs * scale).clamp(10.0, 120.0);
-            let p_line_h = p_fs * 1.25;
-            let p_max_chars = (usable_w / (p_fs * 0.58)).max(3.0) as usize;
-            let p_lines = wrap_text_to_lines(&text.primary_text, p_max_chars);
-            let p_h = (p_lines.len() as f64) * p_line_h;
+    let (
+        primary_fs,
+        primary_line_h,
+        primary_lines,
+        primary_h,
+        tag_fs,
+        tag_line_h,
+        tag_gap,
+        sub_fs,
+        sub_line_h,
+        subtitle_gap,
+        sub_lines,
+        sub_h,
+    ) = if (scale - 1.0).abs() > 0.001 {
+        let p_fs = (base_primary_fs * scale).clamp(10.0, 120.0);
+        let p_line_h = p_fs * 1.25;
+        let p_max_chars = (usable_w / (p_fs * 0.58)).max(3.0) as usize;
+        let p_lines = wrap_text_to_lines(&text.primary_text, p_max_chars);
+        let p_h = (p_lines.len() as f64) * p_line_h;
 
-            let t_fs = (p_fs * 0.35).clamp(9.0, 18.0);
-            let t_line_h = t_fs * 1.2;
-            let t_gap = base_tag_gap * scale;
+        let t_fs = (p_fs * 0.35).clamp(9.0, 18.0);
+        let t_line_h = t_fs * 1.2;
+        let t_gap = base_tag_gap * scale;
 
-            let s_fs = (p_fs * 0.55).clamp(9.0, 48.0);
-            let s_line_h = s_fs * 1.3;
-            let s_gap = base_subtitle_gap * scale;
-            let s_max_chars = (usable_w / (s_fs * 0.58)).max(3.0) as usize;
-            let s_lines = if let Some(subtitle) = &text.secondary_text {
-                if !subtitle.trim().is_empty() {
-                    wrap_text_to_lines(subtitle, s_max_chars)
-                } else {
-                    Vec::new()
-                }
+        let s_fs = (p_fs * 0.55).clamp(9.0, 48.0);
+        let s_line_h = s_fs * 1.3;
+        let s_gap = base_subtitle_gap * scale;
+        let s_max_chars = (usable_w / (s_fs * 0.58)).max(3.0) as usize;
+        let s_lines = if let Some(subtitle) = &text.secondary_text {
+            if !subtitle.trim().is_empty() {
+                wrap_text_to_lines(subtitle, s_max_chars)
             } else {
                 Vec::new()
-            };
-            let s_h = if has_sub && !s_lines.is_empty() {
-                (s_lines.len() as f64) * s_line_h + s_gap
-            } else {
-                0.0
-            };
-
-            (p_fs, p_line_h, p_lines, p_h, t_fs, t_line_h, t_gap, s_fs, s_line_h, s_gap, s_lines, s_h)
+            }
         } else {
-            let t_gap = base_tag_gap;
-            (
-                base_primary_fs,
-                base_primary_line_h,
-                base_primary_lines,
-                base_primary_h,
-                base_tag_fs,
-                base_tag_line_h,
-                t_gap,
-                base_sub_fs,
-                base_sub_line_h,
-                base_subtitle_gap,
-                base_sub_lines,
-                base_sub_h,
-            )
+            Vec::new()
         };
+        let s_h = if has_sub && !s_lines.is_empty() {
+            (s_lines.len() as f64) * s_line_h + s_gap
+        } else {
+            0.0
+        };
+
+        (
+            p_fs, p_line_h, p_lines, p_h, t_fs, t_line_h, t_gap, s_fs, s_line_h, s_gap, s_lines,
+            s_h,
+        )
+    } else {
+        let t_gap = base_tag_gap;
+        (
+            base_primary_fs,
+            base_primary_line_h,
+            base_primary_lines,
+            base_primary_h,
+            base_tag_fs,
+            base_tag_line_h,
+            t_gap,
+            base_sub_fs,
+            base_sub_line_h,
+            base_subtitle_gap,
+            base_sub_lines,
+            base_sub_h,
+        )
+    };
 
     let tag_h = if has_tag { tag_line_h + tag_gap } else { 0.0 };
     let total_content_h = tag_h + primary_h + sub_h;
@@ -907,7 +932,10 @@ pub fn build_text_preset_svg(
         }
     }
 
-    let clip_id = format!("clip-text-{}", text.id.replace(|c: char| !c.is_alphanumeric(), "-"));
+    let clip_id = format!(
+        "clip-text-{}",
+        text.id.replace(|c: char| !c.is_alphanumeric(), "-")
+    );
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{cw}" height="{ch}" viewBox="0 0 {cw} {ch}">
             <defs>

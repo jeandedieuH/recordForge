@@ -13,7 +13,7 @@ use crate::path_policy::PathPolicy;
 /// persist library metadata.
 #[derive(Debug)]
 pub struct AppState {
-    pub recorder: Arc<Mutex<Recorder>>,
+    pub recorder: Arc<Recorder>,
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub job_manager: Arc<Mutex<JobManager>>,
     pub sessions_dir: PathBuf,

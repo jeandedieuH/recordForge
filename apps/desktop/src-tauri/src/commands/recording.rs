@@ -86,7 +86,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
     );
 
     app.manage(AppState {
-        recorder: Arc::new(Mutex::new(recorder)),
+        recorder: Arc::new(recorder),
         db,
         job_manager: Arc::new(Mutex::new(job_manager)),
         sessions_dir,
@@ -131,20 +131,11 @@ pub fn list_builtin_profiles() -> Result<Vec<capture::config::RecordingProfile>>
 /// global shortcuts or the tray menu. Emission failures are ignored so a
 /// listener-side hiccup can't fail an otherwise-successful recording action.
 pub(crate) fn emit_current_status(app: &tauri::AppHandle, state: &AppState) {
-    let status = {
-        let guard = match state.recorder.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                tracing::error!("recorder state mutex poisoned while emitting status");
-                return;
-            }
-        };
-        match guard.status() {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = ?e, "failed to read recorder status for event");
-                return;
-            }
+    let status = match state.recorder.status() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = ?e, "failed to read recorder status for event");
+            return;
         }
     };
     if let Err(e) = crate::events::emit_recorder_status(app, &status) {
@@ -159,13 +150,7 @@ pub async fn start_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String> {
-    let session_id = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.prepare(config.clone())?
-    };
+    let session_id = state.recorder.prepare(config.clone())?;
     remember_quick_config(&state, config.clone());
 
     if let Err(error) = MainWindow::minimize(&app) {
@@ -193,13 +178,7 @@ pub async fn prepare_recording(
         return Err(InternalError::Capture("countdown must be 0, 3, or 5 seconds".into()).into());
     }
 
-    let session_id = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.prepare(config.clone())?
-    };
+    let session_id = state.recorder.prepare(config.clone())?;
     remember_quick_config(&state, config.clone());
 
     if let Err(error) = MainWindow::minimize(&app) {
@@ -322,13 +301,7 @@ fn start_prepared_session(
     // aborts startup instead of leaving an active, uncontrollable recording.
     open_recording_windows(app, bounds)?;
 
-    let result = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.start_prepared(session_id)
-    };
+    let result = state.recorder.start_prepared(session_id);
     if let Err(error) = result {
         cleanup_recording_windows(app);
         return Err(error);
@@ -338,11 +311,7 @@ fn start_prepared_session(
 }
 
 fn cancel_prepared_session(state: &AppState, session_id: &str) -> Result<()> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.cancel_prepared(session_id)
+    state.recorder.cancel_prepared(session_id)
 }
 
 fn open_recording_windows(
@@ -384,9 +353,8 @@ fn recording_is_active(app: &tauri::AppHandle) -> bool {
     let state = app.state::<AppState>();
     state
         .recorder
-        .lock()
+        .status()
         .ok()
-        .and_then(|guard| guard.status().ok())
         .map(|status| {
             matches!(
                 status.state,
@@ -399,12 +367,8 @@ fn recording_is_active(app: &tauri::AppHandle) -> bool {
 
 fn stop_after_window_failure(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    if let Ok(guard) = state.recorder.lock() {
-        if let Err(error) = guard.stop() {
-            tracing::warn!(error = ?error, "failed to stop recording after control window failure");
-        }
-    } else {
-        tracing::error!("recorder state mutex poisoned after control window failure");
+    if let Err(error) = state.recorder.stop() {
+        tracing::warn!(error = ?error, "failed to stop recording after control window failure");
     }
     cleanup_recording_windows(app);
     if let Err(error) = MainWindow::restore(app) {
@@ -419,13 +383,7 @@ pub fn pause_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RecordingStatus> {
-    let status = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.pause()?
-    };
+    let status = state.recorder.pause()?;
     let _ = crate::events::emit_recorder_status(&app, &status);
     Ok(status)
 }
@@ -436,29 +394,22 @@ pub fn resume_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RecordingStatus> {
-    let status = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.resume()?
-    };
+    let status = state.recorder.resume()?;
     let _ = crate::events::emit_recorder_status(&app, &status);
     Ok(status)
 }
 
 #[tauri::command]
 #[instrument]
-pub async fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<RecordingStats> {
+pub async fn stop_recording(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RecordingStats> {
     // A pending countdown has captured nothing yet: stopping cancels the
     // pending start instead of running finalization over an empty session
     // (which would fail with "no valid recording segments").
     let countdown_session = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        let status = guard.status()?;
+        let status = state.recorder.status()?;
         if status.state == capture::manifest::RecorderState::Countdown {
             Some(status.session_id)
         } else {
@@ -466,13 +417,7 @@ pub async fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -
         }
     };
     if let Some(session_id) = countdown_session {
-        let cancel_result = {
-            let guard = state
-                .recorder
-                .lock()
-                .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-            guard.cancel_prepared(&session_id)
-        };
+        let cancel_result = state.recorder.cancel_prepared(&session_id);
         FloatingWindow::hide(&app);
         BoundaryWindow::hide(&app);
         CountdownWindow::hide(&app);
@@ -490,12 +435,9 @@ pub async fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -
     let app_handle = app.clone();
     let recorder = state.recorder.clone();
     let stop_result = tauri::async_runtime::spawn_blocking(move || {
-        let guard = recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        let session_id = guard.status()?.session_id;
+        let session_id = recorder.status()?.session_id;
         let app_cb = app_handle.clone();
-        let result = guard.stop_with_progress(move |progress| {
+        let result = recorder.stop_with_progress(move |progress| {
             let _ = crate::events::emit_finalization_progress(&app_cb, &progress);
         });
         Ok::<_, crate::errors::AppError>((session_id, result))
@@ -534,11 +476,7 @@ pub async fn stop_recording(app: tauri::AppHandle, state: State<'_, AppState>) -
 #[tauri::command]
 #[instrument]
 pub fn recording_status(state: State<'_, AppState>) -> Result<RecordingStatus> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-    guard.status()
+    state.recorder.status()
 }
 
 #[tauri::command]
@@ -558,13 +496,7 @@ pub(crate) fn insert_marker_broadcast(
     state: &AppState,
     label: String,
 ) -> Result<RecordingMarker> {
-    let marker = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.insert_marker(label)?
-    };
+    let marker = state.recorder.insert_marker(label)?;
     if let Err(error) = crate::events::emit_recorder_marker(app, &marker) {
         tracing::warn!(error = ?error, "failed to emit recorder marker event");
     }
@@ -584,14 +516,11 @@ pub async fn discard_recording(app: tauri::AppHandle, state: State<'_, AppState>
     CountdownWindow::hide(&app);
 
     let recorder = state.recorder.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let guard = recorder
-            .lock()
-            .map_err(|_| InternalError::Capture("recorder state mutex poisoned".into()))?;
-        guard.discard()
-    })
-    .await
-    .map_err(|e| InternalError::Unknown(format!("discard recording worker thread panicked: {e}")))?;
+    let result = tauri::async_runtime::spawn_blocking(move || recorder.discard())
+        .await
+        .map_err(|e| {
+            InternalError::Unknown(format!("discard recording worker thread panicked: {e}"))
+        })?;
 
     let final_result = result;
 
@@ -652,7 +581,10 @@ pub fn scan_recovery_sessions(state: State<'_, AppState>) -> Result<Vec<Recovery
 
 #[tauri::command]
 #[instrument]
-pub async fn recover_session(session_id: String, state: State<'_, AppState>) -> Result<LibraryRecording> {
+pub async fn recover_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<LibraryRecording> {
     // Validate the session ID as a UUID and ensure its directory stays inside
     // the sessions root before any recovery work begins.
     let work_dir = state.path_policy.validate_session_dir(&session_id)?;
@@ -678,7 +610,11 @@ pub async fn delete_recovery_session(session_id: String, state: State<'_, AppSta
         recovery_delete_session(&session_id, &sessions_dir)
     })
     .await
-    .map_err(|e| InternalError::Unknown(format!("delete recovery session worker thread panicked: {e}")))?
+    .map_err(|e| {
+        InternalError::Unknown(format!(
+            "delete recovery session worker thread panicked: {e}"
+        ))
+    })?
 }
 
 #[tauri::command]

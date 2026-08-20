@@ -135,7 +135,8 @@ pub fn probe_media(ffprobe_path: &str, input: &Path, recording_id: &str) -> Resu
             let duration_ms = s
                 .duration
                 .as_ref()
-                .and_then(|value| parse_seconds_to_ms(value));
+                .and_then(|value| parse_seconds_to_ms(value))
+                .or(metadata.format.duration_ms);
 
             metadata.streams.push(MediaStream {
                 index: s.index,

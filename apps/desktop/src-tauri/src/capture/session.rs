@@ -26,6 +26,7 @@ pub struct Recorder {
     ddagrab_available: bool,
     available_encoders: Vec<String>,
     current: Mutex<Option<ActiveSession>>,
+    finalizing: Mutex<Option<RecordingStatus>>,
 }
 
 #[derive(Debug)]
@@ -248,6 +249,7 @@ impl Recorder {
             ddagrab_available,
             available_encoders,
             current: Mutex::new(None),
+            finalizing: Mutex::new(None),
         }
     }
 
@@ -572,50 +574,18 @@ impl Recorder {
                 const WEBCAM_RETRY_DELAY: Duration = Duration::from_millis(100);
 
                 for attempt in 1..=MAX_WEBCAM_ATTEMPTS {
-                    match super::webcam::validate_webcam_device(&ffmpeg, device) {
-                        Ok(capabilities) if capabilities.available => {
-                            let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
-                            match FfmpegCapture::start_webcam(
-                                &ffmpeg,
-                                device,
-                                profile,
-                                &encoder,
-                                &webcam_output.to_string_lossy(),
-                                None,
-                            ) {
-                                Ok(capture) => {
-                                    webcam = Some(capture);
-                                    break;
-                                }
-                                Err(error) => {
-                                    if attempt == MAX_WEBCAM_ATTEMPTS {
-                                        webcam_failed = true;
-                                        tracing::warn!(
-                                            error = %error,
-                                            device,
-                                            "failed to start webcam sidecar; continuing without camera"
-                                        );
-                                    } else {
-                                        tracing::debug!(
-                                            error = %error,
-                                            device,
-                                            attempt,
-                                            "webcam sidecar start failed, retrying"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            if attempt == MAX_WEBCAM_ATTEMPTS {
-                                webcam_failed = true;
-                                tracing::warn!(
-                                    device,
-                                    "selected webcam is not available; continuing without camera"
-                                );
-                            } else {
-                                tracing::debug!(device, attempt, "webcam device is busy, retrying");
-                            }
+                    let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
+                    match FfmpegCapture::start_webcam(
+                        &ffmpeg,
+                        device,
+                        profile,
+                        &encoder,
+                        &webcam_output.to_string_lossy(),
+                        None,
+                    ) {
+                        Ok(capture) => {
+                            webcam = Some(capture);
+                            break;
                         }
                         Err(error) => {
                             if attempt == MAX_WEBCAM_ATTEMPTS {
@@ -623,21 +593,18 @@ impl Recorder {
                                 tracing::warn!(
                                     error = %error,
                                     device,
-                                    "failed to validate webcam device; continuing without camera"
+                                    "failed to start webcam sidecar; continuing without camera"
                                 );
                             } else {
                                 tracing::debug!(
                                     error = %error,
                                     device,
                                     attempt,
-                                    "webcam validation failed, retrying"
+                                    "webcam sidecar start failed, retrying"
                                 );
+                                std::thread::sleep(WEBCAM_RETRY_DELAY);
                             }
                         }
-                    }
-
-                    if webcam.is_none() && attempt < MAX_WEBCAM_ATTEMPTS {
-                        std::thread::sleep(WEBCAM_RETRY_DELAY);
                     }
                 }
             } else {
@@ -1055,13 +1022,16 @@ impl Recorder {
     /// is still cleared in that case so it cannot wedge.
     #[instrument(skip(self))]
     pub fn discard(&self) -> crate::errors::Result<()> {
-        let mut guard = self
-            .current
-            .lock()
-            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
+        let (mut session, work_dir) = {
+            let mut guard = self.current.lock().map_err(|_| {
+                crate::errors::InternalError::Capture("recorder mutex poisoned".into())
+            })?;
+            let session = guard.take().ok_or_else(|| {
+                crate::errors::InternalError::Capture("no active recording".into())
+            })?;
+            let work_dir = session.work_dir.clone();
+            (session, work_dir)
+        };
 
         // Teardown mirrors the error paths of stop(): every worker is told to
         // quit, but results are only logged — we are deleting the outputs.
@@ -1079,10 +1049,6 @@ impl Recorder {
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
         }
-
-        let work_dir = session.work_dir.clone();
-        guard.take();
-        drop(guard);
 
         match std::fs::remove_dir_all(&work_dir) {
             Ok(()) => {
@@ -1106,15 +1072,41 @@ impl Recorder {
     where
         F: Fn(FinalizationProgress) + Send + Sync,
     {
-        let mut guard = self
-            .current
-            .lock()
-            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
+        // Take the session out of self.current and record the finalizing status.
+        // This releases self.current IMMEDIATELY so that status polls and other
+        // commands never block on heavy media finalization.
+        let (mut session, session_id) = {
+            let mut guard = self.current.lock().map_err(|_| {
+                crate::errors::InternalError::Capture("recorder mutex poisoned".into())
+            })?;
+            let session = guard.take().ok_or_else(|| {
+                crate::errors::InternalError::Capture("no active recording".into())
+            })?;
+            let session_id = session.session_id.clone();
+            let mut finalizing_status = match self.status_from_session(&session) {
+                Ok(s) => s,
+                Err(_) => RecordingStatus {
+                    session_id: session_id.clone(),
+                    state: RecorderState::Finalizing,
+                    started_at: None,
+                    stopped_at: None,
+                    duration_ms: session.total_recorded_ms,
+                    recorded_ms: session.total_recorded_ms,
+                    source_kind: String::new(),
+                    source_name: String::new(),
+                    microphone_active: false,
+                    system_audio_active: false,
+                    webcam_active: false,
+                    error: None,
+                },
+            };
+            finalizing_status.state = RecorderState::Finalizing;
+            if let Ok(mut finalizing_guard) = self.finalizing.lock() {
+                *finalizing_guard = Some(finalizing_status);
+            }
+            (session, session_id)
+        };
 
-        let session_id = session.session_id.clone();
         progress(FinalizationProgress {
             session_id: session_id.clone(),
             step: "stopping_captures".into(),
@@ -1143,13 +1135,16 @@ impl Recorder {
                             tracing::error!(error = ?write_error, "failed to persist failed recording state");
                         }
                     }
+                    if let Ok(mut finalizing_guard) = self.finalizing.lock() {
+                        *finalizing_guard = None;
+                    }
                     return Err(error);
                 }
             };
             timeline = self.segment_timeline(&screen, &stats);
             let mut stats = stats;
             stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
-            self.stop_webcam_segment(session, &screen, timeline);
+            self.stop_webcam_segment(&mut session, &screen, timeline);
             self.finalize_audio_tracks(
                 &screen,
                 &mut session.audio_captures,
@@ -1174,7 +1169,13 @@ impl Recorder {
         }
 
         session.total_recorded_ms += final_stats.duration_ms;
-        match self.finalize_session(session, final_stats, &progress) {
+        let finalize_result = self.finalize_session(&mut session, final_stats, &progress);
+
+        if let Ok(mut finalizing_guard) = self.finalizing.lock() {
+            *finalizing_guard = None;
+        }
+
+        match finalize_result {
             Ok(stats) => {
                 progress(FinalizationProgress {
                     session_id: session_id.clone(),
@@ -1182,7 +1183,6 @@ impl Recorder {
                     stage_label: "Recording finalized".into(),
                     percent: 100,
                 });
-                guard.take();
                 Ok(stats)
             }
             Err(error) => {
@@ -1197,7 +1197,6 @@ impl Recorder {
                         tracing::error!(error = ?write_error, "failed to persist failed state");
                     }
                 }
-                guard.take();
                 Err(error)
             }
         }
@@ -1419,6 +1418,12 @@ impl Recorder {
                 .iter()
                 .find(|stream| stream.kind == "video")
                 .and_then(|stream| stream.duration_ms)
+                .or(metadata.format.duration_ms)
+                .or(if metadata.duration_ms > 0 {
+                    Some(metadata.duration_ms)
+                } else {
+                    None
+                })
         })
     }
 
@@ -1505,29 +1510,31 @@ impl Recorder {
 
     /// Runtime status for the React UI.
     pub fn status(&self) -> crate::errors::Result<RecordingStatus> {
-        let guard = self
-            .current
-            .lock()
-            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-
-        if let Some(session) = guard.as_ref() {
-            self.status_from_session(session)
-        } else {
-            Ok(RecordingStatus {
-                session_id: "".into(),
-                state: RecorderState::Idle,
-                started_at: None,
-                stopped_at: None,
-                duration_ms: 0,
-                recorded_ms: 0,
-                source_kind: String::new(),
-                source_name: String::new(),
-                microphone_active: false,
-                system_audio_active: false,
-                webcam_active: false,
-                error: None,
-            })
+        if let Ok(guard) = self.current.lock() {
+            if let Some(session) = guard.as_ref() {
+                return self.status_from_session(session);
+            }
         }
+        if let Ok(guard) = self.finalizing.lock() {
+            if let Some(status) = guard.as_ref() {
+                return Ok(status.clone());
+            }
+        }
+
+        Ok(RecordingStatus {
+            session_id: "".into(),
+            state: RecorderState::Idle,
+            started_at: None,
+            stopped_at: None,
+            duration_ms: 0,
+            recorded_ms: 0,
+            source_kind: String::new(),
+            source_name: String::new(),
+            microphone_active: false,
+            system_audio_active: false,
+            webcam_active: false,
+            error: None,
+        })
     }
 
     fn status_from_session(

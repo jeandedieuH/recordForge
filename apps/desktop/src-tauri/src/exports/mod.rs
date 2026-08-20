@@ -2,13 +2,13 @@ use crate::database::library::get_recording;
 use crate::database::media::MediaJob;
 use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
-use tauri::Manager;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Manager;
 use tracing::{info, instrument, warn};
 
 use tiny_skia::{Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, Rect, Transform};
@@ -20,7 +20,7 @@ mod encoding;
 
 pub use annotations::{RenderPlanAnnotation, RenderPlanImage, RenderPlanText};
 
-/// Auto-cleanup guard for temporary mask PNG files generated during timeline compositing.
+/// Auto-cleanup guard for temporary mask PNG files and filter complex scripts generated during timeline compositing.
 struct TempMaskFile(PathBuf);
 
 impl Drop for TempMaskFile {
@@ -694,7 +694,9 @@ fn common_screen_source(
     for segment in segments {
         let dimensions = if let (Some(w), Some(h)) = (segment.source_width, segment.source_height) {
             Some((w, h))
-        } else if let (Some(ffprobe), Some(path)) = (ffprobe_path, asset_paths.get(&segment.asset_id)) {
+        } else if let (Some(ffprobe), Some(path)) =
+            (ffprobe_path, asset_paths.get(&segment.asset_id))
+        {
             if let Ok(metadata) = crate::media::probe::probe_media(
                 &ffprobe.to_string_lossy(),
                 path,
@@ -813,11 +815,8 @@ fn render_timeline_composition(
         .as_ref()
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
-    let bg_image_path = resolve_background_image_with_resource_dir(
-        &canvas.background,
-        asset_paths,
-        resource_dir,
-    );
+    let bg_image_path =
+        resolve_background_image_with_resource_dir(&canvas.background, asset_paths, resource_dir);
     let mut temp_mask_guards = Vec::new();
     if let Some(bg_path) = &bg_image_path {
         if bg_path.starts_with(std::env::temp_dir())
@@ -927,14 +926,37 @@ fn render_timeline_composition(
         None
     };
 
-
     let mut camera_mask_indices = HashMap::new();
+    let mut camera_border_indices = HashMap::new();
+    let mut camera_shadow_indices = HashMap::new();
     for (index, overlay) in plan.overlays.iter().enumerate() {
         if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
             continue;
         }
         let overlay_w = overlay.width.round().max(1.0) as u32;
         let overlay_h = overlay.height.round().max(1.0) as u32;
+
+        if overlay.shadow_enabled.unwrap_or(false) {
+            if let Some(sp) = generate_camera_shadow_plate_png(
+                canvas.width,
+                canvas.height,
+                overlay.x,
+                overlay.y,
+                overlay.width,
+                overlay.height,
+                &overlay.shape,
+                overlay.shadow_color.as_deref(),
+                overlay.shadow_blur,
+                overlay.shadow_offset_x,
+                overlay.shadow_offset_y,
+            ) {
+                let idx = input_assets.len();
+                input_assets.push((format!("shadow:cam:{index}"), sp.clone()));
+                temp_mask_guards.push(TempMaskFile(sp));
+                camera_shadow_indices.insert(index, idx);
+            }
+        }
+
         if overlay.shape == "circle" {
             let mask_bytes = cursor::generate_circle_mask_png(overlay_w, overlay_h)
                 .map_err(|err| InternalError::Media(format!("generate circle mask: {err}")))?;
@@ -963,6 +985,28 @@ fn render_timeline_composition(
             input_assets.push((format!("mask:cam_rounded:{index}"), mask_path.clone()));
             temp_mask_guards.push(TempMaskFile(mask_path));
             camera_mask_indices.insert(index, idx);
+        }
+
+        if let Some(border_width) = overlay.border_width.filter(|value| *value > 0.0) {
+            let border_bytes = generate_camera_border_png(
+                overlay_w,
+                overlay_h,
+                &overlay.shape,
+                border_width,
+                overlay.border_color.as_deref(),
+                overlay.border_opacity,
+            )
+            .map_err(|err| InternalError::Media(format!("generate camera border: {err}")))?;
+            let border_path = std::env::temp_dir().join(format!(
+                "rf-border-cam-{}-{}-{}-{}.png",
+                project_id, index, overlay_w, overlay_h
+            ));
+            std::fs::write(&border_path, &border_bytes)
+                .map_err(|err| InternalError::Storage(format!("write camera border: {err}")))?;
+            let idx = input_assets.len();
+            input_assets.push((format!("border:cam:{index}"), border_path.clone()));
+            temp_mask_guards.push(TempMaskFile(border_path));
+            camera_border_indices.insert(index, idx);
         }
     }
 
@@ -1179,48 +1223,16 @@ fn render_timeline_composition(
         // 2. Crop and format the fitted video layer [screen_fitted]
         let mut screen_filter = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
             let width_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                screen_w,
-                screen_h,
-                screen_x,
-                screen_y,
-                crop_x,
-                crop_y,
-                "width",
+                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "width",
             );
             let height_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                screen_w,
-                screen_h,
-                screen_x,
-                screen_y,
-                crop_x,
-                crop_y,
-                "height",
+                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "height",
             );
             let x_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                screen_w,
-                screen_h,
-                screen_x,
-                screen_y,
-                crop_x,
-                crop_y,
-                "x",
+                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "x",
             );
             let y_expression = zoom_crop_expression(
-                plan,
-                canvas,
-                screen_w,
-                screen_h,
-                screen_x,
-                screen_y,
-                crop_x,
-                crop_y,
-                "y",
+                plan, canvas, screen_w, screen_h, screen_x, screen_y, crop_x, crop_y, "y",
             );
             format!(
                 "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop=w='{width_expression}':h='{height_expression}':x='{x_expression}':y='{y_expression}',scale={screen_w:.0}:{screen_h:.0},setsar=1"
@@ -1278,11 +1290,31 @@ fn render_timeline_composition(
             InternalError::Media("camera overlay references an unknown asset".into())
         })?;
         let input = input_stream_at(input_index, overlay.stream_index, false)?;
-        let camera_label = format!("camera{index}");
-        let camera_color = safe_filter_color(overlay.border_color.as_deref().unwrap_or("#ffffff"));
         if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
             return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
         }
+
+        let enable = format!(
+            "between(t,{},{})",
+            seconds(overlay.output_start_ms),
+            seconds(overlay.output_end_ms)
+        );
+
+        // 1. Composite shadow underlay if present
+        if let Some(&shadow_idx) = camera_shadow_indices.get(&index) {
+            let shadow_loop_label = format!("cam_shadow_loop{index}");
+            let after_shadow_label = format!("cam_with_shadow{index}");
+            filters.push(format!(
+                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[{shadow_loop_label}]",
+                canvas.width, canvas.height, canvas.fps
+            ));
+            filters.push(format!(
+                "[{current_label}][{shadow_loop_label}]overlay=x=0:y=0:eof_action=pass:enable='{enable}':format=auto[{after_shadow_label}]"
+            ));
+            current_label = after_shadow_label;
+        }
+
+        // 2. Format camera video stream (trim, speed, crop/cover, scale, opacity)
         let mut camera_filter = format!(
             "{input}trim=start={}:end={},setpts=(PTS-STARTPTS)/{:.6}+{}/TB",
             seconds(overlay.source_in_ms),
@@ -1295,59 +1327,66 @@ fn render_timeline_composition(
                 ",crop={}:{}:{}:{}",
                 crop.width, crop.height, crop.x, crop.y
             ));
+            camera_filter.push_str(&format!(
+                ",scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba",
+                overlay.width.max(1.0),
+                overlay.height.max(1.0),
+                overlay.width.max(1.0),
+                overlay.height.max(1.0)
+            ));
+        } else {
+            camera_filter.push_str(&format!(
+                ",scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}:(iw-ow)/2:(ih-oh)/2,format=rgba",
+                overlay.width.max(1.0),
+                overlay.height.max(1.0),
+                overlay.width.max(1.0),
+                overlay.height.max(1.0)
+            ));
         }
-        camera_filter.push_str(&format!(
-            ",scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba",
-            overlay.width.max(1.0),
-            overlay.height.max(1.0),
-            overlay.width.max(1.0),
-            overlay.height.max(1.0)
-        ));
         if overlay.opacity < 1.0 {
             camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
         }
-        if overlay.shadow_enabled.unwrap_or(false) {
-            let shadow_color =
-                safe_filter_color(overlay.shadow_color.as_deref().unwrap_or("#000000"));
-            let shadow_blur = overlay.shadow_blur.unwrap_or(8.0).clamp(0.0, 64.0);
-            let shadow_opacity = (0.35 - shadow_blur / 256.0).clamp(0.08, 0.35);
-            camera_filter.push_str(&format!(
-                ",drawbox=x={:.2}:y={:.2}:w=iw-1:h=ih-1:color={shadow_color}@{shadow_opacity:.4}:t={:.2}",
-                overlay.shadow_offset_x.unwrap_or(0.0),
-                overlay.shadow_offset_y.unwrap_or(4.0),
-                shadow_blur.max(1.0)
-            ));
-        }
-        if let Some(border_width) = overlay.border_width.filter(|value| *value > 0.0) {
-            let border_opacity = overlay.border_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
-            camera_filter.push_str(&format!(
-                ",drawbox=x=0:y=0:w=iw-1:h=ih-1:color={camera_color}@{border_opacity:.4}:t={border_width:.2}"
-            ));
-        }
-        if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
+
+        // 3. Mask camera video stream (for circle and rounded shapes)
+        let masked_camera_label = if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
             let raw_label = format!("camera_unmasked{index}");
             let mask_label = format!("cam_mask_loop{index}");
+            let masked_label = format!("camera_masked{index}");
             let overlay_w = overlay.width.max(1.0).round() as u32;
             let overlay_h = overlay.height.max(1.0).round() as u32;
             camera_filter.push_str(&format!("[{raw_label}]"));
             filters.push(camera_filter);
             filters.push(format!(
                 "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{mask_label}];\
-                 [{raw_label}][{mask_label}]alphamerge[{camera_label}]"
+                 [{raw_label}][{mask_label}]alphamerge[{masked_label}]"
             ));
+            masked_label
         } else {
-            camera_filter.push_str(&format!("[{camera_label}]"));
+            let raw_label = format!("camera_raw{index}");
+            camera_filter.push_str(&format!("[{raw_label}]"));
             filters.push(camera_filter);
-        }
+            raw_label
+        };
 
+        // 4. Overlay border stroke if present
+        let final_camera_label = if let Some(&border_idx) = camera_border_indices.get(&index) {
+            let border_loop_label = format!("cam_border_loop{index}");
+            let bordered_label = format!("camera_bordered{index}");
+            let overlay_w = overlay.width.max(1.0).round() as u32;
+            let overlay_h = overlay.height.max(1.0).round() as u32;
+            filters.push(format!(
+                "[{border_idx}:v]format=rgba,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{border_loop_label}];\
+                 [{masked_camera_label}][{border_loop_label}]overlay=x=0:y=0:shortest=1:format=auto[{bordered_label}]"
+            ));
+            bordered_label
+        } else {
+            masked_camera_label
+        };
+
+        // 5. Composite camera on top of current canvas
         let next_label = format!("composite{index}");
-        let enable = format!(
-            "between(t,{},{})",
-            seconds(overlay.output_start_ms),
-            seconds(overlay.output_end_ms)
-        );
         filters.push(format!(
-            "[{current_label}][{camera_label}]overlay=x={:.2}:y={:.2}:eof_action=pass:enable='{enable}'[{next_label}]",
+            "[{current_label}][{final_camera_label}]overlay=x={:.2}:y={:.2}:eof_action=pass:enable='{enable}'[{next_label}]",
             overlay.x, overlay.y
         ));
         current_label = next_label;
@@ -1604,6 +1643,8 @@ fn render_timeline_composition(
         if asset_kind == "canvas:background"
             || asset_kind == "canvas:shadow"
             || asset_kind.starts_with("mask:")
+            || asset_kind.starts_with("shadow:")
+            || asset_kind.starts_with("border:")
         {
             command.args(["-loop", "1"]);
         }
@@ -1619,8 +1660,19 @@ fn render_timeline_composition(
             .arg("-i")
             .arg("-");
     }
+    let filter_script_content = filters.join(";\n");
+    let filter_script_path = std::env::temp_dir().join(format!(
+        "rf-filter-complex-{}-{}.txt",
+        project_id,
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&filter_script_path, filter_script_content.as_bytes())
+        .map_err(|err| InternalError::Storage(format!("write filter complex script: {err}")))?;
+    temp_mask_guards.push(TempMaskFile(filter_script_path.clone()));
+
     command
-        .args(["-filter_complex", &filters.join(";")])
+        .arg("-filter_complex_script")
+        .arg(&filter_script_path)
         .args(["-map", &format!("[{current_label}]")]);
     if audio_labels.is_empty() {
         command.arg("-an");
@@ -2541,7 +2593,12 @@ fn parse_color_hex(hex: &str, default_alpha: f32) -> Color {
         let g = u8::from_str_radix(&raw[2..4], 16).unwrap_or(0);
         let b = u8::from_str_radix(&raw[4..6], 16).unwrap_or(0);
         let a = u8::from_str_radix(&raw[6..8], 16).unwrap_or(255);
-        Color::from_rgba8(r, g, b, ((a as f32 / 255.0) * default_alpha * 255.0).round() as u8)
+        Color::from_rgba8(
+            r,
+            g,
+            b,
+            ((a as f32 / 255.0) * default_alpha * 255.0).round() as u8,
+        )
     } else if raw.len() == 3 {
         let r = u8::from_str_radix(&format!("{}{}", &raw[0..1], &raw[0..1]), 16).unwrap_or(0);
         let g = u8::from_str_radix(&format!("{}{}", &raw[1..2], &raw[1..2]), 16).unwrap_or(0);
@@ -2663,19 +2720,178 @@ pub(crate) fn generate_shadow_plate_png(
     let mut paint = Paint::default();
     paint.set_color(color);
     paint.anti_alias = true;
-    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
     fast_blur_pixmap(&mut pixmap, (blur / 2.0).clamp(1.0, 32.0) as f32);
 
-    let temp_path = std::env::temp_dir().join(format!("recordforge_bg_shadow_{}.png", uuid::Uuid::new_v4()));
+    let temp_path = std::env::temp_dir().join(format!(
+        "recordforge_bg_shadow_{}.png",
+        uuid::Uuid::new_v4()
+    ));
     pixmap.save_png(&temp_path).ok()?;
     Some(temp_path)
 }
 
-fn parse_css_gradient_to_svg(
-    gradient_str: &str,
+pub(crate) fn generate_camera_border_png(
     width: u32,
     height: u32,
-) -> Option<String> {
+    shape: &str,
+    border_width: f64,
+    border_color: Option<&str>,
+    border_opacity: Option<f64>,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))
+        .ok_or_else(|| "failed to allocate camera border pixmap".to_string())?;
+
+    let bw = (border_width.max(0.5) as f32)
+        .min(width.max(1) as f32 / 2.0)
+        .min(height.max(1) as f32 / 2.0);
+    let opacity = border_opacity.unwrap_or(1.0).clamp(0.0, 1.0) as f32;
+    let hex_color = safe_filter_color(border_color.unwrap_or("#ffffff"));
+    let color = parse_color_hex(&hex_color, opacity);
+
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+
+    let mut stroke = tiny_skia::Stroke::default();
+    stroke.width = bw;
+
+    let half_bw = bw / 2.0;
+
+    let path = match shape {
+        "circle" => {
+            let rx = (w / 2.0 - half_bw).max(0.1);
+            let ry = (h / 2.0 - half_bw).max(0.1);
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let k = 0.552_284_8;
+            let kx = rx * k;
+            let ky = ry * k;
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy - ry);
+            pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
+            pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
+            pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
+            pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
+            pb.close();
+            pb.finish()
+        }
+        "rounded" => {
+            let r = ((w.min(h) * 0.12).max(4.0) - half_bw).max(0.1);
+            let x = half_bw;
+            let y = half_bw;
+            let inner_w = (w - bw).max(0.1);
+            let inner_h = (h - bw).max(0.1);
+            build_rounded_rect_path(x, y, inner_w, inner_h, r)
+        }
+        _ => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(half_bw, half_bw);
+            pb.line_to(w - half_bw, half_bw);
+            pb.line_to(w - half_bw, h - half_bw);
+            pb.line_to(half_bw, h - half_bw);
+            pb.close();
+            pb.finish()
+        }
+    };
+
+    if let Some(p) = path {
+        pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+    }
+
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("encode camera border png: {e}"))
+}
+
+pub(crate) fn generate_camera_shadow_plate_png(
+    canvas_w: u32,
+    canvas_h: u32,
+    overlay_x: f64,
+    overlay_y: f64,
+    overlay_w: f64,
+    overlay_h: f64,
+    shape: &str,
+    shadow_color: Option<&str>,
+    shadow_blur: Option<f64>,
+    shadow_offset_x: Option<f64>,
+    shadow_offset_y: Option<f64>,
+) -> Option<PathBuf> {
+    let mut pixmap = Pixmap::new(canvas_w, canvas_h)?;
+    let blur = shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
+    let off_x = shadow_offset_x.unwrap_or(0.0);
+    let off_y = shadow_offset_y.unwrap_or(4.0);
+    let x = (overlay_x + off_x) as f32;
+    let y = (overlay_y + off_y) as f32;
+    let w = overlay_w as f32;
+    let h = overlay_h as f32;
+
+    let hex_color = safe_filter_color(shadow_color.unwrap_or("#000000"));
+    let color = parse_color_hex(&hex_color, 0.4);
+
+    let path = match shape {
+        "circle" => {
+            let rx = (w / 2.0).min(h / 2.0);
+            let ry = rx;
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let k = 0.552_284_8;
+            let kx = rx * k;
+            let ky = ry * k;
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy - ry);
+            pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
+            pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
+            pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
+            pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
+            pb.close();
+            pb.finish()
+        }
+        "rounded" => {
+            let r = (w.min(h) * 0.12).max(4.0);
+            build_rounded_rect_path(x, y, w, h, r)
+        }
+        _ => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(x, y);
+            pb.line_to(x + w, y);
+            pb.line_to(x + w, y + h);
+            pb.line_to(x, y + h);
+            pb.close();
+            pb.finish()
+        }
+    }?;
+
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    fast_blur_pixmap(&mut pixmap, (blur / 2.0).clamp(1.0, 32.0) as f32);
+
+    let temp_path = std::env::temp_dir().join(format!(
+        "recordforge_cam_shadow_{}.png",
+        uuid::Uuid::new_v4()
+    ));
+    pixmap.save_png(&temp_path).ok()?;
+    Some(temp_path)
+}
+
+fn parse_css_gradient_to_svg(gradient_str: &str, width: u32, height: u32) -> Option<String> {
     let trimmed = gradient_str.trim();
     if !trimmed.contains("-gradient(") {
         return None;
@@ -2718,13 +2934,17 @@ fn parse_css_gradient_to_svg(
         let p = part.trim();
         if p.starts_with("linear-gradient(") && p.ends_with(')') {
             let inner = &p[16..p.len() - 1].trim();
-            if let Some((grad_def, rect_layer)) = parse_linear_gradient_layer(inner, &format!("grad_{idx}")) {
+            if let Some((grad_def, rect_layer)) =
+                parse_linear_gradient_layer(inner, &format!("grad_{idx}"))
+            {
                 defs_xml.push_str(&grad_def);
                 layers_xml.push_str(&rect_layer);
             }
         } else if p.starts_with("radial-gradient(") && p.ends_with(')') {
             let inner = &p[16..p.len() - 1].trim();
-            if let Some((grad_def, rect_layer)) = parse_radial_gradient_layer(inner, &format!("grad_{idx}")) {
+            if let Some((grad_def, rect_layer)) =
+                parse_radial_gradient_layer(inner, &format!("grad_{idx}"))
+            {
                 defs_xml.push_str(&grad_def);
                 layers_xml.push_str(&rect_layer);
             }
@@ -2785,7 +3005,11 @@ fn parse_linear_gradient_layer(inner: &str, grad_id: &str) -> Option<(String, St
 
     let first = parts[0].trim().to_lowercase();
     let (angle_deg, stops_start_idx) = if first.ends_with("deg") {
-        let deg: f64 = first.trim_end_matches("deg").trim().parse().unwrap_or(180.0);
+        let deg: f64 = first
+            .trim_end_matches("deg")
+            .trim()
+            .parse()
+            .unwrap_or(180.0);
         (deg, 1)
     } else if first == "to bottom" {
         (180.0, 1)
@@ -2949,7 +3173,8 @@ pub(crate) fn generate_background_plate_png(
     let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
     let mut pixmap = Pixmap::new(width, height)?;
     resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
-    let temp_path = std::env::temp_dir().join(format!("recordforge_bg_grad_{}.png", uuid::Uuid::new_v4()));
+    let temp_path =
+        std::env::temp_dir().join(format!("recordforge_bg_grad_{}.png", uuid::Uuid::new_v4()));
     pixmap.save_png(&temp_path).ok()?;
     Some(temp_path)
 }
@@ -2994,7 +3219,8 @@ fn rasterize_svg_bytes_to_png(svg_bytes: &[u8], width: u32, height: u32) -> Opti
     let tree = resvg::usvg::Tree::from_str(svg_str, &options).ok()?;
     let mut pixmap = Pixmap::new(width, height)?;
     resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
-    let temp_path = std::env::temp_dir().join(format!("recordforge_bg_svg_{}.png", uuid::Uuid::new_v4()));
+    let temp_path =
+        std::env::temp_dir().join(format!("recordforge_bg_svg_{}.png", uuid::Uuid::new_v4()));
     pixmap.save_png(&temp_path).ok()?;
     Some(temp_path)
 }
@@ -3050,9 +3276,13 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                 let trimmed_data = rest.trim();
                 base64::engine::general_purpose::STANDARD
                     .decode(trimmed_data)
-                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed_data))
+                    .or_else(|_| {
+                        base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed_data)
+                    })
                     .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed_data))
-                    .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed_data))
+                    .or_else(|_| {
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed_data)
+                    })
                     .ok()
             } else {
                 Some(rest.as_bytes().to_vec())
@@ -3110,7 +3340,11 @@ pub(crate) fn resolve_background_image_with_resource_dir(
 
     let direct = PathBuf::from(clean_str);
     if direct.is_file() {
-        if direct.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        if direct
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+        {
             if let Ok(bytes) = std::fs::read(&direct) {
                 if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
                     return Some(png_path);
@@ -3206,7 +3440,11 @@ pub(crate) fn resolve_background_image_with_resource_dir(
         for name in &candidate_names {
             let candidate = dir.join(name);
             if candidate.is_file() {
-                if candidate.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+                if candidate
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+                {
                     if let Ok(bytes) = std::fs::read(&candidate) {
                         if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
                             return Some(png_path);
@@ -4329,10 +4567,8 @@ mod tests {
         assert!(resolve_background_image("#1e1b4b", &asset_paths).is_none());
 
         // Radial gradients generate a rendered background plate file
-        let resolved_radial = resolve_background_image(
-            "radial-gradient(circle, #fff, #000)",
-            &asset_paths,
-        );
+        let resolved_radial =
+            resolve_background_image("radial-gradient(circle, #fff, #000)", &asset_paths);
         assert!(resolved_radial.is_some());
         if let Some(path) = resolved_radial {
             assert!(path.is_file());
@@ -4340,10 +4576,8 @@ mod tests {
         }
 
         // Linear gradients generate a rendered background plate file
-        let resolved_gradient = resolve_background_image(
-            "linear-gradient(135deg, #111 0%, #222 100%)",
-            &asset_paths,
-        );
+        let resolved_gradient =
+            resolve_background_image("linear-gradient(135deg, #111 0%, #222 100%)", &asset_paths);
         assert!(resolved_gradient.is_some());
         if let Some(path) = resolved_gradient {
             assert!(path.is_file());
@@ -4377,7 +4611,10 @@ mod tests {
         );
 
         // asset://localhost/ URI scheme
-        let asset_uri = format!("asset://localhost/{}", file_path.to_str().unwrap().replace('\\', "/"));
+        let asset_uri = format!(
+            "asset://localhost/{}",
+            file_path.to_str().unwrap().replace('\\', "/")
+        );
         let resolved_asset_uri = resolve_background_image(&asset_uri, &asset_paths);
         assert!(
             resolved_asset_uri.is_some(),
@@ -4388,7 +4625,12 @@ mod tests {
         // Percent-encoded URI scheme
         let encoded_path = format!(
             "file:///{}",
-            file_path.to_str().unwrap().replace('\\', "/").replace(':', "%3A").replace(' ', "%20")
+            file_path
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+                .replace(':', "%3A")
+                .replace(' ', "%20")
         );
         let resolved_encoded = resolve_background_image(&encoded_path, &asset_paths);
         assert!(
@@ -4408,7 +4650,10 @@ mod tests {
         // SVG data URL rasterizes to a PNG
         let svg_data_url = "data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\" fill=\"#6366f1\"/></svg>";
         let resolved_svg = resolve_background_image(svg_data_url, &asset_paths);
-        assert!(resolved_svg.is_some(), "SVG data URL should rasterize to PNG");
+        assert!(
+            resolved_svg.is_some(),
+            "SVG data URL should rasterize to PNG"
+        );
         if let Some(path) = resolved_svg {
             assert!(path.is_file());
             let _ = std::fs::remove_file(path);
@@ -4703,8 +4948,10 @@ mod tests {
             ..Default::default()
         };
 
-        let w_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "width");
-        let h_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "height");
+        let w_expr =
+            zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "width");
+        let h_expr =
+            zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "height");
         let x_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "x");
         let y_expr = zoom_crop_expression(&plan, &canvas, 1920.0, 1080.0, 0.0, 0.0, 0.0, 0.0, "y");
 
@@ -4718,4 +4965,69 @@ mod tests {
             "Total crop expressions length ({total_filter_len}) must be well below 30KB"
         );
     }
+
+    #[test]
+    fn test_temp_filter_complex_script_lifecycle() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let script_path = temp_dir.path().join("rf-filter-complex-test.txt");
+
+        let large_filter_content = "color=c=black:s=1920x1080:r=30:d=10[v0];\n".repeat(2000);
+        assert!(
+            large_filter_content.len() > 32_767,
+            "Filter content should exceed Windows 32KB command line limit"
+        );
+
+        std::fs::write(&script_path, large_filter_content.as_bytes())
+            .expect("write filter complex script");
+        assert!(script_path.exists());
+
+        {
+            let _guard = TempMaskFile(script_path.clone());
+            assert!(script_path.exists());
+        }
+        // Guard drop should remove the temp filter complex script
+        assert!(!script_path.exists());
+    }
+
+    #[test]
+    fn test_camera_border_generation_all_shapes() {
+        for shape in ["rectangle", "rounded", "circle"] {
+            let border_bytes = generate_camera_border_png(
+                320,
+                240,
+                shape,
+                3.0,
+                Some("#38bdf8"),
+                Some(0.9),
+            );
+            assert!(border_bytes.is_ok(), "Border generation failed for shape {shape}");
+            let png_bytes = border_bytes.unwrap();
+            assert!(!png_bytes.is_empty());
+            assert_eq!(&png_bytes[0..8], b"\x89PNG\r\n\x1a\n");
+        }
+    }
+
+    #[test]
+    fn test_camera_shadow_plate_generation_all_shapes() {
+        for shape in ["rectangle", "rounded", "circle"] {
+            let shadow_path = generate_camera_shadow_plate_png(
+                1920,
+                1080,
+                100.0,
+                100.0,
+                320.0,
+                240.0,
+                shape,
+                Some("#000000"),
+                Some(16.0),
+                Some(4.0),
+                Some(8.0),
+            );
+            assert!(shadow_path.is_some(), "Shadow plate generation failed for shape {shape}");
+            let path = shadow_path.unwrap();
+            assert!(path.exists());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
+

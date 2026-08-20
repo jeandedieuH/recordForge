@@ -71,11 +71,35 @@ export function CameraPreview({
       const output = outputsByStream.get(clip.streamIndex ?? -1)
       if (!video || !output) continue
       const sourceMs = clip.sourceInMs + (playheadMs - clip.startMs) * clip.speed
-      if (Math.abs(video.currentTime * 1000 - sourceMs) > 80) video.currentTime = sourceMs / 1000
-      video.playbackRate = Math.max(0.25, Math.min(4, playbackRate * clip.speed))
+      const driftMs = video.currentTime * 1000 - sourceMs
       const isActive = isClipActive(clip, playheadMs) && clip.transform.visible !== false
-      if (isPlaying && isActive) void video.play().catch(() => undefined)
-      else video.pause()
+
+      if (!isPlaying) {
+        // When paused or scrubbing, ensure frame-accurate sync
+        if (Math.abs(driftMs) > 1) {
+          video.currentTime = Math.max(0, sourceMs / 1000)
+        }
+        video.pause()
+      } else if (isActive) {
+        const baseRate = playbackRate * clip.speed
+        if (video.paused) {
+          video.currentTime = Math.max(0, sourceMs / 1000)
+          video.playbackRate = Math.max(0.25, Math.min(4, baseRate))
+          void video.play().catch(() => undefined)
+        } else if (Math.abs(driftMs) > 100) {
+          // Hard desync: seek directly to playhead source position
+          video.currentTime = Math.max(0, sourceMs / 1000)
+          video.playbackRate = Math.max(0.25, Math.min(4, baseRate))
+        } else if (Math.abs(driftMs) > 15) {
+          // Mild drift (1-3 frames): dynamically nudge playback rate slightly to lock back in sync
+          const rateAdjustment = driftMs > 0 ? 0.95 : 1.05
+          video.playbackRate = Math.max(0.25, Math.min(4, baseRate * rateAdjustment))
+        } else {
+          video.playbackRate = Math.max(0.25, Math.min(4, baseRate))
+        }
+      } else {
+        video.pause()
+      }
     }
   }, [clips, isPlaying, outputsByStream, playheadMs, playbackRate])
 

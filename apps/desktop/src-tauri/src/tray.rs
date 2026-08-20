@@ -88,10 +88,7 @@ pub fn create_tray(app: &tauri::App) -> Result<()> {
 pub fn refresh_tray_menu(app: &tauri::AppHandle) {
     let (menu_state, tooltip, badge) = {
         let state = app.state::<AppState>();
-        let Ok(guard) = state.recorder.lock() else {
-            return;
-        };
-        let Ok(status) = guard.status() else {
+        let Ok(status) = state.recorder.status() else {
             return;
         };
         (
@@ -399,9 +396,8 @@ fn recorder_is_active(app: &tauri::AppHandle) -> bool {
     let state = app.state::<AppState>();
     state
         .recorder
-        .lock()
+        .status()
         .ok()
-        .and_then(|guard| guard.status().ok())
         .map(|status| {
             matches!(
                 status.state,
@@ -413,19 +409,14 @@ fn recorder_is_active(app: &tauri::AppHandle) -> bool {
 
 fn start_or_focus(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Result<()> {
     let bounds = {
-        let guard = state
-            .recorder
-            .lock()
-            .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-
-        let status = guard.status()?;
+        let status = state.recorder.status()?;
         if matches!(status.state, RecorderState::Idle) {
             let quick = state.quick_config.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("quick config mutex poisoned".into())
             })?;
             if let Some(config) = quick.as_ref() {
                 let bounds = config.source.bounds;
-                guard.start(config.clone())?;
+                state.recorder.start(config.clone())?;
                 Some(bounds)
             } else {
                 None
@@ -448,14 +439,10 @@ fn start_or_focus(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Res
 }
 
 fn toggle_pause_resume(state: &tauri::State<AppState>) -> Result<()> {
-    let guard = state
-        .recorder
-        .lock()
-        .map_err(|_| crate::errors::InternalError::Capture("recorder mutex poisoned".into()))?;
-    let status = guard.status()?;
+    let status = state.recorder.status()?;
     match status.state {
-        RecorderState::Recording => guard.pause().map(|_| ()),
-        RecorderState::Paused => guard.resume().map(|_| ()),
+        RecorderState::Recording => state.recorder.pause().map(|_| ()),
+        RecorderState::Paused => state.recorder.resume().map(|_| ()),
         _ => Ok(()),
     }
 }
