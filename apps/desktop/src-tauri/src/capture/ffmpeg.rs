@@ -103,16 +103,10 @@ impl FfmpegCapture {
         self.start_time
     }
 
-    /// Send a graceful stop signal ("q\n") to FFmpeg and wait for it to exit.
-    #[instrument]
-    pub fn stop(&mut self) -> crate::errors::Result<RecordingStats> {
-        // The quit timestamp anchors the capture window: FFmpeg stops grabbing
-        // frames as soon as it processes 'q', so the wall clock at this instant
-        // (unlike process exit, which trails by the flush and trailer write)
-        // matches the last captured frame closely enough to compute the video
-        // startup gap at finalize time.
+    /// Send the graceful stop signal ("q\n") to FFmpeg immediately and record the
+    /// quit instant, without blocking for process termination.
+    pub fn request_stop(&mut self) -> Instant {
         let quit_at = Instant::now();
-        // Send 'q' followed by a newline to request a clean shutdown.
         if let Some(stdin) = self.stdin.as_mut() {
             if let Err(e) = stdin.write_all(b"q\n") {
                 // A broken/closed pipe (Windows os error 232) here means FFmpeg
@@ -135,8 +129,13 @@ impl FfmpegCapture {
 
         // Close stdin so FFmpeg sees EOF if it did not react to 'q'.
         self.stdin = None;
+        quit_at
+    }
 
-        // Wait up to 10 seconds for a clean shutdown.
+    /// Wait up to 10 seconds for FFmpeg to finish flushing and exit after `request_stop()`,
+    /// extracting final statistics anchored to the provided `quit_at` timestamp.
+    #[instrument(skip(self))]
+    pub fn wait_for_stop(&mut self, quit_at: Instant) -> crate::errors::Result<RecordingStats> {
         let start = std::time::Instant::now();
         let status = loop {
             if let Some(status) = self.child.try_wait().map_err(|e| {
@@ -206,6 +205,13 @@ impl FfmpegCapture {
         }
 
         Ok(stats)
+    }
+
+    /// Send a graceful stop signal ("q\n") to FFmpeg and wait for it to exit.
+    #[instrument(skip(self))]
+    pub fn stop(&mut self) -> crate::errors::Result<RecordingStats> {
+        let quit_at = self.request_stop();
+        self.wait_for_stop(quit_at)
     }
 }
 

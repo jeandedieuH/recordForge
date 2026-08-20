@@ -361,6 +361,13 @@ impl WasapiCaptureSession {
         self.started_at
     }
 
+    /// Signal the capture worker thread to stop reading audio samples immediately,
+    /// without blocking to join the thread yet.
+    pub fn request_stop(&self) {
+        #[cfg(windows)]
+        self.stop_requested.store(true, Ordering::Release);
+    }
+
     /// Stop the worker, patch the WAV sizes, and return the number of audio
     /// payload bytes written. The worker owns all WASAPI interfaces, so stop
     /// and join happen on the same COM thread that created the stream.

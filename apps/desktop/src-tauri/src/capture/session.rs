@@ -196,6 +196,7 @@ fn compute_segment_timeline(
     wall_span_ms: u64,
     fallback_wall_ms: u64,
     probed_video_ms: Option<u64>,
+    probed_start_ms: Option<u64>,
 ) -> SegmentTimeline {
     let Some(video_ms) = probed_video_ms.filter(|value| *value > 0) else {
         return SegmentTimeline {
@@ -203,7 +204,12 @@ fn compute_segment_timeline(
             duration: Duration::from_millis(fallback_wall_ms),
         };
     };
-    let head_trim_ms = wall_span_ms.saturating_sub(video_ms);
+    let wall_head_trim_ms = wall_span_ms.saturating_sub(video_ms);
+    let head_trim_ms = probed_start_ms
+        .filter(|start| *start > 0 && *start <= MAX_VIDEO_STARTUP_GAP_MS)
+        .unwrap_or(0)
+        .max(wall_head_trim_ms);
+
     if head_trim_ms > MAX_VIDEO_STARTUP_GAP_MS {
         return SegmentTimeline {
             head_trim: Duration::ZERO,
@@ -729,15 +735,21 @@ impl Recorder {
     fn stop_webcam_segment(
         &self,
         session: &mut ActiveSession,
-        screen: &FfmpegCapture,
+        webcam: Option<FfmpegCapture>,
+        webcam_quit: Option<std::time::Instant>,
         timeline: SegmentTimeline,
+        screen_started_at: std::time::Instant,
     ) {
-        let Some(mut webcam) = session.webcam_capture.take() else {
+        let Some(mut webcam) = webcam.or_else(|| session.webcam_capture.take()) else {
             return;
         };
         let path = webcam.output_path().to_path_buf();
         let index = session.segment_index;
-        let stats = match webcam.stop() {
+        let stats = match webcam_quit {
+            Some(quit_at) => webcam.wait_for_stop(quit_at),
+            None => webcam.stop(),
+        };
+        let stats = match stats {
             Ok(stats) => stats,
             Err(error) => {
                 session.webcam_capture_failed = true;
@@ -749,18 +761,22 @@ impl Recorder {
         // Align the webcam stream to the master screen/audio timeline:
         // FFmpeg webcam sidecars take several hundred milliseconds (DirectShow
         // initialization and encoder setup) to capture their first frame.
-        // We probe the real webcam duration, calculate its startup gap, and
-        // compute the exact offset relative to the screen's first frame.
+        // We probe the real webcam duration and start timestamp, calculate its startup gap,
+        // and compute the exact offset relative to the screen's first frame.
         let wall_span_ms = if stats.quit_span_ms > 0 {
             stats.quit_span_ms
         } else {
             stats.duration_ms
         };
-        let probed_webcam = self.probe_video_duration_ms(&path);
-        let webcam_timeline =
-            compute_segment_timeline(wall_span_ms, stats.duration_ms, probed_webcam);
+        let (probed_start_ms, probed_webcam) = self.probe_video_timing_ms(&path);
+        let webcam_timeline = compute_segment_timeline(
+            wall_span_ms,
+            stats.duration_ms,
+            probed_webcam,
+            probed_start_ms,
+        );
 
-        let spawn_offset_ms = signed_start_offset_ms(webcam.started_at(), screen.started_at());
+        let spawn_offset_ms = signed_start_offset_ms(webcam.started_at(), screen_started_at);
         let offset_ms = compute_webcam_start_offset_ms(
             spawn_offset_ms,
             webcam_timeline.head_trim_ms(),
@@ -772,6 +788,7 @@ impl Recorder {
             spawn_offset_ms,
             webcam_wall_span_ms = wall_span_ms,
             probed_webcam_ms = probed_webcam.unwrap_or(0),
+            probed_start_ms = probed_start_ms.unwrap_or(0),
             webcam_head_trim_ms = webcam_timeline.head_trim_ms(),
             screen_head_trim_ms = timeline.head_trim_ms(),
             final_offset_ms = offset_ms,
@@ -864,16 +881,27 @@ impl Recorder {
         let session = guard
             .as_mut()
             .ok_or_else(|| crate::errors::InternalError::Capture("no active recording".into()))?;
-        let mut screen = session.screen_capture.take().ok_or_else(|| {
+
+        // Broadcast stop signal concurrently to all active capture workers at the exact same instant
+        let mut screen_capture = session.screen_capture.take();
+        let screen_quit = screen_capture.as_mut().map(|s| s.request_stop());
+        let mut webcam_capture = session.webcam_capture.take();
+        let webcam_quit = webcam_capture.as_mut().map(|w| w.request_stop());
+        for audio in &session.audio_captures {
+            audio.session.request_stop();
+        }
+
+        let mut screen = screen_capture.ok_or_else(|| {
             crate::errors::InternalError::Capture("recording is not in progress".into())
         })?;
-        let stats = match screen.stop() {
+        let screen_started_at = screen.started_at();
+        let stats = match screen.wait_for_stop(screen_quit.unwrap_or_else(std::time::Instant::now)) {
             Ok(stats) => stats,
             Err(error) => {
                 self.stop_audio_captures(&mut session.audio_captures);
-                if let Some(mut webcam) = session.webcam_capture.take() {
+                if let Some(mut webcam) = webcam_capture {
                     session.webcam_capture_failed = true;
-                    if let Err(error) = webcam.stop() {
+                    if let Err(error) = webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now)) {
                         tracing::warn!(error = %error, "failed to stop webcam sidecar during pause error");
                     }
                 }
@@ -893,7 +921,7 @@ impl Recorder {
         let timeline = self.segment_timeline(&screen, &stats);
         let mut stats = stats;
         stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
-        self.stop_webcam_segment(session, &screen, timeline);
+        self.stop_webcam_segment(session, webcam_capture, webcam_quit, timeline, screen_started_at);
         self.finalize_audio_tracks(
             &screen,
             &mut session.audio_captures,
@@ -1114,18 +1142,28 @@ impl Recorder {
             percent: 15,
         });
 
+        // Broadcast stop signal concurrently to all active capture workers at the exact same instant
+        let mut screen_capture = session.screen_capture.take();
+        let screen_quit = screen_capture.as_mut().map(|s| s.request_stop());
+        let mut webcam_capture = session.webcam_capture.take();
+        let webcam_quit = webcam_capture.as_mut().map(|w| w.request_stop());
+        for audio in &session.audio_captures {
+            audio.session.request_stop();
+        }
+
         let mut timeline = SegmentTimeline {
             head_trim: Duration::ZERO,
             duration: Duration::ZERO,
         };
-        let final_stats = if let Some(mut screen) = session.screen_capture.take() {
-            let stats = match screen.stop() {
+        let final_stats = if let Some(mut screen) = screen_capture {
+            let screen_started_at = screen.started_at();
+            let stats = match screen.wait_for_stop(screen_quit.unwrap_or_else(std::time::Instant::now)) {
                 Ok(stats) => stats,
                 Err(error) => {
                     self.stop_audio_captures(&mut session.audio_captures);
-                    if let Some(mut webcam) = session.webcam_capture.take() {
+                    if let Some(mut webcam) = webcam_capture {
                         session.webcam_capture_failed = true;
-                        if let Err(error) = webcam.stop() {
+                        if let Err(error) = webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now)) {
                             tracing::warn!(error = %error, "failed to stop webcam sidecar during stop error");
                         }
                     }
@@ -1144,7 +1182,13 @@ impl Recorder {
             timeline = self.segment_timeline(&screen, &stats);
             let mut stats = stats;
             stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
-            self.stop_webcam_segment(&mut session, &screen, timeline);
+            self.stop_webcam_segment(
+                &mut session,
+                webcam_capture,
+                webcam_quit,
+                timeline,
+                screen_started_at,
+            );
             self.finalize_audio_tracks(
                 &screen,
                 &mut session.audio_captures,
@@ -1154,9 +1198,9 @@ impl Recorder {
             stats
         } else {
             self.stop_audio_captures(&mut session.audio_captures);
-            if let Some(mut webcam) = session.webcam_capture.take() {
+            if let Some(mut webcam) = webcam_capture {
                 session.webcam_capture_failed = true;
-                if let Err(error) = webcam.stop() {
+                if let Err(error) = webcam.wait_for_stop(webcam_quit.unwrap_or_else(std::time::Instant::now)) {
                     tracing::warn!(error = %error, "failed to stop webcam sidecar during stop cleanup");
                 }
             }
@@ -1403,28 +1447,29 @@ impl Recorder {
             .unwrap_or(false)
     }
 
-    /// Probe the fragment's real video stream length. The probed value is the
-    /// authority for timeline alignment; the wall clock is only a fallback.
-    fn probe_video_duration_ms(&self, path: &Path) -> Option<u64> {
+    /// Probe the fragment's real video stream length and start timestamp. The probed
+    /// values are the authority for timeline alignment; the wall clock is only a fallback.
+    fn probe_video_timing_ms(&self, path: &Path) -> (Option<u64>, Option<u64>) {
         crate::media::probe::probe_media(
             &self.ffprobe_path.to_string_lossy(),
             path,
             "capture-alignment",
         )
         .ok()
-        .and_then(|metadata| {
-            metadata
-                .streams
-                .iter()
-                .find(|stream| stream.kind == "video")
+        .map(|metadata| {
+            let video_stream = metadata.streams.iter().find(|stream| stream.kind == "video");
+            let start_ms = video_stream.and_then(|stream| stream.start_ms);
+            let duration_ms = video_stream
                 .and_then(|stream| stream.duration_ms)
                 .or(metadata.format.duration_ms)
                 .or(if metadata.duration_ms > 0 {
                     Some(metadata.duration_ms)
                 } else {
                     None
-                })
+                });
+            (start_ms, duration_ms)
         })
+        .unwrap_or((None, None))
     }
 
     fn segment_timeline(&self, screen: &FfmpegCapture, stats: &RecordingStats) -> SegmentTimeline {
@@ -1435,11 +1480,18 @@ impl Recorder {
         } else {
             stats.duration_ms
         };
-        let probed = self.probe_video_duration_ms(screen.output_path());
-        let timeline = compute_segment_timeline(wall_span_ms, stats.duration_ms, probed);
+        let (probed_start_ms, probed_duration_ms) =
+            self.probe_video_timing_ms(screen.output_path());
+        let timeline = compute_segment_timeline(
+            wall_span_ms,
+            stats.duration_ms,
+            probed_duration_ms,
+            probed_start_ms,
+        );
         info!(
             wall_span_ms,
-            probed_video_ms = probed.unwrap_or(0),
+            probed_video_ms = probed_duration_ms.unwrap_or(0),
+            probed_start_ms = probed_start_ms.unwrap_or(0),
             head_trim_ms = timeline.head_trim_ms(),
             duration_ms = timeline.duration.as_millis() as u64,
             "aligned segment tracks to video timeline"
@@ -1617,18 +1669,23 @@ mod tests {
 
     #[test]
     fn segment_timeline_trims_the_video_startup_gap() {
-        let timeline = compute_segment_timeline(265_040, 265_061, Some(264_550));
+        let timeline = compute_segment_timeline(265_040, 265_061, Some(264_550), None);
         assert_eq!(timeline.head_trim_ms(), 490);
         assert_eq!(timeline.duration, Duration::from_millis(264_550));
+
+        let probed_start_timeline =
+            compute_segment_timeline(265_040, 265_061, Some(264_240), Some(800));
+        assert_eq!(probed_start_timeline.head_trim_ms(), 800);
+        assert_eq!(probed_start_timeline.duration, Duration::from_millis(264_240));
     }
 
     #[test]
     fn segment_timeline_falls_back_to_wall_clock_without_a_probe() {
-        let timeline = compute_segment_timeline(265_040, 265_061, None);
+        let timeline = compute_segment_timeline(265_040, 265_061, None, None);
         assert_eq!(timeline.head_trim_ms(), 0);
         assert_eq!(timeline.duration, Duration::from_millis(265_061));
 
-        let zero_probe = compute_segment_timeline(265_040, 265_061, Some(0));
+        let zero_probe = compute_segment_timeline(265_040, 265_061, Some(0), None);
         assert_eq!(zero_probe.head_trim_ms(), 0);
         assert_eq!(zero_probe.duration, Duration::from_millis(265_061));
     }
@@ -1637,13 +1694,13 @@ mod tests {
     fn segment_timeline_rejects_implausible_gaps_and_negative_trims() {
         // A probe far shorter than any plausible startup window is a clock or
         // probe anomaly; the wall clock must win instead of a giant trim.
-        let implausible = compute_segment_timeline(265_040, 265_061, Some(1_000));
+        let implausible = compute_segment_timeline(265_040, 265_061, Some(1_000), None);
         assert_eq!(implausible.head_trim_ms(), 0);
         assert_eq!(implausible.duration, Duration::from_millis(265_061));
 
         // CFR frame duplication can make the probed video slightly longer than
         // the wall span; the trim clamps to zero and the video length wins.
-        let longer_video = compute_segment_timeline(265_040, 265_061, Some(265_100));
+        let longer_video = compute_segment_timeline(265_040, 265_061, Some(265_100), None);
         assert_eq!(longer_video.head_trim_ms(), 0);
         assert_eq!(longer_video.duration, Duration::from_millis(265_100));
     }
