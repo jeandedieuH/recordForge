@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type {
   TextClip,
   TextBackdropStyle,
@@ -60,6 +60,33 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
   const { toast } = useToast()
   const [browserOpen, setBrowserOpen] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
+
+  const [draftPrimary, setDraftPrimary] = useState(clip.primaryText)
+  const [draftSecondary, setDraftSecondary] = useState(clip.secondaryText ?? "")
+  const [draftTag, setDraftTag] = useState(clip.tagText ?? "")
+  const textTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setDraftPrimary(clip.primaryText)
+    setDraftSecondary(clip.secondaryText ?? "")
+    setDraftTag(clip.tagText ?? "")
+  }, [clip.id, clip.presetId, clip.primaryText, clip.secondaryText, clip.tagText])
+
+  function scheduleTextUpdate(update: Partial<TextClip>) {
+    if (textTimerRef.current) clearTimeout(textTimerRef.current)
+    textTimerRef.current = setTimeout(() => {
+      textTimerRef.current = null
+      onChange(update)
+    }, 120)
+  }
+
+  function flushTextUpdate(update: Partial<TextClip>) {
+    if (textTimerRef.current) {
+      clearTimeout(textTimerRef.current)
+      textTimerRef.current = null
+    }
+    onChange(update)
+  }
 
   const canvasWidth = useTimelineStore(
     (state) => state.engine?.history.present.canvas.width ?? 1920,
@@ -347,8 +374,12 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
         <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
           <span>Primary Title</span>
           <Textarea
-            value={clip.primaryText}
-            onChange={(e) => onChange({ primaryText: e.target.value })}
+            value={draftPrimary}
+            onChange={(e) => {
+              setDraftPrimary(e.target.value)
+              scheduleTextUpdate({ primaryText: e.target.value })
+            }}
+            onBlur={() => flushTextUpdate({ primaryText: draftPrimary })}
             placeholder="Main Title..."
             rows={2}
             className="min-h-14 text-xs font-bold resize-y"
@@ -358,8 +389,12 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
         <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
           <span>Subtitle / Description</span>
           <Textarea
-            value={clip.secondaryText ?? ""}
-            onChange={(e) => onChange({ secondaryText: e.target.value })}
+            value={draftSecondary}
+            onChange={(e) => {
+              setDraftSecondary(e.target.value)
+              scheduleTextUpdate({ secondaryText: e.target.value })
+            }}
+            onBlur={() => flushTextUpdate({ secondaryText: draftSecondary })}
             placeholder="Subtitle text (optional)..."
             rows={2}
             className="min-h-14 text-xs resize-y"
@@ -370,8 +405,12 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
           <span>Tag / Category Badge</span>
           <Input
             type="text"
-            value={clip.tagText ?? ""}
-            onChange={(e) => onChange({ tagText: e.target.value })}
+            value={draftTag}
+            onChange={(e) => {
+              setDraftTag(e.target.value)
+              scheduleTextUpdate({ tagText: e.target.value })
+            }}
+            onBlur={() => flushTextUpdate({ tagText: draftTag })}
             placeholder="Tag / Topic badge (optional)..."
             className="h-8 text-xs uppercase font-semibold"
           />

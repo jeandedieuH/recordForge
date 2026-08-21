@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { defaultCursorSettings, type TimelineState } from "@recordforge/contracts"
+import type {
+  OverlayDisplayAnnotation,
+  OverlayDisplayList,
+  OverlayDisplayText,
+} from "@recordforge/contracts"
 import {
   annotationPresetToShapePreset,
   createAnnotationClipFromPreset,
@@ -7,10 +11,10 @@ import {
   textPresetToDefinition,
   type AnnotationPresetRecord,
   type PresetDefinition,
+  type TextPresetDefinition,
   type TextPresetRecord,
 } from "@recordforge/editor-core"
-import { buildOverlayRenderPlan } from "@recordforge/media-core"
-import { createOverlayWasmEngine } from "@recordforge/overlay-core"
+import { renderOverlayDisplayList } from "@recordforge/overlay-core"
 import { Skeleton, cn } from "@recordforge/ui"
 import { AlertTriangle, Shapes, Type } from "lucide-react"
 
@@ -29,46 +33,38 @@ interface PresetThumbnailProps {
 export function PresetThumbnail({ kind, preset, className }: PresetThumbnailProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
-  const plan = useMemo(() => {
+
+  const displayList = useMemo<OverlayDisplayList | null>(() => {
     try {
-      return createThumbnailPlan(kind, preset)
+      if (kind === "annotation") {
+        const item = createAnnotationDisplayItem(preset as AnnotationPreset)
+        return { timeMs: 1_000, items: [item] }
+      }
+      const item = createTextDisplayItem(preset as TextPreset)
+      return { timeMs: 1_000, items: [item] }
     } catch {
       return null
     }
   }, [kind, preset])
 
   useEffect(() => {
-    let isCancelled = false
-    if (!plan) {
+    if (!displayList) {
       setStatus("error")
       return
     }
 
-    setStatus("loading")
     const canvas = canvasRef.current
     if (!canvas) return
     canvas.width = THUMBNAIL_WIDTH
     canvas.height = THUMBNAIL_HEIGHT
 
-    void createOverlayWasmEngine(plan).then(
-      (engine) => {
-        if (isCancelled) {
-          engine.dispose()
-          return
-        }
-        engine.renderToCanvas(1_000, canvas)
-        setStatus("ready")
-        engine.dispose()
-      },
-      () => {
-        if (!isCancelled) setStatus("error")
-      },
-    )
-
-    return () => {
-      isCancelled = true
+    try {
+      renderOverlayDisplayList(displayList, canvas)
+      setStatus("ready")
+    } catch {
+      setStatus("error")
     }
-  }, [plan])
+  }, [displayList])
 
   return (
     <div
@@ -99,61 +95,106 @@ export function PresetThumbnail({ kind, preset, className }: PresetThumbnailProp
   )
 }
 
-function createThumbnailPlan(kind: "annotation" | "text", preset: AnnotationPreset | TextPreset) {
-  const id = `preset-thumbnail-${preset.id}`
-  const clip =
-    kind === "annotation"
-      ? createAnnotationClipFromPreset(annotationPresetToShapePreset(preset as AnnotationPreset), {
-          id,
-          startMs: 0,
-          durationMs: 2_000,
-          canvasWidth: THUMBNAIL_WIDTH,
-          canvasHeight: THUMBNAIL_HEIGHT,
-        })
-      : createTextClipFromDefinition(
-          "definition" in preset && preset.definition
-            ? textPresetToDefinition(preset as TextPreset)
-            : (preset as unknown as import("@recordforge/editor-core").TextPresetDefinition),
-          {
-            id,
-            startMs: 0,
-            durationMs: 2_000,
-            canvasWidth: THUMBNAIL_WIDTH,
-            canvasHeight: THUMBNAIL_HEIGHT,
-          },
-        )
+function createTextDisplayItem(preset: TextPreset): OverlayDisplayText {
+  const def =
+    "definition" in preset && preset.definition
+      ? textPresetToDefinition(preset as TextPreset)
+      : (preset as unknown as TextPresetDefinition)
 
-  const timeline: TimelineState = {
-    version: 1,
-    id: id,
-    name: "Preset preview",
-    recordingId: "preset-preview",
-    canvas: {
-      width: THUMBNAIL_WIDTH,
-      height: THUMBNAIL_HEIGHT,
-      fps: 30,
-      background: "#090d16",
-      padding: 0,
-      borderRadius: 0,
-      shadow: false,
-      cursorSettings: defaultCursorSettings,
+  const clip = createTextClipFromDefinition(def, {
+    id: `thumb-${preset.id}`,
+    startMs: 0,
+    durationMs: 2_000,
+    canvasWidth: THUMBNAIL_WIDTH,
+    canvasHeight: THUMBNAIL_HEIGHT,
+  })
+
+  return {
+    id: clip.id,
+    kind: "text",
+    zIndex: 0,
+    transform: {
+      x: clip.x,
+      y: clip.y,
+      width: clip.width,
+      height: clip.height,
+      rotation: 0,
+      anchorX: 0.5,
+      anchorY: 0.5,
+      zIndex: 0,
+      opacity: 1,
     },
-    tracks: [
-      {
-        id: "preset-preview-overlay",
-        kind: "overlay",
-        name: "Preset preview",
-        muted: false,
-        locked: false,
-        solo: false,
-        volume: 1,
-        clips: [clip],
-      },
-    ],
-    markers: [],
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
+    animationProgress: 1,
+    textProgress: 1,
+    presetId: clip.presetId,
+    category: clip.category,
+    primaryText: clip.primaryText,
+    secondaryText: clip.secondaryText,
+    tagText: clip.tagText,
+    alignment: clip.alignment,
+    fontFamily: clip.fontFamily,
+    fontSize: clip.fontSize,
+    fontWeight: clip.fontWeight,
+    textColor: clip.textColor,
+    secondaryTextColor: clip.secondaryTextColor,
+    accentColor: clip.accentColor,
+    backdropStyle: clip.backdropStyle,
+    backdropColor: clip.backdropColor,
+    backdropOpacity: clip.backdropOpacity,
+    backdropBlur: clip.backdropBlur,
+    backdropBorderRadius: clip.backdropBorderRadius,
+    backdropPaddingX: clip.backdropPaddingX,
+    backdropPaddingY: clip.backdropPaddingY,
+    shadowEnabled: clip.shadowEnabled,
+    shadowColor: clip.shadowColor,
+    shadowBlur: clip.shadowBlur,
+    autoScaleText: clip.autoScaleText ?? true,
   }
+}
 
-  return buildOverlayRenderPlan(timeline)
+function createAnnotationDisplayItem(preset: AnnotationPreset): OverlayDisplayAnnotation {
+  const shapePreset = annotationPresetToShapePreset(preset)
+  const clip = createAnnotationClipFromPreset(shapePreset, {
+    id: `thumb-${preset.id}`,
+    startMs: 0,
+    durationMs: 2_000,
+    canvasWidth: THUMBNAIL_WIDTH,
+    canvasHeight: THUMBNAIL_HEIGHT,
+  })
+
+  return {
+    id: clip.id,
+    kind: "annotation",
+    zIndex: 0,
+    transform: {
+      x: clip.x,
+      y: clip.y,
+      width: clip.width,
+      height: clip.height,
+      rotation: 0,
+      anchorX: 0.5,
+      anchorY: 0.5,
+      zIndex: 0,
+      opacity: 1,
+    },
+    animationProgress: 1,
+    drawProgress: 1,
+    annotationType: clip.annotationType,
+    endX: clip.endX,
+    endY: clip.endY,
+    strokeColor: clip.strokeColor,
+    strokeWidth: clip.strokeWidth,
+    strokeStyle: clip.strokeStyle,
+    fillColor: clip.fillColor,
+    fillOpacity: clip.fillOpacity,
+    cornerRadius: clip.cornerRadius,
+    arrowEndHead: clip.arrowEndHead,
+    arrowStartHead: clip.arrowStartHead,
+    shadowEnabled: clip.shadowEnabled,
+    shadowColor: clip.shadowColor,
+    shadowBlur: clip.shadowBlur,
+    text: clip.text,
+    textColor: clip.textColor,
+    fontSize: clip.fontSize,
+  }
 }

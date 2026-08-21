@@ -1279,9 +1279,6 @@ export function TimelineView({
       return
     }
     setSelection({ kind: "clip", primaryClipId: clip.id, clipIds: [clip.id], trackId: track.id })
-    if (event.button === 0) {
-      seek(clip.startMs)
-    }
   }
 
   function selectMultipleClips(clipIds: string[], primaryClipId: string, trackId: string) {

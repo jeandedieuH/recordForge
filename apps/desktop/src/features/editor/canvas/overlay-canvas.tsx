@@ -46,11 +46,6 @@ export function OverlayCanvas({
 
   useEffect(() => {
     let isCancelled = false
-    const previousEngine = engineRef.current
-    engineRef.current = null
-    previousEngine?.dispose()
-    setEngineVersion((version) => version + 1)
-    imageCacheRef.current.clear()
 
     void createOverlayWasmEngine(renderPlan).then(
       (engine) => {
@@ -58,35 +53,48 @@ export function OverlayCanvas({
           engine.dispose()
           return
         }
+        const previousEngine = engineRef.current
         engineRef.current = engine
+        previousEngine?.dispose()
         setEngineVersion((version) => version + 1)
       },
-      () => {
-        if (!isCancelled) setEngineVersion((version) => version + 1)
+      (error) => {
+        console.warn("Failed to create WASM overlay engine for preview:", error)
       },
     )
 
     return () => {
       isCancelled = true
+    }
+  }, [renderPlan])
+
+  useEffect(() => {
+    return () => {
       const engine = engineRef.current
       engineRef.current = null
       engine?.dispose()
     }
-  }, [renderPlan])
+  }, [])
 
   const renderFrame = useCallback(() => {
     const canvas = canvasRef.current
     const engine = engineRef.current
-    if (!canvas || !engine) return
+    if (!canvas) return
 
     if (canvas.width !== canvasWidth) canvas.width = canvasWidth
     if (canvas.height !== canvasHeight) canvas.height = canvasHeight
 
-    engine.renderToCanvas(playheadMs, canvas, {
-      assetUrls,
-      imageCache: imageCacheRef.current,
-      onImageLoad: () => renderFrameRef.current(),
-    })
+    if (engine) {
+      try {
+        engine.renderToCanvas(playheadMs, canvas, {
+          assetUrls,
+          imageCache: imageCacheRef.current,
+          onImageLoad: () => renderFrameRef.current(),
+        })
+      } catch (err) {
+        console.warn("Overlay renderToCanvas error:", err)
+      }
+    }
 
     const currentDrawState = drawState
     if (!currentDrawState) return

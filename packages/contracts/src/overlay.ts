@@ -225,6 +225,9 @@ export const overlayDisplayItemSchema = z.discriminatedUnion("kind", [
   overlayDisplayImageSchema,
 ])
 
+export type OverlayDisplayAnnotation = z.infer<typeof overlayDisplayAnnotationSchema>
+export type OverlayDisplayText = z.infer<typeof overlayDisplayTextSchema>
+export type OverlayDisplayImage = z.infer<typeof overlayDisplayImageSchema>
 export type OverlayDisplayItem = z.infer<typeof overlayDisplayItemSchema>
 
 export const overlayDisplayListSchema = z.object({
@@ -233,3 +236,4 @@ export const overlayDisplayListSchema = z.object({
 })
 
 export type OverlayDisplayList = z.infer<typeof overlayDisplayListSchema>
+
