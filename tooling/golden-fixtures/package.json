@@ -1,7 +1,7 @@
 {
   "name": "@recordforge/golden-fixtures",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0-beta",
   "type": "module",
   "scripts": {
     "test": "bun test",
@@ -13,7 +13,7 @@
   "devDependencies": {
     "@recordforge/config": "workspace:*",
     "@types/node": "26.2.0",
-    "bun-types": "1.3.14",
+    "bun-types": "1.4.0",
     "typescript": "~7.0.2"
   }
 }

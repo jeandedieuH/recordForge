@@ -1,7 +1,7 @@
 {
   "name": "@recordforge/editor-benchmarks",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0-beta",
   "type": "module",
   "scripts": {
     "benchmark:phase9": "bun run editor-phase9-benchmark.ts",

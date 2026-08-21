@@ -1,8 +1,8 @@
 [package]
 name = "cursor-engine-wasm-proto"
-version = "0.1.0"
+version = "1.0.0-beta"
 edition = "2021"
-authors = ["recordForge"]
+authors = ["Prestige Tech"]
 description = "Throwaway Rust+WASM cursor evaluator prototype for Phase 0"
 license = "MIT"
 autotests = false

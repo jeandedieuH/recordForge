@@ -1,8 +1,8 @@
 [package]
 name = "cursor-engine"
-version = "0.1.0"
+version = "1.0.0-beta"
 edition = "2021"
-authors = ["recordForge"]
+authors = ["Prestige Tech"]
 description = "Canonical cursor evaluation engine for preview and export"
 license = "MIT"
 

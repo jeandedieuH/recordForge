@@ -1,8 +1,8 @@
 [package]
 name = "overlay-engine"
-version = "0.1.0"
+version = "1.0.0-beta"
 edition = "2021"
-authors = ["recordForge"]
+authors = ["Prestige Tech"]
 description = "Canonical overlay evaluation engine for preview and export"
 license = "MIT"
 rust-version = "1.97.1"
