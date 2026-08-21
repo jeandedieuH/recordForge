@@ -194,6 +194,13 @@ function findCursorRange(
   return null
 }
 
+function isClipLocked(clip: TimelineClip): boolean {
+  if ("locked" in clip && Boolean((clip as { locked?: boolean }).locked)) {
+    return true
+  }
+  return false
+}
+
 function findZoomSegment(state: TimelineState, segmentId: string): ManualZoomSegment | null {
   return getManualZoomSegments(state).find((segment) => segment.id === segmentId) ?? null
 }
@@ -316,7 +323,6 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
     case "trim-clip":
     case "split-clip":
     case "delete-clip":
-    case "ripple-delete-clip":
     case "update-clip-audio":
     case "update-clip-transform":
     case "update-caption-clip":
@@ -327,8 +333,8 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       if (!found) return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       const trackResult = checkTrackLocked(found.track)
       if (!trackResult.ok) return trackResult
-      if (found.clip.kind === "cursor-effect" && found.clip.locked) {
-        return { ok: false, error: editorError("cursor_range_locked", "Cursor range is locked") }
+      if (isClipLocked(found.clip)) {
+        return { ok: false, error: editorError("clip_locked", "Clip is locked") }
       }
       if (command.kind === "move-clip") {
         const target = command.newTrackId ? findTrack(state, command.newTrackId) : found.track
@@ -345,6 +351,29 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "ripple-delete-clip": {
+      const found = findClip(state, command.clipId)
+      if (found) {
+        const trackResult = checkTrackLocked(found.track)
+        if (!trackResult.ok) return trackResult
+        if (isClipLocked(found.clip)) {
+          return { ok: false, error: editorError("clip_locked", "Clip is locked") }
+        }
+        return { ok: true, value: undefined }
+      }
+      const foundZoom = findZoomSegment(state, command.clipId)
+      if (foundZoom) {
+        const zoomTrack = state.tracks.find((t) => t.kind === "zoom")
+        if (zoomTrack?.locked) {
+          return { ok: false, error: editorError("track_locked", 'Track "Zoom" is locked') }
+        }
+        if (foundZoom.locked) {
+          return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
+        }
+        return { ok: true, value: undefined }
+      }
+      return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+    }
     case "move-clips":
     case "duplicate-clips": {
       const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
@@ -353,7 +382,7 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       const lockedClip = foundClips.find(
         (found) =>
-          found?.track.locked || (found?.clip.kind === "cursor-effect" && found.clip.locked),
+          found?.track.locked || (found?.clip && isClipLocked(found.clip)),
       )
       if (lockedClip) {
         return {
@@ -367,21 +396,47 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
-    case "delete-clips":
-    case "ripple-delete-clips": {
+    case "delete-clips": {
       const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
       if (foundClips.some((found) => !found)) {
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
       const lockedClip = foundClips.find(
         (found) =>
-          found?.track.locked || (found?.clip.kind === "cursor-effect" && found.clip.locked),
+          found?.track.locked || (found?.clip && isClipLocked(found.clip)),
       )
       if (lockedClip) {
         return {
           ok: false,
           error: editorError("track_locked", `Track "${lockedClip.track.name}" is locked`),
         }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "ripple-delete-clips": {
+      for (const id of command.clipIds) {
+        const found = findClip(state, id)
+        if (found) {
+          if (found.track.locked) {
+            return { ok: false, error: editorError("track_locked", `Track "${found.track.name}" is locked`) }
+          }
+          if (isClipLocked(found.clip)) {
+            return { ok: false, error: editorError("clip_locked", "Clip is locked") }
+          }
+          continue
+        }
+        const foundZoom = findZoomSegment(state, id)
+        if (foundZoom) {
+          const zoomTrack = state.tracks.find((t) => t.kind === "zoom")
+          if (zoomTrack?.locked) {
+            return { ok: false, error: editorError("track_locked", 'Track "Zoom" is locked') }
+          }
+          if (foundZoom.locked) {
+            return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
+          }
+          continue
+        }
+        return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
       return { ok: true, value: undefined }
     }
@@ -1218,7 +1273,7 @@ function clipSegmentsAfterRange(
   deleteEndMs: number,
   ripple: boolean,
 ): TimelineClip[] {
-  if (clip.kind === "cursor-effect" && clip.locked) return [clip]
+  if (isClipLocked(clip)) return [clip]
   const clipEndMs = clip.startMs + clip.durationMs
   if (clipEndMs <= deleteStartMs) return [clip]
   if (clip.startMs >= deleteEndMs) {
@@ -1289,11 +1344,27 @@ function zoomSegmentsAfterRange(
 
     const leftEndMs = Math.min(deleteStartMs, segmentEndMs)
     const rightStartMs = Math.max(deleteEndMs, segment.startMs)
+    const hasLeft = segment.startMs < deleteStartMs && leftEndMs > segment.startMs
+    const hasRight = segmentEndMs > deleteEndMs && segmentEndMs > rightStartMs
+
+    // If ripple-deleting a range directly inside an existing zoom segment that starts before
+    // and ends after the cut, fuse the remaining spans into a single continuous zoom segment
+    // so the zoom effect stays active and smoothly continuous across the spliced cut.
+    if (ripple && hasLeft && hasRight) {
+      const deletedSpan = deleteEndMs - deleteStartMs
+      return [
+        {
+          ...segment,
+          durationMs: segment.durationMs - deletedSpan,
+        },
+      ]
+    }
+
     const next: ManualZoomSegment[] = []
-    if (segment.startMs < deleteStartMs && leftEndMs > segment.startMs) {
+    if (hasLeft) {
       next.push({ ...segment, durationMs: leftEndMs - segment.startMs })
     }
-    if (segmentEndMs > deleteEndMs && segmentEndMs > rightStartMs) {
+    if (hasRight) {
       next.push({
         ...segment,
         id:
@@ -1337,18 +1408,23 @@ function applyDeleteRangeInternal(
   deleteEndMs: number,
   ripple: boolean,
 ): TimelineState {
+  const isZoomTrackLocked = state.tracks.some(
+    (track) => track.kind === "zoom" && track.locked,
+  )
   const tracks = state.tracks.map((track) =>
     deleteRangeFromTrack(track, deleteStartMs, deleteEndMs, ripple),
   )
   const markers = ripple
     ? shiftMarkersAfterRipple(state.markers, deleteStartMs, deleteEndMs)
     : deleteMarkersInRange(state.markers, deleteStartMs, deleteEndMs)
-  const zoomSegments = zoomSegmentsAfterRange(
-    getManualZoomSegments(state),
-    deleteStartMs,
-    deleteEndMs,
-    ripple,
-  )
+  const zoomSegments = isZoomTrackLocked
+    ? (state.zoomSegments ?? [])
+    : zoomSegmentsAfterRange(
+        getManualZoomSegments(state),
+        deleteStartMs,
+        deleteEndMs,
+        ripple,
+      )
   return { ...state, tracks, markers, zoomSegments, updatedAt: now() }
 }
 
@@ -1384,22 +1460,62 @@ function applyRippleDeleteRange(
   }
 }
 
+function mergeTimelineRanges(
+  ranges: { startMs: number; endMs: number }[],
+): { startMs: number; endMs: number }[] {
+  if (ranges.length === 0) return []
+  const sorted = [...ranges].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs)
+  const merged: { startMs: number; endMs: number }[] = [sorted[0]]
+  for (let i = 1; i < sorted.length; i++) {
+    const current = sorted[i]
+    const last = merged[merged.length - 1]
+    if (current.startMs <= last.endMs) {
+      last.endMs = Math.max(last.endMs, current.endMs)
+    } else {
+      merged.push({ ...current })
+    }
+  }
+  return merged
+}
+
 function applyRippleDeleteClips(
   state: TimelineState,
   command: RippleDeleteClipsCommand,
 ): CommandResult<TimelineState> {
-  const ranges = command.clipIds
-    .map((clipId) => findClip(state, clipId)?.clip)
-    .filter((clip): clip is TimelineClip => clip !== undefined)
-    .map((clip) => ({ startMs: clip.startMs, endMs: clip.startMs + clip.durationMs }))
-    .sort((a, b) => b.startMs - a.startMs || b.endMs - a.endMs)
+  const rawRanges: { startMs: number; endMs: number }[] = []
+  for (const id of command.clipIds) {
+    const foundClip = findClip(state, id)
+    if (foundClip) {
+      if (foundClip.track.locked || isClipLocked(foundClip.clip)) continue
+      rawRanges.push({
+        startMs: foundClip.clip.startMs,
+        endMs: foundClip.clip.startMs + foundClip.clip.durationMs,
+      })
+      continue
+    }
+    const foundZoom = findZoomSegment(state, id)
+    if (foundZoom) {
+      const zoomTrackLocked = state.tracks.some((t) => t.kind === "zoom" && t.locked)
+      if (zoomTrackLocked || foundZoom.locked) continue
+      rawRanges.push({
+        startMs: foundZoom.startMs,
+        endMs: foundZoom.startMs + foundZoom.durationMs,
+      })
+    }
+  }
+
+  if (rawRanges.length === 0) {
+    return { ok: true, value: state }
+  }
+
+  const mergedRanges = mergeTimelineRanges(rawRanges).sort(
+    (a, b) => b.startMs - a.startMs || b.endMs - a.endMs,
+  )
 
   let next = state
-  let previousRange: { startMs: number; endMs: number } | undefined
-  for (const range of ranges) {
-    if (previousRange?.startMs === range.startMs && previousRange.endMs === range.endMs) continue
+  for (const range of mergedRanges) {
+    if (range.endMs <= range.startMs) continue
     next = applyDeleteRangeInternal(next, range.startMs, range.endMs, true)
-    previousRange = range
   }
   return { ok: true, value: next }
 }
@@ -1409,18 +1525,41 @@ function applyRippleDeleteClip(
   command: RippleDeleteClipCommand,
 ): CommandResult<TimelineState> {
   const found = findClip(state, command.clipId)
-  if (!found) {
-    return { ok: false, error: editorError("clip_not_found", "Clip not found") }
-  }
-  const { track, clip } = found
-  if (track.locked) {
-    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  if (found) {
+    const { track, clip } = found
+    if (track.locked) {
+      return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+    }
+    if (isClipLocked(clip)) {
+      return { ok: false, error: editorError("clip_locked", "Clip is locked") }
+    }
+    return {
+      ok: true,
+      value: applyDeleteRangeInternal(state, clip.startMs, clip.startMs + clip.durationMs, true),
+    }
   }
 
-  return {
-    ok: true,
-    value: applyDeleteRangeInternal(state, clip.startMs, clip.startMs + clip.durationMs, true),
+  const foundZoom = findZoomSegment(state, command.clipId)
+  if (foundZoom) {
+    const zoomTrackLocked = state.tracks.some((t) => t.kind === "zoom" && t.locked)
+    if (zoomTrackLocked) {
+      return { ok: false, error: editorError("track_locked", 'Track "Zoom" is locked') }
+    }
+    if (foundZoom.locked) {
+      return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
+    }
+    return {
+      ok: true,
+      value: applyDeleteRangeInternal(
+        state,
+        foundZoom.startMs,
+        foundZoom.startMs + foundZoom.durationMs,
+        true,
+      ),
+    }
   }
+
+  return { ok: false, error: editorError("clip_not_found", "Clip not found") }
 }
 
 function applyUpdateTrack(

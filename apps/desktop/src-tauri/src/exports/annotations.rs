@@ -1108,19 +1108,27 @@ pub fn build_overlay_render_plan_from_legacy(
     for (idx, txt) in texts.iter().filter(|t| t.enabled).enumerate() {
         let anim_in = match txt.animation_in.as_str() {
             "none" => overlay_engine::OverlayAnimationType::None,
-            "scale-up" => overlay_engine::OverlayAnimationType::ScaleUp,
+            "scale-up" | "zoom-punch" => overlay_engine::OverlayAnimationType::ScaleUp,
             "scale-down" => overlay_engine::OverlayAnimationType::ScaleDown,
-            "slide-up" => overlay_engine::OverlayAnimationType::SlideUp,
+            "slide-up" | "expand-bar" => overlay_engine::OverlayAnimationType::SlideUp,
             "slide-down" => overlay_engine::OverlayAnimationType::SlideDown,
+            "slide-left" => overlay_engine::OverlayAnimationType::SlideLeft,
+            "slide-right" => overlay_engine::OverlayAnimationType::SlideRight,
+            "pop-in" => overlay_engine::OverlayAnimationType::PopIn,
+            "bounce" => overlay_engine::OverlayAnimationType::Bounce,
             "typewriter" => overlay_engine::OverlayAnimationType::Typewriter,
             _ => overlay_engine::OverlayAnimationType::Fade,
         };
         let anim_out = match txt.animation_out.as_str() {
             "none" => overlay_engine::OverlayAnimationOutType::None,
             "scale-up" => overlay_engine::OverlayAnimationOutType::ScaleUp,
-            "scale-down" => overlay_engine::OverlayAnimationOutType::ScaleDown,
+            "scale-down" | "zoom-punch" | "pop-in" | "bounce" => {
+                overlay_engine::OverlayAnimationOutType::ScaleDown
+            }
             "slide-up" => overlay_engine::OverlayAnimationOutType::SlideUp,
-            "slide-down" => overlay_engine::OverlayAnimationOutType::SlideDown,
+            "slide-down" | "expand-bar" => overlay_engine::OverlayAnimationOutType::SlideDown,
+            "slide-left" => overlay_engine::OverlayAnimationOutType::SlideLeft,
+            "slide-right" => overlay_engine::OverlayAnimationOutType::SlideRight,
             _ => overlay_engine::OverlayAnimationOutType::Fade,
         };
         items.push(overlay_engine::OverlayItem::Text {

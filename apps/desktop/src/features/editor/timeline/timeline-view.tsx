@@ -945,6 +945,14 @@ export function TimelineView({
       return
     }
     if (selection.kind === "zoom") {
+      if (ripple && timeline) {
+        const segment = getManualZoomSegments(timeline).find((s) => s.id === selection.segmentId)
+        if (segment) {
+          execute(createRippleDeleteClipCommand(segment.id))
+          setSelection(null)
+          return
+        }
+      }
       execute(createDeleteZoomSegmentCommand(selection.segmentId))
       setSelection(null)
       return
@@ -1094,20 +1102,40 @@ export function TimelineView({
         execute(createSplitClipCommand(clip.id, view.playheadMs))
       }
     }
+    const zoomTrack = timeline.tracks.find((t) => t.kind === "zoom")
+    if (!zoomTrack?.locked) {
+      const zoomToSplit = getManualZoomSegments(timeline).find(
+        (s) =>
+          !s.locked &&
+          view.playheadMs > s.startMs + 1 &&
+          view.playheadMs < s.startMs + s.durationMs - 1,
+      )
+      if (zoomToSplit) {
+        execute(createSplitZoomSegmentCommand(zoomToSplit.id, view.playheadMs))
+      }
+    }
   }
 
-  function deleteClip(clip: TimelineClip) {
+  function deleteClip(clip: TimelineClip, ripple = false) {
     const selection = view.selection
     if (
       selection?.kind === "clip" &&
       selection.clipIds.length > 1 &&
       selection.clipIds.includes(clip.id)
     ) {
-      execute(createDeleteClipsCommand(selection.clipIds))
+      execute(
+        ripple
+          ? createRippleDeleteClipsCommand(selection.clipIds)
+          : createDeleteClipsCommand(selection.clipIds),
+      )
       setSelection(null)
       return
     }
-    execute(createDeleteClipCommand(clip.id))
+    execute(
+      ripple
+        ? createRippleDeleteClipCommand(clip.id)
+        : createDeleteClipCommand(clip.id),
+    )
     if (selection?.kind === "clip" && selection.primaryClipId === clip.id) {
       setSelection(null)
     }
@@ -1190,6 +1218,13 @@ export function TimelineView({
       case "delete":
         if (segment.locked) return
         execute(createDeleteZoomSegmentCommand(segment.id))
+        if (view.selection?.kind === "zoom" && view.selection.segmentId === segment.id) {
+          setSelection(null)
+        }
+        return
+      case "ripple-delete":
+        if (segment.locked) return
+        execute(createRippleDeleteClipCommand(segment.id))
         if (view.selection?.kind === "zoom" && view.selection.segmentId === segment.id) {
           setSelection(null)
         }

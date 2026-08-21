@@ -82,7 +82,7 @@ export interface TimelineClipItemProps {
   onSpriteError: () => void
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
-  onDeleteClip: (clip: TimelineClip) => void
+  onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
 }
 
@@ -589,10 +589,17 @@ export const TimelineClipItem = memo(function TimelineClipItem({
         <ContextMenuSeparator />
         <ContextMenuItem
           className="text-destructive focus:bg-destructive/10 focus:text-destructive"
-          onSelect={() => onDeleteClip(clip)}
+          onSelect={() => onDeleteClip(clip, false)}
           disabled={isLocked}
         >
           <Trash2 className="size-3.5 mr-2" /> Delete
+        </ContextMenuItem>
+        <ContextMenuItem
+          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+          onSelect={() => onDeleteClip(clip, true)}
+          disabled={isLocked}
+        >
+          <Trash2 className="size-3.5 mr-2" /> Ripple Delete (Shift+Del)
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>

@@ -46,7 +46,7 @@ export interface CursorRangeAction {
 }
 
 export interface ZoomSegmentAction {
-  kind: "select" | "toggle-lock" | "split" | "delete" | "regenerate-from-click"
+  kind: "select" | "toggle-lock" | "split" | "delete" | "ripple-delete" | "regenerate-from-click"
   segmentId: string
 }
 
@@ -111,7 +111,7 @@ export interface TimelineLanesProps {
   onSpriteError: () => void
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
-  onDeleteClip: (clip: TimelineClip) => void
+  onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
   onAddAssetAtTime?: (assetId: string, timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void

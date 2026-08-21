@@ -288,6 +288,10 @@ export const overlayAnimationTypeSchema = z.enum([
   "scale-down",
   "slide-up",
   "slide-down",
+  "slide-left",
+  "slide-right",
+  "pop-in",
+  "bounce",
   "draw",
   "typewriter",
 ])
@@ -300,6 +304,8 @@ export const overlayAnimationOutTypeSchema = z.enum([
   "scale-down",
   "slide-up",
   "slide-down",
+  "slide-left",
+  "slide-right",
 ])
 export type OverlayAnimationOutType = z.infer<typeof overlayAnimationOutTypeSchema>
 
@@ -445,10 +451,14 @@ export const textAnimationSchema = z.enum([
   "none",
   "fade",
   "slide-up",
+  "slide-down",
+  "slide-left",
+  "slide-right",
   "typewriter",
   "zoom-punch",
   "expand-bar",
-  "slide-down",
+  "pop-in",
+  "bounce",
 ])
 export type TextAnimation = z.infer<typeof textAnimationSchema>
 

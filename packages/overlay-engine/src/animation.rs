@@ -10,6 +10,10 @@ pub enum OverlayAnimationType {
     ScaleDown,
     SlideUp,
     SlideDown,
+    SlideLeft,
+    SlideRight,
+    PopIn,
+    Bounce,
     Draw,
     Typewriter,
 }
@@ -24,6 +28,8 @@ pub enum OverlayAnimationOutType {
     ScaleDown,
     SlideUp,
     SlideDown,
+    SlideLeft,
+    SlideRight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +129,7 @@ pub fn animation_at(
     time_ms: u64,
     start_ms: u64,
     end_ms: u64,
-    _width: f64,
+    width: f64,
     height: f64,
 ) -> OverlayAnimationFrame {
     if time_ms < start_ms || time_ms >= end_ms {
@@ -153,9 +159,11 @@ pub fn animation_at(
     };
 
     match phase {
-        AnimationPhase::In => apply_in_animation(&mut frame, animation.in_type, progress, height),
+        AnimationPhase::In => {
+            apply_in_animation(&mut frame, animation.in_type, progress, width, height)
+        }
         AnimationPhase::Out => {
-            apply_out_animation(&mut frame, animation.out_type, progress, height)
+            apply_out_animation(&mut frame, animation.out_type, progress, width, height)
         }
     }
 
@@ -197,6 +205,7 @@ fn apply_in_animation(
     frame: &mut OverlayAnimationFrame,
     animation: OverlayAnimationType,
     progress: f64,
+    width: f64,
     height: f64,
 ) {
     match animation {
@@ -206,6 +215,21 @@ fn apply_in_animation(
         OverlayAnimationType::ScaleDown => frame.scale = lerp(1.15, 1.0, progress),
         OverlayAnimationType::SlideUp => frame.translate_y = (1.0 - progress) * height,
         OverlayAnimationType::SlideDown => frame.translate_y = -(1.0 - progress) * height,
+        OverlayAnimationType::SlideLeft => frame.translate_x = (1.0 - progress) * width,
+        OverlayAnimationType::SlideRight => frame.translate_x = -(1.0 - progress) * width,
+        OverlayAnimationType::PopIn => {
+            frame.scale = lerp(0.65, 1.0, progress);
+            frame.opacity = (progress * 1.5).min(1.0);
+        }
+        OverlayAnimationType::Bounce => {
+            let s = if progress < 0.65 {
+                lerp(0.5, 1.08, progress / 0.65)
+            } else {
+                lerp(1.08, 1.0, (progress - 0.65) / 0.35)
+            };
+            frame.scale = s;
+            frame.opacity = (progress * 1.5).min(1.0);
+        }
         OverlayAnimationType::Draw => frame.draw_progress = progress,
         OverlayAnimationType::Typewriter => frame.text_progress = progress,
     }
@@ -215,6 +239,7 @@ fn apply_out_animation(
     frame: &mut OverlayAnimationFrame,
     animation: OverlayAnimationOutType,
     progress: f64,
+    width: f64,
     height: f64,
 ) {
     match animation {
@@ -224,6 +249,8 @@ fn apply_out_animation(
         OverlayAnimationOutType::ScaleDown => frame.scale = lerp(1.0, 0.85, progress),
         OverlayAnimationOutType::SlideUp => frame.translate_y = -progress * height,
         OverlayAnimationOutType::SlideDown => frame.translate_y = progress * height,
+        OverlayAnimationOutType::SlideLeft => frame.translate_x = -progress * width,
+        OverlayAnimationOutType::SlideRight => frame.translate_x = progress * width,
     }
 }
 
@@ -323,5 +350,42 @@ mod tests {
         assert_eq!(eased_progress(OverlayEasing::EaseOut, 0.25), 0.4375);
         assert_eq!(eased_progress(OverlayEasing::EaseInOut, 0.25), 0.125);
         assert!((eased_progress(OverlayEasing::ExpoOut, 0.5) - 0.96875).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn supports_horizontal_slide_and_pop_animations() {
+        let slide_left = OverlayAnimation {
+            in_type: OverlayAnimationType::SlideLeft,
+            out_type: OverlayAnimationOutType::SlideRight,
+            in_duration_ms: 100,
+            out_duration_ms: 100,
+            easing: OverlayEasing::Linear,
+        };
+        let in_frame = animation_at(&slide_left, 50, 0, 1_000, 200.0, 100.0);
+        assert_eq!(in_frame.translate_x, 100.0);
+        assert_eq!(in_frame.translate_y, 0.0);
+
+        let out_frame = animation_at(&slide_left, 950, 0, 1_000, 200.0, 100.0);
+        assert_eq!(out_frame.translate_x, 100.0);
+
+        let pop_in = OverlayAnimation {
+            in_type: OverlayAnimationType::PopIn,
+            out_type: OverlayAnimationOutType::Fade,
+            in_duration_ms: 100,
+            out_duration_ms: 100,
+            easing: OverlayEasing::Linear,
+        };
+        let pop_frame = animation_at(&pop_in, 50, 0, 1_000, 200.0, 100.0);
+        assert!((pop_frame.scale - 0.825).abs() < 1e-4);
+
+        let bounce = OverlayAnimation {
+            in_type: OverlayAnimationType::Bounce,
+            out_type: OverlayAnimationOutType::Fade,
+            in_duration_ms: 100,
+            out_duration_ms: 100,
+            easing: OverlayEasing::Linear,
+        };
+        let bounce_frame = animation_at(&bounce, 50, 0, 1_000, 200.0, 100.0);
+        assert!(bounce_frame.scale > 0.5 && bounce_frame.scale < 1.15);
     }
 }

@@ -30,6 +30,7 @@ function toOverlayAnimationOut(animation: TextAnimation): OverlayAnimation["outT
   if (animation === "zoom-punch") return "scale-down"
   if (animation === "expand-bar") return "slide-down"
   if (animation === "typewriter") return "fade"
+  if (animation === "pop-in" || animation === "bounce") return "scale-down"
   return animation
 }
 

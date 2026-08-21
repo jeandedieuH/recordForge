@@ -1,7 +1,14 @@
 import { useMemo, useState } from "react"
-import type { TextClip, TextBackdropStyle, TitlePresetCategory } from "@recordforge/contracts"
+import type {
+  TextClip,
+  TextBackdropStyle,
+  TitlePresetCategory,
+  OverlayEasing,
+} from "@recordforge/contracts"
 import {
   applyTextPresetToClip,
+  getTextPresetById,
+  listTextPresetsByCategory,
   textPresetFromClip,
   textPresetToDefinition,
   type TextPresetRecord,
@@ -26,11 +33,22 @@ import {
   cn,
   useToast,
 } from "@recordforge/ui"
-import { AlignCenter, AlignLeft, AlignRight, Eye, FolderOpen, Lock, Save, Type } from "lucide-react"
+import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
+  Eye,
+  FolderOpen,
+  Lock,
+  RotateCcw,
+  Save,
+  Type,
+} from "lucide-react"
 import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 import { useTextPresetRegistry } from "../presets/preset-store"
 import { PresetBrowser, type BrowserPreset } from "../panels/preset-browser"
 import { SavePresetDialog, type SavePresetFormData } from "../presets/save-preset-dialog"
+import { useTimelineStore } from "../../../stores/timeline-store"
 
 interface TextClipInspectorProps {
   clip: TextClip
@@ -43,10 +61,21 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
   const [browserOpen, setBrowserOpen] = useState(false)
   const [saveOpen, setSaveOpen] = useState(false)
 
+  const canvasWidth = useTimelineStore(
+    (state) => state.engine?.history.present.canvas.width ?? 1920,
+  )
+  const canvasHeight = useTimelineStore(
+    (state) => state.engine?.history.present.canvas.height ?? 1080,
+  )
+
   const activePresetName = useMemo(() => {
     const preset = registry.getPresetById(clip.presetId)
     return preset?.name ?? clip.presetId
   }, [registry, clip.presetId])
+
+  const categoryPresets = useMemo(() => {
+    return listTextPresetsByCategory(clip.category)
+  }, [clip.category])
 
   function handleApplyPreset(preset: BrowserPreset) {
     const definition = textPresetToDefinition(preset as TextPresetRecord)
@@ -56,6 +85,61 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
       primaryText: clip.primaryText,
       secondaryText: clip.secondaryText,
       tagText: clip.tagText,
+    })
+  }
+
+  function handleQuickSwitchPreset(presetId: string) {
+    const definition = getTextPresetById(presetId)
+    const updated = applyTextPresetToClip(clip, definition)
+    onChange({
+      ...updated,
+      primaryText: clip.primaryText,
+      secondaryText: clip.secondaryText,
+      tagText: clip.tagText,
+    })
+  }
+
+  function handleResetDimensions() {
+    const defaultDef = getTextPresetById(clip.presetId)
+    onChange({
+      width: defaultDef.width,
+      height: defaultDef.height,
+      fontSize: defaultDef.fontSize,
+      backdropPaddingX: defaultDef.backdropPaddingX,
+      backdropPaddingY: defaultDef.backdropPaddingY,
+      backdropBorderRadius: defaultDef.backdropBorderRadius,
+    })
+    toast({ title: "Dimensions reset", description: "Reset layout properties to preset defaults." })
+  }
+
+  function handleAlignToCanvas(position: "center" | "lower-third" | "top-left" | "top-right" | "bottom-left" | "bottom-right") {
+    let targetX = clip.x
+    let targetY = clip.y
+    const pad = 60
+
+    if (position === "center") {
+      targetX = Math.round((canvasWidth - clip.width) / 2)
+      targetY = Math.round((canvasHeight - clip.height) / 2)
+    } else if (position === "lower-third") {
+      targetX = Math.round((canvasWidth - clip.width) / 2)
+      targetY = Math.round(canvasHeight - clip.height - 90)
+    } else if (position === "top-left") {
+      targetX = pad
+      targetY = pad
+    } else if (position === "top-right") {
+      targetX = canvasWidth - clip.width - pad
+      targetY = pad
+    } else if (position === "bottom-left") {
+      targetX = pad
+      targetY = canvasHeight - clip.height - pad
+    } else if (position === "bottom-right") {
+      targetX = canvasWidth - clip.width - pad
+      targetY = canvasHeight - clip.height - pad
+    }
+
+    onChange({
+      x: Math.max(0, targetX),
+      y: Math.max(0, targetY),
     })
   }
 
@@ -120,7 +204,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
       </div>
 
       {/* Preset Controls */}
-      <InspectorSection title="Style Preset">
+      <InspectorSection title="Style Preset & Theme">
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-dim px-2.5 py-1.5">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
@@ -133,7 +217,28 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               {activePresetName}
             </span>
           </div>
-          <div className="grid grid-cols-2 gap-2">
+
+          {/* Quick Preset Selector Chips */}
+          <div className="flex flex-wrap gap-1">
+            {categoryPresets.slice(0, 6).map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => handleQuickSwitchPreset(preset.id)}
+                className={cn(
+                  "rounded px-2 py-1 text-[10px] font-medium transition-colors",
+                  clip.presetId === preset.id
+                    ? "bg-primary/20 text-primary border border-primary/40 font-semibold"
+                    : "bg-surface-dim text-muted-foreground hover:bg-surface-container hover:text-foreground border border-border/60",
+                )}
+                title={preset.description}
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 mt-0.5">
             <Button
               variant="secondary"
               size="sm"
@@ -141,7 +246,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               onClick={() => setBrowserOpen(true)}
             >
               <FolderOpen className="size-3.5" aria-hidden />
-              Browse
+              Browse Library
             </Button>
             <Button
               variant="outline"
@@ -150,7 +255,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               onClick={() => setSaveOpen(true)}
             >
               <Save className="size-3.5" aria-hidden />
-              Save
+              Save As Preset
             </Button>
           </div>
         </div>
@@ -183,6 +288,60 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
         onSave={handleSavePreset}
       />
 
+      {/* Quick Placement */}
+      <InspectorSection title="Quick Alignment">
+        <div className="grid grid-cols-3 gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px] px-1"
+            onClick={() => handleAlignToCanvas("center")}
+          >
+            🎯 Center
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px] px-1"
+            onClick={() => handleAlignToCanvas("lower-third")}
+          >
+            ⬇️ Lower Third
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px] px-1"
+            onClick={() => handleAlignToCanvas("top-left")}
+          >
+            ↖️ Top Left
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px] px-1"
+            onClick={() => handleAlignToCanvas("top-right")}
+          >
+            ↗️ Top Right
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px] px-1"
+            onClick={() => handleAlignToCanvas("bottom-left")}
+          >
+            ↙️ Bottom Left
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[10px] px-1"
+            onClick={() => handleAlignToCanvas("bottom-right")}
+          >
+            ↘️ Bottom Right
+          </Button>
+        </div>
+      </InspectorSection>
+
       {/* Text Content */}
       <InspectorSection title="Text Content">
         <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
@@ -214,7 +373,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             value={clip.tagText ?? ""}
             onChange={(e) => onChange({ tagText: e.target.value })}
             placeholder="Tag / Topic badge (optional)..."
-            className="h-8 text-xs uppercase"
+            className="h-8 text-xs uppercase font-semibold"
           />
         </label>
       </InspectorSection>
@@ -340,9 +499,9 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
           </div>
 
           <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] text-muted-foreground">Accent Bar</span>
+            <span className="text-[11px] text-muted-foreground">Accent / Tag Color</span>
             <ColorPicker
-              aria-label="Accent bar color"
+              aria-label="Accent color"
               size="sm"
               value={clip.accentColor}
               onChange={(accentColor) => onChange({ accentColor })}
@@ -350,7 +509,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
           </div>
         </div>
 
-        <div className="mt-2">
+        <div className="mt-2 pt-2 border-t border-border/50">
           <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
             Backdrop Style
           </label>
@@ -374,7 +533,17 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
         </div>
 
         {clip.backdropStyle !== "none" && (
-          <div className="space-y-2 mt-2">
+          <div className="space-y-2.5 mt-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-muted-foreground">Backdrop Color</span>
+              <ColorPicker
+                aria-label="Backdrop color"
+                size="sm"
+                value={clip.backdropColor}
+                onChange={(backdropColor) => onChange({ backdropColor })}
+              />
+            </div>
+
             <div className="space-y-1">
               <div className="flex justify-between text-[11px] text-muted-foreground">
                 <span>Backdrop Opacity</span>
@@ -396,20 +565,45 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
               </div>
               <DebouncedSlider
                 min={0}
-                max={32}
+                max={48}
                 step={2}
                 value={[clip.backdropBorderRadius]}
                 onValueCommit={([val]) => onChange({ backdropBorderRadius: val })}
               />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-[11px] text-muted-foreground">
+                <span>Padding X / Y</span>
+                <span>
+                  {clip.backdropPaddingX}px / {clip.backdropPaddingY}px
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <DebouncedSlider
+                  min={4}
+                  max={64}
+                  step={2}
+                  value={[clip.backdropPaddingX]}
+                  onValueCommit={([val]) => onChange({ backdropPaddingX: val })}
+                />
+                <DebouncedSlider
+                  min={4}
+                  max={48}
+                  step={2}
+                  value={[clip.backdropPaddingY]}
+                  onValueCommit={([val]) => onChange({ backdropPaddingY: val })}
+                />
+              </div>
             </div>
           </div>
         )}
       </InspectorSection>
 
       {/* Shadow & Glow */}
-      <InspectorSection title="Shadow & Glow">
+      <InspectorSection title="Shadow & Ambient Glow">
         <div className="flex items-center justify-between">
-          <span className="text-[11px] font-medium text-foreground">Drop Shadow</span>
+          <span className="text-[11px] font-medium text-foreground">Drop Shadow / Glow</span>
           <Switch
             checked={clip.shadowEnabled ?? true}
             onCheckedChange={(checked) => onChange({ shadowEnabled: checked })}
@@ -417,24 +611,36 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
         </div>
 
         {clip.shadowEnabled && (
-          <div className="space-y-1.5 mt-1">
-            <div className="flex justify-between text-[11px] text-muted-foreground">
-              <span>Shadow Blur</span>
-              <span>{clip.shadowBlur ?? 16}px</span>
+          <div className="space-y-2 mt-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-muted-foreground">Shadow Color</span>
+              <ColorPicker
+                aria-label="Shadow color"
+                size="sm"
+                value={clip.shadowColor ?? "rgba(0,0,0,0.6)"}
+                onChange={(shadowColor) => onChange({ shadowColor })}
+              />
             </div>
-            <DebouncedSlider
-              min={2}
-              max={40}
-              step={2}
-              value={[clip.shadowBlur ?? 16]}
-              onValueCommit={([val]) => onChange({ shadowBlur: val })}
-            />
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-[11px] text-muted-foreground">
+                <span>Shadow Blur</span>
+                <span>{clip.shadowBlur ?? 16}px</span>
+              </div>
+              <DebouncedSlider
+                min={2}
+                max={48}
+                step={2}
+                value={[clip.shadowBlur ?? 16]}
+                onValueCommit={([val]) => onChange({ shadowBlur: val })}
+              />
+            </div>
           </div>
         )}
       </InspectorSection>
 
       {/* Animation */}
-      <InspectorSection title="Animation">
+      <InspectorSection title="Motion & Animation">
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
@@ -452,9 +658,13 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
                 <SelectItem value="fade">Fade</SelectItem>
                 <SelectItem value="slide-up">Slide Up</SelectItem>
                 <SelectItem value="slide-down">Slide Down</SelectItem>
-                <SelectItem value="typewriter">Typewriter</SelectItem>
+                <SelectItem value="slide-left">Slide Left</SelectItem>
+                <SelectItem value="slide-right">Slide Right</SelectItem>
                 <SelectItem value="zoom-punch">Zoom Punch</SelectItem>
                 <SelectItem value="expand-bar">Expand Bar</SelectItem>
+                <SelectItem value="pop-in">Pop In</SelectItem>
+                <SelectItem value="bounce">Bounce</SelectItem>
+                <SelectItem value="typewriter">Typewriter</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -475,22 +685,97 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
                 <SelectItem value="fade">Fade</SelectItem>
                 <SelectItem value="slide-down">Slide Down</SelectItem>
                 <SelectItem value="slide-up">Slide Up</SelectItem>
+                <SelectItem value="slide-left">Slide Left</SelectItem>
+                <SelectItem value="slide-right">Slide Right</SelectItem>
+                <SelectItem value="zoom-punch">Zoom Punch</SelectItem>
               </SelectContent>
             </Select>
           </div>
         </div>
+
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] text-muted-foreground">
+              <span>In Duration</span>
+              <span>{clip.overlayAnimation?.inDurationMs ?? 350}ms</span>
+            </div>
+            <DebouncedSlider
+              min={100}
+              max={1500}
+              step={50}
+              value={[clip.overlayAnimation?.inDurationMs ?? 350]}
+              onValueCommit={([val]) =>
+                onChange({
+                  overlayAnimation: {
+                    ...clip.overlayAnimation,
+                    inDurationMs: val,
+                  },
+                })
+              }
+            />
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] text-muted-foreground">
+              <span>Out Duration</span>
+              <span>{clip.overlayAnimation?.outDurationMs ?? 350}ms</span>
+            </div>
+            <DebouncedSlider
+              min={100}
+              max={1500}
+              step={50}
+              value={[clip.overlayAnimation?.outDurationMs ?? 350]}
+              onValueCommit={([val]) =>
+                onChange({
+                  overlayAnimation: {
+                    ...clip.overlayAnimation,
+                    outDurationMs: val,
+                  },
+                })
+              }
+            />
+          </div>
+        </div>
+
+        <div className="mt-2">
+          <label className="text-[10px] text-muted-foreground uppercase tracking-wider block mb-1">
+            Motion Easing Curve
+          </label>
+          <Select
+            value={clip.overlayAnimation?.easing ?? "expo-out"}
+            onValueChange={(val) =>
+              onChange({
+                overlayAnimation: {
+                  ...clip.overlayAnimation,
+                  easing: val as OverlayEasing,
+                },
+              })
+            }
+          >
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="expo-out">Expo Out (Snappy Finish)</SelectItem>
+              <SelectItem value="ease-out">Ease Out (Smooth Decel)</SelectItem>
+              <SelectItem value="ease-in-out">Ease In Out (Natural)</SelectItem>
+              <SelectItem value="ease-in">Ease In (Accelerate)</SelectItem>
+              <SelectItem value="linear">Linear (Constant Speed)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </InspectorSection>
 
       {/* Transform & Geometry */}
-      <InspectorSection title="Position & Dimensions">
+      <InspectorSection title="Dimensions & Geometry">
         <div className="grid grid-cols-2 gap-2">
           <NumberField
-            label="X Pos"
+            label="X Position"
             value={Math.round(clip.x)}
             onChange={(val) => onChange({ x: val })}
           />
           <NumberField
-            label="Y Pos"
+            label="Y Position"
             value={Math.round(clip.y)}
             onChange={(val) => onChange({ y: val })}
           />
@@ -507,6 +792,16 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             min={30}
           />
         </div>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-xs text-muted-foreground hover:text-foreground justify-center gap-1.5 mt-1"
+          onClick={handleResetDimensions}
+        >
+          <RotateCcw className="size-3" aria-hidden />
+          Reset to Preset Dimensions
+        </Button>
       </InspectorSection>
     </div>
   )

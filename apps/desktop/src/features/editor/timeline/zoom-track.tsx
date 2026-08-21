@@ -19,10 +19,10 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import { Lock, Plus, Sparkles, ZoomIn } from "lucide-react"
+import { Lock, Plus, Scissors, Sparkles, Trash2, ZoomIn } from "lucide-react"
 
 interface ZoomSegmentAction {
-  kind: "toggle-lock" | "split" | "delete" | "regenerate-from-click"
+  kind: "toggle-lock" | "split" | "delete" | "ripple-delete" | "regenerate-from-click"
   segmentId: string
 }
 
@@ -494,14 +494,22 @@ function ZoomSegmentItem({
           onSelect={() => onZoomSegmentAction?.({ kind: "split", segmentId: segment.id })}
           disabled={segment.locked}
         >
-          Split
+          <Scissors className="size-3.5 mr-2" /> Split
         </ContextMenuItem>
+        <ContextMenuSeparator />
         <ContextMenuItem
           className="text-destructive focus:bg-destructive/10 focus:text-destructive"
           onSelect={() => onZoomSegmentAction?.({ kind: "delete", segmentId: segment.id })}
           disabled={segment.locked}
         >
-          Delete
+          <Trash2 className="size-3.5 mr-2" /> Delete
+        </ContextMenuItem>
+        <ContextMenuItem
+          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+          onSelect={() => onZoomSegmentAction?.({ kind: "ripple-delete", segmentId: segment.id })}
+          disabled={segment.locked}
+        >
+          <Trash2 className="size-3.5 mr-2" /> Ripple Delete (Shift+Del)
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
