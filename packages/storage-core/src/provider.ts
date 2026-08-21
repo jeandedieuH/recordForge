@@ -77,17 +77,18 @@ export function formatEta(seconds: number): string {
 export function calculateProgress(
   bytesUploaded: number,
   totalBytes: number,
-  speedBps = 0
+  speedBps?: number | null
 ): UploadProgress {
+  const currentSpeed = speedBps ?? 0
   const percentage = totalBytes > 0 ? Math.min(100, (bytesUploaded / totalBytes) * 100) : 0
   const remainingBytes = Math.max(0, totalBytes - bytesUploaded)
-  const etaSeconds = speedBps > 0 ? remainingBytes / speedBps : 0
+  const etaSeconds = currentSpeed > 0 ? remainingBytes / currentSpeed : 0
 
   return {
     bytesUploaded,
     totalBytes,
     percentage: Math.round(percentage * 10) / 10,
-    speedBps,
+    speedBps: currentSpeed,
     etaSeconds: Math.ceil(etaSeconds),
   }
 }
