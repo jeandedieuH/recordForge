@@ -122,9 +122,10 @@ export function AppShell() {
     let cancelled = false
     void loadRecovery().then(() => {
       if (cancelled) return
-      const recoverable = useRecorderStore
-        .getState()
-        .recovery.filter((session) => session.isRecoverable)
+      const sessions = useRecorderStore.getState().recovery
+      const recoverable = sessions.filter((session) => session.isRecoverable)
+      const unrecoverable = sessions.filter((session) => !session.isRecoverable)
+
       if (recoverable.length > 0) {
         toast({
           title:
@@ -132,6 +133,13 @@ export function AppShell() {
               ? "Interrupted recording found"
               : `${recoverable.length} interrupted recordings found`,
           description: "Recover or delete them from the Library.",
+        })
+      } else if (unrecoverable.length > 0) {
+        toast({
+          title: "Incomplete recording session found",
+          description:
+            "An interrupted session with no recoverable video was detected. Review or discard it in the Library.",
+          variant: "warning",
         })
       }
     })

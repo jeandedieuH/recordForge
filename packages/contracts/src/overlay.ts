@@ -38,8 +38,8 @@ export type OverlayTransform = z.infer<typeof overlayTransformSchema>
 
 const overlayRenderItemBaseSchema = z.object({
   id: z.string().min(1),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   transform: overlayTransformSchema,
   animation: overlayAnimationSchema.default({}),
   enabled: z.boolean().default(true),

@@ -211,9 +211,12 @@ function createAudioClip(
   duration: number,
   streamIndex: number,
 ): AudioClip | null {
-  const startMs = Math.min(stream?.startMs ?? 0, duration)
-  const availableDuration = stream?.durationMs ?? Math.max(0, duration - startMs)
-  const clipDuration = Math.min(Math.max(0, availableDuration), Math.max(0, duration - startMs))
+  const roundedDuration = Math.round(duration)
+  const startMs = Math.round(Math.min(stream?.startMs ?? 0, roundedDuration))
+  const availableDuration = Math.round(stream?.durationMs ?? Math.max(0, roundedDuration - startMs))
+  const clipDuration = Math.round(
+    Math.min(Math.max(0, availableDuration), Math.max(0, roundedDuration - startMs)),
+  )
   if (clipDuration <= 0) return null
 
   return {
@@ -240,7 +243,7 @@ export function createTimelineFromRecording(
   projectId?: string,
 ): TimelineState {
   const now = new Date().toISOString()
-  const duration = Math.max(metadata.durationMs, recording.durationMs)
+  const duration = Math.round(Math.max(metadata.durationMs, recording.durationMs))
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const primaryVideo = videoStreams[0]
   const cameraStreams = recording.webcamPath

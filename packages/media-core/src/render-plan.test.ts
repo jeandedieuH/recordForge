@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest"
 import {
   annotationClipSchema,
   defaultCursorSettings,
+  exportTimelineOptionsSchema,
   imageClipSchema,
+  renderPlanSchema,
   textClipSchema,
   type ProjectAsset,
   type TimelineState,
@@ -1010,5 +1012,85 @@ describe("render-plan", () => {
     expect(segment.keyframes!.length).toBeGreaterThanOrEqual(10)
     expect(segment.keyframes![0].timeMs).toBe(1000)
     expect(segment.keyframes![segment.keyframes!.length - 1].timeMs).toBe(2000)
+  })
+
+  it("handles floating-point timing values seamlessly and passes renderPlanSchema validation", () => {
+    const state = makeTimeline()
+    // Inject float values across clips, tracks, and effects
+    state.tracks[0].clips = [
+      {
+        id: "clip-0",
+        kind: "screen",
+        assetId: "rec-1",
+        startMs: 0.25,
+        durationMs: 1234.567,
+        sourceInMs: 0.1,
+        sourceOutMs: 1234.667,
+        speed: 1.5,
+      },
+      {
+        id: "clip-1",
+        kind: "screen",
+        assetId: "rec-1",
+        startMs: 2000.33,
+        durationMs: 3456.78,
+        sourceInMs: 1500.2,
+        sourceOutMs: 6685.37,
+        speed: 1.5,
+      },
+    ]
+
+    const cursorAsset: ProjectAsset = {
+      id: "cursor-1",
+      role: "cursor_events",
+      kind: "cursor",
+      path: "cursor.json",
+      status: "available",
+      importStrategy: "copy",
+      derivativeVersion: 1,
+      durationMs: 0,
+      hasAudio: false,
+    }
+
+    const planResult = buildRenderPlan({
+      state,
+      projectId: "project-float-test",
+      assets: [cursorAsset],
+    })
+
+    expect(planResult.ok).toBe(true)
+    if (!planResult.ok) return
+
+    const plan = planResult.value
+    // All timing fields must be integers
+    expect(Number.isInteger(plan.durationMs)).toBe(true)
+    expect(Number.isInteger(plan.segments[0].outputStartMs)).toBe(true)
+    expect(Number.isInteger(plan.segments[0].outputEndMs)).toBe(true)
+    expect(Number.isInteger(plan.segments[0].sourceInMs)).toBe(true)
+    expect(Number.isInteger(plan.segments[0].sourceOutMs)).toBe(true)
+    expect(Number.isInteger(plan.gaps[0].startMs)).toBe(true)
+    expect(Number.isInteger(plan.gaps[0].endMs)).toBe(true)
+    expect(Number.isInteger(plan.cursorEffects[0].startMs)).toBe(true)
+    expect(Number.isInteger(plan.cursorEffects[0].endMs)).toBe(true)
+
+    // Validates cleanly against renderPlanSchema
+    const validatedPlan = renderPlanSchema.parse(plan)
+    expect(validatedPlan).toBeDefined()
+
+    // Validates cleanly in full export options
+    const validatedExport = exportTimelineOptionsSchema.parse({
+      projectId: "project-float-test",
+      outputPath: "D:/Exports/output.mp4",
+      plan,
+      settings: {
+        preset: "balanced",
+        codec: "h264",
+        encoder: "auto",
+        container: "mp4",
+        captionMode: "burn-in",
+        chapterMode: "embed",
+      },
+    })
+    expect(validatedExport.plan.durationMs).toBe(plan.durationMs)
   })
 })

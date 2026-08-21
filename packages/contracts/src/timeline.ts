@@ -266,10 +266,10 @@ export const cursorEffectClipSchema = z.object({
   id: z.string(),
   kind: z.literal("cursor-effect"),
   assetId: z.string(),
-  startMs: z.number().int().min(0),
-  durationMs: z.number().int().min(1),
-  sourceInMs: z.number().int().min(0).default(0),
-  sourceOutMs: z.number().int().min(0).default(0),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  durationMs: z.number().transform(Math.round).pipe(z.number().int().min(1)),
+  sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)).default(0),
+  sourceOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0)).default(0),
   speed: z.number().positive().default(1),
   presetId: cursorIconPresetSchema.default("recorded-system"),
   scale: z.number().min(0.2).max(5).default(1),
@@ -644,8 +644,8 @@ export const exportPresetSchema = z.enum([
 export type ExportPreset = z.infer<typeof exportPresetSchema>
 
 export const exportRangeSchema = z.object({
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
 })
 export type ExportRange = z.infer<typeof exportRangeSchema>
 
@@ -664,8 +664,8 @@ export type ExportChapterMode = RenderChapterMode
 export const renderPlanChapterSchema = z.object({
   id: z.string(),
   title: z.string().min(1),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
 })
 export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
 
@@ -681,8 +681,8 @@ export const exportSettingsSchema = z.object({
 export type ExportSettings = z.infer<typeof exportSettingsSchema>
 
 export const renderPlanGapSchema = z.object({
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
 })
 export type RenderPlanGap = z.infer<typeof renderPlanGapSchema>
 
@@ -694,10 +694,10 @@ export const renderSegmentSchema = z.object({
   fadeInMs: z.number().min(0).optional(),
   fadeOutMs: z.number().min(0).optional(),
   speed: z.number().positive().default(1),
-  sourceInMs: z.number().int().min(0),
-  sourceOutMs: z.number().int().min(0),
-  outputStartMs: z.number().int().min(0),
-  outputEndMs: z.number().int().min(0),
+  sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  sourceOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  outputStartMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  outputEndMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   // Native source dimensions, when known, so the export can fit the recorded
   // video precisely instead of guessing from the padded content area.
   sourceWidth: z.number().int().positive().optional(),
@@ -722,10 +722,10 @@ export type RenderPlanAudio = z.infer<typeof renderPlanAudioSchema>
 export const renderPlanOverlaySchema = z.object({
   assetId: z.string(),
   streamIndex: z.number().int().min(0).optional(),
-  sourceInMs: z.number().int().min(0),
-  sourceOutMs: z.number().int().min(0),
-  outputStartMs: z.number().int().min(0),
-  outputEndMs: z.number().int().min(0),
+  sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  sourceOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  outputStartMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  outputEndMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   speed: z.number().positive().default(1),
   x: z.number(),
   y: z.number(),
@@ -751,8 +751,8 @@ export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
 export const renderPlanCaptionSchema = z.object({
   id: z.string(),
   text: z.string().min(1),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   style: captionStylePresetSchema.default("default"),
   placement: captionPlacementSchema.default("bottom"),
   safeAreaMargin: z.number().int().min(0).max(2_000).default(48),
@@ -763,8 +763,8 @@ export type RenderPlanCaption = z.infer<typeof renderPlanCaptionSchema>
 export const renderPlanMaskSchema = z.object({
   id: z.string(),
   assetId: z.string().optional(),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   mode: maskModeSchema,
   rect: maskRectSchema,
   blurRadius: z.number().min(1).max(128).default(24),
@@ -776,7 +776,7 @@ export const renderPlanMaskSchema = z.object({
 export type RenderPlanMask = z.infer<typeof renderPlanMaskSchema>
 
 export const renderPlanZoomKeyframeSchema = z.object({
-  timeMs: z.number().int().min(0),
+  timeMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   target: zoomTargetSchema,
 })
 
@@ -784,13 +784,13 @@ export type RenderPlanZoomKeyframe = z.infer<typeof renderPlanZoomKeyframeSchema
 
 export const renderPlanZoomSegmentSchema = z.object({
   id: z.string(),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   target: zoomTargetSchema,
   scale: z.number().min(1).max(8).default(1.5),
   easing: zoomEasingSchema.default("smooth"),
-  transitionInMs: z.number().int().min(0).max(10_000).default(400),
-  transitionOutMs: z.number().int().min(0).max(10_000).default(400),
+  transitionInMs: z.number().transform(Math.round).pipe(z.number().int().min(0).max(10_000)).default(400),
+  transitionOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0).max(10_000)).default(400),
   enabled: z.boolean().default(true),
   mode: zoomModeSchema.optional(),
   source: zoomSourceSchema.optional(),
@@ -810,8 +810,8 @@ export type RenderPlanZoomSegment = z.infer<typeof renderPlanZoomSegmentSchema>
 export const renderPlanCursorEffectSchema = z.object({
   id: z.string(),
   assetId: z.string(),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   enabled: z.boolean().default(true),
   presetId: cursorIconPresetSchema.default("recorded-system"),
   scale: z.number().min(0.2).max(5).default(1),
@@ -823,8 +823,8 @@ export type RenderPlanCursorEffect = z.infer<typeof renderPlanCursorEffectSchema
 
 export const renderPlanAnnotationSchema = z.object({
   id: z.string(),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   annotationType: annotationTypeSchema,
   x: z.number(),
   y: z.number(),
@@ -855,8 +855,8 @@ export type RenderPlanAnnotation = z.infer<typeof renderPlanAnnotationSchema>
 
 export const renderPlanTextSchema = z.object({
   id: z.string(),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   presetId: z.string(),
   category: titlePresetCategorySchema,
   primaryText: z.string().min(1),
@@ -894,8 +894,8 @@ export type RenderPlanText = z.infer<typeof renderPlanTextSchema>
 export const renderPlanImageSchema = z.object({
   id: z.string(),
   assetId: z.string(),
-  startMs: z.number().int().min(0),
-  endMs: z.number().int().positive(),
+  startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   x: z.number(),
   y: z.number(),
   width: z.number().min(10),
@@ -920,7 +920,7 @@ export const renderPlanSchema = z
   .object({
     projectId: z.string().min(1),
     canvas: timelineCanvasSchema,
-    durationMs: z.number().int().positive(),
+    durationMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
     segments: z.array(renderSegmentSchema).min(1),
     gaps: z.array(renderPlanGapSchema).default([]),
     // `audio` remains for backwards-compatible consumers; new exports use all tracks.

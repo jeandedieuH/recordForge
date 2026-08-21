@@ -295,7 +295,11 @@ fn build_screen_command(
 
     command.args([
         "-movflags",
-        "+frag_keyframe+empty_moov+default_base_moof+faststart",
+        "+frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration",
+        "2000000",
+        "-min_frag_duration",
+        "2000000",
         output,
     ]);
 
@@ -355,7 +359,11 @@ fn build_webcam_command(
     add_video_encoder(&mut command, profile, encoder, true);
     command.args([
         "-movflags",
-        "+frag_keyframe+empty_moov+default_base_moof+faststart",
+        "+frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration",
+        "2000000",
+        "-min_frag_duration",
+        "2000000",
         output,
     ]);
 
@@ -472,6 +480,14 @@ fn add_video_encoder(
 ) {
     command.arg("-c:v").arg(encoder);
     command.args(["-pix_fmt", "yuv420p", "-r", &profile.fps.to_string()]);
+
+    let gop_size = profile.fps.max(1);
+    command.args([
+        "-g",
+        &gop_size.to_string(),
+        "-keyint_min",
+        &(gop_size / 2).max(1).to_string(),
+    ]);
 
     let default_bitrate = if is_webcam {
         if profile.id == "low-impact" {

@@ -585,6 +585,7 @@ fn capture_worker_inner(
         return Err(format!("write WASAPI startup silence: {error}"));
     }
     let mut data_frames = data_bytes / block_align as u64;
+    let mut last_flush_bytes = data_bytes;
     let is_system_loopback = options.kind == WasapiCaptureKind::SystemLoopback;
 
     let capture_result = 'capture: loop {
@@ -659,6 +660,14 @@ fn capture_worker_inner(
                 None => break 'capture Err("WASAPI WAV payload size overflow".into()),
             };
             data_frames = data_bytes / block_align as u64;
+
+            // Periodically flush OS write buffers every ~1 second (~192KB) so abrupt power loss or crashes
+            // do not lose captured audio packets in write buffers.
+            if data_bytes.saturating_sub(last_flush_bytes) >= 192_000 {
+                let _ = file.flush();
+                last_flush_bytes = data_bytes;
+            }
+
             if buffer_info.flags.data_discontinuity {
                 tracing::debug!(
                     path = %options.output_path.display(),
@@ -937,10 +946,85 @@ fn finalize_wav(file: &mut std::fs::File, data_bytes: u64) -> std::io::Result<u6
     Ok(data_bytes + WAV_HEADER_SIZE)
 }
 
+/// If an abruptly-interrupted WAV file has written audio data but its 44-byte
+/// header still has zero RIFF and data chunk sizes, repair the header in-place
+/// using the actual on-disk length.
+pub fn repair_wav_header_if_needed(path: &Path) -> std::io::Result<u64> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let metadata = std::fs::metadata(path)?;
+    let file_len = metadata.len();
+    if file_len < WAV_HEADER_SIZE {
+        return Ok(0);
+    }
+
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let mut header = [0u8; WAV_HEADER_SIZE as usize];
+    file.read_exact(&mut header)?;
+
+    // Verify basic RIFF / WAVE / fmt / data magic
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" || &header[36..40] != b"data" {
+        return Ok(0);
+    }
+
+    let current_data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]);
+    let actual_data_size = (file_len - WAV_HEADER_SIZE).min(u32::MAX as u64) as u32;
+
+    if (current_data_size == 0 || current_data_size != actual_data_size) && actual_data_size > 0 {
+        let riff_size = 36u32.saturating_add(actual_data_size);
+        file.seek(SeekFrom::Start(4))?;
+        file.write_all(&riff_size.to_le_bytes())?;
+        file.seek(SeekFrom::Start(40))?;
+        file.write_all(&actual_data_size.to_le_bytes())?;
+        file.flush()?;
+        let _ = file.sync_all();
+        tracing::info!(
+            path = %path.display(),
+            actual_data_size,
+            "repaired unfinalized WAV header from file length"
+        );
+    }
+
+    Ok(file_len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn repairs_unfinalized_wav_header() {
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        let path = directory.path().join("unfinalized.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open temporary WAV");
+
+        write_wav_header(&mut file, 48000, 2, WasapiSampleFormat::Pcm16).expect("write header");
+        // Simulate writing 1000 bytes of PCM audio without calling finalize_wav
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(&vec![0x7fu8; 1000]).unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let repaired_len = repair_wav_header_if_needed(&path).expect("repair header");
+        assert_eq!(repaired_len, 1044);
+
+        let mut read_file = std::fs::File::open(&path).unwrap();
+        let mut header = [0u8; 44];
+        read_file.read_exact(&mut header).unwrap();
+
+        let riff_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]);
+        assert_eq!(data_size, 1000);
+        assert_eq!(riff_size, 1036);
+    }
 
     #[test]
     fn uses_a_plausible_loopback_device_position() {

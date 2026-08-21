@@ -57,24 +57,31 @@ interface WindowedClip {
 
 function resolveRange(range: ExportRange | undefined): ExportRange | undefined {
   if (!range) return undefined
-  if (range.endMs <= range.startMs) return undefined
-  return range
+  const startMs = Math.round(range.startMs)
+  const endMs = Math.round(range.endMs)
+  if (endMs <= startMs) return undefined
+  return { startMs, endMs }
 }
 
 function windowClip(clip: TimelineClip, range: ExportRange | undefined): WindowedClip | null {
-  const clipEndMs = clip.startMs + clip.durationMs
-  const startMs = Math.max(clip.startMs, range?.startMs ?? 0)
-  const endMs = Math.min(clipEndMs, range?.endMs ?? clipEndMs)
+  const clipStartMs = Math.round(clip.startMs)
+  const clipDurationMs = Math.round(clip.durationMs)
+  const clipEndMs = clipStartMs + clipDurationMs
+  const rangeStartMs = range ? Math.round(range.startMs) : undefined
+  const rangeEndMs = range ? Math.round(range.endMs) : undefined
+  const startMs = Math.max(clipStartMs, rangeStartMs ?? 0)
+  const endMs = Math.min(clipEndMs, rangeEndMs ?? clipEndMs)
   if (endMs <= startMs) return null
 
-  const outputOffsetMs = range?.startMs ?? 0
-  const relativeStartMs = startMs - clip.startMs
-  const relativeEndMs = endMs - clip.startMs
+  const outputOffsetMs = rangeStartMs ?? 0
+  const relativeStartMs = startMs - clipStartMs
+  const relativeEndMs = endMs - clipStartMs
+  const sourceInMs = Math.round(clip.sourceInMs)
   return {
-    sourceInMs: clip.sourceInMs + Math.round(relativeStartMs * clip.speed),
-    sourceOutMs: clip.sourceInMs + Math.round(relativeEndMs * clip.speed),
-    outputStartMs: startMs - outputOffsetMs,
-    outputEndMs: endMs - outputOffsetMs,
+    sourceInMs: sourceInMs + Math.round(relativeStartMs * clip.speed),
+    sourceOutMs: sourceInMs + Math.round(relativeEndMs * clip.speed),
+    outputStartMs: Math.round(startMs - outputOffsetMs),
+    outputEndMs: Math.round(endMs - outputOffsetMs),
   }
 }
 
@@ -83,10 +90,14 @@ function windowTimeRange(
   endMs: number,
   range: ExportRange | undefined,
 ): { startMs: number; endMs: number } | null {
-  const start = Math.max(startMs, range?.startMs ?? 0)
-  const end = Math.min(endMs, range?.endMs ?? endMs)
+  const rangeStart = range ? Math.round(range.startMs) : 0
+  const rangeEnd = range ? Math.round(range.endMs) : undefined
+  const roundedStart = Math.round(startMs)
+  const roundedEnd = Math.round(endMs)
+  const start = Math.max(roundedStart, rangeStart)
+  const end = Math.min(roundedEnd, rangeEnd ?? roundedEnd)
   if (end <= start) return null
-  return { startMs: start - (range?.startMs ?? 0), endMs: end - (range?.startMs ?? 0) }
+  return { startMs: Math.round(start - rangeStart), endMs: Math.round(end - rangeStart) }
 }
 
 function assetForClip(
@@ -109,19 +120,19 @@ function toSegments(
       const durationMs = window.outputEndMs - window.outputStartMs
       const asset = assetForClip(assets, clip.assetId)
       const sourceWidth =
-        asset && typeof asset.width === "number" && asset.width > 0 ? asset.width : undefined
+        asset && typeof asset.width === "number" && asset.width > 0 ? Math.round(asset.width) : undefined
       const sourceHeight =
-        asset && typeof asset.height === "number" && asset.height > 0 ? asset.height : undefined
+        asset && typeof asset.height === "number" && asset.height > 0 ? Math.round(asset.height) : undefined
       return {
         assetId: clip.assetId,
         ...("streamIndex" in clip && clip.streamIndex !== undefined
-          ? { streamIndex: clip.streamIndex }
+          ? { streamIndex: Math.round(clip.streamIndex) }
           : {}),
         ...(includeAudioSettings && clip.kind === "audio"
           ? {
               volume: clip.volume,
-              fadeInMs: Math.min(clip.fadeInMs, durationMs),
-              fadeOutMs: Math.min(clip.fadeOutMs, durationMs),
+              fadeInMs: Math.round(Math.min(clip.fadeInMs, durationMs)),
+              fadeOutMs: Math.round(Math.min(clip.fadeOutMs, durationMs)),
             }
           : {}),
         sourceInMs: window.sourceInMs,
@@ -143,13 +154,16 @@ function toGaps(
 ): Array<{ startMs: number; endMs: number }> {
   const gaps: Array<{ startMs: number; endMs: number }> = []
   let cursorMs = 0
+  const totalDuration = Math.round(durationMs)
   for (const segment of segments) {
-    if (segment.outputStartMs > cursorMs) {
-      gaps.push({ startMs: cursorMs, endMs: segment.outputStartMs })
+    const segStart = Math.round(segment.outputStartMs)
+    const segEnd = Math.round(segment.outputEndMs)
+    if (segStart > cursorMs) {
+      gaps.push({ startMs: cursorMs, endMs: segStart })
     }
-    cursorMs = Math.max(cursorMs, segment.outputEndMs)
+    cursorMs = Math.max(cursorMs, segEnd)
   }
-  if (cursorMs < durationMs) gaps.push({ startMs: cursorMs, endMs: durationMs })
+  if (cursorMs < totalDuration) gaps.push({ startMs: cursorMs, endMs: totalDuration })
   return gaps
 }
 
@@ -709,7 +723,10 @@ function toCursorEffects(
   if (cursorAsset && (settings?.enabled ?? true)) {
     const screenTrack = state.tracks.find((candidate) => candidate.kind === "screen")
     const durationMs = screenTrack
-      ? screenTrack.clips.reduce((max, c) => Math.max(max, c.startMs + c.durationMs), 0)
+      ? screenTrack.clips.reduce(
+          (max, c) => Math.max(max, Math.round(c.startMs) + Math.round(c.durationMs)),
+          0,
+        )
       : 0
     const window = windowTimeRange(0, durationMs, range)
     if (!window) return []
@@ -844,7 +861,7 @@ export function buildRenderPlan(
     (duration, segment) => Math.max(duration, segment.outputEndMs),
     0,
   )
-  const durationMs = range ? range.endMs - range.startMs : screenDurationMs
+  const durationMs = Math.round(range ? range.endMs - range.startMs : screenDurationMs)
   const gaps = toGaps(segments, durationMs)
   const chapters = timelineMarkersToChapters(
     state.markers,

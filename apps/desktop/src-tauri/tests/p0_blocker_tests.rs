@@ -226,6 +226,44 @@ fn test_manifest_rewrite_is_atomic_and_durable() {
     std::fs::remove_dir_all(&temp_dir).unwrap();
 }
 
+#[test]
+fn test_recovery_repairs_unfinalized_audio_wav_header() {
+    let temp_dir = tempfile_dir("wav_repair");
+    let wav_path = temp_dir.join("mic_000.wav");
+
+    // Construct a standard 44-byte WAV header with 0 data length as happens before finalize_wav()
+    let mut header = vec![0u8; 44];
+    header[0..4].copy_from_slice(b"RIFF");
+    header[8..12].copy_from_slice(b"WAVE");
+    header[12..16].copy_from_slice(b"fmt ");
+    header[16..20].copy_from_slice(&16u32.to_le_bytes());
+    header[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
+    header[22..24].copy_from_slice(&2u16.to_le_bytes()); // 2 channels
+    header[24..28].copy_from_slice(&48000u32.to_le_bytes());
+    header[28..32].copy_from_slice(&192000u32.to_le_bytes());
+    header[32..34].copy_from_slice(&4u16.to_le_bytes());
+    header[34..36].copy_from_slice(&16u16.to_le_bytes());
+    header[36..40].copy_from_slice(b"data");
+    header[40..44].copy_from_slice(&0u32.to_le_bytes()); // unfinalized 0 size
+
+    let mut file = std::fs::File::create(&wav_path).unwrap();
+    std::io::Write::write_all(&mut file, &header).unwrap();
+    // Simulate 48,000 bytes of audio PCM written before crash
+    std::io::Write::write_all(&mut file, &vec![0x12u8; 48000]).unwrap();
+    drop(file);
+
+    let repaired_len = recordforge_desktop_lib::capture::audio::repair_wav_header_if_needed(&wav_path).unwrap();
+    assert_eq!(repaired_len, 48044);
+
+    let read_back = std::fs::read(&wav_path).unwrap();
+    let data_len = u32::from_le_bytes([read_back[40], read_back[41], read_back[42], read_back[43]]);
+    let riff_len = u32::from_le_bytes([read_back[4], read_back[5], read_back[6], read_back[7]]);
+    assert_eq!(data_len, 48000);
+    assert_eq!(riff_len, 48036);
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}
+
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
     let id = uuid::Uuid::new_v4().to_string();
     let dir = std::env::temp_dir().join(format!("recordforge_test_{prefix}_{id}"));

@@ -110,8 +110,9 @@ export function timelineMarkersToChapters(
     return []
   }
 
-  const rangeStart = range?.startMs ?? 0
-  const rangeEnd = range ? Math.min(range.endMs, durationMs) : durationMs
+  const rangeStart = range?.startMs !== undefined ? Math.round(range.startMs) : 0
+  const totalDuration = Math.round(durationMs)
+  const rangeEnd = range?.endMs !== undefined ? Math.min(Math.round(range.endMs), totalDuration) : totalDuration
   const effectiveDuration = Math.max(0, rangeEnd - rangeStart)
 
   if (effectiveDuration <= 0) {
@@ -120,10 +121,15 @@ export function timelineMarkersToChapters(
 
   // Filter markers within range and remap time relative to export start
   const windowedMarkers = markers
-    .filter((marker) => marker.timeMs >= rangeStart && marker.timeMs < rangeEnd)
     .map((marker) => ({
       id: marker.id,
       title: marker.label.trim() || "Chapter",
+      timeMs: Math.round(marker.timeMs),
+    }))
+    .filter((marker) => marker.timeMs >= rangeStart && marker.timeMs < rangeEnd)
+    .map((marker) => ({
+      id: marker.id,
+      title: marker.title,
       timeMs: marker.timeMs - rangeStart,
     }))
     .sort((left, right) => left.timeMs - right.timeMs)

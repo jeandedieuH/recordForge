@@ -63,11 +63,25 @@ export function RecoveryBanner({ sessions, onRecovered }: RecoveryBannerProps) {
             key={session.sessionId}
             className="flex items-center justify-between rounded bg-background/50 p-2 text-xs"
           >
-            <div>
-              <span className="font-mono">{session.sessionId.slice(0, 8)}</span>
-              <span className="ml-2 text-muted-foreground">
-                ({(session.outputSizeBytes / 1024 / 1024).toFixed(1)} MB captured)
-              </span>
+            <div className="flex flex-col gap-0.5">
+              <div className="flex items-center gap-2">
+                <span className="font-mono">{session.sessionId.slice(0, 8)}</span>
+                <span className="text-muted-foreground">
+                  {session.isRecoverable
+                    ? `(${(session.outputSizeBytes / 1024 / 1024).toFixed(1)} MB captured)`
+                    : "(Incomplete / 0 MB valid data)"}
+                </span>
+                {!session.isRecoverable && (
+                  <span className="rounded bg-destructive/15 px-1.5 py-0.2 text-[10px] font-medium text-destructive">
+                    Corrupt / Unrecoverable
+                  </span>
+                )}
+              </div>
+              {session.validationError && !session.isRecoverable ? (
+                <span className="text-[11px] text-muted-foreground">
+                  {session.validationError}
+                </span>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Button
@@ -81,7 +95,8 @@ export function RecoveryBanner({ sessions, onRecovered }: RecoveryBannerProps) {
               </Button>
               <Button
                 size="sm"
-                disabled={busySessionId === session.sessionId}
+                disabled={busySessionId === session.sessionId || !session.isRecoverable}
+                title={!session.isRecoverable ? "No valid video fragments to recover" : undefined}
                 onClick={() => handleRecover(session.sessionId)}
               >
                 <CheckCircle2 className="mr-1 h-3 w-3" />

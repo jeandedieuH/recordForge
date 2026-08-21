@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::{info, instrument};
 
 use super::config::builtin_profiles;
@@ -192,6 +193,11 @@ fn recover_session_inner(
                 "no valid fragments to recover".into(),
             )
             .into());
+        }
+
+        // Mux any un-muxed WASAPI audio tracks into each segment before concatenation
+        for segment in &segment_files {
+            mux_orphaned_segment_audio(work_dir, segment, manifest, ffmpeg_path, ffprobe_path);
         }
 
         let partial_output = work_dir.join("output.partial.mp4");
@@ -424,6 +430,119 @@ fn output_size_valid(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.len() > 1024)
         .unwrap_or(false)
+}
+
+fn media_has_audio(ffprobe_path: &str, path: &Path) -> bool {
+    let output = crate::process::create_command(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output();
+
+    output
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+fn probe_video_duration_ms(ffprobe_path: &str, path: &Path) -> Option<u64> {
+    crate::media::probe::probe_media(ffprobe_path, path, "recovery-probe")
+        .ok()
+        .map(|metadata| metadata.duration_ms)
+        .filter(|d| *d > 0)
+}
+
+fn mux_orphaned_segment_audio(
+    work_dir: &Path,
+    segment_path: &Path,
+    manifest: &RecordingManifest,
+    ffmpeg_path: &str,
+    ffprobe_path: &str,
+) {
+    if media_has_audio(ffprobe_path, segment_path) {
+        return;
+    }
+
+    let Some(idx) = segment_index(segment_path) else {
+        return;
+    };
+
+    let mic_path = work_dir.join(format!("mic_{:03}.wav", idx));
+    let sys_path = work_dir.join(format!("sys_{:03}.wav", idx));
+
+    let _ = crate::capture::audio::repair_wav_header_if_needed(&mic_path);
+    let _ = crate::capture::audio::repair_wav_header_if_needed(&sys_path);
+
+    let mut tracks = Vec::new();
+    if mic_path.is_file() {
+        if let Ok(meta) = std::fs::metadata(&mic_path) {
+            if meta.len() > 44 {
+                tracks.push(media::AudioTrackInput {
+                    path: mic_path.clone(),
+                    title: "Microphone",
+                    kind: media::AudioTrackKind::Microphone,
+                });
+            }
+        }
+    }
+    if sys_path.is_file() {
+        if let Ok(meta) = std::fs::metadata(&sys_path) {
+            if meta.len() > 44 {
+                tracks.push(media::AudioTrackInput {
+                    path: sys_path.clone(),
+                    title: "System Audio",
+                    kind: media::AudioTrackKind::System,
+                });
+            }
+        }
+    }
+
+    if tracks.is_empty() {
+        return;
+    }
+
+    let Some(duration_ms) = probe_video_duration_ms(ffprobe_path, segment_path) else {
+        return;
+    };
+    if duration_ms == 0 {
+        return;
+    }
+
+    let (audio_codec, audio_bitrate) = builtin_profiles()
+        .into_iter()
+        .find(|profile| profile.id == manifest.profile_name)
+        .map(|p| (p.audio_codec, p.audio_bitrate_kbps))
+        .unwrap_or_else(|| ("aac".to_string(), 128));
+
+    let stem = segment_path
+        .file_stem()
+        .map(|v| v.to_string_lossy())
+        .unwrap_or_else(|| "seg".into());
+    let muxed_path = work_dir.join(format!("audio_mux_{stem}.mp4"));
+
+    if let Err(error) = media::mux_audio_tracks(
+        ffmpeg_path,
+        segment_path,
+        &tracks,
+        &muxed_path,
+        &audio_codec,
+        audio_bitrate,
+        Duration::from_millis(duration_ms),
+    ) {
+        tracing::warn!(error = ?error, "failed to mux audio tracks during recovery; continuing with silent video");
+        return;
+    }
+
+    if let Err(error) = disk::atomic_replace(&muxed_path, segment_path) {
+        tracing::warn!(error = ?error, "failed to replace video segment with audio-muxed segment during recovery");
+    }
 }
 
 #[cfg(test)]
