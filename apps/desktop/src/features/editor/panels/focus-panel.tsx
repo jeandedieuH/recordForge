@@ -2,7 +2,6 @@ import { useMemo, useState } from "react"
 import type { ManualZoomSegment, ZoomPreset } from "@recordforge/contracts"
 import {
   getCursorPointAtTimelineTime,
-  zoomSegmentBadges,
   zoomTargetForCursorPoint,
 } from "@recordforge/cursor-core"
 import {
@@ -16,21 +15,25 @@ import {
   getManualZoomSegments,
   getTotalDuration,
 } from "@recordforge/editor-core"
-import { Check, Maximize2, Sparkles, X, ZoomIn } from "lucide-react"
-import { Badge, Button, NativeSelect } from "@recordforge/ui"
+import { Plus, ZoomIn } from "lucide-react"
+import { Badge, Button, EmptyState } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { SmartZoomCard } from "./focus/smart-zoom-card"
+import { ReviewSuggestionsCard } from "./focus/review-suggestions-card"
+import { ZoomSegmentCard } from "./focus/zoom-segment-card"
 
-function badgeVariant(
-  variant: "default" | "secondary" | "outline" | "warning",
-): "default" | "accent" | "outline" | "warning" {
-  if (variant === "secondary") return "outline"
-  if (variant === "default") return "accent"
-  return variant
+function formatTimecode(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  const millis = Math.floor((ms % 1000) / 10)
+  return `${minutes}:${seconds.toString().padStart(2, "0")}.${millis.toString().padStart(2, "0")}`
 }
 
 export function FocusPanel() {
   const execute = useTimelineStore((state) => state.execute)
   const setSelection = useTimelineStore((state) => state.setSelection)
+  const seek = useTimelineStore((state) => state.seek)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const view = useTimelineStore((state) => state.view)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
@@ -39,8 +42,8 @@ export function FocusPanel() {
   const playheadMs = view.playheadMs
   const segments = useMemo(() => (timeline ? getManualZoomSegments(timeline) : []), [timeline])
   const selectedId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
-  const selectedSegment = segments.find((segment) => segment.id === selectedId) ?? null
 
+  const canvas = timeline?.canvas ?? { width: 1920, height: 1080 }
   const smartZoomPreset = timeline?.smartZoomSettings?.preset ?? "product-demo"
 
   const [preset, setPreset] = useState<ZoomPreset>(smartZoomPreset)
@@ -106,9 +109,10 @@ export function FocusPanel() {
     setReviewing(suggestions)
   }
 
-  function acceptSuggestions() {
-    if (!reviewing) return
-    execute(createRegenerateZoomSuggestionsCommand(reviewing))
+  function acceptSuggestions(selectedSuggestions?: ManualZoomSegment[]) {
+    const toApply = selectedSuggestions ?? reviewing
+    if (!toApply || toApply.length === 0) return
+    execute(createRegenerateZoomSuggestionsCommand(toApply))
     setReviewing(null)
   }
 
@@ -117,6 +121,12 @@ export function FocusPanel() {
   }
 
   function selectSegment(segment: ManualZoomSegment) {
+    setSelection({ kind: "zoom", segmentId: segment.id })
+    seek(segment.startMs)
+  }
+
+  function jumpToSegment(segment: ManualZoomSegment) {
+    seek(segment.startMs)
     setSelection({ kind: "zoom", segmentId: segment.id })
   }
 
@@ -136,211 +146,106 @@ export function FocusPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
-      <div className="flex items-center gap-2 border-b border-border pb-2 text-sm font-semibold text-foreground">
-        <ZoomIn className="size-4 text-primary" aria-hidden />
-        <h2>Focus</h2>
-      </div>
-
-      <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs font-semibold text-foreground">Smart Zoom</span>
-          <NativeSelect
-            aria-label="Smart zoom preset"
-            value={preset}
-            onChange={(event) => onPresetChange(event.target.value as ZoomPreset)}
-            className="w-36"
-          >
-            <option value="product-demo">Product Demo</option>
-            <option value="developer">Developer (Code)</option>
-            <option value="cinematic">Cinematic</option>
-            <option value="subtle">Subtle</option>
-            <option value="manual-only">Manual Only</option>
-          </NativeSelect>
+      {/* Panel Header */}
+      <div className="flex items-center justify-between border-b border-border pb-2.5">
+        <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+          <ZoomIn className="size-4 text-primary" aria-hidden />
+          <h2>Focus & Zoom</h2>
         </div>
-        <p className="text-[10px] leading-relaxed text-subtle-foreground">
-          Intelligent action clustering groups rapid clicks and code interactions into smooth,
-          unified focus frames.
-        </p>
-        {cursorTelemetryStatus === "unavailable" ? (
-          <p
-            className="mt-1 rounded border border-warning/30 bg-warning/10 px-2 py-1.5 text-[10px] text-warning"
-            role="status"
-          >
-            Smart zoom unavailable: no usable cursor telemetry.
-          </p>
+        {segments.length > 0 ? (
+          <Badge variant="default" className="text-[10px] font-mono">
+            {segments.length} segment{segments.length === 1 ? "" : "s"}
+          </Badge>
         ) : null}
-        {cursorTelemetryStatus === "loading" ? (
-          <p className="mt-1 text-[10px] text-subtle-foreground" role="status" aria-live="polite">
-            Checking cursor telemetry…
-          </p>
-        ) : null}
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 w-full text-[10px]"
-          disabled={cursorTelemetryStatus !== "available" || preset === "manual-only"}
-          onClick={startReview}
-        >
-          <Sparkles data-icon="inline-start" />
-          Review suggestions
-        </Button>
       </div>
 
+      {/* Smart Zoom Settings Card */}
+      <SmartZoomCard
+        preset={preset}
+        onPresetChange={onPresetChange}
+        telemetryStatus={cursorTelemetryStatus}
+        onReviewSuggestions={startReview}
+        disabled={!timeline}
+      />
+
+      {/* Suggestion Review Banner (when active) */}
       {reviewing ? (
-        <div className="flex flex-col gap-2 rounded-lg border border-primary/30 bg-primary/5 p-2.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-foreground">
-              Review {reviewing.length} suggestion{reviewing.length === 1 ? "" : "s"}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[10px]"
-              onClick={rejectSuggestions}
-            >
-              <X data-icon="inline-start" />
-              Cancel
-            </Button>
-          </div>
-          <p className="text-[10px] text-subtle-foreground">
-            Locked or manual segments are preserved. Overlapping suggestions are merged on accept.
-          </p>
-          <div className="flex max-h-48 flex-col gap-1.5 overflow-auto">
-            {reviewing.map((segment) => {
-              const badges = zoomSegmentBadges(segment)
-              return (
-                <div
-                  key={segment.id}
-                  className="flex flex-col gap-1 rounded-md border border-border bg-surface-dim p-2 text-[10px]"
-                >
-                  <div className="flex items-center justify-between">
-                    <span>
-                      {formatZoomTime(segment.startMs)} →{" "}
-                      {formatZoomTime(segment.startMs + segment.durationMs)}
-                    </span>
-                    <span className="font-mono tabular-nums">{segment.scale.toFixed(1)}×</span>
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {badges.map((badge) => (
-                      <Badge
-                        key={badge.key}
-                        variant={badgeVariant(badge.variant)}
-                        className="text-[9px]"
-                      >
-                        {badge.label}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-7 text-[10px]"
-            onClick={acceptSuggestions}
-          >
-            <Check data-icon="inline-start" />
-            Accept all suggestions
-          </Button>
-        </div>
+        <ReviewSuggestionsCard
+          suggestions={reviewing}
+          canvas={canvas}
+          onAccept={acceptSuggestions}
+          onReject={rejectSuggestions}
+        />
       ) : null}
 
+      {/* Add Manual Zoom Primary Action */}
       <Button
         variant="secondary"
         size="sm"
-        className="h-8 text-xs"
+        className="h-8.5 w-full text-xs font-semibold shadow-xs border border-border-strong hover:border-primary/50 transition-all"
         disabled={!timeline}
         onClick={addManual}
       >
-        <Maximize2 data-icon="inline-start" />
-        Add manual zoom
+        <Plus className="size-3.5" data-icon="inline-start" />
+        <span>Add manual zoom at {formatTimecode(playheadMs)}</span>
       </Button>
 
-      {segments.length === 0 ? (
-        <p className="text-[11px] leading-relaxed text-subtle-foreground">
-          Add a manual range or generate suggestions from cursor activity. Targets are clamped to
-          the canvas before preview and export.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-1.5">
-          {segments.map((segment) => {
-            const badges = zoomSegmentBadges(segment)
-            return (
-              <div
-                key={segment.id}
-                className={`flex flex-col gap-1.5 rounded-md border p-2 text-[11px] ${
-                  selectedSegment?.id === segment.id
-                    ? "border-primary/60 bg-primary/10"
-                    : "border-border bg-surface-dim"
-                }`}
-              >
-                <button
-                  type="button"
-                  className="flex items-center justify-between text-left"
-                  onClick={() => selectSegment(segment)}
-                >
-                  <span className="min-w-0 truncate">
-                    {formatZoomTime(segment.startMs)} →{" "}
-                    {formatZoomTime(segment.startMs + segment.durationMs)}
-                  </span>
-                  <span className="shrink-0 font-mono text-subtle-foreground">
-                    {segment.scale.toFixed(1)}×
-                  </span>
-                </button>
-                {badges.length > 0 ? (
-                  <div className="flex flex-wrap gap-1">
-                    {badges.map((badge) => (
-                      <Badge
-                        key={badge.key}
-                        variant={badgeVariant(badge.variant)}
-                        className="text-[9px]"
-                      >
-                        {badge.label}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="flex gap-1.5">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-1.5 text-[10px]"
-                    onClick={() => splitSegment(segment)}
-                    disabled={segment.locked}
-                  >
-                    Split
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-1.5 text-[10px]"
-                    onClick={() => toggleLock(segment)}
-                  >
-                    {segment.locked ? "Unlock" : "Lock"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-1.5 text-[10px] text-recording hover:text-recording"
-                    onClick={() => deleteSegment(segment)}
-                    disabled={segment.locked}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </div>
-            )
-          })}
+      {/* Zoom Keyframe Segments Section */}
+      <div className="flex flex-col gap-2 pt-1">
+        <div className="flex items-center justify-between px-0.5">
+          <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Zoom Keyframes
+          </span>
+          <span className="text-[10px] font-mono text-subtle-foreground">
+            {segments.length} total
+          </span>
         </div>
-      )}
+
+        {segments.length === 0 ? (
+          <EmptyState
+            icon={ZoomIn}
+            title="No Zoom Segments"
+            description="Add a manual zoom keyframe at the playhead or generate smart zoom from cursor activity."
+            action={
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                disabled={!timeline}
+                onClick={addManual}
+              >
+                <Plus className="size-3" data-icon="inline-start" />
+                Add Zoom Keyframe
+              </Button>
+            }
+            className="py-6 px-4"
+          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {segments.map((segment) => {
+              const isSelected = selectedId === segment.id
+              const isPlayheadInside =
+                playheadMs >= segment.startMs &&
+                playheadMs <= segment.startMs + segment.durationMs
+
+              return (
+                <ZoomSegmentCard
+                  key={segment.id}
+                  segment={segment}
+                  canvas={canvas}
+                  selected={isSelected}
+                  isPlayheadInside={isPlayheadInside}
+                  onSelect={() => selectSegment(segment)}
+                  onJumpToStart={() => jumpToSegment(segment)}
+                  onSplit={() => splitSegment(segment)}
+                  onToggleLock={() => toggleLock(segment)}
+                  onDelete={() => deleteSegment(segment)}
+                />
+              )
+            })}
+          </div>
+        )}
+      </div>
     </div>
   )
-}
-
-function formatZoomTime(ms: number): string {
-  const seconds = Math.floor(ms / 1000)
-  const remainder = Math.floor(ms % 1000)
-  return `${seconds}.${remainder.toString().padStart(3, "0")}s`
 }
