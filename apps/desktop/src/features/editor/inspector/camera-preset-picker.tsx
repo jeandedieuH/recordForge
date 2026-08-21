@@ -33,7 +33,7 @@ const PRESETS: PresetMeta[] = [
   {
     id: "side-by-side",
     label: "Side by side",
-    description: "Screen on the left, a vertical webcam strip on the right.",
+    description: "Expanded screen on the left, 5:7 portrait webcam on the right.",
   },
 ]
 

@@ -6,11 +6,11 @@ import type {
 } from "@recordforge/contracts"
 import { buildCameraPresetTransform } from "@recordforge/editor-core"
 import { useEffect, useMemo } from "react"
-import { AlignLeft, AlignRight, Maximize2, Sparkles } from "lucide-react"
+import { Sparkles } from "lucide-react"
 import { ColorPicker, Switch } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
-import { DebouncedSlider, InspectorSection, NumberField, PresetButton } from "./fields"
+import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 import { CameraPresetPicker } from "./camera-preset-picker"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
@@ -21,7 +21,7 @@ interface CameraClipInspectorProps {
   selectedClipCount?: number
 }
 
-const GEOMETRY_KEYS: Array<keyof ClipTransform> = ["x", "y", "width", "height", "shape", "crop"]
+const GEOMETRY_KEYS: Array<keyof ClipTransform> = ["x", "y", "width", "height", "crop"]
 
 export function CameraClipInspector({
   clip,
@@ -87,7 +87,6 @@ export function CameraClipInspector({
       current.y !== expected.y ||
       current.width !== expected.width ||
       current.height !== expected.height ||
-      current.shape !== expected.shape ||
       current.crop?.x !== expected.crop?.x ||
       current.crop?.y !== expected.crop?.y ||
       current.crop?.width !== expected.crop?.width ||
@@ -101,7 +100,6 @@ export function CameraClipInspector({
           y: expected.y,
           width: expected.width,
           height: expected.height,
-          shape: expected.shape,
           crop: expected.crop,
         },
         { phase: "commit" },
@@ -286,39 +284,6 @@ export function CameraClipInspector({
               aria-label="Camera border color"
               value={clip.transform.borderColor ?? "#ffffff"}
               onChange={(borderColor) => updateTransform({ borderColor })}
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-2">
-            <PresetButton
-              active={clip.transform.x < 100}
-              label="Left"
-              onClick={() => updateTransform({ x: 24, y: 24 })}
-              icon={AlignLeft}
-            />
-            <PresetButton
-              active={clip.transform.x > 100}
-              label="Right"
-              onClick={() =>
-                updateTransform({
-                  x: (metadata?.width ?? 1920) - clip.transform.width - 24,
-                  y: 24,
-                })
-              }
-              icon={AlignRight}
-            />
-            <PresetButton
-              active={clip.transform.width >= (metadata?.width ?? 1920) - 10}
-              label="Full"
-              onClick={() =>
-                updateTransform({
-                  x: 0,
-                  y: 0,
-                  width: metadata?.width ?? 1920,
-                  height: metadata?.height ?? 1080,
-                })
-              }
-              icon={Maximize2}
             />
           </div>
         </div>

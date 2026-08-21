@@ -158,27 +158,27 @@ export function buildCameraPresetTransform(
     }
 
     case "side-by-side": {
-      // Side-by-side is laid out inside the visible padded video area, not the
-      // full canvas wrapper, so the camera strip lines up with the screen edges
-      // and leaves the canvas background visible on all four sides.
+      // Side-by-side is laid out inside the visible padded video area, giving the
+      // recorded screen maximum prominence (~76% width) with a 5:7 portrait camera
+      // box on the right, separated by a 2% gap and vertically centered.
       const padding = canvas.padding ?? 0
-      const usableWidth = canvas.width - padding * 2
-      const usableHeight = canvas.height - padding * 2
-      const screenWidth = Math.round(usableWidth * 0.68)
+      const usableWidth = Math.max(1, canvas.width - padding * 2)
+      const usableHeight = Math.max(1, canvas.height - padding * 2)
+      const screenWidth = Math.round(usableWidth * 0.76)
       const gap = Math.round(usableWidth * 0.02)
-      const width = Math.round(usableWidth * 0.3)
-      // Height is derived from the canvas aspect as if the screen were scaled
-      // to 68% of the usable width. This keeps both rectangles the same height
-      // and leaves visible background on the top and bottom.
-      const overlayHeight = Math.round((screenWidth / canvas.width) * canvas.height)
+      const width = Math.max(1, usableWidth - screenWidth - gap)
+      // Camera aspect ratio is 5:7 (width:height = 5:7 -> height = width * 7 / 5)
+      const rawHeight = Math.round(width * (7 / 5))
+      const overlayHeight = Math.min(rawHeight, usableHeight)
       const x = padding + screenWidth + gap
-      const y = padding + (usableHeight - overlayHeight) / 2
+      const y = padding + Math.max(0, Math.round((usableHeight - overlayHeight) / 2))
       return {
         ...defaultStyle(preset),
         x,
         y,
         width,
         height: overlayHeight,
+        locked: true,
         crop: centerCoverCrop(source.width, source.height, width, overlayHeight),
       }
     }

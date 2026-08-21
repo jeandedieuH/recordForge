@@ -743,6 +743,7 @@ export const renderPlanOverlaySchema = z.object({
   shadowBlur: z.number().min(0).optional(),
   shadowOffsetX: z.number().optional(),
   shadowOffsetY: z.number().optional(),
+  preset: cameraPlacementPresetSchema.optional(),
 })
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>

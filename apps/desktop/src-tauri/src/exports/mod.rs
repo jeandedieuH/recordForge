@@ -170,6 +170,7 @@ pub struct RenderPlanOverlay {
     pub shadow_blur: Option<f64>,
     pub shadow_offset_x: Option<f64>,
     pub shadow_offset_y: Option<f64>,
+    pub preset: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -746,7 +747,7 @@ fn video_screen_rect(
     let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
     let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
     if is_side_by_side {
-        let target_w = (content_width * 0.68).round().max(1.0);
+        let target_w = (content_width * 0.76).round().max(1.0);
         let target_h = ((target_w / canvas.width as f64) * canvas.height as f64)
             .round()
             .max(1.0);
@@ -876,10 +877,15 @@ fn render_timeline_composition(
         if !overlay.visible {
             return false;
         }
+        if overlay.preset.as_deref() == Some("side-by-side") {
+            return true;
+        }
         let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
         let target_camera_x =
+            (canvas.padding as f64) + (usable_w * 0.76).round() + (usable_w * 0.02).round();
+        let legacy_camera_x =
             (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
-        (overlay.x - target_camera_x).abs() <= 2.0
+        (overlay.x - target_camera_x).abs() <= 3.0 || (overlay.x - legacy_camera_x).abs() <= 3.0
     });
     let (screen_x, screen_y, screen_w, screen_h) = video_screen_rect(
         canvas,
@@ -1030,8 +1036,8 @@ fn render_timeline_composition(
         .collect::<HashMap<_, _>>();
     let (segment_w, segment_h) = if is_side_by_side {
         (
-            (content_width as f64 * 0.68).round().max(1.0) as u32,
-            ((content_width as f64 * 0.68 / canvas.width as f64) * canvas.height as f64)
+            (content_width as f64 * 0.76).round().max(1.0) as u32,
+            ((content_width as f64 * 0.76 / canvas.width as f64) * canvas.height as f64)
                 .round()
                 .max(1.0) as u32,
         )
@@ -5156,6 +5162,13 @@ mod tests {
         assert_eq!(rect_1_1.2, 1000.0);
         assert_eq!(rect_1_1.3, 562.0);
         assert_eq!(rect_1_1.1, 259.0);
+
+        // 16:9 canvas (1920x1080) with 16:9 source in side-by-side mode (76% screen width)
+        let rect_sbs = video_screen_rect(&canvas_16_9, Some((1920, 1080)), true);
+        assert_eq!(rect_sbs.0, 0.0);
+        assert_eq!(rect_sbs.2, 1459.0);
+        assert_eq!(rect_sbs.3, 820.0);
+        assert_eq!(rect_sbs.1, 130.0);
     }
 
     #[test]

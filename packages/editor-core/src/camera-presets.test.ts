@@ -42,17 +42,43 @@ describe("buildCameraPresetTransform", () => {
     expect(transform.preset).toBe("circle-pip")
   })
 
-  it("creates a side-by-side layout with 68/30/2% and top/bottom gap", () => {
+  it("creates a robust side-by-side layout with 76% screen, 5:7 camera ratio, and vertical centering", () => {
     const transform = buildCameraPresetTransform("side-by-side", { canvas, source })
 
-    const screenWidth = Math.round(canvas.width * 0.68)
+    const screenWidth = Math.round(canvas.width * 0.76)
     const gap = Math.round(canvas.width * 0.02)
-    expect(transform.width).toBe(Math.round(canvas.width * 0.3))
+    const expectedWidth = canvas.width - screenWidth - gap
+    const expectedHeight = Math.round(expectedWidth * (7 / 5))
+    expect(transform.width).toBe(expectedWidth)
+    expect(transform.height).toBe(expectedHeight)
+    // Verify 5:7 aspect ratio
+    expect(transform.width / transform.height).toBeCloseTo(5 / 7, 2)
     expect(transform.x).toBe(screenWidth + gap)
+    // Vertically centered
+    expect(transform.y).toBe(Math.round((canvas.height - expectedHeight) / 2))
     expect(transform.y).toBeGreaterThan(0)
-    expect(transform.height).toBeLessThan(canvas.height)
     expect(transform.y + transform.height).toBeLessThanOrEqual(canvas.height)
     expect(transform.crop).toBeDefined()
     expect(transform.preset).toBe("side-by-side")
+    expect(transform.locked).toBe(true)
+  })
+
+  it("respects canvas padding for side-by-side layout", () => {
+    const paddedCanvas = { width: 1920, height: 1080, padding: 40 }
+    const transform = buildCameraPresetTransform("side-by-side", { canvas: paddedCanvas, source })
+
+    const usableWidth = 1920 - 80
+    const usableHeight = 1080 - 80
+    const screenWidth = Math.round(usableWidth * 0.76)
+    const gap = Math.round(usableWidth * 0.02)
+    const expectedWidth = usableWidth - screenWidth - gap
+    const expectedHeight = Math.round(expectedWidth * (7 / 5))
+
+    expect(transform.width).toBe(expectedWidth)
+    expect(transform.height).toBe(expectedHeight)
+    expect(transform.x).toBe(40 + screenWidth + gap)
+    expect(transform.y).toBe(40 + Math.round((usableHeight - expectedHeight) / 2))
+    expect(transform.x + transform.width).toBe(1920 - 40)
+    expect(transform.locked).toBe(true)
   })
 })

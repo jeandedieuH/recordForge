@@ -39,8 +39,8 @@ export function CameraPresetThumbnail({ preset, className }: CameraPresetThumbna
 
       {preset === "side-by-side" ? (
         <>
-          <rect x="2" y="9" width="52" height="32" rx="5" opacity={0.35} />
-          <rect x="56" y="9" width="22" height="32" rx="3" />
+          <rect x="2" y="7" width="58" height="36" rx="4" opacity={0.35} />
+          <rect x="62" y="13" width="16" height="24" rx="3" />
         </>
       ) : null}
     </svg>

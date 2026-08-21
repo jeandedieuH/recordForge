@@ -563,7 +563,7 @@ export function TimelineView({
     if (isSideBySideAtPlayhead) {
       const usableWidth = width - padding * 2
       const usableHeight = height - padding * 2
-      const targetScreenWidth = Math.round(usableWidth * 0.68)
+      const targetScreenWidth = Math.round(usableWidth * 0.76)
       const targetScreenHeight = Math.round((targetScreenWidth / width) * height)
       const sourceWidth = video && video.videoWidth > 0 ? video.videoWidth : width
       const sourceHeight = video && video.videoHeight > 0 ? video.videoHeight : height
@@ -1669,6 +1669,9 @@ export function TimelineView({
                   playbackRate={view.playbackRate}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
+                  onSelectClip={(clipId) =>
+                    setSelection({ kind: "clip", primaryClipId: clipId, clipIds: [clipId] })
+                  }
                   onUpdateTransform={(clipId, transform, options) =>
                     interaction.updateClipTransform(clipId, transform, options)
                   }

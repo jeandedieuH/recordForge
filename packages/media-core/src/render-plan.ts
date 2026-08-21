@@ -192,6 +192,7 @@ function toOverlays(
           shadowBlur: transform.shadowBlur,
           shadowOffsetX: transform.shadowOffsetX,
           shadowOffsetY: transform.shadowOffsetY,
+          preset: transform.preset,
         },
       ]
     })

@@ -1659,9 +1659,9 @@ mod tests {
     #[test]
     fn side_by_side_places_cursor_strictly_inside_left_screen_bounds() {
         // Canvas: 1920x1080 with 40px padding.
-        // Side-by-side screen is placed on the left: target_w = (1920 - 80)*0.68 = 1251, x = 40.
-        // Screen bounds: x: 40, y: 40 + (1000 - 704)/2 = 188, w: 1251, h: 704.
-        let screen_rect = (40.0, 188.0, 1251.0, 704.0);
+        // Side-by-side screen is placed on the left: target_w = (1920 - 80)*0.76 = 1398, x = 40.
+        // Screen bounds: x: 40, y: 40 + (1000 - 786)/2 = 147, w: 1398, h: 786.
+        let screen_rect = (40.0, 147.0, 1398.0, 786.0);
         let mut telemetry = make_v2_telemetry();
         // Telemetry point at bottom-right corner of recorded source:
         telemetry.events = vec![cursor_engine::CursorEvent {
@@ -1684,15 +1684,15 @@ mod tests {
         .expect("valid side-by-side renderer");
 
         let (px, py) = renderer.fit_source_point(100.0, 100.0);
-        // Source is 100x100 (1:1). Target screen is 1251x704 (16:9).
-        // Fit scale = 704 / 100 = 7.04, fit_width = 704. Offset_x = (1251 - 704) / 2 = 273.5.
-        // Mapped x = 40 + 273.5 + 100 * 7.04 = 1017.5.
-        // Mapped y = 188 + 0 + 100 * 7.04 = 892.0.
+        // Source is 100x100 (1:1). Target screen is 1398x786 (16:9).
+        // Fit scale = 786 / 100 = 7.86, fit_width = 786. Offset_x = (1398 - 786) / 2 = 306.0.
+        // Mapped x = 40 + 306 + 100 * 7.86 = 1132.0.
+        // Mapped y = 147 + 0 + 100 * 7.86 = 933.0.
         assert!(
-            (px - 1017.5).abs() < 1.0,
-            "expected px near 1017.5, got {px}"
+            (px - 1132.0).abs() < 1.0,
+            "expected px near 1132.0, got {px}"
         );
-        assert!((py - 892.0).abs() < 1.0, "expected py near 892.0, got {py}");
+        assert!((py - 933.0).abs() < 1.0, "expected py near 933.0, got {py}");
 
         // Now test 16:9 source (1920x1080)
         let mut telemetry_16_9 = make_v2_telemetry();
@@ -1708,24 +1708,24 @@ mod tests {
         )
         .expect("valid 16:9 side-by-side renderer");
         let (px_16_9, py_16_9) = renderer_16_9.fit_source_point(1920.0, 1080.0);
-        // For 16:9 source matching 16:9 screen rect, (1920, 1080) maps exactly to (40 + 1251 = 1291, 188 + 704 = 892)
+        // For 16:9 source matching 16:9 screen rect, (1920, 1080) maps exactly to (40 + 1398 = 1438, 147 + 786 = 933)
         assert!(
-            (px_16_9 - 1291.0).abs() < 1.0,
-            "expected px_16_9 near 1291.0, got {px_16_9}"
+            (px_16_9 - 1438.0).abs() < 1.0,
+            "expected px_16_9 near 1438.0, got {px_16_9}"
         );
         assert!(
-            (py_16_9 - 892.0).abs() < 1.0,
-            "expected py_16_9 near 892.0, got {py_16_9}"
+            (py_16_9 - 933.0).abs() < 1.0,
+            "expected py_16_9 near 933.0, got {py_16_9}"
         );
 
         // Render frame: no pixels should bleed beyond the screen rect,
-        // and absolutely no pixels should be in the right camera half (x > 1350).
+        // and absolutely no pixels should be in the right camera half (x > 1470).
         let mut frame = vec![0; 1920 * 1080 * 4];
         renderer.render_frame(0, &mut frame);
 
         let mut right_side_pixels = 0;
         for py in 0..1080u32 {
-            for px in 1350..1920u32 {
+            for px in 1470..1920u32 {
                 let idx = (py as usize * 1920 + px as usize) * 4;
                 if frame[idx + 3] > 0 {
                     right_side_pixels += 1;

@@ -12,6 +12,7 @@ interface CameraPreviewProps {
   playbackRate: number
   canvasWidth: number
   canvasHeight: number
+  onSelectClip?: (clipId: string) => void
   onUpdateTransform?: (
     clipId: string,
     transform: ClipTransform,
@@ -53,6 +54,7 @@ export function CameraPreview({
   playbackRate,
   canvasWidth,
   canvasHeight,
+  onSelectClip,
   onUpdateTransform,
 }: CameraPreviewProps) {
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({})
@@ -104,6 +106,7 @@ export function CameraPreview({
   }, [clips, isPlaying, outputsByStream, playheadMs, playbackRate])
 
   function beginDrag(event: React.PointerEvent<HTMLDivElement>, clip: CameraClip) {
+    onSelectClip?.(clip.id)
     if (!onUpdateTransform || event.button !== 0 || clip.transform.locked) return
     event.stopPropagation()
     event.preventDefault()
@@ -200,12 +203,12 @@ export function CameraPreview({
           <div
             key={clip.id}
             role="button"
-            tabIndex={isActive && !isLocked ? 0 : -1}
-            aria-label={isLocked ? "Camera overlay, locked" : "Camera overlay, drag to move"}
-            aria-disabled={isLocked}
+            tabIndex={isActive ? 0 : -1}
+            aria-label={isLocked ? "Camera overlay, select to edit" : "Camera overlay, drag to move"}
+            aria-disabled={false}
             className={cn(
               "absolute z-20 overflow-hidden",
-              !isLocked && onUpdateTransform && isActive && "cursor-grab active:cursor-grabbing",
+              isActive && (isLocked ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"),
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
             )}
             style={{
@@ -221,8 +224,9 @@ export function CameraPreview({
               boxShadow: transform.shadowEnabled
                 ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "var(--color-pip-shadow)"}`
                 : undefined,
-              pointerEvents: onUpdateTransform && isActive && !isLocked ? "auto" : "none",
+              pointerEvents: isActive ? "auto" : "none",
             }}
+            onClick={() => onSelectClip?.(clip.id)}
             onKeyDown={(event) => {
               if (!onUpdateTransform || isLocked || gestureRef.current) return
               const step = event.shiftKey ? 10 : 1
