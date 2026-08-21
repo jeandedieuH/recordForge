@@ -182,7 +182,7 @@ export function TextCanvasOverlay({
 
               {/* Primary Main Title */}
               <div
-                className="font-bold leading-tight drop-shadow-sm whitespace-pre-wrap break-words"
+                className="font-bold leading-tight drop-shadow-sm whitespace-pre-wrap wrap-break-word"
                 style={{
                   color: clip.textColor,
                   fontSize: `${primaryFs}px`,
@@ -196,7 +196,7 @@ export function TextCanvasOverlay({
               {/* Secondary Subtitle */}
               {clip.secondaryText ? (
                 <div
-                  className="mt-1 opacity-90 leading-snug whitespace-pre-wrap break-words"
+                  className="mt-1 opacity-90 leading-snug whitespace-pre-wrap wrap-break-word"
                   style={{
                     color: clip.secondaryTextColor ?? "#94a3b8",
                     fontSize: `${subFs}px`,

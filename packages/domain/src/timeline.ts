@@ -3,6 +3,7 @@ import {
   defaultProjectExportSettings,
   defaultSmartZoomSettings,
 } from "@recordforge/contracts"
+import { buildCameraPresetTransform } from "./camera-presets"
 import type {
   AudioClip,
   AudioRole,
@@ -283,8 +284,12 @@ export function createTimelineFromRecording(
   if (cameraStream) {
     const width = metadata.width ?? recording.width
     const height = metadata.height ?? recording.height
-    const cameraWidth = Math.round(width * 0.25)
-    const cameraHeight = Math.round((cameraWidth * height) / Math.max(1, width))
+    const cameraSourceWidth = cameraStream.width ?? (recording.webcamPath ? 1280 : width)
+    const cameraSourceHeight = cameraStream.height ?? (recording.webcamPath ? 720 : height)
+    const transform = buildCameraPresetTransform("vertical-pip", {
+      canvas: { width, height },
+      source: { width: cameraSourceWidth, height: cameraSourceHeight },
+    })
     const cameraClip: CameraClip = {
       id: crypto.randomUUID(),
       kind: "camera",
@@ -295,14 +300,7 @@ export function createTimelineFromRecording(
       sourceInMs: 0,
       sourceOutMs: duration,
       speed: 1,
-      transform: {
-        x: width - cameraWidth - 24,
-        y: height - cameraHeight - 24,
-        width: cameraWidth,
-        height: cameraHeight,
-        opacity: 1,
-        shape: "rounded",
-      },
+      transform,
     }
     tracks.splice(1, 0, makeTrack("camera", "Camera", [cameraClip]))
   }

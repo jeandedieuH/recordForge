@@ -144,6 +144,14 @@ describe("domain", () => {
       kind: "camera",
       streamIndex: 1,
       durationMs: 60_000,
+      transform: {
+        preset: "vertical-pip",
+        shape: "rectangle",
+        shadowEnabled: true,
+        borderWidth: 2,
+        width: 422,
+        height: 454,
+      },
     })
 
     const project = createProjectFromRecording(recording, metadata)
@@ -155,5 +163,11 @@ describe("domain", () => {
       }),
     )
     expect(project.tracks[1].clips[0].assetId).toContain(":webcam:1")
+    expect(project.tracks[1].clips[0]).toMatchObject({
+      transform: {
+        preset: "vertical-pip",
+        shape: "rectangle",
+      },
+    })
   })
 })
