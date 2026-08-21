@@ -1,7 +1,7 @@
 {
   "name": "recordforge",
   "private": true,
-  "version": "1.0.0-beta",
+  "version": "1.0.0",
   "description": "Local-first screen recorder and lightweight editor",
   "license": "MIT",
   "author": "Prestige Tech",

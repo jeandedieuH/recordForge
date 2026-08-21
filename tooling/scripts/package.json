@@ -1,7 +1,7 @@
 {
   "name": "@recordforge/tooling-scripts",
   "private": true,
-  "version": "1.0.0-beta",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "icons": "node generate-icons.mjs"
