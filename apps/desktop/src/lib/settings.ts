@@ -20,7 +20,9 @@ export async function getSetting(key: string): Promise<string | null> {
       return val
     } catch {
       try {
-        return typeof localStorage !== "undefined" ? localStorage.getItem(`recordforge:${key}`) : null
+        return typeof localStorage !== "undefined"
+          ? localStorage.getItem(`recordforge:${key}`)
+          : null
       } catch {
         return null
       }

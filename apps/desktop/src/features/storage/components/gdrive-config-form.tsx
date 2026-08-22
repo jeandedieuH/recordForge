@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react"
-import { AlertCircle, CheckCircle2, Cloud, HardDrive, KeyRound, Loader2, LogOut, ShieldCheck } from "lucide-react"
+import {
+  AlertCircle,
+  CheckCircle2,
+  Cloud,
+  HardDrive,
+  KeyRound,
+  Loader2,
+  LogOut,
+  ShieldCheck,
+} from "lucide-react"
 import { Button, Card, Input, Label } from "@recordforge/ui"
 import type { SaveGoogleDriveProfileInput, StorageProfile } from "@recordforge/contracts"
 import { startGoogleDriveOAuth, testStorageProfile } from "../storage-api"
@@ -15,13 +24,13 @@ interface GDriveConfigFormProps {
 export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveConfigFormProps) {
   const [name, setName] = useState(initialProfile?.name ?? "My Google Drive")
   const [folderName, setFolderName] = useState(
-    initialProfile?.driveConfig?.folderName ?? "recordForge"
+    initialProfile?.driveConfig?.folderName ?? "recordForge",
   )
   const [folderId, setFolderId] = useState(initialProfile?.driveConfig?.folderId ?? "root")
   const [accountEmail, setAccountEmail] = useState(initialProfile?.driveConfig?.accountEmail ?? "")
   const [refreshToken, setRefreshToken] = useState<string | null>(null)
   const [isAuthenticated, setIsAuthenticated] = useState(
-    initialProfile?.hasCredentials || !!initialProfile?.driveConfig?.accountEmail
+    initialProfile?.hasCredentials || !!initialProfile?.driveConfig?.accountEmail,
   )
   const [isDefault] = useState(initialProfile?.isDefault ?? false)
 
@@ -223,8 +232,8 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
               <div className="max-w-xs space-y-1">
                 <div className="font-semibold text-xs text-foreground">Authorize recordForge</div>
                 <p className="text-[11px] text-muted-foreground">
-                  Uses strict <code className="bg-muted px-1 py-0.5 rounded">drive.file</code> scope.
-                  recordForge only accesses files created by the application.
+                  Uses strict <code className="bg-muted px-1 py-0.5 rounded">drive.file</code>{" "}
+                  scope. recordForge only accesses files created by the application.
                 </p>
               </div>
 
@@ -261,7 +270,9 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
         </div>
 
         <div className="col-span-2 sm:col-span-1">
-          <Label className="mb-1 block font-medium">Folder ID (Optional, "root" for top level)</Label>
+          <Label className="mb-1 block font-medium">
+            Folder ID (Optional, "root" for top level)
+          </Label>
           <Input
             value={folderId}
             onChange={(e) => setFolderId(e.target.value)}
@@ -284,7 +295,9 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           )}
           <div className="flex-1">
-            <div className="font-semibold">{testResult.ok ? "Drive Access Verified" : "Test Failed"}</div>
+            <div className="font-semibold">
+              {testResult.ok ? "Drive Access Verified" : "Test Failed"}
+            </div>
             <div className="text-[11px] opacity-90">{testResult.message}</div>
           </div>
         </Card>

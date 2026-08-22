@@ -7,3 +7,4 @@ coverage
 *.lock
 packages/cursor-core/wasm
 packages/overlay-core/wasm
+.astro

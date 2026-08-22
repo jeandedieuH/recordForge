@@ -12,6 +12,7 @@ import {
   Label,
   NativeSelect,
 } from "@recordforge/ui"
+import { toErrorMessage } from "../../../lib/errors"
 import { useStorageStore } from "../storage-store"
 
 interface UploadDialogProps {
@@ -62,7 +63,7 @@ export function UploadDialog({
       onOpenChange(false)
       onUploaded?.()
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to queue upload")
+      setError(toErrorMessage(err))
     } finally {
       setIsStarting(false)
     }
@@ -127,8 +128,8 @@ export function UploadDialog({
                   {activeProfile.kind === "s3"
                     ? `Bucket: ${activeProfile.s3Config?.bucket} (${activeProfile.s3Config?.region})`
                     : activeProfile.kind === "gdrive"
-                    ? `Folder: ${activeProfile.driveConfig?.folderName}`
-                    : `Path: ${activeProfile.localConfig?.destinationPath}`}
+                      ? `Folder: ${activeProfile.driveConfig?.folderName}`
+                      : `Path: ${activeProfile.localConfig?.destinationPath}`}
                 </span>
               </div>
             ) : null}

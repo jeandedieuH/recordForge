@@ -70,7 +70,17 @@ describe("overlay canvas renderer", () => {
             kind: "text",
             id: "title-multiline",
             zIndex: 1,
-            transform: { x: 100, y: 100, width: 400, height: 200, zIndex: 1, opacity: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
+            transform: {
+              x: 100,
+              y: 100,
+              width: 400,
+              height: 200,
+              zIndex: 1,
+              opacity: 1,
+              rotation: 0,
+              anchorX: 0.5,
+              anchorY: 0.5,
+            },
             animationProgress: 1,
             textProgress: 1,
             presetId: "title",
@@ -101,7 +111,17 @@ describe("overlay canvas renderer", () => {
             kind: "annotation",
             id: "callout-multiline",
             zIndex: 2,
-            transform: { x: 500, y: 100, width: 200, height: 120, zIndex: 2, opacity: 1, rotation: 0, anchorX: 0.5, anchorY: 0.5 },
+            transform: {
+              x: 500,
+              y: 100,
+              width: 200,
+              height: 120,
+              zIndex: 2,
+              opacity: 1,
+              rotation: 0,
+              anchorX: 0.5,
+              anchorY: 0.5,
+            },
             animationProgress: 1,
             drawProgress: 1,
             annotationType: "callout",
@@ -126,13 +146,45 @@ describe("overlay canvas renderer", () => {
     )
 
     // Primary text: 3 lines; secondary: 2 lines; tag: 1 line; callout: 2 lines => total 8 calls
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Line 1"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Line 2"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Line 3"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Sub 1"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Sub 2"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("TAG"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Callout Line A"), expect.any(Number), expect.any(Number))
-    expect(fillText).toHaveBeenCalledWith(expect.stringContaining("Callout Line B"), expect.any(Number), expect.any(Number))
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Line 1"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Line 2"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Line 3"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Sub 1"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Sub 2"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("TAG"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Callout Line A"),
+      expect.any(Number),
+      expect.any(Number),
+    )
+    expect(fillText).toHaveBeenCalledWith(
+      expect.stringContaining("Callout Line B"),
+      expect.any(Number),
+      expect.any(Number),
+    )
   })
 })

@@ -28,10 +28,14 @@ function safeParseAppError(text: string): string | null {
   return null
 }
 
-function formatZodIssues(issues: Array<{ path?: Array<string | number>; message?: string }>): string {
+function formatZodIssues(
+  issues: Array<{ path?: Array<string | number>; message?: string }>,
+): string {
   const messages = issues.map((issue) => {
     const path = issue.path && issue.path.length > 0 ? issue.path.join(".") : ""
-    return path ? `${path}: ${issue.message ?? "Invalid value"}` : (issue.message ?? "Validation error")
+    return path
+      ? `${path}: ${issue.message ?? "Invalid value"}`
+      : (issue.message ?? "Validation error")
   })
   return messages.join("; ")
 }
@@ -48,7 +52,8 @@ export function toErrorMessage(error: unknown): string {
     "issues" in error &&
     Array.isArray((error as { issues?: unknown[] }).issues)
   ) {
-    const issues = (error as { issues: Array<{ path?: Array<string | number>; message?: string }> }).issues
+    const issues = (error as { issues: Array<{ path?: Array<string | number>; message?: string }> })
+      .issues
     if (issues.length > 0) {
       return formatZodIssues(issues)
     }

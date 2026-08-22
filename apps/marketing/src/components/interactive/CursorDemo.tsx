@@ -58,7 +58,9 @@ export function CursorDemo() {
           <button
             onClick={() => setIsSmoothed(false)}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              !isSmoothed ? "bg-recording/20 text-recording border border-recording/40" : "text-muted-foreground"
+              !isSmoothed
+                ? "bg-recording/20 text-recording border border-recording/40"
+                : "text-muted-foreground"
             }`}
           >
             Raw Jittery Mouse

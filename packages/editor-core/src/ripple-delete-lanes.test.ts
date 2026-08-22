@@ -382,9 +382,17 @@ describe("Ripple Delete Across All Timeline Lanes", () => {
     const state = result.value.history.present
 
     // Screen track clips shifted
-    expect(state.tracks[0].clips[0]).toMatchObject({ id: "screen-1", startMs: 0, durationMs: 2_000 })
+    expect(state.tracks[0].clips[0]).toMatchObject({
+      id: "screen-1",
+      startMs: 0,
+      durationMs: 2_000,
+    })
     expect(state.tracks[0].clips[1]).toMatchObject({ startMs: 2_000, durationMs: 1_000 })
-    expect(state.tracks[0].clips[2]).toMatchObject({ id: "screen-2", startMs: 3_000, durationMs: 5_000 })
+    expect(state.tracks[0].clips[2]).toMatchObject({
+      id: "screen-2",
+      startMs: 3_000,
+      durationMs: 5_000,
+    })
 
     // Zoom segments remain untouched at original timestamps because the zoom track is locked
     const zooms = getManualZoomSegments(state)

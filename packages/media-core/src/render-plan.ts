@@ -31,10 +31,7 @@ import {
   resolveFollowCursorTarget,
   timelineMarkersToChapters,
 } from "@recordforge/editor-core"
-import {
-  createCursorEngine,
-  type CursorEngine,
-} from "@recordforge/cursor-core"
+import { createCursorEngine, type CursorEngine } from "@recordforge/cursor-core"
 import {
   annotationClipSchema,
   imageClipSchema,
@@ -120,9 +117,13 @@ function toSegments(
       const durationMs = window.outputEndMs - window.outputStartMs
       const asset = assetForClip(assets, clip.assetId)
       const sourceWidth =
-        asset && typeof asset.width === "number" && asset.width > 0 ? Math.round(asset.width) : undefined
+        asset && typeof asset.width === "number" && asset.width > 0
+          ? Math.round(asset.width)
+          : undefined
       const sourceHeight =
-        asset && typeof asset.height === "number" && asset.height > 0 ? Math.round(asset.height) : undefined
+        asset && typeof asset.height === "number" && asset.height > 0
+          ? Math.round(asset.height)
+          : undefined
       return {
         assetId: clip.assetId,
         ...("streamIndex" in clip && clip.streamIndex !== undefined
@@ -172,7 +173,9 @@ function toOverlays(
   canvas: TimelineState["canvas"],
   trackVisible: boolean,
   range: ExportRange | undefined,
+  assets?: ProjectAsset[],
 ): RenderPlanOverlay[] {
+  const assetById = new Map(assets?.map((asset) => [asset.id, asset]))
   return sortClips(clips)
     .filter((clip): clip is Extract<TimelineClip, { kind: "camera" }> => clip.kind === "camera")
     .flatMap((clip) => {
@@ -181,10 +184,19 @@ function toOverlays(
       const transform = clip.transform
       const width = Math.min(Math.max(0, transform.width), canvas.width)
       const height = Math.min(Math.max(0, transform.height), canvas.height)
+      const asset = assetById.get(clip.assetId)
+      const isStandaloneWebcam =
+        asset?.role === "webcam" &&
+        Boolean(
+          asset.path &&
+            !asset.path.includes(":") &&
+            asset.path.toLowerCase().endsWith(".mp4"),
+        )
+      const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
       return [
         {
           assetId: clip.assetId,
-          streamIndex: clip.streamIndex,
+          ...(streamIndex !== undefined ? { streamIndex: Math.round(streamIndex) } : {}),
           sourceInMs: window.sourceInMs,
           sourceOutMs: window.sourceOutMs,
           outputStartMs: window.outputStartMs,
@@ -764,10 +776,12 @@ function buildAudioTracks(state: TimelineState, range: ExportRange | undefined):
     const clips = sortClips(track.clips).filter(
       (clip): clip is Extract<TimelineClip, { kind: "audio" }> => clip.kind === "audio",
     )
-    const segments = toSegments(clips, range, true).map((segment, index) => ({
-      ...segment,
-      volume: Math.min(2, (clips[index]?.volume ?? 1) * track.volume),
-    }))
+    const segments = clips.flatMap((clip) =>
+      toSegments([clip], range, true).map((segment) => ({
+        ...segment,
+        volume: Math.min(2, clip.volume * track.volume),
+      })),
+    )
     const firstAudioClip = clips[0]
     if (!firstAudioClip || segments.length === 0) return []
     return [
@@ -901,7 +915,7 @@ export function buildRenderPlan(
   }
 
   const overlays = cameraTrack
-    ? toOverlays(cameraTrack.clips, state.canvas, !cameraTrack.muted, range)
+    ? toOverlays(cameraTrack.clips, state.canvas, !cameraTrack.muted, range, input.assets)
     : []
   const firstScreenAssetId = segments[0].assetId
   return {

@@ -142,11 +142,7 @@ function renderAnnotation(
     const totalHeight = (lines.length - 1) * lineHeight
     const startY = transform.y + transform.height / 2 - totalHeight / 2
     lines.forEach((line, index) => {
-      context.fillText(
-        line,
-        transform.x + transform.width / 2,
-        startY + index * lineHeight,
-      )
+      context.fillText(line, transform.x + transform.width / 2, startY + index * lineHeight)
     })
   }
   context.restore()
@@ -310,9 +306,7 @@ function renderText(
           )
         : []
     subH =
-      hasSub && secondaryLines.length > 0
-        ? secondaryLines.length * subLineHeight + subtitleGap
-        : 0
+      hasSub && secondaryLines.length > 0 ? secondaryLines.length * subLineHeight + subtitleGap : 0
   }
 
   const tagH = hasTag ? tagLineHeight + tagGap : 0

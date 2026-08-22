@@ -10,7 +10,12 @@ export const S3ConfigSchema = z.object({
   region: z.string().min(1, "Region is required"),
   bucket: z.string().min(1, "Bucket name is required"),
   prefix: z.string().nullish().default(""),
-  partSizeBytes: z.number().int().positive().nullish().default(8 * 1024 * 1024), // 8MB default
+  partSizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .nullish()
+    .default(8 * 1024 * 1024), // 8MB default
   forcePathStyle: z.boolean().nullish().default(false),
 })
 export type S3Config = z.infer<typeof S3ConfigSchema>
@@ -31,7 +36,12 @@ export const GoogleDriveConfigSchema = z.object({
   folderId: z.string().nullish().default("root"),
   folderName: z.string().nullish().default("recordForge"),
   accountEmail: z.string().nullish(),
-  chunkSizeBytes: z.number().int().positive().nullish().default(5 * 1024 * 1024), // 5MB chunks
+  chunkSizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .nullish()
+    .default(5 * 1024 * 1024), // 5MB chunks
 })
 export type GoogleDriveConfig = z.infer<typeof GoogleDriveConfigSchema>
 
@@ -126,4 +136,3 @@ export const OAuthFlowStartResultSchema = z.object({
   port: z.number().int(),
 })
 export type OAuthFlowStartResult = z.infer<typeof OAuthFlowStartResultSchema>
-

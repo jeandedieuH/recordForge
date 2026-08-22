@@ -381,8 +381,7 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
       const lockedClip = foundClips.find(
-        (found) =>
-          found?.track.locked || (found?.clip && isClipLocked(found.clip)),
+        (found) => found?.track.locked || (found?.clip && isClipLocked(found.clip)),
       )
       if (lockedClip) {
         return {
@@ -402,8 +401,7 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
       }
       const lockedClip = foundClips.find(
-        (found) =>
-          found?.track.locked || (found?.clip && isClipLocked(found.clip)),
+        (found) => found?.track.locked || (found?.clip && isClipLocked(found.clip)),
       )
       if (lockedClip) {
         return {
@@ -418,7 +416,10 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
         const found = findClip(state, id)
         if (found) {
           if (found.track.locked) {
-            return { ok: false, error: editorError("track_locked", `Track "${found.track.name}" is locked`) }
+            return {
+              ok: false,
+              error: editorError("track_locked", `Track "${found.track.name}" is locked`),
+            }
           }
           if (isClipLocked(found.clip)) {
             return { ok: false, error: editorError("clip_locked", "Clip is locked") }
@@ -432,7 +433,10 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
             return { ok: false, error: editorError("track_locked", 'Track "Zoom" is locked') }
           }
           if (foundZoom.locked) {
-            return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
+            return {
+              ok: false,
+              error: editorError("zoom_segment_locked", "Zoom segment is locked"),
+            }
           }
           continue
         }
@@ -1408,9 +1412,7 @@ function applyDeleteRangeInternal(
   deleteEndMs: number,
   ripple: boolean,
 ): TimelineState {
-  const isZoomTrackLocked = state.tracks.some(
-    (track) => track.kind === "zoom" && track.locked,
-  )
+  const isZoomTrackLocked = state.tracks.some((track) => track.kind === "zoom" && track.locked)
   const tracks = state.tracks.map((track) =>
     deleteRangeFromTrack(track, deleteStartMs, deleteEndMs, ripple),
   )
@@ -1419,12 +1421,7 @@ function applyDeleteRangeInternal(
     : deleteMarkersInRange(state.markers, deleteStartMs, deleteEndMs)
   const zoomSegments = isZoomTrackLocked
     ? (state.zoomSegments ?? [])
-    : zoomSegmentsAfterRange(
-        getManualZoomSegments(state),
-        deleteStartMs,
-        deleteEndMs,
-        ripple,
-      )
+    : zoomSegmentsAfterRange(getManualZoomSegments(state), deleteStartMs, deleteEndMs, ripple)
   return { ...state, tracks, markers, zoomSegments, updatedAt: now() }
 }
 

@@ -361,7 +361,7 @@ pub fn complete_job(conn: &Connection, id: &str, outputs: &MediaJobOutputs) -> R
         .map_err(|e| InternalError::Storage(format!("serialize outputs: {e}")))?;
 
     conn.execute(
-        "UPDATE media_jobs SET status = ?1, progress = ?2, stage = ?3, completed_at = ?4, updated_at = ?4, outputs = ?5 WHERE id = ?6 AND status IN ('pending', 'running')",
+        "UPDATE media_jobs SET status = ?1, progress = ?2, stage = ?3, completed_at = ?4, updated_at = ?4, outputs = ?5 WHERE id = ?6 AND status IN ('pending', 'running', 'cancelled')",
         params![
             MediaJobStatus::Completed.as_str(),
             1.0,
@@ -766,6 +766,32 @@ mod tests {
         assert_eq!(retried.status, MediaJobStatus::Pending);
         assert_eq!(retried.options, options);
         assert_eq!(retried.attempts, 1);
+    }
+
+    #[test]
+    fn completion_wins_when_cancellation_races_after_publication() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+        let job =
+            insert_job(&conn, "recording-1", MediaJobKind::Export).expect("insert export job");
+        start_job(&conn, &job.id).expect("start export job");
+        cancel_job(&conn, &job.id).expect("cancel export job");
+
+        let completed = complete_job(
+            &conn,
+            &job.id,
+            &MediaJobOutputs {
+                output_path: Some("C:/exports/demo.mp4".into()),
+                ..Default::default()
+            },
+        )
+        .expect("complete published export");
+
+        assert_eq!(completed.status, MediaJobStatus::Completed);
+        assert_eq!(
+            completed.outputs.output_path.as_deref(),
+            Some("C:/exports/demo.mp4")
+        );
     }
 
     #[test]

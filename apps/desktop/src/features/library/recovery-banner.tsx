@@ -78,9 +78,7 @@ export function RecoveryBanner({ sessions, onRecovered }: RecoveryBannerProps) {
                 )}
               </div>
               {session.validationError && !session.isRecoverable ? (
-                <span className="text-[11px] text-muted-foreground">
-                  {session.validationError}
-                </span>
+                <span className="text-[11px] text-muted-foreground">{session.validationError}</span>
               ) : null}
             </div>
             <div className="flex items-center gap-2">

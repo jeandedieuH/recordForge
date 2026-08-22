@@ -204,7 +204,9 @@ export function CameraPreview({
             key={clip.id}
             role="button"
             tabIndex={isActive ? 0 : -1}
-            aria-label={isLocked ? "Camera overlay, select to edit" : "Camera overlay, drag to move"}
+            aria-label={
+              isLocked ? "Camera overlay, select to edit" : "Camera overlay, drag to move"
+            }
             aria-disabled={false}
             className={cn(
               "absolute z-20 overflow-hidden",

@@ -77,7 +77,7 @@ describe("Storage Core Provider", () => {
         hasCredentials: true,
         createdAt: "2026-01-01",
         updatedAt: "2026-01-01",
-      })
+      }),
     ).toBe(true)
 
     expect(
@@ -97,7 +97,7 @@ describe("Storage Core Provider", () => {
         hasCredentials: false, // missing secrets
         createdAt: "2026-01-01",
         updatedAt: "2026-01-01",
-      })
+      }),
     ).toBe(false)
 
     expect(
@@ -117,7 +117,7 @@ describe("Storage Core Provider", () => {
         hasCredentials: true,
         createdAt: "2026-01-01",
         updatedAt: "2026-01-01",
-      })
+      }),
     ).toBe(true)
   })
 })

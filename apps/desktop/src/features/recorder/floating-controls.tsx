@@ -396,7 +396,11 @@ export function FloatingControls() {
               disabled={!isActive || pendingAction != null}
               onClick={stop}
             >
-              {pendingAction === "stop" ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4 fill-current" />}
+              {pendingAction === "stop" ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Square className="size-4 fill-current" />
+              )}
             </Button>
 
             <Button

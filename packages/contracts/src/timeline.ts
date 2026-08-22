@@ -789,8 +789,16 @@ export const renderPlanZoomSegmentSchema = z.object({
   target: zoomTargetSchema,
   scale: z.number().min(1).max(8).default(1.5),
   easing: zoomEasingSchema.default("smooth"),
-  transitionInMs: z.number().transform(Math.round).pipe(z.number().int().min(0).max(10_000)).default(400),
-  transitionOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0).max(10_000)).default(400),
+  transitionInMs: z
+    .number()
+    .transform(Math.round)
+    .pipe(z.number().int().min(0).max(10_000))
+    .default(400),
+  transitionOutMs: z
+    .number()
+    .transform(Math.round)
+    .pipe(z.number().int().min(0).max(10_000))
+    .default(400),
   enabled: z.boolean().default(true),
   mode: zoomModeSchema.optional(),
   source: zoomSourceSchema.optional(),

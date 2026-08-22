@@ -384,3 +384,44 @@ pub fn delete_upload_job(conn: &Connection, id: &str) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inserts_upload_job_without_legacy_project_or_export_id() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+
+        let job = UploadJob {
+            id: "job-1".to_string(),
+            provider_profile_id: "profile-1".to_string(),
+            provider_profile_name: None,
+            provider_kind: "s3".to_string(),
+            recording_id: None,
+            export_id: None,
+            local_path: "C:\\recordings\\demo.mp4".to_string(),
+            remote_path: "demo.mp4".to_string(),
+            state: "uploading".to_string(),
+            bytes_uploaded: 0,
+            total_bytes: 123,
+            speed_bps: 0,
+            remote_url: None,
+            retry_count: 0,
+            last_error: None,
+            created_at: "2026-08-22T00:00:00Z".to_string(),
+            updated_at: "2026-08-22T00:00:00Z".to_string(),
+            completed_at: None,
+        };
+
+        insert_upload_job(&conn, &job).expect("upload job should be insertable");
+        let persisted = get_upload_job(&conn, &job.id)
+            .expect("load upload job")
+            .expect("upload job should exist");
+
+        assert_eq!(persisted.recording_id, None);
+        assert_eq!(persisted.export_id, None);
+        assert_eq!(persisted.local_path, job.local_path);
+    }
+}

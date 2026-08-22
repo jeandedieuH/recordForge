@@ -65,9 +65,7 @@ export function formatYouTubeChapters(
 /**
  * Parses YouTube-formatted chapter lines (e.g., "01:23 Introduction") into timestamps and labels.
  */
-export function parseYouTubeChapters(
-  text: string,
-): Array<{ timeMs: number; label: string }> {
+export function parseYouTubeChapters(text: string): Array<{ timeMs: number; label: string }> {
   if (!text || typeof text !== "string") return []
 
   const lines = text.split(/\r?\n/)
@@ -112,7 +110,8 @@ export function timelineMarkersToChapters(
 
   const rangeStart = range?.startMs !== undefined ? Math.round(range.startMs) : 0
   const totalDuration = Math.round(durationMs)
-  const rangeEnd = range?.endMs !== undefined ? Math.min(Math.round(range.endMs), totalDuration) : totalDuration
+  const rangeEnd =
+    range?.endMs !== undefined ? Math.min(Math.round(range.endMs), totalDuration) : totalDuration
   const effectiveDuration = Math.max(0, rangeEnd - rangeStart)
 
   if (effectiveDuration <= 0) {

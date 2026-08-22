@@ -114,7 +114,7 @@ pub(crate) fn append_export_video_args(
     canvas_height: u32,
 ) {
     let target_fps = match settings.preset.as_str() {
-        "smooth-60fps" | "ultra-4k-60" => 60.max(fps),
+        "smooth-60fps" | "ultra-4k-60" => 60,
         _ => fps,
     };
     let crf = quality_crf(&settings.preset);
@@ -399,6 +399,19 @@ mod tests {
             1080,
         );
         assert!(args_of(&command)
+            .windows(2)
+            .any(|pair| pair == ["-r", "60"]));
+
+        let mut high_fps_command = Command::new("ffmpeg");
+        append_export_video_args(
+            &mut high_fps_command,
+            &settings("ultra-4k-60", "h264", "auto"),
+            ExportEncoder::Software,
+            120,
+            3_840,
+            2_160,
+        );
+        assert!(args_of(&high_fps_command)
             .windows(2)
             .any(|pair| pair == ["-r", "60"]));
     }

@@ -63,6 +63,41 @@ describe("domain", () => {
     ])
   })
 
+  it("uses probed media duration when the recorder clock runs longer", () => {
+    const metadata: MediaMetadata = {
+      recordingId: "recording-1",
+      path: "C:/recordforge/session-1/output.mp4",
+      durationMs: 1_000,
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      hasAudio: false,
+      streams: [
+        {
+          index: 0,
+          kind: "video",
+          codec: "h264",
+          durationMs: 1_000,
+          width: 1920,
+          height: 1080,
+          fps: 60,
+        },
+      ],
+      format: { name: "mov,mp4,m4a,3gp,3g2,mj2", durationMs: 1_000 },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+
+    const project = createProjectFromRecording(makeRecording(), metadata)
+
+    expect(project.tracks[0].clips[0]).toMatchObject({
+      kind: "screen",
+      durationMs: 1_000,
+      sourceInMs: 0,
+      sourceOutMs: 1_000,
+    })
+    expect(project.assets[0]).toMatchObject({ role: "screen", durationMs: 1_000 })
+  })
+
   it("creates aligned screen, microphone, and system audio tracks from recorded streams", () => {
     const metadata: MediaMetadata = {
       recordingId: "recording-1",

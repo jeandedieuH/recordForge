@@ -100,8 +100,8 @@ Upload jobs are persisted in the `upload_jobs` table and managed by the durable 
 CREATE TABLE upload_jobs (
     id TEXT PRIMARY KEY,
     provider_profile_id TEXT NOT NULL,
-    recording_id TEXT NOT NULL,
-    export_id TEXT NOT NULL,
+    recording_id TEXT,
+    export_id TEXT,
     local_path TEXT NOT NULL,
     remote_path TEXT NOT NULL,
     state TEXT NOT NULL,           -- pending | uploading | paused | completed | failed | cancelled
@@ -117,6 +117,8 @@ CREATE TABLE upload_jobs (
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
 ```
+
+`recording_id` and `export_id` are nullable because an upload can originate from either a library recording or a standalone export.
 
 ---
 

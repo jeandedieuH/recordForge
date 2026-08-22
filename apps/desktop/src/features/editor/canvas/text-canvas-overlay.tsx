@@ -90,7 +90,9 @@ export function TextCanvasOverlay({
 
         const initialTotalContentH = baseTagH + basePrimaryH + baseSubH
         const scale =
-          clip.autoScaleText !== false && initialTotalContentH > availableH && initialTotalContentH > 0
+          clip.autoScaleText !== false &&
+          initialTotalContentH > availableH &&
+          initialTotalContentH > 0
             ? Math.min(1, Math.max(0.55, availableH / initialTotalContentH))
             : 1
 

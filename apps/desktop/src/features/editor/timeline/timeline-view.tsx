@@ -1131,11 +1131,7 @@ export function TimelineView({
       setSelection(null)
       return
     }
-    execute(
-      ripple
-        ? createRippleDeleteClipCommand(clip.id)
-        : createDeleteClipCommand(clip.id),
-    )
+    execute(ripple ? createRippleDeleteClipCommand(clip.id) : createDeleteClipCommand(clip.id))
     if (selection?.kind === "clip" && selection.primaryClipId === clip.id) {
       setSelection(null)
     }
@@ -1556,7 +1552,8 @@ export function TimelineView({
             >
               {/* Background Layer */}
               <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-[inherit] z-0">
-                {timeline?.canvas.backgroundFit === "contain" && !preRenderedBackground.isPreRendered ? (
+                {timeline?.canvas.backgroundFit === "contain" &&
+                !preRenderedBackground.isPreRendered ? (
                   <>
                     {/* Ambient blurred underlay */}
                     <div

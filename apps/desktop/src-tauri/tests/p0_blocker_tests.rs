@@ -252,7 +252,8 @@ fn test_recovery_repairs_unfinalized_audio_wav_header() {
     std::io::Write::write_all(&mut file, &vec![0x12u8; 48000]).unwrap();
     drop(file);
 
-    let repaired_len = recordforge_desktop_lib::capture::audio::repair_wav_header_if_needed(&wav_path).unwrap();
+    let repaired_len =
+        recordforge_desktop_lib::capture::audio::repair_wav_header_if_needed(&wav_path).unwrap();
     assert_eq!(repaired_len, 48044);
 
     let read_back = std::fs::read(&wav_path).unwrap();

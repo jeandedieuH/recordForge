@@ -112,7 +112,9 @@
 .glass-panel-interactive:hover {
   background: rgba(18, 28, 46, 0.95);
   border-color: var(--color-primary-container);
-  box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.7), 0 0 24px -4px rgba(9, 77, 178, 0.3);
+  box-shadow:
+    0 12px 36px -8px rgba(0, 0, 0, 0.7),
+    0 0 24px -4px rgba(9, 77, 178, 0.3);
   transform: translateY(-2px);
 }
 
@@ -148,9 +150,10 @@
 }
 
 .bg-radial-glow {
-  background: radial-gradient(circle 700px at 50% 10%, rgba(9, 77, 178, 0.25), transparent 70%),
-              radial-gradient(circle 500px at 85% 25%, rgba(125, 48, 143, 0.20), transparent 70%),
-              radial-gradient(circle 500px at 15% 55%, rgba(56, 189, 248, 0.12), transparent 70%);
+  background:
+    radial-gradient(circle 700px at 50% 10%, rgba(9, 77, 178, 0.25), transparent 70%),
+    radial-gradient(circle 500px at 85% 25%, rgba(125, 48, 143, 0.2), transparent 70%),
+    radial-gradient(circle 500px at 15% 55%, rgba(56, 189, 248, 0.12), transparent 70%);
 }
 
 /* Custom Animation Keyframes */

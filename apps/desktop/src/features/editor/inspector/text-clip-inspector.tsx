@@ -139,7 +139,9 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
     toast({ title: "Dimensions reset", description: "Reset layout properties to preset defaults." })
   }
 
-  function handleAlignToCanvas(position: "center" | "lower-third" | "top-left" | "top-right" | "bottom-left" | "bottom-right") {
+  function handleAlignToCanvas(
+    position: "center" | "lower-third" | "top-left" | "top-right" | "bottom-left" | "bottom-right",
+  ) {
     let targetX = clip.x
     let targetY = clip.y
     const pad = 60

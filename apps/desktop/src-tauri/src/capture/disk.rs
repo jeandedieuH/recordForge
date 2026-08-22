@@ -45,10 +45,7 @@ pub fn atomic_replace(temp: &Path, destination: &Path) -> crate::errors::Result<
                     None,
                 )
                 .map_err(|e| {
-                    crate::errors::InternalError::Storage(format!(
-                        "replace {}: {e}",
-                        destination.display()
-                    ))
+                    crate::errors::InternalError::Storage(format!("replace destination: {e}"))
                 })?;
             }
 
@@ -56,9 +53,8 @@ pub fn atomic_replace(temp: &Path, destination: &Path) -> crate::errors::Result<
         }
     }
 
-    std::fs::rename(temp, destination).map_err(|e| {
-        crate::errors::InternalError::Storage(format!("publish {}: {e}", destination.display()))
-    })?;
+    std::fs::rename(temp, destination)
+        .map_err(|e| crate::errors::InternalError::Storage(format!("publish destination: {e}")))?;
 
     Ok(())
 }

@@ -51,9 +51,12 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     if current_version < 8 {
         migrate_v8(&tx)?;
     }
+    if current_version < 9 {
+        migrate_v9(&tx)?;
+    }
 
     tx.execute(
-        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '8')",
+        "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '9')",
         [],
     )?;
 
@@ -337,6 +340,62 @@ fn migrate_v8(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn migrate_v9(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let upload_jobs_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upload_jobs')",
+        [],
+        |row| row.get(0),
+    )?;
+
+    tx.execute(
+        "CREATE TABLE upload_jobs_new (
+            id TEXT PRIMARY KEY,
+            provider_profile_id TEXT NOT NULL,
+            project_id TEXT,
+            export_id TEXT,
+            local_path TEXT NOT NULL,
+            remote_path TEXT NOT NULL,
+            state TEXT NOT NULL,
+            bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            speed_bps INTEGER NOT NULL DEFAULT 0,
+            remote_url TEXT,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            completed_at TEXT,
+            provider_kind TEXT NOT NULL DEFAULT 's3',
+            recording_id TEXT
+        )",
+        [],
+    )?;
+
+    if !upload_jobs_exists {
+        tx.execute("ALTER TABLE upload_jobs_new RENAME TO upload_jobs", [])?;
+        return Ok(());
+    }
+
+    tx.execute(
+        "INSERT INTO upload_jobs_new (
+            id, provider_profile_id, project_id, export_id, local_path, remote_path,
+            state, bytes_uploaded, total_bytes, retry_count, last_error, speed_bps,
+            remote_url, created_at, updated_at, completed_at, provider_kind, recording_id
+        )
+        SELECT
+            id, provider_profile_id, project_id, export_id, local_path, remote_path,
+            state, bytes_uploaded, total_bytes, retry_count, last_error, speed_bps,
+            remote_url, created_at, updated_at, completed_at, provider_kind, recording_id
+        FROM upload_jobs",
+        [],
+    )?;
+
+    tx.execute("DROP TABLE upload_jobs", [])?;
+    tx.execute("ALTER TABLE upload_jobs_new RENAME TO upload_jobs", [])?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,7 +431,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
 
         let webcam_column_count: i64 = conn
             .query_row(
@@ -391,5 +450,80 @@ mod tests {
             )
             .unwrap();
         assert_eq!(storage_profiles_table_count, 1);
+    }
+
+    #[test]
+    fn makes_legacy_upload_identifiers_nullable_without_losing_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO app_meta VALUES ('schema_version', '8')", [])
+            .unwrap();
+        conn.execute(
+            "CREATE TABLE upload_jobs (
+                id TEXT PRIMARY KEY,
+                provider_profile_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                export_id TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                remote_path TEXT NOT NULL,
+                state TEXT NOT NULL,
+                bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                speed_bps INTEGER NOT NULL DEFAULT 0,
+                remote_url TEXT,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                completed_at TEXT,
+                provider_kind TEXT NOT NULL DEFAULT 's3',
+                recording_id TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO upload_jobs (
+                id, provider_profile_id, project_id, export_id, local_path, remote_path, state
+            ) VALUES (
+                'job-legacy', 'profile-1', 'project-1', 'export-1',
+                'C:/recordings/demo.mp4', 'demo.mp4', 'failed'
+            )",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let project_id: String = conn
+            .query_row(
+                "SELECT project_id FROM upload_jobs WHERE id = 'job-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(project_id, "project-1");
+
+        let project_id_not_null: i64 = conn
+            .query_row(
+                "SELECT [notnull] FROM pragma_table_info('upload_jobs') WHERE name = 'project_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let export_id_not_null: i64 = conn
+            .query_row(
+                "SELECT [notnull] FROM pragma_table_info('upload_jobs') WHERE name = 'export_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(project_id_not_null, 0);
+        assert_eq!(export_id_not_null, 0);
     }
 }

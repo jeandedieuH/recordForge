@@ -89,7 +89,11 @@ export function TimelineSandbox() {
                 : "bg-primary hover:bg-primary-hover text-foreground"
             }`}
           >
-            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+            {isPlaying ? (
+              <Pause className="w-3.5 h-3.5" />
+            ) : (
+              <Play className="w-3.5 h-3.5 fill-current" />
+            )}
             {isPlaying ? "Pause Timeline" : "Play Preview"}
           </button>
 
@@ -308,7 +312,9 @@ export function TimelineSandbox() {
           <span>•</span>
           <span className="text-track-mic font-medium">Non-Destructive Session Journal</span>
         </div>
-        <div className="text-[11px] text-subtle-foreground">Click anywhere on the ruler to seek</div>
+        <div className="text-[11px] text-subtle-foreground">
+          Click anywhere on the ruler to seek
+        </div>
       </div>
     </div>
   )

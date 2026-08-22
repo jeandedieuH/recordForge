@@ -499,12 +499,14 @@ pub fn run_render_plan(
         .into());
     }
     let asset_paths = crate::projects::load_asset_path_map(&work_dir)?;
-    if asset_paths
-        .values()
-        .any(|asset_path| asset_path == output_path)
-    {
+    let managed_paths = managed_export_paths(output_path, &plan);
+    if asset_paths.values().any(|asset_path| {
+        managed_paths
+            .iter()
+            .any(|managed_path| paths_refer_to_same_file(asset_path, managed_path))
+    }) {
         return Err(InternalError::Permissions(
-            "export destination cannot overwrite a project asset".into(),
+            "export files cannot overwrite a project asset".into(),
         )
         .into());
     }
@@ -855,7 +857,11 @@ fn render_timeline_composition(
         && !plan.chapters.is_empty()
     {
         let meta_content = generate_ffmetadata(project_id, &plan.chapters);
-        let meta_path = std::env::temp_dir().join(format!("rf-chapters-{}.ffmeta", project_id));
+        let meta_path = std::env::temp_dir().join(format!(
+            "rf-chapters-{}-{}.ffmeta",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&meta_path, meta_content.as_bytes())
             .map_err(|err| InternalError::Storage(format!("write ffmetadata: {err}")))?;
         let idx = input_assets.len();
@@ -904,10 +910,11 @@ fn render_timeline_composition(
         )
         .map_err(|err| InternalError::Media(format!("generate canvas border mask: {err}")))?;
         let mask_path = std::env::temp_dir().join(format!(
-            "rf-mask-canvas-{}-{}-{}.png",
+            "rf-mask-canvas-{}-{}-{}-{}.png",
             project_id,
             screen_w.round() as u32,
-            screen_h.round() as u32
+            screen_h.round() as u32,
+            uuid::Uuid::new_v4()
         ));
         std::fs::write(&mask_path, &mask_bytes)
             .map_err(|err| InternalError::Storage(format!("write canvas border mask: {err}")))?;
@@ -980,8 +987,12 @@ fn render_timeline_composition(
             let mask_bytes = cursor::generate_circle_mask_png(overlay_w, overlay_h)
                 .map_err(|err| InternalError::Media(format!("generate circle mask: {err}")))?;
             let mask_path = std::env::temp_dir().join(format!(
-                "rf-mask-cam-circle-{}-{}-{}-{}.png",
-                project_id, index, overlay_w, overlay_h
+                "rf-mask-cam-circle-{}-{}-{}-{}-{}.png",
+                project_id,
+                index,
+                overlay_w,
+                overlay_h,
+                uuid::Uuid::new_v4()
             ));
             std::fs::write(&mask_path, &mask_bytes)
                 .map_err(|err| InternalError::Storage(format!("write circle mask: {err}")))?;
@@ -995,8 +1006,12 @@ fn render_timeline_composition(
                 cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius)
                     .map_err(|err| InternalError::Media(format!("generate rounded mask: {err}")))?;
             let mask_path = std::env::temp_dir().join(format!(
-                "rf-mask-cam-rounded-{}-{}-{}-{}.png",
-                project_id, index, overlay_w, overlay_h
+                "rf-mask-cam-rounded-{}-{}-{}-{}-{}.png",
+                project_id,
+                index,
+                overlay_w,
+                overlay_h,
+                uuid::Uuid::new_v4()
             ));
             std::fs::write(&mask_path, &mask_bytes)
                 .map_err(|err| InternalError::Storage(format!("write rounded mask: {err}")))?;
@@ -1017,8 +1032,12 @@ fn render_timeline_composition(
             )
             .map_err(|err| InternalError::Media(format!("generate camera border: {err}")))?;
             let border_path = std::env::temp_dir().join(format!(
-                "rf-border-cam-{}-{}-{}-{}.png",
-                project_id, index, overlay_w, overlay_h
+                "rf-border-cam-{}-{}-{}-{}-{}.png",
+                project_id,
+                index,
+                overlay_w,
+                overlay_h,
+                uuid::Uuid::new_v4()
             ));
             std::fs::write(&border_path, &border_bytes)
                 .map_err(|err| InternalError::Storage(format!("write camera border: {err}")))?;
@@ -1081,7 +1100,7 @@ fn render_timeline_composition(
             &segment.asset_id,
             input_index,
             segment.stream_index,
-        );
+        )?;
         let label = format!("screen{index}");
         let mut filter = format!(
             "{input}trim=start={}:end={},setpts=PTS-STARTPTS",
@@ -1096,8 +1115,13 @@ fn render_timeline_composition(
         } else {
             background.clone()
         };
+        let segment_duration = seconds(
+            segment
+                .output_end_ms
+                .saturating_sub(segment.output_start_ms),
+        );
         filter.push_str(&format!(
-            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1[{label}]",
+            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
             canvas.fps,
         ));
         filters.push(filter);
@@ -1153,19 +1177,15 @@ fn render_timeline_composition(
     let base_label = "canvas_base";
     if is_fullscreen_canvas {
         if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
-                plan,
-                canvas,
-                canvas.width as f64,
-                canvas.height as f64,
-            );
+            let (z_expr, x_expr, y_expr) =
+                build_zoompan_expressions(plan, canvas, canvas.width as f64, canvas.height as f64);
             filters.push(format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1[{base_label}]",
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1[{base_label}]",
                 canvas.width, canvas.height, canvas.fps
             ));
         } else {
             filters.push(format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},setsar=1[{base_label}]"
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,setsar=1[{base_label}]"
             ));
         }
     } else {
@@ -1211,7 +1231,7 @@ fn render_timeline_composition(
                 ));
             }
             bg_filter.push_str(&format!(
-                ",fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[bg_plate]",
+                ",fps={},tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS[bg_plate]",
                 canvas.fps
             ));
             filters.push(bg_filter);
@@ -1233,16 +1253,15 @@ fn render_timeline_composition(
 
         // 2. Crop and format the fitted video layer [screen_fitted]
         let mut screen_filter = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let (z_expr, x_expr, y_expr) = build_zoompan_expressions(
-                plan, canvas, screen_w, screen_h,
-            );
+            let (z_expr, x_expr, y_expr) =
+                build_zoompan_expressions(plan, canvas, screen_w, screen_h);
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
                 canvas.fps
             )
         } else {
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration},crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
             )
         };
         if let Some(mask_idx) = canvas_mask_idx {
@@ -1263,7 +1282,7 @@ fn render_timeline_composition(
         let mut bg_current = "[bg_plate]".to_string();
         if let Some(shadow_idx) = shadow_input_index {
             filters.push(format!(
-                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[shadow_loop]",
+                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS[shadow_loop]",
                 canvas.width, canvas.height, canvas.fps
             ));
             filters.push(format!(
@@ -1338,7 +1357,7 @@ fn render_timeline_composition(
             &overlay.asset_id,
             input_index,
             overlay.stream_index,
-        );
+        )?;
         if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
             return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
         }
@@ -1354,7 +1373,7 @@ fn render_timeline_composition(
             let shadow_loop_label = format!("cam_shadow_loop{index}");
             let after_shadow_label = format!("cam_with_shadow{index}");
             filters.push(format!(
-                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},trim=duration={plan_duration}[{shadow_loop_label}]",
+                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS[{shadow_loop_label}]",
                 canvas.width, canvas.height, canvas.fps
             ));
             filters.push(format!(
@@ -1570,7 +1589,8 @@ fn render_timeline_composition(
             source_width: None,
             source_height: None,
         };
-        let segments = if track.segments.is_empty() {
+        let uses_legacy_fallback = track.segments.is_empty();
+        let segments = if uses_legacy_fallback {
             vec![fallback]
         } else {
             track.segments.clone()
@@ -1587,13 +1607,19 @@ fn render_timeline_composition(
             let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
                 InternalError::Media("audio track references an unknown asset".into())
             })?;
+            let stream_index = if uses_legacy_fallback {
+                segment.stream_index.or(track.stream_index)
+            } else {
+                segment.stream_index
+            };
             let Some(input) = resolve_audio_stream_specifier(
                 ffprobe_path,
                 asset_path,
                 &segment.asset_id,
                 input_index,
-                segment.stream_index.or(track.stream_index),
-            ) else {
+                stream_index,
+            )?
+            else {
                 continue;
             };
             let label = format!("audio{audio_segment_index}");
@@ -1721,7 +1747,7 @@ fn render_timeline_composition(
         command.args(["-map_chapters", &idx.to_string()]);
     }
     command
-        .arg("-shortest")
+        .args(["-t", &seconds(plan.duration_ms)])
         .args(["-movflags", "+faststart"])
         .arg(output_path);
 
@@ -1839,10 +1865,12 @@ fn prepare_cursor_frame_plan(
         .unwrap_or(1)
         .max(1);
 
-    let overlay_plan: Option<overlay_engine::OverlayRenderPlan> = if let Some(val) =
+    let overlay_plan: Option<overlay_engine::OverlayRenderPlan> = if let Some(value) =
         &plan.overlay_render_plan
     {
-        serde_json::from_value(val.clone()).ok()
+        Some(serde_json::from_value(value.clone()).map_err(|error| {
+            InternalError::Media(format!("overlay render plan is invalid: {error}"))
+        })?)
     } else if !plan.annotations.is_empty() || !plan.texts.is_empty() || !plan.images.is_empty() {
         Some(annotations::build_overlay_render_plan_from_legacy(
             canvas.width,
@@ -1855,37 +1883,26 @@ fn prepare_cursor_frame_plan(
         None
     };
 
-    let mut overlay_engine = None;
-    if let Some(mut parsed_plan) = overlay_plan {
+    let overlay_engine = if let Some(mut parsed_plan) = overlay_plan {
         parsed_plan.canvas = overlay_engine::OverlayCanvas {
             width: canvas.width,
             height: canvas.height,
         };
-        match overlay_engine::OverlayEngine::from_render_plan(parsed_plan) {
-            Ok(mut engine) => {
-                for asset in plan.images.iter().map(|img| &img.asset_id) {
-                    if let Some(path) = asset_paths.get(asset) {
-                        register_overlay_image_asset(&mut engine, asset, path);
-                    }
-                }
-                if let Some(val) = &plan.overlay_render_plan {
-                    if let Ok(plan_obj) =
-                        serde_json::from_value::<overlay_engine::OverlayRenderPlan>(val.clone())
-                    {
-                        for asset in &plan_obj.assets {
-                            if let Some(path) = asset_paths.get(&asset.id) {
-                                register_overlay_image_asset(&mut engine, &asset.id, path);
-                            }
-                        }
-                    }
-                }
-                overlay_engine = Some(engine);
-            }
-            Err(e) => {
-                tracing::warn!("failed to build overlay engine for export: {e}");
-            }
+        let mut image_asset_ids = std::collections::BTreeSet::new();
+        image_asset_ids.extend(plan.images.iter().map(|image| image.asset_id.clone()));
+        image_asset_ids.extend(parsed_plan.assets.iter().map(|asset| asset.id.clone()));
+        let mut engine = overlay_engine::OverlayEngine::from_render_plan(parsed_plan)
+            .map_err(|error| InternalError::Media(format!("build overlay render plan: {error}")))?;
+        for asset_id in image_asset_ids {
+            let path = asset_paths.get(&asset_id).ok_or_else(|| {
+                InternalError::Permissions("overlay references a missing image asset".into())
+            })?;
+            register_overlay_image_asset(&mut engine, &asset_id, path)?;
         }
-    }
+        Some(engine)
+    } else {
+        None
+    };
 
     Ok(CursorFramePlan {
         fps: canvas.fps,
@@ -1902,18 +1919,36 @@ fn register_overlay_image_asset(
     engine: &mut overlay_engine::OverlayEngine,
     asset_id: &str,
     path: &Path,
-) {
+) -> Result<()> {
     if crate::media::svg::is_svg_path(path) {
-        if let Ok(svg_bytes) = crate::media::svg::read_safe_svg(path) {
-            if let Err(e) = engine.register_image_svg(asset_id, &svg_bytes) {
-                tracing::warn!(%asset_id, "failed to decode overlay SVG: {e}");
-            }
-        }
-    } else if let Ok(bytes) = std::fs::read(path) {
-        if let Err(e) = engine.register_image_png(asset_id, &bytes) {
-            tracing::warn!(%asset_id, "failed to decode overlay PNG: {e}");
-        }
+        let svg_bytes = crate::media::svg::read_safe_svg(path)
+            .map_err(|error| InternalError::Media(format!("read overlay SVG: {error}")))?;
+        engine
+            .register_image_svg(asset_id, &svg_bytes)
+            .map_err(|error| InternalError::Media(format!("decode overlay SVG: {error}")))?;
+    } else {
+        let bytes = std::fs::read(path)
+            .map_err(|error| InternalError::Media(format!("read overlay image: {error}")))?;
+        let png_bytes = if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        {
+            bytes
+        } else {
+            let image = image::load_from_memory(&bytes)
+                .map_err(|error| InternalError::Media(format!("decode overlay image: {error}")))?;
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .map_err(|error| InternalError::Media(format!("convert overlay image: {error}")))?;
+            encoded.into_inner()
+        };
+        engine
+            .register_image_png(asset_id, &png_bytes)
+            .map_err(|error| InternalError::Media(format!("decode overlay image: {error}")))?;
     }
+    Ok(())
 }
 
 /// Stream every composited overlay frame into FFmpeg's stdin.
@@ -1937,9 +1972,9 @@ fn feed_cursor_frames(
 
         // 1. Render active overlay items (annotations, text presets, images)
         if let Some(engine) = &cursor.overlay_engine {
-            if let Err(err) = engine.render_to_pixmap(output_ms, &mut cursor.pixmap) {
-                tracing::warn!(%output_ms, "failed to render overlay frame: {err}");
-            }
+            engine
+                .render_to_pixmap(output_ms, &mut cursor.pixmap)
+                .map_err(|error| InternalError::Media(format!("render overlay frame: {error}")))?;
         }
 
         // 2. Render cursor telemetry (if active at timestamp)
@@ -2331,13 +2366,33 @@ fn redact_paths(line: &str) -> String {
 /// paths redacted, falling back to a generic message when stderr is empty.
 fn ffmpeg_failure_detail(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
-    text.lines()
+    let lines = text
+        .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(redact_paths)
-        .next_back()
-        .map(|line| line.chars().take(300).collect::<String>())
         .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    // Filter out trailing generic muxer/conversion status lines to reveal the root cause line
+    let meaningful_lines = lines
+        .iter()
+        .filter(|line| {
+            !line.contains("Conversion failed")
+                && !line.contains("Nothing was written into output file")
+                && !line.starts_with("Error closing file")
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(&last_meaningful) = meaningful_lines.last() {
+        return Some(last_meaningful.chars().take(300).collect());
+    }
+
+    lines
+        .last()
+        .map(|line| line.chars().take(300).collect())
 }
 
 /// True when a stderr line belongs to a `-progress` block rather than a
@@ -2363,9 +2418,7 @@ fn is_progress_line(line: &str) -> bool {
 /// Stderr is drained on a dedicated thread because `-progress pipe:2` emits a
 /// continuous block stream that would otherwise fill the pipe and deadlock the
 /// child; progress lines are reported through `on_progress` (as a 0..1 ratio
-/// against `expected_duration_ms`) and excluded from the failure buffer.
-/// `cursor` optionally supplies a generated RGBA layer streamed over stdin.
-#[allow(clippy::too_many_arguments)]
+/// of expected duration) and non-progress lines are kept as diagnostics.
 fn run_export_ffmpeg(
     command: &mut Command,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
@@ -2444,7 +2497,7 @@ fn run_export_ffmpeg(
                     let _ = std::fs::remove_file(partial_path);
                     let detail = ffmpeg_failure_detail(&diagnostic)
                         .unwrap_or_else(|| "no diagnostic output".into());
-                    warn!(stage, detail = %detail, "ffmpeg export process failed");
+                    tracing::error!(stage, detail = %detail, stderr = %String::from_utf8_lossy(&diagnostic), "ffmpeg export process failed");
                     return Err(InternalError::Media(format!("{stage} failed: {detail}")).into());
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(100)),
@@ -2466,7 +2519,8 @@ fn validate_export_output(
     settings: &ExportSettings,
 ) -> Result<()> {
     let metadata =
-        crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)?;
+        crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)
+            .map_err(|_| InternalError::Media("probe rendered export failed".into()))?;
     let duration_delta = metadata.duration_ms.abs_diff(plan.duration_ms);
     if duration_delta > 150 {
         return Err(InternalError::Media(format!(
@@ -2525,13 +2579,49 @@ fn validate_export_output(
     Ok(())
 }
 
-pub(crate) fn cleanup_export_files(output_path: &Path) {
+fn temporary_export_paths(output_path: &Path) -> Vec<PathBuf> {
     let partial = partial_output_path(output_path);
-    let _ = std::fs::remove_file(&partial);
-    let _ = std::fs::remove_file(cursor_partial_output_path(output_path));
-    let _ = std::fs::remove_file(partial.with_extension("srt"));
-    let _ = std::fs::remove_file(partial.with_extension("chapters.txt"));
-    let _ = std::fs::remove_file(cursor_partial_output_path(&partial));
+    vec![
+        partial.clone(),
+        cursor_partial_output_path(output_path),
+        partial.with_extension("srt"),
+        partial.with_extension("chapters.txt"),
+        cursor_partial_output_path(&partial),
+    ]
+}
+
+fn managed_export_paths(output_path: &Path, plan: &RenderPlan) -> Vec<PathBuf> {
+    let mut paths = temporary_export_paths(output_path);
+    paths.push(output_path.to_path_buf());
+    if plan.caption_mode == "sidecar" {
+        paths.push(output_path.with_extension("srt"));
+    }
+    if matches!(plan.chapter_mode.as_str(), "sidecar" | "both") && !plan.chapters.is_empty() {
+        paths.push(output_path.with_extension("chapters.txt"));
+    }
+    paths
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    let left = crate::path_policy::canonicalize_path(left)
+        .unwrap_or_else(|_| crate::path_policy::normalize_path(left));
+    let right = crate::path_policy::canonicalize_path(right)
+        .unwrap_or_else(|_| crate::path_policy::normalize_path(right));
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+pub(crate) fn cleanup_export_files(output_path: &Path) {
+    for path in temporary_export_paths(output_path) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn update_progress(
@@ -3651,7 +3741,13 @@ pub(crate) fn clamped_zoom_target(
     canvas_padding: u32,
     segment: &RenderPlanZoomSegment,
 ) -> RenderCropFloat {
-    clamped_zoom_crop(canvas_width, canvas_height, canvas_padding, &segment.target, segment.scale)
+    clamped_zoom_crop(
+        canvas_width,
+        canvas_height,
+        canvas_padding,
+        &segment.target,
+        segment.scale,
+    )
 }
 
 pub(crate) fn clamped_zoom_crop(
@@ -3668,8 +3764,12 @@ pub(crate) fn clamped_zoom_crop(
     let target_width = target.width.clamp(1.0, canvas_w);
     let target_height = target.height.clamp(1.0, canvas_h);
 
-    let (final_width, final_height) = if (target_width - canvas_w).abs() < 1.0 && safe_scale > 1.01 {
-        ((canvas_w / safe_scale).max(1.0), (canvas_h / safe_scale).max(1.0))
+    let (final_width, final_height) = if (target_width - canvas_w).abs() < 1.0 && safe_scale > 1.01
+    {
+        (
+            (canvas_w / safe_scale).max(1.0),
+            (canvas_h / safe_scale).max(1.0),
+        )
     } else {
         (target_width, target_height)
     };
@@ -3705,32 +3805,71 @@ fn build_keyframe_center_expression(
         return fallback.to_string();
     }
 
+    // 1. Extract (t_s, val) points
+    let mut points: Vec<(f64, f64)> = Vec::with_capacity(keyframes.len());
+    for k in keyframes {
+        let t_s = k.time_ms as f64 / 1000.0;
+        let target = clamped_zoom_crop(
+            canvas.width,
+            canvas.height,
+            canvas.padding,
+            &k.target,
+            scale,
+        );
+        let val = if axis == "x" {
+            (((target.x + target.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        } else {
+            (((target.y + target.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        };
+        if let Some(last) = points.last_mut() {
+            if (last.0 - t_s).abs() < 1e-4 {
+                last.1 = val;
+                continue;
+            }
+        }
+        points.push((t_s, val));
+    }
+
+    if points.len() <= 1 {
+        return fallback.to_string();
+    }
+
+    // 2. Collapse consecutive points that are effectively static
+    let mut simplified: Vec<(f64, f64)> = Vec::with_capacity(points.len());
+    for (t, v) in points {
+        if simplified.len() >= 2 {
+            let p0 = simplified[simplified.len() - 2];
+            let p1 = simplified[simplified.len() - 1];
+            if (p1.1 - p0.1).abs() < 1.0 && (v - p1.1).abs() < 1.0 {
+                simplified.pop();
+                simplified.push((t, p1.1));
+                continue;
+            }
+        }
+        simplified.push((t, v));
+    }
+
+    // 3. Limit to max 10 segments (11 keyframe points) to prevent FFmpeg zoompan AST recursion limits
+    const MAX_POINTS: usize = 11;
+    let final_points = if simplified.len() > MAX_POINTS {
+        let stride = (simplified.len() - 1) as f64 / (MAX_POINTS - 1) as f64;
+        let mut decimated = Vec::with_capacity(MAX_POINTS);
+        for i in 0..MAX_POINTS {
+            let idx = ((i as f64 * stride).round() as usize).min(simplified.len() - 1);
+            decimated.push(simplified[idx]);
+        }
+        decimated
+    } else {
+        simplified
+    };
+
     let mut expr = fallback.to_string();
-    for i in (0..keyframes.len() - 1).rev() {
-        let k0 = &keyframes[i];
-        let k1 = &keyframes[i + 1];
-        let t0_s = k0.time_ms as f64 / 1000.0;
-        let t1_s = k1.time_ms as f64 / 1000.0;
+    for i in (0..final_points.len() - 1).rev() {
+        let (t0_s, val0) = final_points[i];
+        let (t1_s, val1) = final_points[i + 1];
         if t1_s <= t0_s {
             continue;
         }
-
-        let target0 =
-            clamped_zoom_crop(canvas.width, canvas.height, canvas.padding, &k0.target, scale);
-        let target1 =
-            clamped_zoom_crop(canvas.width, canvas.height, canvas.padding, &k1.target, scale);
-
-        let val0 = if axis == "x" {
-            (((target0.x + target0.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
-        } else {
-            (((target0.y + target0.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
-        };
-
-        let val1 = if axis == "x" {
-            (((target1.x + target1.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
-        } else {
-            (((target1.y + target1.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
-        };
 
         let span_s = t1_s - t0_s;
         let delta = val1 - val0;
@@ -3781,8 +3920,7 @@ fn build_zoompan_expressions(
         }
         let duration_s = (segment.end_ms - segment.start_ms) as f64 / 1000.0;
         let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.001, duration_s);
-        let mut trans_out_s =
-            (segment.transition_out_ms as f64 / 1000.0).clamp(0.001, duration_s);
+        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.001, duration_s);
         if trans_in_s + trans_out_s > duration_s {
             trans_in_s = duration_s / 2.0;
             trans_out_s = duration_s - trans_in_s;
@@ -3916,7 +4054,9 @@ fn build_zoompan_expressions(
         } else if trans_out_s < 1e-4 {
             format!("if(lt(it,{in_end_str}),{cx_in},{cx_hold})")
         } else {
-            format!("if(lt(it,{in_end_str}),{cx_in},if(lte(it,{out_start_str}),{cx_hold},{cx_out}))")
+            format!(
+                "if(lt(it,{in_end_str}),{cx_in},if(lte(it,{out_start_str}),{cx_hold},{cx_out}))"
+            )
         };
 
         // Center Y
@@ -3964,7 +4104,9 @@ fn build_zoompan_expressions(
         } else if trans_out_s < 1e-4 {
             format!("if(lt(it,{in_end_str}),{cy_in},{cy_hold})")
         } else {
-            format!("if(lt(it,{in_end_str}),{cy_in},if(lte(it,{out_start_str}),{cy_hold},{cy_out}))")
+            format!(
+                "if(lt(it,{in_end_str}),{cy_in},if(lte(it,{out_start_str}),{cy_hold},{cy_out}))"
+            )
         };
 
         let cond = if start_s.abs() < 1e-6 {
@@ -3983,7 +4125,6 @@ fn build_zoompan_expressions(
 
     (z_expr, x_expr, y_expr)
 }
-
 
 fn validate_segment_known(
     segment: &RenderSegment,
@@ -4167,27 +4308,44 @@ fn resolve_video_stream_specifier(
     asset_id: &str,
     input_index: usize,
     stream_index: Option<i32>,
-) -> String {
-    if let Some(ffprobe) = ffprobe_path {
-        if let Ok(meta) =
-            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
-        {
-            let video_streams: Vec<_> = meta.streams.iter().filter(|s| s.kind == "video").collect();
-            if let Some(idx) = stream_index {
-                if video_streams.iter().any(|s| s.index == idx) {
-                    return format!("[{input_index}:{idx}]");
-                }
-            }
-            if let Some(first_video) = video_streams.first() {
-                return format!("[{input_index}:{}]", first_video.index);
-            }
+) -> Result<String> {
+    let Some(ffprobe) = ffprobe_path else {
+        return Ok(stream_index.map_or_else(
+            || format!("[{input_index}:v:0]"),
+            |index| format!("[{input_index}:{index}]"),
+        ));
+    };
+    let metadata =
+        crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
+            .map_err(|_| {
+                InternalError::Media("probe render asset for stream selection failed".into())
+            })?;
+    let video_streams = metadata
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == "video")
+        .collect::<Vec<_>>();
+    if let Some(index) = stream_index {
+        if video_streams.iter().any(|stream| stream.index == index) {
+            return Ok(format!("[{input_index}:{index}]"));
         }
+        let is_webcam = asset_id.contains(":webcam:")
+            || asset_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("webcam.mp4"));
+        if is_webcam && !video_streams.is_empty() {
+            return Ok(format!("[{input_index}:{}]", video_streams[0].index));
+        }
+        return Err(InternalError::Media(
+            "the selected video stream is missing from its asset".into(),
+        )
+        .into());
     }
-    if let Some(idx) = stream_index {
-        format!("[{input_index}:{idx}]")
-    } else {
-        format!("[{input_index}:v:0]")
-    }
+    video_streams
+        .first()
+        .map(|stream| format!("[{input_index}:{}]", stream.index))
+        .ok_or_else(|| InternalError::Media("render asset has no video stream".into()).into())
 }
 
 fn resolve_audio_stream_specifier(
@@ -4196,30 +4354,47 @@ fn resolve_audio_stream_specifier(
     asset_id: &str,
     input_index: usize,
     stream_index: Option<i32>,
-) -> Option<String> {
-    if let Some(ffprobe) = ffprobe_path {
-        if let Ok(meta) =
-            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
-        {
-            let audio_streams: Vec<_> = meta.streams.iter().filter(|s| s.kind == "audio").collect();
-            if audio_streams.is_empty() {
-                return None;
-            }
-            if let Some(idx) = stream_index {
-                if audio_streams.iter().any(|s| s.index == idx) {
-                    return Some(format!("[{input_index}:{idx}]"));
-                }
-            }
-            if let Some(first_audio) = audio_streams.first() {
-                return Some(format!("[{input_index}:{}]", first_audio.index));
-            }
+) -> Result<Option<String>> {
+    let Some(ffprobe) = ffprobe_path else {
+        return Ok(Some(stream_index.map_or_else(
+            || format!("[{input_index}:a:0]"),
+            |index| format!("[{input_index}:{index}]"),
+        )));
+    };
+    let metadata =
+        crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
+            .map_err(|_| {
+                InternalError::Media("probe render asset for stream selection failed".into())
+            })?;
+    let audio_streams = metadata
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == "audio")
+        .collect::<Vec<_>>();
+    if let Some(index) = stream_index {
+        if audio_streams.iter().any(|stream| stream.index == index) {
+            return Ok(Some(format!("[{input_index}:{index}]")));
         }
+        let is_standalone = asset_id.contains(":microphone:")
+            || asset_id.contains(":system_audio:")
+            || asset_id.contains(":audio:")
+            || asset_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| {
+                    n.ends_with(".wav") || n.ends_with(".mp3") || n.ends_with(".m4a")
+                });
+        if is_standalone && !audio_streams.is_empty() {
+            return Ok(Some(format!("[{input_index}:{}]", audio_streams[0].index)));
+        }
+        return Err(InternalError::Media(
+            "the selected audio stream is missing from its asset".into(),
+        )
+        .into());
     }
-    if let Some(idx) = stream_index {
-        Some(format!("[{input_index}:{idx}]"))
-    } else {
-        Some(format!("[{input_index}:a:0]"))
-    }
+    Ok(audio_streams
+        .first()
+        .map(|stream| format!("[{input_index}:{}]", stream.index)))
 }
 
 fn seconds(milliseconds: u64) -> String {
@@ -4623,6 +4798,19 @@ mod tests {
         cleanup_export_files(&output);
 
         assert!(!cursor_partial.exists());
+    }
+
+    #[test]
+    fn detects_export_partial_path_collisions_with_project_assets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("demo.mp4");
+        let asset = partial_output_path(&output);
+        std::fs::write(&asset, b"project asset").expect("write project asset");
+
+        assert!(managed_export_paths(&output, &valid_plan())
+            .iter()
+            .any(|path| paths_refer_to_same_file(&asset, path)));
+        assert_eq!(std::fs::read(&asset).unwrap(), b"project asset");
     }
 
     #[test]
@@ -5392,8 +5580,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (z_expr, x_expr, y_expr) =
-            build_zoompan_expressions(&plan, &canvas, 1920.0, 1080.0);
+        let (z_expr, x_expr, y_expr) = build_zoompan_expressions(&plan, &canvas, 1920.0, 1080.0);
 
         let total_filter_len = z_expr.len() + x_expr.len() + y_expr.len();
         // Ensure that 30 dynamic zoom segments total well under the Windows
@@ -5402,6 +5589,153 @@ mod tests {
             total_filter_len < 30_000,
             "Total zoompan expressions length ({total_filter_len}) must be well below 30KB"
         );
+    }
+
+    #[test]
+    fn test_zoompan_with_dense_keyframes_renders_successfully() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-zoom-dense-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let out_path = temp_dir.join("out_zoom_dense.mp4");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x480:rate=10",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let mut keyframes = Vec::new();
+        for i in 0..100 {
+            keyframes.push(RenderPlanZoomKeyframe {
+                time_ms: i * 20,
+                target: RenderCropFloat {
+                    x: 50.0 + (i as f64 * 2.0),
+                    y: 50.0 + (i as f64 * 1.5),
+                    width: 320.0,
+                    height: 240.0,
+                },
+            });
+        }
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        let plan = RenderPlan {
+            project_id: "test-zoom-dense-project".into(),
+            duration_ms: 2000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 2000,
+                output_start_ms: 0,
+                output_end_ms: 2000,
+                source_width: Some(640),
+                source_height: Some(480),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: vec![RenderPlanZoomSegment {
+                id: "zoom-dense-1".into(),
+                start_ms: 200,
+                end_ms: 1800,
+                target: RenderCropFloat {
+                    x: 100.0,
+                    y: 100.0,
+                    width: 320.0,
+                    height: 240.0,
+                },
+                scale: 1.5,
+                easing: "smooth".into(),
+                transition_in_ms: 200,
+                transition_out_ms: 200,
+                enabled: true,
+                mode: "follow-cursor".into(),
+                source: "auto".into(),
+                preset: "product-demo".into(),
+                follow_deadzone_percent: None,
+                follow_smoothing_alpha: None,
+                label: None,
+                from_target: None,
+                from_scale: None,
+                keyframes: Some(keyframes),
+            }],
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 640,
+                height: 480,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-zoom-dense-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "zoompan with dense keyframes failed: {:?}",
+            res.err()
+        );
+        assert!(out_path.is_file(), "exported composition should exist");
     }
 
     #[test]
@@ -5600,6 +5934,113 @@ mod tests {
             res.err()
         );
 
+        let mut plan_with_missing_stream = plan.clone();
+        plan_with_missing_stream.segments[0].stream_index = Some(99);
+        let missing_stream_error = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &temp_dir.join("test_out_missing_stream.mp4"),
+            &plan_with_missing_stream,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        )
+        .expect_err("missing explicit video stream should fail before FFmpeg");
+        assert!(missing_stream_error
+            .to_string()
+            .contains("selected video stream is missing"));
+
+        let mut plan_with_missing_audio_stream = plan.clone();
+        plan_with_missing_audio_stream
+            .audio_tracks
+            .as_mut()
+            .unwrap()[0]
+            .segments[0]
+            .stream_index = Some(99);
+        let missing_audio_stream_error = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &temp_dir.join("test_out_missing_audio_stream.mp4"),
+            &plan_with_missing_audio_stream,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        )
+        .expect_err("missing explicit audio stream should fail before FFmpeg");
+        assert!(missing_audio_stream_error
+            .to_string()
+            .contains("selected audio stream is missing"));
+
+        let mut plan_with_invalid_overlay = plan.clone();
+        plan_with_invalid_overlay.overlay_render_plan =
+            Some(serde_json::json!({ "invalid": true }));
+        let invalid_overlay_error = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &temp_dir.join("test_out_invalid_overlay.mp4"),
+            &plan_with_invalid_overlay,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        )
+        .expect_err("invalid overlay plans should not be silently dropped");
+        assert!(invalid_overlay_error
+            .to_string()
+            .contains("overlay render plan is invalid"));
+
+        let mut plan_with_empty_video_packets = plan.clone();
+        plan_with_empty_video_packets.segments[0].source_in_ms = 2_000;
+        plan_with_empty_video_packets.segments[0].source_out_ms = 3_000;
+        let out_with_empty_video_packets = temp_dir.join("test_out_empty_video_packets.mp4");
+        let res_with_empty_video_packets = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_with_empty_video_packets,
+            &plan_with_empty_video_packets,
+            "test-project-1",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res_with_empty_video_packets.is_ok(),
+            "composition with an empty source range failed: {:?}",
+            res_with_empty_video_packets.err()
+        );
+        assert!(
+            out_with_empty_video_packets.is_file(),
+            "composition with an empty source range should still publish video"
+        );
+        let empty_video_metadata = crate::media::probe::probe_media(
+            &ffprobe.to_string_lossy(),
+            &out_with_empty_video_packets,
+            "test-project-1",
+        )
+        .expect("probe composition with an empty source range");
+        assert_eq!(empty_video_metadata.duration_ms, 1_000);
+        assert!(
+            empty_video_metadata
+                .streams
+                .iter()
+                .any(|stream| stream.kind == "video"),
+            "composition with an empty source range should include video packets"
+        );
+
         // Case 1: Video-only input with empty audio_tracks
         let video_only_path = temp_dir.join("test_screen_video_only.mp4");
         let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
@@ -5773,5 +6214,586 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn prepare_cursor_frame_plan_loads_jpeg_webp_gif_bmp_image_assets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Generate a uniform red 20x20 RGBA sample that can be saved to all
+        // the raster formats the UI allows for overlay images.
+        let red_pixel = image::Rgba([255u8, 0, 0, 255]);
+        let rgba_buffer = image::RgbaImage::from_pixel(20, 20, red_pixel);
+        let sample = image::DynamicImage::ImageRgba8(rgba_buffer);
+
+        let mut asset_paths = HashMap::new();
+        let mut add = |asset_id: &str, path: PathBuf, format: image::ImageFormat| {
+            sample
+                .save_with_format(&path, format)
+                .expect("write test overlay image");
+            asset_paths.insert(asset_id.into(), path);
+        };
+
+        add(
+            "asset-jpg",
+            dir.path().join("sticker.jpg"),
+            image::ImageFormat::Jpeg,
+        );
+        add(
+            "asset-webp",
+            dir.path().join("sticker.webp"),
+            image::ImageFormat::WebP,
+        );
+        add(
+            "asset-gif",
+            dir.path().join("sticker.gif"),
+            image::ImageFormat::Gif,
+        );
+        add(
+            "asset-bmp",
+            dir.path().join("sticker.bmp"),
+            image::ImageFormat::Bmp,
+        );
+
+        let mut plan = valid_plan();
+        plan.overlay_render_plan = Some(serde_json::json!({
+            "version": 1,
+            "canvas": { "width": 200, "height": 60 },
+            "items": [
+                {
+                    "kind": "image",
+                    "id": "img-jpg",
+                    "startMs": 0,
+                    "endMs": 1000,
+                    "transform": {
+                        "x": 10.0,
+                        "y": 10.0,
+                        "width": 20.0,
+                        "height": 20.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.0,
+                        "anchorY": 0.0,
+                        "zIndex": 1,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 0,
+                        "outDurationMs": 0,
+                        "easing": "linear"
+                    },
+                    "enabled": true,
+                    "assetId": "asset-jpg",
+                    "fit": "contain",
+                    "borderRadius": 0.0,
+                    "borderWidth": 0.0,
+                    "borderColor": "#ffffff",
+                    "shadowEnabled": false,
+                    "shadowColor": "#000000",
+                    "shadowBlur": 0.0
+                },
+                {
+                    "kind": "image",
+                    "id": "img-webp",
+                    "startMs": 0,
+                    "endMs": 1000,
+                    "transform": {
+                        "x": 50.0,
+                        "y": 10.0,
+                        "width": 20.0,
+                        "height": 20.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.0,
+                        "anchorY": 0.0,
+                        "zIndex": 2,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 0,
+                        "outDurationMs": 0,
+                        "easing": "linear"
+                    },
+                    "enabled": true,
+                    "assetId": "asset-webp",
+                    "fit": "contain",
+                    "borderRadius": 0.0,
+                    "borderWidth": 0.0,
+                    "borderColor": "#ffffff",
+                    "shadowEnabled": false,
+                    "shadowColor": "#000000",
+                    "shadowBlur": 0.0
+                },
+                {
+                    "kind": "image",
+                    "id": "img-gif",
+                    "startMs": 0,
+                    "endMs": 1000,
+                    "transform": {
+                        "x": 90.0,
+                        "y": 10.0,
+                        "width": 20.0,
+                        "height": 20.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.0,
+                        "anchorY": 0.0,
+                        "zIndex": 3,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 0,
+                        "outDurationMs": 0,
+                        "easing": "linear"
+                    },
+                    "enabled": true,
+                    "assetId": "asset-gif",
+                    "fit": "contain",
+                    "borderRadius": 0.0,
+                    "borderWidth": 0.0,
+                    "borderColor": "#ffffff",
+                    "shadowEnabled": false,
+                    "shadowColor": "#000000",
+                    "shadowBlur": 0.0
+                },
+                {
+                    "kind": "image",
+                    "id": "img-bmp",
+                    "startMs": 0,
+                    "endMs": 1000,
+                    "transform": {
+                        "x": 130.0,
+                        "y": 10.0,
+                        "width": 20.0,
+                        "height": 20.0,
+                        "rotation": 0.0,
+                        "anchorX": 0.0,
+                        "anchorY": 0.0,
+                        "zIndex": 4,
+                        "opacity": 1.0
+                    },
+                    "animation": {
+                        "inType": "fade",
+                        "outType": "fade",
+                        "inDurationMs": 0,
+                        "outDurationMs": 0,
+                        "easing": "linear"
+                    },
+                    "enabled": true,
+                    "assetId": "asset-bmp",
+                    "fit": "contain",
+                    "borderRadius": 0.0,
+                    "borderWidth": 0.0,
+                    "borderColor": "#ffffff",
+                    "shadowEnabled": false,
+                    "shadowColor": "#000000",
+                    "shadowBlur": 0.0
+                }
+            ],
+            "assets": [
+                { "id": "asset-jpg", "kind": "image" },
+                { "id": "asset-webp", "kind": "image" },
+                { "id": "asset-gif", "kind": "image" },
+                { "id": "asset-bmp", "kind": "image" }
+            ],
+            "fonts": []
+        }));
+
+        let canvas = cursor::RenderCanvas {
+            width: 200,
+            height: 60,
+            fps: 30,
+            ..Default::default()
+        };
+        let frame_plan = prepare_cursor_frame_plan(&canvas, 1000, Vec::new(), &plan, &asset_paths)
+            .expect("prepare frame plan succeeds");
+
+        assert!(frame_plan.overlay_engine.is_some());
+        let engine = frame_plan.overlay_engine.unwrap();
+        assert_eq!(
+            engine.images().len(),
+            4,
+            "all non-PNG overlay image assets should be decoded"
+        );
+
+        let mut pixmap = tiny_skia::Pixmap::new(200, 60).unwrap();
+        engine
+            .render_to_pixmap(100, &mut pixmap)
+            .expect("render image overlays");
+        let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        assert!(has_content, "rendered image overlay frame contains pixels");
+    }
+
+    #[test]
+    fn test_render_standalone_webcam_overlay_with_synthetic_stream_index() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-webcam-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let webcam_path = temp_dir.join("webcam.mp4");
+        let out_path = temp_dir.join("out_webcam_test.mp4");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x120:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&webcam_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate webcam test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+        asset_paths.insert("rec-1:webcam:2".to_string(), webcam_path);
+
+        let plan = RenderPlan {
+            project_id: "test-webcam-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: vec![RenderPlanOverlay {
+                asset_id: "rec-1:webcam:2".into(),
+                stream_index: Some(2), // synthetic project stream index
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                speed: 1.0,
+                x: 10.0,
+                y: 10.0,
+                width: 100.0,
+                height: 80.0,
+                crop: None,
+                opacity: 1.0,
+                visible: true,
+                shape: "rectangle".into(),
+                border_width: Some(0.0),
+                border_color: Some("#ffffff".into()),
+                border_opacity: Some(1.0),
+                shadow_enabled: Some(false),
+                shadow_color: Some("#000000".into()),
+                shadow_blur: Some(0.0),
+                shadow_offset_x: Some(0.0),
+                shadow_offset_y: Some(0.0),
+                preset: None,
+            }],
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-webcam-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "webcam overlay composition with synthetic stream index failed: {:?}",
+            res.err()
+        );
+        assert!(out_path.is_file(), "exported composition should exist");
+    }
+
+    #[test]
+    fn test_render_standalone_webcam_with_audio_and_chapters() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-webcam-full-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let webcam_path = temp_dir.join("webcam.mp4");
+        let mic_path = temp_dir.join("microphone.wav");
+        let out_path = temp_dir.join("out_webcam_full_test.mp4");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x120:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&webcam_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate webcam test video");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=1",
+                "-c:a",
+                "pcm_s16le",
+            ])
+            .arg(&mic_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate audio wav");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+        asset_paths.insert("rec-1:webcam:2".to_string(), webcam_path);
+        asset_paths.insert("rec-1:microphone:1".to_string(), mic_path);
+
+        let plan = RenderPlan {
+            project_id: "test-webcam-full-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: vec![RenderPlanOverlay {
+                asset_id: "rec-1:webcam:2".into(),
+                stream_index: Some(2),
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                speed: 1.0,
+                x: 10.0,
+                y: 10.0,
+                width: 100.0,
+                height: 80.0,
+                crop: None,
+                opacity: 1.0,
+                visible: true,
+                shape: "circle".into(),
+                border_width: Some(2.0),
+                border_color: Some("#ffffff".into()),
+                border_opacity: Some(1.0),
+                shadow_enabled: Some(true),
+                shadow_color: Some("#000000".into()),
+                shadow_blur: Some(10.0),
+                shadow_offset_x: Some(0.0),
+                shadow_offset_y: Some(4.0),
+                preset: None,
+            }],
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: vec![
+                RenderPlanChapter {
+                    id: "ch-1".into(),
+                    title: "Intro".into(),
+                    start_ms: 0,
+                    end_ms: 500,
+                },
+                RenderPlanChapter {
+                    id: "ch-2".into(),
+                    title: "Demo".into(),
+                    start_ms: 500,
+                    end_ms: 1000,
+                },
+            ],
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 640,
+                height: 480,
+                padding: 16,
+                background: "#1e1e1e".into(),
+                border_radius: 8,
+                shadow: true,
+                shadow_color: Some("#000000".into()),
+                shadow_blur: Some(16.0),
+                shadow_offset_x: Some(0.0),
+                shadow_offset_y: Some(8.0),
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: Some(vec![RenderPlanAudio {
+                asset_id: "rec-1:microphone:1".into(),
+                stream_index: Some(1),
+                role: Some("microphone".into()),
+                volume: 1.0,
+                muted: false,
+                segments: vec![RenderSegment {
+                    asset_id: "rec-1:microphone:1".into(),
+                    stream_index: Some(1),
+                    volume: Some(1.0),
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 1000,
+                    output_start_ms: 0,
+                    output_end_ms: 1000,
+                    source_width: None,
+                    source_height: None,
+                }],
+            }]),
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-webcam-full-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "full composition with webcam, audio, chapters, and canvas failed: {:?}",
+            res.err()
+        );
+        assert!(out_path.is_file(), "exported composition should exist");
     }
 }

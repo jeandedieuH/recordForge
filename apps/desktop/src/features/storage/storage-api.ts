@@ -4,6 +4,7 @@ import {
   OAuthFlowStartResultSchema,
   SaveGoogleDriveProfileInputSchema,
   SaveS3ProfileInputSchema,
+  StartUploadJobInputSchema,
   StorageProfileSchema,
   UploadJobSchema,
   type ConnectionTestResult,
@@ -29,7 +30,7 @@ export async function saveS3Profile(input: SaveS3ProfileInput): Promise<StorageP
 }
 
 export async function saveGoogleDriveProfile(
-  input: SaveGoogleDriveProfileInput
+  input: SaveGoogleDriveProfileInput,
 ): Promise<StorageProfile> {
   const validated = SaveGoogleDriveProfileInputSchema.parse(input)
   const res = await invoke("save_google_drive_profile", { input: validated })
@@ -58,7 +59,7 @@ export async function testStorageProfile(profileId: string): Promise<ConnectionT
 export async function testS3Credentials(
   config: S3Config,
   accessKey: string,
-  secretKey: string
+  secretKey: string,
 ): Promise<ConnectionTestResult> {
   const res = await invoke("test_s3_credentials", {
     config,
@@ -74,7 +75,8 @@ export async function startGoogleDriveOAuth(): Promise<OAuthFlowStartResult> {
 }
 
 export async function startUploadJob(input: StartUploadJobInput): Promise<UploadJob> {
-  const res = await invoke("start_upload_job", { input })
+  const validated = StartUploadJobInputSchema.parse(input)
+  const res = await invoke("start_upload_job", { input: validated })
   return UploadJobSchema.parse(res)
 }
 

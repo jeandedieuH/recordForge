@@ -180,6 +180,64 @@ describe("render-plan", () => {
     })
   })
 
+  it("keeps audio clip volume aligned when an export range excludes earlier clips", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "music-track",
+      kind: "audio",
+      name: "Music",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 0.5,
+      clips: [
+        {
+          id: "music-before-range",
+          kind: "audio",
+          assetId: "music",
+          startMs: 0,
+          durationMs: 1_000,
+          sourceInMs: 0,
+          sourceOutMs: 1_000,
+          speed: 1,
+          volume: 0.2,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+        },
+        {
+          id: "music-in-range",
+          kind: "audio",
+          assetId: "music",
+          startMs: 2_000,
+          durationMs: 1_000,
+          sourceInMs: 1_000,
+          sourceOutMs: 2_000,
+          speed: 1,
+          volume: 0.8,
+          fadeInMs: 0,
+          fadeOutMs: 0,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 2_000, endMs: 3_000 },
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.audioTracks[0].segments).toEqual([
+      expect.objectContaining({
+        assetId: "music",
+        sourceInMs: 1_000,
+        sourceOutMs: 2_000,
+        volume: 0.4,
+      }),
+    ])
+  })
+
   it("preserves muted audio tracks in the render plan", () => {
     const state = makeTimeline()
     state.tracks.push({
@@ -1092,5 +1150,72 @@ describe("render-plan", () => {
       },
     })
     expect(validatedExport.plan.durationMs).toBe(plan.durationMs)
+  })
+
+  it("omits synthetic stream index for standalone webcam overlay assets", () => {
+    const state = makeTimeline()
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "webcam-clip",
+          kind: "camera",
+          assetId: "rec-1:webcam:2",
+          streamIndex: 2,
+          startMs: 0,
+          durationMs: 20_000,
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          transform: {
+            x: 100,
+            y: 100,
+            width: 320,
+            height: 240,
+            opacity: 1,
+            shape: "rectangle",
+            visible: true,
+            borderWidth: 0,
+            shadowEnabled: false,
+          },
+        },
+      ],
+    })
+
+    const assets: ProjectAsset[] = [
+      {
+        id: "rec-1",
+        role: "screen",
+        path: "output.mp4",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 60_000,
+        hasAudio: true,
+      },
+      {
+        id: "rec-1:webcam:2",
+        role: "webcam",
+        path: "webcam.mp4",
+        status: "available",
+        derivativeVersion: 1,
+        durationMs: 60_000,
+        hasAudio: false,
+        streamIndex: 2,
+      },
+    ]
+
+    const plan = buildRenderPlan({ state, projectId: "project-webcam-test", assets })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.overlays).toHaveLength(1)
+    expect(plan.value.overlays[0].assetId).toBe("rec-1:webcam:2")
+    // Standalone webcam asset has streamIndex omitted so FFmpeg selects its primary stream 0
+    expect(plan.value.overlays[0].streamIndex).toBeUndefined()
   })
 })

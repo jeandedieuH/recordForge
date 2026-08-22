@@ -1,9 +1,6 @@
 import { useMemo, useState } from "react"
 import type { ManualZoomSegment, ZoomPreset } from "@recordforge/contracts"
-import {
-  getCursorPointAtTimelineTime,
-  zoomTargetForCursorPoint,
-} from "@recordforge/cursor-core"
+import { getCursorPointAtTimelineTime, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import {
   createAddZoomSegmentCommand,
   createDeleteZoomSegmentCommand,
@@ -225,8 +222,7 @@ export function FocusPanel() {
             {segments.map((segment) => {
               const isSelected = selectedId === segment.id
               const isPlayheadInside =
-                playheadMs >= segment.startMs &&
-                playheadMs <= segment.startMs + segment.durationMs
+                playheadMs >= segment.startMs && playheadMs <= segment.startMs + segment.durationMs
 
               return (
                 <ZoomSegmentCard

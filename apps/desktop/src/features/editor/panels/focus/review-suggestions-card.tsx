@@ -41,9 +41,7 @@ export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
 }: ReviewSuggestionsCardProps) {
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set())
 
-  const activeSuggestions = initialSuggestions.filter(
-    (segment) => !excludedIds.has(segment.id),
-  )
+  const activeSuggestions = initialSuggestions.filter((segment) => !excludedIds.has(segment.id))
 
   function toggleExclude(segmentId: string) {
     setExcludedIds((prev) => {
@@ -164,12 +162,7 @@ export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
 
       {/* Action Footer */}
       <div className="flex items-center gap-2 pt-0.5">
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 flex-1 text-xs"
-          onClick={onReject}
-        >
+        <Button variant="outline" size="sm" className="h-7 flex-1 text-xs" onClick={onReject}>
           Dismiss
         </Button>
         <Button

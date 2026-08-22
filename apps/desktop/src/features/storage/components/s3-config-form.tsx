@@ -58,14 +58,16 @@ interface S3ConfigFormProps {
 
 export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormProps) {
   const [name, setName] = useState(initialProfile?.name ?? "My S3 Storage")
-  const [endpoint, setEndpoint] = useState(initialProfile?.s3Config?.endpoint ?? S3_PRESETS[0].endpoint)
+  const [endpoint, setEndpoint] = useState(
+    initialProfile?.s3Config?.endpoint ?? S3_PRESETS[0].endpoint,
+  )
   const [region, setRegion] = useState(initialProfile?.s3Config?.region ?? S3_PRESETS[0].region)
   const [bucket, setBucket] = useState(initialProfile?.s3Config?.bucket ?? "")
   const [prefix, setPrefix] = useState(initialProfile?.s3Config?.prefix ?? "recordings")
   const [accessKeyId, setAccessKeyId] = useState("")
   const [secretAccessKey, setSecretAccessKey] = useState("")
   const [forcePathStyle, setForcePathStyle] = useState(
-    initialProfile?.s3Config?.forcePathStyle ?? false
+    initialProfile?.s3Config?.forcePathStyle ?? false,
   )
   const [showSecret, setShowSecret] = useState(false)
   const [isDefault] = useState(initialProfile?.isDefault ?? false)
@@ -252,14 +254,17 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
           <Input
             value={accessKeyId}
             onChange={(e) => setAccessKeyId(e.target.value)}
-            placeholder={initialProfile?.hasCredentials ? "••••••••••••••••" : "AKIAIOSFODNN7EXAMPLE"}
+            placeholder={
+              initialProfile?.hasCredentials ? "••••••••••••••••" : "AKIAIOSFODNN7EXAMPLE"
+            }
             required={!initialProfile?.hasCredentials}
           />
         </div>
 
         <div className="col-span-2 sm:col-span-1">
           <Label className="mb-1 block font-medium">
-            Secret Access Key {initialProfile?.hasCredentials ? "(Leave blank to keep current)" : ""}
+            Secret Access Key{" "}
+            {initialProfile?.hasCredentials ? "(Leave blank to keep current)" : ""}
           </Label>
           <div className="relative">
             <Input
@@ -267,7 +272,9 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
               value={secretAccessKey}
               onChange={(e) => setSecretAccessKey(e.target.value)}
               placeholder={
-                initialProfile?.hasCredentials ? "••••••••••••••••" : "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                initialProfile?.hasCredentials
+                  ? "••••••••••••••••"
+                  : "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
               }
               required={!initialProfile?.hasCredentials}
               className="pr-8"
@@ -297,7 +304,9 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
           )}
           <div className="flex-1">
-            <div className="font-semibold">{testResult.ok ? "Connection Verified" : "Test Failed"}</div>
+            <div className="font-semibold">
+              {testResult.ok ? "Connection Verified" : "Test Failed"}
+            </div>
             <div className="text-[11px] opacity-90">{testResult.message}</div>
           </div>
         </Card>

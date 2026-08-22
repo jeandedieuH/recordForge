@@ -576,8 +576,7 @@ export function NewRecordingModal({
                           !videoDevicesLoaded ? (
                             <Skeleton className="h-3 w-28 rounded mt-1" />
                           ) : (
-                            webcams.find((w) => w.id === selectedWebcamId)?.name ||
-                            "Default Camera"
+                            webcams.find((w) => w.id === selectedWebcamId)?.name || "Default Camera"
                           )
                         ) : (
                           "Disabled"
@@ -623,7 +622,8 @@ export function NewRecordingModal({
                       <WebcamPreview
                         deviceName={
                           videoDevicesLoaded
-                            ? webcams.find((w) => w.id === selectedWebcamId)?.name || selectedWebcamId
+                            ? webcams.find((w) => w.id === selectedWebcamId)?.name ||
+                              selectedWebcamId
                             : ""
                         }
                       />

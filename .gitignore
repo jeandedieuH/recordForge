@@ -9,6 +9,7 @@ build
 
 # Tauri
 apps/desktop/src-tauri/target
+apps/desktop/src-tauri/target-export-debug
 apps/desktop/src-tauri/gen
 apps/desktop/src-tauri/Wix?i
 apps/desktop/src-tauri/binaries

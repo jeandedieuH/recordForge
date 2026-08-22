@@ -237,6 +237,12 @@ function createAudioClip(
   }
 }
 
+function recordingVideoDurationMs(recording: LibraryRecording, metadata: MediaMetadata): number {
+  const primaryVideo = metadata.streams.find((stream) => stream.kind === "video")
+  const probedDuration = primaryVideo?.durationMs ?? metadata.durationMs
+  return Math.round(probedDuration > 0 ? probedDuration : recording.durationMs)
+}
+
 export function createTimelineFromRecording(
   recording: LibraryRecording,
   metadata: MediaMetadata,
@@ -244,9 +250,9 @@ export function createTimelineFromRecording(
   projectId?: string,
 ): TimelineState {
   const now = new Date().toISOString()
-  const duration = Math.round(Math.max(metadata.durationMs, recording.durationMs))
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const primaryVideo = videoStreams[0]
+  const duration = recordingVideoDurationMs(recording, metadata)
   const cameraStreams = recording.webcamPath
     ? [standaloneWebcamStream(recording, metadata, duration)].filter(
         (stream): stream is MediaStream => Boolean(stream),
@@ -407,6 +413,7 @@ function standaloneWebcamStream(
 
 // Build the durable screen asset for a newly created project.
 function createScreenAsset(recording: LibraryRecording, metadata: MediaMetadata): ProjectAsset {
+  const durationMs = recordingVideoDurationMs(recording, metadata)
   return {
     id: recording.id,
     role: "screen",
@@ -415,7 +422,7 @@ function createScreenAsset(recording: LibraryRecording, metadata: MediaMetadata)
     status: "available",
     importStrategy: "copy",
     derivativeVersion: 1,
-    durationMs: metadata.durationMs,
+    durationMs,
     width: metadata.width ?? recording.width,
     height: metadata.height ?? recording.height,
     fps: metadata.fps ?? recording.fps,

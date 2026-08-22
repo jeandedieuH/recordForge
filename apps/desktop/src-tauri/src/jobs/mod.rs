@@ -499,26 +499,35 @@ impl JobManager {
             if matches!(job.kind, crate::database::media::MediaJobKind::Export) {
                 let request = match serde_json::from_value::<ExportRequest>(job.options.clone()) {
                     Ok(request) => request,
-                    Err(error) => {
-                        error!(job_id = %job.id, error = %error, "cannot resume export with invalid options");
+                    Err(_) => {
+                        self.fail_unresumable_job(
+                            &job.id,
+                            "stored export request is incompatible with this app version",
+                        )?;
                         continue;
                     }
                 };
-                if let Err(error) = request.plan.validate() {
-                    error!(job_id = %job.id, error = %error, "cannot resume invalid export plan");
+                if request.plan.validate().is_err() {
+                    self.fail_unresumable_job(&job.id, "stored export timeline is invalid")?;
                     continue;
                 }
-                if let Err(error) =
-                    crate::exports::validate_export_settings(&request.settings, &request.plan)
+                if crate::exports::validate_export_settings(&request.settings, &request.plan)
+                    .is_err()
                 {
-                    error!(job_id = %job.id, error = %error, "cannot resume export with invalid settings");
+                    self.fail_unresumable_job(&job.id, "stored export settings are invalid")?;
                     continue;
                 }
-                if let Err(error) = self
-                    .path_policy
-                    .validate_export_destination(Path::new(&request.output_path))
+                let destination = Path::new(&request.output_path);
+                if !destination
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+                    || self
+                        .path_policy
+                        .validate_export_destination(destination)
+                        .is_err()
                 {
-                    error!(job_id = %job.id, error = %error, "cannot resume export with an invalid destination");
+                    self.fail_unresumable_job(&job.id, "stored export destination is invalid")?;
                     continue;
                 }
                 let token = Arc::new(AtomicBool::new(false));
@@ -567,6 +576,16 @@ impl JobManager {
         }
 
         Ok(())
+    }
+
+    fn fail_unresumable_job(&self, job_id: &str, message: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::fail_job(&conn, job_id, message)?;
+        drop(conn);
+        self.emit_job_update(&job)
     }
 
     fn emit_job_update(&self, job: &MediaJob) -> Result<()> {
@@ -619,9 +638,6 @@ impl ExportWorker {
             &self.available_encoders,
         );
 
-        if cancel.load(Ordering::Relaxed) {
-            return self.finish_cancelled();
-        }
         match result {
             Ok(()) => {
                 let conn = self
@@ -647,19 +663,11 @@ impl ExportWorker {
                     },
                 )?;
                 drop(conn);
-                if matches!(
-                    completed.status,
-                    crate::database::media::MediaJobStatus::Cancelled
-                ) {
-                    let _ = std::fs::remove_file(&self.request.output_path);
-                    let _ = std::fs::remove_file(
-                        Path::new(&self.request.output_path).with_extension("srt"),
-                    );
-                }
-                self.emit(&completed)?;
                 self.cleanup_active_token();
+                self.emit(&completed)?;
                 Ok(())
             }
+            Err(_) if cancel.load(Ordering::Relaxed) => self.finish_cancelled(),
             Err(error) => self.fail(&error.to_string()),
         }
     }

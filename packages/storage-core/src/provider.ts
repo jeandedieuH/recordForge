@@ -1,8 +1,4 @@
-import type {
-  StorageProfile,
-  StorageProviderKind,
-  UploadJobState,
-} from "@recordforge/contracts"
+import type { StorageProfile, StorageProviderKind, UploadJobState } from "@recordforge/contracts"
 
 export interface UploadProgress {
   bytesUploaded: number
@@ -77,7 +73,7 @@ export function formatEta(seconds: number): string {
 export function calculateProgress(
   bytesUploaded: number,
   totalBytes: number,
-  speedBps?: number | null
+  speedBps?: number | null,
 ): UploadProgress {
   const currentSpeed = speedBps ?? 0
   const percentage = totalBytes > 0 ? Math.min(100, (bytesUploaded / totalBytes) * 100) : 0

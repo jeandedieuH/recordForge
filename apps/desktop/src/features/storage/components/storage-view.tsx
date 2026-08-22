@@ -1,12 +1,5 @@
 import { useEffect } from "react"
-import {
-  Cloud,
-  HardDrive,
-  RefreshCw,
-  Server,
-  ShieldCheck,
-  Database,
-} from "lucide-react"
+import { Cloud, HardDrive, RefreshCw, Server, ShieldCheck, Database } from "lucide-react"
 import { Button, Card } from "@recordforge/ui"
 import { useStorageStore } from "../storage-store"
 import { StorageProfilesManager } from "./storage-profiles-manager"
@@ -17,8 +10,7 @@ interface StorageViewProps {
 }
 
 export function StorageView({}: StorageViewProps) {
-  const { profiles, jobs, fetchProfiles, fetchJobs, initListeners } =
-    useStorageStore()
+  const { profiles, jobs, fetchProfiles, fetchJobs, initListeners } = useStorageStore()
 
   useEffect(() => {
     fetchProfiles()
@@ -44,7 +36,8 @@ export function StorageView({}: StorageViewProps) {
             Storage &amp; Cloud Hub
           </h2>
           <p className="text-xs text-subtle-foreground mt-0.5">
-            Monitor local disk space, configure S3 &amp; Google Drive destinations, and track video upload transfers.
+            Monitor local disk space, configure S3 &amp; Google Drive destinations, and track video
+            upload transfers.
           </p>
         </div>
 
@@ -78,9 +71,7 @@ export function StorageView({}: StorageViewProps) {
                 <p className="text-[11px] text-subtle-foreground">Primary output volume</p>
               </div>
             </div>
-            <span className="text-[11px] font-mono font-medium text-foreground">
-              Local First
-            </span>
+            <span className="text-[11px] font-mono font-medium text-foreground">Local First</span>
           </div>
 
           <div className="space-y-1.5">

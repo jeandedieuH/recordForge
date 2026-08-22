@@ -155,7 +155,8 @@ export const ZoomSegmentCard = memo(function ZoomSegmentCard({
           </div>
           <div className="flex flex-wrap items-baseline gap-x-1.5 min-w-0">
             <span className="font-mono text-xs font-semibold tabular-nums text-foreground">
-              {formatTimecode(segment.startMs)} → {formatTimecode(segment.startMs + segment.durationMs)}
+              {formatTimecode(segment.startMs)} →{" "}
+              {formatTimecode(segment.startMs + segment.durationMs)}
             </span>
             <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
               ({formatDuration(segment.durationMs)})
@@ -206,7 +207,10 @@ export const ZoomSegmentCard = memo(function ZoomSegmentCard({
           ))}
 
           {segment.easing && segment.easing !== "smooth" ? (
-            <Badge variant="outline" className="text-[9px] px-1.5 py-0 text-muted-foreground capitalize">
+            <Badge
+              variant="outline"
+              className="text-[9px] px-1.5 py-0 text-muted-foreground capitalize"
+            >
               {segment.easing}
             </Badge>
           ) : null}
@@ -259,7 +263,11 @@ export const ZoomSegmentCard = memo(function ZoomSegmentCard({
             )}
             onClick={onToggleLock}
           >
-            {segment.locked ? <Lock className="size-3" aria-hidden /> : <Unlock className="size-3" aria-hidden />}
+            {segment.locked ? (
+              <Lock className="size-3" aria-hidden />
+            ) : (
+              <Unlock className="size-3" aria-hidden />
+            )}
           </IconButton>
 
           <IconButton

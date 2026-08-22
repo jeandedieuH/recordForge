@@ -12,7 +12,18 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react"
-import { Badge, Button, Card, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Input, Label } from "@recordforge/ui"
+import {
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  Label,
+} from "@recordforge/ui"
 import type {
   SaveGoogleDriveProfileInput,
   SaveS3ProfileInput,
@@ -37,7 +48,9 @@ export function StorageProfilesManager() {
   const [editingProfile, setEditingProfile] = useState<StorageProfile | null>(null)
 
   const [testingId, setTestingId] = useState<string | null>(null)
-  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>(
+    {},
+  )
 
   // Local folder form state
   const [localName, setLocalName] = useState("Local Exports Folder")
@@ -121,16 +134,27 @@ export function StorageProfilesManager() {
         <div>
           <h3 className="text-base font-semibold">Cloud Storage & Export Destinations</h3>
           <p className="text-xs text-muted-foreground">
-            Connect S3 buckets, Google Drive, or local storage for automatic or 1-click video uploads.
+            Connect S3 buckets, Google Drive, or local storage for automatic or 1-click video
+            uploads.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={() => handleOpenAdd("s3")} className="gap-1.5 text-xs">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => handleOpenAdd("s3")}
+            className="gap-1.5 text-xs"
+          >
             <Plus className="h-3.5 w-3.5" />
             Add S3 Bucket
           </Button>
-          <Button size="sm" variant="outline" onClick={() => handleOpenAdd("gdrive")} className="gap-1.5 text-xs">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => handleOpenAdd("gdrive")}
+            className="gap-1.5 text-xs"
+          >
             <Cloud className="h-3.5 w-3.5 text-primary" />
             Connect Google Drive
           </Button>
@@ -149,7 +173,9 @@ export function StorageProfilesManager() {
             </div>
             <div>
               <div className="font-semibold text-xs text-foreground">S3-Compatible Storage</div>
-              <div className="text-[11px] text-subtle-foreground">AWS S3, Cloudflare R2, MinIO, Wasabi</div>
+              <div className="text-[11px] text-subtle-foreground">
+                AWS S3, Cloudflare R2, MinIO, Wasabi
+              </div>
             </div>
           </div>
         </Card>
@@ -164,7 +190,9 @@ export function StorageProfilesManager() {
             </div>
             <div>
               <div className="font-semibold text-xs text-foreground">Google Drive</div>
-              <div className="text-[11px] text-subtle-foreground">OAuth 2.0 PKCE Resumable Uploads</div>
+              <div className="text-[11px] text-subtle-foreground">
+                OAuth 2.0 PKCE Resumable Uploads
+              </div>
             </div>
           </div>
         </Card>
@@ -179,7 +207,9 @@ export function StorageProfilesManager() {
             </div>
             <div>
               <div className="font-semibold text-xs text-foreground">Local / NAS Folder</div>
-              <div className="text-[11px] text-subtle-foreground">Custom local path or network drive</div>
+              <div className="text-[11px] text-subtle-foreground">
+                Custom local path or network drive
+              </div>
             </div>
           </div>
         </Card>
@@ -203,7 +233,8 @@ export function StorageProfilesManager() {
             <HardDrive className="h-8 w-8 text-muted-foreground/50" />
             <div className="font-medium text-xs">No Cloud Storage Configured</div>
             <p className="text-[11px] text-muted-foreground max-w-sm">
-              All recordings are currently saved to your local library. Add an S3 bucket or Google Drive to enable cloud uploads and sharing.
+              All recordings are currently saved to your local library. Add an S3 bucket or Google
+              Drive to enable cloud uploads and sharing.
             </p>
           </Card>
         ) : (
@@ -233,13 +264,15 @@ export function StorageProfilesManager() {
 
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
-                          <span className="font-semibold text-xs text-foreground">{profile.name}</span>
+                          <span className="font-semibold text-xs text-foreground">
+                            {profile.name}
+                          </span>
                           <Badge variant="outline" className="text-[10px] uppercase py-0 px-1.5">
                             {profile.kind === "s3"
                               ? "S3 Bucket"
                               : profile.kind === "gdrive"
-                              ? "Google Drive"
-                              : "Local Folder"}
+                                ? "Google Drive"
+                                : "Local Folder"}
                           </Badge>
                           {profile.isDefault ? (
                             <Badge className="text-[10px] py-0 px-1.5 gap-1 bg-primary/10 text-primary hover:bg-primary/20 border-primary/20">
@@ -252,17 +285,25 @@ export function StorageProfilesManager() {
                         <div className="text-[11px] text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1">
                           {profile.kind === "s3" && profile.s3Config ? (
                             <>
-                              <span>Bucket: <code>{profile.s3Config.bucket}</code></span>
+                              <span>
+                                Bucket: <code>{profile.s3Config.bucket}</code>
+                              </span>
                               <span>Region: {profile.s3Config.region}</span>
-                              {profile.s3Config.prefix ? <span>Prefix: /{profile.s3Config.prefix}</span> : null}
+                              {profile.s3Config.prefix ? (
+                                <span>Prefix: /{profile.s3Config.prefix}</span>
+                              ) : null}
                             </>
                           ) : profile.kind === "gdrive" && profile.driveConfig ? (
                             <>
-                              <span>Account: {profile.driveConfig.accountEmail ?? "Connected"}</span>
+                              <span>
+                                Account: {profile.driveConfig.accountEmail ?? "Connected"}
+                              </span>
                               <span>Folder: {profile.driveConfig.folderName}</span>
                             </>
                           ) : profile.kind === "local" && profile.localConfig ? (
-                            <span>Path: <code>{profile.localConfig.destinationPath}</code></span>
+                            <span>
+                              Path: <code>{profile.localConfig.destinationPath}</code>
+                            </span>
                           ) : null}
                         </div>
 
@@ -291,11 +332,7 @@ export function StorageProfilesManager() {
                         disabled={isTesting}
                         onClick={() => handleTestProfile(profile.id)}
                       >
-                        {isTesting ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          "Test"
-                        )}
+                        {isTesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Test"}
                       </Button>
 
                       <Button
@@ -336,8 +373,8 @@ export function StorageProfilesManager() {
               {selectedKind === "s3"
                 ? "Configure AWS S3 or compatible cloud storage provider."
                 : selectedKind === "gdrive"
-                ? "Connect your Google Drive account with secure OAuth 2.0 PKCE."
-                : "Specify an external folder or NAS path for video exports."}
+                  ? "Connect your Google Drive account with secure OAuth 2.0 PKCE."
+                  : "Specify an external folder or NAS path for video exports."}
             </DialogDescription>
           </DialogHeader>
 
@@ -376,7 +413,12 @@ export function StorageProfilesManager() {
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t">
-                <Button type="button" variant="ghost" size="sm" onClick={() => setDialogOpen(false)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDialogOpen(false)}
+                >
                   Cancel
                 </Button>
                 <Button type="submit" size="sm" disabled={savingLocal}>

@@ -104,14 +104,18 @@ export function UploadJobsPanel() {
                     <div className="min-w-0">
                       <div className="font-semibold truncate text-foreground">{job.remotePath}</div>
                       <div className="text-[11px] text-subtle-foreground truncate">
-                        {job.providerProfileName ?? "Cloud Destination"} • {formatBytes(job.totalBytes)}
+                        {job.providerProfileName ?? "Cloud Destination"} •{" "}
+                        {formatBytes(job.totalBytes)}
                       </div>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
                     {isUploading ? (
-                      <Badge variant="outline" className="text-[10px] gap-1 text-primary border-primary/30">
+                      <Badge
+                        variant="outline"
+                        className="text-[10px] gap-1 text-primary border-primary/30"
+                      >
                         <Loader2 className="h-2.5 w-2.5 animate-spin" />
                         {progress.percentage}%
                       </Badge>
