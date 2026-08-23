@@ -5,7 +5,7 @@ import type {
   TimelineState,
   ZoomTarget,
 } from "@recordforge/contracts"
-import { clampZoomTarget } from "@recordforge/cursor-core"
+import { canonicalizeZoomTarget } from "@recordforge/cursor-core"
 
 /**
  * Keep an effect target inside the usable canvas. This is shared by the
@@ -69,9 +69,11 @@ export function zoomEasedProgress(progress: number, easing: ManualZoomSegment["e
   if (easing === "snappy") return 1 - (1 - value) ** 3
   if (easing === "cinematic") return value * value * (3 - 2 * value)
   if (easing === "spring") {
-    // Damped harmonic oscillation settling smoothly at 1
+    // Damped harmonic oscillation with a bounded output so high zoom factors
+    // cannot produce a negative crop during an overshoot.
     const p = 0.4
-    return Math.pow(2, -10 * value) * Math.sin(((value - p / 4) * (2 * Math.PI)) / p) + 1
+    const spring = Math.pow(2, -10 * value) * Math.sin(((value - p / 4) * (2 * Math.PI)) / p) + 1
+    return Math.min(1, Math.max(0, spring))
   }
   if (easing === "smooth") {
     // Quintic smootherstep: 6t^5 - 15t^4 + 10t^3 (0 velocity and 0 acceleration at endpoints)
@@ -150,7 +152,7 @@ export function resolveZoomTransform(
   canvas: Pick<TimelineCanvas, "width" | "height" | "padding">,
   options: ZoomTransformOptions = {},
 ): ZoomTransform {
-  const target = clampZoomTarget(options.target ?? segment.target, canvas)
+  const target = canonicalizeZoomTarget(options.target ?? segment.target, canvas, segment.scale)
   const duration = Math.max(1, segment.durationMs)
 
   const declaredIn =
@@ -174,8 +176,8 @@ export function resolveZoomTransform(
   let isPannedFromPrevious = false
 
   if (elapsed <= 0) {
-    progress = 0
-    if (options.fromTarget) {
+    progress = transitionInMs === 0 ? 1 : 0
+    if (options.fromTarget && progress < 1) {
       isPannedFromPrevious = true
     }
   } else if (elapsed < transitionInMs) {
@@ -208,7 +210,7 @@ export function resolveZoomTransform(
   let currentCenterY: number
 
   if (isPannedFromPrevious && options.fromTarget) {
-    const fromTarget = clampZoomTarget(options.fromTarget, canvas)
+    const fromTarget = canonicalizeZoomTarget(options.fromTarget, canvas, options.fromScale ?? 1)
     const fromCenterX = fromTarget.x + fromTarget.width / 2
     const fromCenterY = fromTarget.y + fromTarget.height / 2
 

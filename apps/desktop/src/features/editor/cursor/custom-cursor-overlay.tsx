@@ -1,9 +1,11 @@
 import { useId, useMemo } from "react"
 import {
   fitCursorPoint,
+  mapCursorPointThroughZoom,
   renderCursorAssetSvg,
   resolveCursorAsset,
   type CursorFrame,
+  type CursorZoomTransform,
 } from "@recordforge/cursor-core"
 import type { CursorSettings, CursorTelemetryFile } from "@recordforge/contracts"
 
@@ -14,9 +16,12 @@ interface CustomCursorOverlayProps {
   telemetry: CursorTelemetryFile
   containerWidth: number
   containerHeight: number
+  canvasWidth: number
+  canvasHeight: number
   offsetX?: number
   offsetY?: number
-  zoomTransform?: string
+  /** The structured transform used by the video, not a second CSS transform. */
+  zoomTransform?: CursorZoomTransform | null
   /** Radius for clipping the overlay to the video screen. */
   borderRadius?: number | string
 }
@@ -36,6 +41,8 @@ export function CustomCursorOverlay({
   telemetry,
   containerWidth,
   containerHeight,
+  canvasWidth,
+  canvasHeight,
   offsetX = 0,
   offsetY = 0,
   zoomTransform,
@@ -55,18 +62,46 @@ export function CustomCursorOverlay({
     [frame.sourceX, frame.sourceY, telemetry, containerWidth, containerHeight],
   )
 
+  const zoomed = useMemo(
+    () =>
+      mapCursorPointThroughZoom(
+        { x: fitted.x, y: fitted.y },
+        { width: containerWidth, height: containerHeight },
+        { width: canvasWidth, height: canvasHeight },
+        zoomTransform,
+      ),
+    [fitted.x, fitted.y, containerWidth, containerHeight, canvasWidth, canvasHeight, zoomTransform],
+  )
+
   const clickEffects = useMemo(
     () =>
-      frame.activeClicks.map((click) => ({
-        ...click,
-        fitted: fitSourcePoint(
+      frame.activeClicks.map((click) => {
+        const clickFitted = fitSourcePoint(
           { x: click.sourceX, y: click.sourceY },
           telemetry,
           containerWidth,
           containerHeight,
-        ),
-      })),
-    [frame.activeClicks, telemetry, containerWidth, containerHeight],
+        )
+        return {
+          ...click,
+          fitted: clickFitted,
+          zoomed: mapCursorPointThroughZoom(
+            { x: clickFitted.x, y: clickFitted.y },
+            { width: containerWidth, height: containerHeight },
+            { width: canvasWidth, height: canvasHeight },
+            zoomTransform,
+          ),
+        }
+      }),
+    [
+      frame.activeClicks,
+      telemetry,
+      containerWidth,
+      containerHeight,
+      canvasWidth,
+      canvasHeight,
+      zoomTransform,
+    ],
   )
 
   const asset = useMemo(
@@ -80,18 +115,29 @@ export function CustomCursorOverlay({
 
   if (!containerWidth || !containerHeight) return null
 
-  const posX = fitted.x
-  const posY = fitted.y
-  const cursorScale = (cursorSettings.scale ?? 1) * (fitted.scale ?? 1)
+  const posX = zoomed.x
+  const posY = zoomed.y
+  const cursorScale = (cursorSettings.scale ?? 1) * (fitted.scale ?? 1) * zoomed.scale
   const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
 
-  const cursorMarkup = renderCursorAssetSvg(asset, {
-    fill: cursorSettings.fillColor,
-    fillOpacity: cursorSettings.fillOpacity,
-    stroke: cursorSettings.strokeColor,
-    strokeWidth: cursorSettings.strokeWidth,
-    strokeOpacity: cursorSettings.strokeOpacity,
-  })
+  const cursorMarkup = useMemo(
+    () =>
+      renderCursorAssetSvg(asset, {
+        fill: cursorSettings.fillColor,
+        fillOpacity: cursorSettings.fillOpacity,
+        stroke: cursorSettings.strokeColor,
+        strokeWidth: cursorSettings.strokeWidth,
+        strokeOpacity: cursorSettings.strokeOpacity,
+      }),
+    [
+      asset,
+      cursorSettings.fillColor,
+      cursorSettings.fillOpacity,
+      cursorSettings.strokeColor,
+      cursorSettings.strokeWidth,
+      cursorSettings.strokeOpacity,
+    ],
+  )
 
   return (
     <div
@@ -103,8 +149,6 @@ export function CustomCursorOverlay({
         width: containerWidth,
         height: containerHeight,
         borderRadius,
-        transform: zoomTransform,
-        transformOrigin: "0 0",
       }}
     >
       {/* Spotlight mode background mask */}
@@ -117,7 +161,10 @@ export function CustomCursorOverlay({
                 cx={posX}
                 cy={posY}
                 r={
-                  cursorSettings.spotlightRadius * (fitted.scale ?? 1) * (cursorSettings.scale ?? 1)
+                  cursorSettings.spotlightRadius *
+                  (fitted.scale ?? 1) *
+                  (cursorSettings.scale ?? 1) *
+                  zoomed.scale
                 }
                 fill="black"
               />
@@ -137,7 +184,10 @@ export function CustomCursorOverlay({
       {isCursorVisible && cursorSettings.clickFeedback !== "none"
         ? clickEffects.map((click, index) => {
             const size =
-              cursorSettings.clickSize * (click.fitted.scale ?? 1) * (cursorSettings.scale ?? 1)
+              cursorSettings.clickSize *
+              (click.fitted.scale ?? 1) *
+              (cursorSettings.scale ?? 1) *
+              click.zoomed.scale
             const scale = 0.25 + click.progress * 0.75
             const opacity = click.intensity * 0.75
             const color = cursorSettings.clickColor
@@ -147,8 +197,8 @@ export function CustomCursorOverlay({
                 key={`${click.startMs}-${index}`}
                 className="pointer-events-none absolute rounded-full"
                 style={{
-                  left: click.fitted.x,
-                  top: click.fitted.y,
+                  left: click.zoomed.x,
+                  top: click.zoomed.y,
                   width: size,
                   height: size,
                   transform: `translate(-50%, -50%) scale(${scale})`,

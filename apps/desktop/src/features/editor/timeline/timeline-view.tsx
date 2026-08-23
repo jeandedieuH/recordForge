@@ -1707,10 +1707,12 @@ export function TimelineView({
                   telemetry={cursorTelemetry}
                   containerWidth={videoBounds.width}
                   containerHeight={videoBounds.height}
+                  canvasWidth={timeline.canvas.width}
+                  canvasHeight={timeline.canvas.height}
                   offsetX={videoBounds.left}
                   offsetY={videoBounds.top}
                   borderRadius={screenStyle.borderRadius as number | string | undefined}
-                  zoomTransform={zoomTransformStyle}
+                  zoomTransform={composition?.screen.zoomTransform}
                 />
               ) : null}
 

@@ -25,6 +25,7 @@ import type {
   TimelineState,
 } from "@recordforge/domain"
 import {
+  FOLLOW_CAMERA_SAMPLE_STEP_MS,
   clampZoomTarget,
   findPreviousZoomSegment,
   getManualZoomSegments,
@@ -188,9 +189,7 @@ function toOverlays(
       const isStandaloneWebcam =
         asset?.role === "webcam" &&
         Boolean(
-          asset.path &&
-            !asset.path.includes(":") &&
-            asset.path.toLowerCase().endsWith(".mp4"),
+          asset.path && !asset.path.includes(":") && asset.path.toLowerCase().endsWith(".mp4"),
         )
       const streamIndex = isStandaloneWebcam ? undefined : clip.streamIndex
       return [
@@ -657,15 +656,36 @@ function toZoomSegments(
       let keyframes: RenderPlanZoomKeyframe[] | undefined = undefined
       if (engine && segment.mode !== "static" && segment.mode !== "manual") {
         const samples: RenderPlanZoomKeyframe[] = []
-        const sampleStepMs = 100 // 10 samples per second
-        for (let t = window.startMs; t <= window.endMs; t += sampleStepMs) {
-          const followTarget = resolveFollowCursorTarget(segment, state, t, engine)
+        const sampleStepMs = FOLLOW_CAMERA_SAMPLE_STEP_MS // 10 samples per second
+        const sourceTimelineOffsetMs = range?.startMs ?? 0
+        for (let t = window.startMs; t < window.endMs; t += sampleStepMs) {
+          // Keyframe timestamps are local to the export, while cursor lookup
+          // must use the original project timeline (especially for selected
+          // range exports).
+          const followTarget = resolveFollowCursorTarget(
+            segment,
+            state,
+            t + sourceTimelineOffsetMs,
+            engine,
+          )
           if (followTarget) {
             samples.push({
               timeMs: t,
               target: clampZoomTarget(followTarget, state.canvas),
             })
           }
+        }
+        const endFollowTarget = resolveFollowCursorTarget(
+          segment,
+          state,
+          window.endMs + sourceTimelineOffsetMs,
+          engine,
+        )
+        if (endFollowTarget) {
+          samples.push({
+            timeMs: window.endMs,
+            target: clampZoomTarget(endFollowTarget, state.canvas),
+          })
         }
         if (samples.length > 0) {
           keyframes = samples

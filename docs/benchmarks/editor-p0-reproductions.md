@@ -244,6 +244,10 @@ The React overlay uses `findCursorEventAtTime` (`packages/cursor-core/src/index.
 
 A shared canonical evaluator computes cursor position at any project time deterministically. Frame-rate differences are handled by interpolation, and arbitrary seeking produces the same frame as uninterrupted playback.
 
+### Resolution
+
+V2 capture now samples against a monotonic screen origin with deadline-based ~120 Hz polling and aligns startup/tail windows per segment. Export feeds the overlay at exact fractional CFR frame timestamps, and the shared evaluator uses timestamp-aware cubic interpolation with cached smoothing passes.
+
 ### Evidence
 
 - `packages/cursor-core/src/index.ts:54-78,103-130`
@@ -269,6 +273,10 @@ React click detection in `custom-cursor-overlay.tsx:146-162` uses CSS `animate-p
 ### Expected result after Phase 6
 
 Click effect timing is a pure function of project time and is identical in preview and export. The click detection window, easing, and decay are shared by the same canonical evaluator.
+
+### Resolution
+
+The preview cursor now renders click positions and feedback from the structured zoom transform rather than a second CSS-transformed layer. Native and WASM evaluation share the same project-time click windows and fractional frame sampling.
 
 ### Evidence
 
@@ -296,6 +304,10 @@ React zoom transform in `timeline-view.tsx:317-325` uses `resolveZoomTransform` 
 ### Expected result after Phases 6 and 8
 
 React and Rust use the same coordinate fitting algorithm, the same zoom transform, and the same canvas geometry. Cursor position inside a zoomed frame is identical within the agreed pixel tolerance.
+
+### Resolution
+
+Manual and smart zoom now canonicalize one aspect-preserving crop. Preview maps fitted cursor points through that crop directly, while export derives FFmpeg scale from the same crop and interpolates dynamic follow targets on the same sample grid. Padding, letterboxing, side-by-side screen rectangles, and transition progress therefore share one normalized transform.
 
 ### Evidence
 

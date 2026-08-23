@@ -75,6 +75,11 @@ interface ClickEntry {
   button: "left" | "right" | "middle"
 }
 
+interface SmoothedPositions {
+  x: Float64Array
+  y: Float64Array
+}
+
 const DEFAULT_JITTER_THRESHOLD_PX = 1.0
 const DEFAULT_MOTION_THRESHOLD_PX = 1.5
 const DEFAULT_IDLE_FADE_MS = 400
@@ -157,6 +162,10 @@ export function createCursorEngine(
   const segmentStartIndex: number[] = new Array(count)
   const segmentEndIndex: number[] = new Array(count)
   const clicks: ClickEntry[] = []
+  // Smoothing is deterministic for a segment and settings pair. Cache the
+  // zero-phase pass so frame-by-frame playback does not rescan a 60-minute
+  // telemetry stream on every render tick.
+  const smoothingCache = new Map<string, SmoothedPositions>()
 
   let currentSegmentId = 0
 
@@ -297,25 +306,21 @@ export function createCursorEngine(
     return low
   }
 
-  function evaluateSplinePosition(
-    index: number,
-    timeMs: number,
-    settings: CursorSettings,
-  ): CursorPoint {
-    const segStart = segmentStartIndex[index]
-    const segEnd = segmentEndIndex[index]
+  function getSmoothedPositions(
+    segStart: number,
+    segEnd: number,
+    alpha: number,
+  ): SmoothedPositions {
+    const key = `${segStart}:${segEnd}:${alpha}`
+    const cached = smoothingCache.get(key)
+    if (cached) return cached
 
-    if (segStart === segEnd) {
-      return { x: prepared[segStart].denoisedX, y: prepared[segStart].denoisedY }
-    }
-
-    const alpha = getSmoothingAlpha(settings)
     const segLen = segEnd - segStart + 1
-
-    // Forward pass of zero-phase bidirectional smoothing
     const forwardX = new Float64Array(segLen)
     const forwardY = new Float64Array(segLen)
 
+    // Forward pass of zero-phase bidirectional smoothing. This is computed once
+    // per segment/settings pair and reused for every output frame.
     for (let i = segStart; i <= segEnd; i++) {
       const relI = i - segStart
       const ev = prepared[i]
@@ -339,10 +344,10 @@ export function createCursorEngine(
       }
     }
 
-    // Backward pass of zero-phase bidirectional smoothing
     const smoothedX = new Float64Array(segLen)
     const smoothedY = new Float64Array(segLen)
 
+    // Backward pass removes phase lag without making evaluation stateful.
     for (let relI = segLen - 1; relI >= 0; relI--) {
       const absI = segStart + relI
       const ev = prepared[absI]
@@ -366,7 +371,35 @@ export function createCursorEngine(
       }
     }
 
-    // Centripetal Catmull-Rom Spline Interpolation between index and index+1:
+    const result = { x: smoothedX, y: smoothedY }
+    // Settings usually have only the base and strong presets. Bound the cache
+    // so unusual per-range values cannot retain unbounded telemetry arrays.
+    if (smoothingCache.size >= 8) {
+      const oldest = smoothingCache.keys().next().value
+      if (oldest !== undefined) smoothingCache.delete(oldest)
+    }
+    smoothingCache.set(key, result)
+    return result
+  }
+
+  function evaluateSplinePosition(
+    index: number,
+    timeMs: number,
+    settings: CursorSettings,
+  ): CursorPoint {
+    const segStart = segmentStartIndex[index]
+    const segEnd = segmentEndIndex[index]
+
+    if (segStart === segEnd) {
+      return { x: prepared[segStart].denoisedX, y: prepared[segStart].denoisedY }
+    }
+
+    const alpha = getSmoothingAlpha(settings)
+    const segLen = segEnd - segStart + 1
+    const { x: smoothedX, y: smoothedY } = getSmoothedPositions(segStart, segEnd, alpha)
+
+    // Time-aware Catmull-Rom interpolation gives the renderer a continuous
+    // path between high-frequency samples instead of a staircase of segments.
     const k = index
     const kRel = k - segStart
     const t0 = prepared[k].tMs
@@ -388,28 +421,33 @@ export function createCursorEngine(
 
     const p0X = kRel > 0 ? smoothedX[kRel - 1] : p1X - (p2X - p1X)
     const p0Y = kRel > 0 ? smoothedY[kRel - 1] : p1Y - (p2Y - p1Y)
-
     const p3X = k1Rel + 1 < segLen ? smoothedX[k1Rel + 1] : p2X + (p2X - p1X)
     const p3Y = k1Rel + 1 < segLen ? smoothedY[k1Rel + 1] : p2Y + (p2Y - p1Y)
 
+    // Cardinal Catmull-Rom expressed as a time-aware cubic Hermite curve.
+    // Irregular polling intervals therefore affect tangents by duration, not
+    // by array index, eliminating timing-dependent bends and phase lag.
+    const previousTime = kRel > 0 ? prepared[k - 1].tMs : t0 - (t1 - t0)
+    const nextTime = k1Rel + 1 < segLen ? prepared[k1 + 1].tMs : t1 + (t1 - t0)
+    const interval = Math.max(1, t1 - t0)
+    const tangent1Scale = interval / Math.max(1, t1 - previousTime)
+    const tangent2Scale = interval / Math.max(1, nextTime - t0)
+    const tangent1X = (p2X - p0X) * tangent1Scale
+    const tangent1Y = (p2Y - p0Y) * tangent1Scale
+    const tangent2X = (p3X - p1X) * tangent2Scale
+    const tangent2Y = (p3Y - p1Y) * tangent2Scale
+
     const u2 = u * u
     const u3 = u2 * u
+    const h00 = 2 * u3 - 3 * u2 + 1
+    const h10 = u3 - 2 * u2 + u
+    const h01 = -2 * u3 + 3 * u2
+    const h11 = u3 - u2
 
-    const interpX =
-      0.5 *
-      (2 * p1X +
-        (-p0X + p2X) * u +
-        (2 * p0X - 5 * p1X + 4 * p2X - p3X) * u2 +
-        (-p0X + 3 * p1X - 3 * p2X + p3X) * u3)
-
-    const interpY =
-      0.5 *
-      (2 * p1Y +
-        (-p0Y + p2Y) * u +
-        (2 * p0Y - 5 * p1Y + 4 * p2Y - p3Y) * u2 +
-        (-p0Y + 3 * p1Y - 3 * p2Y + p3Y) * u3)
-
-    return { x: interpX, y: interpY }
+    return {
+      x: h00 * p1X + h10 * tangent1X + h01 * p2X + h11 * tangent2X,
+      y: h00 * p1Y + h10 * tangent1Y + h01 * p2Y + h11 * tangent2Y,
+    }
   }
 
   function activeClicks(timeMs: number, settings: CursorSettings): CursorClickEffect[] {
@@ -419,11 +457,18 @@ export function createCursorEngine(
     if (duration <= 0) return []
 
     const result: CursorClickEffect[] = []
+    let low = 0
+    let high = clicks.length
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2)
+      if (clicks[middle].tMs <= timeMs) low = middle + 1
+      else high = middle
+    }
 
-    // Clicks are sparse; scan backward from the end until we are outside the window.
-    for (let i = clicks.length - 1; i >= 0; i--) {
+    // Clicks are sparse; seek to the last eligible click before scanning the
+    // short active window instead of walking every future click at t=0.
+    for (let i = low - 1; i >= 0; i--) {
       const click = clicks[i]
-      if (click.tMs > timeMs) continue
       const elapsed = timeMs - click.tMs
       if (elapsed > duration) break
 

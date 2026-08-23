@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
+import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
 import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
-import { resolvePreviewComposition } from "./preview-composition"
+import { resolveFollowCursorTargetAtTime, resolvePreviewComposition } from "./preview-composition"
 
 function makeState(): TimelineState {
   const now = "2026-08-10T00:00:00Z"
@@ -231,6 +232,35 @@ describe("resolvePreviewComposition", () => {
     const leadIn = resolvePreviewComposition(makeState(), 4_225)
     expect(leadIn.screen.zoomTransform?.progress).toBeGreaterThan(0)
     expect(leadIn.screen.zoomTransform?.progress).toBeLessThan(1)
+  })
+
+  it("uses the export sample grid for follow-cursor camera interpolation", () => {
+    const state = makeState()
+    const baseSegment = state.zoomSegments?.[0]
+    if (!baseSegment) return
+    const segment = {
+      ...baseSegment,
+      scale: 2,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      mode: "follow-cursor" as const,
+    }
+    state.zoomSegments = [segment]
+
+    const followTelemetry = normalizeCursorTelemetry({
+      ...telemetry,
+      events: [event(0, 960, 540), event(4_000, 960, 540), event(4_100, 1_600, 540)],
+    })
+    const cursorEngine = createCursorEngine(followTelemetry)
+
+    const left = resolveFollowCursorTargetAtTime(segment, state, 4_000, cursorEngine)
+    const right = resolveFollowCursorTargetAtTime(segment, state, 4_100, cursorEngine)
+    const middle = resolveFollowCursorTargetAtTime(segment, state, 4_050, cursorEngine)
+
+    expect(left).toBeDefined()
+    expect(right).toBeDefined()
+    expect(middle?.x).toBeCloseTo(((left?.x ?? 0) + (right?.x ?? 0)) / 2, 5)
   })
 
   it("marks inactive layers outside their clip ranges", () => {

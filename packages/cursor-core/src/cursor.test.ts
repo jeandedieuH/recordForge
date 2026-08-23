@@ -3,6 +3,7 @@ import {
   cursorRangeOverrideLabels,
   findCursorEventAtTime,
   fitCursorPoint,
+  mapCursorPointThroughZoom,
   isCursorButtonEnabled,
   isCursorIdle,
   normalizeCursorTelemetry,
@@ -86,6 +87,40 @@ describe("cursor-core", () => {
     expect(result.wasClamped).toBe(true)
     expect(result.sourceX).toBe(0)
     expect(result.sourceY).toBe(768)
+  })
+
+  it("maps a fitted cursor through the same crop transform as the zoomed video", () => {
+    const viewport = { width: 900, height: 506.25 }
+    const canvas = { width: 1920, height: 1080 }
+    const transform = {
+      scale: 2,
+      crop: { x: 480, y: 270, width: 960, height: 540 },
+    }
+
+    const mapped = mapCursorPointThroughZoom({ x: 225, y: 126.5625 }, viewport, canvas, transform)
+
+    expect(mapped.x).toBeCloseTo(0)
+    expect(mapped.y).toBeCloseTo(0)
+    expect(mapped.scale).toBeCloseTo(2)
+  })
+
+  it("keeps the cursor centered when a padded viewport is zoomed around the canvas center", () => {
+    const viewport = { width: 900, height: 506.25 }
+    const canvas = { width: 1920, height: 1080 }
+    const transform = {
+      scale: 2,
+      crop: { x: 480, y: 270, width: 960, height: 540 },
+    }
+
+    const mapped = mapCursorPointThroughZoom(
+      { x: viewport.width / 2, y: viewport.height / 2 },
+      viewport,
+      canvas,
+      transform,
+    )
+
+    expect(mapped.x).toBeCloseTo(viewport.width / 2)
+    expect(mapped.y).toBeCloseTo(viewport.height / 2)
   })
 
   it("labels cursor range overrides against the project profile", () => {

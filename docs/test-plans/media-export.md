@@ -40,6 +40,10 @@
 | `test_render_canvas` | 1080p canvas with padding | Output matches canvas dimensions |
 | `test_render_camera_speed` | Camera clip at 2× speed | Overlay timing matches preview |
 | `test_render_captions_masks_cursor` | Combined Phase 7 effects | All enabled effects are present or export is blocked |
+| `maps_exact_fractional_frame_pts_without_flooring_time` | 30/60 fps export with sparse telemetry | Cursor samples the exact output frame PTS without cumulative lag |
+| `shift_clock_preserves_prior_segments_when_aligning_a_later_segment` | Telemetry from multiple recording segments | Earlier cursor events remain fixed and segment joins stay continuous |
+| `apply_zoom_clamps_target_to_padded_content_area` | Padded/letterboxed screen with manual and smart zoom | Preview and export use the same crop and cursor coordinates |
+| `samples follow-cursor keyframes in source timeline time for selected-range exports` | Selected range containing follow-cursor zoom | Keyframes use source timeline time while output timestamps start at zero |
 | `test_render_selected_range` | Selected timeline range | Output starts at zero and preserves internal gaps |
 
 ---

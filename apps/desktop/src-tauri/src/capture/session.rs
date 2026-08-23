@@ -43,6 +43,9 @@ struct ActiveSession {
     webcam_segments_started: usize,
     webcam_capture_failed: bool,
     cursor_tracker: Option<super::cursor_v2::CursorTrackerV2>,
+    /// First timestamp owned by the active cursor segment. Keeping this boundary
+    /// prevents startup alignment for a resumed segment from shifting history.
+    cursor_segment_start_ms: u64,
     segment_index: u32,
     total_recorded_ms: u64,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -60,11 +63,17 @@ struct SegmentCaptures {
     audio: Vec<ActiveAudioCapture>,
     webcam: Option<FfmpegCapture>,
     webcam_failed: bool,
+    cursor_tracker: super::cursor_v2::CursorTrackerV2,
 }
 
+/// Build the manifest cursor descriptor in encoded-frame coordinates. The
+/// capture bounds can be larger than the selected output profile, so the
+/// profile dimensions—not the desktop rectangle—are the stable source space.
 fn cursor_asset_metadata(
     session_id: &str,
     bounds: super::source::Bounds,
+    source_width: u32,
+    source_height: u32,
 ) -> crate::errors::Result<CursorTelemetryAsset> {
     let capture_bounds = super::cursor::CursorCaptureBounds {
         x: bounds.x,
@@ -88,8 +97,8 @@ fn cursor_asset_metadata(
         },
     );
 
-    let source_width = capture_bounds.width;
-    let source_height = capture_bounds.height;
+    let source_width = source_width.max(1);
+    let source_height = source_height.max(1);
     let coordinate_transform = super::cursor_v2::CursorCoordinateTransform::from_bounds(
         &capture_bounds,
         source_width,
@@ -352,6 +361,7 @@ impl Recorder {
             webcam_segments_started: 0,
             webcam_capture_failed: false,
             cursor_tracker: None,
+            cursor_segment_start_ms: 0,
             segment_index: 0,
             total_recorded_ms: 0,
             started_at: None,
@@ -397,6 +407,8 @@ impl Recorder {
             &session.config,
             &session.profile,
             Arc::clone(&session.manifest),
+            &session.session_id,
+            0,
         ) {
             Ok(captures) => captures,
             Err(error) => {
@@ -410,7 +422,6 @@ impl Recorder {
             }
         };
 
-        let timeline_origin = captures.screen.started_at();
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
         if captures.webcam.is_some() {
@@ -418,29 +429,19 @@ impl Recorder {
         }
         session.webcam_capture = captures.webcam;
         session.webcam_capture_failed |= captures.webcam_failed;
+        session.cursor_tracker = Some(captures.cursor_tracker);
         let bounds = session.config.source.bounds;
-        let capture_bounds = super::cursor::CursorCaptureBounds {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width.max(1) as u32,
-            height: bounds.height.max(1) as u32,
-        };
-        session.cursor_tracker = Some(super::cursor_v2::CursorTrackerV2::start(
-            session.session_id.clone(),
-            session.work_dir.clone(),
-            capture_bounds,
-            capture_bounds.width,
-            capture_bounds.height,
-            timeline_origin,
-            0,
-            super::cursor_v2::CursorCaptureMode::Full,
-        ));
         session.started_at = Some(chrono::Utc::now());
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds)?);
+            manifest.set_cursor_telemetry(cursor_asset_metadata(
+                &session.session_id,
+                bounds,
+                session.profile.width.max(1) as u32,
+                session.profile.height.max(1) as u32,
+            )?);
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }
@@ -487,6 +488,7 @@ impl Recorder {
         Ok(session_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_segment(
         &self,
         index: u32,
@@ -494,6 +496,8 @@ impl Recorder {
         config: &RecordingConfig,
         profile: &RecordingProfile,
         manifest: Arc<Mutex<RecordingManifest>>,
+        recording_id: &str,
+        cursor_time_offset_ms: u64,
     ) -> crate::errors::Result<SegmentCaptures> {
         let ffmpeg = self.ffmpeg_path.to_string_lossy();
         let screen_output = work_dir.join(format!("seg_{:03}.mp4", index));
@@ -533,10 +537,28 @@ impl Recorder {
             Err(error) => return Err(error),
         };
 
-        // Every audio worker writes against the screen capture's monotonic
-        // origin, so startup latency is represented as leading silence rather
-        // than a second independent FFmpeg offset.
+        // Every auxiliary capture and the cursor tracker share the screen
+        // process origin. Starting the tracker before webcam initialization
+        // prevents a slow camera from creating a telemetry blind spot.
         let timeline_origin = screen.started_at();
+        let bounds = config.source.bounds;
+        let capture_bounds = super::cursor::CursorCaptureBounds {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width.max(1) as u32,
+            height: bounds.height.max(1) as u32,
+        };
+        let cursor_tracker = super::cursor_v2::CursorTrackerV2::start(
+            recording_id.to_string(),
+            work_dir.to_path_buf(),
+            capture_bounds,
+            profile.width.max(1) as u32,
+            profile.height.max(1) as u32,
+            timeline_origin,
+            cursor_time_offset_ms,
+            super::cursor_v2::CursorCaptureMode::Full,
+        );
+
         let mut audio = Vec::new();
         if config.capture_microphone {
             let device_id = config.microphone_device_id.clone().ok_or_else(|| {
@@ -629,6 +651,7 @@ impl Recorder {
             audio,
             webcam,
             webcam_failed,
+            cursor_tracker,
         })
     }
 
@@ -940,7 +963,7 @@ impl Recorder {
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
-            self.shift_cursor_clock(&session.work_dir, timeline.head_trim);
+            self.align_cursor_segment(&session.work_dir, session.cursor_segment_start_ms, timeline);
         }
 
         let total = session.total_recorded_ms + stats.duration_ms;
@@ -1010,9 +1033,10 @@ impl Recorder {
             &session.config,
             &session.profile,
             Arc::clone(&session.manifest),
+            &session.session_id,
+            session.total_recorded_ms,
         )?;
 
-        let timeline_origin = captures.screen.started_at();
         session.segment_index = next_index;
         session.screen_capture = Some(captures.screen);
         session.audio_captures = captures.audio;
@@ -1022,27 +1046,18 @@ impl Recorder {
         session.webcam_capture = captures.webcam;
         session.webcam_capture_failed |= captures.webcam_failed;
         let bounds = session.config.source.bounds;
-        let capture_bounds = super::cursor::CursorCaptureBounds {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width.max(1) as u32,
-            height: bounds.height.max(1) as u32,
-        };
-        session.cursor_tracker = Some(super::cursor_v2::CursorTrackerV2::start(
-            session.session_id.clone(),
-            session.work_dir.clone(),
-            capture_bounds,
-            capture_bounds.width,
-            capture_bounds.height,
-            timeline_origin,
-            session.total_recorded_ms,
-            super::cursor_v2::CursorCaptureMode::Full,
-        ));
+        session.cursor_segment_start_ms = session.total_recorded_ms.saturating_add(1);
+        session.cursor_tracker = Some(captures.cursor_tracker);
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            manifest.set_cursor_telemetry(cursor_asset_metadata(&session.session_id, bounds)?);
+            manifest.set_cursor_telemetry(cursor_asset_metadata(
+                &session.session_id,
+                bounds,
+                session.profile.width.max(1) as u32,
+                session.profile.height.max(1) as u32,
+            )?);
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }
@@ -1224,7 +1239,7 @@ impl Recorder {
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
-            self.shift_cursor_clock(&session.work_dir, timeline.head_trim);
+            self.align_cursor_segment(&session.work_dir, session.cursor_segment_start_ms, timeline);
         }
 
         session.total_recorded_ms += final_stats.duration_ms;
@@ -1517,13 +1532,21 @@ impl Recorder {
         timeline
     }
 
-    fn shift_cursor_clock(&self, work_dir: &Path, head_trim: Duration) {
-        let head_trim_ms = head_trim.as_millis().min(u64::MAX as u128) as u64;
-        if head_trim_ms == 0 {
-            return;
-        }
-        if let Err(error) = super::cursor_v2::shift_telemetry_clock(work_dir, head_trim_ms) {
-            tracing::warn!(%error, "failed to align cursor telemetry to video timeline");
+    fn align_cursor_segment(
+        &self,
+        work_dir: &Path,
+        segment_start_ms: u64,
+        timeline: SegmentTimeline,
+    ) {
+        let head_trim_ms = timeline.head_trim_ms();
+        let duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
+        if let Err(error) = super::cursor_v2::align_telemetry_segment(
+            work_dir,
+            segment_start_ms,
+            duration_ms,
+            head_trim_ms,
+        ) {
+            tracing::warn!(%error, segment_start_ms, head_trim_ms, duration_ms, "failed to align cursor telemetry to video timeline");
         }
     }
 

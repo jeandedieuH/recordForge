@@ -10,7 +10,8 @@ import {
   type TimelineState,
 } from "@recordforge/domain"
 import { buildOverlayRenderPlan, buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
-import { normalizeCursorTelemetry } from "@recordforge/cursor-core"
+import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
+import { resolveFollowCursorTarget } from "@recordforge/editor-core"
 
 function makeTimeline(clipCount = 1): TimelineState {
   return {
@@ -1070,6 +1071,95 @@ describe("render-plan", () => {
     expect(segment.keyframes!.length).toBeGreaterThanOrEqual(10)
     expect(segment.keyframes![0].timeMs).toBe(1000)
     expect(segment.keyframes![segment.keyframes!.length - 1].timeMs).toBe(2000)
+  })
+
+  it("samples follow-cursor keyframes in source timeline time for selected-range exports", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-follow-range",
+        startMs: 1_000,
+        durationMs: 1_000,
+        target: { x: 100, y: 100, width: 960, height: 540 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 200,
+        transitionOutMs: 200,
+        enabled: true,
+        locked: false,
+        mode: "follow-cursor",
+      },
+    ]
+
+    const telemetry = normalizeCursorTelemetry({
+      recordingId: "rec-1",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        {
+          tMs: 0,
+          rawX: 100,
+          rawY: 300,
+          sourceX: 100,
+          sourceY: 300,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 1_000,
+          rawX: 1_500,
+          rawY: 300,
+          sourceX: 1_500,
+          sourceY: 300,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 2_000,
+          rawX: 1_500,
+          rawY: 300,
+          sourceX: 1_500,
+          sourceY: 300,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 1_000, endMs: 2_000 },
+      cursorTelemetry: telemetry,
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const segment = state.zoomSegments?.[0]
+    const firstKeyframe = plan.value.zoomSegments[0].keyframes?.[0]
+    expect(segment).toBeDefined()
+    expect(firstKeyframe?.timeMs).toBe(0)
+    if (!segment || !firstKeyframe) return
+
+    const engine = createCursorEngine(telemetry)
+    const expectedTarget = resolveFollowCursorTarget(segment, state, 1_000, engine)
+    const localTimeTarget = resolveFollowCursorTarget(segment, state, 0, engine)
+    expect(expectedTarget).toBeDefined()
+    expect(localTimeTarget).toBeDefined()
+    if (!expectedTarget || !localTimeTarget) return
+
+    // The first output frame maps to source timeline t=1000ms, not local t=0ms.
+    expect(firstKeyframe.target.x).toBeCloseTo(expectedTarget.x, 5)
+    expect(firstKeyframe.target.x).not.toBeCloseTo(localTimeTarget.x, 5)
   })
 
   it("handles floating-point timing values seamlessly and passes renderPlanSchema validation", () => {

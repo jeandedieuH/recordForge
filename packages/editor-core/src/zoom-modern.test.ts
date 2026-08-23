@@ -170,6 +170,50 @@ describe("Modern Zoom System", () => {
       expect(1920).toBeGreaterThanOrEqual(target.x)
       expect(1920).toBeLessThanOrEqual(target.x + target.width)
     })
+
+    it("canonicalizes a legacy target height so cursor and video keep the canvas aspect", () => {
+      const segment: ManualZoomSegment = {
+        id: "legacy-aspect",
+        startMs: 0,
+        durationMs: 2_000,
+        target: { x: 300, y: 100, width: 960, height: 700 },
+        scale: 1.5,
+        easing: "linear",
+        transitionInMs: 0,
+        transitionOutMs: 0,
+        enabled: true,
+        locked: false,
+        mode: "manual",
+      }
+
+      const transform = resolveZoomTransform(segment, 1_000, canvas)
+      expect(transform.scale).toBeCloseTo(2)
+      expect(transform.crop.width).toBeCloseTo(960)
+      expect(transform.crop.height).toBeCloseTo(540)
+    })
+
+    it("bounds spring transitions so high zoom factors never create a negative crop", () => {
+      const segment: ManualZoomSegment = {
+        id: "safe-spring",
+        startMs: 0,
+        durationMs: 1_000,
+        target: { x: 840, y: 472.5, width: 240, height: 135 },
+        scale: 8,
+        easing: "spring",
+        transitionInMs: 1_000,
+        transitionOutMs: 0,
+        enabled: true,
+        locked: false,
+        mode: "manual",
+      }
+
+      for (const timeMs of [0, 100, 200, 300, 500, 900]) {
+        const transform = resolveZoomTransform(segment, timeMs, canvas)
+        expect(transform.crop.width).toBeGreaterThanOrEqual(1)
+        expect(transform.crop.height).toBeGreaterThanOrEqual(1)
+        expect(transform.scale).toBeLessThanOrEqual(8)
+      }
+    })
   })
 
   describe("Commands & State Management", () => {

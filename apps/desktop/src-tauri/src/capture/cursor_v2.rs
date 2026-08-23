@@ -872,30 +872,87 @@ pub fn read_any_telemetry(work_dir: &Path) -> Option<CursorTelemetryFileV2> {
     Some(migrate_v1_to_v2(v1))
 }
 
-/// Shift every telemetry timestamp earlier by `shift_ms`, dropping events that
-/// fall before zero. The tracker clocks events against the segment's wall-clock
-/// origin (process spawn), but the video stream only starts at FFmpeg's first
-/// captured frame — `shift_ms` is that startup gap, so afterwards telemetry
-/// time matches video time.
-pub fn shift_telemetry_clock(work_dir: &Path, shift_ms: u64) -> Result<(), String> {
-    if shift_ms == 0 {
+/// Shift timestamps for the current capture segment earlier by `shift_ms`.
+///
+/// Cursor samples are stored in one session timeline, but each pause/resume
+/// segment has its own FFmpeg startup window. Only events at or after
+/// `segment_start_ms` belong to the segment being aligned; earlier events must
+/// never be shifted again or the cursor will drift progressively after resume.
+/// Events that still fall inside the segment's startup window are discarded.
+fn shift_telemetry_clock_in_segment(
+    work_dir: &Path,
+    segment_start_ms: u64,
+    segment_end_ms: Option<u64>,
+    shift_ms: u64,
+) -> Result<(), String> {
+    if shift_ms == 0 && segment_end_ms.is_none() {
         return Ok(());
     }
     let Some(mut telemetry) = read_any_telemetry(work_dir) else {
         return Ok(());
     };
-    let before = telemetry.events.len();
-    telemetry.events.retain(|event| event.t_ms >= shift_ms);
-    for event in &mut telemetry.events {
-        event.t_ms -= shift_ms;
+
+    let mut shifted_events = Vec::with_capacity(telemetry.events.len());
+    let mut dropped = 0usize;
+    for mut event in telemetry.events {
+        if event.t_ms < segment_start_ms {
+            shifted_events.push(event);
+            continue;
+        }
+
+        // A first-segment event must not become negative. For resumed
+        // segments, allow the first shifted sample to land exactly on the
+        // prior segment's join timestamp (`segment_start_ms - 1`).
+        let shifted_time = event.t_ms.saturating_sub(shift_ms);
+        let before_segment_video = if segment_start_ms == 0 {
+            event.t_ms < shift_ms
+        } else {
+            shifted_time < segment_start_ms.saturating_sub(1)
+        };
+        let after_segment_video = segment_end_ms.is_some_and(|end| shifted_time > end);
+        if before_segment_video || after_segment_video {
+            dropped += 1;
+            continue;
+        }
+        event.t_ms = shifted_time;
+        shifted_events.push(event);
     }
-    if telemetry.events.len() != before {
+
+    if dropped > 0 {
         info!(
-            dropped = before - telemetry.events.len(),
-            "dropped cursor events that predate the first video frame"
+            dropped,
+            segment_start_ms,
+            shift_ms,
+            "dropped cursor events outside the aligned segment video window"
         );
     }
+    telemetry.events = shifted_events;
     write_v2_telemetry(work_dir, &telemetry).map(|_| ())
+}
+
+/// Shift timestamps for a segment while preserving earlier session history.
+pub fn shift_telemetry_clock_from(
+    work_dir: &Path,
+    segment_start_ms: u64,
+    shift_ms: u64,
+) -> Result<(), String> {
+    shift_telemetry_clock_in_segment(work_dir, segment_start_ms, None, shift_ms)
+}
+
+/// Align one segment's timestamps to its actual video start and end.
+pub fn align_telemetry_segment(
+    work_dir: &Path,
+    segment_start_ms: u64,
+    segment_duration_ms: u64,
+    shift_ms: u64,
+) -> Result<(), String> {
+    let segment_end_ms = segment_start_ms.saturating_add(segment_duration_ms);
+    shift_telemetry_clock_in_segment(work_dir, segment_start_ms, Some(segment_end_ms), shift_ms)
+}
+
+/// Shift the first segment's timestamps for compatibility with older callers.
+pub fn shift_telemetry_clock(work_dir: &Path, shift_ms: u64) -> Result<(), String> {
+    shift_telemetry_clock_from(work_dir, 0, shift_ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -921,12 +978,12 @@ pub struct CursorTrackerV2 {
 impl CursorTrackerV2 {
     /// Start capturing cursor telemetry for a recording session.
     ///
-    /// `timeline_origin` is the `Instant` at which the first video frame was
-    /// produced by the screen capture. Cursor timestamps are session-clock
-    /// offsets from that instant plus `time_offset_ms`, not wall-clock or
-    /// tracker-local time. This guarantees that a cursor sample at 5.000 s
-    /// matches the video frame at 5.000 s, and that pause/resume continues the
-    /// same session timeline.
+    /// `timeline_origin` is the monotonic origin captured immediately before
+    /// the screen FFmpeg process starts. Cursor timestamps are session-clock
+    /// offsets from that origin plus `time_offset_ms`; finalization removes the
+    /// measured per-segment startup window before publishing the telemetry.
+    /// This keeps pause/resume segments on one session timeline without relying
+    /// on wall-clock or tracker-local timestamps.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         recording_id: String,
@@ -957,17 +1014,12 @@ impl CursorTrackerV2 {
                         previous.map_or("default".into(), |event| event.shape_id);
                     (v2.metadata, v2.events, previous_buttons, previous_shape_id)
                 } else {
-                    let mut metadata = CursorTelemetryMetadata::new(
+                    let metadata = CursorTelemetryMetadata::new(
                         recording_id.clone(),
                         source_width,
                         source_height,
                         bounds,
                     );
-                    // Probe topology and DPI once at the start of capture.
-                    metadata.topology = probe_cursor_topology(bounds.x, bounds.y);
-                    if metadata.topology.is_none() {
-                        metadata.health = CursorTelemetryHealth::TopologyUnavailable;
-                    }
                     (
                         metadata,
                         Vec::with_capacity(3600),
@@ -975,6 +1027,32 @@ impl CursorTrackerV2 {
                         "default".into(),
                     )
                 };
+
+            // Keep source coordinates in the encoded profile's space. A window
+            // can move or resize between pause/resume segments, so each new
+            // tracker must publish the transform for its current bounds while
+            // preserving the stable source dimensions used by prior events.
+            let topology = probe_cursor_topology(bounds.x, bounds.y);
+            let dpi_scale = topology
+                .as_ref()
+                .map_or_else(CursorDpiScale::default, |topology| CursorDpiScale {
+                    x: topology.dpi_x / 96.0,
+                    y: topology.dpi_y / 96.0,
+                });
+            metadata.source_width = source_width;
+            metadata.source_height = source_height;
+            metadata.capture_bounds = bounds;
+            metadata.coordinate_transform = CursorCoordinateTransform::from_bounds(
+                &bounds,
+                source_width,
+                source_height,
+                &dpi_scale,
+            );
+            if topology.is_some() {
+                metadata.topology = topology;
+            } else if metadata.topology.is_none() {
+                metadata.health = CursorTelemetryHealth::TopologyUnavailable;
+            }
 
             // Health handshake: verify we can read the cursor state.
             let health = check_cursor_capture_health();
@@ -1011,6 +1089,10 @@ impl CursorTrackerV2 {
             }
 
             let mut last_checkpoint = Instant::now();
+            // Schedule against a monotonic deadline instead of sleeping for a
+            // fixed interval after each sample. This prevents capture work and
+            // disk checkpoints from slowly lowering the effective polling rate.
+            let mut next_sample_at = Instant::now();
             let mut shape_registry: std::collections::HashMap<String, CursorShapeInfo> = metadata
                 .shapes
                 .iter()
@@ -1020,6 +1102,12 @@ impl CursorTrackerV2 {
             info!(mode = ?mode, "cursor telemetry v2 tracking started");
 
             while !stop_signal_clone.load(Ordering::Relaxed) {
+                let now = Instant::now();
+                if now < next_sample_at {
+                    thread::sleep(next_sample_at.duration_since(now));
+                    continue;
+                }
+
                 let t_ms = elapsed_ms(timeline_origin, time_offset_ms);
                 let (raw_x, raw_y, visible) = capture_cursor_position();
 
@@ -1077,7 +1165,13 @@ impl CursorTrackerV2 {
                     last_checkpoint = Instant::now();
                 }
 
-                thread::sleep(SAMPLE_INTERVAL);
+                next_sample_at = next_sample_at
+                    .checked_add(SAMPLE_INTERVAL)
+                    .unwrap_or_else(Instant::now);
+                let after_sample = Instant::now();
+                if next_sample_at <= after_sample {
+                    next_sample_at = after_sample + SAMPLE_INTERVAL;
+                }
             }
 
             let telemetry = CursorTelemetryFileV2 {
@@ -1541,6 +1635,22 @@ mod tests {
     }
 
     #[test]
+    fn coordinate_transform_maps_capture_bounds_to_encoded_dimensions() {
+        let bounds = CursorCaptureBounds {
+            x: -100,
+            y: 50,
+            width: 3840,
+            height: 2160,
+        };
+        let transform =
+            CursorCoordinateTransform::from_bounds(&bounds, 1920, 1080, &CursorDpiScale::default());
+
+        assert_eq!(transform.apply(-100, 50), (0.0, 0.0));
+        assert!((transform.apply(3_740, 2_210).0 - 1_920.0).abs() < 0.001);
+        assert!((transform.apply(3_740, 2_210).1 - 1_080.0).abs() < 0.001);
+    }
+
+    #[test]
     fn button_event_derivation() {
         let mut previous = CursorButtonState::default();
         let current = CursorButtonState {
@@ -1723,6 +1833,60 @@ mod tests {
         shift_telemetry_clock(dir.path(), 0).expect("zero shift");
         let reread = read_v2_telemetry(dir.path()).expect("reread");
         assert_eq!(reread.events.len(), 2);
+    }
+
+    #[test]
+    fn shift_clock_preserves_prior_segments_when_aligning_a_later_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let metadata = CursorTelemetryMetadata::new(
+            "rec".into(),
+            1920,
+            1080,
+            CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        let event = |t_ms: u64| CursorTelemetryEventV2 {
+            t_ms,
+            raw_x: 100,
+            raw_y: 200,
+            source_x: 100.0,
+            source_y: 200.0,
+            buttons: CursorButtonState::default(),
+            button_event: "none".into(),
+            visible: true,
+            shape_id: "arrow".into(),
+            shape_changed: false,
+        };
+        write_v2_telemetry(
+            dir.path(),
+            &CursorTelemetryFileV2 {
+                metadata,
+                events: vec![
+                    event(100),
+                    event(900),
+                    event(1_400),
+                    event(1_900),
+                    event(2_300),
+                ],
+            },
+        )
+        .expect("write");
+
+        align_telemetry_segment(dir.path(), 1_000, 500, 400).expect("align later segment");
+
+        let shifted = read_v2_telemetry(dir.path()).expect("read");
+        assert_eq!(
+            shifted
+                .events
+                .iter()
+                .map(|event| event.t_ms)
+                .collect::<Vec<_>>(),
+            vec![100, 900, 1_000, 1_500]
+        );
     }
 
     #[test]

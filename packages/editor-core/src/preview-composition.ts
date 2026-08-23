@@ -15,10 +15,13 @@ import type {
   ZoomTarget,
 } from "@recordforge/contracts"
 import {
+  canonicalizeZoomTarget,
+  clampZoomTarget,
   createCursorEngine,
   cursorSettingsForEffect,
   findCursorEffectAtTime,
   fitCursorPoint,
+  resolveInertialFollowCenter,
   timelineToCursorSourceTime,
   zoomTargetForCursorPoint,
   type CursorEngine,
@@ -127,6 +130,8 @@ function clampRect(rect: MaskRect, canvas: TimelineCanvas): MaskRect {
   }
 }
 
+export const FOLLOW_CAMERA_SAMPLE_STEP_MS = 100
+
 export function resolveFollowCursorTarget(
   segment: ManualZoomSegment,
   state: TimelineState,
@@ -146,8 +151,63 @@ export function resolveFollowCursorTarget(
   )
   if (!fitted.visible) return undefined
 
-  const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, segment.target.width))
-  return zoomTargetForCursorPoint({ x: fitted.x, y: fitted.y }, state.canvas, desiredScale)
+  const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
+  const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
+  const initialCenter = {
+    x: baseTarget.x + baseTarget.width / 2,
+    y: baseTarget.y + baseTarget.height / 2,
+  }
+  const followCenter = resolveInertialFollowCenter(
+    { x: fitted.x, y: fitted.y },
+    initialCenter,
+    { width: state.canvas.width / desiredScale, height: state.canvas.height / desiredScale },
+    {
+      deadzoneRadiusPercent: segment.followDeadzonePercent,
+      smoothingAlpha: segment.followSmoothingAlpha,
+    },
+  )
+  return zoomTargetForCursorPoint(followCenter, state.canvas, desiredScale)
+}
+
+/**
+ * Sample follow-camera targets on the same 100ms grid used by the export plan.
+ * Preview therefore displays the exact piecewise-linear camera path that Rust
+ * receives instead of following a separate continuous approximation.
+ */
+export function resolveFollowCursorTargetAtTime(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  timeMs: number,
+  cursorEngine: CursorEngine | null | undefined,
+  sampleStepMs = FOLLOW_CAMERA_SAMPLE_STEP_MS,
+): ZoomTarget | undefined {
+  if (segment.mode === "static" || segment.mode === "manual" || !cursorEngine) {
+    return undefined
+  }
+
+  const safeStepMs = Math.max(1, Math.round(sampleStepMs))
+  const segmentEndMs = segment.startMs + segment.durationMs
+  const clampedTimeMs = Math.min(segmentEndMs, Math.max(segment.startMs, timeMs))
+  const elapsedMs = clampedTimeMs - segment.startMs
+  const leftTimeMs = segment.startMs + Math.floor(elapsedMs / safeStepMs) * safeStepMs
+  const rightTimeMs = Math.min(segmentEndMs, leftTimeMs + safeStepMs)
+  const leftTarget = resolveFollowCursorTarget(segment, state, leftTimeMs, cursorEngine)
+  if (!leftTarget || rightTimeMs === leftTimeMs) return leftTarget
+
+  const rightTarget = resolveFollowCursorTarget(segment, state, rightTimeMs, cursorEngine)
+  if (!rightTarget) return leftTarget
+
+  const spanMs = Math.max(1, rightTimeMs - leftTimeMs)
+  const alpha = (clampedTimeMs - leftTimeMs) / spanMs
+  return clampZoomTarget(
+    {
+      x: leftTarget.x + (rightTarget.x - leftTarget.x) * alpha,
+      y: leftTarget.y + (rightTarget.y - leftTarget.y) * alpha,
+      width: leftTarget.width + (rightTarget.width - leftTarget.width) * alpha,
+      height: leftTarget.height + (rightTarget.height - leftTarget.height) * alpha,
+    },
+    state.canvas,
+  )
 }
 
 /**
@@ -173,7 +233,7 @@ export function resolvePreviewComposition(
   const screenSourceMs = screenClip ? timelineToSource(screenClip, timeMs) : null
   const activeZoom = findManualZoomAtTime(state, timeMs)
   const followTarget = activeZoom
-    ? resolveFollowCursorTarget(activeZoom, state, timeMs, cursorEngine)
+    ? resolveFollowCursorTargetAtTime(activeZoom, state, timeMs, cursorEngine)
     : undefined
 
   const previousZoom = activeZoom ? findPreviousZoomSegment(state, activeZoom) : null
@@ -321,7 +381,13 @@ export function zoomTransformToCss(
   transform: ZoomTransform,
   canvas: { width: number; height: number },
 ): string {
-  const cropXPercent = (transform.crop.x / Math.max(1, canvas.width)) * 100
-  const cropYPercent = (transform.crop.y / Math.max(1, canvas.height)) * 100
-  return `scale(${transform.scale}) translate(-${cropXPercent}%, -${cropYPercent}%)`
+  const canvasWidth = Math.max(1, canvas.width)
+  const canvasHeight = Math.max(1, canvas.height)
+  const cropXPercent = (transform.crop.x / canvasWidth) * 100
+  const cropYPercent = (transform.crop.y / canvasHeight) * 100
+  const scaleX = canvasWidth / Math.max(1, transform.crop.width)
+  const scaleY = canvasHeight / Math.max(1, transform.crop.height)
+  const scale =
+    Math.abs(scaleX - scaleY) < 1e-6 ? `scale(${scaleX})` : `scale(${scaleX}, ${scaleY})`
+  return `${scale} translate(-${cropXPercent}%, -${cropYPercent}%)`
 }

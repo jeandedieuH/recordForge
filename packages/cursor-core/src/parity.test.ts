@@ -104,6 +104,7 @@ function framesAreEqual(
   wasm: ReturnType<WasmEngine["evaluate"]>,
   ts: ReturnType<ReturnType<typeof createCursorEngine>["evaluate"]>,
 ) {
+  expect(wasm.sourceTimeMs).toBeCloseTo(ts.sourceTimeMs, 5)
   expect(wasm.sourceX).toBeCloseTo(ts.sourceX, 1)
   expect(wasm.sourceY).toBeCloseTo(ts.sourceY, 1)
   expect(wasm.visible).toBe(ts.visible)

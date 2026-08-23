@@ -176,7 +176,7 @@ fn ease_progress(progress: f64, easing: &str) -> f64 {
             (2.0f64.powf(-10.0 * p)
                 * (((p - period / 4.0) * (2.0 * std::f64::consts::PI)) / period).sin()
                 + 1.0)
-                .clamp(0.0, 1.5)
+                .clamp(0.0, 1.0)
         }
         _ => {
             if p < 0.5 {
@@ -190,24 +190,24 @@ fn ease_progress(progress: f64, easing: &str) -> f64 {
 
 fn find_keyframe_target(
     keyframes: &[super::RenderPlanZoomKeyframe],
-    time_ms: u64,
+    time_ms: f64,
     fallback: &super::RenderCropFloat,
 ) -> super::RenderCropFloat {
     if keyframes.is_empty() {
         return fallback.clone();
     }
-    if time_ms <= keyframes[0].time_ms {
+    if time_ms <= keyframes[0].time_ms as f64 {
         return keyframes[0].target.clone();
     }
-    if time_ms >= keyframes[keyframes.len() - 1].time_ms {
+    if time_ms >= keyframes[keyframes.len() - 1].time_ms as f64 {
         return keyframes[keyframes.len() - 1].target.clone();
     }
     for i in 0..keyframes.len() - 1 {
         let k0 = &keyframes[i];
         let k1 = &keyframes[i + 1];
-        if time_ms >= k0.time_ms && time_ms <= k1.time_ms {
-            let span = (k1.time_ms - k0.time_ms).max(1) as f64;
-            let alpha = ((time_ms - k0.time_ms) as f64 / span).clamp(0.0, 1.0);
+        if time_ms >= k0.time_ms as f64 && time_ms <= k1.time_ms as f64 {
+            let span = (k1.time_ms.saturating_sub(k0.time_ms).max(1)) as f64;
+            let alpha = ((time_ms - k0.time_ms as f64) / span).clamp(0.0, 1.0);
             return super::RenderCropFloat {
                 x: k0.target.x + (k1.target.x - k0.target.x) * alpha,
                 y: k0.target.y + (k1.target.y - k0.target.y) * alpha,
@@ -217,6 +217,36 @@ fn find_keyframe_target(
         }
     }
     fallback.clone()
+}
+
+/// Map a point already fitted into the screen rectangle through a crop in
+/// normalized canvas coordinates. This is the native counterpart of the
+/// preview's `mapCursorPointThroughZoom` helper.
+fn map_screen_point_through_zoom(
+    transform: ZoomTransformState,
+    point: (f64, f64),
+    canvas_width: f64,
+    canvas_height: f64,
+    screen: (f64, f64, f64, f64),
+) -> (f64, f64) {
+    if transform.scale <= 1.0001 && transform.progress < 1e-4 {
+        return point;
+    }
+
+    let safe_canvas_width = canvas_width.max(1.0);
+    let safe_canvas_height = canvas_height.max(1.0);
+    let (screen_x, screen_y, screen_width, screen_height) = screen;
+    let crop_x = transform.crop_x / safe_canvas_width * screen_width;
+    let crop_y = transform.crop_y / safe_canvas_height * screen_height;
+    let crop_width = (transform.crop_w / safe_canvas_width).max(1e-4);
+    let crop_height = (transform.crop_h / safe_canvas_height).max(1e-4);
+    let relative_x = point.0 - screen_x;
+    let relative_y = point.1 - screen_y;
+
+    (
+        screen_x + (relative_x - crop_x) / crop_width,
+        screen_y + (relative_y - crop_y) / crop_height,
+    )
 }
 
 impl CursorRenderer {
@@ -338,9 +368,11 @@ impl CursorRenderer {
         )
     }
 
-    pub fn render_frame(&mut self, output_ms: u64, frame: &mut [u8]) {
+    /// Render at the exact fractional presentation timestamp assigned to a
+    /// CFR frame so cursor evaluation shares the video frame PTS.
+    pub fn render_frame_at(&mut self, output_ms: f64, frame: &mut [u8]) {
         let expected_len = self.canvas_width as usize * self.canvas_height as usize * 4;
-        if frame.len() != expected_len {
+        if frame.len() != expected_len || !output_ms.is_finite() || output_ms < 0.0 {
             return;
         }
 
@@ -352,17 +384,17 @@ impl CursorRenderer {
             return;
         }
 
-        let cursor_frame = self.engine.evaluate(source_time_ms as f64, &self.settings);
+        let cursor_frame = self.engine.evaluate(source_time_ms, &self.settings);
         if !cursor_frame.visible {
             return;
         }
 
-        let transform = self.resolve_zoom_transform(output_ms);
+        let transform = self.resolve_zoom_transform_at(output_ms);
         let effective_cursor_scale = self.cursor_scale * transform.scale;
 
         let (px, py) = self.fit_source_point(cursor_frame.source_x, cursor_frame.source_y);
-        let (x, y) = self.apply_zoom(output_ms, px, py);
-        let clip = self.clip_for_output(output_ms);
+        let (x, y) = self.apply_zoom_at(output_ms, px, py);
+        let clip = self.clip_for_output();
 
         if self.settings.spotlight_mode {
             self.render_spotlight(frame, x, y, effective_cursor_scale, &clip);
@@ -371,7 +403,7 @@ impl CursorRenderer {
         if self.settings.click_feedback != "none" {
             for click in &cursor_frame.active_clicks {
                 let (cx_raw, cy_raw) = self.fit_source_point(click.source_x, click.source_y);
-                let (cx, cy) = self.apply_zoom(output_ms, cx_raw, cy_raw);
+                let (cx, cy) = self.apply_zoom_at(output_ms, cx_raw, cy_raw);
                 self.render_click_feedback(frame, cx, cy, click, effective_cursor_scale, &clip);
             }
         }
@@ -390,17 +422,32 @@ impl CursorRenderer {
         );
     }
 
-    fn clip_for_output(&self, _output_ms: u64) -> ClipRect {
+    fn clip_for_output(&self) -> ClipRect {
         self.video_screen
     }
 
-    pub fn resolve_zoom_transform(&self, output_ms: u64) -> ZoomTransformState {
+    /// Resolve zoom at a fractional output PTS so the cursor and video use the
+    /// same transition progress between integer millisecond boundaries.
+    pub fn resolve_zoom_transform_at(&self, output_ms: f64) -> ZoomTransformState {
         let canvas_w = self.canvas_width as f64;
         let canvas_h = self.canvas_height as f64;
 
-        let Some(segment) = self.zoom_segments.iter().find(|segment| {
-            segment.enabled && output_ms >= segment.start_ms && output_ms < segment.end_ms
-        }) else {
+        let Some(segment) = self
+            .zoom_segments
+            .iter()
+            .filter(|segment| {
+                segment.enabled
+                    && output_ms >= segment.start_ms as f64
+                    && output_ms < segment.end_ms as f64
+            })
+            // Match the editor's deterministic overlap rule: the latest
+            // starting segment wins, with the id as the stable tie-breaker.
+            .max_by(|left, right| {
+                left.start_ms
+                    .cmp(&right.start_ms)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+        else {
             return ZoomTransformState {
                 progress: 0.0,
                 scale: 1.0,
@@ -412,21 +459,22 @@ impl CursorRenderer {
         };
 
         let duration = (segment.end_ms - segment.start_ms).max(1) as f64;
-        let mut trans_in = (segment.transition_in_ms as f64).clamp(1.0, duration);
-        let mut trans_out = (segment.transition_out_ms as f64).clamp(1.0, duration);
+        let mut trans_in = (segment.transition_in_ms as f64).clamp(0.0, duration);
+        let mut trans_out = (segment.transition_out_ms as f64).clamp(0.0, duration);
         if trans_in + trans_out > duration {
             trans_in = duration / 2.0;
             trans_out = duration - trans_in;
         }
 
-        let elapsed = output_ms.saturating_sub(segment.start_ms) as f64;
+        let elapsed = (output_ms - segment.start_ms as f64).max(0.0);
         let mut is_panned_from_prev = false;
 
         let progress = if elapsed <= 0.0 {
-            if segment.from_target.is_some() {
+            let progress = if trans_in == 0.0 { 1.0 } else { 0.0 };
+            if segment.from_target.is_some() && progress < 1.0 {
                 is_panned_from_prev = true;
             }
-            0.0
+            progress
         } else if elapsed < trans_in {
             if segment.from_target.is_some() {
                 is_panned_from_prev = true;
@@ -523,32 +571,19 @@ impl CursorRenderer {
         }
     }
 
-    fn apply_zoom(&self, output_ms: u64, x: f64, y: f64) -> (f64, f64) {
-        let transform = self.resolve_zoom_transform(output_ms);
-        if transform.scale <= 1.0001 && transform.progress < 1e-4 {
-            return (x, y);
-        }
-        let canvas_w = self.canvas_width as f64;
-        let canvas_h = self.canvas_height as f64;
-        let screen_w = self.video_screen.w as f64;
-        let screen_h = self.video_screen.h as f64;
-        let screen_x = self.video_screen.x as f64;
-        let screen_y = self.video_screen.y as f64;
-
-        let norm_crop_x = transform.crop_x / canvas_w;
-        let norm_crop_y = transform.crop_y / canvas_h;
-        let norm_crop_w = (transform.crop_w / canvas_w).max(1e-4);
-        let norm_crop_h = (transform.crop_h / canvas_h).max(1e-4);
-
-        let rel_x = x - screen_x;
-        let rel_y = y - screen_y;
-
-        let zoomed_rel_x = (rel_x - norm_crop_x * screen_w) / norm_crop_w;
-        let zoomed_rel_y = (rel_y - norm_crop_y * screen_h) / norm_crop_h;
-
-        (
-            (screen_x + zoomed_rel_x).clamp(0.0, canvas_w),
-            (screen_y + zoomed_rel_y).clamp(0.0, canvas_h),
+    fn apply_zoom_at(&self, output_ms: f64, x: f64, y: f64) -> (f64, f64) {
+        let transform = self.resolve_zoom_transform_at(output_ms);
+        map_screen_point_through_zoom(
+            transform,
+            (x, y),
+            self.canvas_width as f64,
+            self.canvas_height as f64,
+            (
+                self.video_screen.x as f64,
+                self.video_screen.y as f64,
+                self.video_screen.w as f64,
+                self.video_screen.h as f64,
+            ),
         )
     }
 
@@ -1005,24 +1040,38 @@ pub fn generate_circle_mask_png(width: u32, height: u32) -> Result<Vec<u8>, Stri
         .map_err(|e| format!("encode circle mask png: {e}"))
 }
 
-fn source_time_for_output(segments: &[RenderSegment], output_ms: u64) -> Option<u64> {
+/// Return the exact presentation timestamp for a CFR output frame.
+///
+/// Keeping this as a rational calculation until the last possible boundary
+/// prevents the per-frame floor in the old feeder from accumulating a visible
+/// cursor lag over long exports.
+pub(crate) fn frame_time_ms(frame_index: u64, fps: u32) -> f64 {
+    if fps == 0 {
+        return 0.0;
+    }
+    frame_index as f64 * 1_000.0 / fps as f64
+}
+
+/// Map an output presentation timestamp to the source timestamp for the active
+/// segment. The result remains fractional so the cursor engine can interpolate
+/// at the same PTS that FFmpeg assigns to the overlay frame.
+fn source_time_for_output(segments: &[RenderSegment], output_ms: f64) -> Option<f64> {
+    if !output_ms.is_finite() || output_ms < 0.0 {
+        return None;
+    }
     let segment = segments.iter().find(|segment| {
-        output_ms >= segment.output_start_ms && output_ms < segment.output_end_ms
+        output_ms >= segment.output_start_ms as f64 && output_ms < segment.output_end_ms as f64
     })?;
     let output_duration = segment
         .output_end_ms
-        .saturating_sub(segment.output_start_ms);
-    let source_duration = segment.source_out_ms.saturating_sub(segment.source_in_ms);
-    if output_duration == 0 || source_duration == 0 {
+        .saturating_sub(segment.output_start_ms) as f64;
+    let source_duration = segment.source_out_ms.saturating_sub(segment.source_in_ms) as f64;
+    if output_duration <= 0.0 || source_duration <= 0.0 {
         return None;
     }
-    let elapsed = output_ms.saturating_sub(segment.output_start_ms) as f64;
-    let ratio = source_duration as f64 / output_duration as f64;
-    Some(
-        segment
-            .source_in_ms
-            .saturating_add((elapsed * ratio) as u64),
-    )
+    let elapsed = (output_ms - segment.output_start_ms as f64).clamp(0.0, output_duration);
+    let ratio = source_duration / output_duration;
+    Some((segment.source_in_ms as f64 + elapsed * ratio).min(segment.source_out_ms as f64))
 }
 
 fn parse_color(value: &str, fallback: Rgba) -> Rgba {
@@ -1324,7 +1373,19 @@ mod tests {
 
     #[test]
     fn maps_output_time_to_source_time_for_a_segment() {
-        assert_eq!(source_time_for_output(&segments(), 500), Some(500));
+        assert_eq!(source_time_for_output(&segments(), 500.0), Some(500.0));
+    }
+
+    #[test]
+    fn maps_exact_fractional_frame_pts_without_flooring_time() {
+        let mut scaled = segments();
+        scaled[0].source_out_ms = 2_000;
+
+        let frame_time_ms = frame_time_ms(1, 30);
+        let source_time = source_time_for_output(&scaled, frame_time_ms).expect("active segment");
+
+        assert!((frame_time_ms - (1_000.0 / 30.0)).abs() < 0.000_001);
+        assert!((source_time - (2_000.0 / 30.0)).abs() < 0.000_001);
     }
 
     fn test_canvas(width: u32, height: u32, padding: u32) -> RenderCanvas {
@@ -1346,7 +1407,7 @@ mod tests {
         )
         .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
-        renderer.render_frame(100, &mut frame);
+        renderer.render_frame_at(100.0, &mut frame);
         assert!(frame.chunks_exact(4).any(|pixel| pixel[3] > 0));
     }
 
@@ -1368,7 +1429,7 @@ mod tests {
         .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
         // Time 0 places the cursor at the first telemetry sample (10, 20).
-        renderer.render_frame(0, &mut frame);
+        renderer.render_frame_at(0.0, &mut frame);
 
         let mut found = false;
         for index in (0..frame.len()).step_by(4) {
@@ -1402,7 +1463,7 @@ mod tests {
         let mut frame = vec![0; 100 * 100 * 4];
         // The second telemetry sample is a left-click at (40, 50) and time 100,
         // which is the start of the click effect (progress 0, full intensity).
-        renderer.render_frame(100, &mut frame);
+        renderer.render_frame_at(100.0, &mut frame);
 
         let mut core_pixel_count = 0;
         let mut glow_pixel_count = 0;
@@ -1468,7 +1529,7 @@ mod tests {
         )
         .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
-        renderer.render_frame(100, &mut frame);
+        renderer.render_frame_at(100.0, &mut frame);
         assert!(frame.chunks_exact(4).all(|pixel| pixel[3] == 0));
     }
 
@@ -1511,11 +1572,11 @@ mod tests {
 
         // In the 3-phase lifecycle, 500ms is in the sustained hold phase (progress 1.0)
         // Center is (100, 100). Point (120, 120) is +20px from center. At 2x zoom, +20px * 2 = +40px from center -> 140.0.
-        let (x, y) = renderer.apply_zoom(500, 120.0, 120.0);
+        let (x, y) = renderer.apply_zoom_at(500.0, 120.0, 120.0);
         assert!((x - 140.0).abs() < 0.1, "expected 140.0, got {x}");
         assert!((y - 140.0).abs() < 0.1, "expected 140.0, got {y}");
 
-        let (no_zoom_x, no_zoom_y) = renderer.apply_zoom(1_001, 120.0, 120.0);
+        let (no_zoom_x, no_zoom_y) = renderer.apply_zoom_at(1_001.0, 120.0, 120.0);
         assert!((no_zoom_x - 120.0).abs() < 0.01);
         assert!((no_zoom_y - 120.0).abs() < 0.01);
     }
@@ -1576,7 +1637,7 @@ mod tests {
         )
         .expect("valid cursor renderer");
 
-        let transform_mid = renderer.resolve_zoom_transform(500);
+        let transform_mid = renderer.resolve_zoom_transform_at(500.0);
         assert!((transform_mid.crop_x - 50.0).abs() < 0.1);
         assert!((transform_mid.crop_y - 50.0).abs() < 0.1);
         assert!((transform_mid.scale - 2.0).abs() < 0.1);
@@ -1650,7 +1711,7 @@ mod tests {
         .expect("valid cursor renderer");
 
         // At 1200ms (halfway through 400ms transition), crop should be at (50, 50) with scale 2.0 (never dropping to 1.0)
-        let transform = renderer.resolve_zoom_transform(1200);
+        let transform = renderer.resolve_zoom_transform_at(1200.0);
         assert!((transform.crop_x - 50.0).abs() < 0.1);
         assert!((transform.crop_y - 50.0).abs() < 0.1);
         assert!((transform.scale - 2.0).abs() < 0.1);
@@ -1721,7 +1782,7 @@ mod tests {
         // Render frame: no pixels should bleed beyond the screen rect,
         // and absolutely no pixels should be in the right camera half (x > 1470).
         let mut frame = vec![0; 1920 * 1080 * 4];
-        renderer.render_frame(0, &mut frame);
+        renderer.render_frame_at(0.0, &mut frame);
 
         let mut right_side_pixels = 0;
         for py in 0..1080u32 {
@@ -1775,13 +1836,13 @@ mod tests {
                 .expect("valid cursor renderer");
 
         let mut frame_arrow = vec![0; 100 * 100 * 4];
-        renderer.render_frame(0, &mut frame_arrow);
+        renderer.render_frame_at(0.0, &mut frame_arrow);
 
         let mut frame_ibeam = vec![0; 100 * 100 * 4];
-        renderer.render_frame(200, &mut frame_ibeam);
+        renderer.render_frame_at(200.0, &mut frame_ibeam);
 
         let mut frame_hand = vec![0; 100 * 100 * 4];
-        renderer.render_frame(400, &mut frame_hand);
+        renderer.render_frame_at(400.0, &mut frame_hand);
 
         // All 3 frames should have non-empty cursor content
         assert!(frame_arrow.iter().any(|&b| b > 0));

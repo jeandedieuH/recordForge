@@ -1,6 +1,10 @@
 import { useCallback, useRef, useState } from "react"
 import type { ManualZoomSegment, ZoomMode, ZoomTarget } from "@recordforge/contracts"
-import { clampZoomTarget, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
+import {
+  canonicalizeZoomTarget,
+  clampZoomTarget,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
 import { Button, cn } from "@recordforge/ui"
 import { Crosshair, Lock, MousePointer, Move, Unlock, ZoomIn } from "lucide-react"
 
@@ -40,6 +44,7 @@ interface DragState {
   startX: number
   startY: number
   initialTarget: ZoomTarget
+  currentTarget: ZoomTarget
   moved: boolean
 }
 
@@ -57,6 +62,13 @@ export function ZoomCanvasOverlay({
 }: ZoomCanvasOverlayProps) {
   const [isInteracting, setIsInteracting] = useState(false)
   const dragStateRef = useRef<DragState | null>(null)
+  const normalizedTarget = segment
+    ? canonicalizeZoomTarget(
+        segment.target,
+        { width: canvasWidth, height: canvasHeight, padding: 0 },
+        segment.scale,
+      )
+    : null
 
   const scaleX = containerWidth / Math.max(1, canvasWidth)
   const scaleY = containerHeight / Math.max(1, canvasHeight)
@@ -75,12 +87,13 @@ export function ZoomCanvasOverlay({
         handle,
         startX: event.clientX,
         startY: event.clientY,
-        initialTarget: { ...segment.target },
+        initialTarget: { ...(normalizedTarget ?? segment.target) },
+        currentTarget: { ...(normalizedTarget ?? segment.target) },
         moved: false,
       }
       setIsInteracting(true)
     },
-    [segment],
+    [normalizedTarget, segment],
   )
 
   const handlePointerMove = useCallback(
@@ -152,6 +165,7 @@ export function ZoomCanvasOverlay({
         height: canvasHeight,
         padding: 0,
       })
+      state.currentTarget = clamped
       onUpdateTarget(clamped, { phase: "draft" })
     },
     [canvasHeight, canvasWidth, onUpdateTarget, scaleX, scaleY, segment],
@@ -171,27 +185,29 @@ export function ZoomCanvasOverlay({
         element.releasePointerCapture(event.pointerId)
       }
 
-      if (didMove && segment && onUpdateTarget) {
-        onUpdateTarget(segment.target, { phase: "commit" })
+      if (didMove && onUpdateTarget) {
+        onUpdateTarget(state.currentTarget, { phase: "commit" })
       }
     },
-    [onUpdateTarget, segment],
+    [onUpdateTarget],
   )
 
   if (!segment || !segment.enabled) return null
 
-  // Convert target to screen coordinates
-  const frameLeft = offsetX + segment.target.x * scaleX
-  const frameTop = offsetY + segment.target.y * scaleY
-  const frameWidth = segment.target.width * scaleX
-  const frameHeight = segment.target.height * scaleY
+  // Convert the canonical target to screen coordinates so the edit affordance
+  // describes the same crop that preview and export actually render.
+  const displayTarget = normalizedTarget ?? segment.target
+  const frameLeft = offsetX + displayTarget.x * scaleX
+  const frameTop = offsetY + displayTarget.y * scaleY
+  const frameWidth = displayTarget.width * scaleX
+  const frameHeight = displayTarget.height * scaleY
 
-  const currentScale = (canvasWidth / Math.max(1, segment.target.width)).toFixed(1)
+  const currentScale = (canvasWidth / Math.max(1, displayTarget.width)).toFixed(1)
 
   function applyScalePreset(targetScale: number) {
     if (!segment) return
-    const centerX = segment.target.x + segment.target.width / 2
-    const centerY = segment.target.y + segment.target.height / 2
+    const centerX = displayTarget.x + displayTarget.width / 2
+    const centerY = displayTarget.y + displayTarget.height / 2
     const next = zoomTargetForCursorPoint(
       { x: centerX, y: centerY },
       { width: canvasWidth, height: canvasHeight, padding: 0 },
@@ -206,7 +222,7 @@ export function ZoomCanvasOverlay({
 
   function centerTarget() {
     if (!segment) return
-    const targetScale = Math.max(1.1, canvasWidth / Math.max(1, segment.target.width))
+    const targetScale = Math.max(1.1, canvasWidth / Math.max(1, displayTarget.width))
     const next = zoomTargetForCursorPoint(
       { x: canvasWidth / 2, y: canvasHeight / 2 },
       { width: canvasWidth, height: canvasHeight, padding: 0 },
@@ -221,7 +237,7 @@ export function ZoomCanvasOverlay({
 
   function snapToCursor() {
     if (!segment || !cursorPointAtPlayhead) return
-    const targetScale = Math.max(1.1, canvasWidth / Math.max(1, segment.target.width))
+    const targetScale = Math.max(1.1, canvasWidth / Math.max(1, displayTarget.width))
     const next = zoomTargetForCursorPoint(
       cursorPointAtPlayhead,
       { width: canvasWidth, height: canvasHeight, padding: 0 },

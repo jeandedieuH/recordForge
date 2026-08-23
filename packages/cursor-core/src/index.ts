@@ -38,6 +38,31 @@ export interface CursorFitOptions {
   clampToSource?: boolean
 }
 
+export interface CursorViewport {
+  width: number
+  height: number
+}
+
+export interface CursorCanvasGeometry {
+  width: number
+  height: number
+}
+
+export interface CursorZoomTransform {
+  scale: number
+  crop: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+}
+
+export interface CursorZoomedPoint extends CursorSourcePoint {
+  /** Uniform scale to apply to cursor artwork after the canvas crop. */
+  scale: number
+}
+
 export function normalizeCursorTelemetry(input: unknown): CursorTelemetryFile {
   const parsed = cursorTelemetryFileSchema.parse(input)
   const events = parsed.events
@@ -155,8 +180,9 @@ export function isCursorIdle(
 }
 
 /**
- * Map source coordinates into an aspect-fit output. Capture bounds and DPI are
- * applied before fitting so preview and export use the same geometry.
+ * Map normalized source coordinates into an aspect-fit output. Capture bounds
+ * and DPI are resolved when telemetry is recorded; this function only handles
+ * the final source-to-viewport fit shared by preview and export.
  */
 export function fitCursorPoint(
   point: CursorSourcePoint,
@@ -191,6 +217,53 @@ export function fitCursorPoint(
   }
 }
 
+/**
+ * Apply the canvas crop used by the preview video to a fitted cursor point.
+ *
+ * Cursor points are already in the fitted video viewport; the zoom crop is in
+ * full-canvas coordinates. Converting the crop through normalized canvas
+ * coordinates keeps padding, letterboxing, and side-by-side screen rectangles
+ * on the same transform as the video layer.
+ */
+export function mapCursorPointThroughZoom(
+  point: CursorSourcePoint,
+  viewport: CursorViewport,
+  canvas: CursorCanvasGeometry,
+  transform: CursorZoomTransform | null | undefined,
+): CursorZoomedPoint {
+  const viewportWidth = Math.max(1, viewport.width)
+  const viewportHeight = Math.max(1, viewport.height)
+  const canvasWidth = Math.max(1, canvas.width)
+  const canvasHeight = Math.max(1, canvas.height)
+
+  if (!transform) return { ...point, scale: 1 }
+
+  const cropX = Number.isFinite(transform.crop.x)
+    ? (transform.crop.x / canvasWidth) * viewportWidth
+    : 0
+  const cropY = Number.isFinite(transform.crop.y)
+    ? (transform.crop.y / canvasHeight) * viewportHeight
+    : 0
+  const cropWidth = Math.max(
+    1e-6,
+    (Number.isFinite(transform.crop.width) ? transform.crop.width : canvasWidth) / canvasWidth,
+  )
+  const cropHeight = Math.max(
+    1e-6,
+    (Number.isFinite(transform.crop.height) ? transform.crop.height : canvasHeight) / canvasHeight,
+  )
+  const scaleX = 1 / cropWidth
+  const scaleY = 1 / cropHeight
+
+  return {
+    x: (point.x - cropX) / cropWidth,
+    y: (point.y - cropY) / cropHeight,
+    // Cursor artwork remains uniform even if a legacy target has a non-canvas
+    // aspect ratio; the video transform uses the smaller axis as its safe fit.
+    scale: Math.min(scaleX, scaleY),
+  }
+}
+
 export function findTimelineClipAt(
   state: TimelineState,
   trackKind: "screen" | "cursor",
@@ -210,7 +283,12 @@ export function timelineToCursorSourceTime(
 ): number | null {
   const clip = findTimelineClipAt(state, "screen", timelineMs)
   if (!clip) return null
-  return clip.sourceInMs + (timelineMs - clip.startMs) * clip.speed
+
+  // Use the persisted clip endpoints, not an independently rounded speed
+  // multiplication, so preview time mapping matches export's endpoint mapping.
+  const timelineDuration = Math.max(1, clip.durationMs)
+  const sourceDuration = Math.max(0, clip.sourceOutMs - clip.sourceInMs)
+  return clip.sourceInMs + ((timelineMs - clip.startMs) / timelineDuration) * sourceDuration
 }
 
 /**

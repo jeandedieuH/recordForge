@@ -1967,23 +1967,25 @@ fn feed_cursor_frames(
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
-        let output_ms = frame_index.saturating_mul(1000) / cursor.fps as u64;
+        // Rawvideo assigns each input frame the exact CFR PTS. Do not floor
+        // this value: the old integer calculation accumulated almost one frame
+        // of cursor timing error over long exports.
+        let output_time_ms = cursor::frame_time_ms(frame_index, cursor.fps);
+        let overlay_time_ms = output_time_ms.floor().max(0.0) as u64;
         cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
 
         // 1. Render active overlay items (annotations, text presets, images)
         if let Some(engine) = &cursor.overlay_engine {
             engine
-                .render_to_pixmap(output_ms, &mut cursor.pixmap)
+                .render_to_pixmap(overlay_time_ms, &mut cursor.pixmap)
                 .map_err(|error| InternalError::Media(format!("render overlay frame: {error}")))?;
         }
 
-        // 2. Render cursor telemetry (if active at timestamp)
-        if let Some((_, _, renderer)) = cursor
-            .renderers
-            .iter_mut()
-            .find(|(start_ms, end_ms, _)| output_ms >= *start_ms && output_ms < *end_ms)
-        {
-            renderer.render_frame(output_ms, cursor.pixmap.data_mut());
+        // 2. Render cursor telemetry (if active at the exact frame PTS)
+        if let Some((_, _, renderer)) = cursor.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
+            output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
+        }) {
+            renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
         }
 
         // Unpremultiply directly in-place without heap allocations
@@ -2390,9 +2392,7 @@ fn ffmpeg_failure_detail(stderr: &[u8]) -> Option<String> {
         return Some(last_meaningful.chars().take(300).collect());
     }
 
-    lines
-        .last()
-        .map(|line| line.chars().take(300).collect())
+    lines.last().map(|line| line.chars().take(300).collect())
 }
 
 /// True when a stderr line belongs to a `-progress` block rather than a
@@ -3727,9 +3727,19 @@ fn zoom_easing_expression(p: &str, easing: &str) -> String {
         // Quintic smootherstep: 6t⁵ - 15t⁴ + 10t³ — matches preview's
         // zoomEasedProgress which uses 0-velocity + 0-acceleration endpoints.
         "smooth" => format!("({p})*({p})*({p})*(({p})*(({p})*6-15)+10)"),
-        "spring" => format!("pow(2,-10*({p}))*sin((({p})-0.1)*15.708)+1"),
+        "spring" => format!("min(1,max(0,pow(2,-10*({p}))*sin((({p})-0.1)*15.708)+1))"),
         _ => format!("if(lte({p},0.5),2*({p})*({p}),1-pow(-2*({p})+2,2)/2)"),
     }
+}
+
+/// Derive the effective scale from the crop rectangle used by every renderer.
+/// The persisted segment scale is a convenient editor value, but the crop is
+/// the authoritative geometry at export time.
+fn effective_zoom_scale(canvas_width: f64, crop: &RenderCropFloat) -> f64 {
+    if !canvas_width.is_finite() || canvas_width <= 0.0 {
+        return 1.0;
+    }
+    (canvas_width / crop.width.max(1.0)).clamp(1.0, 8.0)
 }
 
 /// Clamp a zoom segment target to full canvas coordinates [0..canvas_width] x [0..canvas_height].
@@ -3759,11 +3769,22 @@ pub(crate) fn clamped_zoom_crop(
 ) -> RenderCropFloat {
     let canvas_w = canvas_width as f64;
     let canvas_h = canvas_height as f64;
-    let safe_scale = scale.clamp(1.0, 8.0);
+    let safe_scale = if scale.is_finite() {
+        scale.clamp(1.0, 8.0)
+    } else {
+        1.0
+    };
 
-    let target_width = target.width.clamp(1.0, canvas_w);
-    let target_height = target.height.clamp(1.0, canvas_h);
+    let clamped_target_width = if target.width.is_finite() {
+        target.width.clamp(1.0, canvas_w)
+    } else {
+        canvas_w
+    };
+    let minimum_crop_width = (canvas_w / 8.0).max(1.0);
+    let target_width = clamped_target_width.max(minimum_crop_width);
 
+    // Zoompan is an aspect-preserving transform. A stale/manual target height
+    // must not make the cursor and video use different vertical crops.
     let (final_width, final_height) = if (target_width - canvas_w).abs() < 1.0 && safe_scale > 1.01
     {
         (
@@ -3771,11 +3792,34 @@ pub(crate) fn clamped_zoom_crop(
             (canvas_h / safe_scale).max(1.0),
         )
     } else {
-        (target_width, target_height)
+        (
+            target_width,
+            (target_width * canvas_h / canvas_w).clamp(1.0, canvas_h),
+        )
     };
 
-    let target_cx = target.x + target.width / 2.0;
-    let target_cy = target.y + target.height / 2.0;
+    // Match the TypeScript clamp-then-canonicalize order. Centering from the
+    // raw out-of-bounds rectangle would make preview and export disagree on
+    // legacy targets dragged past an edge.
+    let clamped_target_x = if target.x.is_finite() {
+        target
+            .x
+            .clamp(0.0, (canvas_w - clamped_target_width).max(0.0))
+    } else {
+        0.0
+    };
+    let requested_height = if target.height.is_finite() {
+        target.height.clamp(1.0, canvas_h)
+    } else {
+        canvas_h
+    };
+    let clamped_target_y = if target.y.is_finite() {
+        target.y.clamp(0.0, (canvas_h - requested_height).max(0.0))
+    } else {
+        0.0
+    };
+    let target_cx = clamped_target_x + clamped_target_width / 2.0;
+    let target_cy = clamped_target_y + requested_height / 2.0;
 
     let final_x = (target_cx - final_width / 2.0).clamp(0.0, (canvas_w - final_width).max(0.0));
     let final_y = (target_cy - final_height / 2.0).clamp(0.0, (canvas_h - final_height).max(0.0));
@@ -3909,18 +3953,26 @@ fn build_zoompan_expressions(
     let canvas_w = canvas.width as f64;
     let canvas_h = canvas.height as f64;
 
-    for segment in plan
+    let mut zoom_segments = plan
         .zoom_segments
         .iter()
-        .rev()
         .filter(|segment| segment.enabled)
-    {
+        .collect::<Vec<_>>();
+    // Build the expression in ascending order so a later overlapping segment
+    // is the outer condition, matching preview and cursor export.
+    zoom_segments.sort_by(|left, right| {
+        left.start_ms
+            .cmp(&right.start_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    for segment in zoom_segments {
         if segment.end_ms <= segment.start_ms {
             continue;
         }
         let duration_s = (segment.end_ms - segment.start_ms) as f64 / 1000.0;
-        let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.001, duration_s);
-        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.001, duration_s);
+        let mut trans_in_s = (segment.transition_in_ms as f64 / 1000.0).clamp(0.0, duration_s);
+        let mut trans_out_s = (segment.transition_out_ms as f64 / 1000.0).clamp(0.0, duration_s);
         if trans_in_s + trans_out_s > duration_s {
             trans_in_s = duration_s / 2.0;
             trans_out_s = duration_s - trans_in_s;
@@ -3931,22 +3983,26 @@ fn build_zoompan_expressions(
         let out_start_s = end_s - trans_out_s;
 
         let target = clamped_zoom_target(canvas.width, canvas.height, canvas.padding, segment);
-        let target_scale = segment.scale.clamp(1.0, 8.0);
-        let from_scale = segment.from_scale.unwrap_or(1.0).clamp(1.0, 8.0);
+        // The crop rectangle is the authoritative geometry. Deriving scale
+        // from it keeps FFmpeg's video zoom and the cursor rasterizer aligned
+        // even when a legacy/manual plan contains stale `scale` metadata.
+        let target_scale = effective_zoom_scale(canvas.width as f64, &target);
 
         let target_cx =
             (((target.x + target.width / 2.0) / canvas_w) * screen_w).clamp(0.0, screen_w);
         let target_cy =
             (((target.y + target.height / 2.0) / canvas_h) * screen_h).clamp(0.0, screen_h);
 
-        let (from_cx, from_cy) = if let Some(from_raw) = &segment.from_target {
-            let from = clamped_zoom_crop(
+        let from_target = segment.from_target.as_ref().map(|from_raw| {
+            clamped_zoom_crop(
                 canvas.width,
                 canvas.height,
                 canvas.padding,
                 from_raw,
-                from_scale,
-            );
+                segment.from_scale.unwrap_or(1.0),
+            )
+        });
+        let (from_cx, from_cy) = if let Some(from) = from_target.as_ref() {
             let cx = (((from.x + from.width / 2.0) / canvas_w) * screen_w).clamp(0.0, screen_w);
             let cy = (((from.y + from.height / 2.0) / canvas_h) * screen_h).clamp(0.0, screen_h);
             (cx, cy)
@@ -3962,42 +4018,81 @@ fn build_zoompan_expressions(
         let trans_out_str = compact_num(trans_out_s);
 
         let target_scale_str = compact_num(target_scale);
-        let from_scale_str = compact_num(from_scale);
         let target_cx_str = compact_num(target_cx);
         let target_cy_str = compact_num(target_cy);
         let from_cx_str = compact_num(from_cx);
         let from_cy_str = compact_num(from_cy);
         let full_cx_str = compact_num(full_cx);
         let full_cy_str = compact_num(full_cy);
+        let has_dynamic_center = segment
+            .keyframes
+            .as_ref()
+            .is_some_and(|keyframes| keyframes.len() > 1);
+        let target_cx_expression = if has_dynamic_center {
+            build_keyframe_center_expression(
+                segment.keyframes.as_deref().unwrap_or_default(),
+                canvas,
+                screen_w,
+                "x",
+                target_scale,
+                &target_cx_str,
+            )
+        } else {
+            target_cx_str.clone()
+        };
+        let target_cy_expression = if has_dynamic_center {
+            build_keyframe_center_expression(
+                segment.keyframes.as_deref().unwrap_or_default(),
+                canvas,
+                screen_h,
+                "y",
+                target_scale,
+                &target_cy_str,
+            )
+        } else {
+            target_cy_str.clone()
+        };
 
-        let progress_in = if start_s.abs() < 1e-6 {
+        let progress_in = if trans_in_s < 1e-4 {
+            "1.0".to_string()
+        } else if start_s.abs() < 1e-6 {
             format!("it/{trans_in_str}")
         } else {
             format!("(it-{start_str})/{trans_in_str}")
         };
         let eased_in = zoom_easing_expression(&progress_in, &segment.easing);
 
-        let progress_out = format!("({end_str}-it)/{trans_out_str}");
-        let eased_out = zoom_easing_expression(&progress_out, &segment.easing);
-
-        // Zoom scale (z)
-        let delta_z_in = target_scale - from_scale;
-        let delta_z_in_str = compact_num(delta_z_in);
-        let z_in = if delta_z_in.abs() < 1e-4 {
-            target_scale_str.clone()
-        } else if delta_z_in > 0.0 {
-            format!("{from_scale_str}+{delta_z_in_str}*{eased_in}")
-        } else {
-            format!("{from_scale_str}{delta_z_in_str}*{eased_in}")
-        };
-
-        let delta_z_out = target_scale - 1.0;
-        let delta_z_out_str = compact_num(delta_z_out);
-        let z_out = if delta_z_out.abs() < 1e-4 {
+        let progress_out = if trans_out_s < 1e-4 {
             "1.0".to_string()
         } else {
-            format!("1.0+{delta_z_out_str}*{eased_out}")
+            format!("({end_str}-it)/{trans_out_str}")
         };
+        let eased_out = zoom_easing_expression(&progress_out, &segment.easing);
+
+        // Interpolate crop width, then derive zoom from that width. Interpolating
+        // scale directly is not equivalent to the preview's crop interpolation
+        // and causes cursor drift throughout every transition (especially with
+        // spring easing).
+        let canvas_width_str = compact_num(canvas_w);
+        let from_width = from_target.as_ref().map_or(canvas_w, |from| from.width);
+        let from_width_str = compact_num(from_width);
+        let delta_width_in_value = target.width - from_width;
+        let delta_width_in = compact_num(delta_width_in_value);
+        let crop_width_in = if delta_width_in_value.abs() < 1e-4 {
+            from_width_str.clone()
+        } else {
+            format!("{from_width_str}+{delta_width_in}*{eased_in}")
+        };
+        let z_in = format!("{canvas_width_str}/max(1,({crop_width_in}))");
+
+        let delta_width_out_value = target.width - canvas_w;
+        let delta_width_out = compact_num(delta_width_out_value);
+        let crop_width_out = if delta_width_out_value.abs() < 1e-4 {
+            canvas_width_str.clone()
+        } else {
+            format!("{canvas_width_str}+{delta_width_out}*{eased_out}")
+        };
+        let z_out = format!("{canvas_width_str}/max(1,({crop_width_out}))");
 
         let z_seg = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
             target_scale_str.clone()
@@ -4012,7 +4107,9 @@ fn build_zoompan_expressions(
         // Center X
         let delta_cx_in = target_cx - from_cx;
         let delta_cx_in_str = compact_num(delta_cx_in);
-        let cx_in = if delta_cx_in.abs() < 1e-4 {
+        let cx_in = if has_dynamic_center {
+            format!("{from_cx_str}+(({target_cx_expression})-({from_cx_str}))*{eased_in}")
+        } else if delta_cx_in.abs() < 1e-4 {
             target_cx_str.clone()
         } else if delta_cx_in > 0.0 {
             format!("{from_cx_str}+{delta_cx_in_str}*{eased_in}")
@@ -4022,7 +4119,9 @@ fn build_zoompan_expressions(
 
         let delta_cx_out = target_cx - full_cx;
         let delta_cx_out_str = compact_num(delta_cx_out);
-        let cx_out = if delta_cx_out.abs() < 1e-4 {
+        let cx_out = if has_dynamic_center {
+            format!("{full_cx_str}+(({target_cx_expression})-({full_cx_str}))*{eased_out}")
+        } else if delta_cx_out.abs() < 1e-4 {
             full_cx_str.clone()
         } else if delta_cx_out > 0.0 {
             format!("{full_cx_str}+{delta_cx_out_str}*{eased_out}")
@@ -4030,22 +4129,7 @@ fn build_zoompan_expressions(
             format!("{full_cx_str}{delta_cx_out_str}*{eased_out}")
         };
 
-        let cx_hold = if let Some(keyframes) = &segment.keyframes {
-            if keyframes.len() > 1 {
-                build_keyframe_center_expression(
-                    keyframes,
-                    canvas,
-                    screen_w,
-                    "x",
-                    target_scale,
-                    &target_cx_str,
-                )
-            } else {
-                target_cx_str.clone()
-            }
-        } else {
-            target_cx_str.clone()
-        };
+        let cx_hold = target_cx_expression;
 
         let cx_seg = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
             cx_hold
@@ -4062,7 +4146,9 @@ fn build_zoompan_expressions(
         // Center Y
         let delta_cy_in = target_cy - from_cy;
         let delta_cy_in_str = compact_num(delta_cy_in);
-        let cy_in = if delta_cy_in.abs() < 1e-4 {
+        let cy_in = if has_dynamic_center {
+            format!("{from_cy_str}+(({target_cy_expression})-({from_cy_str}))*{eased_in}")
+        } else if delta_cy_in.abs() < 1e-4 {
             target_cy_str.clone()
         } else if delta_cy_in > 0.0 {
             format!("{from_cy_str}+{delta_cy_in_str}*{eased_in}")
@@ -4072,7 +4158,9 @@ fn build_zoompan_expressions(
 
         let delta_cy_out = target_cy - full_cy;
         let delta_cy_out_str = compact_num(delta_cy_out);
-        let cy_out = if delta_cy_out.abs() < 1e-4 {
+        let cy_out = if has_dynamic_center {
+            format!("{full_cy_str}+(({target_cy_expression})-({full_cy_str}))*{eased_out}")
+        } else if delta_cy_out.abs() < 1e-4 {
             full_cy_str.clone()
         } else if delta_cy_out > 0.0 {
             format!("{full_cy_str}+{delta_cy_out_str}*{eased_out}")
@@ -4080,22 +4168,7 @@ fn build_zoompan_expressions(
             format!("{full_cy_str}{delta_cy_out_str}*{eased_out}")
         };
 
-        let cy_hold = if let Some(keyframes) = &segment.keyframes {
-            if keyframes.len() > 1 {
-                build_keyframe_center_expression(
-                    keyframes,
-                    canvas,
-                    screen_h,
-                    "y",
-                    target_scale,
-                    &target_cy_str,
-                )
-            } else {
-                target_cy_str.clone()
-            }
-        } else {
-            target_cy_str.clone()
-        };
+        let cy_hold = target_cy_expression;
 
         let cy_seg = if trans_in_s < 1e-4 && trans_out_s < 1e-4 {
             cy_hold
@@ -4207,18 +4280,55 @@ fn mask_values_are_finite(mask: &RenderPlanMask) -> bool {
     .all(|value| value.is_finite())
 }
 
+fn zoom_target_values_are_valid(target: &RenderCropFloat) -> bool {
+    [target.x, target.y, target.width, target.height]
+        .iter()
+        .all(|value| value.is_finite())
+        && target.width > 0.0
+        && target.height > 0.0
+}
+
 fn zoom_values_are_finite(segment: &RenderPlanZoomSegment) -> bool {
-    [
+    let base_values_are_valid = [
         segment.start_ms as f64,
         segment.end_ms as f64,
-        segment.target.x,
-        segment.target.y,
-        segment.target.width,
-        segment.target.height,
         segment.scale,
     ]
     .iter()
     .all(|value| value.is_finite())
+        && (1.0..=8.0).contains(&segment.scale)
+        && zoom_target_values_are_valid(&segment.target);
+    if !base_values_are_valid {
+        return false;
+    }
+
+    if let Some(from_scale) = segment.from_scale {
+        if !from_scale.is_finite() || !(1.0..=8.0).contains(&from_scale) {
+            return false;
+        }
+    }
+    if let Some(from_target) = &segment.from_target {
+        if !zoom_target_values_are_valid(from_target) {
+            return false;
+        }
+    }
+
+    let Some(keyframes) = segment.keyframes.as_ref() else {
+        return true;
+    };
+    keyframes.windows(2).all(|window| {
+        let previous = &window[0];
+        let current = &window[1];
+        previous.time_ms < current.time_ms
+            && previous.time_ms >= segment.start_ms
+            && current.time_ms <= segment.end_ms
+            && zoom_target_values_are_valid(&previous.target)
+            && zoom_target_values_are_valid(&current.target)
+    }) && keyframes.iter().all(|keyframe| {
+        keyframe.time_ms >= segment.start_ms
+            && keyframe.time_ms <= segment.end_ms
+            && zoom_target_values_are_valid(&keyframe.target)
+    })
 }
 
 fn validate_overlay(
@@ -4381,9 +4491,7 @@ fn resolve_audio_stream_specifier(
             || asset_path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| {
-                    n.ends_with(".wav") || n.ends_with(".mp3") || n.ends_with(".m4a")
-                });
+                .is_some_and(|n| n.ends_with(".wav") || n.ends_with(".mp3") || n.ends_with(".m4a"));
         if is_standalone && !audio_streams.is_empty() {
             return Ok(Some(format!("[{input_index}:{}]", audio_streams[0].index)));
         }
@@ -4711,8 +4819,23 @@ mod tests {
             1080.0,
         );
         assert!(z_expr.contains("lt(it,1)"));
+        assert!(z_expr.contains("/max(1,("));
         assert!(x_expr.contains("max(0,min(iw-iw/zoom"));
         assert!(y_expr.contains("max(0,min(ih-ih/zoom"));
+    }
+
+    #[test]
+    fn derives_video_zoom_scale_from_the_authoritative_crop() {
+        let crop = RenderCropFloat {
+            x: 320.0,
+            y: 190.0,
+            width: 960.0,
+            height: 700.0,
+        };
+
+        assert!((effective_zoom_scale(1_920.0, &crop) - 2.0).abs() < 0.000_001);
+        let canonical = clamped_zoom_crop(1_920, 1_080, 48, &crop, 1.5);
+        assert!((canonical.height - 540.0).abs() < 0.000_001);
     }
 
     #[test]

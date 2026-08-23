@@ -296,6 +296,41 @@ export function clampZoomTarget(
   }
 }
 
+/**
+ * Normalize a target into the aspect-preserving crop actually consumed by the
+ * video transform. Manual targets can come from older project files where
+ * `scale` and the rectangle disagree; width plus the canvas aspect is the
+ * deterministic source of truth, while `scale` only migrates full-canvas
+ * legacy targets.
+ */
+export function canonicalizeZoomTarget(
+  target: ZoomTarget,
+  canvas: Pick<TimelineCanvas, "width" | "height" | "padding">,
+  legacyScale = 1,
+): ZoomTarget {
+  const clamped = clampZoomTarget(target, canvas)
+  const canvasWidth = Math.max(1, canvas.width)
+  const canvasHeight = Math.max(1, canvas.height)
+  const safeLegacyScale = Number.isFinite(legacyScale) ? clampRange(legacyScale, 1, 8) : 1
+  const usesLegacyScale = Math.abs(clamped.width - canvasWidth) < 1 && safeLegacyScale > 1.01
+  const minimumCropWidth = canvasWidth / 8
+  const requestedCropWidth = usesLegacyScale ? canvasWidth / safeLegacyScale : clamped.width
+  const cropWidth = Math.min(canvasWidth, Math.max(minimumCropWidth, requestedCropWidth))
+  const cropHeight = (cropWidth * canvasHeight) / canvasWidth
+  const centerX = clamped.x + clamped.width / 2
+  const centerY = clamped.y + clamped.height / 2
+
+  return clampZoomTarget(
+    {
+      x: centerX - cropWidth / 2,
+      y: centerY - cropHeight / 2,
+      width: cropWidth,
+      height: cropHeight,
+    },
+    canvas,
+  )
+}
+
 /** Build an aspect-ratio-preserving crop around a canvas-space cursor point. */
 export function zoomTargetForCursorPoint(
   point: { x: number; y: number },

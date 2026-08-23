@@ -82,6 +82,28 @@ describe("cursor engine", () => {
     expect(at24.sourceY).toBeCloseTo(7.5, 0)
   })
 
+  it("uses event timestamps for smooth interpolation across irregular sample intervals", () => {
+    const irregular = normalizeCursorTelemetry({
+      recordingId: "irregular",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      sampleRateHz: 60,
+      events: [
+        v2Event(0, 0, 0, "none"),
+        v2Event(10, 10, 0, "none"),
+        v2Event(20, 20, 0, "none"),
+        v2Event(120, 120, 0, "none"),
+      ],
+    })
+    const engine = createCursorEngine(irregular)
+    const frame = engine.evaluate(15, { ...defaultCursorSettings, smoothMovement: false })
+
+    // A time-aware cubic path remains at the midpoint of the 10ms–20ms
+    // interval; uniform Catmull-Rom would be pulled backward by the distant
+    // 120ms sample.
+    expect(frame.sourceX).toBeCloseTo(15, 5)
+  })
+
   it("produces the same frame when seeking to a time and when sampling it during playback", () => {
     const engine = createCursorEngine(telemetry)
     const settings = { ...defaultCursorSettings, smoothMovement: true, smoothFactor: 0.25 }

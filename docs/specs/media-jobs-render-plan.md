@@ -155,6 +155,8 @@ TypeScript validates the plan and project identity before IPC. Rust validates th
 - `outputPath` is the user-selected destination and is validated by Rust path policy.
 - Source paths never cross IPC; Rust loads the saved project by `projectId` and resolves canonical asset paths.
 - The plan includes explicit gaps, speed, source/output ranges, audio roles/fades, camera transforms, canvas, zoom, cursor, captions, and masks.
+- Cursor telemetry is captured from the monotonic screen timeline, aligned per segment to the measured video startup/tail window, and sampled at exact CFR output presentation timestamps during export.
+- Manual and smart zoom share an aspect-preserving crop contract; preview, FFmpeg, and cursor compositing apply that crop through the fitted screen rectangle rather than maintaining independent translations.
 - Zoom suggestions are project metadata with editable `mode`, `source`, and `preset` fields; regeneration happens before plan construction and preserves manual/locked ranges.
 - Selected-range export remaps the chosen timeline range to zero-based output time.
 
