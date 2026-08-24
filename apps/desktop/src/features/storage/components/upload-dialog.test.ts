@@ -1,5 +1,24 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { toErrorMessage } from "../../../lib/errors"
+import { loadProfilesForUploadDialog } from "./upload-dialog"
+
+describe("upload dialog profile loading", () => {
+  it("loads storage profiles when the dialog is opened", () => {
+    const fetchProfiles = vi.fn().mockResolvedValue(undefined)
+
+    loadProfilesForUploadDialog(true, fetchProfiles)
+
+    expect(fetchProfiles).toHaveBeenCalledOnce()
+  })
+
+  it("does not load storage profiles while the dialog is closed", () => {
+    const fetchProfiles = vi.fn().mockResolvedValue(undefined)
+
+    loadProfilesForUploadDialog(false, fetchProfiles)
+
+    expect(fetchProfiles).not.toHaveBeenCalled()
+  })
+})
 
 describe("upload error handling", () => {
   it("preserves serialized Tauri AppError messages", () => {

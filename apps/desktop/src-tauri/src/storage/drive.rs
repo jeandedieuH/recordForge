@@ -16,7 +16,7 @@ use crate::storage::s3::ConnectionTestResult;
 
 // Public client credentials for desktop app authorization (installed application)
 pub const GOOGLE_DRIVE_CLIENT_ID: &str =
-    "1041930258169-p8b6v74u3eab4387d890o82e347h0vck.apps.googleusercontent.com";
+    "254207736726-t74i43783vr9gu3vava8uog2n9i9d15k.apps.googleusercontent.com";
 pub const GOOGLE_DRIVE_AUTH_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

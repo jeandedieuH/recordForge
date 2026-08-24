@@ -505,25 +505,9 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   },
 
   start: async () => {
-    let state = get()
-    if (!state.preferencesLoaded) {
-      await get().loadPreferences()
-      state = get()
-    }
-
-    let source = state.selectedSource
-    if (!source && state.sources.length > 0) {
-      const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
-      if (fallback) {
-        source = fallback
-        set({ selectedSource: fallback })
-      }
-    }
-
-    if (!source) {
-      set({ error: "Select a capture source before recording" })
-      return
-    }
+    // Set the guard before any awaited initialization so repeated clicks cannot
+    // create overlapping native recording sessions.
+    if (get().pendingAction === "start") return
 
     set({
       isLoading: true,
@@ -533,7 +517,40 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       saveMessage: null,
       completedRecordingId: null,
     })
+
     try {
+      let state = get()
+      if (!state.preferencesLoaded) {
+        await get().loadPreferences()
+        state = get()
+      }
+
+      // The modal can be submitted before its asynchronous source enumeration
+      // finishes. Wait for that result and refresh the state before building the
+      // IPC payload instead of treating the first click as a missing source.
+      if (!state.selectedSource && !state.sourcesLoaded) {
+        await get().loadSources()
+        state = get()
+      }
+
+      let source = state.selectedSource
+      if (!source && state.sources.length > 0) {
+        const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
+        if (fallback) {
+          source = fallback
+          set({ selectedSource: fallback })
+        }
+      }
+
+      if (!source) {
+        set({
+          error: state.error ?? "Select a capture source before recording",
+          isLoading: false,
+          pendingAction: null,
+        })
+        return
+      }
+
       const config: RecordingConfig = {
         source,
         profile: state.selectedProfileId,
@@ -567,7 +584,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       const countdownSeconds = configuredCountdown === "5" ? 5 : configuredCountdown === "0" ? 0 : 3
       await prepareRecording(config, countdownSeconds)
       const status = await getRecordingStatus()
-      set({ status, isLoading: false, pendingAction: null })
+      set({ status, isLoading: false, pendingAction: null, error: null })
     } catch (error) {
       set({ error: toErrorMessage(error), isLoading: false, pendingAction: null })
     }

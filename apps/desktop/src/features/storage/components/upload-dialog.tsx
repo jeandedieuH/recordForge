@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertCircle, Cloud, HardDrive, Loader2, Server, UploadCloud } from "lucide-react"
 import {
   Button,
@@ -25,6 +25,13 @@ interface UploadDialogProps {
   onUploaded?: () => void
 }
 
+export function loadProfilesForUploadDialog(
+  open: boolean,
+  fetchProfiles: () => Promise<void>,
+): void {
+  if (open) void fetchProfiles()
+}
+
 export function UploadDialog({
   open,
   onOpenChange,
@@ -34,13 +41,31 @@ export function UploadDialog({
   defaultName,
   onUploaded,
 }: UploadDialogProps) {
-  const { profiles, startUpload } = useStorageStore()
+  const {
+    profiles,
+    isLoadingProfiles,
+    error: profileError,
+    fetchProfiles,
+    startUpload,
+  } = useStorageStore()
+  const [hasRequestedProfiles, setHasRequestedProfiles] = useState(false)
+
+  useEffect(() => {
+    if (!open) {
+      setHasRequestedProfiles(false)
+      return
+    }
+
+    setHasRequestedProfiles(true)
+    loadProfilesForUploadDialog(open, fetchProfiles)
+  }, [open, fetchProfiles])
 
   const defaultProfile = profiles.find((p) => p.isDefault) ?? profiles[0]
   const [selectedProfileId, setSelectedProfileId] = useState<string>(defaultProfile?.id ?? "")
   const [customName, setCustomName] = useState(defaultName ?? "")
   const [isStarting, setIsStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const isLoadingProfileList = open && (!hasRequestedProfiles || isLoadingProfiles)
 
   async function handleStart() {
     const profileId = selectedProfileId || defaultProfile?.id
@@ -91,7 +116,21 @@ export function UploadDialog({
           </div>
         ) : null}
 
-        {profiles.length === 0 ? (
+        {isLoadingProfileList ? (
+          <div className="flex items-center justify-center gap-2 rounded-md border bg-muted/20 p-4 text-center text-xs text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading cloud destinations...
+          </div>
+        ) : profileError && profiles.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-4 text-center text-xs">
+            <AlertCircle className="h-5 w-5 text-destructive" />
+            <div className="font-semibold">Could not load cloud storage</div>
+            <p className="text-muted-foreground text-[11px]">{profileError}</p>
+            <Button variant="outline" size="sm" onClick={() => void fetchProfiles()}>
+              Retry
+            </Button>
+          </div>
+        ) : profiles.length === 0 ? (
           <div className="p-4 text-center space-y-2 bg-muted/20 rounded-md border text-xs">
             <Cloud className="h-6 w-6 text-muted-foreground mx-auto" />
             <div className="font-semibold">No Cloud Storage Connected</div>

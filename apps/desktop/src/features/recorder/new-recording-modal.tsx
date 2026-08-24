@@ -52,6 +52,7 @@ export function NewRecordingModal({
     selectedSystemAudioId,
     selectedWebcamId,
     preferences,
+    pendingAction,
     error,
     setSelectedSource,
     setSelectedSourceType,
@@ -190,9 +191,15 @@ export function NewRecordingModal({
   }
 
   const regionSource = selectedSource?.kind === "region" ? selectedSource : null
+  const hasMatchingSource =
+    (selectedSourceType === "screen" && selectedSource?.kind === "display") ||
+    (selectedSourceType === "window" && selectedSource?.kind === "window") ||
+    (selectedSourceType === "region" && Boolean(regionSource))
+  const isStarting = pendingAction === "start"
+  const canStart = Boolean(hasMatchingSource) && !isStarting
 
   function handleStartRecording() {
-    if (selectedSourceType === "region" && !regionSource) return
+    if (!canStart) return
     if (!selectedSource && sources.length > 0) {
       setSelectedSource(sources[0])
     }
@@ -670,7 +677,8 @@ export function NewRecordingModal({
 
             <Button
               onClick={handleStartRecording}
-              disabled={selectedSourceType === "region" && !regionSource}
+              loading={isStarting}
+              disabled={!canStart}
               className="flex items-center gap-3 rounded-lg bg-recording px-5 py-2 text-xs font-semibold text-white shadow-lg transition-all hover:bg-recording-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <span className="size-2 rounded-full bg-white animate-pulse" />

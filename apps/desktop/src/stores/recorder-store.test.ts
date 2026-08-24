@@ -25,11 +25,17 @@ describe("recorder-store preferences & fallback", () => {
     vi.restoreAllMocks()
     useRecorderStore.setState({
       sources: [],
+      sourcesLoaded: false,
       audioDevices: [],
       audioDevicesLoaded: false,
       videoDevices: [],
       videoDevicesLoaded: false,
       profiles: [],
+      profilesLoaded: false,
+      diagnosticsLoaded: false,
+      status: null,
+      isLoading: false,
+      pendingAction: null,
       selectedSource: null,
       selectedSourceType: "screen",
       selectedProfileId: "low-impact",
@@ -132,6 +138,47 @@ describe("recorder-store preferences & fallback", () => {
       }),
       3,
     )
+  })
+
+  it("waits for capture sources before starting on the first click", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-first-click",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: false,
+      webcamActive: false,
+      error: null,
+    }
+    vi.spyOn(recorderApi, "listCaptureSources").mockResolvedValue([source])
+    const prepare = vi
+      .spyOn(recorderApi, "prepareRecording")
+      .mockResolvedValue("session-first-click")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    useRecorderStore.setState({
+      sources: [],
+      sourcesLoaded: false,
+      selectedSource: null,
+      preferencesLoaded: true,
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ source }), 3)
+    expect(useRecorderStore.getState().status).toEqual(status)
+    expect(useRecorderStore.getState().error).toBeNull()
   })
 
   it("automatically falls back to first available microphone when preferred mic is disconnected", async () => {
