@@ -16,6 +16,7 @@ import {
 import {
   buildFollowCursorKeyframes,
   buildFollowCursorMotionPlan,
+  resolveFollowCursorMotionPlanTargetAtTime,
   resolveFollowCursorTargetAtTime,
   resolvePreviewComposition,
   zoomTransformToCss,
@@ -330,6 +331,87 @@ describe("resolvePreviewComposition", () => {
     expect(target?.y).toBeGreaterThanOrEqual(0)
     expect(target?.x).toBeLessThanOrEqual(state.canvas.width - (target?.width ?? 0))
     expect(target?.y).toBeLessThanOrEqual(state.canvas.height - (target?.height ?? 0))
+  })
+
+  it("keeps tight-turn follow motion within the simplification tolerance", () => {
+    const state = makeState()
+    state.canvas.cursorSettings = {
+      ...defaultCursorSettings,
+      smoothMovement: false,
+    }
+    const followPoints = [
+      [600, 500],
+      [700, 500],
+      [800, 500],
+      [900, 500],
+      [1000, 500],
+      [1100, 500],
+      [1200, 500],
+      [1300, 500],
+      [1300, 600],
+      [1300, 700],
+      [1300, 800],
+      [1300, 800],
+    ]
+    const durationMs = (followPoints.length - 1) * 100
+    state.tracks[0]!.clips[0]!.durationMs = durationMs
+    state.tracks[0]!.clips[0]!.sourceOutMs = durationMs
+    const baseSegment = state.zoomSegments?.[0]
+    if (!baseSegment) return
+    const segment = {
+      ...baseSegment,
+      startMs: 0,
+      durationMs,
+      scale: 2,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      mode: "follow-cursor" as const,
+      followDeadzonePercent: 0,
+      followSmoothingAlpha: 1,
+    }
+    state.zoomSegments = [segment]
+
+    const followTelemetry = normalizeCursorTelemetry({
+      ...telemetry,
+      events: followPoints.map(([x, y], index) => event(index * 100, x, y)),
+    })
+    const cursorEngine = createCursorEngine(followTelemetry)
+    const reference = buildFollowCursorKeyframes(segment, state, cursorEngine)
+    const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine, {
+      sampleStepMs: 100,
+      tolerancePx: 2,
+    })
+
+    expect(motionPlan).toBeDefined()
+    if (!motionPlan) return
+
+    let maxError = 0
+    for (const keyframe of reference) {
+      const actual = resolveFollowCursorMotionPlanTargetAtTime(
+        motionPlan,
+        segment,
+        state,
+        keyframe.timeMs,
+        cursorEngine,
+      )
+      expect(actual).toBeDefined()
+      if (!actual) continue
+      const actualCenter = {
+        x: actual.x + actual.width / 2,
+        y: actual.y + actual.height / 2,
+      }
+      const referenceCenter = {
+        x: keyframe.target.x + keyframe.target.width / 2,
+        y: keyframe.target.y + keyframe.target.height / 2,
+      }
+      maxError = Math.max(
+        maxError,
+        Math.hypot(actualCenter.x - referenceCenter.x, actualCenter.y - referenceCenter.y),
+      )
+    }
+
+    expect(maxError).toBeLessThanOrEqual(2)
   })
 
   it("continues following a cursor that remains outside the camera deadzone", () => {

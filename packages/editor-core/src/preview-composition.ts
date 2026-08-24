@@ -135,6 +135,7 @@ function clampRect(rect: MaskRect, canvas: TimelineCanvas): MaskRect {
 
 export const FOLLOW_CAMERA_SAMPLE_STEP_MS = 100
 export const FOLLOW_CAMERA_MOTION_TOLERANCE_PX = 2
+const MOTION_TURN_COSINE_THRESHOLD = 0.75
 
 export interface FollowCursorKeyframe {
   timeMs: number
@@ -383,21 +384,36 @@ function motionPointDistance(
   return Math.hypot(left.x - right.x, left.y - right.y)
 }
 
-function pointToLineDistance(
+function pointToTimedChordDistance(
   point: RenderPlanZoomMotionPoint,
-  start: RenderPlanZoomMotionPoint,
-  end: RenderPlanZoomMotionPoint,
+  timeMs: number,
+  start: FollowCursorKeyframe,
+  end: FollowCursorKeyframe,
 ): number {
-  const dx = end.x - start.x
-  const dy = end.y - start.y
-  const lengthSquared = dx * dx + dy * dy
-  if (lengthSquared <= Number.EPSILON) return motionPointDistance(point, start)
+  const durationMs = Math.max(1, end.timeMs - start.timeMs)
+  const progress = Math.min(1, Math.max(0, (timeMs - start.timeMs) / durationMs))
+  const startPoint = motionPointFromKeyframe(start)
+  const endPoint = motionPointFromKeyframe(end)
+  const expected = {
+    x: startPoint.x + (endPoint.x - startPoint.x) * progress,
+    y: startPoint.y + (endPoint.y - startPoint.y) * progress,
+  }
+  return motionPointDistance(point, expected)
+}
 
-  const projection = Math.min(
-    1,
-    Math.max(0, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared),
-  )
-  return Math.hypot(point.x - (start.x + projection * dx), point.y - (start.y + projection * dy))
+function motionTurnCosine(
+  previous: RenderPlanZoomMotionPoint | undefined,
+  current: RenderPlanZoomMotionPoint,
+  next: RenderPlanZoomMotionPoint | undefined,
+  tolerancePx: number,
+): number | null {
+  if (!previous || !next) return null
+  const incoming = subtractMotionPoints(current, previous)
+  const outgoing = subtractMotionPoints(next, current)
+  const incomingDistance = Math.hypot(incoming.x, incoming.y)
+  const outgoingDistance = Math.hypot(outgoing.x, outgoing.y)
+  if (incomingDistance <= tolerancePx || outgoingDistance <= tolerancePx) return null
+  return (incoming.x * outgoing.x + incoming.y * outgoing.y) / (incomingDistance * outgoingDistance)
 }
 
 function shouldPreserveMotionAnchor(
@@ -420,17 +436,8 @@ function shouldPreserveMotionAnchor(
     (nextDistance <= tolerancePx && previousDistance > tolerancePx)
   if (hasPauseBoundary) return true
 
-  const previousDuration = Math.max(1, current.timeMs - previous.timeMs)
-  const nextDuration = Math.max(1, next.timeMs - current.timeMs)
-  const incoming = {
-    x: (currentPoint.x - previousPoint.x) / previousDuration,
-    y: (currentPoint.y - previousPoint.y) / previousDuration,
-  }
-  const outgoing = {
-    x: (nextPoint.x - currentPoint.x) / nextDuration,
-    y: (nextPoint.y - currentPoint.y) / nextDuration,
-  }
-  return incoming.x * outgoing.x + incoming.y * outgoing.y < 0
+  const turnCosine = motionTurnCosine(previousPoint, currentPoint, nextPoint, tolerancePx)
+  return turnCosine !== null && turnCosine < MOTION_TURN_COSINE_THRESHOLD
 }
 
 function rdpMotionPointIndices(
@@ -445,15 +452,14 @@ function rdpMotionPointIndices(
     const [start, end] = stack.pop() ?? [0, 0]
     if (end - start <= 1) continue
 
-    const startPoint = motionPointFromKeyframe(samples[start])
-    const endPoint = motionPointFromKeyframe(samples[end])
     let furthestIndex = -1
     let furthestDistance = tolerancePx
     for (let index = start + 1; index < end; index++) {
-      const distance = pointToLineDistance(
+      const distance = pointToTimedChordDistance(
         motionPointFromKeyframe(samples[index]),
-        startPoint,
-        endPoint,
+        samples[index].timeMs,
+        samples[start],
+        samples[end],
       )
       if (distance > furthestDistance) {
         furthestDistance = distance
@@ -525,18 +531,41 @@ function clampMotionControlPoint(
   }
 }
 
+function cubicMotionPoint(
+  segment: RenderPlanZoomMotionSegment,
+  progress: number,
+): RenderPlanZoomMotionPoint {
+  const inverse = 1 - progress
+  const inverseSquared = inverse * inverse
+  const progressSquared = progress * progress
+  return {
+    x:
+      inverseSquared * inverse * segment.start.x +
+      3 * inverseSquared * progress * segment.control1.x +
+      3 * inverse * progressSquared * segment.control2.x +
+      progressSquared * progress * segment.end.x,
+    y:
+      inverseSquared * inverse * segment.start.y +
+      3 * inverseSquared * progress * segment.control1.y +
+      3 * inverse * progressSquared * segment.control2.y +
+      progressSquared * progress * segment.end.y,
+  }
+}
+
 function buildFollowCursorMotionSegments(
   samples: FollowCursorKeyframe[],
   tolerancePx: number,
+  referenceSamples: FollowCursorKeyframe[] = samples,
 ): RenderPlanZoomMotionSegment[] {
   const points = samples.map(motionPointFromKeyframe)
+  const sharpTurns = points.map((point, index) => {
+    const turnCosine = motionTurnCosine(points[index - 1], point, points[index + 1], tolerancePx)
+    return turnCosine !== null && turnCosine < MOTION_TURN_COSINE_THRESHOLD
+  })
   const tangents = points.map((point, index) => {
     const previous = points[index - 1]
     const next = points[index + 1]
-    const isStationary =
-      (previous && motionPointDistance(previous, point) <= tolerancePx) ||
-      (next && motionPointDistance(point, next) <= tolerancePx)
-    if (isStationary) return { x: 0, y: 0 }
+    if (!previous && !next) return { x: 0, y: 0 }
     if (!previous && next) {
       return scaleMotionPoint(
         subtractMotionPoints(next, point),
@@ -550,34 +579,86 @@ function buildFollowCursorMotionSegments(
       )
     }
     if (!previous || !next) return { x: 0, y: 0 }
+
+    const previousDistance = motionPointDistance(previous, point)
+    const nextDistance = motionPointDistance(point, next)
+    if (previousDistance <= tolerancePx && nextDistance <= tolerancePx) {
+      return { x: 0, y: 0 }
+    }
+    if (previousDistance <= tolerancePx) {
+      return scaleMotionPoint(
+        subtractMotionPoints(next, point),
+        1 / Math.max(1, samples[index + 1].timeMs - samples[index].timeMs),
+      )
+    }
+    if (nextDistance <= tolerancePx) {
+      return scaleMotionPoint(
+        subtractMotionPoints(point, previous),
+        1 / Math.max(1, samples[index].timeMs - samples[index - 1].timeMs),
+      )
+    }
     return scaleMotionPoint(
       subtractMotionPoints(next, previous),
       1 / Math.max(1, samples[index + 1].timeMs - samples[index - 1].timeMs),
     )
   })
 
+  let referenceIndex = 0
   return samples.slice(0, -1).map((sample, index) => {
     const nextSample = samples[index + 1]
     const start = points[index]
     const end = points[index + 1]
     const durationMs = Math.max(1, nextSample.timeMs - sample.timeMs)
-    const control1 = clampMotionControlPoint(
-      addMotionPoints(start, scaleMotionPoint(tangents[index], durationMs / 3)),
-      start,
-      end,
-    )
-    const control2 = clampMotionControlPoint(
-      subtractMotionPoints(end, scaleMotionPoint(tangents[index + 1], durationMs / 3)),
-      start,
-      end,
-    )
-    return {
+    const segmentTangent = scaleMotionPoint(subtractMotionPoints(end, start), 1 / durationMs)
+    const startTangent = sharpTurns[index] ? segmentTangent : tangents[index]
+    const endTangent = sharpTurns[index + 1] ? segmentTangent : tangents[index + 1]
+    const candidate: RenderPlanZoomMotionSegment = {
       startMs: Math.round(sample.timeMs),
       endMs: Math.round(nextSample.timeMs),
       start,
-      control1,
-      control2,
+      control1: clampMotionControlPoint(
+        addMotionPoints(start, scaleMotionPoint(startTangent, durationMs / 3)),
+        start,
+        end,
+      ),
+      control2: clampMotionControlPoint(
+        subtractMotionPoints(end, scaleMotionPoint(endTangent, durationMs / 3)),
+        start,
+        end,
+      ),
       end,
+    }
+
+    while (referenceIndex < referenceSamples.length) {
+      const reference = referenceSamples[referenceIndex]
+      if (reference.timeMs > candidate.startMs) break
+      referenceIndex += 1
+    }
+
+    let exceedsTolerance = false
+    const candidateDurationMs = Math.max(1, candidate.endMs - candidate.startMs)
+    while (referenceIndex < referenceSamples.length) {
+      const reference = referenceSamples[referenceIndex]
+      if (reference.timeMs >= candidate.endMs) break
+      const progress = Math.min(
+        1,
+        Math.max(0, (reference.timeMs - candidate.startMs) / candidateDurationMs),
+      )
+      const actual = cubicMotionPoint(candidate, progress)
+      const expected = motionPointFromKeyframe(reference)
+      if (motionPointDistance(actual, expected) > tolerancePx + 1e-6) {
+        exceedsTolerance = true
+      }
+      referenceIndex += 1
+    }
+
+    if (!exceedsTolerance) return candidate
+
+    const linearDelta = scaleMotionPoint(subtractMotionPoints(end, start), 1 / 3)
+    return {
+      ...candidate,
+      control1: addMotionPoints(start, linearDelta),
+      control2: subtractMotionPoints(end, linearDelta),
     }
   })
 }
@@ -593,7 +674,7 @@ function buildMotionPlanFromWindow(
   if (window.keyframes.length < 2) return undefined
   const tolerancePx = getMotionPlanTolerance(options)
   const samples = simplifyFollowCursorKeyframes(window.keyframes, tolerancePx)
-  const segments = buildFollowCursorMotionSegments(samples, tolerancePx)
+  const segments = buildFollowCursorMotionSegments(samples, tolerancePx, window.keyframes)
   if (segments.length === 0) return undefined
   const timeOffsetMs = Number.isFinite(options.timeOffsetMs) ? (options.timeOffsetMs ?? 0) : 0
 
