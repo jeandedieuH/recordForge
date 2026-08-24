@@ -3,6 +3,7 @@ import {
   Cpu,
   Folder,
   HardDrive,
+  Info,
   Moon,
   Monitor,
   MousePointer2,
@@ -36,10 +37,15 @@ import { DiagnosticsPanel } from "./diagnostics-panel"
 import { CursorInspector } from "../editor/cursor"
 import { StorageSettings } from "./storage-settings"
 import { SmartZoomSettings } from "./smart-zoom-settings"
+import { AboutView } from "../about"
 
-type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "storage"
+export type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "storage" | "about"
 
-export function SettingsView() {
+export interface SettingsViewProps {
+  onNavigateToAbout?: () => void
+}
+
+export function SettingsView({ onNavigateToAbout }: SettingsViewProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general")
   const { theme, setTheme, micaEnabled, setMicaEnabled, micaActive } = useThemeStore()
   const {
@@ -262,6 +268,19 @@ export function SettingsView() {
           <HardDrive className="size-4" />
           <span>Storage & Cloud</span>
         </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab("about")}
+          className={`flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-semibold transition-all ${
+            activeTab === "about"
+              ? "bg-primary text-white shadow-sm"
+              : "text-subtle-foreground hover:bg-surface hover:text-foreground"
+          }`}
+        >
+          <Info className="size-4" />
+          <span>About & Studio</span>
+        </button>
       </div>
 
       {/* Tab 1: General & Appearance */}
@@ -379,6 +398,35 @@ export function SettingsView() {
                 </p>
               </div>
               <Switch checked={minimizeToTray} onCheckedChange={handleMinimizeToTrayChange} />
+            </div>
+          </div>
+
+          {/* About & Developer Summary Card */}
+          <div className="rounded-2xl border border-border bg-surface p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-foreground">About RecordForge</h3>
+                  <span className="rounded bg-primary/15 px-2 py-0.5 text-[10px] font-mono font-medium text-primary">
+                    v1.0.0 Free Edition
+                  </span>
+                </div>
+                <p className="text-xs text-subtle-foreground mt-0.5">
+                  Free proprietary screen recorder developed by Prestige Tech. Version 2 will
+                  introduce optional premium features.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (onNavigateToAbout) onNavigateToAbout()
+                  else setActiveTab("about")
+                }}
+                className="h-8 px-3 text-xs cursor-pointer"
+              >
+                <Info className="mr-1.5 size-3.5 text-primary" /> View Details
+              </Button>
             </div>
           </div>
         </div>
@@ -506,6 +554,11 @@ export function SettingsView() {
 
       {/* Tab 4: Storage & Cloud */}
       {activeTab === "storage" ? <StorageSettings /> : null}
+
+      {/* Tab 5: About & Studio */}
+      {activeTab === "about" ? (
+        <AboutView onNavigateToDiagnostics={() => setActiveTab("diagnostics")} />
+      ) : null}
     </div>
   )
 }

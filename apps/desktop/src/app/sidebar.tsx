@@ -1,6 +1,7 @@
 import {
   FolderOpen,
   HardDrive,
+  Info,
   ListTodo,
   PanelLeftClose,
   PanelLeftOpen,
@@ -20,7 +21,7 @@ import {
 import { cn } from "@recordforge/ui"
 import { useJobsStore } from "../stores/jobs-store"
 
-export type View = "library" | "editor" | "settings" | "projects" | "storage" | "export"
+export type View = "library" | "editor" | "settings" | "projects" | "storage" | "export" | "about"
 
 interface SidebarProps {
   activeView: View
@@ -41,6 +42,7 @@ const NAV_ITEMS: NavItem[] = [
   { view: "projects", label: "Projects", icon: FolderOpen },
   { view: "storage", label: "Storage", icon: HardDrive },
   { view: "settings", label: "Settings", icon: Settings },
+  { view: "about", label: "About", icon: Info },
 ]
 
 export function Sidebar({
@@ -201,13 +203,22 @@ export function Sidebar({
             collapsed && "flex-col justify-center gap-3",
           )}
         >
-          <button
-            type="button"
-            className="flex size-8 items-center justify-center rounded-full border border-sidebar-border bg-sidebar-surface text-sidebar-text transition-colors hover:border-foreground/30 hover:text-foreground"
-            aria-label="User Account"
-          >
-            <User className="size-4" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onNavigate("about")}
+                className={cn(
+                  "flex size-8 items-center justify-center rounded-full border border-sidebar-border bg-sidebar-surface text-sidebar-text transition-colors hover:border-foreground/30 hover:text-foreground cursor-pointer",
+                  activeView === "about" && "border-primary text-foreground bg-sidebar-active",
+                )}
+                aria-label="About RecordForge"
+              >
+                <User className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">About RecordForge & Creators</TooltipContent>
+          </Tooltip>
 
           {!collapsed ? (
             <IconButton

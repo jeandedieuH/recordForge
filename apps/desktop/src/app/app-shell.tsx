@@ -23,6 +23,7 @@ import { ProjectsView } from "../features/projects"
 import { StorageView } from "../features/storage"
 import { NewRecordingModal } from "../features/recorder"
 import { SettingsView } from "../features/settings"
+import { AboutView } from "../features/about"
 import { toErrorMessage } from "../lib/errors"
 import { getDiagnosticsReport } from "../lib/recorder"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
@@ -41,6 +42,7 @@ const VIEW_TITLES: Record<View, string> = {
   editor: "Editor",
   export: "Export",
   settings: "Settings",
+  about: "About RecordForge",
 }
 
 export function AppShell() {
@@ -416,7 +418,16 @@ export function AppShell() {
                 resetKey={activeView}
                 onNavigateHome={() => setActiveView("library")}
               >
-                <SettingsView />
+                <SettingsView onNavigateToAbout={() => setActiveView("about")} />
+              </ViewErrorBoundary>
+            ) : null}
+            {activeView === "about" ? (
+              <ViewErrorBoundary
+                viewName="About"
+                resetKey={activeView}
+                onNavigateHome={() => setActiveView("library")}
+              >
+                <AboutView onNavigateToSettings={() => setActiveView("settings")} />
               </ViewErrorBoundary>
             ) : null}
           </main>
