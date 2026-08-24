@@ -145,7 +145,7 @@ export function AboutView({
                   v1.0.0
                 </Badge>
                 <Badge variant="outline" className="text-xs px-2 py-0.5 text-subtle-foreground">
-                  Windows 11 Native
+                  Windows 10 native
                 </Badge>
               </div>
               <p className="text-xs sm:text-sm text-subtle-foreground max-w-2xl leading-relaxed">
