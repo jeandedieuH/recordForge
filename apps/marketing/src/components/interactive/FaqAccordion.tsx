@@ -9,10 +9,22 @@ interface FaqItem {
 
 const faqs: FaqItem[] = [
   {
-    category: "General & Licensing",
-    question: "Is RecordForge truly 100% free and open source?",
+    category: "Licensing & Ownership",
+    question: "Is RecordForge free to use? Is it open-source?",
     answer:
-      "Yes. RecordForge is MIT-licensed, completely free, and local-first. There are no paywalls, no feature gating, no mandatory sign-ups, and no artificial recording time limits. You have full ownership of your recordings and project files.",
+      "RecordForge is 100% free to download and use for personal, commercial, and professional screen recording with unlimited capture time and zero export watermarks. It is proprietary software engineered by Prestige Tech and is not open-source.",
+  },
+  {
+    category: "Roadmap & Monetization",
+    question: "What is planned for Version 2.0? Will the free version go away?",
+    answer:
+      "No, the core recorder and essential proxy timeline editor will always remain 100% free. Version 2.0 will introduce optional paid premium features (such as AI-driven smart zoom auto-framing, multi-track studio audio isolation, and team cloud workspaces) for high-velocity power creators.",
+  },
+  {
+    category: "Engineering & Developer",
+    question: "Who develops and maintains RecordForge?",
+    answer:
+      "RecordForge is engineered and maintained by Prestige Tech (https://prestigetech.dev), an independent software engineering studio dedicated to native performance and privacy-first digital tools, and was created by its Master Developer (https://me.prestigetech.dev).",
   },
   {
     category: "Performance & Low-End Support",

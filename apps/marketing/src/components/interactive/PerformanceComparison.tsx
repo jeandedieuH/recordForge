@@ -70,7 +70,7 @@ export function PerformanceComparison() {
       electron: false,
     },
     {
-      feature: "Zero Cloud Lock-in / 100% Free & Open-Source",
+      feature: "Zero Cloud Lock-in / 100% Free Desktop Edition",
       recordForge: true,
       obs: true,
       camtasia: false,
