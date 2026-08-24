@@ -1200,6 +1200,10 @@ export function TimelineView({
     if (!segment) return
 
     switch (action.kind) {
+      case "toggle-enabled":
+        if (segment.locked) return
+        execute(createUpdateZoomSegmentCommand(segment.id, { enabled: !segment.enabled }))
+        return
       case "toggle-lock":
         execute(createUpdateZoomSegmentCommand(segment.id, { locked: !segment.locked }))
         return
@@ -1613,6 +1617,7 @@ export function TimelineView({
                         ? {
                             transform: zoomTransformStyle,
                             transformOrigin: "0 0",
+                            willChange: "transform",
                           }
                         : undefined
                     }

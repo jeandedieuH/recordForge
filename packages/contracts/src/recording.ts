@@ -51,6 +51,21 @@ export const recordingProfileSchema = z.object({
 
 export type RecordingProfile = z.infer<typeof recordingProfileSchema>
 
+export const recordingSmartZoomPresetSchema = z.enum([
+  "subtle",
+  "product-demo",
+  "cinematic",
+  "developer",
+  "manual-only",
+])
+export type RecordingSmartZoomPreset = z.infer<typeof recordingSmartZoomPresetSchema>
+
+export const recordingSmartZoomSchema = z.object({
+  enabled: z.boolean(),
+  preset: recordingSmartZoomPresetSchema,
+})
+export type RecordingSmartZoom = z.infer<typeof recordingSmartZoomSchema>
+
 // Audio device kinds supported during recording.
 export const audioDeviceKindSchema = z.enum(["microphone", "system"])
 export type AudioDeviceKind = z.infer<typeof audioDeviceKindSchema>
@@ -93,6 +108,8 @@ export const recordingConfigSchema = z.object({
   webcamDeviceId: z.string().nullish(),
   microphoneDeviceId: z.string().nullish(),
   systemAudioDeviceId: z.string().nullish(),
+  smartZoomEnabled: z.boolean().default(false),
+  smartZoomPreset: recordingSmartZoomPresetSchema.default("product-demo"),
 })
 
 export type RecordingConfig = z.infer<typeof recordingConfigSchema>
@@ -209,6 +226,8 @@ export const recordingManifestSchema = z.object({
   webcamFragments: z.array(recordingWebcamFragmentSchema).default([]),
   fragments: z.array(recordingFragmentSchema),
   markers: z.array(recordingMarkerSchema).default([]),
+  // Snapshot of the smart-zoom preference used to create this recording.
+  smartZoom: recordingSmartZoomSchema.optional(),
   // Total accumulated recorded time in milliseconds (used for pause/resume).
   totalRecordedMs: z.number().int().min(0).default(0),
   // Checkpoint identity for the cursor_events project asset. Event samples stay
@@ -402,6 +421,8 @@ export const recordingPreferencesSchema = z.object({
   sourceName: z.string().nullable().default(null),
   regionBounds: boundsSchema.nullable().default(null),
   profile: recordingConfigSchema.shape.profile.default("low-impact"),
+  smartZoomEnabled: z.boolean().default(false),
+  smartZoomPreset: recordingSmartZoomPresetSchema.default("product-demo"),
   microphoneEnabled: z.boolean().default(false),
   microphoneId: z.string().nullable().default(null),
   microphoneName: z.string().nullable().default(null),
@@ -421,6 +442,8 @@ export const defaultRecordingPreferences: RecordingPreferences = {
   sourceName: null,
   regionBounds: null,
   profile: "low-impact",
+  smartZoomEnabled: false,
+  smartZoomPreset: "product-demo",
   microphoneEnabled: false,
   microphoneId: null,
   microphoneName: null,

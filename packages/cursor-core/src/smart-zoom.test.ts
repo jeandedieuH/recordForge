@@ -101,6 +101,29 @@ describe("smart zoom telemetry analysis", () => {
     }
   })
 
+  it("uses the selected preset transition profile unless an explicit transition is provided", () => {
+    const singleClickTelemetry = normalizeCursorTelemetry({
+      recordingId: "preset-transitions",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [v2Event(3_000, 800, 600, "left-down", true)],
+    })
+
+    const cinematic = generateSmartZoomSuggestions(singleClickTelemetry, canvas, {
+      preset: "cinematic",
+    })
+    expect(cinematic[0]?.transitionInMs).toBe(600)
+    expect(cinematic[0]?.transitionOutMs).toBe(600)
+
+    const custom = generateSmartZoomSuggestions(singleClickTelemetry, canvas, {
+      preset: "cinematic",
+      defaultTransitionInMs: 200,
+      defaultTransitionOutMs: 250,
+    })
+    expect(custom[0]?.transitionInMs).toBe(200)
+    expect(custom[0]?.transitionOutMs).toBe(250)
+  })
+
   it("merges rapid clicks close in time into a single extended zoom without overlap", () => {
     const multiClickTelemetry = normalizeCursorTelemetry({
       recordingId: "multi-click",

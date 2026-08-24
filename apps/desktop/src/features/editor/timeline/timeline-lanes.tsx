@@ -46,7 +46,14 @@ export interface CursorRangeAction {
 }
 
 export interface ZoomSegmentAction {
-  kind: "select" | "toggle-lock" | "split" | "delete" | "ripple-delete" | "regenerate-from-click"
+  kind:
+    | "select"
+    | "toggle-enabled"
+    | "toggle-lock"
+    | "split"
+    | "delete"
+    | "ripple-delete"
+    | "regenerate-from-click"
   segmentId: string
 }
 

@@ -26,13 +26,16 @@ import type {
 } from "@recordforge/domain"
 import {
   buildFollowCursorMotionPlan,
-  clampZoomTarget,
   findPreviousZoomSegment,
   getManualZoomSegments,
   resolveFollowCursorTargetAtTime,
   timelineMarkersToChapters,
 } from "@recordforge/editor-core"
-import { createCursorEngine, type CursorEngine } from "@recordforge/cursor-core"
+import {
+  canonicalizeZoomTarget,
+  createCursorEngine,
+  type CursorEngine,
+} from "@recordforge/cursor-core"
 import {
   annotationClipSchema,
   imageClipSchema,
@@ -658,7 +661,9 @@ function toZoomSegments(
               engine,
             )
           : prevSegment?.target
-      const fromTarget = previousTarget ? clampZoomTarget(previousTarget, state.canvas) : undefined
+      const fromTarget = previousTarget
+        ? canonicalizeZoomTarget(previousTarget, state.canvas, prevSegment?.scale ?? 1)
+        : undefined
       const fromScale = prevSegment ? prevSegment.scale : undefined
 
       let motionPlan: RenderPlanZoomMotionPlan | undefined = undefined
@@ -676,7 +681,7 @@ function toZoomSegments(
           id: segment.id,
           startMs: window.startMs,
           endMs: window.endMs,
-          target: clampZoomTarget(segment.target, state.canvas),
+          target: canonicalizeZoomTarget(segment.target, state.canvas, segment.scale),
           scale: segment.scale ?? 1.5,
           easing: segment.easing ?? "smooth",
           transitionInMs: segment.transitionInMs ?? defaultTrans,

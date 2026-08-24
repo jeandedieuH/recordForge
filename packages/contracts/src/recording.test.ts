@@ -112,25 +112,29 @@ describe("recording contracts", () => {
       captureWebcam: false,
     }
 
-    expect(recordingConfigSchema.parse(config)).toEqual(config)
+    expect(recordingConfigSchema.parse(config)).toMatchObject({
+      ...config,
+      smartZoomEnabled: false,
+      smartZoomPreset: "product-demo",
+    })
 
     const config60fps = {
       ...config,
       profile: "smooth-60fps" as const,
     }
-    expect(recordingConfigSchema.parse(config60fps)).toEqual(config60fps)
+    expect(recordingConfigSchema.parse(config60fps)).toMatchObject(config60fps)
 
     const config4k = {
       ...config,
       profile: "ultra-4k" as const,
     }
-    expect(recordingConfigSchema.parse(config4k)).toEqual(config4k)
+    expect(recordingConfigSchema.parse(config4k)).toMatchObject(config4k)
 
     const config4k60 = {
       ...config,
       profile: "ultra-4k-60" as const,
     }
-    expect(recordingConfigSchema.parse(config4k60)).toEqual(config4k60)
+    expect(recordingConfigSchema.parse(config4k60)).toMatchObject(config4k60)
   })
 
   it("validates a recording profile", () => {
@@ -225,6 +229,46 @@ describe("recording contracts", () => {
     }
 
     expect(recordingManifestSchema.parse(manifest)).toMatchObject(manifest)
+  })
+
+  it("round-trips the smart zoom preference used for a recording", () => {
+    const parsed = recordingManifestSchema.parse({
+      version: 1,
+      sessionId: "session-smart-zoom",
+      state: "completed",
+      createdAt: "2026-08-02T12:00:00.000Z",
+      updatedAt: "2026-08-02T12:00:01.000Z",
+      source: {
+        kind: "display",
+        id: "display-1",
+        name: "Main Display",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      },
+      profileName: "balanced",
+      workDir: "C:/temp/session-smart-zoom",
+      fragments: [],
+      smartZoom: { enabled: true, preset: "cinematic" },
+    })
+
+    expect(parsed.smartZoom).toEqual({ enabled: true, preset: "cinematic" })
+  })
+
+  it("defaults new recording configs to smart zoom off", () => {
+    const parsed = recordingConfigSchema.parse({
+      source: {
+        kind: "display",
+        id: "display-1",
+        name: "Main Display",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      },
+      profile: "balanced",
+      captureMicrophone: false,
+      captureSystemAudio: false,
+      captureWebcam: false,
+    })
+
+    expect(parsed.smartZoomEnabled).toBe(false)
+    expect(parsed.smartZoomPreset).toBe("product-demo")
   })
 
   it("validates a recording marker", () => {

@@ -12,6 +12,7 @@ import {
   recordingStatsSchema,
   recordingStatusSchema,
   recoveryScanResultSchema,
+  recordingSmartZoomSchema,
   videoDeviceSchema,
 } from "@recordforge/contracts"
 import type {
@@ -24,6 +25,7 @@ import type {
   RecordingConfig,
   RecordingMarker,
   RecordingProfile,
+  RecordingSmartZoom,
   RecordingStats,
   RecordingStatus,
   RecoveryScanResult,
@@ -45,6 +47,16 @@ export async function listVideoDevices(): Promise<VideoDevice[]> {
 
 export async function listBuiltinProfiles(): Promise<RecordingProfile[]> {
   return invokeValidated("list_builtin_profiles", undefined, z.array(recordingProfileSchema))
+}
+
+export async function getRecordingSmartZoom(
+  recordingId: string,
+): Promise<RecordingSmartZoom | null> {
+  return invokeValidated(
+    "get_recording_smart_zoom",
+    { recordingId },
+    recordingSmartZoomSchema.nullable(),
+  )
 }
 
 export async function startRecording(config: RecordingConfig): Promise<string> {

@@ -11,7 +11,11 @@ import {
   Sun,
   Volume2,
 } from "lucide-react"
-import type { CursorSettings, RecordingConfig } from "@recordforge/contracts"
+import type {
+  CursorSettings,
+  RecordingConfig,
+  RecordingSmartZoomPreset,
+} from "@recordforge/contracts"
 import { cursorSettingsSchema, defaultCursorSettings } from "@recordforge/contracts"
 import {
   Button,
@@ -31,18 +35,30 @@ import { getSetting, isTauri, setSetting } from "../../lib/settings"
 import { DiagnosticsPanel } from "./diagnostics-panel"
 import { CursorInspector } from "../editor/cursor"
 import { StorageSettings } from "./storage-settings"
+import { SmartZoomSettings } from "./smart-zoom-settings"
 
 type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "storage"
 
 export function SettingsView() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general")
   const { theme, setTheme, micaEnabled, setMicaEnabled, micaActive } = useThemeStore()
-  const { selectedProfileId, setSelectedProfileId } = useRecorderStore()
+  const {
+    selectedProfileId,
+    setSelectedProfileId,
+    preferences,
+    preferencesLoaded,
+    loadPreferences,
+    savePreferences,
+  } = useRecorderStore()
 
   const [savePath, setSavePath] = useState("")
   const [countdownSec, setCountdownSec] = useState("3")
   const [minimizeToTray, setMinimizeToTray] = useState(false)
   const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
+
+  useEffect(() => {
+    void loadPreferences()
+  }, [loadPreferences])
 
   useEffect(() => {
     async function load() {
@@ -158,6 +174,14 @@ export function SettingsView() {
       // Ignore localStorage errors
     }
     if (isTauri()) void setSetting("defaultCursorSettings", json)
+  }
+
+  function handleSmartZoomEnabledChange(enabled: boolean) {
+    void savePreferences({ smartZoomEnabled: enabled })
+  }
+
+  function handleSmartZoomPresetChange(preset: RecordingSmartZoomPreset) {
+    void savePreferences({ smartZoomPreset: preset })
   }
 
   return (
@@ -421,6 +445,14 @@ export function SettingsView() {
               ))}
             </div>
           </div>
+
+          <SmartZoomSettings
+            enabled={preferences.smartZoomEnabled}
+            preset={preferences.smartZoomPreset}
+            disabled={!preferencesLoaded}
+            onEnabledChange={handleSmartZoomEnabledChange}
+            onPresetChange={handleSmartZoomPresetChange}
+          />
 
           {/* Countdown & Audio Options */}
           <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">

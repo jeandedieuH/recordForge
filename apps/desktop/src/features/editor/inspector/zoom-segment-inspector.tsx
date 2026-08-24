@@ -10,7 +10,7 @@ import {
   createSplitZoomSegmentCommand,
 } from "@recordforge/editor-core"
 import { Lock, Unlock, ZoomIn } from "lucide-react"
-import { Badge, Button, Input, NativeSelect, cn } from "@recordforge/ui"
+import { Badge, Button, Input, NativeSelect, Switch, cn } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { NumberField } from "./fields"
@@ -127,6 +127,21 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           ))}
         </div>
       ) : null}
+
+      <div className="flex items-center justify-between rounded-xl border border-border bg-surface p-3">
+        <div className="min-w-0 pr-3">
+          <span className="text-[11px] font-semibold text-foreground">Apply zoom</span>
+          <p className="mt-0.5 text-[10px] leading-relaxed text-subtle-foreground">
+            Keep this range editable without rendering it in preview or export.
+          </p>
+        </div>
+        <Switch
+          checked={segment.enabled}
+          disabled={segment.locked}
+          onCheckedChange={(enabled) => handleUpdate({ enabled })}
+          aria-label="Apply zoom segment"
+        />
+      </div>
 
       {/* Label */}
       <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">

@@ -448,7 +448,7 @@ describe("render-plan", () => {
       id: "zoom-1",
       startMs: 1_000,
       endMs: 4_000,
-      target: { x: 0, y: 100 },
+      target: { x: 0, y: 168.75, width: 1_000, height: 562.5 },
       mode: "auto",
       source: "click",
       preset: "product-demo",

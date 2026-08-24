@@ -478,7 +478,8 @@ export function TimelineToolbar({
           aria-label="Playback speed"
           value={String(playbackRate)}
           onChange={(event) => onSetPlaybackRate(Number(event.target.value))}
-          className="h-7 w-18 pl-2 pr-6 text-[11px] font-mono font-medium"
+          className="h-7 w-18 text-[11px] font-mono font-medium"
+          selectClassName="pl-2 pr-6"
         >
           {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4].map((rate) => (
             <option key={rate} value={rate}>

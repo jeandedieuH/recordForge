@@ -18,7 +18,7 @@ export {
 } from "./components/forms/color-picker"
 export { Input, type InputProps } from "./components/forms/input"
 export { Label } from "./components/forms/label"
-export { NativeSelect } from "./components/forms/native-select"
+export { NativeSelect, type NativeSelectProps } from "./components/forms/native-select"
 export {
   Select,
   SelectContent,

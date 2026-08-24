@@ -1,6 +1,8 @@
 import { create } from "zustand"
 import {
   cursorSettingsSchema,
+  defaultSmartZoomSettings,
+  recordingPreferencesSchema,
   type ExportEncoderPreference,
   type ExportPreset,
   type ExportRange,
@@ -18,6 +20,7 @@ import {
   findClip,
   findMarker,
   getTotalDuration,
+  initializeSmartZoom,
   projectToTimeline,
   redoCommand,
   timelineToProject,
@@ -39,6 +42,7 @@ import {
 } from "../lib/assets"
 import { createProject, loadProject, saveProject, snapshotProject } from "../lib/project"
 import { getCursorTelemetry } from "../lib/cursor"
+import { getRecordingSmartZoom } from "../lib/recorder"
 import {
   createCursorEngine,
   createWasmCursorEngine,
@@ -324,11 +328,20 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         throw new Error(`Recording ${recordingId} not found`)
       }
 
-      const [metadata, jobs, initialCursorTelemetry, defaultCursorRaw] = await Promise.all([
+      const [
+        metadata,
+        jobs,
+        initialCursorTelemetry,
+        defaultCursorRaw,
+        recordingSmartZoom,
+        recordingPreferencesRaw,
+      ] = await Promise.all([
         getMediaMetadata(recordingId),
         listMediaJobs(recordingId),
         isTauri() ? getCursorTelemetry(recordingId).catch(() => null) : Promise.resolve(null),
         isTauri() ? getSetting("defaultCursorSettings").catch(() => null) : Promise.resolve(null),
+        isTauri() ? getRecordingSmartZoom(recordingId).catch(() => null) : Promise.resolve(null),
+        getSetting("recordingPreferences").catch(() => null),
       ])
 
       const meta = metadata ?? fallbackMetadata(recording)
@@ -365,6 +378,29 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       let project: recordForgeProject
       let missingAssets: string[] = []
       let didMigrateCursorTrack = false
+      const storedPreferences = recordingPreferencesRaw
+        ? (() => {
+            try {
+              const parsed = recordingPreferencesSchema.safeParse(
+                JSON.parse(recordingPreferencesRaw),
+              )
+              return parsed.success ? parsed.data : null
+            } catch {
+              return null
+            }
+          })()
+        : null
+      const capturedSmartZoom =
+        recordingSmartZoom ??
+        (storedPreferences
+          ? {
+              enabled: storedPreferences.smartZoomEnabled,
+              preset: storedPreferences.smartZoomPreset,
+            }
+          : {
+              enabled: false,
+              preset: defaultSmartZoomSettings.preset,
+            })
 
       if (loaded) {
         project = loaded.project
@@ -381,6 +417,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
             // Keep defaults if parse fails
           }
         }
+        const initializedTimeline = initializeSmartZoom(
+          projectToTimeline(project),
+          initialCursorTelemetry,
+          capturedSmartZoom,
+        )
+        project = timelineToProject(initializedTimeline, project)
         project = await createProject(project)
       }
 

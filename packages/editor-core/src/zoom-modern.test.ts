@@ -275,6 +275,35 @@ describe("Modern Zoom System", () => {
       expect(updated.label).toBe("Terminal View")
       expect(updated.easing).toBe("spring") // preserved
     })
+
+    it("can disable an automatic zoom without deleting its editable range", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "auto-zoom",
+          startMs: 1_000,
+          durationMs: 2_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "follow-cursor",
+          source: "click",
+          preset: "product-demo",
+        },
+      ]
+      const result = executeCommand(
+        createEngine(initial),
+        createUpdateZoomSegmentCommand("auto-zoom", { enabled: false }),
+      )
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(getManualZoomSegments(result.value.history.present)).toEqual([
+        expect.objectContaining({ id: "auto-zoom", enabled: false, source: "click" }),
+      ])
+    })
   })
 
   describe("CSS Transform Resolution", () => {

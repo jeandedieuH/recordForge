@@ -2372,7 +2372,6 @@ function applyUpdateZoomSegment(
       command.target !== undefined ||
       command.scale !== undefined ||
       command.easing !== undefined ||
-      command.enabled !== undefined ||
       command.transitionInMs !== undefined ||
       command.transitionOutMs !== undefined)
   const next: ManualZoomSegment = {

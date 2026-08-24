@@ -4,7 +4,12 @@ import {
   type TimelineCanvas,
   type TimelineState,
 } from "@recordforge/contracts"
-import { buildSmartZoomSegment, computeSmartZoomDuration } from "./smart-zoom-builder"
+import { normalizeCursorTelemetry } from "@recordforge/cursor-core"
+import {
+  buildSmartZoomSegment,
+  computeSmartZoomDuration,
+  initializeSmartZoom,
+} from "./smart-zoom-builder"
 
 const canvas: TimelineCanvas = {
   width: 1920,
@@ -195,5 +200,54 @@ describe("Smart Zoom Builder", () => {
     expect(segment.target.y).toBeCloseTo(180, 0)
     expect(segment.target.width).toBeCloseTo(1280, 0)
     expect(segment.target.height).toBeCloseTo(720, 0)
+  })
+
+  it("initializes a new timeline with captured smart zooms for the selected preset", () => {
+    const telemetry = normalizeCursorTelemetry({
+      recordingId: "recording",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        {
+          tMs: 0,
+          rawX: 700,
+          rawY: 400,
+          sourceX: 700,
+          sourceY: 400,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          buttonEvent: "none",
+          visible: true,
+          shapeId: "arrow",
+          shapeChanged: false,
+        },
+        {
+          tMs: 1_000,
+          rawX: 700,
+          rawY: 400,
+          sourceX: 700,
+          sourceY: 400,
+          buttons: { left: true, right: false, middle: false, x1: false, x2: false },
+          buttonEvent: "left-down",
+          visible: true,
+          shapeId: "arrow",
+          shapeChanged: false,
+        },
+      ],
+    })
+
+    const timeline = makeState()
+    timeline.zoomSegments = []
+    const initialized = initializeSmartZoom(timeline, telemetry, {
+      enabled: true,
+      preset: "cinematic",
+    })
+
+    expect(initialized.smartZoomSettings?.preset).toBe("cinematic")
+    expect(initialized.zoomSegments).toHaveLength(1)
+    expect(initialized.zoomSegments?.[0]).toMatchObject({
+      source: "click",
+      preset: "cinematic",
+      easing: "cinematic",
+    })
   })
 })

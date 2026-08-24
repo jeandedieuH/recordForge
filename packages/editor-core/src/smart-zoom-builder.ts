@@ -1,5 +1,16 @@
-import type { ManualZoomSegment, TimelineState, ZoomPreset } from "@recordforge/contracts"
-import { clampZoomTarget, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
+import {
+  defaultSmartZoomSettings,
+  type CursorTelemetryFile,
+  type ManualZoomSegment,
+  type SmartZoomSettings,
+  type TimelineState,
+  type ZoomPreset,
+} from "@recordforge/contracts"
+import {
+  clampZoomTarget,
+  generateSmartZoomSuggestions,
+  zoomTargetForCursorPoint,
+} from "@recordforge/cursor-core"
 import { getTotalDuration } from "@recordforge/domain"
 import { getManualZoomSegments } from "./composition"
 
@@ -53,6 +64,46 @@ export const SMART_ZOOM_PRESETS: Record<ZoomPreset, SmartZoomPresetConfig> = {
     transitionOutMs: 400,
     label: "Manual 1.5×",
   },
+}
+
+export interface CapturedSmartZoomOptions {
+  enabled: boolean
+  preset?: ZoomPreset
+  settings?: Partial<SmartZoomSettings>
+}
+
+/**
+ * Initialize a newly created recording timeline with the zoom ranges selected
+ * at capture time. Existing ranges are left untouched so reopening a project
+ * never overwrites an intentional edit.
+ */
+export function initializeSmartZoom(
+  timeline: TimelineState,
+  telemetry: CursorTelemetryFile | null | undefined,
+  options: CapturedSmartZoomOptions,
+): TimelineState {
+  const settings: SmartZoomSettings = {
+    ...defaultSmartZoomSettings,
+    ...(timeline.smartZoomSettings ?? {}),
+    ...(options.settings ?? {}),
+    ...(options.preset === undefined ? {} : { preset: options.preset }),
+  }
+
+  if (
+    !options.enabled ||
+    !telemetry ||
+    settings.preset === "manual-only" ||
+    getManualZoomSegments(timeline).length > 0
+  ) {
+    return { ...timeline, smartZoomSettings: settings }
+  }
+
+  const zoomSegments = generateSmartZoomSuggestions(telemetry, timeline.canvas, {
+    ...settings,
+    durationMs: getTotalDuration(timeline),
+  })
+
+  return { ...timeline, smartZoomSettings: settings, zoomSegments }
 }
 
 export interface BuildSmartZoomOptions {

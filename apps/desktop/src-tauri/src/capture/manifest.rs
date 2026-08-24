@@ -50,6 +50,14 @@ pub struct RecordingMarker {
     pub created_at: String,
 }
 
+/// Snapshot of the smart-zoom preference used to create a recording.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingSmartZoom {
+    pub enabled: bool,
+    pub preset: String,
+}
+
 /// Stats captured from the FFmpeg stderr at stop time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +154,8 @@ pub struct RecordingManifest {
     #[serde(default)]
     pub markers: Vec<RecordingMarker>,
     #[serde(default)]
+    pub smart_zoom: Option<RecordingSmartZoom>,
+    #[serde(default)]
     pub total_recorded_ms: u64,
     #[serde(default)]
     pub cursor_telemetry: Option<CursorTelemetryAsset>,
@@ -175,6 +185,7 @@ impl RecordingManifest {
             webcam_fragments: Vec::new(),
             fragments: Vec::new(),
             markers: Vec::new(),
+            smart_zoom: None,
             total_recorded_ms: 0,
             cursor_telemetry: None,
             stats: None,
@@ -254,6 +265,11 @@ impl RecordingManifest {
 
     pub fn set_total_recorded_ms(&mut self, ms: u64) {
         self.total_recorded_ms = ms;
+        self.touch();
+    }
+
+    pub fn set_smart_zoom(&mut self, smart_zoom: RecordingSmartZoom) {
+        self.smart_zoom = Some(smart_zoom);
         self.touch();
     }
 

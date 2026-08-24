@@ -10,7 +10,9 @@ use crate::capture::benchmark::{run_benchmark, BenchmarkReport};
 use crate::capture::config::RecordingConfig;
 use crate::capture::devices::{AudioDevice, VideoDevice};
 use crate::capture::encoder::{detect_encoders, EncoderInfo};
-use crate::capture::manifest::{RecordingMarker, RecordingStats};
+use crate::capture::manifest::{
+    RecordingManifest, RecordingMarker, RecordingSmartZoom, RecordingStats,
+};
 use crate::capture::recovery::{
     delete_recovery_session as recovery_delete_session,
     recover_session as recovery_recover_session, scan_recovery, RecoveryScanResult,
@@ -1051,4 +1053,33 @@ pub fn get_cursor_telemetry(
         }
     }
     Ok(result)
+}
+
+/// Return the smart-zoom preference captured with a recording session.
+#[tauri::command]
+#[instrument(skip(state))]
+pub fn get_recording_smart_zoom(
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> Result<Option<RecordingSmartZoom>> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    let recording = get_recording(&conn, &recording_id)?;
+    drop(conn);
+
+    let manifest_path = Path::new(&recording.work_dir).join("session.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+
+    let manifest = match RecordingManifest::read(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            warn!(recording_id = %recording_id, error = ?error, "failed to read recording manifest for smart zoom");
+            return Ok(None);
+        }
+    };
+    Ok(manifest.smart_zoom)
 }

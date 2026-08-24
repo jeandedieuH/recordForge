@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import type { ManualZoomSegment, ZoomPreset } from "@recordforge/contracts"
 import { getCursorPointAtTimelineTime, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import {
@@ -46,6 +46,10 @@ export function FocusPanel() {
 
   const [preset, setPreset] = useState<ZoomPreset>(smartZoomPreset)
   const [reviewing, setReviewing] = useState<ManualZoomSegment[] | null>(null)
+
+  useEffect(() => {
+    setPreset(smartZoomPreset)
+  }, [smartZoomPreset])
 
   const timelineDuration = timeline ? getTotalDuration(timeline) : 0
 

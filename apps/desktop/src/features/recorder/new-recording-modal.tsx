@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
-import { Crop, Mic, Monitor, MonitorUp, Pencil, Video, Volume2, X } from "lucide-react"
+import { Crop, Mic, Monitor, MonitorUp, Pencil, Sparkles, Video, Volume2, X } from "lucide-react"
 import {
   AudioLevelMeter,
   Button,
@@ -630,6 +630,27 @@ export function NewRecordingModal({
                     </div>
                   </div>
                 ) : null}
+              </div>
+
+              <div className="rounded-lg border border-primary/25 bg-primary/5 p-3.5">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
+                    <Sparkles className="size-4" aria-hidden />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-foreground">Smart Zoom</span>
+                      <span className="rounded-full border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
+                        {preferences.smartZoomEnabled ? "Ready" : "Off"}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 truncate text-xs text-subtle-foreground">
+                      {preferences.smartZoomEnabled
+                        ? `${preferences.smartZoomPreset} focus ranges will be added to the editor.`
+                        : "Enable it in Settings → Recording Defaults."}
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

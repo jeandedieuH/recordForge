@@ -446,8 +446,16 @@ function resolvedGenerationSettings(options: SmartZoomGenerationOptions): {
       options.dwellTailMs === defaultSmartZoomSettings.dwellTailMs
         ? profile.dwellTailMs
         : options.dwellTailMs,
-    defaultTransitionInMs: options.defaultTransitionInMs ?? profile.transitionInMs,
-    defaultTransitionOutMs: options.defaultTransitionOutMs ?? profile.transitionOutMs,
+    defaultTransitionInMs:
+      options.defaultTransitionInMs === undefined ||
+      options.defaultTransitionInMs === defaultSmartZoomSettings.defaultTransitionInMs
+        ? profile.transitionInMs
+        : options.defaultTransitionInMs,
+    defaultTransitionOutMs:
+      options.defaultTransitionOutMs === undefined ||
+      options.defaultTransitionOutMs === defaultSmartZoomSettings.defaultTransitionOutMs
+        ? profile.transitionOutMs
+        : options.defaultTransitionOutMs,
   }
   return { settings, profile }
 }

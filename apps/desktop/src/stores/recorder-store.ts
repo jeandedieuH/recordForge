@@ -505,7 +505,12 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   },
 
   start: async () => {
-    const state = get()
+    let state = get()
+    if (!state.preferencesLoaded) {
+      await get().loadPreferences()
+      state = get()
+    }
+
     let source = state.selectedSource
     if (!source && state.sources.length > 0) {
       const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
@@ -538,6 +543,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         microphoneDeviceId: state.selectedMicrophoneId || undefined,
         systemAudioDeviceId: state.selectedSystemAudioId || undefined,
         webcamDeviceId: state.selectedWebcamId || undefined,
+        smartZoomEnabled: state.preferences.smartZoomEnabled,
+        smartZoomPreset: state.preferences.smartZoomPreset,
       }
 
       void get().savePreferences({

@@ -19,10 +19,16 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import { Lock, Plus, Scissors, Sparkles, Trash2, ZoomIn } from "lucide-react"
+import { Eye, EyeOff, Lock, Plus, Scissors, Sparkles, Trash2, ZoomIn } from "lucide-react"
 
 interface ZoomSegmentAction {
-  kind: "toggle-lock" | "split" | "delete" | "ripple-delete" | "regenerate-from-click"
+  kind:
+    | "toggle-enabled"
+    | "toggle-lock"
+    | "split"
+    | "delete"
+    | "ripple-delete"
+    | "regenerate-from-click"
   segmentId: string
 }
 
@@ -362,13 +368,14 @@ function ZoomSegmentItem({
           role="button"
           tabIndex={0}
           data-timeline-zoom
-          aria-label={`Zoom segment ${segment.scale.toFixed(1)}x`}
+          aria-label={`${segment.enabled ? "Zoom" : "Disabled zoom"} segment ${segment.scale.toFixed(1)}x`}
           aria-pressed={selected}
           className={cn(
             "group/zoom absolute flex items-center overflow-hidden rounded-lg border border-primary/70 bg-linear-to-b from-primary/30 to-primary/15 px-2 text-left text-[11px] transition-all duration-fast select-none cursor-grab active:cursor-grabbing hover:from-primary/40 hover:to-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             selected
               ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-[0_0_12px_rgba(9,77,178,0.45)] z-20"
               : "z-10",
+            !segment.enabled && "border-muted-foreground/50 bg-muted/20 opacity-60",
             (track.locked || segment.locked) && "cursor-not-allowed opacity-60",
           )}
           style={{
@@ -468,6 +475,17 @@ function ZoomSegmentItem({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        <ContextMenuItem
+          onSelect={() => onZoomSegmentAction?.({ kind: "toggle-enabled", segmentId: segment.id })}
+          disabled={segment.locked}
+        >
+          {segment.enabled ? (
+            <EyeOff className="mr-2 size-3.5" aria-hidden />
+          ) : (
+            <Eye className="mr-2 size-3.5" aria-hidden />
+          )}
+          {segment.enabled ? "Disable zoom" : "Enable zoom"}
+        </ContextMenuItem>
         <ContextMenuItem onSelect={() => onSelectZoom(segment.id)}>Edit target</ContextMenuItem>
         <ContextMenuItem
           onSelect={() =>

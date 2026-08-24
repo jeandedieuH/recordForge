@@ -233,6 +233,7 @@ export function CustomCursorOverlay({
               ? `drop-shadow(${cursorSettings.shadowOffsetX}px ${cursorSettings.shadowOffsetY}px ${cursorSettings.shadowBlur}px ${cursorSettings.shadowColor})`
               : "none",
             opacity: frame.opacity,
+            willChange: "transform, opacity",
           }}
         >
           <svg

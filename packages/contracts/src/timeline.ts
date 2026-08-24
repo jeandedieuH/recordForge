@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { boundsSchema } from "./recording"
+import { boundsSchema, recordingSmartZoomPresetSchema } from "./recording"
 import {
   cursorEffectSettingsSchema,
   cursorIconPresetSchema,
@@ -53,13 +53,7 @@ export const zoomSourceSchema = z.enum([
 ])
 export type ZoomSource = z.infer<typeof zoomSourceSchema>
 
-export const zoomPresetSchema = z.enum([
-  "subtle",
-  "product-demo",
-  "cinematic",
-  "developer",
-  "manual-only",
-])
+export const zoomPresetSchema = recordingSmartZoomPresetSchema
 export type ZoomPreset = z.infer<typeof zoomPresetSchema>
 
 // Smart zoom settings for AI/deterministic suggestion generation from telemetry.

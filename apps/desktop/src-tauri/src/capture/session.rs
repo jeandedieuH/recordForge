@@ -8,8 +8,8 @@ use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::ffmpeg::FfmpegCapture;
 use super::manifest::{
-    CursorTelemetryAsset, RecorderState, RecordingManifest, RecordingMarker, RecordingStats,
-    RecordingWebcamFragment,
+    CursorTelemetryAsset, RecorderState, RecordingManifest, RecordingMarker, RecordingSmartZoom,
+    RecordingStats, RecordingWebcamFragment,
 };
 use super::media;
 
@@ -344,6 +344,10 @@ impl Recorder {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             m.set_output_path(output.to_string_lossy());
+            m.set_smart_zoom(RecordingSmartZoom {
+                enabled: config.smart_zoom_enabled,
+                preset: config.smart_zoom_preset.clone(),
+            });
             m.set_state(RecorderState::Countdown);
             m.write()?;
         }
@@ -1802,10 +1806,29 @@ mod tests {
             webcam_device_id: None,
             microphone_device_id: None,
             system_audio_device_id: None,
+            smart_zoom_enabled: true,
+            smart_zoom_preset: "cinematic".into(),
         };
 
         let session_id = recorder.prepare(config.clone()).expect("prepare session");
         assert!(temp_dir.path().join(&session_id).exists());
+        let manifest =
+            RecordingManifest::read(temp_dir.path().join(&session_id).join("session.json"))
+                .expect("read prepared manifest");
+        assert_eq!(
+            manifest
+                .smart_zoom
+                .as_ref()
+                .map(|smart_zoom| smart_zoom.enabled),
+            Some(true)
+        );
+        assert_eq!(
+            manifest
+                .smart_zoom
+                .as_ref()
+                .map(|smart_zoom| smart_zoom.preset.as_str()),
+            Some("cinematic")
+        );
 
         recorder.discard().expect("discard prepared session");
 
@@ -1865,6 +1888,8 @@ mod tests {
             webcam_device_id: None,
             microphone_device_id: None,
             system_audio_device_id: None,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
         };
 
         let session_id = recorder.prepare(config).expect("prepare countdown session");
@@ -1920,6 +1945,8 @@ mod tests {
             webcam_device_id: Some("Nonexistent Camera".into()),
             microphone_device_id: None,
             system_audio_device_id: None,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
         };
 
         let session_id = recorder.prepare(config).expect("prepare session");
@@ -1973,6 +2000,8 @@ mod tests {
             webcam_device_id: None,
             microphone_device_id: None,
             system_audio_device_id: None,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
         };
 
         let session_id = recorder.prepare(config).expect("prepare session");
@@ -2052,6 +2081,8 @@ mod tests {
             webcam_device_id: Some(device),
             microphone_device_id: None,
             system_audio_device_id: None,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
         };
 
         let session_id = recorder.prepare(config).expect("prepare session");

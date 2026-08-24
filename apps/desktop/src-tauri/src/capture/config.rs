@@ -30,6 +30,14 @@ pub struct RecordingConfig {
     pub webcam_device_id: Option<String>,
     pub microphone_device_id: Option<String>,
     pub system_audio_device_id: Option<String>,
+    #[serde(default)]
+    pub smart_zoom_enabled: bool,
+    #[serde(default = "default_smart_zoom_preset")]
+    pub smart_zoom_preset: String,
+}
+
+fn default_smart_zoom_preset() -> String {
+    "product-demo".into()
 }
 
 impl RecordingConfig {
@@ -87,6 +95,16 @@ impl RecordingConfig {
                 "unknown profile: {}",
                 self.profile
             ))
+            .into());
+        }
+
+        if !matches!(
+            self.smart_zoom_preset.as_str(),
+            "subtle" | "product-demo" | "cinematic" | "developer" | "manual-only"
+        ) {
+            return Err(crate::errors::InternalError::Capture(
+                "unsupported smart zoom preset".into(),
+            )
             .into());
         }
 

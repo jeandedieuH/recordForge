@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import type { RecordingStatus } from "@recordforge/contracts"
 import { useRecorderStore } from "./recorder-store"
 import * as recorderApi from "../lib/recorder"
 
@@ -41,6 +42,8 @@ describe("recorder-store preferences & fallback", () => {
         sourceName: null,
         regionBounds: null,
         profile: "low-impact",
+        smartZoomEnabled: false,
+        smartZoomPreset: "product-demo",
         microphoneEnabled: false,
         microphoneId: null,
         microphoneName: null,
@@ -60,6 +63,8 @@ describe("recorder-store preferences & fallback", () => {
     const store = useRecorderStore.getState()
     await store.savePreferences({
       profile: "balanced",
+      smartZoomEnabled: true,
+      smartZoomPreset: "cinematic",
       microphoneEnabled: true,
       microphoneId: "mic-1",
       microphoneName: "Custom Mic",
@@ -73,10 +78,60 @@ describe("recorder-store preferences & fallback", () => {
 
     const stored = await useRecorderStore.getState().loadPreferences()
     expect(stored.profile).toBe("balanced")
+    expect(stored.smartZoomEnabled).toBe(true)
+    expect(stored.smartZoomPreset).toBe("cinematic")
     expect(stored.microphoneEnabled).toBe(true)
     expect(stored.microphoneId).toBe("mic-1")
     expect(stored.sourceType).toBe("region")
     expect(stored.regionBounds).toEqual({ x: 10, y: 20, width: 800, height: 600 })
+  })
+
+  it("passes persisted smart zoom settings into the recording session", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-smart-zoom",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: false,
+      webcamActive: false,
+      error: null,
+    }
+    const prepare = vi
+      .spyOn(recorderApi, "prepareRecording")
+      .mockResolvedValue("session-smart-zoom")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        smartZoomEnabled: true,
+        smartZoomPreset: "cinematic",
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        smartZoomEnabled: true,
+        smartZoomPreset: "cinematic",
+      }),
+      3,
+    )
   })
 
   it("automatically falls back to first available microphone when preferred mic is disconnected", async () => {
