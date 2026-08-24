@@ -189,31 +189,11 @@ pub struct RenderPlanZoomKeyframe {
     pub target: RenderCropFloat,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenderPlanZoomMotionPoint {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenderPlanZoomMotionSegment {
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub start: RenderPlanZoomMotionPoint,
-    pub control1: RenderPlanZoomMotionPoint,
-    pub control2: RenderPlanZoomMotionPoint,
-    pub end: RenderPlanZoomMotionPoint,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenderPlanZoomMotionPlan {
-    pub version: u32,
-    pub kind: String,
-    pub segments: Vec<RenderPlanZoomMotionSegment>,
-}
+pub use cursor_engine::{
+    CubicBezierMotionPlan as RenderPlanZoomMotionPlan,
+    CubicBezierMotionPoint as RenderPlanZoomMotionPoint,
+    CubicBezierMotionSegment as RenderPlanZoomMotionSegment,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -4070,8 +4050,8 @@ fn build_motion_plan_center_expression(
     axis: &str,
     fallback: &str,
 ) -> String {
-    if motion_plan.version != 1
-        || motion_plan.kind != "cubic-bezier"
+    if motion_plan.version != cursor_engine::CUBIC_BEZIER_MOTION_PLAN_VERSION
+        || motion_plan.kind != cursor_engine::CUBIC_BEZIER_MOTION_PLAN_KIND
         || motion_plan.segments.is_empty()
     {
         return fallback.to_string();
@@ -4086,57 +4066,6 @@ fn build_motion_plan_center_expression(
         motion_plan.segments.len(),
         fallback,
     )
-}
-
-pub(crate) fn resolve_zoom_motion_point(
-    motion_plan: &RenderPlanZoomMotionPlan,
-    time_ms: f64,
-) -> Option<RenderPlanZoomMotionPoint> {
-    if motion_plan.version != 1 || motion_plan.kind != "cubic-bezier" {
-        return None;
-    }
-    let first = motion_plan.segments.first()?;
-    let last = motion_plan.segments.last()?;
-    let safe_time_ms = if time_ms.is_finite() {
-        time_ms
-    } else {
-        first.start_ms as f64
-    };
-    if safe_time_ms <= first.start_ms as f64 {
-        return Some(first.start);
-    }
-
-    let mut low = 0;
-    let mut high = motion_plan.segments.len() - 1;
-    while low < high {
-        let middle = (low + high) / 2;
-        if safe_time_ms <= motion_plan.segments[middle].end_ms as f64 {
-            high = middle;
-        } else {
-            low = middle + 1;
-        }
-    }
-
-    let segment = &motion_plan.segments[low];
-    let duration_ms = (segment.end_ms - segment.start_ms).max(1) as f64;
-    let progress = ((safe_time_ms - segment.start_ms as f64) / duration_ms).clamp(0.0, 1.0);
-    let inverse = 1.0 - progress;
-    let inverse_squared = inverse * inverse;
-    let progress_squared = progress * progress;
-    if safe_time_ms <= segment.end_ms as f64 {
-        return Some(RenderPlanZoomMotionPoint {
-            x: inverse_squared * inverse * segment.start.x
-                + 3.0 * inverse_squared * progress * segment.control1.x
-                + 3.0 * inverse * progress_squared * segment.control2.x
-                + progress_squared * progress * segment.end.x,
-            y: inverse_squared * inverse * segment.start.y
-                + 3.0 * inverse_squared * progress * segment.control1.y
-                + 3.0 * inverse * progress_squared * segment.control2.y
-                + progress_squared * progress * segment.end.y,
-        });
-    }
-
-    Some(last.end)
 }
 
 fn build_zoompan_expressions(
@@ -4528,8 +4457,8 @@ fn zoom_motion_plan_is_valid(
     motion_plan: &RenderPlanZoomMotionPlan,
     segment: &RenderPlanZoomSegment,
 ) -> bool {
-    if motion_plan.version != 1
-        || motion_plan.kind != "cubic-bezier"
+    if motion_plan.version != cursor_engine::CUBIC_BEZIER_MOTION_PLAN_VERSION
+        || motion_plan.kind != cursor_engine::CUBIC_BEZIER_MOTION_PLAN_KIND
         || motion_plan.segments.is_empty()
     {
         return false;

@@ -527,6 +527,117 @@ pub struct CursorFrame {
     pub velocity_px_per_sec: f64,
 }
 
+/// Version tag for the compact cubic Bézier motion-plan format.
+pub const CUBIC_BEZIER_MOTION_PLAN_VERSION: u32 = 1;
+/// Kind tag for the compact cubic Bézier motion-plan format.
+pub const CUBIC_BEZIER_MOTION_PLAN_KIND: &str = "cubic-bezier";
+
+/// A two-dimensional point in a cubic Bézier motion plan.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubicBezierMotionPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// A time-bounded cubic Bézier segment in a motion plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubicBezierMotionSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub start: CubicBezierMotionPoint,
+    pub control1: CubicBezierMotionPoint,
+    pub control2: CubicBezierMotionPoint,
+    pub end: CubicBezierMotionPoint,
+}
+
+/// A serialized cubic Bézier motion plan shared by preview and export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CubicBezierMotionPlan {
+    pub version: u32,
+    pub kind: String,
+    pub segments: Vec<CubicBezierMotionSegment>,
+}
+
+fn is_finite_motion_point(point: &CubicBezierMotionPoint) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn is_evaluable_motion_segment(segment: &CubicBezierMotionSegment) -> bool {
+    segment.end_ms > segment.start_ms
+        && is_finite_motion_point(&segment.start)
+        && is_finite_motion_point(&segment.control1)
+        && is_finite_motion_point(&segment.control2)
+        && is_finite_motion_point(&segment.end)
+}
+
+/// Evaluate a compact cubic Bézier motion plan at a fractional millisecond.
+///
+/// The evaluator clamps times outside the plan to its first or last point and
+/// uses a binary search so long plans remain cheap to seek.
+pub fn evaluate_cubic_motion_plan(
+    motion_plan: &CubicBezierMotionPlan,
+    time_ms: f64,
+) -> Option<CubicBezierMotionPoint> {
+    if motion_plan.version != CUBIC_BEZIER_MOTION_PLAN_VERSION
+        || motion_plan.kind != CUBIC_BEZIER_MOTION_PLAN_KIND
+        || motion_plan.segments.is_empty()
+    {
+        return None;
+    }
+
+    let first = motion_plan.segments.first()?;
+    let last = motion_plan.segments.last()?;
+    if !is_evaluable_motion_segment(first) || !is_evaluable_motion_segment(last) {
+        return None;
+    }
+    let safe_time_ms = if time_ms.is_finite() {
+        time_ms
+    } else {
+        first.start_ms as f64
+    };
+    if safe_time_ms <= first.start_ms as f64 {
+        return Some(first.start);
+    }
+    if safe_time_ms >= last.end_ms as f64 {
+        return Some(last.end);
+    }
+
+    let mut low = 0usize;
+    let mut high = motion_plan.segments.len() - 1;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if safe_time_ms <= motion_plan.segments[middle].end_ms as f64 {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+
+    let segment = &motion_plan.segments[low];
+    if !is_evaluable_motion_segment(segment) {
+        return None;
+    }
+    let duration_ms = segment.end_ms.saturating_sub(segment.start_ms).max(1) as f64;
+    let progress = ((safe_time_ms - segment.start_ms as f64) / duration_ms).clamp(0.0, 1.0);
+    let inverse = 1.0 - progress;
+    let inverse_squared = inverse * inverse;
+    let progress_squared = progress * progress;
+
+    Some(CubicBezierMotionPoint {
+        x: inverse_squared * inverse * segment.start.x
+            + 3.0 * inverse_squared * progress * segment.control1.x
+            + 3.0 * inverse * progress_squared * segment.control2.x
+            + progress_squared * progress * segment.end.x,
+        y: inverse_squared * inverse * segment.start.y
+            + 3.0 * inverse_squared * progress * segment.control1.y
+            + 3.0 * inverse * progress_squared * segment.control2.y
+            + progress_squared * progress * segment.end.y,
+    })
+}
+
 #[derive(Debug, Clone)]
 struct PreparedEvent {
     t_ms: u64,
@@ -1094,6 +1205,17 @@ mod wasm {
         }
 
         #[wasm_bindgen]
+        pub fn evaluate_motion_plan(
+            &self,
+            motion_plan_json: &str,
+            time_ms: f64,
+        ) -> Result<String, String> {
+            let motion_plan: CubicBezierMotionPlan = parse_json_or_err(motion_plan_json)?;
+            let point = evaluate_cubic_motion_plan(&motion_plan, time_ms);
+            serde_json::to_string(&point).map_err(|error| error.to_string())
+        }
+
+        #[wasm_bindgen]
         pub fn fit(
             &self,
             source_x: f64,
@@ -1433,5 +1555,47 @@ mod tests {
         // At t = 50ms midpoint, position should be centered ~50.0
         let at_mid = engine.evaluate(50.0, &settings);
         assert!((at_mid.source_x - 50.0).abs() < 10.0);
+    }
+
+    #[test]
+    fn evaluates_cubic_motion_plan_at_boundaries_and_midpoints() {
+        let plan = CubicBezierMotionPlan {
+            version: 1,
+            kind: "cubic-bezier".into(),
+            segments: vec![
+                CubicBezierMotionSegment {
+                    start_ms: 100,
+                    end_ms: 1_100,
+                    start: CubicBezierMotionPoint { x: 0.0, y: 0.0 },
+                    control1: CubicBezierMotionPoint { x: 0.0, y: 0.0 },
+                    control2: CubicBezierMotionPoint { x: 100.0, y: 100.0 },
+                    end: CubicBezierMotionPoint { x: 100.0, y: 100.0 },
+                },
+                CubicBezierMotionSegment {
+                    start_ms: 1_100,
+                    end_ms: 2_100,
+                    start: CubicBezierMotionPoint { x: 100.0, y: 100.0 },
+                    control1: CubicBezierMotionPoint { x: 100.0, y: 100.0 },
+                    control2: CubicBezierMotionPoint { x: 200.0, y: 0.0 },
+                    end: CubicBezierMotionPoint { x: 200.0, y: 0.0 },
+                },
+            ],
+        };
+
+        let before = evaluate_cubic_motion_plan(&plan, 0.0).expect("valid motion plan");
+        assert_eq!(before, CubicBezierMotionPoint { x: 0.0, y: 0.0 });
+
+        let midpoint = evaluate_cubic_motion_plan(&plan, 600.0).expect("valid motion plan");
+        assert!((midpoint.x - 50.0).abs() < 0.000_001);
+        assert!((midpoint.y - 50.0).abs() < 0.000_001);
+
+        let after = evaluate_cubic_motion_plan(&plan, 3_000.0).expect("valid motion plan");
+        assert_eq!(after, CubicBezierMotionPoint { x: 200.0, y: 0.0 });
+
+        let invalid_kind = CubicBezierMotionPlan {
+            kind: "linear".into(),
+            ..plan
+        };
+        assert!(evaluate_cubic_motion_plan(&invalid_kind, 600.0).is_none());
     }
 }

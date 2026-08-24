@@ -5,10 +5,7 @@ use cursor_engine::CursorTelemetryFile;
 use resvg::tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 use resvg::usvg;
 
-use super::{
-    clamped_zoom_crop, clamped_zoom_target, resolve_zoom_motion_point, RenderPlanZoomSegment,
-    RenderSegment,
-};
+use super::{clamped_zoom_crop, clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
 
 // Re-export the canonical cursor settings so the renderer and engine share the
 // same type and defaults.
@@ -501,7 +498,7 @@ impl CursorRenderer {
             segment,
         );
         let target = if let Some(motion_plan) = &segment.motion_plan {
-            if let Some(point) = resolve_zoom_motion_point(motion_plan, output_ms) {
+            if let Some(point) = cursor_engine::evaluate_cubic_motion_plan(motion_plan, output_ms) {
                 let motion_target = super::RenderCropFloat {
                     x: point.x - fallback_target.width / 2.0,
                     y: point.y - fallback_target.height / 2.0,
@@ -1326,6 +1323,80 @@ mod tests {
     use super::*;
     use crate::exports::RenderCropFloat;
 
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FractionalParityFixture {
+        canvas: RenderCanvas,
+        screen_rect: GoldenScreenRect,
+        telemetry: CursorTelemetryFile,
+        segments: Vec<RenderSegment>,
+        zoom_segments: Vec<RenderPlanZoomSegment>,
+        frames: Vec<GoldenFrame>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoldenScreenRect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoldenFrame {
+        time_ms: f64,
+        expected: GoldenFrameExpectation,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoldenFrameExpectation {
+        source_time_ms: f64,
+        source_point: GoldenPoint,
+        zoom: GoldenZoom,
+        cursor_point: GoldenPoint,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoldenPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoldenZoom {
+        progress: f64,
+        scale: f64,
+        crop: GoldenCrop,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GoldenCrop {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    fn fractional_parity_fixture() -> FractionalParityFixture {
+        serde_json::from_str(include_str!(
+            "../../../../../tooling/golden-fixtures/preview-rust-fractional-frame.json"
+        ))
+        .expect("fractional preview/Rust golden fixture is valid")
+    }
+
+    fn assert_within_half_pixel(label: &str, actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 0.5,
+            "{label}: expected {expected}, got {actual}"
+        );
+    }
+
     fn make_v2_telemetry() -> CursorTelemetryFile {
         CursorTelemetryFile {
             schema_version: 2,
@@ -1791,6 +1862,81 @@ mod tests {
         assert!((transform.crop_x - 50.0).abs() < 0.1);
         assert!((transform.crop_y - 50.0).abs() < 0.1);
         assert!((transform.scale - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn matches_typescript_preview_golden_frames_at_fractional_timestamps() {
+        let fixture = fractional_parity_fixture();
+        let settings = fixture.canvas.cursor_settings.clone();
+        let screen_rect = (
+            fixture.screen_rect.x,
+            fixture.screen_rect.y,
+            fixture.screen_rect.width,
+            fixture.screen_rect.height,
+        );
+        let mut renderer = CursorRenderer::new_with_zoom(
+            settings.clone(),
+            fixture.telemetry,
+            &fixture.segments,
+            &fixture.zoom_segments,
+            &fixture.canvas,
+            Some(screen_rect),
+        )
+        .expect("valid fractional preview/Rust parity renderer");
+
+        for golden in fixture.frames {
+            assert!(
+                golden.time_ms.fract().abs() > f64::EPSILON,
+                "golden frame timestamp must remain fractional: {}",
+                golden.time_ms
+            );
+            let source_time = source_time_for_output(&fixture.segments, golden.time_ms)
+                .expect("golden frame must map to a source timestamp");
+            let cursor_frame = renderer.engine.evaluate(source_time, &settings);
+            let expected = &golden.expected;
+
+            assert!((cursor_frame.source_time_ms - expected.source_time_ms).abs() < 0.000_001);
+            assert_within_half_pixel(
+                "cursor source x",
+                cursor_frame.source_x,
+                expected.source_point.x,
+            );
+            assert_within_half_pixel(
+                "cursor source y",
+                cursor_frame.source_y,
+                expected.source_point.y,
+            );
+
+            let transform = renderer.resolve_zoom_transform_at(golden.time_ms);
+            assert!((transform.progress - expected.zoom.progress).abs() < 0.000_001);
+            assert!((transform.scale - expected.zoom.scale).abs() < 0.000_001);
+            assert_within_half_pixel("zoom crop x", transform.crop_x, expected.zoom.crop.x);
+            assert_within_half_pixel("zoom crop y", transform.crop_y, expected.zoom.crop.y);
+            assert_within_half_pixel(
+                "zoom crop width",
+                transform.crop_w,
+                expected.zoom.crop.width,
+            );
+            assert_within_half_pixel(
+                "zoom crop height",
+                transform.crop_h,
+                expected.zoom.crop.height,
+            );
+
+            let fitted = renderer.fit_source_point(cursor_frame.source_x, cursor_frame.source_y);
+            let cursor_point = renderer.apply_zoom_at(golden.time_ms, fitted.0, fitted.1);
+            assert_within_half_pixel("cursor x", cursor_point.0, expected.cursor_point.x);
+            assert_within_half_pixel("cursor y", cursor_point.1, expected.cursor_point.y);
+
+            let mut frame =
+                vec![0; fixture.canvas.width as usize * fixture.canvas.height as usize * 4];
+            renderer.render_frame_at(golden.time_ms, &mut frame);
+            assert!(
+                frame.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "fractional golden frame at {}ms should contain cursor pixels",
+                golden.time_ms
+            );
+        }
     }
 
     #[test]

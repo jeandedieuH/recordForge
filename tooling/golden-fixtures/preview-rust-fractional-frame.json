@@ -1,0 +1,329 @@
+{
+  "name": "preview-rust-fractional-frame",
+  "canvas": {
+    "width": 200,
+    "height": 200,
+    "fps": 60,
+    "background": "#000000",
+    "padding": 20,
+    "borderRadius": 0,
+    "shadow": false,
+    "cursorSettings": {
+      "enabled": true,
+      "shapeMode": "optimized",
+      "preset": "recorded-system",
+      "scale": 1,
+      "fillColor": "#3b82f6",
+      "fillOpacity": 1,
+      "strokeColor": "#ffffff",
+      "strokeWidth": 2,
+      "strokeOpacity": 1,
+      "shadowEnabled": false,
+      "shadowColor": "#000000",
+      "shadowBlur": 0,
+      "shadowOffsetX": 0,
+      "shadowOffsetY": 0,
+      "shadowOpacity": 0,
+      "clickFeedback": "none",
+      "clickColor": "#60a5fa",
+      "clickSize": 36,
+      "clickDurationMs": 350,
+      "leftClickEnabled": true,
+      "rightClickEnabled": true,
+      "smoothMovement": false,
+      "smoothFactor": 1,
+      "autoHideIdle": false,
+      "idleTimeoutMs": 2000,
+      "spotlightMode": false,
+      "spotlightRadius": 120,
+      "spotlightDimOpacity": 0.5,
+      "hideNativeCursor": true
+    }
+  },
+  "screenRect": {
+    "x": 20,
+    "y": 20,
+    "width": 160,
+    "height": 160
+  },
+  "timeline": {
+    "version": 1,
+    "id": "fractional-parity",
+    "name": "Fractional parity",
+    "recordingId": "recording",
+    "tracks": [
+      {
+        "id": "screen",
+        "kind": "screen",
+        "name": "Screen",
+        "muted": false,
+        "locked": false,
+        "solo": false,
+        "volume": 1,
+        "clips": [
+          {
+            "id": "screen-clip",
+            "kind": "screen",
+            "assetId": "recording",
+            "startMs": 0,
+            "durationMs": 1000,
+            "sourceInMs": 0,
+            "sourceOutMs": 2000,
+            "speed": 1
+          }
+        ]
+      },
+      {
+        "id": "cursor",
+        "kind": "cursor",
+        "name": "Cursor",
+        "muted": false,
+        "locked": false,
+        "solo": false,
+        "volume": 1,
+        "clips": [
+          {
+            "id": "cursor-effect",
+            "kind": "cursor-effect",
+            "assetId": "cursor-events:fractional-parity",
+            "startMs": 0,
+            "durationMs": 1000,
+            "sourceInMs": 0,
+            "sourceOutMs": 2000,
+            "speed": 1,
+            "presetId": "recorded-system",
+            "scale": 1,
+            "smoothing": "off",
+            "settings": {},
+            "enabled": true,
+            "locked": false
+          }
+        ]
+      }
+    ],
+    "markers": [],
+    "zoomSegments": [
+      {
+        "id": "zoom",
+        "startMs": 0,
+        "durationMs": 900,
+        "target": {
+          "x": 40,
+          "y": 40,
+          "width": 100,
+          "height": 100
+        },
+        "scale": 2,
+        "easing": "ease-out",
+        "transitionInMs": 200,
+        "transitionOutMs": 200,
+        "enabled": true,
+        "locked": false,
+        "mode": "manual",
+        "source": "manual",
+        "preset": "manual-only"
+      }
+    ],
+    "createdAt": "2026-08-24T00:00:00.000Z",
+    "updatedAt": "2026-08-24T00:00:00.000Z"
+  },
+  "telemetry": {
+    "schemaVersion": 2,
+    "assetId": "cursor-events:fractional-parity",
+    "recordingId": "fractional-parity",
+    "sourceWidth": 100,
+    "sourceHeight": 100,
+    "captureBounds": {
+      "x": 0,
+      "y": 0,
+      "width": 100,
+      "height": 100
+    },
+    "coordinateTransform": {
+      "a00": 1,
+      "a01": 0,
+      "a10": 0,
+      "a11": 1,
+      "b0": 0,
+      "b1": 0
+    },
+    "shapes": [],
+    "timebase": {
+      "unit": "ms",
+      "ticksPerSecond": 1000
+    },
+    "sampleRateHz": 1,
+    "clickWindowMs": 350,
+    "health": "healthy",
+    "eventCount": 3,
+    "index": [],
+    "eventFile": "cursor_events.bin",
+    "events": [
+      {
+        "tMs": 0,
+        "rawX": 15,
+        "rawY": 25,
+        "sourceX": 15,
+        "sourceY": 25,
+        "buttons": {
+          "left": false,
+          "right": false,
+          "middle": false,
+          "x1": false,
+          "x2": false
+        },
+        "buttonEvent": "none",
+        "visible": true,
+        "shapeId": "arrow",
+        "shapeChanged": false
+      },
+      {
+        "tMs": 1000,
+        "rawX": 50,
+        "rawY": 50,
+        "sourceX": 50,
+        "sourceY": 50,
+        "buttons": {
+          "left": false,
+          "right": false,
+          "middle": false,
+          "x1": false,
+          "x2": false
+        },
+        "buttonEvent": "none",
+        "visible": true,
+        "shapeId": "arrow",
+        "shapeChanged": false
+      },
+      {
+        "tMs": 2000,
+        "rawX": 85,
+        "rawY": 75,
+        "sourceX": 85,
+        "sourceY": 75,
+        "buttons": {
+          "left": false,
+          "right": false,
+          "middle": false,
+          "x1": false,
+          "x2": false
+        },
+        "buttonEvent": "none",
+        "visible": true,
+        "shapeId": "arrow",
+        "shapeChanged": false
+      }
+    ]
+  },
+  "segments": [
+    {
+      "assetId": "recording",
+      "streamIndex": null,
+      "volume": null,
+      "fadeInMs": null,
+      "fadeOutMs": null,
+      "speed": 1,
+      "sourceInMs": 0,
+      "sourceOutMs": 2000,
+      "outputStartMs": 0,
+      "outputEndMs": 1000,
+      "sourceWidth": 100,
+      "sourceHeight": 100
+    }
+  ],
+  "zoomSegments": [
+    {
+      "id": "zoom",
+      "startMs": 0,
+      "endMs": 900,
+      "target": {
+        "x": 40,
+        "y": 40,
+        "width": 100,
+        "height": 100
+      },
+      "scale": 2,
+      "easing": "ease-out",
+      "transitionInMs": 200,
+      "transitionOutMs": 200,
+      "enabled": true,
+      "mode": "manual",
+      "source": "manual",
+      "preset": "manual-only"
+    }
+  ],
+  "frames": [
+    {
+      "timeMs": 16.666666666666668,
+      "expected": {
+        "sourceTimeMs": 33.333333333333336,
+        "sourcePoint": {
+          "x": 16.166666666666664,
+          "y": 25.833333333333332
+        },
+        "zoom": {
+          "progress": 0.15972222222222232,
+          "scale": 1.0867924528301887,
+          "crop": {
+            "x": 6.388888888888886,
+            "y": 6.388888888888886,
+            "width": 184.02777777777777,
+            "height": 184.02777777777777
+          }
+        },
+        "cursorPoint": {
+          "x": 42.55698113207547,
+          "y": 59.36603773584906
+        }
+      }
+    },
+    {
+      "timeMs": 250.5,
+      "expected": {
+        "sourceTimeMs": 501,
+        "sourcePoint": {
+          "x": 32.535,
+          "y": 37.525
+        },
+        "zoom": {
+          "progress": 1,
+          "scale": 2,
+          "crop": {
+            "x": 40,
+            "y": 40,
+            "width": 100,
+            "height": 100
+          }
+        },
+        "cursorPoint": {
+          "x": 60.111999999999995,
+          "y": 76.08
+        }
+      }
+    },
+    {
+      "timeMs": 816.6666666666666,
+      "expected": {
+        "sourceTimeMs": 1633.3333333333333,
+        "sourcePoint": {
+          "x": 72.16666666666667,
+          "y": 65.83333333333333
+        },
+        "zoom": {
+          "progress": 0.6597222222222224,
+          "scale": 1.4922279792746114,
+          "crop": {
+            "x": 26.388888888888886,
+            "y": 26.388888888888886,
+            "width": 134.02777777777777,
+            "height": 134.02777777777777
+          }
+        },
+        "cursorPoint": {
+          "x": 160.80000000000004,
+          "y": 145.67875647668396
+        }
+      }
+    }
+  ]
+}

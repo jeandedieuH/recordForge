@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmcursorengine_free: (a: number, b: number) => void;
 export const wasmcursorengine_evaluate: (a: number, b: number, c: number, d: number) => [number, number];
+export const wasmcursorengine_evaluate_motion_plan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const wasmcursorengine_fit: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const wasmcursorengine_new: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;

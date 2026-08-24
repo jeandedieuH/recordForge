@@ -679,58 +679,15 @@ export function buildFollowCursorKeyframes(
   }))
 }
 
-function cubicBezierPoint(
-  segment: RenderPlanZoomMotionSegment,
-  progress: number,
-): RenderPlanZoomMotionPoint {
-  const inverse = 1 - progress
-  const inverseSquared = inverse * inverse
-  const progressSquared = progress * progress
-  return {
-    x:
-      inverseSquared * inverse * segment.start.x +
-      3 * inverseSquared * progress * segment.control1.x +
-      3 * inverse * progressSquared * segment.control2.x +
-      progressSquared * progress * segment.end.x,
-    y:
-      inverseSquared * inverse * segment.start.y +
-      3 * inverseSquared * progress * segment.control1.y +
-      3 * inverse * progressSquared * segment.control2.y +
-      progressSquared * progress * segment.end.y,
-  }
-}
-
-function resolveFollowCursorMotionPointAtTime(
-  motionPlan: RenderPlanZoomMotionPlan,
-  timeMs: number,
-): RenderPlanZoomMotionPoint | undefined {
-  const segments = motionPlan.segments
-  if (segments.length === 0) return undefined
-  const safeTimeMs = Number.isFinite(timeMs) ? timeMs : segments[0].startMs
-  if (safeTimeMs <= segments[0].startMs) return segments[0].start
-
-  let low = 0
-  let high = segments.length - 1
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2)
-    if (safeTimeMs <= segments[middle].endMs) high = middle
-    else low = middle + 1
-  }
-
-  const segment = segments[low]
-  const durationMs = Math.max(1, segment.endMs - segment.startMs)
-  const progress = Math.min(1, Math.max(0, (safeTimeMs - segment.startMs) / durationMs))
-  return cubicBezierPoint(segment, progress)
-}
-
-/** Evaluate a compact motion plan into the canonical zoom target at a time. */
+/** Evaluate a compact motion plan through the shared Rust/WASM cursor engine. */
 export function resolveFollowCursorMotionPlanTargetAtTime(
   motionPlan: RenderPlanZoomMotionPlan,
   segment: ManualZoomSegment,
   state: TimelineState,
   timeMs: number,
+  cursorEngine: CursorEngine,
 ): ZoomTarget | undefined {
-  const point = resolveFollowCursorMotionPointAtTime(motionPlan, timeMs)
+  const point = cursorEngine.evaluateMotionPlan(timeMs, motionPlan)
   if (!point) return undefined
   const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
   const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
@@ -748,7 +705,7 @@ export function resolveFollowCursorTargetAtTime(
   if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
   const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine, { sampleStepMs })
   return motionPlan
-    ? resolveFollowCursorMotionPlanTargetAtTime(motionPlan, segment, state, timeMs)
+    ? resolveFollowCursorMotionPlanTargetAtTime(motionPlan, segment, state, timeMs, cursorEngine)
     : undefined
 }
 

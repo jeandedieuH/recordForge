@@ -8,6 +8,7 @@ import {
   defaultCursorSettings,
   type CursorSettings,
   type CursorTelemetryFile,
+  type RenderPlanZoomMotionPlan,
 } from "@recordforge/contracts"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -82,6 +83,10 @@ interface WasmEngine {
     timeMs: number,
     settings: CursorSettings,
   ) => ReturnType<ReturnType<typeof createCursorEngine>["evaluate"]>
+  evaluateMotionPlan: (
+    timeMs: number,
+    motionPlan: RenderPlanZoomMotionPlan,
+  ) => { x: number; y: number } | null
   fit: (
     sourceX: number,
     sourceY: number,
@@ -95,6 +100,8 @@ function createWasmEngine(telemetry: CursorTelemetryFile): WasmEngine {
   const raw = new WasmCursorEngine(JSON.stringify(telemetry), JSON.stringify({}))
   return {
     evaluate: (timeMs, settings) => JSON.parse(raw.evaluate(timeMs, JSON.stringify(settings))),
+    evaluateMotionPlan: (timeMs, motionPlan) =>
+      JSON.parse(raw.evaluate_motion_plan(JSON.stringify(motionPlan), timeMs)),
     fit: (sourceX, sourceY, targetWidth, targetHeight, padding) =>
       JSON.parse(raw.fit(sourceX, sourceY, targetWidth, targetHeight, padding)),
   }
@@ -158,6 +165,43 @@ describe("cursor engine cross-language parity", () => {
         wasmEngine.evaluate(timeMs, defaultCursorSettings),
         tsEngine.evaluate(timeMs, defaultCursorSettings),
       )
+    }
+  })
+
+  it("cubic motion-plan evaluation is identical between wasm and typescript", () => {
+    const telemetry = loadFixture("cursor-v1-100dpi-10s.json")
+    const tsEngine = createCursorEngine(telemetry)
+    const wasmEngine = createWasmEngine(telemetry)
+    const motionPlan: RenderPlanZoomMotionPlan = {
+      version: 1,
+      kind: "cubic-bezier",
+      segments: [
+        {
+          startMs: 100,
+          endMs: 1_100,
+          start: { x: 0, y: 0 },
+          control1: { x: 0, y: 0 },
+          control2: { x: 100, y: 100 },
+          end: { x: 100, y: 100 },
+        },
+        {
+          startMs: 1_100,
+          endMs: 2_100,
+          start: { x: 100, y: 100 },
+          control1: { x: 100, y: 100 },
+          control2: { x: 200, y: 0 },
+          end: { x: 200, y: 0 },
+        },
+      ],
+    }
+
+    for (const timeMs of [0, 600, 1_100, 1_600, 3_000]) {
+      const wasm = wasmEngine.evaluateMotionPlan(timeMs, motionPlan)
+      const ts = tsEngine.evaluateMotionPlan(timeMs, motionPlan)
+      expect(wasm).not.toBeNull()
+      expect(ts).not.toBeNull()
+      expect(wasm?.x).toBeCloseTo(ts?.x ?? 0, 10)
+      expect(wasm?.y).toBeCloseTo(ts?.y ?? 0, 10)
     }
   })
 

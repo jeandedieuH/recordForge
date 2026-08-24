@@ -1,6 +1,18 @@
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
-import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
-import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
+import {
+  createCursorEngine,
+  fitCursorPoint,
+  mapCursorPointThroughZoom,
+  normalizeCursorTelemetry,
+} from "@recordforge/cursor-core"
+import {
+  cursorTelemetryFileSchema,
+  defaultCursorSettings,
+  timelineStateSchema,
+  type TimelineState,
+} from "@recordforge/domain"
 import {
   buildFollowCursorKeyframes,
   buildFollowCursorMotionPlan,
@@ -464,5 +476,104 @@ describe("resolvePreviewComposition", () => {
     const comp = resolvePreviewComposition(state, 2_000)
     expect(comp.screen.active).toBe(false)
     expect(comp.screen.isGap).toBe(true)
+  })
+})
+
+interface GoldenPoint {
+  x: number
+  y: number
+}
+
+interface GoldenCrop extends GoldenPoint {
+  width: number
+  height: number
+}
+
+interface GoldenZoom {
+  progress: number
+  scale: number
+  crop: GoldenCrop
+}
+
+interface GoldenFrameExpectation {
+  sourceTimeMs: number
+  sourcePoint: GoldenPoint
+  zoom: GoldenZoom
+  cursorPoint: GoldenPoint
+}
+
+interface GoldenFrame {
+  timeMs: number
+  expected: GoldenFrameExpectation
+}
+
+interface FractionalParityFixture {
+  canvas: Record<string, unknown>
+  timeline: Record<string, unknown>
+  telemetry: unknown
+  screenRect: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+  frames: GoldenFrame[]
+}
+
+const fractionalParityFixturePath = fileURLToPath(
+  new URL("../../../tooling/golden-fixtures/preview-rust-fractional-frame.json", import.meta.url),
+)
+
+function loadFractionalParityFixture(): FractionalParityFixture {
+  return JSON.parse(readFileSync(fractionalParityFixturePath, "utf-8")) as FractionalParityFixture
+}
+
+describe("fractional preview/Rust golden frames", () => {
+  it("matches the Rust golden crop and cursor geometry at fractional timestamps", () => {
+    const fixture = loadFractionalParityFixture()
+    const state = timelineStateSchema.parse({ ...fixture.timeline, canvas: fixture.canvas })
+    const telemetry = cursorTelemetryFileSchema.parse(fixture.telemetry)
+    const cursorEngine = createCursorEngine(telemetry)
+
+    for (const { timeMs, expected } of fixture.frames) {
+      expect(timeMs % 1).not.toBe(0)
+      const composition = resolvePreviewComposition(state, timeMs, { cursorEngine })
+      const frame = composition.cursor.frame
+      const zoom = composition.screen.zoomTransform
+      const sourceTimeMs = composition.cursor.sourceTimeMs
+      if (!frame || !zoom || sourceTimeMs === null) {
+        throw new Error(`missing preview frame at ${timeMs}ms`)
+      }
+
+      expect(sourceTimeMs).toBeCloseTo(expected.sourceTimeMs, 6)
+      expect(frame.sourceX).toBeCloseTo(expected.sourcePoint.x, 6)
+      expect(frame.sourceY).toBeCloseTo(expected.sourcePoint.y, 6)
+      expect(zoom.progress).toBeCloseTo(expected.zoom.progress, 6)
+      expect(zoom.scale).toBeCloseTo(expected.zoom.scale, 6)
+      expect(zoom.crop.x).toBeCloseTo(expected.zoom.crop.x, 6)
+      expect(zoom.crop.y).toBeCloseTo(expected.zoom.crop.y, 6)
+      expect(zoom.crop.width).toBeCloseTo(expected.zoom.crop.width, 6)
+      expect(zoom.crop.height).toBeCloseTo(expected.zoom.crop.height, 6)
+
+      const fitted = fitCursorPoint(
+        { x: frame.sourceX, y: frame.sourceY },
+        telemetry,
+        fixture.screenRect.width,
+        fixture.screenRect.height,
+      )
+      const zoomed = mapCursorPointThroughZoom(
+        { x: fitted.x, y: fitted.y },
+        { width: fixture.screenRect.width, height: fixture.screenRect.height },
+        { width: state.canvas.width, height: state.canvas.height },
+        zoom,
+      )
+      const previewPoint = {
+        x: fixture.screenRect.x + zoomed.x,
+        y: fixture.screenRect.y + zoomed.y,
+      }
+
+      expect(previewPoint.x).toBeCloseTo(expected.cursorPoint.x, 6)
+      expect(previewPoint.y).toBeCloseTo(expected.cursorPoint.y, 6)
+    }
   })
 })

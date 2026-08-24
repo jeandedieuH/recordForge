@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "benchmark:phase9": "bun run editor-phase9-benchmark.ts",
+    "benchmark:cursor-follow": "bun run cursor-follow-path-benchmark.ts",
     "typecheck": "tsc --noEmit",
     "format:check": "prettier --check .",
     "format": "prettier --write ."

@@ -3,6 +3,8 @@ import {
   type CursorSettings,
   type CursorTelemetryEvent,
   type CursorTelemetryFile,
+  type RenderPlanZoomMotionPlan,
+  type RenderPlanZoomMotionPoint,
 } from "@recordforge/contracts"
 
 export interface CursorPoint {
@@ -88,6 +90,67 @@ const DEFAULT_GAP_MULTIPLIER = 8
 const MIN_GAP_THRESHOLD_MS = 120
 const ADAPTIVE_SPEED_REF_PX_PER_SEC = 2000
 
+// Kept only for non-browser callers and the short period before the WASM
+// adapter finishes loading; preview/export use the Rust implementation when available.
+function isEvaluableMotionSegment(segment: RenderPlanZoomMotionPlan["segments"][number]): boolean {
+  return (
+    segment.endMs > segment.startMs &&
+    [segment.start, segment.control1, segment.control2, segment.end].every(
+      (point) => Number.isFinite(point.x) && Number.isFinite(point.y),
+    )
+  )
+}
+
+function evaluateCubicMotionPlanFallback(
+  motionPlan: RenderPlanZoomMotionPlan,
+  timeMs: number,
+): RenderPlanZoomMotionPoint | null {
+  if (
+    motionPlan.version !== 1 ||
+    motionPlan.kind !== "cubic-bezier" ||
+    motionPlan.segments.length === 0
+  ) {
+    return null
+  }
+
+  const first = motionPlan.segments[0]
+  const last = motionPlan.segments[motionPlan.segments.length - 1]
+  if (!isEvaluableMotionSegment(first) || !isEvaluableMotionSegment(last)) return null
+
+  const safeTimeMs = Number.isFinite(timeMs) ? timeMs : first.startMs
+  if (safeTimeMs <= first.startMs) return first.start
+  if (safeTimeMs >= last.endMs) return last.end
+
+  let low = 0
+  let high = motionPlan.segments.length - 1
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2)
+    if (safeTimeMs <= motionPlan.segments[middle].endMs) high = middle
+    else low = middle + 1
+  }
+
+  const segment = motionPlan.segments[low]
+  if (!isEvaluableMotionSegment(segment)) return null
+  const durationMs = Math.max(1, segment.endMs - segment.startMs)
+  const progress = Math.min(1, Math.max(0, (safeTimeMs - segment.startMs) / durationMs))
+  const inverse = 1 - progress
+  const inverseSquared = inverse * inverse
+  const progressSquared = progress * progress
+
+  return {
+    x:
+      inverseSquared * inverse * segment.start.x +
+      3 * inverseSquared * progress * segment.control1.x +
+      3 * inverse * progressSquared * segment.control2.x +
+      progressSquared * progress * segment.end.x,
+    y:
+      inverseSquared * inverse * segment.start.y +
+      3 * inverseSquared * progress * segment.control1.y +
+      3 * inverse * progressSquared * segment.control2.y +
+      progressSquared * progress * segment.end.y,
+  }
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
@@ -121,6 +184,10 @@ function getEffectiveShapeId(event: PreparedEvent): string {
 
 export interface CursorEngine {
   evaluate: (timeMs: number, settings: CursorSettings) => CursorFrame
+  evaluateMotionPlan: (
+    timeMs: number,
+    motionPlan: RenderPlanZoomMotionPlan,
+  ) => RenderPlanZoomMotionPoint | null
   telemetry: CursorTelemetryFile
 }
 
@@ -144,6 +211,8 @@ export function createCursorEngine(
         activeClicks: [],
         velocityPxPerSec: 0,
       }),
+      evaluateMotionPlan: (timeMs, motionPlan) =>
+        evaluateCubicMotionPlanFallback(motionPlan, timeMs),
       telemetry,
     }
   }
@@ -525,5 +594,9 @@ export function createCursorEngine(
     }
   }
 
-  return { evaluate, telemetry }
+  return {
+    evaluate,
+    evaluateMotionPlan: (timeMs, motionPlan) => evaluateCubicMotionPlanFallback(motionPlan, timeMs),
+    telemetry,
+  }
 }
