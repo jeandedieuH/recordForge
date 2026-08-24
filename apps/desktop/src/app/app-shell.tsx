@@ -24,6 +24,7 @@ import { StorageView } from "../features/storage"
 import { NewRecordingModal } from "../features/recorder"
 import { SettingsView } from "../features/settings"
 import { AboutView } from "../features/about"
+import { OnboardingModal } from "../features/onboarding"
 import { toErrorMessage } from "../lib/errors"
 import { getDiagnosticsReport } from "../lib/recorder"
 import { getSetting, isTauri, setSetting } from "../lib/settings"
@@ -50,6 +51,7 @@ export function AppShell() {
   const [activeView, setActiveView] = useState<View>("library")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isNewRecordingOpen, setIsNewRecordingOpen] = useState(false)
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false)
   // Opened by the Rust `request-discard-confirmation` event (tray menu): the
   // destructive action itself runs only after the user confirms here.
   const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false)
@@ -216,6 +218,21 @@ export function AppShell() {
 
     void checkHardware()
   }, [setSelectedProfileId, toast])
+
+  // Check if first-run onboarding has been completed.
+  useEffect(() => {
+    async function checkOnboarding() {
+      try {
+        const done = await getSetting("onboardingCompleted")
+        if (done !== "true") {
+          setIsOnboardingOpen(true)
+        }
+      } catch {
+        // Fallback
+      }
+    }
+    void checkOnboarding()
+  }, [])
 
   // Open the editor view when a recording is opened from the library.
   useEffect(() => {
@@ -418,7 +435,10 @@ export function AppShell() {
                 resetKey={activeView}
                 onNavigateHome={() => setActiveView("library")}
               >
-                <SettingsView onNavigateToAbout={() => setActiveView("about")} />
+                <SettingsView
+                  onNavigateToAbout={() => setActiveView("about")}
+                  onReplayOnboarding={() => setIsOnboardingOpen(true)}
+                />
               </ViewErrorBoundary>
             ) : null}
             {activeView === "about" ? (
@@ -427,11 +447,24 @@ export function AppShell() {
                 resetKey={activeView}
                 onNavigateHome={() => setActiveView("library")}
               >
-                <AboutView onNavigateToSettings={() => setActiveView("settings")} />
+                <AboutView
+                  onNavigateToSettings={() => setActiveView("settings")}
+                  onReplayOnboarding={() => setIsOnboardingOpen(true)}
+                />
               </ViewErrorBoundary>
             ) : null}
           </main>
         </div>
+
+        {/* First-Run Onboarding Experience */}
+        <OnboardingModal
+          open={isOnboardingOpen}
+          onClose={() => setIsOnboardingOpen(false)}
+          onStartRecording={() => {
+            setIsOnboardingOpen(false)
+            setIsNewRecordingOpen(true)
+          }}
+        />
 
         {/* New Recording Modal Overlay */}
         <NewRecordingModal

@@ -35,12 +35,17 @@ import { useRecorderStore } from "../../hooks/use-recorder"
 export interface AboutViewProps {
   onNavigateToSettings?: () => void
   onNavigateToDiagnostics?: () => void
+  onReplayOnboarding?: () => void
 }
 
 const PRESTIGE_TECH_URL = "https://prestigetech.dev"
 const MASTER_DEV_URL = "https://me.prestigetech.dev"
 
-export function AboutView({ onNavigateToSettings, onNavigateToDiagnostics }: AboutViewProps) {
+export function AboutView({ 
+  onNavigateToSettings, 
+  onNavigateToDiagnostics, 
+  onReplayOnboarding,
+}: AboutViewProps) {
   const { toast } = useToast()
   const diagnostics = useRecorderStore((state) => state.diagnostics)
   const [isCopying, setIsCopying] = useState(false)
@@ -114,7 +119,7 @@ export function AboutView({ onNavigateToSettings, onNavigateToDiagnostics }: Abo
   return (
     <div className="flex flex-col gap-6 p-6 max-w-6xl mx-auto w-full">
       {/* Brand Hero Card */}
-      <div className="relative overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-surface via-surface to-surface-dim p-6 sm:p-8 shadow-e2">
+      <div className="relative overflow-hidden rounded-3xl border border-border bg-linear-to-br from-surface via-surface to-surface-dim p-6 sm:p-8 shadow-e2">
         <div className="absolute top-0 right-0 -mr-16 -mt-16 size-64 rounded-full bg-primary/10 blur-3xl pointer-events-none" />
         <div className="absolute bottom-0 left-1/3 -mb-16 size-48 rounded-full bg-secondary/10 blur-2xl pointer-events-none" />
 
@@ -151,6 +156,18 @@ export function AboutView({ onNavigateToSettings, onNavigateToDiagnostics }: Abo
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0 pt-2 lg:pt-0">
+            {onReplayOnboarding ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onReplayOnboarding}
+                className="h-9 px-3.5 text-xs cursor-pointer gap-1.5"
+              >
+                <Sparkles className="size-3.5 text-accent" />
+                Quick Tour
+              </Button>
+            ) : null}
+
             <Button
               variant="outline"
               size="sm"

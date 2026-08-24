@@ -43,9 +43,10 @@ export type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "st
 
 export interface SettingsViewProps {
   onNavigateToAbout?: () => void
+  onReplayOnboarding?: () => void
 }
 
-export function SettingsView({ onNavigateToAbout }: SettingsViewProps) {
+export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: SettingsViewProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general")
   const { theme, setTheme, micaEnabled, setMicaEnabled, micaActive } = useThemeStore()
   const {
@@ -398,6 +399,33 @@ export function SettingsView({ onNavigateToAbout }: SettingsViewProps) {
                 </p>
               </div>
               <Switch checked={minimizeToTray} onCheckedChange={handleMinimizeToTrayChange} />
+            </div>
+          </div>
+
+          {/* Welcome & Onboarding Tour Card */}
+          <div className="rounded-2xl border border-border bg-surface p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-foreground">Welcome & Onboarding Tour</h3>
+                  <span className="rounded bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">
+                    Interactive Walkthrough
+                  </span>
+                </div>
+                <p className="text-xs text-subtle-foreground mt-0.5">
+                  Replay the 5-step onboarding guide to review hardware tuning, audio setup, and cursor telemetry effects.
+                </p>
+              </div>
+              {onReplayOnboarding && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onReplayOnboarding}
+                  className="h-8 px-3 text-xs cursor-pointer gap-1.5"
+                >
+                  <Sparkles className="size-3.5 text-accent" /> Replay Tour
+                </Button>
+              )}
             </div>
           </div>
 

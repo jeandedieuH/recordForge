@@ -20,6 +20,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "editorTextPresets",
     "editorTextPresetFavorites",
     "recordingPreferences",
+    "onboardingCompleted",
 ];
 
 pub fn validate_key(key: &str) -> Result<()> {
@@ -53,6 +54,7 @@ mod tests {
     #[test]
     fn test_allowed_keys_includes_recording_preferences() {
         assert!(validate_key("recordingPreferences").is_ok());
+        assert!(validate_key("onboardingCompleted").is_ok());
         assert!(validate_key("theme").is_ok());
         assert!(validate_key("minimizeToTray").is_ok());
         assert!(validate_key("defaultOutputFolder").is_ok());
