@@ -176,6 +176,16 @@ describe("cursor-core", () => {
     expect(asset.effectiveId).toBe("shape-hand")
   })
 
+  it("stores cursor hotspots at the rendered SVG geometry point", () => {
+    const arrow = resolveCursorAsset("arrow", "recorded-system", { shapeMode: "optimized" })
+    const hand = resolveCursorAsset("hand", "recorded-system", { shapeMode: "optimized" })
+
+    expect(arrow.hotspotX).toBeCloseTo(3.5)
+    expect(arrow.hotspotY).toBeCloseTo(3.5)
+    expect(hand.hotspotX).toBeCloseTo(9)
+    expect(hand.hotspotY).toBeCloseTo(2.5)
+  })
+
   it("falls back to the recorded system arrow for unknown shape ids", () => {
     const asset = resolveCursorAsset("unknown-shape", "recorded-system", { shapeMode: "optimized" })
     expect(asset.id).toBe("recorded-system")

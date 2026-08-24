@@ -287,7 +287,7 @@ describe("Modern Zoom System", () => {
         translateY: 0,
       }
       const css = zoomTransformToCss(transform, canvas)
-      expect(css).toBe("scale(2) translate(-25%, -25%)")
+      expect(css).toBe("matrix(2, 0, 0, 2, -960, -540)")
     })
 
     it("maintains perfect cursor framing across high zoom factors (1.5x, 2.0x, 3.0x, 5.0x, 8.0x)", () => {

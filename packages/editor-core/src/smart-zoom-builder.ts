@@ -23,7 +23,7 @@ export const SMART_ZOOM_PRESETS: Record<ZoomPreset, SmartZoomPresetConfig> = {
   },
   developer: {
     scale: 2.0,
-    easing: "snappy",
+    easing: "smooth",
     mode: "follow-cursor",
     transitionInMs: 300,
     transitionOutMs: 300,
@@ -32,7 +32,7 @@ export const SMART_ZOOM_PRESETS: Record<ZoomPreset, SmartZoomPresetConfig> = {
   cinematic: {
     scale: 1.8,
     easing: "cinematic",
-    mode: "smooth-pan",
+    mode: "follow-cursor",
     transitionInMs: 600,
     transitionOutMs: 600,
     label: "Cinematic 1.8×",
@@ -48,10 +48,10 @@ export const SMART_ZOOM_PRESETS: Record<ZoomPreset, SmartZoomPresetConfig> = {
   "manual-only": {
     scale: 1.5,
     easing: "smooth",
-    mode: "static",
+    mode: "follow-cursor",
     transitionInMs: 400,
     transitionOutMs: 400,
-    label: "Static Center 1.5×",
+    label: "Manual 1.5×",
   },
 }
 

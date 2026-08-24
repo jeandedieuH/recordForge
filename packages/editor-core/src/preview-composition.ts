@@ -13,6 +13,9 @@ import type {
   TimelineClip,
   TimelineState,
   ZoomTarget,
+  RenderPlanZoomMotionPlan,
+  RenderPlanZoomMotionPoint,
+  RenderPlanZoomMotionSegment,
 } from "@recordforge/contracts"
 import {
   canonicalizeZoomTarget,
@@ -131,17 +134,78 @@ function clampRect(rect: MaskRect, canvas: TimelineCanvas): MaskRect {
 }
 
 export const FOLLOW_CAMERA_SAMPLE_STEP_MS = 100
+export const FOLLOW_CAMERA_MOTION_TOLERANCE_PX = 2
 
+export interface FollowCursorKeyframe {
+  timeMs: number
+  target: ZoomTarget
+}
+
+export interface FollowCursorKeyframeOptions {
+  sampleStepMs?: number
+  windowStartMs?: number
+  windowEndMs?: number
+  timeOffsetMs?: number
+  tolerancePx?: number
+}
+
+const followCursorPathCache = new WeakMap<
+  TimelineState,
+  WeakMap<CursorEngine, Map<string, FollowCursorKeyframe[]>>
+>()
+
+const followCursorMotionPlanCache = new WeakMap<
+  TimelineState,
+  WeakMap<CursorEngine, Map<string, RenderPlanZoomMotionPlan>>
+>()
+
+function zoomTargetCenter(target: ZoomTarget): { x: number; y: number } {
+  return {
+    x: target.x + target.width / 2,
+    y: target.y + target.height / 2,
+  }
+}
+
+function followCursorPathCacheKey(segment: ManualZoomSegment, sampleStepMs: number): string {
+  return [
+    segment.id,
+    segment.startMs,
+    segment.durationMs,
+    segment.scale,
+    segment.target.x,
+    segment.target.y,
+    segment.target.width,
+    segment.target.height,
+    segment.followDeadzonePercent,
+    segment.followSmoothingAlpha,
+    sampleStepMs,
+  ].join(":")
+}
+
+function followCursorMotionPlanCacheKey(
+  segment: ManualZoomSegment,
+  sampleStepMs: number,
+  tolerancePx: number,
+): string {
+  return `${followCursorPathCacheKey(segment, sampleStepMs)}:${tolerancePx}`
+}
+
+/** Resolve one follow-camera sample from a supplied previous camera center. */
 export function resolveFollowCursorTarget(
   segment: ManualZoomSegment,
   state: TimelineState,
   timeMs: number,
   cursorEngine: CursorEngine | null | undefined,
+  previousCenter?: { x: number; y: number },
 ): ZoomTarget | undefined {
-  if (segment.mode === "static" || segment.mode === "manual" || !cursorEngine) return undefined
+  if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
   const sourceTimeMs = timelineToCursorSourceTime(state, timeMs)
   if (sourceTimeMs === null) return undefined
-  const frame = cursorEngine.evaluate(sourceTimeMs, state.canvas.cursorSettings)
+  const cursorSettings = cursorSettingsForEffect(
+    state.canvas.cursorSettings,
+    findCursorEffectAtTime(state, timeMs),
+  )
+  const frame = cursorEngine.evaluate(sourceTimeMs, cursorSettings)
   if (!frame.visible) return undefined
   const fitted = fitCursorPoint(
     { x: frame.sourceX, y: frame.sourceY },
@@ -153,13 +217,10 @@ export function resolveFollowCursorTarget(
 
   const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
   const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
-  const initialCenter = {
-    x: baseTarget.x + baseTarget.width / 2,
-    y: baseTarget.y + baseTarget.height / 2,
-  }
+  const initialCenter = zoomTargetCenter(baseTarget)
   const followCenter = resolveInertialFollowCenter(
     { x: fitted.x, y: fitted.y },
-    initialCenter,
+    previousCenter ?? initialCenter,
     { width: state.canvas.width / desiredScale, height: state.canvas.height / desiredScale },
     {
       deadzoneRadiusPercent: segment.followDeadzonePercent,
@@ -169,11 +230,514 @@ export function resolveFollowCursorTarget(
   return zoomTargetForCursorPoint(followCenter, state.canvas, desiredScale)
 }
 
+function buildRawFollowCursorKeyframes(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  cursorEngine: CursorEngine,
+  sampleStepMs: number,
+): FollowCursorKeyframe[] {
+  const segmentStartMs = segment.startMs
+  const segmentEndMs = segment.startMs + Math.max(1, segment.durationMs)
+  const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
+  let previousTarget = baseTarget
+  let previousCenter = zoomTargetCenter(baseTarget)
+  const keyframes: FollowCursorKeyframe[] = []
+
+  for (let timeMs = segmentStartMs; timeMs < segmentEndMs; timeMs += sampleStepMs) {
+    const target =
+      resolveFollowCursorTarget(segment, state, timeMs, cursorEngine, previousCenter) ??
+      previousTarget
+    keyframes.push({ timeMs, target })
+    previousTarget = target
+    previousCenter = zoomTargetCenter(target)
+  }
+
+  keyframes.push({
+    timeMs: segmentEndMs,
+    target:
+      resolveFollowCursorTarget(segment, state, segmentEndMs, cursorEngine, previousCenter) ??
+      previousTarget,
+  })
+  return keyframes
+}
+
+function getRawFollowCursorKeyframes(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  cursorEngine: CursorEngine,
+  sampleStepMs: number,
+): FollowCursorKeyframe[] {
+  if (sampleStepMs !== FOLLOW_CAMERA_SAMPLE_STEP_MS) {
+    return buildRawFollowCursorKeyframes(segment, state, cursorEngine, sampleStepMs)
+  }
+
+  let stateCache = followCursorPathCache.get(state)
+  if (!stateCache) {
+    stateCache = new WeakMap()
+    followCursorPathCache.set(state, stateCache)
+  }
+
+  let engineCache = stateCache.get(cursorEngine)
+  if (!engineCache) {
+    engineCache = new Map()
+    stateCache.set(cursorEngine, engineCache)
+  }
+
+  const key = followCursorPathCacheKey(segment, sampleStepMs)
+  const cached = engineCache.get(key)
+  if (cached) return cached
+
+  const keyframes = buildRawFollowCursorKeyframes(segment, state, cursorEngine, sampleStepMs)
+  engineCache.set(key, keyframes)
+  return keyframes
+}
+
+function interpolateFollowCursorTarget(
+  keyframes: FollowCursorKeyframe[],
+  timeMs: number,
+): ZoomTarget | undefined {
+  if (keyframes.length === 0) return undefined
+  const safeTimeMs = Number.isFinite(timeMs) ? timeMs : keyframes[0].timeMs
+  if (safeTimeMs <= keyframes[0].timeMs) return keyframes[0].target
+
+  for (let index = 1; index < keyframes.length; index++) {
+    const right = keyframes[index]
+    const left = keyframes[index - 1]
+    if (safeTimeMs > right.timeMs) continue
+    const span = Math.max(1, right.timeMs - left.timeMs)
+    const alpha = Math.min(1, Math.max(0, (safeTimeMs - left.timeMs) / span))
+    return {
+      x: left.target.x + (right.target.x - left.target.x) * alpha,
+      y: left.target.y + (right.target.y - left.target.y) * alpha,
+      width: left.target.width + (right.target.width - left.target.width) * alpha,
+      height: left.target.height + (right.target.height - left.target.height) * alpha,
+    }
+  }
+
+  return keyframes[keyframes.length - 1].target
+}
+
+function deduplicateFollowCursorKeyframes(
+  keyframes: FollowCursorKeyframe[],
+): FollowCursorKeyframe[] {
+  const result: FollowCursorKeyframe[] = []
+  for (const keyframe of keyframes) {
+    const previous = result[result.length - 1]
+    if (previous?.timeMs === keyframe.timeMs) result[result.length - 1] = keyframe
+    else result.push(keyframe)
+  }
+  return result
+}
+
+interface FollowCursorWindow {
+  keyframes: FollowCursorKeyframe[]
+}
+
+function getFollowCursorWindow(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  cursorEngine: CursorEngine,
+  sampleStepMs: number,
+  options: FollowCursorKeyframeOptions,
+): FollowCursorWindow | undefined {
+  const segmentStartMs = segment.startMs
+  const segmentEndMs = segment.startMs + Math.max(1, segment.durationMs)
+  const raw = getRawFollowCursorKeyframes(segment, state, cursorEngine, sampleStepMs)
+  const requestedStart = options.windowStartMs ?? segmentStartMs
+  const requestedEnd = options.windowEndMs ?? segmentEndMs
+  const windowStartMs = Math.min(
+    segmentEndMs,
+    Math.max(segmentStartMs, Number.isFinite(requestedStart) ? requestedStart : segmentStartMs),
+  )
+  const windowEndMs = Math.max(
+    windowStartMs,
+    Math.min(segmentEndMs, Number.isFinite(requestedEnd) ? requestedEnd : segmentEndMs),
+  )
+  const startTarget = interpolateFollowCursorTarget(raw, windowStartMs)
+  const endTarget = interpolateFollowCursorTarget(raw, windowEndMs)
+  if (!startTarget || !endTarget) return undefined
+
+  return {
+    keyframes: deduplicateFollowCursorKeyframes([
+      { timeMs: windowStartMs, target: startTarget },
+      ...raw.filter(({ timeMs }) => timeMs > windowStartMs && timeMs < windowEndMs),
+      { timeMs: windowEndMs, target: endTarget },
+    ]),
+  }
+}
+
+function safeMotionTolerance(value: number | undefined): number {
+  return Number.isFinite(value)
+    ? Math.max(0, value ?? FOLLOW_CAMERA_MOTION_TOLERANCE_PX)
+    : FOLLOW_CAMERA_MOTION_TOLERANCE_PX
+}
+
+function motionPointFromKeyframe(keyframe: FollowCursorKeyframe): RenderPlanZoomMotionPoint {
+  return zoomTargetCenter(keyframe.target)
+}
+
+function motionPointDistance(
+  left: RenderPlanZoomMotionPoint,
+  right: RenderPlanZoomMotionPoint,
+): number {
+  return Math.hypot(left.x - right.x, left.y - right.y)
+}
+
+function pointToLineDistance(
+  point: RenderPlanZoomMotionPoint,
+  start: RenderPlanZoomMotionPoint,
+  end: RenderPlanZoomMotionPoint,
+): number {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const lengthSquared = dx * dx + dy * dy
+  if (lengthSquared <= Number.EPSILON) return motionPointDistance(point, start)
+
+  const projection = Math.min(
+    1,
+    Math.max(0, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared),
+  )
+  return Math.hypot(point.x - (start.x + projection * dx), point.y - (start.y + projection * dy))
+}
+
+function shouldPreserveMotionAnchor(
+  samples: FollowCursorKeyframe[],
+  index: number,
+  tolerancePx: number,
+): boolean {
+  const previous = samples[index - 1]
+  const current = samples[index]
+  const next = samples[index + 1]
+  if (!previous || !current || !next) return false
+
+  const previousPoint = motionPointFromKeyframe(previous)
+  const currentPoint = motionPointFromKeyframe(current)
+  const nextPoint = motionPointFromKeyframe(next)
+  const previousDistance = motionPointDistance(previousPoint, currentPoint)
+  const nextDistance = motionPointDistance(currentPoint, nextPoint)
+  const hasPauseBoundary =
+    (previousDistance <= tolerancePx && nextDistance > tolerancePx) ||
+    (nextDistance <= tolerancePx && previousDistance > tolerancePx)
+  if (hasPauseBoundary) return true
+
+  const previousDuration = Math.max(1, current.timeMs - previous.timeMs)
+  const nextDuration = Math.max(1, next.timeMs - current.timeMs)
+  const incoming = {
+    x: (currentPoint.x - previousPoint.x) / previousDuration,
+    y: (currentPoint.y - previousPoint.y) / previousDuration,
+  }
+  const outgoing = {
+    x: (nextPoint.x - currentPoint.x) / nextDuration,
+    y: (nextPoint.y - currentPoint.y) / nextDuration,
+  }
+  return incoming.x * outgoing.x + incoming.y * outgoing.y < 0
+}
+
+function rdpMotionPointIndices(
+  samples: FollowCursorKeyframe[],
+  startIndex: number,
+  endIndex: number,
+  tolerancePx: number,
+  retained: Set<number>,
+): void {
+  const stack: Array<[number, number]> = [[startIndex, endIndex]]
+  while (stack.length > 0) {
+    const [start, end] = stack.pop() ?? [0, 0]
+    if (end - start <= 1) continue
+
+    const startPoint = motionPointFromKeyframe(samples[start])
+    const endPoint = motionPointFromKeyframe(samples[end])
+    let furthestIndex = -1
+    let furthestDistance = tolerancePx
+    for (let index = start + 1; index < end; index++) {
+      const distance = pointToLineDistance(
+        motionPointFromKeyframe(samples[index]),
+        startPoint,
+        endPoint,
+      )
+      if (distance > furthestDistance) {
+        furthestDistance = distance
+        furthestIndex = index
+      }
+    }
+
+    if (furthestIndex < 0) continue
+    retained.add(furthestIndex)
+    stack.push([start, furthestIndex], [furthestIndex, end])
+  }
+}
+
+function simplifyFollowCursorKeyframes(
+  samples: FollowCursorKeyframe[],
+  tolerancePx: number,
+): FollowCursorKeyframe[] {
+  if (samples.length <= 2) return samples
+
+  const anchors = new Set<number>([0, samples.length - 1])
+  for (let index = 1; index < samples.length - 1; index++) {
+    if (shouldPreserveMotionAnchor(samples, index, tolerancePx)) anchors.add(index)
+  }
+
+  const sortedAnchors = [...anchors].sort((left, right) => left - right)
+  const retained = new Set<number>(sortedAnchors)
+  for (let index = 1; index < sortedAnchors.length; index++) {
+    rdpMotionPointIndices(
+      samples,
+      sortedAnchors[index - 1],
+      sortedAnchors[index],
+      tolerancePx,
+      retained,
+    )
+  }
+
+  return [...retained].sort((left, right) => left - right).map((index) => samples[index])
+}
+
+function subtractMotionPoints(
+  left: RenderPlanZoomMotionPoint,
+  right: RenderPlanZoomMotionPoint,
+): RenderPlanZoomMotionPoint {
+  return { x: left.x - right.x, y: left.y - right.y }
+}
+
+function scaleMotionPoint(
+  point: RenderPlanZoomMotionPoint,
+  factor: number,
+): RenderPlanZoomMotionPoint {
+  return { x: point.x * factor, y: point.y * factor }
+}
+
+function addMotionPoints(
+  left: RenderPlanZoomMotionPoint,
+  right: RenderPlanZoomMotionPoint,
+): RenderPlanZoomMotionPoint {
+  return { x: left.x + right.x, y: left.y + right.y }
+}
+
+function clampMotionControlPoint(
+  point: RenderPlanZoomMotionPoint,
+  start: RenderPlanZoomMotionPoint,
+  end: RenderPlanZoomMotionPoint,
+): RenderPlanZoomMotionPoint {
+  return {
+    x: Math.min(Math.max(point.x, Math.min(start.x, end.x)), Math.max(start.x, end.x)),
+    y: Math.min(Math.max(point.y, Math.min(start.y, end.y)), Math.max(start.y, end.y)),
+  }
+}
+
+function buildFollowCursorMotionSegments(
+  samples: FollowCursorKeyframe[],
+  tolerancePx: number,
+): RenderPlanZoomMotionSegment[] {
+  const points = samples.map(motionPointFromKeyframe)
+  const tangents = points.map((point, index) => {
+    const previous = points[index - 1]
+    const next = points[index + 1]
+    const isStationary =
+      (previous && motionPointDistance(previous, point) <= tolerancePx) ||
+      (next && motionPointDistance(point, next) <= tolerancePx)
+    if (isStationary) return { x: 0, y: 0 }
+    if (!previous && next) {
+      return scaleMotionPoint(
+        subtractMotionPoints(next, point),
+        1 / Math.max(1, samples[index + 1].timeMs - samples[index].timeMs),
+      )
+    }
+    if (!next && previous) {
+      return scaleMotionPoint(
+        subtractMotionPoints(point, previous),
+        1 / Math.max(1, samples[index].timeMs - samples[index - 1].timeMs),
+      )
+    }
+    if (!previous || !next) return { x: 0, y: 0 }
+    return scaleMotionPoint(
+      subtractMotionPoints(next, previous),
+      1 / Math.max(1, samples[index + 1].timeMs - samples[index - 1].timeMs),
+    )
+  })
+
+  return samples.slice(0, -1).map((sample, index) => {
+    const nextSample = samples[index + 1]
+    const start = points[index]
+    const end = points[index + 1]
+    const durationMs = Math.max(1, nextSample.timeMs - sample.timeMs)
+    const control1 = clampMotionControlPoint(
+      addMotionPoints(start, scaleMotionPoint(tangents[index], durationMs / 3)),
+      start,
+      end,
+    )
+    const control2 = clampMotionControlPoint(
+      subtractMotionPoints(end, scaleMotionPoint(tangents[index + 1], durationMs / 3)),
+      start,
+      end,
+    )
+    return {
+      startMs: Math.round(sample.timeMs),
+      endMs: Math.round(nextSample.timeMs),
+      start,
+      control1,
+      control2,
+      end,
+    }
+  })
+}
+
+function getMotionPlanTolerance(options: FollowCursorKeyframeOptions): number {
+  return safeMotionTolerance(options.tolerancePx)
+}
+
+function buildMotionPlanFromWindow(
+  window: FollowCursorWindow,
+  options: FollowCursorKeyframeOptions,
+): RenderPlanZoomMotionPlan | undefined {
+  if (window.keyframes.length < 2) return undefined
+  const tolerancePx = getMotionPlanTolerance(options)
+  const samples = simplifyFollowCursorKeyframes(window.keyframes, tolerancePx)
+  const segments = buildFollowCursorMotionSegments(samples, tolerancePx)
+  if (segments.length === 0) return undefined
+  const timeOffsetMs = Number.isFinite(options.timeOffsetMs) ? (options.timeOffsetMs ?? 0) : 0
+
+  return {
+    version: 1,
+    kind: "cubic-bezier",
+    segments: segments.map((segment) => ({
+      ...segment,
+      startMs: Math.round(segment.startMs - timeOffsetMs),
+      endMs: Math.round(segment.endMs - timeOffsetMs),
+    })),
+  }
+}
+
+/** Build an adaptive cubic camera path without the legacy 11-keyframe limit. */
+export function buildFollowCursorMotionPlan(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  cursorEngine: CursorEngine | null | undefined,
+  options: FollowCursorKeyframeOptions = {},
+): RenderPlanZoomMotionPlan | undefined {
+  if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
+
+  const requestedSampleStepMs = options.sampleStepMs ?? FOLLOW_CAMERA_SAMPLE_STEP_MS
+  const sampleStepMs = Number.isFinite(requestedSampleStepMs)
+    ? Math.max(1, Math.round(requestedSampleStepMs))
+    : FOLLOW_CAMERA_SAMPLE_STEP_MS
+  const tolerancePx = getMotionPlanTolerance(options)
+  const isFullPlan =
+    options.windowStartMs === undefined &&
+    options.windowEndMs === undefined &&
+    (!options.timeOffsetMs || options.timeOffsetMs === 0)
+  const cacheKey = followCursorMotionPlanCacheKey(segment, sampleStepMs, tolerancePx)
+
+  if (isFullPlan && sampleStepMs === FOLLOW_CAMERA_SAMPLE_STEP_MS) {
+    let stateCache = followCursorMotionPlanCache.get(state)
+    if (!stateCache) {
+      stateCache = new WeakMap()
+      followCursorMotionPlanCache.set(state, stateCache)
+    }
+    let engineCache = stateCache.get(cursorEngine)
+    if (!engineCache) {
+      engineCache = new Map()
+      stateCache.set(cursorEngine, engineCache)
+    }
+    const cached = engineCache.get(cacheKey)
+    if (cached) return cached
+
+    const window = getFollowCursorWindow(segment, state, cursorEngine, sampleStepMs, options)
+    const plan = window ? buildMotionPlanFromWindow(window, options) : undefined
+    if (plan) engineCache.set(cacheKey, plan)
+    return plan
+  }
+
+  const window = getFollowCursorWindow(segment, state, cursorEngine, sampleStepMs, options)
+  return window ? buildMotionPlanFromWindow(window, options) : undefined
+}
+
 /**
- * Sample follow-camera targets on the same 100ms grid used by the export plan.
- * Preview therefore displays the exact piecewise-linear camera path that Rust
- * receives instead of following a separate continuous approximation.
+ * Keep the old keyframe helper available for callers that still need samples.
+ * New preview and export paths use `buildFollowCursorMotionPlan` instead.
  */
+export function buildFollowCursorKeyframes(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  cursorEngine: CursorEngine | null | undefined,
+  options: FollowCursorKeyframeOptions = {},
+): FollowCursorKeyframe[] {
+  if (segment.mode !== "follow-cursor" || !cursorEngine) return []
+
+  const requestedSampleStepMs = options.sampleStepMs ?? FOLLOW_CAMERA_SAMPLE_STEP_MS
+  const sampleStepMs = Number.isFinite(requestedSampleStepMs)
+    ? Math.max(1, Math.round(requestedSampleStepMs))
+    : FOLLOW_CAMERA_SAMPLE_STEP_MS
+  const window = getFollowCursorWindow(segment, state, cursorEngine, sampleStepMs, options)
+  if (!window) return []
+
+  const timeOffsetMs = Number.isFinite(options.timeOffsetMs) ? (options.timeOffsetMs ?? 0) : 0
+
+  return window.keyframes.map((keyframe) => ({
+    timeMs: keyframe.timeMs - timeOffsetMs,
+    target: clampZoomTarget(keyframe.target, state.canvas),
+  }))
+}
+
+function cubicBezierPoint(
+  segment: RenderPlanZoomMotionSegment,
+  progress: number,
+): RenderPlanZoomMotionPoint {
+  const inverse = 1 - progress
+  const inverseSquared = inverse * inverse
+  const progressSquared = progress * progress
+  return {
+    x:
+      inverseSquared * inverse * segment.start.x +
+      3 * inverseSquared * progress * segment.control1.x +
+      3 * inverse * progressSquared * segment.control2.x +
+      progressSquared * progress * segment.end.x,
+    y:
+      inverseSquared * inverse * segment.start.y +
+      3 * inverseSquared * progress * segment.control1.y +
+      3 * inverse * progressSquared * segment.control2.y +
+      progressSquared * progress * segment.end.y,
+  }
+}
+
+function resolveFollowCursorMotionPointAtTime(
+  motionPlan: RenderPlanZoomMotionPlan,
+  timeMs: number,
+): RenderPlanZoomMotionPoint | undefined {
+  const segments = motionPlan.segments
+  if (segments.length === 0) return undefined
+  const safeTimeMs = Number.isFinite(timeMs) ? timeMs : segments[0].startMs
+  if (safeTimeMs <= segments[0].startMs) return segments[0].start
+
+  let low = 0
+  let high = segments.length - 1
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (safeTimeMs <= segments[middle].endMs) high = middle
+    else low = middle + 1
+  }
+
+  const segment = segments[low]
+  const durationMs = Math.max(1, segment.endMs - segment.startMs)
+  const progress = Math.min(1, Math.max(0, (safeTimeMs - segment.startMs) / durationMs))
+  return cubicBezierPoint(segment, progress)
+}
+
+/** Evaluate a compact motion plan into the canonical zoom target at a time. */
+export function resolveFollowCursorMotionPlanTargetAtTime(
+  motionPlan: RenderPlanZoomMotionPlan,
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  timeMs: number,
+): ZoomTarget | undefined {
+  const point = resolveFollowCursorMotionPointAtTime(motionPlan, timeMs)
+  if (!point) return undefined
+  const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
+  const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
+  return zoomTargetForCursorPoint(point, state.canvas, desiredScale)
+}
+
+/** Resolve a preview target from the same motion plan that export receives. */
 export function resolveFollowCursorTargetAtTime(
   segment: ManualZoomSegment,
   state: TimelineState,
@@ -181,32 +745,28 @@ export function resolveFollowCursorTargetAtTime(
   cursorEngine: CursorEngine | null | undefined,
   sampleStepMs = FOLLOW_CAMERA_SAMPLE_STEP_MS,
 ): ZoomTarget | undefined {
-  if (segment.mode === "static" || segment.mode === "manual" || !cursorEngine) {
-    return undefined
-  }
+  if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
+  const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine, { sampleStepMs })
+  return motionPlan
+    ? resolveFollowCursorMotionPlanTargetAtTime(motionPlan, segment, state, timeMs)
+    : undefined
+}
 
-  const safeStepMs = Math.max(1, Math.round(sampleStepMs))
-  const segmentEndMs = segment.startMs + segment.durationMs
-  const clampedTimeMs = Math.min(segmentEndMs, Math.max(segment.startMs, timeMs))
-  const elapsedMs = clampedTimeMs - segment.startMs
-  const leftTimeMs = segment.startMs + Math.floor(elapsedMs / safeStepMs) * safeStepMs
-  const rightTimeMs = Math.min(segmentEndMs, leftTimeMs + safeStepMs)
-  const leftTarget = resolveFollowCursorTarget(segment, state, leftTimeMs, cursorEngine)
-  if (!leftTarget || rightTimeMs === leftTimeMs) return leftTarget
+function resolvePreviousZoomTarget(
+  previous: ManualZoomSegment | null,
+  state: TimelineState,
+  cursorEngine: CursorEngine | null | undefined,
+): ZoomTarget | null {
+  if (!previous) return null
+  if (previous.mode !== "follow-cursor" || !cursorEngine) return previous.target
 
-  const rightTarget = resolveFollowCursorTarget(segment, state, rightTimeMs, cursorEngine)
-  if (!rightTarget) return leftTarget
-
-  const spanMs = Math.max(1, rightTimeMs - leftTimeMs)
-  const alpha = (clampedTimeMs - leftTimeMs) / spanMs
-  return clampZoomTarget(
-    {
-      x: leftTarget.x + (rightTarget.x - leftTarget.x) * alpha,
-      y: leftTarget.y + (rightTarget.y - leftTarget.y) * alpha,
-      width: leftTarget.width + (rightTarget.width - leftTarget.width) * alpha,
-      height: leftTarget.height + (rightTarget.height - leftTarget.height) * alpha,
-    },
-    state.canvas,
+  return (
+    resolveFollowCursorTargetAtTime(
+      previous,
+      state,
+      previous.startMs + Math.max(1, previous.durationMs),
+      cursorEngine,
+    ) ?? previous.target
   )
 }
 
@@ -237,11 +797,14 @@ export function resolvePreviewComposition(
     : undefined
 
   const previousZoom = activeZoom ? findPreviousZoomSegment(state, activeZoom) : null
+  const previousTarget = activeZoom
+    ? resolvePreviousZoomTarget(previousZoom, state, cursorEngine)
+    : null
 
   const zoomTransform = activeZoom
     ? resolveZoomTransform(activeZoom, timeMs, state.canvas, {
         target: followTarget,
-        fromTarget: previousZoom?.target,
+        fromTarget: previousTarget,
         fromScale: previousZoom?.scale,
       })
     : null
@@ -373,21 +936,22 @@ export function resolvePreviewComposition(
 }
 
 /**
- * Convert a zoom transform into the same CSS transform string used by the
- * preview video and the cursor overlay so they share one geometry.
- * Uses standard top-left origin (0 0) with scale and crop translation.
+ * Convert a zoom crop to a pixel matrix so the preview video and cursor overlay
+ * apply exactly the same transform at the rendered video dimensions.
  */
 export function zoomTransformToCss(
   transform: ZoomTransform,
   canvas: { width: number; height: number },
+  viewport: { width: number; height: number } = canvas,
 ): string {
   const canvasWidth = Math.max(1, canvas.width)
   const canvasHeight = Math.max(1, canvas.height)
-  const cropXPercent = (transform.crop.x / canvasWidth) * 100
-  const cropYPercent = (transform.crop.y / canvasHeight) * 100
+  const viewportWidth = Math.max(1, viewport.width)
+  const viewportHeight = Math.max(1, viewport.height)
   const scaleX = canvasWidth / Math.max(1, transform.crop.width)
   const scaleY = canvasHeight / Math.max(1, transform.crop.height)
-  const scale =
-    Math.abs(scaleX - scaleY) < 1e-6 ? `scale(${scaleX})` : `scale(${scaleX}, ${scaleY})`
-  return `${scale} translate(-${cropXPercent}%, -${cropYPercent}%)`
+  const translateX = -(transform.crop.x / canvasWidth) * viewportWidth * scaleX
+  const translateY = -(transform.crop.y / canvasHeight) * viewportHeight * scaleY
+
+  return `matrix(${scaleX}, 0, 0, ${scaleY}, ${translateX}, ${translateY})`
 }

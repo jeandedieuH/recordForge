@@ -1,5 +1,5 @@
 import { useState } from "react"
-import type { ManualZoomSegment, ZoomEasing, ZoomMode } from "@recordforge/contracts"
+import type { ManualZoomSegment, ZoomEasing } from "@recordforge/contracts"
 import {
   clampZoomTarget,
   zoomSegmentBadges,
@@ -271,41 +271,26 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
         </div>
       </div>
 
-      {/* Mode and Easing */}
+      {/* Follow camera and the two stable easing choices are intentionally the only new controls. */}
       <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-3">
-        <label className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
+        <div className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
           <span>Camera Mode</span>
-          <NativeSelect
-            aria-label="Camera tracking mode"
-            value={segment.mode ?? "static"}
-            onChange={(event) => handleUpdate({ mode: event.target.value as ZoomMode })}
-            disabled={segment.locked}
-            className="w-36"
-          >
-            <option value="static">Static Box</option>
-            <option value="follow-cursor">Follow Cursor</option>
-            <option value="smooth-pan">Smooth Pan</option>
-            <option value="auto">Auto / Smart</option>
-          </NativeSelect>
-        </label>
+          <span className="rounded-md border border-primary/30 bg-primary/10 px-2 py-1 font-medium text-primary">
+            Follow cursor
+          </span>
+        </div>
 
         <label className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
           <span>Easing Curve</span>
           <NativeSelect
             aria-label="Zoom easing"
-            value={segment.easing ?? "smooth"}
+            value={segment.easing === "cinematic" ? "cinematic" : "smooth"}
             onChange={(event) => handleUpdate({ easing: event.target.value as ZoomEasing })}
             disabled={segment.locked}
             className="w-36"
           >
-            <option value="smooth">Smooth (Quintic)</option>
-            <option value="spring">Spring (Dynamic)</option>
+            <option value="smooth">Smooth</option>
             <option value="cinematic">Cinematic</option>
-            <option value="snappy">Snappy</option>
-            <option value="ease-in-out">Ease in / out</option>
-            <option value="ease-in">Ease in</option>
-            <option value="ease-out">Ease out</option>
-            <option value="linear">Linear</option>
           </NativeSelect>
         </label>
 

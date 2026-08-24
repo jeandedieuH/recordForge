@@ -189,6 +189,32 @@ pub struct RenderPlanZoomKeyframe {
     pub target: RenderCropFloat,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanZoomMotionPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanZoomMotionSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub start: RenderPlanZoomMotionPoint,
+    pub control1: RenderPlanZoomMotionPoint,
+    pub control2: RenderPlanZoomMotionPoint,
+    pub end: RenderPlanZoomMotionPoint,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanZoomMotionPlan {
+    pub version: u32,
+    pub kind: String,
+    pub segments: Vec<RenderPlanZoomMotionSegment>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenderPlanZoomSegment {
@@ -224,6 +250,8 @@ pub struct RenderPlanZoomSegment {
     pub from_scale: Option<f64>,
     #[serde(default)]
     pub keyframes: Option<Vec<RenderPlanZoomKeyframe>>,
+    #[serde(default)]
+    pub motion_plan: Option<RenderPlanZoomMotionPlan>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -292,7 +320,7 @@ fn default_zoom_easing() -> String {
 }
 
 fn default_zoom_mode() -> String {
-    "static".into()
+    "follow-cursor".into()
 }
 
 fn default_zoom_source() -> String {
@@ -3832,87 +3860,22 @@ pub(crate) fn clamped_zoom_crop(
     }
 }
 
-fn build_keyframe_center_expression(
-    keyframes: &[RenderPlanZoomKeyframe],
-    canvas: &cursor::RenderCanvas,
-    dimension: f64,
-    axis: &str,
-    scale: f64,
+fn build_balanced_linear_expression(
+    points: &[(f64, f64)],
+    start_index: usize,
+    end_index: usize,
     fallback: &str,
 ) -> String {
-    let canvas_dim = if axis == "x" {
-        canvas.width as f64
-    } else {
-        canvas.height as f64
-    };
-    if keyframes.is_empty() {
+    let interval_count = end_index.saturating_sub(start_index);
+    if interval_count == 0 {
         return fallback.to_string();
     }
 
-    // 1. Extract (t_s, val) points
-    let mut points: Vec<(f64, f64)> = Vec::with_capacity(keyframes.len());
-    for k in keyframes {
-        let t_s = k.time_ms as f64 / 1000.0;
-        let target = clamped_zoom_crop(
-            canvas.width,
-            canvas.height,
-            canvas.padding,
-            &k.target,
-            scale,
-        );
-        let val = if axis == "x" {
-            (((target.x + target.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
-        } else {
-            (((target.y + target.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
-        };
-        if let Some(last) = points.last_mut() {
-            if (last.0 - t_s).abs() < 1e-4 {
-                last.1 = val;
-                continue;
-            }
-        }
-        points.push((t_s, val));
-    }
-
-    if points.len() <= 1 {
-        return fallback.to_string();
-    }
-
-    // 2. Collapse consecutive points that are effectively static
-    let mut simplified: Vec<(f64, f64)> = Vec::with_capacity(points.len());
-    for (t, v) in points {
-        if simplified.len() >= 2 {
-            let p0 = simplified[simplified.len() - 2];
-            let p1 = simplified[simplified.len() - 1];
-            if (p1.1 - p0.1).abs() < 1.0 && (v - p1.1).abs() < 1.0 {
-                simplified.pop();
-                simplified.push((t, p1.1));
-                continue;
-            }
-        }
-        simplified.push((t, v));
-    }
-
-    // 3. Limit to max 10 segments (11 keyframe points) to prevent FFmpeg zoompan AST recursion limits
-    const MAX_POINTS: usize = 11;
-    let final_points = if simplified.len() > MAX_POINTS {
-        let stride = (simplified.len() - 1) as f64 / (MAX_POINTS - 1) as f64;
-        let mut decimated = Vec::with_capacity(MAX_POINTS);
-        for i in 0..MAX_POINTS {
-            let idx = ((i as f64 * stride).round() as usize).min(simplified.len() - 1);
-            decimated.push(simplified[idx]);
-        }
-        decimated
-    } else {
-        simplified
-    };
-
-    let mut expr = fallback.to_string();
-    for i in (0..final_points.len() - 1).rev() {
-        let (t0_s, val0) = final_points[i];
-        let (t1_s, val1) = final_points[i + 1];
+    if interval_count == 1 {
+        let (t0_s, val0) = points[start_index];
+        let (t1_s, val1) = points[end_index];
         if t1_s <= t0_s {
-            continue;
+            return fallback.to_string();
         }
 
         let span_s = t1_s - t0_s;
@@ -3933,10 +3896,247 @@ fn build_keyframe_center_expression(
             format!("{val0_str}{delta_str}*(it-{t0_str})/{span_str}")
         };
 
-        expr = format!("if(gte(it,{t0_str})*lt(it,{t1_str}),{interp},{expr})");
+        return format!("if(gte(it,{t0_str})*lt(it,{t1_str}),{interp},{fallback})");
     }
 
-    expr
+    let split_index = start_index + interval_count / 2;
+    let left = build_balanced_linear_expression(points, start_index, split_index, fallback);
+    let right = build_balanced_linear_expression(points, split_index, end_index, fallback);
+    let split_time = compact_num(points[split_index].0);
+    format!("if(lt(it,{split_time}),{left},{right})")
+}
+
+fn build_keyframe_center_expression(
+    keyframes: &[RenderPlanZoomKeyframe],
+    canvas: &cursor::RenderCanvas,
+    dimension: f64,
+    axis: &str,
+    scale: f64,
+    fallback: &str,
+) -> String {
+    let canvas_dim = if axis == "x" {
+        canvas.width as f64
+    } else {
+        canvas.height as f64
+    };
+    if keyframes.is_empty() || canvas_dim <= 0.0 {
+        return fallback.to_string();
+    }
+
+    let mut points: Vec<(f64, f64)> = Vec::with_capacity(keyframes.len());
+    for keyframe in keyframes {
+        let time_s = keyframe.time_ms as f64 / 1000.0;
+        let target = clamped_zoom_crop(
+            canvas.width,
+            canvas.height,
+            canvas.padding,
+            &keyframe.target,
+            scale,
+        );
+        let value = if axis == "x" {
+            (((target.x + target.width / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        } else {
+            (((target.y + target.height / 2.0) / canvas_dim) * dimension).clamp(0.0, dimension)
+        };
+        if let Some(last) = points.last_mut() {
+            if (last.0 - time_s).abs() < 1e-4 {
+                last.1 = value;
+                continue;
+            }
+        }
+        points.push((time_s, value));
+    }
+
+    if points.len() <= 1 {
+        return fallback.to_string();
+    }
+
+    let mut simplified: Vec<(f64, f64)> = Vec::with_capacity(points.len());
+    for (time_s, value) in points {
+        if simplified.len() >= 2 {
+            let p0 = simplified[simplified.len() - 2];
+            let p1 = simplified[simplified.len() - 1];
+            if (p1.1 - p0.1).abs() < 1.0 && (value - p1.1).abs() < 1.0 {
+                simplified.pop();
+                simplified.push((time_s, p1.1));
+                continue;
+            }
+        }
+        simplified.push((time_s, value));
+    }
+
+    build_balanced_linear_expression(&simplified, 0, simplified.len() - 1, fallback)
+}
+
+fn motion_point_axis_value(point: &RenderPlanZoomMotionPoint, axis: &str) -> f64 {
+    if axis == "x" {
+        point.x
+    } else {
+        point.y
+    }
+}
+
+fn build_motion_cubic_expression(
+    segment: &RenderPlanZoomMotionSegment,
+    canvas: &cursor::RenderCanvas,
+    dimension: f64,
+    axis: &str,
+) -> String {
+    let canvas_dim = if axis == "x" {
+        canvas.width as f64
+    } else {
+        canvas.height as f64
+    };
+    let start_s = segment.start_ms as f64 / 1000.0;
+    let end_s = segment.end_ms as f64 / 1000.0;
+    let span_s = end_s - start_s;
+    if canvas_dim <= 0.0 || dimension <= 0.0 || span_s <= 0.0 {
+        return "0".to_string();
+    }
+
+    let to_render_value = |point: &RenderPlanZoomMotionPoint| {
+        (motion_point_axis_value(point, axis) / canvas_dim * dimension).clamp(0.0, dimension)
+    };
+    let p0 = to_render_value(&segment.start);
+    let p1 = to_render_value(&segment.control1);
+    let p2 = to_render_value(&segment.control2);
+    let p3 = to_render_value(&segment.end);
+    let coefficient_a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+    let coefficient_b = 3.0 * p0 - 6.0 * p1 + 3.0 * p2;
+    let coefficient_c = -3.0 * p0 + 3.0 * p1;
+    let coefficient_d = p0;
+    let start_str = compact_num(start_s);
+    let span_str = compact_num(span_s);
+    let u = format!("((it-{start_str})/{span_str})");
+    let polynomial = format!(
+        "(({a}*{u}+{b})*{u}+{c})*{u}+{d}",
+        a = compact_num(coefficient_a),
+        b = compact_num(coefficient_b),
+        c = compact_num(coefficient_c),
+        d = compact_num(coefficient_d),
+    );
+    format!("max(0,min({},{}))", compact_num(dimension), polynomial)
+}
+
+fn build_balanced_motion_expression(
+    segments: &[RenderPlanZoomMotionSegment],
+    canvas: &cursor::RenderCanvas,
+    dimension: f64,
+    axis: &str,
+    start_index: usize,
+    end_index: usize,
+    fallback: &str,
+) -> String {
+    let segment_count = end_index.saturating_sub(start_index);
+    if segment_count == 0 {
+        return fallback.to_string();
+    }
+
+    if segment_count == 1 {
+        let segment = &segments[start_index];
+        let start_s = compact_num(segment.start_ms as f64 / 1000.0);
+        let end_s = compact_num(segment.end_ms as f64 / 1000.0);
+        let curve = build_motion_cubic_expression(segment, canvas, dimension, axis);
+        return format!("if(gte(it,{start_s})*lt(it,{end_s}),{curve},{fallback})");
+    }
+
+    let split_index = start_index + segment_count / 2;
+    let left = build_balanced_motion_expression(
+        segments,
+        canvas,
+        dimension,
+        axis,
+        start_index,
+        split_index,
+        fallback,
+    );
+    let right = build_balanced_motion_expression(
+        segments,
+        canvas,
+        dimension,
+        axis,
+        split_index,
+        end_index,
+        fallback,
+    );
+    let split_time = compact_num(segments[split_index].start_ms as f64 / 1000.0);
+    format!("if(lt(it,{split_time}),{left},{right})")
+}
+
+fn build_motion_plan_center_expression(
+    motion_plan: &RenderPlanZoomMotionPlan,
+    canvas: &cursor::RenderCanvas,
+    dimension: f64,
+    axis: &str,
+    fallback: &str,
+) -> String {
+    if motion_plan.version != 1
+        || motion_plan.kind != "cubic-bezier"
+        || motion_plan.segments.is_empty()
+    {
+        return fallback.to_string();
+    }
+
+    build_balanced_motion_expression(
+        &motion_plan.segments,
+        canvas,
+        dimension,
+        axis,
+        0,
+        motion_plan.segments.len(),
+        fallback,
+    )
+}
+
+pub(crate) fn resolve_zoom_motion_point(
+    motion_plan: &RenderPlanZoomMotionPlan,
+    time_ms: f64,
+) -> Option<RenderPlanZoomMotionPoint> {
+    if motion_plan.version != 1 || motion_plan.kind != "cubic-bezier" {
+        return None;
+    }
+    let first = motion_plan.segments.first()?;
+    let last = motion_plan.segments.last()?;
+    let safe_time_ms = if time_ms.is_finite() {
+        time_ms
+    } else {
+        first.start_ms as f64
+    };
+    if safe_time_ms <= first.start_ms as f64 {
+        return Some(first.start);
+    }
+
+    let mut low = 0;
+    let mut high = motion_plan.segments.len() - 1;
+    while low < high {
+        let middle = (low + high) / 2;
+        if safe_time_ms <= motion_plan.segments[middle].end_ms as f64 {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+
+    let segment = &motion_plan.segments[low];
+    let duration_ms = (segment.end_ms - segment.start_ms).max(1) as f64;
+    let progress = ((safe_time_ms - segment.start_ms as f64) / duration_ms).clamp(0.0, 1.0);
+    let inverse = 1.0 - progress;
+    let inverse_squared = inverse * inverse;
+    let progress_squared = progress * progress;
+    if safe_time_ms <= segment.end_ms as f64 {
+        return Some(RenderPlanZoomMotionPoint {
+            x: inverse_squared * inverse * segment.start.x
+                + 3.0 * inverse_squared * progress * segment.control1.x
+                + 3.0 * inverse * progress_squared * segment.control2.x
+                + progress_squared * progress * segment.end.x,
+            y: inverse_squared * inverse * segment.start.y
+                + 3.0 * inverse_squared * progress * segment.control1.y
+                + 3.0 * inverse * progress_squared * segment.control2.y
+                + progress_squared * progress * segment.end.y,
+        });
+    }
+
+    Some(last.end)
 }
 
 fn build_zoompan_expressions(
@@ -4024,11 +4224,30 @@ fn build_zoompan_expressions(
         let from_cy_str = compact_num(from_cy);
         let full_cx_str = compact_num(full_cx);
         let full_cy_str = compact_num(full_cy);
-        let has_dynamic_center = segment
-            .keyframes
+        let has_motion_plan = segment
+            .motion_plan
             .as_ref()
-            .is_some_and(|keyframes| keyframes.len() > 1);
-        let target_cx_expression = if has_dynamic_center {
+            .is_some_and(|motion_plan| !motion_plan.segments.is_empty());
+        let has_keyframes = !has_motion_plan
+            && segment
+                .keyframes
+                .as_ref()
+                .is_some_and(|keyframes| keyframes.len() > 1);
+        let has_dynamic_center = has_motion_plan || has_keyframes;
+        let target_cx_expression = if has_motion_plan {
+            segment.motion_plan.as_ref().map_or_else(
+                || target_cx_str.clone(),
+                |motion_plan| {
+                    build_motion_plan_center_expression(
+                        motion_plan,
+                        canvas,
+                        screen_w,
+                        "x",
+                        &target_cx_str,
+                    )
+                },
+            )
+        } else if has_keyframes {
             build_keyframe_center_expression(
                 segment.keyframes.as_deref().unwrap_or_default(),
                 canvas,
@@ -4040,7 +4259,20 @@ fn build_zoompan_expressions(
         } else {
             target_cx_str.clone()
         };
-        let target_cy_expression = if has_dynamic_center {
+        let target_cy_expression = if has_motion_plan {
+            segment.motion_plan.as_ref().map_or_else(
+                || target_cy_str.clone(),
+                |motion_plan| {
+                    build_motion_plan_center_expression(
+                        motion_plan,
+                        canvas,
+                        screen_h,
+                        "y",
+                        &target_cy_str,
+                    )
+                },
+            )
+        } else if has_keyframes {
             build_keyframe_center_expression(
                 segment.keyframes.as_deref().unwrap_or_default(),
                 canvas,
@@ -4288,6 +4520,39 @@ fn zoom_target_values_are_valid(target: &RenderCropFloat) -> bool {
         && target.height > 0.0
 }
 
+fn zoom_motion_point_values_are_valid(point: &RenderPlanZoomMotionPoint) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn zoom_motion_plan_is_valid(
+    motion_plan: &RenderPlanZoomMotionPlan,
+    segment: &RenderPlanZoomSegment,
+) -> bool {
+    if motion_plan.version != 1
+        || motion_plan.kind != "cubic-bezier"
+        || motion_plan.segments.is_empty()
+    {
+        return false;
+    }
+
+    let mut previous_end = segment.start_ms;
+    for motion_segment in &motion_plan.segments {
+        if motion_segment.start_ms != previous_end
+            || motion_segment.end_ms <= motion_segment.start_ms
+            || motion_segment.end_ms > segment.end_ms
+            || !zoom_motion_point_values_are_valid(&motion_segment.start)
+            || !zoom_motion_point_values_are_valid(&motion_segment.control1)
+            || !zoom_motion_point_values_are_valid(&motion_segment.control2)
+            || !zoom_motion_point_values_are_valid(&motion_segment.end)
+        {
+            return false;
+        }
+        previous_end = motion_segment.end_ms;
+    }
+
+    previous_end == segment.end_ms
+}
+
 fn zoom_values_are_finite(segment: &RenderPlanZoomSegment) -> bool {
     let base_values_are_valid = [
         segment.start_ms as f64,
@@ -4309,6 +4574,11 @@ fn zoom_values_are_finite(segment: &RenderPlanZoomSegment) -> bool {
     }
     if let Some(from_target) = &segment.from_target {
         if !zoom_target_values_are_valid(from_target) {
+            return false;
+        }
+    }
+    if let Some(motion_plan) = &segment.motion_plan {
+        if !zoom_motion_plan_is_valid(motion_plan, segment) {
             return false;
         }
     }
@@ -4806,6 +5076,7 @@ mod tests {
                     from_target: None,
                     from_scale: None,
                     keyframes: None,
+                    motion_plan: None,
                 }],
                 ..valid_plan()
             },
@@ -4866,6 +5137,7 @@ mod tests {
                     from_target: None,
                     from_scale: None,
                     keyframes: None,
+                    motion_plan: None,
                 }],
                 ..valid_plan()
             },
@@ -5690,6 +5962,7 @@ mod tests {
                 from_target: None,
                 from_scale: None,
                 keyframes: None,
+                motion_plan: None,
             });
         }
         let plan = RenderPlan {
@@ -5712,6 +5985,75 @@ mod tests {
             total_filter_len < 30_000,
             "Total zoompan expressions length ({total_filter_len}) must be well below 30KB"
         );
+    }
+
+    #[test]
+    fn test_zoompan_motion_plan_keeps_all_adaptive_segments() {
+        let motion_segments = (0..32)
+            .map(|index| {
+                let start = index as f64 * 20.0;
+                let end = (index + 1) as f64 * 20.0;
+                RenderPlanZoomMotionSegment {
+                    start_ms: index * 100,
+                    end_ms: (index + 1) * 100,
+                    start: RenderPlanZoomMotionPoint { x: start, y: start },
+                    control1: RenderPlanZoomMotionPoint {
+                        x: start + 5.0,
+                        y: start + 2.0,
+                    },
+                    control2: RenderPlanZoomMotionPoint {
+                        x: end - 5.0,
+                        y: end - 2.0,
+                    },
+                    end: RenderPlanZoomMotionPoint { x: end, y: end },
+                }
+            })
+            .collect();
+        let plan = RenderPlan {
+            zoom_segments: vec![RenderPlanZoomSegment {
+                id: "zoom-motion-plan".into(),
+                start_ms: 0,
+                end_ms: 3_200,
+                target: RenderCropFloat {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 960.0,
+                    height: 540.0,
+                },
+                scale: 2.0,
+                easing: "linear".into(),
+                transition_in_ms: 0,
+                transition_out_ms: 0,
+                enabled: true,
+                mode: "follow-cursor".into(),
+                source: "auto".into(),
+                preset: "product-demo".into(),
+                follow_deadzone_percent: None,
+                follow_smoothing_alpha: None,
+                label: None,
+                from_target: None,
+                from_scale: None,
+                keyframes: None,
+                motion_plan: Some(RenderPlanZoomMotionPlan {
+                    version: 1,
+                    kind: "cubic-bezier".into(),
+                    segments: motion_segments,
+                }),
+            }],
+            ..valid_plan()
+        };
+        let canvas = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            ..Default::default()
+        };
+
+        let (_, x_expr, y_expr) = build_zoompan_expressions(&plan, &canvas, 1920.0, 1080.0);
+
+        assert_eq!(x_expr.matches("gte(it,").count(), 32);
+        assert_eq!(y_expr.matches("gte(it,").count(), 32);
+        assert!(x_expr.contains("lt(it,0.1)"));
     }
 
     #[test]
@@ -5814,6 +6156,7 @@ mod tests {
                 from_target: None,
                 from_scale: None,
                 keyframes: Some(keyframes),
+                motion_plan: None,
             }],
             cursor_effects: Vec::new(),
             overlay_render_plan: None,

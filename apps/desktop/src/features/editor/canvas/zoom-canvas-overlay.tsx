@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react"
-import type { ManualZoomSegment, ZoomMode, ZoomTarget } from "@recordforge/contracts"
+import type { ManualZoomSegment, ZoomTarget } from "@recordforge/contracts"
 import {
   canonicalizeZoomTarget,
   clampZoomTarget,
@@ -250,10 +250,9 @@ export function ZoomCanvasOverlay({
     }
   }
 
-  function toggleMode() {
-    if (!segment || !onUpdateSegment) return
-    const nextMode: ZoomMode = segment.mode === "follow-cursor" ? "static" : "follow-cursor"
-    onUpdateSegment({ mode: nextMode }, { phase: "commit" })
+  function enableFollowCursor() {
+    if (!segment || !onUpdateSegment || segment.mode === "follow-cursor") return
+    onUpdateSegment({ mode: "follow-cursor" }, { phase: "commit" })
   }
 
   function toggleLock() {
@@ -450,11 +449,11 @@ export function ZoomCanvasOverlay({
               variant={segment.mode === "follow-cursor" ? "secondary" : "ghost"}
               size="sm"
               className="h-6 px-1.5 text-[10px]"
-              onClick={toggleMode}
-              title={segment.mode === "follow-cursor" ? "Mode: Follow Cursor" : "Mode: Static Area"}
-              disabled={segment.locked}
+              onClick={enableFollowCursor}
+              title="Camera mode: Follow Cursor"
+              disabled={segment.locked || segment.mode === "follow-cursor"}
             >
-              {segment.mode === "follow-cursor" ? "Follow" : "Static"}
+              Follow
             </Button>
 
             <Button

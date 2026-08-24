@@ -6,6 +6,7 @@ import {
   getCursorPointAtTimelineTime,
   normalizeCursorTelemetry,
   resolveInertialFollowCenter,
+  zoomTargetForCursorPoint,
 } from "./index"
 
 const canvas: TimelineCanvas = {
@@ -191,6 +192,20 @@ describe("smart zoom telemetry analysis", () => {
     expect(centerAfterTravel.y).toBeGreaterThan(prevCenter.y)
     expect(centerAfterTravel.x).toBeLessThan(largeTravelPoint.x)
     expect(centerAfterTravel.y).toBeLessThan(largeTravelPoint.y)
+  })
+
+  it("keeps a large cursor jump inside the follow camera viewport", () => {
+    const cameraCenter = resolveInertialFollowCenter(
+      { x: 1_900, y: 540 },
+      { x: 960, y: 540 },
+      { width: 960, height: 540 },
+      { deadzoneRadiusPercent: 0.08, smoothingAlpha: 0.05 },
+    )
+    const target = zoomTargetForCursorPoint(cameraCenter, canvas, 2)
+
+    expect(1_900).toBeGreaterThanOrEqual(target.x)
+    expect(1_900).toBeLessThanOrEqual(target.x + target.width)
+    expect(cameraCenter.x).toBeGreaterThan(960)
   })
 
   it("evaluates canvas-fitted cursor position at timeline time via getCursorPointAtTimelineTime", () => {

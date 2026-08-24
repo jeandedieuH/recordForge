@@ -5,7 +5,10 @@ use cursor_engine::CursorTelemetryFile;
 use resvg::tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 use resvg::usvg;
 
-use super::{clamped_zoom_crop, clamped_zoom_target, RenderPlanZoomSegment, RenderSegment};
+use super::{
+    clamped_zoom_crop, clamped_zoom_target, resolve_zoom_motion_point, RenderPlanZoomSegment,
+    RenderSegment,
+};
 
 // Re-export the canonical cursor settings so the renderer and engine share the
 // same type and defaults.
@@ -491,7 +494,31 @@ impl CursorRenderer {
             0.0
         };
 
-        let target = if let Some(keyframes) = &segment.keyframes {
+        let fallback_target = clamped_zoom_target(
+            self.canvas_width,
+            self.canvas_height,
+            self.canvas_padding,
+            segment,
+        );
+        let target = if let Some(motion_plan) = &segment.motion_plan {
+            if let Some(point) = resolve_zoom_motion_point(motion_plan, output_ms) {
+                let motion_target = super::RenderCropFloat {
+                    x: point.x - fallback_target.width / 2.0,
+                    y: point.y - fallback_target.height / 2.0,
+                    width: fallback_target.width,
+                    height: fallback_target.height,
+                };
+                clamped_zoom_crop(
+                    self.canvas_width,
+                    self.canvas_height,
+                    self.canvas_padding,
+                    &motion_target,
+                    segment.scale,
+                )
+            } else {
+                fallback_target.clone()
+            }
+        } else if let Some(keyframes) = &segment.keyframes {
             if !keyframes.is_empty() {
                 let kf = find_keyframe_target(keyframes, output_ms, &segment.target);
                 clamped_zoom_crop(
@@ -502,20 +529,10 @@ impl CursorRenderer {
                     segment.scale,
                 )
             } else {
-                clamped_zoom_target(
-                    self.canvas_width,
-                    self.canvas_height,
-                    self.canvas_padding,
-                    segment,
-                )
+                fallback_target.clone()
             }
         } else {
-            clamped_zoom_target(
-                self.canvas_width,
-                self.canvas_height,
-                self.canvas_padding,
-                segment,
-            )
+            fallback_target
         };
 
         let full_cx = canvas_w / 2.0;
@@ -1559,6 +1576,7 @@ mod tests {
             from_target: None,
             from_scale: None,
             keyframes: None,
+            motion_plan: None,
         };
         let renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),
@@ -1626,6 +1644,62 @@ mod tests {
                     },
                 },
             ]),
+            motion_plan: None,
+        };
+        let renderer = CursorRenderer::new_with_zoom(
+            CursorSettings::default(),
+            make_v2_telemetry(),
+            &segments(),
+            &[zoom],
+            &test_canvas(200, 200, 0),
+            None,
+        )
+        .expect("valid cursor renderer");
+
+        let transform_mid = renderer.resolve_zoom_transform_at(500.0);
+        assert!((transform_mid.crop_x - 50.0).abs() < 0.1);
+        assert!((transform_mid.crop_y - 50.0).abs() < 0.1);
+        assert!((transform_mid.scale - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn apply_zoom_interpolates_compact_motion_plan_accurately() {
+        let zoom = RenderPlanZoomSegment {
+            id: "zoom-motion".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            target: RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            scale: 2.0,
+            easing: "linear".into(),
+            transition_in_ms: 0,
+            transition_out_ms: 0,
+            enabled: true,
+            mode: "follow-cursor".into(),
+            source: "manual".into(),
+            preset: "manual-only".into(),
+            follow_deadzone_percent: None,
+            follow_smoothing_alpha: None,
+            label: None,
+            from_target: None,
+            from_scale: None,
+            keyframes: None,
+            motion_plan: Some(crate::exports::RenderPlanZoomMotionPlan {
+                version: 1,
+                kind: "cubic-bezier".into(),
+                segments: vec![crate::exports::RenderPlanZoomMotionSegment {
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    start: crate::exports::RenderPlanZoomMotionPoint { x: 50.0, y: 50.0 },
+                    control1: crate::exports::RenderPlanZoomMotionPoint { x: 50.0, y: 50.0 },
+                    control2: crate::exports::RenderPlanZoomMotionPoint { x: 150.0, y: 150.0 },
+                    end: crate::exports::RenderPlanZoomMotionPoint { x: 150.0, y: 150.0 },
+                }],
+            }),
         };
         let renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),
@@ -1669,6 +1743,7 @@ mod tests {
             from_target: None,
             from_scale: None,
             keyframes: None,
+            motion_plan: None,
         };
         let zoom2 = RenderPlanZoomSegment {
             id: "zoom-2".into(),
@@ -1699,6 +1774,7 @@ mod tests {
             }),
             from_scale: Some(2.0),
             keyframes: None,
+            motion_plan: None,
         };
         let renderer = CursorRenderer::new_with_zoom(
             CursorSettings::default(),

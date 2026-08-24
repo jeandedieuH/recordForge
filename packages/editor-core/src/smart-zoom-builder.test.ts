@@ -109,7 +109,7 @@ describe("Smart Zoom Builder", () => {
     expect(segment.target.height).toBeCloseTo(720, 0)
   })
 
-  it("applies developer preset (2.0x, snappy, 300ms transitions)", () => {
+  it("applies developer preset (2.0x, smooth, 300ms transitions)", () => {
     const mockTimeline = makeState()
     const segment = buildSmartZoomSegment(
       mockTimeline,
@@ -121,7 +121,7 @@ describe("Smart Zoom Builder", () => {
     )
 
     expect(segment.scale).toBe(2.0)
-    expect(segment.easing).toBe("snappy")
+    expect(segment.easing).toBe("smooth")
     expect(segment.transitionInMs).toBe(300)
     expect(segment.transitionOutMs).toBe(300)
   })
@@ -139,7 +139,7 @@ describe("Smart Zoom Builder", () => {
 
     expect(segment.scale).toBe(1.8)
     expect(segment.easing).toBe("cinematic")
-    expect(segment.mode).toBe("smooth-pan")
+    expect(segment.mode).toBe("follow-cursor")
     expect(segment.transitionInMs).toBe(600)
     expect(segment.transitionOutMs).toBe(600)
   })

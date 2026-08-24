@@ -134,7 +134,7 @@ const PRESET_PROFILES: Record<ZoomPreset, ZoomPresetProfile> = {
     scale: 2.2,
     clickDurationMs: 1_400,
     dwellTailMs: 700,
-    easing: "snappy",
+    easing: "smooth",
     transitionInMs: 320,
     transitionOutMs: 320,
   },
@@ -370,27 +370,38 @@ export function resolveInertialFollowCenter(
   options: InertialFollowOptions = {},
 ): { x: number; y: number } {
   if (!previousCenter) return currentPoint
+  if (!Number.isFinite(currentPoint.x) || !Number.isFinite(currentPoint.y)) return previousCenter
 
-  const deadzone =
+  const viewportWidth = Number.isFinite(viewportSize.width) ? Math.max(1, viewportSize.width) : 1
+  const viewportHeight = Number.isFinite(viewportSize.height) ? Math.max(1, viewportSize.height) : 1
+  const requestedDeadzone =
     options.deadzoneRadiusPx ??
-    Math.min(viewportSize.width, viewportSize.height) * (options.deadzoneRadiusPercent ?? 0.08)
+    Math.min(viewportWidth, viewportHeight) * (options.deadzoneRadiusPercent ?? 0.08)
+  const deadzone = Math.min(
+    Math.max(0, Number.isFinite(requestedDeadzone) ? requestedDeadzone : 0),
+    Math.min(viewportWidth, viewportHeight) / 2,
+  )
 
   const dx = currentPoint.x - previousCenter.x
   const dy = currentPoint.y - previousCenter.y
   const dist = Math.hypot(dx, dy)
-
-  if (dist <= deadzone || dist < 0.001) {
-    return previousCenter
-  }
+  if (dist <= deadzone || dist < 0.001) return previousCenter
 
   const excess = dist - deadzone
   const targetX = previousCenter.x + (dx / dist) * excess
   const targetY = previousCenter.y + (dy / dist) * excess
-  const alpha = clampRange(options.smoothingAlpha ?? 0.25, 0.05, 1)
-
-  return {
+  const requestedAlpha = options.smoothingAlpha ?? 0.25
+  const alpha = clampRange(Number.isFinite(requestedAlpha) ? requestedAlpha : 0.25, 0.05, 1)
+  const next = {
     x: previousCenter.x + (targetX - previousCenter.x) * alpha,
     y: previousCenter.y + (targetY - previousCenter.y) * alpha,
+  }
+
+  // A camera may ease toward the deadzone, but it must never leave the cursor
+  // outside the visible crop after a large telemetry jump.
+  return {
+    x: clampRange(next.x, currentPoint.x - viewportWidth / 2, currentPoint.x + viewportWidth / 2),
+    y: clampRange(next.y, currentPoint.y - viewportHeight / 2, currentPoint.y + viewportHeight / 2),
   }
 }
 
@@ -632,8 +643,7 @@ export function generateSmartZoomSuggestions(
       settings.safeEdgePadding,
     )
 
-    const hasSpatialDispersion = cluster.points.some((p) => Math.hypot(p.x - avgX, p.y - avgY) > 80)
-    const mode: ZoomMode = hasSpatialDispersion ? "follow-cursor" : "auto"
+    const mode: ZoomMode = "follow-cursor"
 
     const segDuration = cluster.endMs - cluster.startMs
     const transIn = Math.min(

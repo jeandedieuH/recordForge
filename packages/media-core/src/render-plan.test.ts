@@ -11,7 +11,7 @@ import {
 } from "@recordforge/domain"
 import { buildOverlayRenderPlan, buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
 import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
-import { resolveFollowCursorTarget } from "@recordforge/editor-core"
+import { buildFollowCursorMotionPlan, resolveFollowCursorTarget } from "@recordforge/editor-core"
 
 function makeTimeline(clipCount = 1): TimelineState {
   return {
@@ -994,7 +994,7 @@ describe("render-plan", () => {
     expect(plan.value.zoomSegments[1].fromScale).toBe(2)
   })
 
-  it("samples dynamic follow keyframes when telemetry engine is provided for follow-cursor mode", () => {
+  it("builds a compact motion plan when telemetry is provided for follow-cursor mode", () => {
     const state = makeTimeline()
     state.zoomSegments = [
       {
@@ -1067,10 +1067,111 @@ describe("render-plan", () => {
     if (!plan.ok) return
     expect(plan.value.zoomSegments).toHaveLength(1)
     const segment = plan.value.zoomSegments[0]
-    expect(segment.keyframes).toBeDefined()
-    expect(segment.keyframes!.length).toBeGreaterThanOrEqual(10)
-    expect(segment.keyframes![0].timeMs).toBe(1000)
-    expect(segment.keyframes![segment.keyframes!.length - 1].timeMs).toBe(2000)
+    expect(segment.motionPlan).toBeDefined()
+    expect(segment.keyframes).toBeUndefined()
+    expect(segment.motionPlan!.segments.length).toBeGreaterThan(0)
+    expect(segment.motionPlan!.segments[0].startMs).toBe(1000)
+    expect(segment.motionPlan!.segments[segment.motionPlan!.segments.length - 1].endMs).toBe(2000)
+    expect(renderPlanSchema.parse(plan.value).zoomSegments[0]?.motionPlan?.kind).toBe(
+      "cubic-bezier",
+    )
+  })
+
+  it("uses the compact stateful follow path for export and leaves legacy modes static", () => {
+    const state = makeTimeline()
+    const followSegment = {
+      id: "zoom-follow-stateful",
+      startMs: 1_000,
+      durationMs: 3_000,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      scale: 2,
+      easing: "cinematic" as const,
+      transitionInMs: 200,
+      transitionOutMs: 200,
+      enabled: true,
+      locked: false,
+      mode: "follow-cursor" as const,
+    }
+    state.zoomSegments = [followSegment]
+
+    const telemetry = normalizeCursorTelemetry({
+      recordingId: "rec-1",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        {
+          tMs: 0,
+          rawX: 960,
+          rawY: 540,
+          sourceX: 960,
+          sourceY: 540,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 1_000,
+          rawX: 1_200,
+          rawY: 540,
+          sourceX: 1_200,
+          sourceY: 540,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 1_100,
+          rawX: 1_200,
+          rawY: 540,
+          sourceX: 1_200,
+          sourceY: 540,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+        {
+          tMs: 4_000,
+          rawX: 1_200,
+          rawY: 540,
+          sourceX: 1_200,
+          sourceY: 540,
+          shapeId: "arrow",
+          buttonEvent: "none",
+          visible: true,
+          buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+          shapeChanged: false,
+        },
+      ],
+    })
+    const cursorEngine = createCursorEngine(telemetry)
+    const expected = buildFollowCursorMotionPlan(followSegment, state, cursorEngine)
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      cursorTelemetry: telemetry,
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.zoomSegments[0]?.motionPlan).toEqual(expected)
+    expect(plan.value.zoomSegments[0]?.keyframes).toBeUndefined()
+    expect(plan.value.zoomSegments[0]?.motionPlan?.segments.length).toBeGreaterThan(0)
+
+    state.zoomSegments = [{ ...followSegment, mode: "auto" }]
+    const legacyPlan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      cursorTelemetry: telemetry,
+    })
+    expect(legacyPlan.ok).toBe(true)
+    if (legacyPlan.ok) expect(legacyPlan.value.zoomSegments[0]?.keyframes).toBeUndefined()
   })
 
   it("samples follow-cursor keyframes in source timeline time for selected-range exports", () => {
@@ -1145,10 +1246,14 @@ describe("render-plan", () => {
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     const segment = state.zoomSegments?.[0]
-    const firstKeyframe = plan.value.zoomSegments[0].keyframes?.[0]
+    const motionPlan = plan.value.zoomSegments[0].motionPlan
+    const firstMotionSegment = motionPlan?.segments[0]
     expect(segment).toBeDefined()
-    expect(firstKeyframe?.timeMs).toBe(0)
-    if (!segment || !firstKeyframe) return
+    expect(firstMotionSegment?.startMs).toBe(0)
+    expect(
+      motionPlan ? motionPlan.segments[motionPlan.segments.length - 1]?.endMs : undefined,
+    ).toBe(1_000)
+    if (!segment || !firstMotionSegment) return
 
     const engine = createCursorEngine(telemetry)
     const expectedTarget = resolveFollowCursorTarget(segment, state, 1_000, engine)
@@ -1158,8 +1263,11 @@ describe("render-plan", () => {
     if (!expectedTarget || !localTimeTarget) return
 
     // The first output frame maps to source timeline t=1000ms, not local t=0ms.
-    expect(firstKeyframe.target.x).toBeCloseTo(expectedTarget.x, 5)
-    expect(firstKeyframe.target.x).not.toBeCloseTo(localTimeTarget.x, 5)
+    expect(firstMotionSegment.start.x).toBeCloseTo(expectedTarget.x + expectedTarget.width / 2, 5)
+    expect(firstMotionSegment.start.x).not.toBeCloseTo(
+      localTimeTarget.x + localTimeTarget.width / 2,
+      5,
+    )
   })
 
   it("handles floating-point timing values seamlessly and passes renderPlanSchema validation", () => {

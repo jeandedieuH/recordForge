@@ -60,8 +60,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 28,
     height: 28,
-    hotspotX: 3,
-    hotspotY: 3,
+    hotspotX: 3.5,
+    hotspotY: 3.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -73,8 +73,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 3,
-    hotspotY: 3,
+    hotspotX: 3.5,
+    hotspotY: 3.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -84,8 +84,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 8.5,
-    hotspotY: 2,
+    hotspotX: 9,
+    hotspotY: 2.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M8.5 2 C7.4 2 6.5 2.9 6.5 4 L6.5 11.8 C5.8 11.2 4.9 11 4 11.5 C3 12 2.5 13 2.7 14.2 C3.3 16.8 5.5 21 9.5 21.8 C14 22.5 17.8 20 18 16 L18 11.5 C18 10.4 17.1 9.5 16 9.5 C15.7 9.5 15.4 9.6 15.1 9.7 C14.8 8.7 13.9 8 12.8 8 C12.5 8 12.2 8.1 11.9 8.2 C11.6 7.2 10.6 6.5 9.5 6.5 C9.1 6.5 8.7 6.6 8.5 6.8 L8.5 4 C8.5 2.9 7.6 2 8.5 2 Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -95,8 +95,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="12" y1="4" x2="12" y2="20" />
@@ -108,8 +108,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="12" y1="2" x2="12" y2="22" />
@@ -120,8 +120,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}">
       <circle cx="12" cy="12" r="9" />
@@ -133,8 +133,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 3,
-    hotspotY: 3,
+    hotspotX: 3.5,
+    hotspotY: 3.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)">
       <path d="M3 3L10 19L13 12L20 10L3 3Z" fill="{fill}" fill-opacity="{fillOpacity}" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linejoin="round" />
@@ -145,8 +145,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="12" y1="4" x2="12" y2="20" />
@@ -165,8 +165,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="4" y1="20" x2="20" y2="4" />
@@ -180,8 +180,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="4" y1="4" x2="20" y2="20" />
@@ -195,8 +195,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="4" y1="12" x2="20" y2="12" />
@@ -210,8 +210,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}" stroke-linecap="round">
       <line x1="12" y1="4" x2="12" y2="20" />
@@ -225,8 +225,8 @@ const PRESET_SVGS: Record<CursorAssetId, Omit<CursorAsset, "id" | "label">> = {
     viewBox: "0 0 24 24",
     width: 24,
     height: 24,
-    hotspotX: 12,
-    hotspotY: 12,
+    hotspotX: 12.5,
+    hotspotY: 12.5,
     isCenterHotspot: false,
     svg: `<g transform="translate(0.5, 0.5)" stroke="{stroke}" stroke-width="{strokeWidth}" stroke-opacity="{strokeOpacity}">
       <circle cx="12" cy="12" r="8" fill="{fill}" fill-opacity="{fillOpacity}" />

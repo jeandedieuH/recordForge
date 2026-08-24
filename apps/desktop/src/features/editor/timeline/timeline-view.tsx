@@ -418,9 +418,10 @@ export function TimelineView({
         ? zoomTransformToCss(
             composition.screen.zoomTransform,
             timeline?.canvas ?? { width: 1, height: 1 },
+            videoBounds ?? { width: 1, height: 1 },
           )
         : undefined,
-    [composition, timeline?.canvas],
+    [composition, timeline?.canvas, videoBounds],
   )
   const selectedZoomSegment = useMemo(() => {
     if (!view.selection || view.selection.kind !== "zoom" || !timeline) return null

@@ -4,6 +4,7 @@ import {
   exportTimelineOptionsSchema,
   imageClipSchema,
   renderPlanSchema,
+  renderPlanZoomMotionPlanSchema,
   textClipSchema,
 } from "./timeline"
 import { projectSchema, projectAssetSchema, projectExportSettingsSchema } from "./project"
@@ -183,6 +184,39 @@ describe("project contract", () => {
       renderPlanSchema.parse({ ...plan, gaps: [{ startMs: 1_000, endMs: 2_000 }] }),
     ).toThrow()
     expect(() => renderPlanSchema.parse({ ...plan, projectId: "" })).toThrow()
+  })
+
+  it("validates compact zoom motion plans as contiguous cubic paths", () => {
+    const motionPlan = renderPlanZoomMotionPlanSchema.parse({
+      version: 1,
+      kind: "cubic-bezier",
+      segments: [
+        {
+          startMs: 0,
+          endMs: 500,
+          start: { x: 100, y: 100 },
+          control1: { x: 120, y: 100 },
+          control2: { x: 180, y: 200 },
+          end: { x: 200, y: 200 },
+        },
+        {
+          startMs: 500,
+          endMs: 1_000,
+          start: { x: 200, y: 200 },
+          control1: { x: 220, y: 200 },
+          control2: { x: 280, y: 300 },
+          end: { x: 300, y: 300 },
+        },
+      ],
+    })
+
+    expect(motionPlan.segments).toHaveLength(2)
+    expect(() =>
+      renderPlanZoomMotionPlanSchema.parse({
+        ...motionPlan,
+        segments: [motionPlan.segments[0], { ...motionPlan.segments[1], startMs: 600 }],
+      }),
+    ).toThrow()
   })
 
   it("validates export settings separately from the render plan", () => {

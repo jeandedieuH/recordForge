@@ -2329,7 +2329,7 @@ function applyAddZoomSegment(
     transitionOutMs: command.transitionOutMs ?? defaultTrans,
     enabled: true,
     locked: false,
-    mode: command.mode ?? "static",
+    mode: command.mode ?? "follow-cursor",
     source: command.source ?? "manual",
     preset: command.preset ?? "product-demo",
     followDeadzonePercent: command.followDeadzonePercent,

@@ -16,7 +16,7 @@ import type {
   RenderChapterMode,
   RenderPlanOverlay,
   RenderPlanText,
-  RenderPlanZoomKeyframe,
+  RenderPlanZoomMotionPlan,
   RenderPlanZoomSegment,
   RenderSegment,
   OverlayRenderItem,
@@ -25,11 +25,11 @@ import type {
   TimelineState,
 } from "@recordforge/domain"
 import {
-  FOLLOW_CAMERA_SAMPLE_STEP_MS,
+  buildFollowCursorMotionPlan,
   clampZoomTarget,
   findPreviousZoomSegment,
   getManualZoomSegments,
-  resolveFollowCursorTarget,
+  resolveFollowCursorTargetAtTime,
   timelineMarkersToChapters,
 } from "@recordforge/editor-core"
 import { createCursorEngine, type CursorEngine } from "@recordforge/cursor-core"
@@ -649,47 +649,26 @@ function toZoomSegments(
       const duration = window.endMs - window.startMs
       const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
       const prevSegment = findPreviousZoomSegment(state, segment)
-      const fromTarget = prevSegment ? clampZoomTarget(prevSegment.target, state.canvas) : undefined
+      const previousTarget =
+        prevSegment?.mode === "follow-cursor" && engine
+          ? resolveFollowCursorTargetAtTime(
+              prevSegment,
+              state,
+              prevSegment.startMs + Math.max(1, prevSegment.durationMs),
+              engine,
+            )
+          : prevSegment?.target
+      const fromTarget = previousTarget ? clampZoomTarget(previousTarget, state.canvas) : undefined
       const fromScale = prevSegment ? prevSegment.scale : undefined
 
-      // If mode is dynamic follow and telemetry engine is present, sample keyframes across duration
-      let keyframes: RenderPlanZoomKeyframe[] | undefined = undefined
-      if (engine && segment.mode !== "static" && segment.mode !== "manual") {
-        const samples: RenderPlanZoomKeyframe[] = []
-        const sampleStepMs = FOLLOW_CAMERA_SAMPLE_STEP_MS // 10 samples per second
-        const sourceTimelineOffsetMs = range?.startMs ?? 0
-        for (let t = window.startMs; t < window.endMs; t += sampleStepMs) {
-          // Keyframe timestamps are local to the export, while cursor lookup
-          // must use the original project timeline (especially for selected
-          // range exports).
-          const followTarget = resolveFollowCursorTarget(
-            segment,
-            state,
-            t + sourceTimelineOffsetMs,
-            engine,
-          )
-          if (followTarget) {
-            samples.push({
-              timeMs: t,
-              target: clampZoomTarget(followTarget, state.canvas),
-            })
-          }
-        }
-        const endFollowTarget = resolveFollowCursorTarget(
-          segment,
-          state,
-          window.endMs + sourceTimelineOffsetMs,
-          engine,
-        )
-        if (endFollowTarget) {
-          samples.push({
-            timeMs: window.endMs,
-            target: clampZoomTarget(endFollowTarget, state.canvas),
-          })
-        }
-        if (samples.length > 0) {
-          keyframes = samples
-        }
+      let motionPlan: RenderPlanZoomMotionPlan | undefined = undefined
+      if (engine && segment.mode === "follow-cursor") {
+        const sourceTimelineOffsetMs = range ? Math.round(range.startMs) : 0
+        motionPlan = buildFollowCursorMotionPlan(segment, state, engine, {
+          windowStartMs: window.startMs + sourceTimelineOffsetMs,
+          windowEndMs: window.endMs + sourceTimelineOffsetMs,
+          timeOffsetMs: sourceTimelineOffsetMs,
+        })
       }
 
       return [
@@ -711,7 +690,7 @@ function toZoomSegments(
           label: segment.label,
           fromTarget,
           fromScale,
-          keyframes,
+          motionPlan,
         },
       ]
     })

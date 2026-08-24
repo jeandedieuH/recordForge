@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
 import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
-import { resolveFollowCursorTargetAtTime, resolvePreviewComposition } from "./preview-composition"
+import {
+  buildFollowCursorKeyframes,
+  buildFollowCursorMotionPlan,
+  resolveFollowCursorTargetAtTime,
+  resolvePreviewComposition,
+  zoomTransformToCss,
+} from "./preview-composition"
 
 function makeState(): TimelineState {
   const now = "2026-08-10T00:00:00Z"
@@ -234,7 +240,7 @@ describe("resolvePreviewComposition", () => {
     expect(leadIn.screen.zoomTransform?.progress).toBeLessThan(1)
   })
 
-  it("uses the export sample grid for follow-cursor camera interpolation", () => {
+  it("uses the adaptive motion plan for follow-cursor camera interpolation", () => {
     const state = makeState()
     const baseSegment = state.zoomSegments?.[0]
     if (!baseSegment) return
@@ -260,7 +266,156 @@ describe("resolvePreviewComposition", () => {
 
     expect(left).toBeDefined()
     expect(right).toBeDefined()
-    expect(middle?.x).toBeCloseTo(((left?.x ?? 0) + (right?.x ?? 0)) / 2, 5)
+    expect(middle?.x).toBeGreaterThan(Math.min(left?.x ?? 0, right?.x ?? 0))
+    expect(middle?.x).toBeLessThan(Math.max(left?.x ?? 0, right?.x ?? 0))
+  })
+
+  it("preserves long follow paths with more than eleven adaptive spline segments", () => {
+    const state = makeState()
+    state.tracks[0]!.clips[0]!.durationMs = 12_000
+    state.tracks[0]!.clips[0]!.sourceOutMs = 12_000
+    const baseSegment = state.zoomSegments?.[0]
+    if (!baseSegment) return
+    const segment = {
+      ...baseSegment,
+      startMs: 0,
+      durationMs: 12_000,
+      scale: 2,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      mode: "follow-cursor" as const,
+    }
+    state.zoomSegments = [segment]
+
+    const followTelemetry = normalizeCursorTelemetry({
+      ...telemetry,
+      events: Array.from({ length: 121 }, (_, index) => {
+        const timeMs = index * 100
+        return event(
+          timeMs,
+          Math.round(960 + Math.sin(index * 0.22) * 650),
+          Math.round(540 + Math.cos(index * 0.31) * 260),
+        )
+      }),
+    })
+    const cursorEngine = createCursorEngine(followTelemetry)
+    const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine)
+
+    expect(motionPlan).toBeDefined()
+    if (!motionPlan) return
+    expect(motionPlan.kind).toBe("cubic-bezier")
+    expect(motionPlan.segments.length).toBeGreaterThan(10)
+    expect(motionPlan.segments[0]?.startMs).toBe(0)
+    expect(motionPlan.segments[motionPlan.segments.length - 1]?.endMs).toBe(12_000)
+    for (let index = 1; index < motionPlan.segments.length; index++) {
+      expect(motionPlan.segments[index]?.startMs).toBe(motionPlan.segments[index - 1]?.endMs)
+    }
+
+    const target = resolveFollowCursorTargetAtTime(segment, state, 6_500, cursorEngine)
+    expect(target).toBeDefined()
+    expect(target?.x).toBeGreaterThanOrEqual(0)
+    expect(target?.y).toBeGreaterThanOrEqual(0)
+    expect(target?.x).toBeLessThanOrEqual(state.canvas.width - (target?.width ?? 0))
+    expect(target?.y).toBeLessThanOrEqual(state.canvas.height - (target?.height ?? 0))
+  })
+
+  it("continues following a cursor that remains outside the camera deadzone", () => {
+    const state = makeState()
+    state.canvas.cursorSettings = {
+      ...defaultCursorSettings,
+      smoothMovement: false,
+    }
+    const baseSegment = state.zoomSegments?.[0]
+    if (!baseSegment) return
+    const segment = {
+      ...baseSegment,
+      scale: 2,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      mode: "follow-cursor" as const,
+    }
+    state.zoomSegments = [segment]
+
+    const followTelemetry = normalizeCursorTelemetry({
+      ...telemetry,
+      events: [
+        event(0, 960, 540),
+        event(4_000, 960, 540),
+        event(4_100, 1_200, 540),
+        event(4_200, 1_200, 540),
+      ],
+    })
+    const cursorEngine = createCursorEngine(followTelemetry)
+
+    const first = resolveFollowCursorTargetAtTime(segment, state, 4_100, cursorEngine)
+    const second = resolveFollowCursorTargetAtTime(segment, state, 4_200, cursorEngine)
+
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    expect(second!.x).toBeGreaterThan(first!.x)
+  })
+
+  it("bridges adjacent follow segments from the previous camera endpoint", () => {
+    const state = makeState()
+    state.canvas.cursorSettings = {
+      ...defaultCursorSettings,
+      smoothMovement: false,
+    }
+    const previous = {
+      id: "zoom-previous",
+      startMs: 0,
+      durationMs: 2_000,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      scale: 2,
+      easing: "smooth" as const,
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      enabled: true,
+      locked: false,
+      mode: "follow-cursor" as const,
+    }
+    const current = {
+      id: "zoom-current",
+      startMs: 2_000,
+      durationMs: 2_000,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      scale: 2,
+      easing: "smooth" as const,
+      transitionInMs: 400,
+      transitionOutMs: 0,
+      enabled: true,
+      locked: false,
+      mode: "follow-cursor" as const,
+    }
+    state.zoomSegments = [previous, current]
+    const followTelemetry = normalizeCursorTelemetry({
+      ...telemetry,
+      events: [event(0, 960, 540), event(1_000, 1_400, 540), event(2_000, 1_400, 540)],
+    })
+    const cursorEngine = createCursorEngine(followTelemetry)
+    const previousKeyframes = buildFollowCursorKeyframes(previous, state, cursorEngine)
+    const previousTarget = previousKeyframes[previousKeyframes.length - 1]?.target
+    const composition = resolvePreviewComposition(state, 2_000, { cursorEngine })
+
+    expect(previousTarget).toBeDefined()
+    expect(composition.screen.zoomTransform?.crop.x).toBeCloseTo(previousTarget?.x ?? 0, 5)
+    expect(composition.screen.zoomTransform?.crop.y).toBeCloseTo(previousTarget?.y ?? 0, 5)
+  })
+
+  it("uses a pixel-precise matrix for the video crop transform", () => {
+    const transform = {
+      crop: { x: 480, y: 270, width: 960, height: 540 },
+      scale: 2,
+      progress: 1,
+      translateX: 0,
+      translateY: 0,
+    }
+
+    expect(
+      zoomTransformToCss(transform, { width: 1920, height: 1080 }, { width: 900, height: 506.25 }),
+    ).toBe("matrix(2, 0, 0, 2, -450, -253.125)")
   })
 
   it("marks inactive layers outside their clip ranges", () => {

@@ -782,34 +782,106 @@ export const renderPlanZoomKeyframeSchema = z.object({
 
 export type RenderPlanZoomKeyframe = z.infer<typeof renderPlanZoomKeyframeSchema>
 
-export const renderPlanZoomSegmentSchema = z.object({
-  id: z.string(),
+// Compact follow-camera paths store cubic Bézier control points for the crop
+// center. Crop dimensions remain on the parent zoom segment, avoiding repeated
+// rectangles for every motion sample.
+export const renderPlanZoomMotionPointSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+})
+
+export type RenderPlanZoomMotionPoint = z.infer<typeof renderPlanZoomMotionPointSchema>
+
+export const renderPlanZoomMotionSegmentSchema = z.object({
   startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
-  target: zoomTargetSchema,
-  scale: z.number().min(1).max(8).default(1.5),
-  easing: zoomEasingSchema.default("smooth"),
-  transitionInMs: z
-    .number()
-    .transform(Math.round)
-    .pipe(z.number().int().min(0).max(10_000))
-    .default(400),
-  transitionOutMs: z
-    .number()
-    .transform(Math.round)
-    .pipe(z.number().int().min(0).max(10_000))
-    .default(400),
-  enabled: z.boolean().default(true),
-  mode: zoomModeSchema.optional(),
-  source: zoomSourceSchema.optional(),
-  preset: zoomPresetSchema.optional(),
-  followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
-  followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
-  label: z.string().optional(),
-  fromTarget: zoomTargetSchema.optional(),
-  fromScale: z.number().min(1).max(8).optional(),
-  keyframes: z.array(renderPlanZoomKeyframeSchema).optional(),
+  start: renderPlanZoomMotionPointSchema,
+  control1: renderPlanZoomMotionPointSchema,
+  control2: renderPlanZoomMotionPointSchema,
+  end: renderPlanZoomMotionPointSchema,
 })
+
+export type RenderPlanZoomMotionSegment = z.infer<typeof renderPlanZoomMotionSegmentSchema>
+
+export const renderPlanZoomMotionPlanSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal("cubic-bezier"),
+    segments: z.array(renderPlanZoomMotionSegmentSchema).min(1),
+  })
+  .superRefine((plan, context) => {
+    plan.segments.forEach((segment, index) => {
+      const previous = plan.segments[index - 1]
+      if (previous && previous.endMs !== segment.startMs) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["segments", index, "startMs"],
+          message: "Motion-plan segments must be contiguous",
+        })
+      }
+      if (segment.endMs <= segment.startMs) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["segments", index],
+          message: "Motion-plan segment must have a positive duration",
+        })
+      }
+    })
+  })
+
+export type RenderPlanZoomMotionPlan = z.infer<typeof renderPlanZoomMotionPlanSchema>
+
+export const renderPlanZoomSegmentSchema = z
+  .object({
+    id: z.string(),
+    startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+    endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
+    target: zoomTargetSchema,
+    scale: z.number().min(1).max(8).default(1.5),
+    easing: zoomEasingSchema.default("smooth"),
+    transitionInMs: z
+      .number()
+      .transform(Math.round)
+      .pipe(z.number().int().min(0).max(10_000))
+      .default(400),
+    transitionOutMs: z
+      .number()
+      .transform(Math.round)
+      .pipe(z.number().int().min(0).max(10_000))
+      .default(400),
+    enabled: z.boolean().default(true),
+    mode: zoomModeSchema.optional(),
+    source: zoomSourceSchema.optional(),
+    preset: zoomPresetSchema.optional(),
+    followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
+    followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+    label: z.string().optional(),
+    fromTarget: zoomTargetSchema.optional(),
+    fromScale: z.number().min(1).max(8).optional(),
+    // New follow-cursor exports prefer this compact path. `keyframes` remains
+    // accepted for render-plan compatibility with older projects and callers.
+    keyframes: z.array(renderPlanZoomKeyframeSchema).optional(),
+    motionPlan: renderPlanZoomMotionPlanSchema.optional(),
+  })
+  .superRefine((segment, context) => {
+    const motionSegments = segment.motionPlan?.segments
+    if (!motionSegments) return
+
+    if (motionSegments[0]?.startMs !== segment.startMs) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["motionPlan", "segments", 0, "startMs"],
+        message: "Motion plan must start at the zoom segment start",
+      })
+    }
+    if (motionSegments[motionSegments.length - 1]?.endMs !== segment.endMs) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["motionPlan", "segments", motionSegments.length - 1, "endMs"],
+        message: "Motion plan must end at the zoom segment end",
+      })
+    }
+  })
 
 export type RenderPlanZoomSegment = z.infer<typeof renderPlanZoomSegmentSchema>
 

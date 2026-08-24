@@ -311,7 +311,11 @@ export function getCursorPointAtTimelineTime(
   if (sourceTimeMs === null) return null
 
   if (cursorEngine) {
-    const frame = cursorEngine.evaluate(sourceTimeMs, state.canvas.cursorSettings)
+    const settings = cursorSettingsForEffect(
+      state.canvas.cursorSettings,
+      findCursorEffectAtTime(state, timelineMs),
+    )
+    const frame = cursorEngine.evaluate(sourceTimeMs, settings)
     if (!frame.visible) return null
     const fitted = fitCursorPoint(
       { x: frame.sourceX, y: frame.sourceY },

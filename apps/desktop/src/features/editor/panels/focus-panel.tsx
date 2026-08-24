@@ -34,6 +34,7 @@ export function FocusPanel() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const view = useTimelineStore((state) => state.view)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
+  const cursorEngine = useTimelineStore((state) => state.cursorEngine)
   const cursorTelemetryStatus = useTimelineStore((state) => state.cursorTelemetryStatus)
 
   const playheadMs = view.playheadMs
@@ -62,7 +63,12 @@ export function FocusPanel() {
     const segmentId = crypto.randomUUID()
 
     // 1) Evaluate cursor position at playhead to navigate to where cursor is
-    const cursorPoint = getCursorPointAtTimelineTime(timeline, startMs, cursorTelemetry)
+    const cursorPoint = getCursorPointAtTimelineTime(
+      timeline,
+      startMs,
+      cursorTelemetry,
+      cursorEngine,
+    )
     const centerPoint = cursorPoint ?? {
       x: timeline.canvas.width / 2,
       y: timeline.canvas.height / 2,
@@ -72,8 +78,7 @@ export function FocusPanel() {
       preset === "subtle" ? 1.25 : preset === "cinematic" ? 1.8 : preset === "developer" ? 2.2 : 1.5
     const target = zoomTargetForCursorPoint(centerPoint, timeline.canvas, targetScale)
 
-    const easing =
-      preset === "cinematic" ? "cinematic" : preset === "developer" ? "snappy" : "smooth"
+    const easing = preset === "cinematic" ? "cinematic" : "smooth"
     const transitionInMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
     const transitionOutMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
 
