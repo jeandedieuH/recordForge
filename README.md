@@ -33,7 +33,7 @@ recordForge is built from the ground up to be **recorder-first, privacy-focused,
 
 ## 🏗️ Architecture
 
-recordForge enforces a strict separation between native systems engineering and declarative user interaction:
+RecordForge enforces a strict separation between native systems engineering and declarative user interaction:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
