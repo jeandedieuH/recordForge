@@ -66,7 +66,7 @@ export function TaskRail({
     const index = buttons.indexOf(event.currentTarget)
     if (index === -1) return
 
-    let nextIndex: number | null = null
+    let nextIndex: number | null
 
     switch (event.key) {
       case "ArrowDown":

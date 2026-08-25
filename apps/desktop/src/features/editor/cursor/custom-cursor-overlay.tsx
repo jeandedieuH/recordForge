@@ -113,13 +113,6 @@ export function CustomCursorOverlay({
     [frame.shapeId, cursorSettings.preset, cursorSettings.shapeMode, telemetry],
   )
 
-  if (!containerWidth || !containerHeight) return null
-
-  const posX = zoomed.x
-  const posY = zoomed.y
-  const cursorScale = (cursorSettings.scale ?? 1) * (fitted.scale ?? 1) * zoomed.scale
-  const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
-
   const cursorMarkup = useMemo(
     () =>
       renderCursorAssetSvg(asset, {
@@ -138,6 +131,13 @@ export function CustomCursorOverlay({
       cursorSettings.strokeOpacity,
     ],
   )
+
+  if (!containerWidth || !containerHeight) return null
+
+  const posX = zoomed.x
+  const posY = zoomed.y
+  const cursorScale = (cursorSettings.scale ?? 1) * (fitted.scale ?? 1) * zoomed.scale
+  const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
 
   return (
     <div

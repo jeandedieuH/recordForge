@@ -9,7 +9,7 @@ interface StorageViewProps {
   onNavigateToSettings?: () => void
 }
 
-export function StorageView({}: StorageViewProps) {
+export function StorageView(_props: StorageViewProps) {
   const { profiles, jobs, fetchProfiles, fetchJobs, initListeners } = useStorageStore()
 
   useEffect(() => {

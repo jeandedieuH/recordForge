@@ -8,7 +8,6 @@ export async function getCursorTelemetry(recordingId: string): Promise<CursorTel
       { recordingId },
       cursorTelemetryFileSchema.nullable(),
     )
-    // eslint-disable-next-line no-console
     console.log("[getCursorTelemetry] raw result:", {
       recordingId,
       hasTelemetry: !!raw,
@@ -16,7 +15,6 @@ export async function getCursorTelemetry(recordingId: string): Promise<CursorTel
     })
     return raw
   } catch (error) {
-    // eslint-disable-next-line no-console
     console.error("[getCursorTelemetry] failed:", { recordingId, error })
     throw error
   }

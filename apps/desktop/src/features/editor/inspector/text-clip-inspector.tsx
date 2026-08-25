@@ -4,6 +4,10 @@ import type {
   TextBackdropStyle,
   TitlePresetCategory,
   OverlayEasing,
+  TextFontFamily,
+  TextFontWeight,
+  TextAlignment,
+  TextAnimation,
 } from "@recordforge/contracts"
 import {
   applyTextPresetToClip,
@@ -434,7 +438,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
                     ? "heading"
                     : clip.fontFamily || "sans"
               }
-              onValueChange={(val) => onChange({ fontFamily: val as any })}
+              onValueChange={(val) => onChange({ fontFamily: val as TextFontFamily })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue placeholder="Font family" />
@@ -465,7 +469,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             </label>
             <Select
               value={String(clip.fontWeight ?? "700")}
-              onValueChange={(val) => onChange({ fontWeight: val as any })}
+              onValueChange={(val) => onChange({ fontWeight: val as TextFontWeight })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -488,7 +492,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             <ToggleGroup
               type="single"
               value={clip.alignment}
-              onValueChange={(val) => val && onChange({ alignment: val as any })}
+              onValueChange={(val) => val && onChange({ alignment: val as TextAlignment })}
               className="bg-surface-dim p-0.5 rounded-lg border border-border"
             >
               <ToggleGroupItem value="left" className="size-7 p-0">
@@ -689,7 +693,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             </label>
             <Select
               value={clip.animationIn ?? "slide-up"}
-              onValueChange={(val) => onChange({ animationIn: val as any })}
+              onValueChange={(val) => onChange({ animationIn: val as TextAnimation })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -716,7 +720,7 @@ export function TextClipInspector({ clip, onChange }: TextClipInspectorProps) {
             </label>
             <Select
               value={clip.animationOut ?? "fade"}
-              onValueChange={(val) => onChange({ animationOut: val as any })}
+              onValueChange={(val) => onChange({ animationOut: val as TextAnimation })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />

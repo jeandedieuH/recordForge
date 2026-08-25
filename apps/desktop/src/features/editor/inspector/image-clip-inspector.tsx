@@ -167,7 +167,7 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
             </label>
             <Select
               value={clip.animationIn ?? "fade"}
-              onValueChange={(val) => onChange({ animationIn: val as any })}
+              onValueChange={(val) => onChange({ animationIn: val as ImageClip["animationIn"] })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -187,7 +187,7 @@ export function ImageClipInspector({ clip, onChange }: ImageClipInspectorProps) 
             </label>
             <Select
               value={clip.animationOut ?? "fade"}
-              onValueChange={(val) => onChange({ animationOut: val as any })}
+              onValueChange={(val) => onChange({ animationOut: val as ImageClip["animationOut"] })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />

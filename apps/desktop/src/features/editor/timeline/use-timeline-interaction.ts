@@ -487,12 +487,12 @@ export function useTimelineInteraction(): TimelineInteraction {
     )
   }
 
-  function disposeTransaction() {
+  const disposeTransaction = useCallback(() => {
     if (!txRef.current) return
     txRef.current.cancel()
     txRef.current = null
     clearDraft()
-  }
+  }, [])
 
   function updateDraft(draft: InteractionDraft) {
     ensureTransaction()
@@ -508,9 +508,9 @@ export function useTimelineInteraction(): TimelineInteraction {
     setDraft(tx.preview)
   }
 
-  function cancel() {
+  const cancel = useCallback(() => {
     disposeTransaction()
-  }
+  }, [disposeTransaction])
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -525,7 +525,7 @@ export function useTimelineInteraction(): TimelineInteraction {
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [])
+  }, [cancel])
 
   function handleDraftOrCommit(draft: InteractionDraft, phase: "draft" | "commit" | "cancel") {
     if (phase === "cancel") {

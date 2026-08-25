@@ -102,7 +102,7 @@ export function ExternalMediaPanel() {
           sourceInMs: 0,
           sourceOutMs: durationMs,
           volume: 0.8,
-          role: item.role as any,
+          role: item.role === "music" ? "music" : "other",
           trackName: "Background Music",
           trackId: audioTrack?.id,
         }),

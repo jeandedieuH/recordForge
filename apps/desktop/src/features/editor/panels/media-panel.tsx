@@ -34,7 +34,7 @@ export function MediaPanel({
     return (
       <div className="flex h-full flex-col overflow-hidden bg-surface">
         <div className="border-b border-border p-3 pb-2">
-          <Tabs value={tab} onValueChange={(v) => setTab(v as any)} className="w-full">
+          <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)} className="w-full">
             <TabsList className="grid w-full grid-cols-2 h-7 bg-surface-dim p-0.5">
               <TabsTrigger value="project" className="text-xs py-0 h-6">
                 Source
@@ -117,7 +117,7 @@ export function MediaPanel({
   return (
     <div className="flex h-full flex-col overflow-hidden bg-surface">
       <div className="border-b border-border p-3 pb-2">
-        <Tabs value={tab} onValueChange={(v) => setTab(v as any)} className="w-full">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)} className="w-full">
           <TabsList className="grid w-full grid-cols-2 h-7 bg-surface-dim p-0.5">
             <TabsTrigger value="project" className="text-xs py-0 h-6">
               Source

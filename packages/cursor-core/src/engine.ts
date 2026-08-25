@@ -300,7 +300,7 @@ export function createCursorEngine(
         ? index
         : segmentStartIndex[index - 1]
 
-    let isMotion = false
+    let isMotion: boolean
     if (index === 0) {
       isMotion = true
     } else {

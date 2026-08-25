@@ -125,7 +125,6 @@ export function ZoomCanvasOverlay({
       } else {
         // Resize handling with aspect-ratio preservation
         let newWidth = initial.width
-        let newHeight = initial.height
         let newX = initial.x
         let newY = initial.y
 
@@ -146,7 +145,7 @@ export function ZoomCanvasOverlay({
         }
 
         // Lock aspect ratio
-        newHeight = newWidth / canvasAspect
+        const newHeight = newWidth / canvasAspect
 
         if (state.handle === "top-left" || state.handle === "top-right" || state.handle === "top") {
           newY = initial.y + (initial.height - newHeight)

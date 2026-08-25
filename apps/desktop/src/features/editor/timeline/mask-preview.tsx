@@ -1,6 +1,8 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, type MutableRefObject } from "react"
 import type { MaskClip, MaskRect } from "@recordforge/contracts"
 import { renderMasksToCanvas } from "../canvas/mask-shader-renderer"
+
+type WebGLBundle = NonNullable<Parameters<typeof renderMasksToCanvas>[4]["current"]>
 
 interface MaskPreviewProps {
   clips: MaskClip[]
@@ -74,7 +76,7 @@ export function MaskPreview({
 }: MaskPreviewProps) {
   const gestureRef = useRef<MaskGesture | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const webglBundleRef = useRef<any>(null)
+  const webglBundleRef = useRef<WebGLBundle | null>(null) as MutableRefObject<WebGLBundle | null>
 
   // Render hardware-accelerated WebGL / Canvas2D shaders onto the canvas layer
   useEffect(() => {

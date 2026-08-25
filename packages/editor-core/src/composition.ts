@@ -172,7 +172,7 @@ export function resolveZoomTransform(
   }
 
   const elapsed = timeMs - segment.startMs
-  let progress = 0
+  let progress: number
   let isPannedFromPrevious = false
 
   if (elapsed <= 0) {

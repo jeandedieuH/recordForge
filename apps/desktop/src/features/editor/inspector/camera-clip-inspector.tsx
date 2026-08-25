@@ -105,6 +105,7 @@ export function CameraClipInspector({
         { phase: "commit" },
       )
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to preset and source-size scalar changes
   }, [clip.id, clip.transform.preset, canvas, sourceSize.width, sourceSize.height])
 
   function isGeometryChange(partial: Partial<ClipTransform>): boolean {

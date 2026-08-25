@@ -1,5 +1,11 @@
 import { useMemo, useState } from "react"
-import type { AnnotationClip, AnnotationType } from "@recordforge/contracts"
+import type {
+  AnnotationClip,
+  AnnotationType,
+  AnnotationStrokeStyle,
+  AnnotationHead,
+  AnnotationAnimation,
+} from "@recordforge/contracts"
 import {
   annotationPresetFromClip,
   annotationPresetToShapePreset,
@@ -38,6 +44,7 @@ import {
   Shapes,
   ShieldAlert,
   Square,
+  type LucideIcon,
 } from "lucide-react"
 import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 import { useAnnotationPresetRegistry } from "../presets/preset-store"
@@ -309,7 +316,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
           <ToggleGroup
             type="single"
             value={clip.strokeStyle}
-            onValueChange={(val) => val && onChange({ strokeStyle: val as any })}
+            onValueChange={(val) => val && onChange({ strokeStyle: val as AnnotationStrokeStyle })}
             className="bg-surface-dim p-0.5 rounded-lg border border-border grid grid-cols-3"
           >
             <ToggleGroupItem value="solid" className="h-6 text-[10px]">
@@ -417,7 +424,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
               </label>
               <Select
                 value={clip.arrowStartHead}
-                onValueChange={(val) => onChange({ arrowStartHead: val as any })}
+                onValueChange={(val) => onChange({ arrowStartHead: val as AnnotationHead })}
               >
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
@@ -436,7 +443,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
               </label>
               <Select
                 value={clip.arrowEndHead}
-                onValueChange={(val) => onChange({ arrowEndHead: val as any })}
+                onValueChange={(val) => onChange({ arrowEndHead: val as AnnotationHead })}
               >
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
@@ -489,7 +496,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
             </label>
             <Select
               value={clip.animationIn ?? "fade"}
-              onValueChange={(val) => onChange({ animationIn: val as any })}
+              onValueChange={(val) => onChange({ animationIn: val as AnnotationAnimation })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -510,7 +517,7 @@ export function AnnotationClipInspector({ clip, onChange }: AnnotationClipInspec
             </label>
             <Select
               value={clip.animationOut ?? "fade"}
-              onValueChange={(val) => onChange({ animationOut: val as any })}
+              onValueChange={(val) => onChange({ animationOut: val as AnnotationAnimation })}
             >
               <SelectTrigger className="h-8 text-xs">
                 <SelectValue />
@@ -566,7 +573,7 @@ function ShapeTypeButton({
 }: {
   type: AnnotationType
   current: AnnotationType
-  icon: any
+  icon: LucideIcon
   label: string
   onClick: () => void
 }) {

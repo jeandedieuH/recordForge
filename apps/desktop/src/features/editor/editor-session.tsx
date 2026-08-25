@@ -52,7 +52,6 @@ export function EditorSession({ recordingId }: EditorSessionProps) {
       cancelled = true
       useTimelineStore.getState().stopListening()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- we deliberately re-run only on recording id changes
   }, [recordingId])
 
   // Window close guard: flush pending saves before allowing the window to close.

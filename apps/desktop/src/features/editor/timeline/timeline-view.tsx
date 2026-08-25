@@ -527,7 +527,7 @@ export function TimelineView({
   const retryThumbnail = useCallback(() => {
     setThumbnailSpriteError(false)
     thumbnailResource.retry()
-  }, [thumbnailResource.retry])
+  }, [thumbnailResource])
 
   const isSideBySideAtPlayhead = useMemo(() => {
     return cameraClips.some(
@@ -645,7 +645,7 @@ export function TimelineView({
       width: `min(100cqw, calc(100cqh * ${width / height}))`,
       aspectRatio: `${width} / ${height}`,
     }
-  }, [timeline?.canvas.width, timeline?.canvas.height])
+  }, [timeline])
 
   const preRenderedBackground = usePreRenderedBackground(timeline?.canvas, view.previewQuality)
 
@@ -684,7 +684,7 @@ export function TimelineView({
       boxShadow: shadow,
       overflow: "hidden",
     }
-  }, [videoBounds, timeline?.canvas, view.previewQuality])
+  }, [videoBounds, timeline, view.previewQuality])
 
   const handleClockBoundary = useCallback(
     (boundary: PlaybackBoundary) => {
@@ -727,180 +727,12 @@ export function TimelineView({
     seek(Math.max(0, Math.min(view.durationMs, view.playheadMs + direction * frameMs)))
   }
 
-  function zoomToFit() {
+  const zoomToFit = useCallback(() => {
     setZoom(0)
     setScroll(0)
-  }
+  }, [setZoom, setScroll])
 
-  const handleTimelineKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      const target = event.target as HTMLElement | null
-      if (target?.closest("input, textarea, select, button")) return
-      const key = event.key.toLowerCase()
-      const hasModifier = event.ctrlKey || event.metaKey
-
-      if (event.code === "Space") {
-        event.preventDefault()
-        togglePlay()
-      } else if (hasModifier && key === "z") {
-        event.preventDefault()
-        if (event.shiftKey) redo()
-        else undo()
-      } else if (hasModifier && key === "y") {
-        event.preventDefault()
-        redo()
-      } else if (hasModifier && key === "s") {
-        event.preventDefault()
-        void save()
-      } else if (hasModifier && key === "d") {
-        event.preventDefault()
-        duplicateSelected()
-      } else if (hasModifier && (key === "=" || key === "+")) {
-        event.preventDefault()
-        setZoom(Math.min(100, Math.round(view.zoom + 10)))
-      } else if (hasModifier && (key === "-" || key === "_")) {
-        event.preventDefault()
-        setZoom(Math.max(0, Math.round(view.zoom - 10)))
-      } else if (event.shiftKey && key === "z") {
-        event.preventDefault()
-        zoomToFit()
-      } else if (key === "r" && selectedOverlayClip && !hasModifier) {
-        event.preventDefault()
-        if (overlayInteraction.isRotateMode) overlayInteraction.finishRotateMode()
-        else overlayInteraction.startRotateMode(selectedOverlayClip.id)
-      } else if (key === "escape") {
-        event.preventDefault()
-        overlayInteraction.cancel()
-        if (view.selection) {
-          setSelection(null)
-        }
-      } else if (key === "v") {
-        setTool("select")
-      } else if (key === "c") {
-        setTool("split")
-      } else if (key === "r") {
-        setTool("range")
-      } else if (key === "s") {
-        event.preventDefault()
-        splitSelected()
-      } else if (key === "m") {
-        event.preventDefault()
-        addMarker()
-      } else if (key === "z") {
-        event.preventDefault()
-        handleAddZoom()
-      } else if (key === "j") {
-        event.preventDefault()
-        setPlaybackRate(0.5)
-        play()
-      } else if (key === "k") {
-        event.preventDefault()
-        pause()
-      } else if (key === "l") {
-        event.preventDefault()
-        setPlaybackRate(1)
-        play()
-      } else if (event.key === "Delete" || event.key === "Backspace") {
-        event.preventDefault()
-        deleteSelected(event.shiftKey)
-      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        event.preventDefault()
-        const direction = event.key === "ArrowLeft" ? -1 : 1
-        if (selectedOverlayClip && overlayInteraction.isRotateMode) {
-          overlayInteraction.rotateSelected(
-            selectedOverlayClip.id,
-            direction * (event.shiftKey ? 15 : 1),
-          )
-        } else if (selectedOverlayClip && hasModifier) {
-          overlayInteraction.resizeSelected(
-            selectedOverlayClip.id,
-            event.key === "ArrowRight"
-              ? event.shiftKey
-                ? 10
-                : 1
-              : event.key === "ArrowLeft"
-                ? event.shiftKey
-                  ? -10
-                  : -1
-                : 0,
-            0,
-          )
-        } else if (selectedOverlayClip) {
-          overlayInteraction.nudgeSelected(
-            selectedOverlayClip.id,
-            direction * (event.shiftKey ? 10 : 1),
-            0,
-          )
-        } else if (event.altKey && selectedClip) {
-          trimSelected(
-            event.shiftKey
-              ? direction === -1
-                ? "end"
-                : "start"
-              : direction === -1
-                ? "start"
-                : "end",
-            direction * frameMs,
-          )
-        } else if (hasModifier && selectedClip) {
-          nudgeSelected(direction * (event.shiftKey ? 1_000 : frameMs))
-        } else {
-          seek(view.playheadMs + direction * (event.shiftKey ? 1_000 : frameMs))
-        }
-      } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && selectedOverlayClip) {
-        event.preventDefault()
-        if (overlayInteraction.isRotateMode) {
-          overlayInteraction.rotateSelected(
-            selectedOverlayClip.id,
-            (event.key === "ArrowUp" ? -1 : 1) * (event.shiftKey ? 15 : 1),
-          )
-        } else if (hasModifier) {
-          overlayInteraction.resizeSelected(
-            selectedOverlayClip.id,
-            0,
-            event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
-          )
-        } else {
-          overlayInteraction.nudgeSelected(
-            selectedOverlayClip.id,
-            0,
-            event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
-          )
-        }
-      } else if (event.key === "Home") {
-        event.preventDefault()
-        seek(0)
-      } else if (event.key === "End") {
-        event.preventDefault()
-        seek(view.durationMs)
-      }
-    },
-    [
-      addMarker,
-      deleteSelected,
-      duplicateSelected,
-      frameMs,
-      nudgeSelected,
-      overlayInteraction,
-      pause,
-      play,
-      redo,
-      save,
-      seek,
-      selectedClip,
-      selectedOverlayClip,
-      setPlaybackRate,
-      splitSelected,
-      togglePlay,
-      trimSelected,
-      undo,
-      view.durationMs,
-      view.playheadMs,
-      zoomToFit,
-    ],
-  )
-
-  function splitSelected() {
+  const splitSelected = useCallback(() => {
     if (!selectedClip || selectedClip.track.locked) {
       // If no clip is explicitly selected, attempt to split the top clip at playhead
       if (timeline) {
@@ -926,132 +758,142 @@ export function TimelineView({
       return
     }
     execute(createSplitClipCommand(selectedClip.clip.id, view.playheadMs))
-  }
+  }, [selectedClip, view.playheadMs, timeline, execute])
 
-  function deleteSelected(ripple: boolean) {
-    const selection = view.selection
-    if (!selection) return
-    if (selection.kind === "range") {
-      execute(
-        ripple
-          ? createRippleDeleteRangeCommand(selection.startMs, selection.endMs)
-          : createDeleteRangeCommand(selection.startMs, selection.endMs),
-      )
-      setSelection(null)
-      return
-    }
-    if (selection.kind === "marker") {
-      execute(createDeleteMarkerCommand(selection.markerId))
-      setSelection(null)
-      return
-    }
-    if (selection.kind === "zoom") {
-      if (ripple && timeline) {
-        const segment = getManualZoomSegments(timeline).find((s) => s.id === selection.segmentId)
-        if (segment) {
-          execute(createRippleDeleteClipCommand(segment.id))
-          setSelection(null)
-          return
-        }
+  const deleteSelected = useCallback(
+    (ripple: boolean) => {
+      const selection = view.selection
+      if (!selection) return
+      if (selection.kind === "range") {
+        execute(
+          ripple
+            ? createRippleDeleteRangeCommand(selection.startMs, selection.endMs)
+            : createDeleteRangeCommand(selection.startMs, selection.endMs),
+        )
+        setSelection(null)
+        return
       }
-      execute(createDeleteZoomSegmentCommand(selection.segmentId))
-      setSelection(null)
-      return
-    }
-    if (selection.kind !== "clip") return
-    if (selection.clipIds.length > 1) {
+      if (selection.kind === "marker") {
+        execute(createDeleteMarkerCommand(selection.markerId))
+        setSelection(null)
+        return
+      }
+      if (selection.kind === "zoom") {
+        if (ripple && timeline) {
+          const segment = getManualZoomSegments(timeline).find((s) => s.id === selection.segmentId)
+          if (segment) {
+            execute(createRippleDeleteClipCommand(segment.id))
+            setSelection(null)
+            return
+          }
+        }
+        execute(createDeleteZoomSegmentCommand(selection.segmentId))
+        setSelection(null)
+        return
+      }
+      if (selection.kind !== "clip") return
+      if (selection.clipIds.length > 1) {
+        execute(
+          ripple
+            ? createRippleDeleteClipsCommand(selection.clipIds)
+            : createDeleteClipsCommand(selection.clipIds),
+        )
+        setSelection(null)
+        return
+      }
+      if (
+        !selectedClip ||
+        selectedClip.track.locked ||
+        (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
+      )
+        return
+      if (selectedClip.clip.kind === "cursor-effect" && !ripple) {
+        execute(createDeleteCursorRangeCommand(selectedClip.clip.id))
+        setSelection(null)
+        return
+      }
       execute(
         ripple
-          ? createRippleDeleteClipsCommand(selection.clipIds)
-          : createDeleteClipsCommand(selection.clipIds),
+          ? createRippleDeleteClipCommand(selectedClip.clip.id)
+          : createDeleteClipCommand(selectedClip.clip.id),
       )
       setSelection(null)
-      return
-    }
-    if (
-      !selectedClip ||
-      selectedClip.track.locked ||
-      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
-    )
-      return
-    if (selectedClip.clip.kind === "cursor-effect" && !ripple) {
-      execute(createDeleteCursorRangeCommand(selectedClip.clip.id))
-      setSelection(null)
-      return
-    }
-    execute(
-      ripple
-        ? createRippleDeleteClipCommand(selectedClip.clip.id)
-        : createDeleteClipCommand(selectedClip.clip.id),
-    )
-    setSelection(null)
-  }
+    },
+    [view.selection, selectedClip, timeline, execute, setSelection],
+  )
 
-  function nudgeSelected(deltaMs: number) {
-    if (
-      !selectedClip ||
-      selectedClip.track.locked ||
-      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
-    )
-      return
-    const selection = view.selection
-    if (selection?.kind === "clip" && selection.clipIds.length > 1) {
+  const nudgeSelected = useCallback(
+    (deltaMs: number) => {
+      if (
+        !selectedClip ||
+        selectedClip.track.locked ||
+        (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
+      )
+        return
+      const selection = view.selection
+      if (selection?.kind === "clip" && selection.clipIds.length > 1) {
+        execute(
+          createMoveClipsCommand(selection.clipIds, Math.round(deltaMs), {
+            coalesceKey: `keyboard-move:${selection.clipIds.slice().sort().join(",")}`,
+          }),
+        )
+        return
+      }
+      const nextStartMs = Math.max(0, Math.round(selectedClip.clip.startMs + deltaMs))
       execute(
-        createMoveClipsCommand(selection.clipIds, Math.round(deltaMs), {
-          coalesceKey: `keyboard-move:${selection.clipIds.slice().sort().join(",")}`,
+        createMoveClipCommand(selectedClip.clip.id, nextStartMs, undefined, {
+          coalesceKey: `keyboard-move:${selectedClip.clip.id}`,
         }),
       )
-      return
-    }
-    const nextStartMs = Math.max(0, Math.round(selectedClip.clip.startMs + deltaMs))
-    execute(
-      createMoveClipCommand(selectedClip.clip.id, nextStartMs, undefined, {
-        coalesceKey: `keyboard-move:${selectedClip.clip.id}`,
-      }),
-    )
-  }
+    },
+    [selectedClip, view.selection, execute],
+  )
 
-  function trimSelected(edge: "start" | "end", deltaMs: number) {
-    if (
-      !selectedClip ||
-      selectedClip.track.locked ||
-      (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
-    )
-      return
-    const { clip } = selectedClip
-    const clipEndMs = clip.startMs + clip.durationMs
-    if (clip.kind === "cursor-effect") {
-      const nextStartMs =
-        edge === "start"
-          ? Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
-          : clip.startMs
-      const nextEndMs = edge === "end" ? Math.max(clip.startMs + 1, clipEndMs + deltaMs) : clipEndMs
-      execute(createResizeCursorRangeCommand(clip.id, { startMs: nextStartMs, endMs: nextEndMs }))
-      return
-    }
-    if (edge === "start") {
-      const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
-      const sourceInMs = Math.max(
-        0,
-        clip.sourceInMs + Math.round((nextStartMs - clip.startMs) * clip.speed),
+  const trimSelected = useCallback(
+    (edge: "start" | "end", deltaMs: number) => {
+      if (
+        !selectedClip ||
+        selectedClip.track.locked ||
+        (selectedClip.clip.kind === "cursor-effect" && selectedClip.clip.locked)
       )
-      if (sourceInMs >= clip.sourceOutMs) return
-      execute(
-        createTrimClipCommand(clip.id, sourceInMs, clip.sourceOutMs, { startMs: nextStartMs }),
+        return
+      const { clip } = selectedClip
+      const clipEndMs = clip.startMs + clip.durationMs
+      if (clip.kind === "cursor-effect") {
+        const nextStartMs =
+          edge === "start"
+            ? Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
+            : clip.startMs
+        const nextEndMs =
+          edge === "end" ? Math.max(clip.startMs + 1, clipEndMs + deltaMs) : clipEndMs
+        execute(createResizeCursorRangeCommand(clip.id, { startMs: nextStartMs, endMs: nextEndMs }))
+        return
+      }
+      if (edge === "start") {
+        const nextStartMs = Math.max(0, Math.min(clipEndMs - 1, clip.startMs + deltaMs))
+        const sourceInMs = Math.max(
+          0,
+          clip.sourceInMs + Math.round((nextStartMs - clip.startMs) * clip.speed),
+        )
+        if (sourceInMs >= clip.sourceOutMs) return
+        execute(
+          createTrimClipCommand(clip.id, sourceInMs, clip.sourceOutMs, { startMs: nextStartMs }),
+        )
+        return
+      }
+      const nextEndMs = Math.max(clip.startMs + 1, clipEndMs + deltaMs)
+      const sourceDurationMs = Math.max(metadata?.durationMs ?? 0, clip.sourceOutMs)
+      const sourceOutMs = Math.min(
+        sourceDurationMs,
+        clip.sourceInMs + Math.round((nextEndMs - clip.startMs) * clip.speed),
       )
-      return
-    }
-    const nextEndMs = Math.max(clip.startMs + 1, clipEndMs + deltaMs)
-    const sourceDurationMs = Math.max(metadata?.durationMs ?? 0, clip.sourceOutMs)
-    const sourceOutMs = Math.min(
-      sourceDurationMs,
-      clip.sourceInMs + Math.round((nextEndMs - clip.startMs) * clip.speed),
-    )
-    if (sourceOutMs <= clip.sourceInMs) return
-    execute(createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs))
-  }
+      if (sourceOutMs <= clip.sourceInMs) return
+      execute(createTrimClipCommand(clip.id, clip.sourceInMs, sourceOutMs))
+    },
+    [selectedClip, metadata?.durationMs, execute],
+  )
 
-  function duplicateSelected() {
+  const duplicateSelected = useCallback(() => {
     const selection = view.selection
     if (selection?.kind === "clip" && selection.clipIds.length > 1) {
       execute(createDuplicateClipsCommand(selection.clipIds))
@@ -1064,7 +906,7 @@ export function TimelineView({
     )
       return
     execute(createDuplicateClipCommand(selectedClip.clip.id))
-  }
+  }, [view.selection, selectedClip, execute])
 
   function duplicateClip(clip: TimelineClip) {
     const selection = view.selection
@@ -1334,10 +1176,15 @@ export function TimelineView({
     }
   }
 
-  function addMarkerAtTime(timeMs: number) {
-    const roundedTimeMs = Math.max(0, Math.round(timeMs))
-    execute(createAddMarkerCommand(roundedTimeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`))
-  }
+  const addMarkerAtTime = useCallback(
+    (timeMs: number) => {
+      const roundedTimeMs = Math.max(0, Math.round(timeMs))
+      execute(
+        createAddMarkerCommand(roundedTimeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`),
+      )
+    },
+    [execute, timeline],
+  )
 
   function cycleTrackHeight(track: TimelineTrack) {
     const currentHeight = view.trackHeights[track.id] ?? 56
@@ -1345,9 +1192,9 @@ export function TimelineView({
     setTrackHeight(track.id, nextHeight)
   }
 
-  function addMarker() {
+  const addMarker = useCallback(() => {
     addMarkerAtTime(view.playheadMs)
-  }
+  }, [addMarkerAtTime, view.playheadMs])
 
   function addMask(mode: MaskClip["mode"]) {
     if (!timeline) return
@@ -1374,98 +1221,283 @@ export function TimelineView({
     setSelection({ kind: "clip", primaryClipId: mask.id, clipIds: [mask.id], trackId: track.id })
   }
 
-  function handleAddZoom(
-    timeOrOptions?:
-      | number
-      | {
-          timeMs?: number
-          endMs?: number
-          preset?: ZoomPreset
-          scale?: number
-          mode?: ManualZoomSegment["mode"]
-        },
-    maybeOptions?: {
-      preset?: ZoomPreset
-      scale?: number
-      endMs?: number
-      mode?: ManualZoomSegment["mode"]
+  const handleAddZoom = useCallback(
+    (
+      timeOrOptions?:
+        | number
+        | {
+            timeMs?: number
+            endMs?: number
+            preset?: ZoomPreset
+            scale?: number
+            mode?: ManualZoomSegment["mode"]
+          },
+      maybeOptions?: {
+        preset?: ZoomPreset
+        scale?: number
+        endMs?: number
+        mode?: ManualZoomSegment["mode"]
+      },
+    ) => {
+      if (!timeline) return
+
+      let timeMs: number | undefined
+      let endMs: number | undefined
+      let preset: ZoomPreset | undefined
+      let scale: number | undefined
+      let mode: ManualZoomSegment["mode"] | undefined
+
+      if (typeof timeOrOptions === "number") {
+        timeMs = timeOrOptions
+        endMs = maybeOptions?.endMs
+        preset = maybeOptions?.preset
+        scale = maybeOptions?.scale
+        mode = maybeOptions?.mode
+      } else if (timeOrOptions) {
+        timeMs = timeOrOptions.timeMs
+        endMs = timeOrOptions.endMs
+        preset = timeOrOptions.preset
+        scale = timeOrOptions.scale
+        mode = timeOrOptions.mode
+      }
+
+      const rangeSelection = view.selection?.kind === "range" ? view.selection : null
+      const effectiveStartMs =
+        timeMs !== undefined ? timeMs : rangeSelection ? rangeSelection.startMs : view.playheadMs
+      const effectiveEndMs =
+        endMs !== undefined
+          ? endMs
+          : rangeSelection && timeMs === undefined
+            ? rangeSelection.endMs
+            : undefined
+
+      const cursorPoint = getCursorPointAtTimelineTime(
+        timeline,
+        effectiveStartMs,
+        cursorTelemetry,
+        cursorEngine,
+      )
+
+      const segment = buildSmartZoomSegment(timeline, cursorPoint, {
+        startMs: effectiveStartMs,
+        endMs: effectiveEndMs,
+        preset,
+        scale,
+        mode,
+      })
+
+      const success = execute(
+        createAddZoomSegmentCommand(
+          segment.startMs,
+          segment.startMs + segment.durationMs,
+          segment.target,
+          {
+            segmentId: segment.id,
+            scale: segment.scale,
+            easing: segment.easing,
+            transitionInMs: segment.transitionInMs,
+            transitionOutMs: segment.transitionOutMs,
+            mode: segment.mode,
+            source: segment.source,
+            preset: segment.preset,
+            label: segment.label,
+          },
+        ),
+      )
+
+      if (success) {
+        setSelection({ kind: "zoom", segmentId: segment.id })
+        const durationSec = (segment.durationMs / 1000).toFixed(1)
+        toast({
+          title: `Added ${segment.scale.toFixed(1)}× Zoom`,
+          description: `${segment.label ?? "Zoom segment"} (${durationSec}s) at ${formatTimelineTime(segment.startMs)}`,
+        })
+      }
     },
-  ) {
-    if (!timeline) return
-
-    let timeMs: number | undefined
-    let endMs: number | undefined
-    let preset: ZoomPreset | undefined
-    let scale: number | undefined
-    let mode: ManualZoomSegment["mode"] | undefined
-
-    if (typeof timeOrOptions === "number") {
-      timeMs = timeOrOptions
-      endMs = maybeOptions?.endMs
-      preset = maybeOptions?.preset
-      scale = maybeOptions?.scale
-      mode = maybeOptions?.mode
-    } else if (timeOrOptions) {
-      timeMs = timeOrOptions.timeMs
-      endMs = timeOrOptions.endMs
-      preset = timeOrOptions.preset
-      scale = timeOrOptions.scale
-      mode = timeOrOptions.mode
-    }
-
-    const rangeSelection = view.selection?.kind === "range" ? view.selection : null
-    const effectiveStartMs =
-      timeMs !== undefined ? timeMs : rangeSelection ? rangeSelection.startMs : view.playheadMs
-    const effectiveEndMs =
-      endMs !== undefined
-        ? endMs
-        : rangeSelection && timeMs === undefined
-          ? rangeSelection.endMs
-          : undefined
-
-    const cursorPoint = getCursorPointAtTimelineTime(
+    [
       timeline,
-      effectiveStartMs,
+      view.selection,
+      view.playheadMs,
       cursorTelemetry,
       cursorEngine,
-    )
+      execute,
+      toast,
+      setSelection,
+    ],
+  )
 
-    const segment = buildSmartZoomSegment(timeline, cursorPoint, {
-      startMs: effectiveStartMs,
-      endMs: effectiveEndMs,
-      preset,
-      scale,
-      mode,
-    })
+  const handleTimelineKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest("input, textarea, select, button")) return
+      const key = event.key.toLowerCase()
+      const hasModifier = event.ctrlKey || event.metaKey
 
-    const success = execute(
-      createAddZoomSegmentCommand(
-        segment.startMs,
-        segment.startMs + segment.durationMs,
-        segment.target,
-        {
-          segmentId: segment.id,
-          scale: segment.scale,
-          easing: segment.easing,
-          transitionInMs: segment.transitionInMs,
-          transitionOutMs: segment.transitionOutMs,
-          mode: segment.mode,
-          source: segment.source,
-          preset: segment.preset,
-          label: segment.label,
-        },
-      ),
-    )
-
-    if (success) {
-      setSelection({ kind: "zoom", segmentId: segment.id })
-      const durationSec = (segment.durationMs / 1000).toFixed(1)
-      toast({
-        title: `Added ${segment.scale.toFixed(1)}× Zoom`,
-        description: `${segment.label ?? "Zoom segment"} (${durationSec}s) at ${formatTimelineTime(segment.startMs)}`,
-      })
-    }
-  }
+      if (event.code === "Space") {
+        event.preventDefault()
+        togglePlay()
+      } else if (hasModifier && key === "z") {
+        event.preventDefault()
+        if (event.shiftKey) redo()
+        else undo()
+      } else if (hasModifier && key === "y") {
+        event.preventDefault()
+        redo()
+      } else if (hasModifier && key === "s") {
+        event.preventDefault()
+        void save()
+      } else if (hasModifier && key === "d") {
+        event.preventDefault()
+        duplicateSelected()
+      } else if (hasModifier && (key === "=" || key === "+")) {
+        event.preventDefault()
+        setZoom(Math.min(100, Math.round(view.zoom + 10)))
+      } else if (hasModifier && (key === "-" || key === "_")) {
+        event.preventDefault()
+        setZoom(Math.max(0, Math.round(view.zoom - 10)))
+      } else if (event.shiftKey && key === "z") {
+        event.preventDefault()
+        zoomToFit()
+      } else if (key === "r" && selectedOverlayClip && !hasModifier) {
+        event.preventDefault()
+        if (overlayInteraction.isRotateMode) overlayInteraction.finishRotateMode()
+        else overlayInteraction.startRotateMode(selectedOverlayClip.id)
+      } else if (key === "escape") {
+        event.preventDefault()
+        overlayInteraction.cancel()
+        if (view.selection) {
+          setSelection(null)
+        }
+      } else if (key === "v") {
+        setTool("select")
+      } else if (key === "c") {
+        setTool("split")
+      } else if (key === "r") {
+        setTool("range")
+      } else if (key === "s") {
+        event.preventDefault()
+        splitSelected()
+      } else if (key === "m") {
+        event.preventDefault()
+        addMarker()
+      } else if (key === "z") {
+        event.preventDefault()
+        handleAddZoom()
+      } else if (key === "j") {
+        event.preventDefault()
+        setPlaybackRate(0.5)
+        play()
+      } else if (key === "k") {
+        event.preventDefault()
+        pause()
+      } else if (key === "l") {
+        event.preventDefault()
+        setPlaybackRate(1)
+        play()
+      } else if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault()
+        deleteSelected(event.shiftKey)
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault()
+        const direction = event.key === "ArrowLeft" ? -1 : 1
+        if (selectedOverlayClip && overlayInteraction.isRotateMode) {
+          overlayInteraction.rotateSelected(
+            selectedOverlayClip.id,
+            direction * (event.shiftKey ? 15 : 1),
+          )
+        } else if (selectedOverlayClip && hasModifier) {
+          overlayInteraction.resizeSelected(
+            selectedOverlayClip.id,
+            event.key === "ArrowRight"
+              ? event.shiftKey
+                ? 10
+                : 1
+              : event.key === "ArrowLeft"
+                ? event.shiftKey
+                  ? -10
+                  : -1
+                : 0,
+            0,
+          )
+        } else if (selectedOverlayClip) {
+          overlayInteraction.nudgeSelected(
+            selectedOverlayClip.id,
+            direction * (event.shiftKey ? 10 : 1),
+            0,
+          )
+        } else if (event.altKey && selectedClip) {
+          trimSelected(
+            event.shiftKey
+              ? direction === -1
+                ? "end"
+                : "start"
+              : direction === -1
+                ? "start"
+                : "end",
+            direction * frameMs,
+          )
+        } else if (hasModifier && selectedClip) {
+          nudgeSelected(direction * (event.shiftKey ? 1_000 : frameMs))
+        } else {
+          seek(view.playheadMs + direction * (event.shiftKey ? 1_000 : frameMs))
+        }
+      } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && selectedOverlayClip) {
+        event.preventDefault()
+        if (overlayInteraction.isRotateMode) {
+          overlayInteraction.rotateSelected(
+            selectedOverlayClip.id,
+            (event.key === "ArrowUp" ? -1 : 1) * (event.shiftKey ? 15 : 1),
+          )
+        } else if (hasModifier) {
+          overlayInteraction.resizeSelected(
+            selectedOverlayClip.id,
+            0,
+            event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
+          )
+        } else {
+          overlayInteraction.nudgeSelected(
+            selectedOverlayClip.id,
+            0,
+            event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
+          )
+        }
+      } else if (event.key === "Home") {
+        event.preventDefault()
+        seek(0)
+      } else if (event.key === "End") {
+        event.preventDefault()
+        seek(view.durationMs)
+      }
+    },
+    [
+      addMarker,
+      deleteSelected,
+      duplicateSelected,
+      frameMs,
+      handleAddZoom,
+      nudgeSelected,
+      overlayInteraction,
+      pause,
+      play,
+      redo,
+      save,
+      seek,
+      selectedClip,
+      selectedOverlayClip,
+      setPlaybackRate,
+      setSelection,
+      setZoom,
+      splitSelected,
+      togglePlay,
+      trimSelected,
+      undo,
+      view.durationMs,
+      view.playheadMs,
+      view.selection,
+      view.zoom,
+      zoomToFit,
+    ],
+  )
 
   if (isLoading) return <TimelineLoadingState />
   if (!timeline || !recording) {

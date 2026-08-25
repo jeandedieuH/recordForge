@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest"
 import { renderOverlayDisplayList } from "./canvas-renderer"
 
 if (typeof globalThis.Path2D === "undefined") {
-  ;(globalThis as any).Path2D = class {
+  const globalWithPath2D = globalThis as unknown as { Path2D?: new () => Path2D }
+  globalWithPath2D.Path2D = class {
     addPath() {}
     closePath() {}
     moveTo() {}
@@ -14,7 +15,7 @@ if (typeof globalThis.Path2D === "undefined") {
     ellipse() {}
     rect() {}
     roundRect() {}
-  }
+  } as unknown as new () => Path2D
 }
 
 function canvasWithContext(clearRect: () => void): HTMLCanvasElement {

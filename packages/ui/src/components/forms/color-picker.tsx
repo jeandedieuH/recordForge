@@ -102,9 +102,9 @@ export function hsvToRgb({ h, s, v, a }: HsvColor): RgbColor {
   const x = c * (1 - Math.abs(((normH / 60) % 2) - 1))
   const m = v - c
 
-  let rPrime = 0
-  let gPrime = 0
-  let bPrime = 0
+  let rPrime: number
+  let gPrime: number
+  let bPrime: number
 
   if (normH < 60) {
     rPrime = c
@@ -410,7 +410,7 @@ export function ColorPicker({
     if (disabled) return
     isDraggingHue.current = true
     e.currentTarget.setPointerCapture(e.pointerId)
-    updateHuePointerFromPointer: updateHueFromPointer(e)
+    updateHueFromPointer(e)
   }
 
   const handleHuePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
