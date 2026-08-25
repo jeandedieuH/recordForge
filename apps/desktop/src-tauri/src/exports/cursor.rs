@@ -692,6 +692,7 @@ impl CursorRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_cursor(
         &mut self,
         frame: &mut [u8],
@@ -951,7 +952,7 @@ pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
         lut
     });
 
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as usize;
         if alpha > 0 && alpha < 255 {
             let inv = inv_lut[alpha];

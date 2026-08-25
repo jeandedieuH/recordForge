@@ -45,6 +45,7 @@ impl FfmpegCapture {
     /// `ddagrab` (Desktop Duplication API) filter. When false, display capture
     /// falls back to `gdigrab` so recording still works on builds without D3D11
     /// capture support.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(config, profile, manifest))]
     pub fn start(
         ffmpeg_path: &str,

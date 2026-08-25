@@ -2817,6 +2817,7 @@ fn fast_blur_pixmap(pixmap: &mut Pixmap, radius: f32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_shadow_plate_png(
     canvas_w: u32,
     canvas_h: u32,
@@ -2889,8 +2890,10 @@ pub(crate) fn generate_camera_border_png(
     paint.set_color(color);
     paint.anti_alias = true;
 
-    let mut stroke = tiny_skia::Stroke::default();
-    stroke.width = bw;
+    let stroke = tiny_skia::Stroke {
+        width: bw,
+        ..Default::default()
+    };
 
     let half_bw = bw / 2.0;
 
@@ -2940,6 +2943,7 @@ pub(crate) fn generate_camera_border_png(
         .map_err(|e| format!("encode camera border png: {e}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_camera_shadow_plate_png(
     canvas_w: u32,
     canvas_h: u32,
@@ -3295,8 +3299,10 @@ pub(crate) fn generate_background_plate_png(
     height: u32,
 ) -> Option<PathBuf> {
     let svg = parse_css_gradient_to_svg(background, width, height)?;
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb = overlay_engine::get_shared_font_database();
+    let options = resvg::usvg::Options {
+        fontdb: overlay_engine::get_shared_font_database(),
+        ..Default::default()
+    };
     let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
     let mut pixmap = Pixmap::new(width, height)?;
     resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
@@ -3341,8 +3347,10 @@ fn normalize_file_path_str(input: &str) -> String {
 
 fn rasterize_svg_bytes_to_png(svg_bytes: &[u8], width: u32, height: u32) -> Option<PathBuf> {
     let svg_str = std::str::from_utf8(svg_bytes).ok()?;
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb = overlay_engine::get_shared_font_database();
+    let options = resvg::usvg::Options {
+        fontdb: overlay_engine::get_shared_font_database(),
+        ..Default::default()
+    };
     let tree = resvg::usvg::Tree::from_str(svg_str, &options).ok()?;
     let mut pixmap = Pixmap::new(width, height)?;
     resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());

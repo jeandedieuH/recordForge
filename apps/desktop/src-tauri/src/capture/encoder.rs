@@ -85,10 +85,8 @@ pub fn detect_encoders(ffmpeg_path: &str) -> crate::errors::Result<Vec<EncoderIn
     });
 
     let mut results = Vec::with_capacity(PROBED_ENCODERS.len());
-    for handle in handles {
-        if let Ok(encoder) = handle {
-            results.push(encoder);
-        }
+    for encoder in handles.into_iter().flatten() {
+        results.push(encoder);
     }
 
     if let Ok(mut lock) = ENCODER_CACHE.write() {

@@ -243,6 +243,7 @@ impl StorageManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_upload_worker(
         app: tauri::AppHandle,
         db: Arc<Mutex<rusqlite::Connection>>,
