@@ -89,6 +89,7 @@ recordForge/
 3. **Rust Toolchain:** [Rustup](https://rustup.rs) (stable, >= 1.80)
 4. **C++ Build Tools:** Visual Studio C++ Build Tools (with Windows 10/11 SDK)
 5. **Wasm Target:** `rustup target add wasm32-unknown-unknown`
+6. **wasm-pack:** `cargo install wasm-pack` (required for `bun run build:wasm:overlay`)
 
 ### 1. Clone & Install Dependencies
 
@@ -125,20 +126,20 @@ bun run tauri:dev
 
 ## 🛠️ Development Workflow
 
-| Command | Description |
-|---|---|
-| `bun run check` | Run linter, formatting checks, typecheck, and test suites |
-| `bun run typecheck` | Run TypeScript type checks across all workspaces |
-| `bun run test` | Execute Vitest unit and integration test suites |
-| `bun run format:check` | Verify codebase formatting with Prettier |
-| `bun run format` | Auto-format all code files across the repository |
-| `cd apps/desktop && bun run tauri:build` | Build production installer (`.msi` / `.exe`) |
+| Command                                  | Description                                               |
+| ---------------------------------------- | --------------------------------------------------------- |
+| `bun run check`                          | Run linter, formatting checks, typecheck, and test suites |
+| `bun run typecheck`                      | Run TypeScript type checks across all workspaces          |
+| `bun run test`                           | Execute Vitest unit and integration test suites           |
+| `bun run format:check`                   | Verify codebase formatting with Prettier                  |
+| `bun run format`                         | Auto-format all code files across the repository          |
+| `cd apps/desktop && bun run tauri:build` | Build production installer (`.msi` / `.exe`)              |
 
 ---
 
 ## 🤝 Contributing
 
-We welcome contributions from developers, designers, and creators of all skill levels! 
+We welcome contributions from developers, designers, and creators of all skill levels!
 
 1. Read our [Contributing Guidelines](CONTRIBUTING.md) to understand our codebase standards, architecture boundaries, and PR workflow.
 2. Adhere to our [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -148,9 +149,10 @@ We welcome contributions from developers, designers, and creators of all skill l
 
 ## 🔒 Security & Privacy
 
-For security vulnerability disclosures, please review our [Security Policy](SECURITY.md). 
+For security vulnerability disclosures, please review our [Security Policy](SECURITY.md).
 
 recordForge strictly complies with local-first security boundaries:
+
 - Cloud credentials and API keys are stored exclusively in the **Windows Credential Manager** (OS Vault), never in plaintext or SQLite.
 - Desktop capabilities are locked down via narrow Tauri security permissions.
 - Telemetry, screen content, and transcripts are never logged or transmitted.

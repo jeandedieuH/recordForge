@@ -28,11 +28,16 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

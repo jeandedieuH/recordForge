@@ -22,12 +22,14 @@ recordForge is a local-first, low-overhead desktop application for Windows 11. T
 ## 🛠️ Development Setup
 
 ### 1. Prerequisites
+
 - **OS:** Windows 11 (or Windows 10 build 19041+)
 - **Package Manager:** [Bun](https://bun.sh) (>= 1.4.0)
-- **Rust Toolchain:** [Rustup](https://rustup.rs) (stable channel, >= 1.80) with target `wasm32-unknown-unknown`
+- **Rust Toolchain:** [Rustup](https://rustup.rs) (stable channel, >= 1.80) with target `wasm32-unknown-unknown` and [wasm-pack](https://rustwasm.github.io/wasm-pack/) (`cargo install wasm-pack`)
 - **Build Tools:** Visual Studio C++ Build Tools with Windows 10/11 SDK
 
 ### 2. Initial Setup
+
 ```bash
 # Clone the repository
 git clone https://github.com/jeandedieuH/recordForge.git
@@ -44,6 +46,7 @@ bun run build:wasm:overlay
 ```
 
 ### 3. Launch Development
+
 ```bash
 # Launch the Tauri v2 Desktop App in hot-reload dev mode
 cd apps/desktop
@@ -71,6 +74,7 @@ bun run format
 ```
 
 > **Note for Rust tests on Windows:** If parallel linking causes intermittent `LNK1104` locks, run tests with single-threaded compilation:
+>
 > ```bash
 > cargo test -j 1
 > ```

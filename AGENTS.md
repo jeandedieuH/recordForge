@@ -76,9 +76,11 @@ Install dependencies:
 bun install
 ```
 
-Build the overlay engine WASM artifact:
+Build the overlay engine WASM artifact (requires `wasm-pack` and the `wasm32-unknown-unknown` Rust target):
 
 ```bash
+cargo install wasm-pack
+rustup target add wasm32-unknown-unknown
 bun run build:wasm:overlay
 ```
 
