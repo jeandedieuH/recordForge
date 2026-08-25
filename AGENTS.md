@@ -179,7 +179,7 @@ Official desktop releases are published by `.github/workflows/release-desktop.ym
 
 ## Tooling
 
-Download FFmpeg/FFprobe sidecar binaries (pinned to v9.0):
+Download FFmpeg/FFprobe sidecar binaries (pinned to v9.0.1):
 
 ```bash
 bun run setup:ffmpeg

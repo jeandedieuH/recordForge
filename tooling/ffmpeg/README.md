@@ -18,7 +18,7 @@ node tooling/ffmpeg/setup.mjs
 
 ## What It Does
 
-1. Downloads the **gyan.dev release essentials** build (FFmpeg 9.0, GPLv3).
+1. Downloads the **gyan.dev release essentials** build (FFmpeg 9.0.1, GPLv3).
 2. Extracts `ffmpeg.exe` and `ffprobe.exe` from the zip.
 3. Copies them to `apps/desktop/src-tauri/binaries/` with the Tauri target-triple
    suffix (`ffmpeg-x86_64-pc-windows-msvc.exe`).

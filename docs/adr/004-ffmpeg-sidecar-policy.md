@@ -16,7 +16,7 @@ Use FFmpeg as an **external sidecar binary**, bundled per platform and invoked f
 
 A tooling script (`tooling/ffmpeg/setup.mjs`) downloads the **gyan.dev release essentials** build (GPLv3, includes x264/x265) and stages the binaries into `apps/desktop/src-tauri/binaries/` with the Tauri target-triple naming convention (e.g. `ffmpeg-x86_64-pc-windows-msvc.exe`).
 
-The FFmpeg version is **pinned to 9.0**. To upgrade, edit `FFMPEG_VERSION` in the setup script and re-run.
+The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` in the setup script and re-run.
 
 ### Bundling
 

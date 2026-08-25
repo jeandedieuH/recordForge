@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 
 /** Pinned FFmpeg version — change this to upgrade. */
-const FFMPEG_VERSION = "9.0";
+const FFMPEG_VERSION = "9.0.1";
 
 /**
  * gyan.dev URL for the release essentials zip.
