@@ -1,4 +1,4 @@
-# recordForge
+# RecordForge
 
 <div align="center">
 
@@ -19,7 +19,7 @@
 
 ## 🌟 Highlights & Philosophy
 
-recordForge is built from the ground up to be **recorder-first, privacy-focused, and low-end friendly**:
+RecordForge is built from the ground up to be **recorder-first, privacy-focused, and low-end friendly**:
 
 - 🔒 **100% Local-First & Private:** No mandatory accounts, no cloud sync lock-in, and zero analytics/telemetry spyware. Your recordings never leave your machine unless you choose to export them.
 - ⚡ **Native Performance (Sub-50MB Idle RAM):** Built on Tauri v2 and native Rust. No bloated Chromium background engines chewing up your CPU and battery.
@@ -33,7 +33,7 @@ recordForge is built from the ground up to be **recorder-first, privacy-focused,
 
 ## 🏗️ Architecture
 
-recordForge enforces a strict separation between native systems engineering and declarative user interaction:
+RecordForge enforces a strict separation between native systems engineering and declarative user interaction:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
