@@ -47,3 +47,7 @@ coverage
 # Env
 .env
 .env.local
+
+.secrets/
+*.key
+*.key.pub
