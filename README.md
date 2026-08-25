@@ -35,21 +35,18 @@ RecordForge is built from the ground up to be **recorder-first, privacy-focused,
 
 RecordForge enforces a strict separation between native systems engineering and declarative user interaction:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      React 19 Frontend                      │
-│   (Vite + Tailwind v4 + Radix UI + Zustand + @recordforge/ui) │
-└──────────────┬───────────────────────────────▲──────────────┘
-               │ Tauri IPC Commands            │ Tauri Events
-               ▼                               │ (Status / Progress)
-┌──────────────────────────────────────────────┴──────────────┐
-│                    Rust Backend (Tauri v2)                  │
-│  ├─ Native Screen Capture (Windows Graphics Capture / DXGI) │
-│  ├─ Native Audio Pipeline (WASAPI Loopback + Device Clock)  │
-│  ├─ SQLite WAL Metadata & State Engine                      │
-│  ├─ Cursor Rasterizer (resvg + tiny-skia)                   │
-│  └─ Media Processing (FFmpeg / FFprobe Pinned Sidecars)     │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Frontend["React 19 Frontend"]
+        F1["Vite • Tailwind v4 • Radix UI • Zustand • @recordforge/ui"]
+    end
+
+    subgraph Backend["Rust Backend (Tauri v2)"]
+        B1["• Native Screen Capture (Windows Graphics Capture / DXGI)<br/>• Native Audio Pipeline (WASAPI Loopback + Device Clock)<br/>• SQLite WAL Metadata & State Engine<br/>• Cursor Rasterizer (resvg + tiny-skia)<br/>• Media Processing (FFmpeg / FFprobe Pinned Sidecars)"]
+    end
+
+    Frontend -->|"Tauri IPC Commands"| Backend
+    Backend -->|"Tauri Events (Status / Progress)"| Frontend
 ```
 
 ### Monorepo Structure
