@@ -20,6 +20,9 @@ bun run build
 # Build full desktop release
 bun run tauri:build
 
+# Official signed release builds are run by .github/workflows/release-desktop.yml.
+# They prepare src-tauri/tauri.release.generated.conf.json before invoking Tauri.
+
 # Type check
 bun run typecheck
 
@@ -59,6 +62,7 @@ cargo clippy
 ## Tauri JS Plugins
 
 - `@tauri-apps/plugin-global-shortcut` and `@tauri-apps/plugin-dialog` are used for global hotkeys and save dialogs.
+- `@tauri-apps/plugin-updater` is enabled only in official packaged builds using the release config overlay and a public GitHub Releases endpoint.
 - The floating toolbar is rendered when the webview URL contains `?floating=1` (see `src/App.tsx`).
 
 ## Security Notes
@@ -66,3 +70,4 @@ cargo clippy
 - Do not add shell or filesystem permissions without review.
 - Keep all native code in Rust.
 - Do not log secrets or media contents.
+- The updater public key may be embedded in official release configuration; the private signing key must remain in GitHub Actions secrets and never enter the frontend bundle.

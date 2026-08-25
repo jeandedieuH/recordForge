@@ -12,7 +12,7 @@
     },
     "apps/desktop": {
       "name": "@recordforge/desktop",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@dnd-kit/core": "^6.3.1",
         "@dnd-kit/sortable": "^10.0.0",
@@ -28,6 +28,7 @@
         "@tauri-apps/plugin-dialog": "^2.7.2",
         "@tauri-apps/plugin-global-shortcut": "^2.3.2",
         "@tauri-apps/plugin-opener": "^2.5.4",
+        "@tauri-apps/plugin-updater": "2.10.1",
         "lucide-react": "1.31.0",
         "react": "^19.2.8",
         "react-dom": "^19.2.8",
@@ -52,7 +53,7 @@
     },
     "apps/marketing": {
       "name": "@recordforge/marketing",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@astrojs/react": "^6.0.3",
         "astro": "^7.2.3",
@@ -72,7 +73,7 @@
     },
     "packages/config": {
       "name": "@recordforge/config",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "devDependencies": {
         "@eslint/js": "^10.0.1",
         "eslint": "^10.8.0",
@@ -85,7 +86,7 @@
     },
     "packages/contracts": {
       "name": "@recordforge/contracts",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "zod": "^3.25.11",
       },
@@ -99,7 +100,7 @@
     },
     "packages/cursor-core": {
       "name": "@recordforge/cursor-core",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -113,7 +114,7 @@
     },
     "packages/domain": {
       "name": "@recordforge/domain",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -127,7 +128,7 @@
     },
     "packages/editor-core": {
       "name": "@recordforge/editor-core",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
@@ -144,7 +145,7 @@
     },
     "packages/media-core": {
       "name": "@recordforge/media-core",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
@@ -161,7 +162,7 @@
     },
     "packages/overlay-core": {
       "name": "@recordforge/overlay-core",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -175,7 +176,7 @@
     },
     "packages/storage-core": {
       "name": "@recordforge/storage-core",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/domain": "workspace:*",
@@ -190,7 +191,7 @@
     },
     "packages/ui": {
       "name": "@recordforge/ui",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@radix-ui/react-alert-dialog": "^1.1.23",
         "@radix-ui/react-context-menu": "^2.3.7",
@@ -230,7 +231,7 @@
     },
     "tooling/benchmarks": {
       "name": "@recordforge/editor-benchmarks",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
@@ -247,10 +248,11 @@
     },
     "tooling/ffmpeg": {
       "name": "@recordforge/setup-ffmpeg",
+      "version": "1.0.0",
     },
     "tooling/golden-fixtures": {
       "name": "@recordforge/golden-fixtures",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -263,7 +265,7 @@
     },
     "tooling/scripts": {
       "name": "@recordforge/tooling-scripts",
-      "version": "1.0.0-beta",
+      "version": "1.0.0",
       "devDependencies": {
         "sharp": "^0.35.3",
       },
@@ -815,6 +817,8 @@
     "@tauri-apps/plugin-global-shortcut": ["@tauri-apps/plugin-global-shortcut@2.3.2", "", { "dependencies": { "@tauri-apps/api": "^2.11.0" } }, "sha512-UReHNXrLvpEjylE4jb4oCYiy96uRykPUthoCQCmRXYrd5hs5X9DrW+qOn7GLW57EJN4tdK8bgK5twBTz2NOxzA=="],
 
     "@tauri-apps/plugin-opener": ["@tauri-apps/plugin-opener@2.5.4", "", { "dependencies": { "@tauri-apps/api": "^2.11.0" } }, "sha512-1HnPkb+AmgO29HBazm4uPLKB+r7zzcTBW1d0fyYp1uP+jwtpoiNDGKMMzz58SFp49nOIrxdE3aUJtT57lfO9CQ=="],
+
+    "@tauri-apps/plugin-updater": ["@tauri-apps/plugin-updater@2.10.1", "", { "dependencies": { "@tauri-apps/api": "^2.10.1" } }, "sha512-NFYMg+tWOZPJdzE/PpFj2qfqwAWwNS3kXrb1tm1gnBJ9mYzZ4WDRrwy8udzWoAnfGCHLuePNLY1WVCNHnh3eRA=="],
 
     "@turbo/darwin-64": ["@turbo/darwin-64@2.10.9", "", { "os": "darwin", "cpu": "x64" }, "sha512-Jh+pTGXLNz8+1tkUU13TI/f+ZOI+OvC4YbHi1H+57iSpLt5DR3xgptd+4sA07RdjdRR/RX/01uQQu2OkbzIefA=="],
 

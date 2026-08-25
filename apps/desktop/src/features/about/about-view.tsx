@@ -1,4 +1,5 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { getVersion } from "@tauri-apps/api/app"
 import {
   AppWindow,
   CheckCircle2,
@@ -30,11 +31,13 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { isTauri } from "../../lib/settings"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { UpdateCard } from "../updater"
 
 export interface AboutViewProps {
   onNavigateToSettings?: () => void
   onNavigateToDiagnostics?: () => void
   onReplayOnboarding?: () => void
+  onPrepareForUpdate?: () => Promise<void>
 }
 
 const PRESTIGE_TECH_URL = "https://prestigetech.dev"
@@ -45,10 +48,19 @@ export function AboutView({
   onNavigateToSettings,
   onNavigateToDiagnostics,
   onReplayOnboarding,
+  onPrepareForUpdate,
 }: AboutViewProps) {
   const { toast } = useToast()
   const diagnostics = useRecorderStore((state) => state.diagnostics)
   const [isCopying, setIsCopying] = useState(false)
+  const [appVersion, setAppVersion] = useState("development")
+
+  useEffect(() => {
+    if (!isTauri()) return
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("unknown"))
+  }, [])
 
   async function handleOpenUrl(url: string, label: string) {
     try {
@@ -90,7 +102,7 @@ export function AboutView({
       const report = [
         "RecordForge Desktop System Report",
         "================================",
-        "App Version: 1.0.0 (Release)",
+        `App Version: ${appVersion}`,
         "Licensing: Free & Open-Source (GNU GPLv3)",
         `Source Repository: ${GITHUB_REPO_URL}`,
         `Platform: ${os}`,
@@ -143,7 +155,7 @@ export function AboutView({
                   RecordForge
                 </h1>
                 <Badge variant="accent" className="text-xs px-2.5 py-0.5 font-mono">
-                  v1.0.0
+                  v{appVersion}
                 </Badge>
                 <Badge variant="outline" className="text-xs px-2 py-0.5 text-subtle-foreground">
                   Windows 10 native
@@ -210,6 +222,8 @@ export function AboutView({
           </span>
         </div>
       </div>
+
+      <UpdateCard onBeforeInstall={onPrepareForUpdate} />
 
       {/* Grid: Licensing & V2 Roadmap */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">

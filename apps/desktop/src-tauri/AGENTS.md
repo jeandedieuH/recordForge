@@ -40,13 +40,14 @@ cargo build --release
 - `src/shortcuts.rs` — Global shortcut registration and handlers
 - `src/tray.rs` — System tray icon and menu
 - `src/errors.rs` — Application error types
-- `src/state.rs` — Shared application state
+- `src/state.rs` — Shared application state and updater operation gate
 
 ## Dependencies
 
 - `tauri` is configured with the `tray-icon` and `image-png` features.
 - `tauri-plugin-global-shortcut` is used for global hotkeys.
 - `tauri-plugin-dialog` is used for save/export dialogs.
+- `tauri-plugin-updater` verifies signed official GitHub Release artifacts; its installer is guarded by `UpdateGate`.
 - `wasapi` provides native Windows microphone and render-loopback capture.
 - These are initialized in `src/lib.rs` and gated by `capabilities/default.json`.
 
@@ -64,3 +65,4 @@ cargo build --release
 - Do not execute arbitrary shell commands from user input.
 - Redact secrets and tokens from logs.
 - Require review for any new Tauri capability or filesystem permission.
+- Keep updater installation behind the native readiness gate; never install while recording, media jobs, or uploads are active.

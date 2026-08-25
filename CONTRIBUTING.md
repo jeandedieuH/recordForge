@@ -75,6 +75,20 @@ bun run format
 > cargo test -j 1
 > ```
 
+### Official Desktop Releases
+
+Official Windows releases are built from `app-v*` tags by `.github/workflows/release-desktop.yml` and published to GitHub Releases. The workflow creates signed updater artifacts and the `latest.json` manifest.
+
+The updater public key is supplied through the `RECORD_FORGE_UPDATER_PUBLIC_KEY` GitHub Actions variable. The Tauri signing private key and password are protected GitHub Actions secrets and must never be committed, logged, or exposed to frontend code.
+
+Before creating a release tag, run:
+
+```bash
+bun run check:versions
+bun run typecheck
+bun run test
+```
+
 ---
 
 ## 🔀 Pull Request Process

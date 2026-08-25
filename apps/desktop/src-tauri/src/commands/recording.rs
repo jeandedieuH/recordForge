@@ -97,6 +97,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         quick_config: Arc::new(Mutex::new(None)),
         path_policy,
         storage_manager,
+        update_gate: Arc::new(crate::state::UpdateGate::default()),
     });
 
     Ok(())
@@ -152,6 +153,7 @@ pub async fn start_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let session_id = state.recorder.prepare(config.clone())?;
     remember_quick_config(&state, config.clone());
 
@@ -176,6 +178,7 @@ pub async fn prepare_recording(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     if !matches!(countdown_seconds, 0 | 3 | 5) {
         return Err(InternalError::Capture("countdown must be 0, 3, or 5 seconds".into()).into());
     }
@@ -216,6 +219,7 @@ pub async fn confirm_recording_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let bounds = match quick_config_bounds(&state) {
         Ok(bounds) => bounds,
         Err(error) => {
@@ -587,6 +591,7 @@ pub async fn recover_session(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<LibraryRecording> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     // Validate the session ID as a UUID and ensure its directory stays inside
     // the sessions root before any recovery work begins.
     let work_dir = state.path_policy.validate_session_dir(&session_id)?;
@@ -622,6 +627,7 @@ pub async fn delete_recovery_session(session_id: String, state: State<'_, AppSta
 #[tauri::command]
 #[instrument]
 pub async fn run_encoder_benchmark(state: State<'_, AppState>) -> Result<BenchmarkReport> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || {
         let encoders = detect_encoders(&ffmpeg)?;
@@ -703,6 +709,7 @@ pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecordin
 #[tauri::command]
 #[instrument]
 pub async fn delete_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state.db.clone();
     let app_data_dir = state.path_policy.app_data_dir().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
@@ -754,6 +761,7 @@ pub fn add_recording_tag(
     tag: String,
     state: State<'_, AppState>,
 ) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state
         .db
         .lock()
@@ -768,6 +776,7 @@ pub fn remove_recording_tag(
     tag: String,
     state: State<'_, AppState>,
 ) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state
         .db
         .lock()
@@ -778,6 +787,7 @@ pub fn remove_recording_tag(
 #[tauri::command]
 #[instrument]
 pub fn trash_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state
         .db
         .lock()
@@ -788,6 +798,7 @@ pub fn trash_recording(recording_id: String, state: State<'_, AppState>) -> Resu
 #[tauri::command]
 #[instrument]
 pub fn restore_recording(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state
         .db
         .lock()
@@ -798,6 +809,7 @@ pub fn restore_recording(recording_id: String, state: State<'_, AppState>) -> Re
 #[tauri::command]
 #[instrument]
 pub fn empty_trash(state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state
         .db
         .lock()
@@ -827,6 +839,7 @@ pub async fn trim_recording(
     options: TrimOptions,
     state: State<'_, AppState>,
 ) -> Result<LibraryRecording> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db_arc = state.db.clone();
     let ffmpeg_path = state.ffmpeg_path.to_string_lossy().to_string();
     let path_policy = state.path_policy.clone();
@@ -899,6 +912,7 @@ pub struct ExportOptions {
 #[tauri::command]
 #[instrument]
 pub fn export_recording(options: ExportOptions, state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let db = state
         .db
         .lock()

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { getVersion } from "@tauri-apps/api/app"
 import {
   Cpu,
   Folder,
@@ -62,6 +63,14 @@ export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: Settings
   const [countdownSec, setCountdownSec] = useState("3")
   const [minimizeToTray, setMinimizeToTray] = useState(false)
   const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
+  const [appVersion, setAppVersion] = useState("development")
+
+  useEffect(() => {
+    if (!isTauri()) return
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("unknown"))
+  }, [])
 
   useEffect(() => {
     void loadPreferences()
@@ -439,7 +448,7 @@ export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: Settings
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-semibold text-foreground">About RecordForge</h3>
                   <span className="rounded bg-primary/15 px-2 py-0.5 text-[10px] font-mono font-medium text-primary">
-                    v1.0.0 GNU GPLv3
+                    v{appVersion} GNU GPLv3
                   </span>
                 </div>
                 <p className="text-xs text-subtle-foreground mt-0.5">

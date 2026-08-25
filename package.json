@@ -32,6 +32,8 @@
     "test": "turbo run test",
     "check": "turbo run lint format:check typecheck test",
     "tauri": "turbo run tauri --filter=desktop",
+    "check:versions": "node tooling/scripts/check-versions.mjs",
+    "prepare:updater": "node tooling/scripts/prepare-updater-config.mjs",
     "setup:ffmpeg": "node tooling/ffmpeg/setup.mjs",
     "fixtures:generate": "bun run tooling/fixtures/generate.ts"
   },

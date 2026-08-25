@@ -6,25 +6,25 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 
 ## Approved Stack
 
-| Area | Decision |
-|---|---|
-| Desktop framework | Tauri v2 |
-| Native language | Rust |
-| UI | React + TypeScript |
-| Bundler | Vite |
-| Styling | Tailwind CSS |
-| Package manager | Bun |
-| Monorepo | Turborepo + Bun workspaces |
-| Local database | SQLite |
-| Video processing | FFmpeg + FFprobe |
-| Windows audio capture | Native WASAPI via `wasapi` |
-| Cursor SVG rasterization | `resvg` + `tiny-skia` in export |
-| State management | Zustand |
-| Validation | Zod |
-| UI kit | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010) |
-| Icons | lucide-react (no emoji in product UI) |
-| Font | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
-| License | GNU General Public License v3.0 (GPL-3.0-or-later) |
+| Area                     | Decision                                                                                                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Desktop framework        | Tauri v2                                                                                                          |
+| Native language          | Rust                                                                                                              |
+| UI                       | React + TypeScript                                                                                                |
+| Bundler                  | Vite                                                                                                              |
+| Styling                  | Tailwind CSS                                                                                                      |
+| Package manager          | Bun                                                                                                               |
+| Monorepo                 | Turborepo + Bun workspaces                                                                                        |
+| Local database           | SQLite                                                                                                            |
+| Video processing         | FFmpeg + FFprobe                                                                                                  |
+| Windows audio capture    | Native WASAPI via `wasapi`                                                                                        |
+| Cursor SVG rasterization | `resvg` + `tiny-skia` in export                                                                                   |
+| State management         | Zustand                                                                                                           |
+| Validation               | Zod                                                                                                               |
+| UI kit                   | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010)                                             |
+| Icons                    | lucide-react (no emoji in product UI)                                                                             |
+| Font                     | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
+| License                  | GNU General Public License v3.0 (GPL-3.0-or-later)                                                                |
 
 ## Repository Layout
 
@@ -120,6 +120,21 @@ Run tests:
 bun run test
 ```
 
+Validate synchronized application versions:
+
+```bash
+bun run check:versions
+```
+
+Prepare the official updater configuration (requires the public signing key):
+
+```bash
+$env:RECORD_FORGE_UPDATER_PUBLIC_KEY = "<public-key>"
+bun run prepare:updater
+```
+
+Official desktop releases are published by `.github/workflows/release-desktop.yml` from `app-v*` tags. The workflow builds signed NSIS/MSI artifacts and uploads `latest.json` to the GitHub Release.
+
 ## Security Rules
 
 - Never store cloud credentials in code, project files, or SQLite.
@@ -129,6 +144,8 @@ bun run test
 - Require ADR approval for new Tauri capabilities.
 - Redact secrets, tokens, and media paths from logs and diagnostics.
 - Do not log screen content, audio transcripts, or user media.
+- The updater uses Tauri signature verification and public GitHub Release metadata; never commit or expose `TAURI_SIGNING_PRIVATE_KEY`.
+- Only the official release workflow may build updater artifacts; local and fork builds should not inherit the official updater signing trust.
 
 ## Rules for Adding Dependencies
 

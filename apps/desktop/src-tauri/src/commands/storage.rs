@@ -284,7 +284,11 @@ pub async fn test_s3_credentials(
 
 #[tauri::command]
 #[instrument(skip(app))]
-pub async fn start_google_drive_oauth(app: tauri::AppHandle) -> Result<OAuthFlowStartResult> {
+pub async fn start_google_drive_oauth(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<OAuthFlowStartResult> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     // Generate PKCE code verifier and challenge
     let verifier = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
     let mut hasher = Sha256::new();
@@ -451,6 +455,7 @@ pub fn start_upload_job(
     input: StartUploadJobInput,
     state: State<'_, AppState>,
 ) -> Result<UploadJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     state.storage_manager.start_upload(
         &input.profile_id,
         input.recording_id,
@@ -469,6 +474,7 @@ pub fn cancel_upload_job(job_id: String, state: State<'_, AppState>) -> Result<(
 #[tauri::command]
 #[instrument(skip(state))]
 pub fn retry_upload_job(job_id: String, state: State<'_, AppState>) -> Result<UploadJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     state.storage_manager.retry_upload(&job_id)
 }
 

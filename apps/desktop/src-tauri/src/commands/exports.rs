@@ -27,6 +27,7 @@ pub fn export_timeline(
     options: ExportTimelineOptions,
     state: State<'_, AppState>,
 ) -> Result<MediaJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     if options.project_id.trim().is_empty() {
         return Err(InternalError::Project("project id is required for export".into()).into());
     }
@@ -52,6 +53,7 @@ pub fn export_timeline(
 #[tauri::command]
 #[instrument]
 pub fn retry_export(job_id: String, state: State<'_, AppState>) -> Result<MediaJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let manager = state
         .job_manager
         .lock()

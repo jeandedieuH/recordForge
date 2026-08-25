@@ -32,6 +32,7 @@ import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
 import { useTimelineStore } from "../stores/timeline-store"
 import { useRecorderStore } from "../hooks/use-recorder"
+import { useUpdaterStore } from "../stores/updater-store"
 import { ViewErrorBoundary } from "../components/error-boundary"
 import { Sidebar, type View } from "./sidebar"
 import { Titlebar } from "./titlebar"
@@ -97,6 +98,8 @@ export function AppShell() {
   const detectedEncoders = useRecorderStore((state) => state.encoders)
   const loadEncoders = useRecorderStore((state) => state.loadEncoders)
   const loadRecovery = useRecorderStore((state) => state.loadRecovery)
+  const checkForUpdate = useUpdaterStore((state) => state.checkForUpdate)
+  const markUpdateNotified = useUpdaterStore((state) => state.markUpdateNotified)
 
   // Mirror the Rust hardware priority (NVENC, QSV, AMF, Media Foundation) when
   // surfacing which encoder the Auto export preference would use.
@@ -151,6 +154,40 @@ export function AppShell() {
       cancelled = true
     }
   }, [loadRecovery, toast])
+
+  // Check the signed GitHub Release updater after the shell is visible so startup
+  // remains responsive and auxiliary recording windows never perform checks.
+  useEffect(() => {
+    if (!isTauri() || import.meta.env.DEV) return
+
+    let cancelled = false
+    const runCheck = () => {
+      void checkForUpdate().then((update) => {
+        if (cancelled || !update) return
+        const { notifiedVersion } = useUpdaterStore.getState()
+        if (notifiedVersion === update.version) return
+
+        markUpdateNotified(update.version)
+        toast({
+          title: `RecordForge ${update.version} is available`,
+          description: update.body ?? "A signed update is ready to install.",
+          variant: "info",
+          action: {
+            label: "View update",
+            onClick: () => setActiveView("about"),
+          },
+        })
+      })
+    }
+
+    const initialCheck = window.setTimeout(runCheck, 10_000)
+    const interval = window.setInterval(runCheck, 6 * 60 * 60 * 1000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(initialCheck)
+      window.clearInterval(interval)
+    }
+  }, [checkForUpdate, markUpdateNotified, toast])
 
   // The tray's "Discard Recording…" entry routes here: Rust restores this
   // window and emits `request-discard-confirmation`; the destructive command
@@ -256,6 +293,17 @@ export function AppShell() {
       if (isTauri()) void setSetting("sidebarCollapsed", String(!prev))
       return !prev
     })
+  }
+
+  async function prepareForUpdate() {
+    const closed = await useTimelineStore.getState().closeSession()
+    if (!closed) {
+      const error = useEditorStore.getState().saveError
+      throw new Error(error ?? "Save the current editor changes before updating.")
+    }
+
+    closeEditor()
+    setActiveView("library")
   }
 
   async function handleStartRecording() {
@@ -450,6 +498,7 @@ export function AppShell() {
                 <AboutView
                   onNavigateToSettings={() => setActiveView("settings")}
                   onReplayOnboarding={() => setIsOnboardingOpen(true)}
+                  onPrepareForUpdate={prepareForUpdate}
                 />
               </ViewErrorBoundary>
             ) : null}

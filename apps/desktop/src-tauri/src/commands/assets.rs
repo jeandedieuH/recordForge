@@ -100,6 +100,7 @@ pub fn import_assets(
     request: AssetImportRequest,
     state: State<'_, AppState>,
 ) -> Result<AssetImportResult> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     if request.paths.is_empty() || request.paths.len() > MAX_IMPORT_COUNT {
         return Err(InternalError::Project(format!(
             "select between 1 and {MAX_IMPORT_COUNT} asset files"
@@ -292,6 +293,7 @@ pub fn import_assets(
 #[tauri::command]
 #[instrument(skip(request, state))]
 pub fn delete_asset(request: AssetDeleteRequest, state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_recording_for_state(&state, &request.recording_id)?;
     let project_dir = PathBuf::from(&recording.work_dir);
     let loaded = load_project(&project_dir, &state.path_policy)?.ok_or_else(|| {
@@ -344,6 +346,7 @@ pub fn relink_asset(
     request: AssetRelinkRequest,
     state: State<'_, AppState>,
 ) -> Result<ProjectAsset> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_recording_for_state(&state, &request.recording_id)?;
     let project_dir = PathBuf::from(&recording.work_dir);
     let loaded = load_project(&project_dir, &state.path_policy)?.ok_or_else(|| {
@@ -459,6 +462,7 @@ pub fn start_derivative_job(
     request: AssetDerivativeJobRequest,
     state: State<'_, AppState>,
 ) -> Result<MediaJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_recording_for_state(&state, &request.recording_id)?;
     let project_dir = PathBuf::from(&recording.work_dir);
     let loaded = load_project(&project_dir, &state.path_policy)?.ok_or_else(|| {

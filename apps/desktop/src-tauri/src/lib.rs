@@ -47,6 +47,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             if let Err(err) = commands::recording::init(app) {
                 tracing::error!(error = ?err, "failed to initialize recorder state");
             }
@@ -171,6 +175,9 @@ pub fn run() {
             commands::storage::retry_upload_job,
             commands::storage::list_upload_jobs,
             commands::storage::delete_upload_job,
+            commands::updates::get_update_readiness,
+            commands::updates::begin_update_install,
+            commands::updates::cancel_update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

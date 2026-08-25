@@ -11,6 +11,7 @@ pub enum ErrorCategory {
     Project,
     Editor,
     Permissions,
+    Update,
     Unknown,
 }
 
@@ -65,6 +66,7 @@ impl ErrorCategory {
             ErrorCategory::Project => "project",
             ErrorCategory::Editor => "editor",
             ErrorCategory::Permissions => "permissions",
+            ErrorCategory::Update => "update",
             ErrorCategory::Unknown => "unknown",
         }
     }
@@ -83,6 +85,8 @@ pub enum InternalError {
     Project(String),
     #[error("permission denied: {0}")]
     Permissions(String),
+    #[error("update failed: {0}")]
+    Update(String),
     #[error("unknown error: {0}")]
     Unknown(String),
 }
@@ -102,6 +106,9 @@ impl From<InternalError> for AppError {
             }
             InternalError::Permissions(msg) => {
                 AppError::new(ErrorCategory::Permissions, "permissions_denied", msg)
+            }
+            InternalError::Update(msg) => {
+                AppError::new(ErrorCategory::Update, "update_failed", msg)
             }
             InternalError::Unknown(msg) => AppError::new(ErrorCategory::Unknown, "unknown", msg),
         }

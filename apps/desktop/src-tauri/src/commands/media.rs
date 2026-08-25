@@ -24,6 +24,7 @@ pub fn prepare_media(
     options: StartMediaJobOptions,
     state: State<'_, AppState>,
 ) -> Result<MediaJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let manager = state
         .job_manager
         .lock()

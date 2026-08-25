@@ -38,6 +38,7 @@ pub fn load_project_for_recording(
 #[tauri::command]
 #[instrument]
 pub fn save_project(project: ProjectFile, state: State<'_, AppState>) -> Result<ProjectFile> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &project.recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
 
@@ -52,6 +53,7 @@ pub fn save_project(project: ProjectFile, state: State<'_, AppState>) -> Result<
 #[tauri::command]
 #[instrument]
 pub fn create_project(project: ProjectFile, state: State<'_, AppState>) -> Result<ProjectFile> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &project.recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
 
@@ -81,6 +83,7 @@ pub fn create_bootstrap_project(
     recording_id: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectFile> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let (recording, metadata) = get_recording_and_metadata(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
     let project = create_project_file(&recording, &metadata, None, &project_dir)?;
@@ -96,6 +99,7 @@ pub fn rename_project(
     new_name: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectFile> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
 
@@ -117,6 +121,7 @@ pub fn duplicate_project(
     new_name: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectFile> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
 
@@ -131,6 +136,7 @@ pub fn duplicate_project(
 #[tauri::command]
 #[instrument]
 pub fn delete_project(recording_id: String, state: State<'_, AppState>) -> Result<()> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
 
@@ -151,6 +157,7 @@ pub fn relink_project_asset(
     new_path: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectFile> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
 
@@ -175,6 +182,7 @@ pub fn relink_project_asset(
 #[tauri::command]
 #[instrument]
 pub fn snapshot_project(recording_id: String, state: State<'_, AppState>) -> Result<String> {
+    let _update_operation = state.update_gate.acquire_operation()?;
     let recording = get_db_recording(&state, &recording_id)?;
     let project_dir = project_dir_for_recording(&recording);
     let snapshot = snapshot_project_file(&project_dir)?;

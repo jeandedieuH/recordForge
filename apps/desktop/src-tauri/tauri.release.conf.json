@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__RECORD_FORGE_UPDATER_PUBLIC_KEY__",
+      "endpoints": [
+        "https://github.com/jeandedieuH/recordForge/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

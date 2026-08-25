@@ -1,9 +1,20 @@
+import { useEffect, useState } from "react"
+import { getVersion } from "@tauri-apps/api/app"
 import { Moon, ShieldCheck, Sparkles, Sun, Wand2, Zap } from "lucide-react"
 import { Badge, Button, Switch } from "@recordforge/ui"
+import { isTauri } from "../../../lib/settings"
 import { useThemeStore } from "../../../stores/theme-store"
 
 export function WelcomeStep() {
   const { theme, setTheme, micaEnabled, setMicaEnabled } = useThemeStore()
+  const [appVersion, setAppVersion] = useState("development")
+
+  useEffect(() => {
+    if (!isTauri()) return
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("unknown"))
+  }, [])
 
   return (
     <div className="flex flex-col gap-6 text-foreground">
@@ -30,7 +41,7 @@ export function WelcomeStep() {
                 Welcome to RecordForge
               </h1>
               <Badge variant="accent" className="text-xs px-2.5 py-0.5 font-mono">
-                v1.0.0
+                v{appVersion}
               </Badge>
               <Badge variant="outline" className="text-xs px-2 py-0.5 text-subtle-foreground">
                 Windows 10 native
