@@ -2,6 +2,7 @@
   "name": "@recordforge/marketing",
   "private": true,
   "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "astro dev --port 4321",

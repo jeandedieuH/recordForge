@@ -129,7 +129,8 @@ export function CursorStep() {
             Smart Cursor Telemetry & Effects
           </h3>
           <p className="text-xs text-subtle-foreground">
-            Move and click in the interactive preview below to test RecordForge's smooth cursor rendering.
+            Move and click in the interactive preview below to test RecordForge's smooth cursor
+            rendering.
           </p>
         </div>
         <Badge variant="outline" className="text-xs px-2.5 py-0.5">
@@ -219,9 +220,7 @@ export function CursorStep() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 rounded-xl border border-border bg-surface/60 p-3.5">
         {/* Click Feedback Selector */}
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-subtle-foreground block">
-            Click Feedback
-          </label>
+          <label className="text-xs font-medium text-subtle-foreground block">Click Feedback</label>
           <div className="flex items-center gap-1.5">
             {(["ripple", "pulse", "none"] as ClickFeedback[]).map((mode) => (
               <Button

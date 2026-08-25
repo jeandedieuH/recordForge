@@ -2,6 +2,7 @@
   "name": "@recordforge/editor-benchmarks",
   "private": true,
   "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "benchmark:phase9": "bun run editor-phase9-benchmark.ts",

@@ -54,7 +54,8 @@ export function WelcomeStep() {
             <span className="text-sm font-semibold text-foreground">Hardware Accelerated</span>
           </div>
           <p className="text-xs text-subtle-foreground leading-relaxed">
-            Direct WASAPI audio sync, low-impact CPU profiles, and GPU-accelerated NVENC/QSV pipelines.
+            Direct WASAPI audio sync, low-impact CPU profiles, and GPU-accelerated NVENC/QSV
+            pipelines.
           </p>
         </div>
 
@@ -66,7 +67,8 @@ export function WelcomeStep() {
             <span className="text-sm font-semibold text-foreground">100% Local & Private</span>
           </div>
           <p className="text-xs text-subtle-foreground leading-relaxed">
-            Your media never touches the cloud without explicit export. Includes automatic crash recovery.
+            Your media never touches the cloud without explicit export. Includes automatic crash
+            recovery.
           </p>
         </div>
 
@@ -78,7 +80,8 @@ export function WelcomeStep() {
             <span className="text-sm font-semibold text-foreground">Proxy Timeline Editor</span>
           </div>
           <p className="text-xs text-subtle-foreground leading-relaxed">
-            Trim, split, zoom, and annotate immediately after recording without heavy re-encoding delays.
+            Trim, split, zoom, and annotate immediately after recording without heavy re-encoding
+            delays.
           </p>
         </div>
       </div>

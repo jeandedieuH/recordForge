@@ -120,16 +120,12 @@ export function ReadyStep({ onStartRecording, onFinish }: ReadyStepProps) {
       {/* Launch Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
         <span className="text-xs text-subtle-foreground">
-          Tip: You can re-open this tour anytime in <strong>Settings</strong> or <strong>About</strong>.
+          Tip: You can re-open this tour anytime in <strong>Settings</strong> or{" "}
+          <strong>About</strong>.
         </span>
 
         <div className="flex items-center gap-3 self-end sm:self-center">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onFinish}
-            className="text-xs"
-          >
+          <Button variant="outline" size="sm" onClick={onFinish} className="text-xs">
             Explore Library
           </Button>
 

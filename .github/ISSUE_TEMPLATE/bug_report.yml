@@ -1,0 +1,61 @@
+name: 🐛 Bug Report
+description: Create a report to help us improve recordForge
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue with recordForge!
+  - type: input
+    id: version
+    attributes:
+      label: recordForge Version
+      description: What version of recordForge are you using? (Check Settings > About)
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running?
+      options:
+        - "Windows 11 (23H2 or newer)"
+        - "Windows 11 (22H2 / 21H2)"
+        - "Windows 10 (21H2 or newer)"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Step by step instructions to reproduce the problem.
+      placeholder: |
+        1. Open recordForge
+        2. Click 'Record Screen'
+        3. Select 'WASAPI Loopback' audio
+        4. See error...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or System Report
+      description: Paste the system report from Settings > About or relevant logs.
+      render: shell

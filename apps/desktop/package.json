@@ -2,6 +2,7 @@
   "name": "@recordforge/desktop",
   "private": true,
   "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +12,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format:check": "prettier --check .",

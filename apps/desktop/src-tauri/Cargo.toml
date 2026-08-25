@@ -2,7 +2,8 @@
 name = "recordforge-desktop"
 version = "1.0.0"
 description = "Local-first screen recorder and lightweight editor"
-authors = ["prestige-tech"]
+authors = ["prestige-tech & recordForge contributors"]
+license = "GPL-3.0-or-later"
 edition = "2021"
 rust-version = "1.97.1"
 

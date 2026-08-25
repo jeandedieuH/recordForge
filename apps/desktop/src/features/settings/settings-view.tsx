@@ -407,13 +407,16 @@ export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: Settings
             <div className="flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-semibold text-foreground">Welcome & Onboarding Tour</h3>
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Welcome & Onboarding Tour
+                  </h3>
                   <span className="rounded bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent">
                     Interactive Walkthrough
                   </span>
                 </div>
                 <p className="text-xs text-subtle-foreground mt-0.5">
-                  Replay the 5-step onboarding guide to review hardware tuning, audio setup, and cursor telemetry effects.
+                  Replay the 5-step onboarding guide to review hardware tuning, audio setup, and
+                  cursor telemetry effects.
                 </p>
               </div>
               {onReplayOnboarding && (
@@ -436,12 +439,12 @@ export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: Settings
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-semibold text-foreground">About RecordForge</h3>
                   <span className="rounded bg-primary/15 px-2 py-0.5 text-[10px] font-mono font-medium text-primary">
-                    v1.0.0 Free Edition
+                    v1.0.0 GNU GPLv3
                   </span>
                 </div>
                 <p className="text-xs text-subtle-foreground mt-0.5">
-                  Free proprietary screen recorder developed by Prestige Tech. Version 2 will
-                  introduce optional premium features.
+                  Free and open-source screen recorder developed by Prestige Tech &amp; recordForge
+                  contributors.
                 </p>
               </div>
               <Button

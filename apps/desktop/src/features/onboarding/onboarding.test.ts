@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest"
 import type { RecordingConfig } from "@recordforge/contracts"
 import type { OnboardingStepId } from "./types"
 
-function getRecommendedProfile(cores: number, hasHardwareEncoder: boolean): RecordingConfig["profile"] {
+function getRecommendedProfile(
+  cores: number,
+  hasHardwareEncoder: boolean,
+): RecordingConfig["profile"] {
   if (cores <= 2) return "low-impact"
   if (cores >= 8 && hasHardwareEncoder) return "smooth-60fps"
   if (cores >= 6) return "smooth-60fps"
@@ -71,6 +74,8 @@ describe("Onboarding Flow and Specifications", () => {
     expect(micPref.microphoneEnabled).toBe(true)
     expect(sysPref.systemAudioEnabled).toBe(true)
     expect(mockMics.find((m) => m.id === micPref.microphoneId)?.name).toBe("Headset Mic")
-    expect(mockSystems.find((s) => s.id === sysPref.systemAudioId)?.name).toBe("Default Speakers Loopback")
+    expect(mockSystems.find((s) => s.id === sysPref.systemAudioId)?.name).toBe(
+      "Default Speakers Loopback",
+    )
   })
 })

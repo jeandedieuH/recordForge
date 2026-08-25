@@ -1,0 +1,29 @@
+name: 💡 Feature Request / Proposal
+description: Suggest an idea or architectural improvement for recordForge
+title: "[Feature]: "
+labels: ["enhancement", "proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an improvement to recordForge!
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: Is your feature request related to a problem or limitation?
+      placeholder: "I'm always frustrated when..."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution or feature you'd like to see implemented.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or features you've considered.

@@ -1,13 +1,6 @@
 import { useState } from "react"
 import { ArrowLeft, ArrowRight } from "lucide-react"
-import {
-  Badge,
-  Button,
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  cn,
-} from "@recordforge/ui"
+import { Badge, Button, Dialog, DialogContent, DialogTitle, cn } from "@recordforge/ui"
 import { isTauri, setSetting } from "../../lib/settings"
 import { WelcomeStep } from "./steps/welcome-step"
 import { PerformanceStep } from "./steps/performance-step"
@@ -188,10 +181,7 @@ export function OnboardingModal({ open, onClose, onStartRecording }: OnboardingM
           {currentStep.id === "devices" && <DevicesStep />}
           {currentStep.id === "cursor" && <CursorStep />}
           {currentStep.id === "ready" && (
-            <ReadyStep
-              onStartRecording={onStartRecording}
-              onFinish={() => void handleComplete()}
-            />
+            <ReadyStep onStartRecording={onStartRecording} onFinish={() => void handleComplete()} />
           )}
         </div>
 

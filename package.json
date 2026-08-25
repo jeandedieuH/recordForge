@@ -3,8 +3,16 @@
   "private": true,
   "version": "1.0.0",
   "description": "Local-first screen recorder and lightweight editor",
-  "license": "MIT",
-  "author": "Prestige Tech",
+  "license": "GPL-3.0-or-later",
+  "author": "Prestige Tech & recordForge Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jeandedieuH/recordForge.git"
+  },
+  "homepage": "https://github.com/jeandedieuH/recordForge",
+  "bugs": {
+    "url": "https://github.com/jeandedieuH/recordForge/issues"
+  },
   "type": "module",
   "workspaces": [
     "apps/*",

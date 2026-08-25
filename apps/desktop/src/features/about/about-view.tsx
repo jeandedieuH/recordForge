@@ -10,7 +10,6 @@ import {
   Globe,
   Info,
   Layers,
-  Lock,
   Radio,
   ShieldCheck,
   Sparkles,
@@ -40,10 +39,11 @@ export interface AboutViewProps {
 
 const PRESTIGE_TECH_URL = "https://prestigetech.dev"
 const MASTER_DEV_URL = "https://me.prestigetech.dev"
+const GITHUB_REPO_URL = "https://github.com/jeandedieuH/recordForge"
 
-export function AboutView({ 
-  onNavigateToSettings, 
-  onNavigateToDiagnostics, 
+export function AboutView({
+  onNavigateToSettings,
+  onNavigateToDiagnostics,
   onReplayOnboarding,
 }: AboutViewProps) {
   const { toast } = useToast()
@@ -91,7 +91,8 @@ export function AboutView({
         "RecordForge Desktop System Report",
         "================================",
         "App Version: 1.0.0 (Release)",
-        "Licensing: Free Proprietary (Not Open-Source)",
+        "Licensing: Free & Open-Source (GNU GPLv3)",
+        `Source Repository: ${GITHUB_REPO_URL}`,
         `Platform: ${os}`,
         `Processor: ${cpu}`,
         "Engine: Rust Native (Tauri v2) + WASAPI Audio + FFmpeg 9.0 + WASM Overlay",
@@ -196,7 +197,7 @@ export function AboutView({
         {/* Feature Pill Tags */}
         <div className="mt-6 flex flex-wrap gap-2 pt-4 border-t border-border/60">
           <span className="inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-surface-dim/80 px-2.5 py-1 text-[11px] font-medium text-foreground">
-            <Lock className="size-3 text-primary" /> Free & Proprietary
+            <Code2 className="size-3 text-primary" /> Free & Open Source (GPLv3)
           </span>
           <span className="inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-surface-dim/80 px-2.5 py-1 text-[11px] font-medium text-foreground">
             <ShieldCheck className="size-3 text-emerald-400" /> 100% Local-First
@@ -213,58 +214,81 @@ export function AboutView({
       {/* Grid: Licensing & V2 Roadmap */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Licensing & Distribution Notice */}
-        <Card className="rounded-2xl border border-border bg-surface shadow-e1">
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="size-5 text-primary" />
-                <CardTitle className="text-base font-semibold text-foreground">
-                  Licensing & Distribution
-                </CardTitle>
+        <Card className="rounded-2xl border border-border bg-surface shadow-e1 flex flex-col justify-between">
+          <div>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="size-5 text-primary" />
+                  <CardTitle className="text-base font-semibold text-foreground">
+                    Licensing & Distribution
+                  </CardTitle>
+                </div>
+                <Badge variant="accent" className="text-[10px] uppercase font-semibold">
+                  GNU GPLv3
+                </Badge>
               </div>
-              <Badge variant="accent" className="text-[10px] uppercase font-semibold">
-                Free Edition
-              </Badge>
-            </div>
-            <CardDescription className="text-xs text-subtle-foreground">
-              Software license terms and ownership model.
-            </CardDescription>
-          </CardHeader>
+              <CardDescription className="text-xs text-subtle-foreground">
+                Copyleft free software license and community permissions.
+              </CardDescription>
+            </CardHeader>
 
-          <CardContent className="space-y-4 text-xs">
-            <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-2">
-              <div className="flex items-center gap-2 font-semibold text-foreground">
-                <Info className="size-4 text-primary shrink-0" />
-                <span>Free to Use — Not Open-Source</span>
+            <CardContent className="space-y-4 text-xs">
+              <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-2">
+                <div className="flex items-center gap-2 font-semibold text-foreground">
+                  <Info className="size-4 text-primary shrink-0" />
+                  <span>100% Free & Open-Source Software</span>
+                </div>
+                <p className="text-subtle-foreground leading-relaxed">
+                  RecordForge is free and open-source software licensed under the{" "}
+                  <strong className="text-foreground font-semibold">
+                    GNU General Public License v3.0 (GPL-3.0-or-later)
+                  </strong>
+                  . You are free to inspect, modify, and contribute to the source code. All
+                  recordings and edits remain 100% private to your machine.
+                </p>
               </div>
-              <p className="text-subtle-foreground leading-relaxed">
-                RecordForge is completely free to download, install, and use for personal,
-                commercial, and educational screen recordings. The software is proprietary and is{" "}
-                <strong className="text-foreground font-semibold">not open-source</strong>. All
-                intellectual property, source code, and assets are owned by Prestige Tech.
-              </p>
-            </div>
 
-            <div className="space-y-2.5">
-              <h4 className="font-semibold text-foreground">Usage Rights:</h4>
-              <ul className="space-y-2 text-subtle-foreground">
-                <li className="flex items-start gap-2">
-                  <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <span>Unlimited recording duration with zero export watermarks.</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <span>Commercial and professional use permitted at no cost.</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <span>
-                    Offline-capable: no mandatory online account or cloud sign-in required.
-                  </span>
-                </li>
-              </ul>
-            </div>
-          </CardContent>
+              <div className="space-y-2.5">
+                <h4 className="font-semibold text-foreground">Usage Rights:</h4>
+                <ul className="space-y-2 text-subtle-foreground">
+                  <li className="flex items-start gap-2">
+                    <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <span>Unlimited recording duration with zero export watermarks.</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <span>
+                      Free for personal, commercial, educational, and developer workflows.
+                    </span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <span>
+                      100% Local-first: no mandatory online account or cloud sign-in required.
+                    </span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <CheckCircle2 className="size-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <span>Full source code and issue tracker available publicly on GitHub.</span>
+                  </li>
+                </ul>
+              </div>
+            </CardContent>
+          </div>
+
+          <div className="p-6 pt-0">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full text-xs h-9 cursor-pointer gap-2"
+              onClick={() => handleOpenUrl(GITHUB_REPO_URL, "GitHub Repository")}
+            >
+              <Code2 className="size-3.5 text-primary" />
+              <span>View Source on GitHub</span>
+              <ExternalLink className="size-3 text-subtle-foreground ml-auto" />
+            </Button>
+          </div>
         </Card>
 
         {/* Version 2 Roadmap & Premium Tiers */}
@@ -508,10 +532,21 @@ export function AboutView({
       {/* Footer info & Copyright */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-4 text-xs text-subtle-foreground border-t border-border">
         <div className="flex items-center gap-2">
-          <span>© {new Date().getFullYear()} Prestige Tech. All rights reserved.</span>
+          <span>
+            © {new Date().getFullYear()} Prestige Tech &amp; recordForge Contributors • Free &amp;
+            Open Source (GNU GPLv3)
+          </span>
         </div>
 
         <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => handleOpenUrl(GITHUB_REPO_URL, "GitHub Repository")}
+            className="hover:text-foreground transition-colors cursor-pointer"
+          >
+            GitHub
+          </button>
+          <span>•</span>
           <button
             type="button"
             onClick={() => handleOpenUrl(PRESTIGE_TECH_URL, "Prestige Tech")}

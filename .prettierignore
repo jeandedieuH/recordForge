@@ -1,10 +1,15 @@
 node_modules
+**/node_modules
 dist
+**/dist
 build
+**/build
 src-tauri/target
+**/src-tauri/target
 .bun
-coverage
+**/coverage
 *.lock
 packages/cursor-core/wasm
 packages/overlay-core/wasm
 .astro
+**/.astro

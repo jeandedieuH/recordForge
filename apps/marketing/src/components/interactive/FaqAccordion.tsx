@@ -12,7 +12,7 @@ const faqs: FaqItem[] = [
     category: "Licensing & Ownership",
     question: "Is RecordForge free to use? Is it open-source?",
     answer:
-      "RecordForge is 100% free to download and use for personal, commercial, and professional screen recording with unlimited capture time and zero export watermarks. It is proprietary software engineered by Prestige Tech and is not open-source.",
+      "Yes! RecordForge is 100% free and open-source software licensed under the GNU General Public License v3 (GPL-3.0-or-later). You can use it for personal, commercial, educational, and developer screen recording with unlimited capture time, zero watermarks, and full access to inspect or contribute to the source code on GitHub.",
   },
   {
     category: "Roadmap & Monetization",

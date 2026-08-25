@@ -101,11 +101,17 @@ export function DevicesStep() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  {captureMic ? <Mic className="size-4" /> : <MicOff className="size-4 text-subtle-foreground" />}
+                  {captureMic ? (
+                    <Mic className="size-4" />
+                  ) : (
+                    <MicOff className="size-4 text-subtle-foreground" />
+                  )}
                 </div>
                 <div>
                   <h3 className="text-sm font-semibold text-foreground">Microphone Audio</h3>
-                  <p className="text-[11px] text-subtle-foreground">Capture your voice / commentary</p>
+                  <p className="text-[11px] text-subtle-foreground">
+                    Capture your voice / commentary
+                  </p>
                 </div>
               </div>
               <Switch
@@ -147,7 +153,9 @@ export function DevicesStep() {
           {captureMic && (
             <div className="rounded-lg border border-border/80 bg-surface-dim/80 p-2.5 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] text-subtle-foreground font-medium">Live Level Test</span>
+                <span className="text-[11px] text-subtle-foreground font-medium">
+                  Live Level Test
+                </span>
                 <Button
                   variant={isTestingAudio ? "destructive" : "outline"}
                   size="sm"
@@ -157,10 +165,7 @@ export function DevicesStep() {
                   {isTestingAudio ? "Stop Test" : "Test Mic"}
                 </Button>
               </div>
-              <AudioLevelMeter
-                level={isTestingAudio ? testAudioLevel : 0}
-                className="h-2"
-              />
+              <AudioLevelMeter level={isTestingAudio ? testAudioLevel : 0} className="h-2" />
             </div>
           )}
         </div>
@@ -179,7 +184,9 @@ export function DevicesStep() {
                 </div>
                 <div>
                   <h3 className="text-sm font-semibold text-foreground">System Sound Loopback</h3>
-                  <p className="text-[11px] text-subtle-foreground">Capture app audio, media & calls</p>
+                  <p className="text-[11px] text-subtle-foreground">
+                    Capture app audio, media & calls
+                  </p>
                 </div>
               </div>
               <Switch

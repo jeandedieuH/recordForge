@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 authors = ["Prestige Tech"]
 description = "Canonical cursor evaluation engine for preview and export"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

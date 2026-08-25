@@ -202,7 +202,9 @@ export function PerformanceStep() {
                       <div
                         className={cn(
                           "size-4 rounded-full border flex items-center justify-center transition-colors",
-                          isSelected ? "border-primary bg-primary text-white" : "border-border-strong",
+                          isSelected
+                            ? "border-primary bg-primary text-white"
+                            : "border-border-strong",
                         )}
                       >
                         {isSelected && <Check className="size-2.5 stroke-3" />}

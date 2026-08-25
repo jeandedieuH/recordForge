@@ -6,7 +6,7 @@
   ],
   "description": "Canonical cursor evaluation engine for preview and export",
   "version": "1.0.0",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "files": [
     "cursor_engine_bg.wasm",
     "cursor_engine.js",

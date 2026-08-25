@@ -24,6 +24,7 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 | UI kit | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010) |
 | Icons | lucide-react (no emoji in product UI) |
 | Font | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
+| License | GNU General Public License v3.0 (GPL-3.0-or-later) |
 
 ## Repository Layout
 

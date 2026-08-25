@@ -2,6 +2,7 @@
   "name": "@recordforge/media-core",
   "private": true,
   "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
