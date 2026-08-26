@@ -24,7 +24,10 @@ Describe how you tested these changes:
 - [ ] `bun run typecheck` passes with zero errors
 - [ ] `bun run test` passes (all unit & integration tests)
 - [ ] `bun run format:check` passes
-- [ ] Tested manually on Windows 11
+- [ ] Tested on target operating systems:
+  - [ ] Windows (10/11)
+  - [ ] macOS (Apple Silicon / Intel)
+  - [ ] Linux (Ubuntu / Fedora / Arch)
 
 ---
 

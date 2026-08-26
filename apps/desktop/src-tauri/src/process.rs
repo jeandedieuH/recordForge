@@ -15,6 +15,7 @@ pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// to ensure background tasks (like FFmpeg/FFprobe) run silently without flashing
 /// console windows over the GUI in production desktop builds.
 pub fn create_command<S: AsRef<OsStr>>(program: S) -> Command {
+    #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {

@@ -6,6 +6,7 @@
 //! FFmpeg never needs a DirectShow audio device or a virtual Stereo Mix device.
 
 use crate::errors::Result;
+#[cfg(any(windows, test))]
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,9 +17,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::wav::{
-    align_wav_to_duration, append_silence_until, finalize_wav, frames_for_duration,
-    loopback_packet_start_frames, write_wav_header, AudioSampleFormat, DEFAULT_CHANNELS,
+    align_wav_to_duration, finalize_wav, write_wav_header, AudioSampleFormat, DEFAULT_CHANNELS,
     DEFAULT_SAMPLE_RATE,
+};
+#[cfg(any(windows, test))]
+use super::wav::{
+    append_silence_until, frames_for_duration, loopback_packet_start_frames,
 };
 
 #[cfg(windows)]
@@ -26,7 +30,9 @@ use wasapi::{
     deinitialize, initialize_mta, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
 };
 
+#[cfg(any(windows, test))]
 const AUDIO_BUFFER_DURATION_HNS: i64 = 100_000;
+#[cfg(any(windows, test))]
 const AUDIO_EVENT_TIMEOUT_MS: u32 = 100;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 

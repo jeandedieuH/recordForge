@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 014: Cross-Platform macOS and Linux Expansion](014-cross-platform-macos-linux.md)
 
 ## Context
 

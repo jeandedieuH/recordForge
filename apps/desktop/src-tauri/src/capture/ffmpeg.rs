@@ -994,6 +994,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn gdigrab_fallback_uses_dpi_virtualized_coordinates() {
         let source = region_source(100, 200, 800, 600);
 
@@ -1036,6 +1037,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn webcam_capture_uses_wall_clock_device_timestamps() {
         let profile = webcam_profile();
         let command =

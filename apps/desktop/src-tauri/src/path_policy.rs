@@ -211,6 +211,7 @@ impl PathPolicy {
         Ok(canonical)
     }
 
+    #[allow(unused_variables)]
     fn reject_protected_path(&self, path: &Path) -> Result<()> {
         #[cfg(windows)]
         {

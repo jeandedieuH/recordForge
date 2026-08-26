@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use tracing::warn;
 
 use super::source::Bounds;

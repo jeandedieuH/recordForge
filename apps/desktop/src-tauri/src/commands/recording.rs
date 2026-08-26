@@ -730,7 +730,7 @@ pub fn reveal_recording(recording_id: String, state: State<'_, AppState>) -> Res
         .lock()
         .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
     let recording = get_recording(&db, &recording_id)?;
-    let path = recording
+    let _path = recording
         .output_path
         .as_ref()
         .ok_or_else(|| InternalError::Storage("recording has no output path".into()))?;
@@ -739,7 +739,7 @@ pub fn reveal_recording(recording_id: String, state: State<'_, AppState>) -> Res
     {
         // Reveal only resolves paths that exist and are inside the app data
         // directory, preventing a compromised database from opening arbitrary files.
-        let validated = state.path_policy.validate_recording_path(Path::new(path))?;
+        let validated = state.path_policy.validate_recording_path(Path::new(_path))?;
         let validated_str = validated.to_string_lossy();
         crate::process::create_command("explorer")
             .args(["/select,", validated_str.as_ref()])

@@ -73,6 +73,7 @@ pub fn enumerate_audio_devices(_ffmpeg_path: &str) -> crate::errors::Result<Vec<
 
 /// Enumerate video capture devices (e.g. webcams) across Windows, macOS, and Linux.
 #[instrument(skip(ffmpeg_path))]
+#[allow(unused_variables)]
 pub fn enumerate_video_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<VideoDevice>> {
     #[cfg(windows)]
     {
@@ -217,6 +218,7 @@ fn list_v4l2_devices() -> Vec<VideoDevice> {
 }
 
 /// Media kind reported by FFmpeg for a dshow device line.
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DshowMediaKind {
     Video,
@@ -226,6 +228,7 @@ enum DshowMediaKind {
     None,
 }
 
+#[cfg(any(windows, test))]
 struct DshowDevice {
     name: String,
     media_kind: DshowMediaKind,
@@ -242,6 +245,7 @@ struct DshowDevice {
 /// - **Older FFmpeg:** `[dshow @ 0x...] "Device Name"` preceded by
 ///   `DirectShow video devices` / `DirectShow audio devices` section headers.
 ///   Kept as a fallback so the parser still works on older builds.
+#[cfg(windows)]
 fn list_dshow_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<DshowDevice>> {
     let output = crate::process::create_command(ffmpeg_path)
         .args(["-f", "dshow", "-list_devices", "true", "-i", "dummy"])
@@ -268,6 +272,7 @@ fn list_dshow_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<DshowDevic
 ///
 /// Example line (FFmpeg 8.x):
 ///   [in#0 @ 0x0000013f4c782e40] "Integrated Webcam" (video)
+#[cfg(any(windows, test))]
 fn parse_dshow_devices(text: &str) -> Vec<DshowDevice> {
     // Primary regex: FFmpeg 8.x input-layer format with inline media kind.
     let re_new = Regex::new(r#"^\s*\[in#\d+\s+@[^\]]*\]\s+"([^"]+)"\s+\((video|audio|none)\)\s*$"#)
@@ -344,6 +349,7 @@ fn parse_dshow_devices(text: &str) -> Vec<DshowDevice> {
     devices
 }
 
+#[cfg(any(windows, test))]
 enum Section {
     Unknown,
     Audio,

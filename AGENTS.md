@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-recordForge is a **local-first, low-end-friendly desktop screen recorder** with a lightweight editor. The initial target is Windows 11. The product is intentionally recorder-first: capture, A/V sync, recovery, editing, and exports come before cloud-sharing features.
+recordForge is a **local-first, low-end-friendly cross-platform desktop screen recorder** with a lightweight editor, supporting Windows, macOS, and Linux. The product is intentionally recorder-first: capture, A/V sync, recovery, editing, and exports come before cloud-sharing features.
 
 ## Approved Stack
 
@@ -16,8 +16,9 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 | Package manager          | Bun                                                                                                               |
 | Monorepo                 | Turborepo + Bun workspaces                                                                                        |
 | Local database           | SQLite                                                                                                            |
-| Video processing         | FFmpeg + FFprobe                                                                                                  |
-| Windows audio capture    | Native WASAPI via `wasapi`                                                                                        |
+| Video processing         | FFmpeg + FFprobe (pinned multi-platform sidecars)                                                                  |
+| Audio capture            | Native WASAPI (Windows), CoreAudio/ScreenCaptureKit (macOS), ALSA/PipeWire (Linux)                                |
+| Credential vault         | Windows Credential Manager, Apple Keychain (macOS), Secret Service (Linux) via `keyring`                         |
 | Cursor SVG rasterization | `resvg` + `tiny-skia` in export                                                                                   |
 | State management         | Zustand                                                                                                           |
 | Validation               | Zod                                                                                                               |
@@ -43,12 +44,12 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 
 ## V1 Scope
 
-- Screen, window, and region recording on Windows 11
+- Screen, window, and region recording on Windows, macOS, and Linux
 - Microphone, system audio, and optional webcam
 - Global shortcuts, tray, floating controls
 - Local library and recovery
 - Proxy-based timeline editor with trim, split, move, delete, undo/redo
-- Local MP4 export
+- Local MP4 export with hardware-accelerated encoders (NVENC, VideoToolbox, QuickSync, VAAPI, AMF)
 - Optional S3-compatible and Google Drive uploads
 
 ## V1 Non-Goals
@@ -57,7 +58,6 @@ recordForge is a **local-first, low-end-friendly desktop screen recorder** with 
 - Public web video pages
 - User accounts and workspaces
 - Cloud collaboration
-- macOS / Linux production support
 - Full professional editor features
 
 ## Architecture Boundaries
