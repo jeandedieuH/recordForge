@@ -14,7 +14,11 @@ Use FFmpeg as an **external sidecar binary**, bundled per platform and invoked f
 
 ### Acquisition
 
-A tooling script (`tooling/ffmpeg/setup.mjs`) downloads the **gyan.dev release essentials** build (GPLv3, includes x264/x265) and stages the binaries into `apps/desktop/src-tauri/binaries/` with the Tauri target-triple naming convention (e.g. `ffmpeg-x86_64-pc-windows-msvc.exe`).
+A tooling script (`tooling/ffmpeg/setup.mjs`) downloads pinned static builds and stages the binaries into `apps/desktop/src-tauri/binaries/` with the Tauri target-triple naming convention (e.g. `ffmpeg-x86_64-pc-windows-msvc.exe`). The script uses a per-platform provider with a fallback:
+
+- Windows x86_64: GyanD GitHub release essentials (GPLv3, includes x264/x265).
+- macOS arm64 and x64: Martin Riedl release builds (primary) with evermeet.cx release zip fallback.
+- Linux x86_64: Martin Riedl release builds (primary) with johnvansickle.com static release fallback.
 
 The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` in the setup script and re-run.
 
@@ -25,6 +29,7 @@ Tauri's `externalBin` configuration in `tauri.conf.json` ensures the sidecar bin
 ### Resolution at Runtime
 
 The Rust `resolve_executable` function checks:
+
 1. The Tauri resource directory (where `externalBin` lands in production installs).
 2. Next to the current executable (dev builds after running the setup script).
 3. Inside a `{name}/` subdirectory next to the executable.
