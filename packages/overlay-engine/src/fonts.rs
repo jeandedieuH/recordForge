@@ -78,4 +78,3 @@ pub fn get_shared_font_database() -> Arc<resvg::usvg::fontdb::Database> {
         })
         .clone()
 }
-

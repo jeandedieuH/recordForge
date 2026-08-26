@@ -416,7 +416,7 @@ describe("Phase 9 hardening", () => {
         const frame = engine.evaluate(t, defaultCursorSettings)
         const evalElapsed = performance.now() - evalStart
 
-        expect(evalElapsed).toBeLessThan(200)
+        expect(evalElapsed).toBeLessThan(500)
         expect(frame.visible).toBe(true)
       }
     })

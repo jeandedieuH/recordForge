@@ -20,9 +20,9 @@ pub use animation::{
     animation_at, eased_progress, opacity_at, OverlayAnimation, OverlayAnimationFrame,
     OverlayAnimationOutType, OverlayAnimationType, OverlayEasing,
 };
-pub use fonts::{default_font_bundle, FontCache, FontSpec};
 #[cfg(feature = "native-render")]
 pub use fonts::get_shared_font_database;
+pub use fonts::{default_font_bundle, FontCache, FontSpec};
 pub use images::{ImageAssetRef, ImageCachePolicy, ImageFit};
 #[cfg(target_arch = "wasm32")]
 pub use preview_adapter::WasmOverlayEngine;
@@ -89,21 +89,13 @@ impl OverlayEngine {
 
     /// Register and decode a PNG image asset from raw file bytes.
     #[cfg(feature = "native-render")]
-    pub fn register_image_png(
-        &mut self,
-        asset_id: &str,
-        bytes: &[u8],
-    ) -> Result<(), OverlayError> {
+    pub fn register_image_png(&mut self, asset_id: &str, bytes: &[u8]) -> Result<(), OverlayError> {
         self.scene.images_mut().insert_png_bytes(asset_id, bytes)
     }
 
     /// Register and decode an SVG image asset from raw file bytes.
     #[cfg(feature = "native-render")]
-    pub fn register_image_svg(
-        &mut self,
-        asset_id: &str,
-        bytes: &[u8],
-    ) -> Result<(), OverlayError> {
+    pub fn register_image_svg(&mut self, asset_id: &str, bytes: &[u8]) -> Result<(), OverlayError> {
         self.scene.images_mut().insert_svg_bytes(asset_id, bytes)
     }
 
@@ -116,7 +108,9 @@ impl OverlayEngine {
         height: u32,
         rgba: &[u8],
     ) -> Result<(), OverlayError> {
-        self.scene.images_mut().insert_rgba(asset_id, width, height, rgba)
+        self.scene
+            .images_mut()
+            .insert_rgba(asset_id, width, height, rgba)
     }
 
     /// Evaluate active overlays at a project timeline timestamp.

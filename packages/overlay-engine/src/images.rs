@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "native-render")]
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -146,7 +146,11 @@ pub fn decode_svg(bytes: &[u8]) -> Result<tiny_skia::Pixmap, crate::OverlayError
     let height = (size.height().ceil() as u32).max(1);
     let mut pixmap = tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| crate::OverlayError::InvalidPlan("SVG dimensions are invalid".into()))?;
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     Ok(pixmap)
 }
 

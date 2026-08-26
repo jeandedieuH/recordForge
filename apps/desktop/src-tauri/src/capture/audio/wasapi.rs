@@ -21,9 +21,7 @@ use super::wav::{
     DEFAULT_SAMPLE_RATE,
 };
 #[cfg(any(windows, test))]
-use super::wav::{
-    append_silence_until, frames_for_duration, loopback_packet_start_frames,
-};
+use super::wav::{append_silence_until, frames_for_duration, loopback_packet_start_frames};
 
 #[cfg(windows)]
 use wasapi::{
