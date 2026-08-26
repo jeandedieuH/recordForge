@@ -65,16 +65,18 @@ const TARGET_CONFIGS = {
         label: "ffmpeg",
         provides: ["ffmpeg"],
         versionedUrl:
+          "https://ffmpeg.martin-riedl.de/download/macos/arm64/1787073674_9.0.1/ffmpeg.zip",
+        fallbackUrl:
           "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip",
-        fallbackUrl: "https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip",
         archiveType: "zip",
       },
       {
         label: "ffprobe",
         provides: ["ffprobe"],
         versionedUrl:
+          "https://ffmpeg.martin-riedl.de/download/macos/arm64/1787073674_9.0.1/ffprobe.zip",
+        fallbackUrl:
           "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffprobe.zip",
-        fallbackUrl: "https://evermeet.cx/ffmpeg/ffprobe-9.0.1.zip",
         archiveType: "zip",
       },
     ],
@@ -88,7 +90,7 @@ const TARGET_CONFIGS = {
         label: "ffmpeg",
         provides: ["ffmpeg"],
         versionedUrl:
-          "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip",
+          "https://ffmpeg.martin-riedl.de/download/macos/amd64/1787081194_9.0.1/ffmpeg.zip",
         fallbackUrl: "https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip",
         archiveType: "zip",
       },
@@ -96,7 +98,7 @@ const TARGET_CONFIGS = {
         label: "ffprobe",
         provides: ["ffprobe"],
         versionedUrl:
-          "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffprobe.zip",
+          "https://ffmpeg.martin-riedl.de/download/macos/amd64/1787081194_9.0.1/ffprobe.zip",
         fallbackUrl: "https://evermeet.cx/ffmpeg/ffprobe-9.0.1.zip",
         archiveType: "zip",
       },
@@ -111,7 +113,7 @@ const TARGET_CONFIGS = {
         label: "ffmpeg",
         provides: ["ffmpeg"],
         versionedUrl:
-          "https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip",
+          "https://ffmpeg.martin-riedl.de/download/linux/amd64/1787074600_9.0.1/ffmpeg.zip",
         fallbackUrl: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
         archiveType: "zip",
         fallbackArchiveType: "tar.xz",
@@ -120,7 +122,7 @@ const TARGET_CONFIGS = {
         label: "ffprobe",
         provides: ["ffprobe"],
         versionedUrl:
-          "https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffprobe.zip",
+          "https://ffmpeg.martin-riedl.de/download/linux/amd64/1787074600_9.0.1/ffprobe.zip",
         fallbackUrl: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
         archiveType: "zip",
         fallbackArchiveType: "tar.xz",

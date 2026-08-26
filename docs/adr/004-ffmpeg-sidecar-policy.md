@@ -20,7 +20,7 @@ A tooling script (`tooling/ffmpeg/setup.mjs`) downloads pinned static builds and
 - macOS arm64 and x64: Martin Riedl release builds (primary) with evermeet.cx release zip fallback.
 - Linux x86_64: Martin Riedl release builds (primary) with johnvansickle.com static release fallback.
 
-The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` in the setup script and re-run.
+The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` and any pinned Martin Riedl build IDs in the setup script, then re-run.
 
 ### Bundling
 

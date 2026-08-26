@@ -42,8 +42,9 @@ node tooling/ffmpeg/setup.mjs
 
 ## Upgrading FFmpeg
 
-Edit `FFMPEG_VERSION` in `setup.mjs`, then re-run the script. The stamp file
-ensures the download only happens when the version changes.
+Edit `FFMPEG_VERSION` and any pinned Martin Riedl build IDs in `setup.mjs`, then
+re-run the script. The stamp file ensures the download only happens when the
+version changes.
 
 ## Notes
 
