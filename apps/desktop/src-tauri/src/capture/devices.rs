@@ -30,11 +30,12 @@ pub struct VideoDevice {
     pub is_default: bool,
 }
 
-/// Enumerate native WASAPI endpoints for microphone capture and render
-/// loopback. DirectShow remains video-only; it is not used for audio devices.
+/// Enumerate native audio capture endpoints.
+/// On Windows, WASAPI endpoints are enumerated.
+/// On macOS/Linux, standard audio endpoints (default mic & system audio) are provided.
 #[instrument(skip(_ffmpeg_path))]
 pub fn enumerate_audio_devices(_ffmpeg_path: &str) -> crate::errors::Result<Vec<AudioDevice>> {
-    let devices = super::audio::enumerate_wasapi_devices()?;
+    let devices = super::audio::enumerate_audio_devices()?;
     let mut audio = devices
         .into_iter()
         .map(|device| AudioDevice {
@@ -48,48 +49,171 @@ pub fn enumerate_audio_devices(_ffmpeg_path: &str) -> crate::errors::Result<Vec<
             is_default: device.is_default,
         })
         .collect::<Vec<_>>();
-    audio.sort_by_key(|device| !device.is_default);
 
-    info!(
-        count = audio.len(),
-        "enumerated native WASAPI audio devices"
-    );
-    Ok(audio)
-}
-
-/// Enumerate DirectShow video capture devices using FFmpeg.
-///
-/// Both `(video)` and `(none)` devices are included as webcams: `(none)` is what
-/// FFmpeg reports for virtual cameras (e.g. OBS Virtual Camera) that are still
-/// openable by name via `video="<name>"`.
-#[instrument(skip(ffmpeg_path))]
-pub fn enumerate_video_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<VideoDevice>> {
-    if !cfg!(windows) {
-        tracing::warn!("video device enumeration is only implemented for Windows");
-        return Ok(Vec::new());
-    }
-
-    let devices = list_dshow_devices(ffmpeg_path)?;
-    let mut video = Vec::new();
-    let mut first = true;
-
-    for device in devices {
-        if matches!(device.media_kind, DshowMediaKind::Audio) {
-            continue;
-        }
-
-        let is_default = first;
-        first = false;
-        video.push(VideoDevice {
-            id: device.name.clone(),
-            name: device.name,
-            kind: "webcam".into(),
-            is_default,
+    if audio.is_empty() && !cfg!(windows) {
+        audio.push(AudioDevice {
+            id: "default".into(),
+            name: "Default Microphone".into(),
+            kind: AudioDeviceKind::Microphone,
+            is_default: true,
+        });
+        audio.push(AudioDevice {
+            id: "system-loopback".into(),
+            name: "System Audio".into(),
+            kind: AudioDeviceKind::System,
+            is_default: false,
         });
     }
 
-    info!(count = video.len(), "enumerated video devices");
-    Ok(video)
+    audio.sort_by_key(|device| !device.is_default);
+
+    info!(count = audio.len(), "enumerated audio capture devices");
+    Ok(audio)
+}
+
+/// Enumerate video capture devices (e.g. webcams) across Windows, macOS, and Linux.
+#[instrument(skip(ffmpeg_path))]
+pub fn enumerate_video_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<VideoDevice>> {
+    #[cfg(windows)]
+    {
+        let devices = list_dshow_devices(ffmpeg_path)?;
+        let mut video = Vec::new();
+        let mut first = true;
+
+        for device in devices {
+            if matches!(device.media_kind, DshowMediaKind::Audio) {
+                continue;
+            }
+
+            let is_default = first;
+            first = false;
+            video.push(VideoDevice {
+                id: device.name.clone(),
+                name: device.name,
+                kind: "webcam".into(),
+                is_default,
+            });
+        }
+
+        info!(count = video.len(), "enumerated Windows video devices");
+        Ok(video)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let devices = list_avfoundation_devices(ffmpeg_path)?;
+        info!(count = devices.len(), "enumerated macOS video devices");
+        Ok(devices)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let devices = list_v4l2_devices();
+        info!(count = devices.len(), "enumerated Linux video devices");
+        Ok(devices)
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// List AVFoundation video capture devices on macOS via FFmpeg.
+#[cfg(target_os = "macos")]
+fn list_avfoundation_devices(ffmpeg_path: &str) -> crate::errors::Result<Vec<VideoDevice>> {
+    let output = crate::process::create_command(ffmpeg_path)
+        .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .output()
+        .map_err(|e| {
+            crate::errors::InternalError::Media(format!("ffmpeg avfoundation list: {e}"))
+        })?;
+
+    let text = String::from_utf8_lossy(&output.stderr);
+    Ok(parse_avfoundation_video_devices(&text))
+}
+
+/// Pure parser for `ffmpeg -f avfoundation -list_devices true -i ""` output.
+pub fn parse_avfoundation_video_devices(text: &str) -> Vec<VideoDevice> {
+    let re = Regex::new(r#"^\s*\[AVFoundation[^\]]*\]\s+\[(\d+)\]\s+(.+)$"#)
+        .expect("avfoundation regex is static and valid");
+
+    let mut devices = Vec::new();
+    let mut in_video_section = false;
+    let mut first = true;
+
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("avfoundation video devices") {
+            in_video_section = true;
+            continue;
+        }
+        if lower.contains("avfoundation audio devices") {
+            in_video_section = false;
+            continue;
+        }
+
+        if in_video_section {
+            if let Some(caps) = re.captures(line) {
+                let id = caps
+                    .get(1)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+                let name = caps
+                    .get(2)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default();
+
+                // Skip screen capture entries in avfoundation video list
+                if name.to_lowercase().starts_with("capture screen") {
+                    continue;
+                }
+
+                if !name.is_empty() {
+                    let is_default = first;
+                    first = false;
+                    devices.push(VideoDevice {
+                        id,
+                        name,
+                        kind: "webcam".into(),
+                        is_default,
+                    });
+                }
+            }
+        }
+    }
+
+    devices
+}
+
+/// List Video4Linux video capture devices on Linux.
+#[cfg(target_os = "linux")]
+fn list_v4l2_devices() -> Vec<VideoDevice> {
+    let mut devices = Vec::new();
+    let mut first = true;
+
+    if let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name_file = path.join("name");
+            if let Ok(raw_name) = std::fs::read_to_string(&name_file) {
+                let name = raw_name.trim().to_string();
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    let dev_path = format!("/dev/{file_name}");
+                    let is_default = first;
+                    first = false;
+                    devices.push(VideoDevice {
+                        id: dev_path,
+                        name,
+                        kind: "webcam".into(),
+                        is_default,
+                    });
+                }
+            }
+        }
+    }
+
+    devices
 }
 
 /// Media kind reported by FFmpeg for a dshow device line.
@@ -293,5 +417,19 @@ mod tests {
         assert_eq!(video[0].name, "Integrated Webcam");
         assert_eq!(audio.len(), 1);
         assert_eq!(audio[0].name, "Microphone (Realtek)");
+    }
+
+    const FFMPEG_AVFOUNDATION_OUTPUT: &str = "[AVFoundation indev @ 0x7fa289704200] AVFoundation video devices:\n[AVFoundation indev @ 0x7fa289704200] [0] FaceTime HD Camera\n[AVFoundation indev @ 0x7fa289704200] [1] OBS Virtual Camera\n[AVFoundation indev @ 0x7fa289704200] [2] Capture screen 0\n[AVFoundation indev @ 0x7fa289704200] AVFoundation audio devices:\n[AVFoundation indev @ 0x7fa289704200] [0] Built-in Microphone\n";
+
+    #[test]
+    fn parses_avfoundation_video_devices_excluding_screens() {
+        let devices = parse_avfoundation_video_devices(FFMPEG_AVFOUNDATION_OUTPUT);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, "0");
+        assert_eq!(devices[0].name, "FaceTime HD Camera");
+        assert!(devices[0].is_default);
+        assert_eq!(devices[1].id, "1");
+        assert_eq!(devices[1].name, "OBS Virtual Camera");
+        assert!(!devices[1].is_default);
     }
 }

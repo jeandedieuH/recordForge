@@ -44,7 +44,7 @@ export function WelcomeStep() {
                 v{appVersion}
               </Badge>
               <Badge variant="outline" className="text-xs px-2 py-0.5 text-subtle-foreground">
-                Windows 10 native
+                Desktop Native
               </Badge>
             </div>
             <p className="text-sm text-subtle-foreground max-w-xl leading-relaxed">
@@ -65,8 +65,8 @@ export function WelcomeStep() {
             <span className="text-sm font-semibold text-foreground">Hardware Accelerated</span>
           </div>
           <p className="text-xs text-subtle-foreground leading-relaxed">
-            Direct WASAPI audio sync, low-impact CPU profiles, and GPU-accelerated NVENC/QSV
-            pipelines.
+            Low-latency audio sync, low-impact CPU profiles, and GPU-accelerated
+            NVENC/QSV/VAAPI/VideoToolbox pipelines.
           </p>
         </div>
 
@@ -105,7 +105,7 @@ export function WelcomeStep() {
             <span>Interface Style & Materials</span>
           </div>
           <p className="text-xs text-subtle-foreground">
-            Choose your preferred color theme and enable Windows 11 Mica material.
+            Choose your preferred color theme and translucent backdrop material.
           </p>
         </div>
 
@@ -140,13 +140,13 @@ export function WelcomeStep() {
             </Button>
           </div>
 
-          {/* Mica Toggle */}
+          {/* Mica / Acrylic Toggle */}
           <div className="flex items-center gap-2 pl-2 border-l border-border">
-            <span className="text-xs text-subtle-foreground select-none">Mica Acrylic</span>
+            <span className="text-xs text-subtle-foreground select-none">Mica / Glass</span>
             <Switch
               checked={micaEnabled}
               onCheckedChange={(checked) => void setMicaEnabled(checked)}
-              aria-label="Toggle Windows 11 Mica transparency"
+              aria-label="Toggle window transparency and backdrop material"
             />
           </div>
         </div>

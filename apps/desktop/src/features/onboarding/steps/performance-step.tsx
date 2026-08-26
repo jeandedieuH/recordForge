@@ -86,10 +86,10 @@ export function PerformanceStep() {
           ? parseInt(coreMatch[1], 10)
           : (navigator.hardwareConcurrency ?? 4)
         setCores(detectedCores)
-        setCpuName(cpuStr.replace(/\s*\(\d+\s*logical\s*cores\)/i, "") || "Windows 11 Processor")
+        setCpuName(cpuStr.replace(/\s*\(\d+\s*logical\s*cores\)/i, "") || "Desktop Processor")
       } catch {
         setCores(navigator.hardwareConcurrency ?? 4)
-        setCpuName("Windows 11 Compatible CPU")
+        setCpuName("Desktop CPU")
       }
     }
 
@@ -97,7 +97,14 @@ export function PerformanceStep() {
   }, [loadDiagnostics, loadEncoders])
 
   const hardwareEncoder = useMemo(() => {
-    const priority = ["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"]
+    const priority = [
+      "h264_nvenc",
+      "h264_videotoolbox",
+      "h264_qsv",
+      "h264_vaapi",
+      "h264_amf",
+      "h264_mf",
+    ]
     const available = new Set(
       (encoders ?? []).filter((encoder) => encoder?.available).map((encoder) => encoder?.id),
     )

@@ -197,8 +197,8 @@ export function DevicesStep() {
             </div>
 
             <p className="text-xs text-subtle-foreground leading-relaxed pt-1">
-              Engineered with native WASAPI loopback on Windows 11. System audio is saved on an
-              independent audio track for precise post-recording mixing.
+              Engineered with native audio loopback. System audio is saved on an independent audio
+              track for precise post-recording mixing.
             </p>
           </div>
 

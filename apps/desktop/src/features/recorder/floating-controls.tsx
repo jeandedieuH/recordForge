@@ -21,6 +21,7 @@ import {
 import { Button } from "@recordforge/ui"
 import { hideFloatingControls, showMainWindow } from "../../lib/recorder"
 import { isTauri } from "../../lib/settings"
+import { MODIFIER_NAME } from "../../lib/platform"
 import { useRecorderStore, useRecorderPolling } from "../../hooks/use-recorder"
 
 function formatDuration(ms: number) {
@@ -364,7 +365,7 @@ export function FloatingControls() {
             <Button
               size="icon"
               variant="ghost"
-              title="Add marker (Ctrl+Shift+M)"
+              title={`Add marker (${MODIFIER_NAME}+Shift+M)`}
               aria-label="Add marker"
               disabled={!isActive || pendingAction != null}
               onClick={handleMarker}
@@ -375,7 +376,11 @@ export function FloatingControls() {
             <Button
               size="icon"
               variant="secondary"
-              title={isRecording ? "Pause (Ctrl+Shift+P)" : "Resume (Ctrl+Shift+P)"}
+              title={
+                isRecording
+                  ? `Pause (${MODIFIER_NAME}+Shift+P)`
+                  : `Resume (${MODIFIER_NAME}+Shift+P)`
+              }
               aria-label={isRecording ? "Pause" : "Resume"}
               disabled={!isActive || pendingAction != null}
               loading={pendingAction === (isRecording ? "pause" : "resume")}

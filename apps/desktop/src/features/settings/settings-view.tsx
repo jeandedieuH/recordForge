@@ -347,20 +347,20 @@ export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: Settings
             </div>
           </div>
 
-          {/* Windows Mica Glass Transparency */}
+          {/* Translucent Glass & Acrylic Backdrop */}
           <div className="rounded-2xl border border-border bg-surface p-5 flex items-center justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-semibold text-foreground">
-                  Windows Mica Glass Backdrop
+                  Translucent Glass & Acrylic Backdrop
                 </h3>
                 <span className="rounded bg-primary/15 px-2 py-0.5 text-[10px] font-mono font-medium text-primary">
                   {micaActive ? "Active" : "Opaque Fallback"}
                 </span>
               </div>
               <p className="text-xs text-subtle-foreground mt-0.5">
-                Enable Windows 11 translucent backdrop material behind the window titlebar and
-                canvas.
+                Enable OS translucent backdrop material (Mica on Windows, Vibrancy on macOS) behind
+                the window titlebar and panels.
               </p>
             </div>
 

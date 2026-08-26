@@ -58,7 +58,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
+    "targets": ["msi", "nsis", "dmg", "app", "deb", "appimage"],
     "externalBin": ["binaries/ffmpeg", "binaries/ffprobe"],
     "resources": ["../public/backgrounds/*", "../../../assets/backgrounds/*"],
     "icon": [
@@ -67,7 +67,16 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.3",
+      "infoPlist": "Info.plist"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1"]
+      }
+    }
   },
   "plugins": {
     "updater": {

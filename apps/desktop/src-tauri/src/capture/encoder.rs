@@ -18,6 +18,18 @@ pub struct EncoderInfo {
 
 /// Encoders we want to probe for H.264/AVC output.
 const PROBED_ENCODERS: &[(&str, &str, &str, Option<&str>)] = &[
+    (
+        "h264_videotoolbox",
+        "Apple VideoToolbox (H.264)",
+        "h264",
+        Some("apple"),
+    ),
+    (
+        "hevc_videotoolbox",
+        "Apple VideoToolbox (HEVC)",
+        "hevc",
+        Some("apple"),
+    ),
     ("h264_nvenc", "NVIDIA NVENC", "h264", Some("nvidia")),
     ("h264_amf", "AMD AMF", "h264", Some("amd")),
     ("h264_qsv", "Intel Quick Sync", "h264", Some("intel")),
@@ -168,7 +180,8 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
             info.supports_cqp = true;
             info.supports_cbr = true;
         }
-        "h264_nvenc" | "h264_amf" | "h264_qsv" | "h264_mf" => {
+        "h264_nvenc" | "h264_amf" | "h264_qsv" | "h264_mf" | "h264_videotoolbox"
+        | "hevc_videotoolbox" => {
             info.supports_cbr = true;
             // Some hardware encoders expose a QP mode instead of CRF.
             info.supports_cqp = true;

@@ -97,8 +97,8 @@ export function AboutView({
   async function handleCopySystemReport() {
     setIsCopying(true)
     try {
-      const cpu = diagnostics?.platform?.cpu ?? "Windows 11 Compatible CPU"
-      const os = diagnostics?.platform?.os ?? "Windows 11"
+      const cpu = diagnostics?.platform?.cpu ?? "Desktop Processor"
+      const os = diagnostics?.platform?.os ?? "Desktop OS"
       const report = [
         "RecordForge Desktop System Report",
         "================================",
@@ -107,7 +107,7 @@ export function AboutView({
         `Source Repository: ${GITHUB_REPO_URL}`,
         `Platform: ${os}`,
         `Processor: ${cpu}`,
-        "Engine: Rust Native (Tauri v2) + WASAPI Audio + FFmpeg 9.0 + WASM Overlay",
+        "Engine: Rust Native (Tauri v2) + Audio Engine + FFmpeg 9.0 + WASM Overlay",
         `Studio: Prestige Tech (${PRESTIGE_TECH_URL})`,
         `Master Developer: (${MASTER_DEV_URL})`,
         `Timestamp: ${new Date().toISOString()}`,
@@ -158,7 +158,7 @@ export function AboutView({
                   v{appVersion}
                 </Badge>
                 <Badge variant="outline" className="text-xs px-2 py-0.5 text-subtle-foreground">
-                  Windows 10 native
+                  Desktop Native
                 </Badge>
               </div>
               <p className="text-xs sm:text-sm text-subtle-foreground max-w-2xl leading-relaxed">
@@ -450,7 +450,7 @@ export function AboutView({
             <CardContent className="space-y-3 text-xs">
               <p className="text-subtle-foreground leading-relaxed">
                 Designed and engineered from the ground up to deliver a low-latency,
-                memory-efficient desktop recording suite on modern Windows environments.
+                memory-efficient desktop recording suite across Windows, macOS, and Linux.
               </p>
 
               <div className="rounded-lg border border-border bg-surface-dim p-2.5 font-mono text-[11px] text-foreground flex items-center justify-between">
@@ -510,11 +510,11 @@ export function AboutView({
             <div className="rounded-xl border border-border bg-surface-dim p-3.5 space-y-1.5">
               <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
                 <Radio className="size-4 text-emerald-400" />
-                <span>WASAPI Audio</span>
+                <span>Native Audio Sync</span>
               </div>
               <p className="text-[11px] text-subtle-foreground leading-relaxed">
-                Direct Windows Audio Session API integration for sub-millisecond hardware-clock
-                sync.
+                Hardware audio clock integration (WASAPI, CoreAudio, ALSA) for zero-drift timeline
+                synchronization.
               </p>
             </div>
 
@@ -524,8 +524,8 @@ export function AboutView({
                 <span>FFmpeg 9.0 Sidecar</span>
               </div>
               <p className="text-[11px] text-subtle-foreground leading-relaxed">
-                Hardware-accelerated encoding pipelines targeting NVENC, QuickSync, AMF, and Media
-                Foundation.
+                Hardware-accelerated encoding pipelines targeting NVENC, VideoToolbox, QuickSync,
+                VAAPI, and Media Foundation.
               </p>
             </div>
 

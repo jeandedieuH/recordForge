@@ -19,7 +19,11 @@ export function DiagnosticsTab() {
 
   function handleExportDiagnostics() {
     const report = {
-      os: "Windows 10/11 x64",
+      os: navigator.userAgent.includes("Mac")
+        ? "macOS"
+        : navigator.userAgent.includes("Linux")
+          ? "Linux"
+          : "Windows 10/11 x64",
       ffmpegVersion: "7.0-recordforge-build",
       cpuCores: 8,
       ramTotalMb: 16384,

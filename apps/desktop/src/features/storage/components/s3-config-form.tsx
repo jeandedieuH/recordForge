@@ -172,7 +172,7 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
         </div>
         <div className="flex items-center gap-1.5 text-xs text-amber-500 font-medium">
           <KeyRound className="h-3.5 w-3.5" />
-          <span>Windows Credential Manager Encrypted</span>
+          <span>OS Credential Vault Encrypted</span>
         </div>
       </div>
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Video } from "lucide-react"
+import { MODIFIER_NAME } from "../../lib/platform"
 
 interface CountdownOverlayProps {
   seconds?: number
@@ -56,6 +57,10 @@ export function CountdownOverlay({
         clearTimeout(timer)
         handleCancel()
       }
+      if (e.shiftKey && (e.ctrlKey || e.metaKey) && e.code === "KeyR" && onCancelRef.current) {
+        clearTimeout(timer)
+        handleCancel()
+      }
     }
 
     window.addEventListener("keydown", handleKeyDown)
@@ -105,7 +110,7 @@ export function CountdownOverlay({
       {/* The native countdown surface is click-through so it cannot block the desktop. */}
       {onCancel ? (
         <div className="mt-8 rounded-full border border-white/20 bg-white/10 px-5 py-2 text-xs font-semibold text-white/90">
-          Press Esc or Ctrl+Shift+R to cancel
+          Press Esc or {MODIFIER_NAME}+Shift+R to cancel
         </div>
       ) : null}
     </div>

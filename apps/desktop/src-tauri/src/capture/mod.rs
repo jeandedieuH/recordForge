@@ -13,6 +13,7 @@ pub mod media;
 pub mod metrics;
 pub mod outputs;
 pub mod recovery;
+pub mod screencapturekit;
 pub mod session;
 pub mod source;
 pub mod webcam;

@@ -44,6 +44,9 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 wasapi = "0.23.0"
 windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Media", "Win32_Security_Credentials"] }
 
+[target.'cfg(not(windows))'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native", "sync-secret-service"] }
+
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.10.1"
 

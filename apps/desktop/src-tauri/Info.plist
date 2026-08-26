@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>recordForge requires screen recording permission to capture your display, windows, and audio.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>recordForge uses your microphone to record voice commentary.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>recordForge uses your camera to record webcam overlays.</string>
+</dict>
+</plist>
