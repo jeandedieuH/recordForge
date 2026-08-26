@@ -111,7 +111,7 @@ jobs:
 
       - name: Test Rust
         working-directory: apps/desktop/src-tauri
-        run: cargo test -- -j 1
+        run: cargo test -j 1
 
       - name: Run macOS Apple Silicon E2E integration tests
         if: runner.os == 'macOS'
