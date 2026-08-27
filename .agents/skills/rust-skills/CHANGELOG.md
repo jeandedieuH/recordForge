@@ -86,4 +86,4 @@ Now 218 rules across 18 categories.
 [1.3.0]: https://github.com/leonardomso/rust-skills
 [1.2.0]: https://github.com/leonardomso/rust-skills
 [1.1.x]: https://github.com/leonardomso/rust-skills
-[1.1.0]: https://github.com/leonardomso/rust-skills
+[1.0.0]: https://github.com/leonardomso/rust-skills

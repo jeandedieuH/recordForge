@@ -12,35 +12,35 @@ impl SourceProvider for LinuxSourceProvider {
         let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
         let display_var = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
 
-        let mut sources = Vec::new();
-
-        if is_wayland {
+        let sources = if is_wayland {
             // Under Wayland, screen & window selection is mediated by the xdg-desktop-portal ScreenCast interface
-            sources.push(CaptureSource {
-                kind: "display".into(),
-                id: "wayland-portal-screen".into(),
-                name: "Wayland Screen (Desktop Portal)".into(),
-                bounds: Bounds {
-                    x: 0,
-                    y: 0,
-                    width: 1920,
-                    height: 1080,
+            vec![
+                CaptureSource {
+                    kind: "display".into(),
+                    id: "wayland-portal-screen".into(),
+                    name: "Wayland Screen (Desktop Portal)".into(),
+                    bounds: Bounds {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
                 },
-            });
-            sources.push(CaptureSource {
-                kind: "window".into(),
-                id: "wayland-portal-window".into(),
-                name: "Wayland Window (Desktop Portal)".into(),
-                bounds: Bounds {
-                    x: 0,
-                    y: 0,
-                    width: 1280,
-                    height: 720,
+                CaptureSource {
+                    kind: "window".into(),
+                    id: "wayland-portal-window".into(),
+                    name: "Wayland Window (Desktop Portal)".into(),
+                    bounds: Bounds {
+                        x: 0,
+                        y: 0,
+                        width: 1280,
+                        height: 720,
+                    },
                 },
-            });
+            ]
         } else {
             // X11 source enumeration
-            sources.push(CaptureSource {
+            vec![CaptureSource {
                 kind: "display".into(),
                 id: format!("x11-display-0-{display_var}"),
                 name: format!("X11 Display 1 ({display_var})"),
@@ -50,8 +50,8 @@ impl SourceProvider for LinuxSourceProvider {
                     width: 1920,
                     height: 1080,
                 },
-            });
-        }
+            }]
+        };
 
         tracing::info!(
             count = sources.len(),

@@ -111,23 +111,22 @@ pub fn enumerate_coreaudio_devices() -> Result<Vec<AudioDeviceInfo>> {
 #[cfg(target_os = "macos")]
 fn enumerate_macos_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
     // macOS CoreAudio HAL property querying
-    let mut devices = Vec::new();
-
-    // Default built-in microphone entry
-    devices.push(AudioDeviceInfo {
-        id: "default".into(),
-        name: "Default Microphone".into(),
-        is_default: true,
-        is_loopback: false,
-    });
-
-    // Native macOS 13+ ScreenCaptureKit System Audio capture endpoint
-    devices.push(AudioDeviceInfo {
-        id: "system-loopback".into(),
-        name: "System Audio (ScreenCaptureKit)".into(),
-        is_default: true,
-        is_loopback: true,
-    });
+    let devices = vec![
+        // Default built-in microphone entry
+        AudioDeviceInfo {
+            id: "default".into(),
+            name: "Default Microphone".into(),
+            is_default: true,
+            is_loopback: false,
+        },
+        // Native macOS 13+ ScreenCaptureKit System Audio capture endpoint
+        AudioDeviceInfo {
+            id: "system-loopback".into(),
+            name: "System Audio (ScreenCaptureKit)".into(),
+            is_default: true,
+            is_loopback: true,
+        },
+    ];
 
     tracing::info!(
         count = devices.len(),

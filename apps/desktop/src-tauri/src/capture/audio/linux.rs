@@ -71,8 +71,6 @@ impl LinuxAudioOptions {
 
 /// Enumerate available Linux audio sources and monitor sinks via PipeWire / PulseAudio / ALSA.
 pub fn enumerate_linux_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
-    let mut devices = Vec::new();
-
     // Check if PulseAudio or PipeWire is active
     let is_pipewire_or_pulse = std::env::var_os("PULSE_SERVER").is_some()
         || std::env::var_os("PIPEWIRE_REMOTE").is_some()
@@ -86,28 +84,29 @@ pub fn enumerate_linux_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
                 })
             });
 
-    if is_pipewire_or_pulse {
-        devices.push(AudioDeviceInfo {
-            id: "default".into(),
-            name: "Default Microphone (PipeWire/PulseAudio)".into(),
-            is_default: true,
-            is_loopback: false,
-        });
-        devices.push(AudioDeviceInfo {
-            id: "system-loopback".into(),
-            name: "System Audio Monitor (PipeWire/PulseAudio)".into(),
-            is_default: true,
-            is_loopback: true,
-        });
+    let devices = if is_pipewire_or_pulse {
+        vec![
+            AudioDeviceInfo {
+                id: "default".into(),
+                name: "Default Microphone (PipeWire/PulseAudio)".into(),
+                is_default: true,
+                is_loopback: false,
+            },
+            AudioDeviceInfo {
+                id: "system-loopback".into(),
+                name: "System Audio Monitor (PipeWire/PulseAudio)".into(),
+                is_default: true,
+                is_loopback: true,
+            },
+        ]
     } else {
-        // Direct ALSA fallback
-        devices.push(AudioDeviceInfo {
+        vec![AudioDeviceInfo {
             id: "hw:0,0".into(),
             name: "ALSA Default Capture".into(),
             is_default: true,
             is_loopback: false,
-        });
-    }
+        }]
+    };
 
     tracing::info!(count = devices.len(), "enumerated Linux audio devices");
     Ok(devices)

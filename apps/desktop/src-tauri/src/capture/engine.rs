@@ -34,19 +34,19 @@ pub fn select_engine(source: &CaptureSource, ddagrab_available: bool) -> Capture
     {
         let _ = (source, ddagrab_available);
         if super::screencapturekit::is_screencapturekit_available() {
-            return CaptureEngineCapabilities {
+            CaptureEngineCapabilities {
                 ddagrab_available: false,
                 gdigrab_available: false,
                 selected_engine: CaptureEngineKind::ScreenCaptureKit,
                 reason: "Selected macOS ScreenCaptureKit for low-CPU hardware capture and independent window capture".into(),
-            };
+            }
         } else {
-            return CaptureEngineCapabilities {
+            CaptureEngineCapabilities {
                 ddagrab_available: false,
                 gdigrab_available: false,
                 selected_engine: CaptureEngineKind::Avfoundation,
                 reason: "ScreenCaptureKit unavailable; falling back to macOS AVFoundation screen capture".into(),
-            };
+            }
         }
     }
 

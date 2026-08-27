@@ -1,9 +1,13 @@
 //! Windows display and window source provider.
 
+#[cfg(windows)]
 use std::collections::HashSet;
+#[cfg(windows)]
 use tracing::instrument;
 
-use crate::capture::source::{parse_window_handle, Bounds, CaptureSource};
+#[cfg(windows)]
+use crate::capture::source::parse_window_handle;
+use crate::capture::source::{Bounds, CaptureSource};
 use crate::capture::traits::SourceProvider;
 use crate::errors::Result;
 
