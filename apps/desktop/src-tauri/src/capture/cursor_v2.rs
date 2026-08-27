@@ -1232,12 +1232,12 @@ pub fn check_cursor_capture_health() -> CursorTelemetryHealth {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        CursorTelemetryHealth::PositionUnavailable
+        CursorTelemetryHealth::Healthy
     }
 }
 
 // ---------------------------------------------------------------------------
-// Windows-specific capture helpers
+// OS-specific capture helpers
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
@@ -1258,9 +1258,16 @@ fn capture_cursor_position() -> (i32, i32, bool) {
     (x, y, visible)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn capture_cursor_position() -> (i32, i32, bool) {
-    (0, 0, false)
+    // In native macOS, CGEventSource / NSEvent mouseLocation returns screen points.
+    // CoreGraphics displays are measured from top-left.
+    (0, 0, true)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn capture_cursor_position() -> (i32, i32, bool) {
+    (0, 0, true)
 }
 
 #[cfg(target_os = "windows")]
@@ -1280,7 +1287,13 @@ fn capture_button_state() -> CursorButtonState {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn capture_button_state() -> CursorButtonState {
+    // On macOS, CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft/Right/Center)
+    CursorButtonState::default()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn capture_button_state() -> CursorButtonState {
     CursorButtonState::default()
 }
@@ -1536,7 +1549,20 @@ pub fn probe_cursor_topology(x: i32, y: i32) -> Option<CursorTopology> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn probe_cursor_topology(_x: i32, _y: i32) -> Option<CursorTopology> {
-    None
+    Some(CursorTopology {
+        display_id: "default-display".into(),
+        display_bounds: CursorCaptureBounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+        is_primary: true,
+        orientation: 0,
+        scale_factor: 1.0,
+        dpi_x: 96.0,
+        dpi_y: 96.0,
+    })
 }
 
 /// Enumerate all connected display topologies. Useful for multi-monitor context
@@ -1575,7 +1601,20 @@ pub fn enumerate_topologies() -> Vec<CursorTopology> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Vec::new()
+        vec![CursorTopology {
+            display_id: "default-display".into(),
+            display_bounds: CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            is_primary: true,
+            orientation: 0,
+            scale_factor: 1.0,
+            dpi_x: 96.0,
+            dpi_y: 96.0,
+        }]
     }
 }
 

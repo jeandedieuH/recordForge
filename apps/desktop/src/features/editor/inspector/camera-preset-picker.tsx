@@ -23,7 +23,7 @@ const PRESETS: PresetMeta[] = [
   {
     id: "vertical-pip",
     label: "Vertical PiP",
-    description: "A tall rectangular webcam overlay in the bottom-right corner.",
+    description: "A compact 5:7 portrait webcam overlay in the bottom-right corner.",
   },
   {
     id: "circle-pip",

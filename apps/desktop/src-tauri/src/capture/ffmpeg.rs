@@ -322,23 +322,59 @@ fn build_webcam_command(
         .stderr(Stdio::piped())
         .arg("-y");
 
-    command.args([
-        "-f",
-        "dshow",
-        "-thread_queue_size",
-        "256",
-        "-rtbufsize",
-        "50M",
-        // DirectShow device timestamps are not guaranteed to share the same
-        // clock as WASAPI or the screen capture. Wall-clock timestamps keep the
-        // webcam on the same timeline as the other capture sources.
-        "-use_video_device_timestamps",
-        "0",
-        "-fflags",
-        "+genpts",
-        "-i",
-        &format!("video={}", device),
-    ]);
+    #[cfg(windows)]
+    {
+        command.args([
+            "-f",
+            "dshow",
+            "-thread_queue_size",
+            "256",
+            "-rtbufsize",
+            "50M",
+            // DirectShow device timestamps are not guaranteed to share the same
+            // clock as WASAPI or the screen capture. Wall-clock timestamps keep the
+            // webcam on the same timeline as the other capture sources.
+            "-use_video_device_timestamps",
+            "0",
+            "-fflags",
+            "+genpts",
+            "-i",
+            &format!("video={}", device),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        command.args([
+            "-f",
+            "avfoundation",
+            "-thread_queue_size",
+            "256",
+            "-framerate",
+            &profile.fps.to_string(),
+            "-i",
+            &format!("{}:none", device),
+        ]);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        command.args([
+            "-f",
+            "v4l2",
+            "-thread_queue_size",
+            "256",
+            "-framerate",
+            &profile.fps.to_string(),
+            "-i",
+            device,
+        ]);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        command.args(["-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30"]);
+    }
 
     // Decouple webcam resolution from screen profile to keep CPU usage low on low-end machines.
     // In recordForge, camera overlays are rendered as picture-in-picture bubbles (or side-by-side)
@@ -391,7 +427,9 @@ fn add_screen_video_input(
             profile.fps, target.output_idx, offset_x, offset_y, width, height
         );
         command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
-    } else if source.kind == "display" || source.kind == "window" || source.kind == "region" {
+    } else if cfg!(windows)
+        && (source.kind == "display" || source.kind == "window" || source.kind == "region")
+    {
         // GDI captures the selected rectangle directly. The sidecar FFmpeg
         // binary is DPI-unaware, so Windows virtualizes its GDI coordinates by
         // the system DPI: physical desktop pixels must be divided by the system
@@ -415,6 +453,42 @@ fn add_screen_video_input(
             &logical.y.to_string(),
             "-i",
             "desktop",
+        ]);
+    } else if cfg!(target_os = "macos")
+        && (source.kind == "display" || source.kind == "window" || source.kind == "region")
+    {
+        // macOS AVFoundation screen input
+        command.args([
+            "-f",
+            "avfoundation",
+            "-capture_cursor",
+            "0",
+            "-thread_queue_size",
+            "512",
+            "-framerate",
+            &profile.fps.to_string(),
+            "-i",
+            "default:none",
+        ]);
+    } else if cfg!(target_os = "linux")
+        && (source.kind == "display" || source.kind == "window" || source.kind == "region")
+    {
+        // Linux X11 screen input
+        let w = bounds.width.max(2);
+        let h = bounds.height.max(2);
+        command.args([
+            "-f",
+            "x11grab",
+            "-draw_mouse",
+            "0",
+            "-thread_queue_size",
+            "512",
+            "-framerate",
+            &profile.fps.to_string(),
+            "-video_size",
+            &format!("{}x{}", w, h),
+            "-i",
+            &format!(":0.0+{},{}", bounds.x, bounds.y),
         ]);
     } else {
         // Unknown source kinds still get a minimal input so FFmpeg does not
@@ -537,6 +611,16 @@ fn add_video_encoder(
                 "cbr",
                 "-b:v",
                 &format!("{default_bitrate}k"),
+            ]);
+        }
+        "h264_videotoolbox" | "hevc_videotoolbox" => {
+            command.args([
+                "-b:v",
+                &format!("{default_bitrate}k"),
+                "-allow_sw",
+                "1",
+                "-realtime",
+                "1",
             ]);
         }
         "libx264" | "libx265" => {
@@ -910,6 +994,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn gdigrab_fallback_uses_dpi_virtualized_coordinates() {
         let source = region_source(100, 200, 800, 600);
 
@@ -952,6 +1037,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn webcam_capture_uses_wall_clock_device_timestamps() {
         let profile = webcam_profile();
         let command =

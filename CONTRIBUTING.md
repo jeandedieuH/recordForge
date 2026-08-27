@@ -8,9 +8,9 @@ Please take a few moments to review this guide before submitting issues or pull 
 
 ## 🧭 Core Architecture & Ground Rules
 
-recordForge is a local-first, low-overhead desktop application for Windows 11. To maintain performance, stability, and security, we enforce strict architectural boundaries:
+recordForge is a local-first, low-overhead desktop application for Windows, macOS, and Linux. To maintain performance, stability, and security, we enforce strict architectural boundaries:
 
-1. **Rust owns:** Native screen capture, WASAPI audio pipelines, SQLite persistence, OS credential storage, and FFmpeg media render jobs.
+1. **Rust owns:** Native screen capture, audio capture pipelines (WASAPI, CoreAudio, ALSA), SQLite persistence, OS credential storage (Keychain, Secret Service, Credential Manager), and FFmpeg media render jobs.
 2. **React owns:** User interface, client-side visual states, and declarative user feedback.
 3. **Never pass raw video frames or audio buffers through React state, Tauri IPC commands, or events.**
 4. **Local-First & Privacy:** Never log user screen content, audio transcripts, or raw media paths. Never transmit user data to external servers without explicit user initiation.
@@ -23,10 +23,13 @@ recordForge is a local-first, low-overhead desktop application for Windows 11. T
 
 ### 1. Prerequisites
 
-- **OS:** Windows 11 (or Windows 10 build 19041+)
-- **Package Manager:** [Bun](https://bun.sh) (>= 1.4.0)
+- **OS:** Windows 10/11, macOS 12+ (Apple Silicon or Intel), or Linux (Ubuntu 22.04+, Fedora 38+, Arch)
+- **Package Manager:** [Bun](https://bun.sh) (>= 1.4.0) or Node.js (>= 22.15.0)
 - **Rust Toolchain:** [Rustup](https://rustup.rs) (stable channel, >= 1.80) with target `wasm32-unknown-unknown` and [wasm-pack](https://rustwasm.github.io/wasm-pack/) (`cargo install wasm-pack`)
-- **Build Tools:** Visual Studio C++ Build Tools with Windows 10/11 SDK
+- **System Build Tools:**
+  - Windows: Visual Studio C++ Build Tools with Windows SDK
+  - macOS: Xcode Command Line Tools (`xcode-select --install`)
+  - Linux: GTK/WebKit development packages (`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev`)
 
 ### 2. Initial Setup
 
@@ -81,7 +84,7 @@ bun run format
 
 ### Official Desktop Releases
 
-Official Windows releases are built from `app-v*` tags by `.github/workflows/release-desktop.yml` and published to GitHub Releases. The workflow creates signed updater artifacts and the `latest.json` manifest.
+Official releases are built from `app-v*` tags by `.github/workflows/release-desktop.yml` across Windows, macOS, and Linux runners, and published to GitHub Releases. The workflow creates signed installer artifacts (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`) and the `latest.json` updater manifest.
 
 The updater public key is supplied through the `RECORD_FORGE_UPDATER_PUBLIC_KEY` GitHub Actions variable. The Tauri signing private key and password are protected GitHub Actions secrets and must never be committed, logged, or exposed to frontend code.
 

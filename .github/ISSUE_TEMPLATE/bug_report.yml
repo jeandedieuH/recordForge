@@ -24,6 +24,15 @@ body:
         - "Windows 11 (23H2 or newer)"
         - "Windows 11 (22H2 / 21H2)"
         - "Windows 10 (21H2 or newer)"
+        - "macOS 15 Sequoia (Apple Silicon)"
+        - "macOS 15 Sequoia (Intel)"
+        - "macOS 14 Sonoma (Apple Silicon)"
+        - "macOS 14 Sonoma (Intel)"
+        - "macOS 13 Ventura or older"
+        - "Linux - Ubuntu / Debian (x86_64)"
+        - "Linux - Fedora / RHEL (x86_64)"
+        - "Linux - Arch Linux (x86_64)"
+        - "Linux - Other"
         - "Other"
     validations:
       required: true

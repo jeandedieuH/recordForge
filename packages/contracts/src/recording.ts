@@ -217,6 +217,9 @@ export const recordingManifestSchema = z.object({
   // Redacted copy of the source and profile for recovery UI.
   source: captureSourceSchema,
   profileName: z.string(),
+  platform: z.enum(["windows", "macos", "linux", "unknown"]).optional(),
+  backend: z.string().optional(),
+  selectedEncoder: z.string().optional(),
   // Working directory where fragments and the final output live.
   workDir: z.string(),
   // Final screen/audio output path; may be absent until finalization completes.

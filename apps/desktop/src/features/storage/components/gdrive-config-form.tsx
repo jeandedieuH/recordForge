@@ -208,7 +208,7 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
                     <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
                   </div>
                   <div className="text-[11px] text-muted-foreground">
-                    {accountEmail || "OAuth Token active in Windows Vault"}
+                    {accountEmail || "OAuth Token active in OS Secure Vault"}
                   </div>
                 </div>
               </div>

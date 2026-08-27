@@ -64,7 +64,7 @@ export function UpdateCard({ onBeforeInstall }: UpdateCardProps) {
           </CardDescription>
         </CardHeader>
         <CardContent className="text-xs text-subtle-foreground">
-          Build the packaged Windows application to test the GitHub Releases updater.
+          Build the packaged application to test the GitHub Releases updater.
         </CardContent>
       </Card>
     )
@@ -199,7 +199,7 @@ export function UpdateCard({ onBeforeInstall }: UpdateCardProps) {
             <div>
               <p className="font-medium text-foreground">Installing update</p>
               <p className="mt-1 text-subtle-foreground">
-                RecordForge will close and restart when Windows finishes the signed installer.
+                RecordForge will close and restart when the updater finishes installing.
               </p>
             </div>
           </div>

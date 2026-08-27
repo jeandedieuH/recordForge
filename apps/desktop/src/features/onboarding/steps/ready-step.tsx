@@ -1,5 +1,6 @@
 import { CheckCircle2, Flag, Keyboard, Video } from "lucide-react"
 import { Badge, Button, Kbd } from "@recordforge/ui"
+import { MODIFIER_NAME } from "../../../lib/platform"
 
 interface ReadyStepProps {
   onStartRecording?: () => void
@@ -36,7 +37,7 @@ export function ReadyStep({ onStartRecording, onFinish }: ReadyStepProps) {
             <span>Essential Keyboard Shortcuts</span>
           </div>
           <Badge variant="outline" className="text-[11px] px-2 py-0.5 font-mono">
-            Global Windows Hotkeys
+            Global Hotkeys
           </Badge>
         </div>
 
@@ -47,10 +48,10 @@ export function ReadyStep({ onStartRecording, onFinish }: ReadyStepProps) {
               <span>Record / Stop</span>
             </div>
             <p className="text-[11px] text-subtle-foreground">
-              Start or finalize recording instantly from anywhere in Windows.
+              Start or finalize recording instantly from anywhere on your desktop.
             </p>
             <div className="flex items-center gap-1">
-              <Kbd>Ctrl</Kbd>
+              <Kbd>{MODIFIER_NAME}</Kbd>
               <span className="text-xs text-subtle-foreground">+</span>
               <Kbd>Shift</Kbd>
               <span className="text-xs text-subtle-foreground">+</span>
@@ -67,7 +68,7 @@ export function ReadyStep({ onStartRecording, onFinish }: ReadyStepProps) {
               Temporarily freeze capture without splitting your video file.
             </p>
             <div className="flex items-center gap-1">
-              <Kbd>Ctrl</Kbd>
+              <Kbd>{MODIFIER_NAME}</Kbd>
               <span className="text-xs text-subtle-foreground">+</span>
               <Kbd>Shift</Kbd>
               <span className="text-xs text-subtle-foreground">+</span>
@@ -84,7 +85,7 @@ export function ReadyStep({ onStartRecording, onFinish }: ReadyStepProps) {
               Drop milestone markers on the fly for fast timeline navigation.
             </p>
             <div className="flex items-center gap-1">
-              <Kbd>Ctrl</Kbd>
+              <Kbd>{MODIFIER_NAME}</Kbd>
               <span className="text-xs text-subtle-foreground">+</span>
               <Kbd>Shift</Kbd>
               <span className="text-xs text-subtle-foreground">+</span>

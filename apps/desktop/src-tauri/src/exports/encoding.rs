@@ -7,13 +7,15 @@ use super::ExportSettings;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExportEncoder {
     Software,
+    VideoToolbox,
     Nvenc,
     Qsv,
     Amf,
     Mf,
 }
 
-const HARDWARE_PRIORITY: [ExportEncoder; 4] = [
+const HARDWARE_PRIORITY: [ExportEncoder; 5] = [
+    ExportEncoder::VideoToolbox,
     ExportEncoder::Nvenc,
     ExportEncoder::Qsv,
     ExportEncoder::Amf,
@@ -24,6 +26,7 @@ impl ExportEncoder {
     pub(crate) fn h264_id(self) -> &'static str {
         match self {
             ExportEncoder::Software => "libx264",
+            ExportEncoder::VideoToolbox => "h264_videotoolbox",
             ExportEncoder::Nvenc => "h264_nvenc",
             ExportEncoder::Qsv => "h264_qsv",
             ExportEncoder::Amf => "h264_amf",
@@ -34,6 +37,7 @@ impl ExportEncoder {
     pub(crate) fn hevc_id(self) -> &'static str {
         match self {
             ExportEncoder::Software => "libx265",
+            ExportEncoder::VideoToolbox => "hevc_videotoolbox",
             ExportEncoder::Nvenc => "hevc_nvenc",
             ExportEncoder::Qsv => "hevc_qsv",
             ExportEncoder::Amf => "hevc_amf",
@@ -52,6 +56,7 @@ impl ExportEncoder {
     pub(crate) fn display_name(self) -> &'static str {
         match self {
             ExportEncoder::Software => "software (x264/x265)",
+            ExportEncoder::VideoToolbox => "Apple VideoToolbox",
             ExportEncoder::Nvenc => "NVIDIA NVENC",
             ExportEncoder::Qsv => "Intel Quick Sync",
             ExportEncoder::Amf => "AMD AMF",
@@ -130,6 +135,26 @@ pub(crate) fn append_export_video_args(
         ExportEncoder::Software => {
             let (preset, crf) = software_preset(&settings.preset);
             command.arg("-preset").arg(preset).arg("-crf").arg(crf);
+        }
+        ExportEncoder::VideoToolbox => {
+            let bits_per_pixel = if settings.preset == "fast-share" {
+                0.07
+            } else if quality_tier {
+                0.14
+            } else {
+                0.10
+            };
+            let bitrate_kbps =
+                (canvas_width as f64 * canvas_height as f64 * target_fps as f64 * bits_per_pixel
+                    / 1000.0)
+                    .clamp(2_500.0, 80_000.0) as u32;
+            command
+                .arg("-b:v")
+                .arg(format!("{bitrate_kbps}k"))
+                .arg("-allow_sw")
+                .arg("1")
+                .arg("-realtime")
+                .arg("0");
         }
         ExportEncoder::Nvenc => {
             command
@@ -414,5 +439,25 @@ mod tests {
         assert!(args_of(&high_fps_command)
             .windows(2)
             .any(|pair| pair == ["-r", "60"]));
+    }
+
+    #[test]
+    fn videotoolbox_args_use_hardware_bitrate_and_software_fallback() {
+        let mut command = Command::new("ffmpeg");
+        append_export_video_args(
+            &mut command,
+            &settings("high-quality", "h264", "auto"),
+            ExportEncoder::VideoToolbox,
+            60,
+            1920,
+            1080,
+        );
+        let args = args_of(&command);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c:v", "h264_videotoolbox"]));
+        assert!(args.windows(2).any(|pair| pair == ["-allow_sw", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-realtime", "0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-r", "60"]));
     }
 }

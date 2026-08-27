@@ -403,10 +403,12 @@ export function createCursorEngine(
         const prevFx = forwardX[relI - 1]
         const prevFy = forwardY[relI - 1]
         const dt = Math.max(1, ev.tMs - prepared[i - 1].tMs)
-        const speedFactor = ev.speedPxPerSec / ADAPTIVE_SPEED_REF_PX_PER_SEC
-        const sampleAlpha = clamp(alpha * (1 + speedFactor), 0.05, 1)
-        const rate = clamp(dt / expectedIntervalMs, 0.1, 5)
-        const lambda = clamp(1 - Math.pow(1 - sampleAlpha, rate), 0.05, 1)
+        const rawAlpha = alpha * (1 + ev.speedPxPerSec / ADAPTIVE_SPEED_REF_PX_PER_SEC)
+        const sampleAlpha = rawAlpha < 0.05 ? 0.05 : rawAlpha > 1 ? 1 : rawAlpha
+        const rawRate = dt / expectedIntervalMs
+        const rate = rawRate < 0.1 ? 0.1 : rawRate > 5 ? 5 : rawRate
+        const rawLambda = rate === 1 ? sampleAlpha : 1 - Math.pow(1 - sampleAlpha, rate)
+        const lambda = rawLambda < 0.05 ? 0.05 : rawLambda > 1 ? 1 : rawLambda
 
         forwardX[relI] = prevFx + (x - prevFx) * lambda
         forwardY[relI] = prevFy + (y - prevFy) * lambda
@@ -430,10 +432,12 @@ export function createCursorEngine(
         const nextBx = smoothedX[relI + 1]
         const nextBy = smoothedY[relI + 1]
         const dt = Math.max(1, prepared[absI + 1].tMs - ev.tMs)
-        const speedFactor = ev.speedPxPerSec / ADAPTIVE_SPEED_REF_PX_PER_SEC
-        const sampleAlpha = clamp(alpha * (1 + speedFactor), 0.05, 1)
-        const rate = clamp(dt / expectedIntervalMs, 0.1, 5)
-        const lambda = clamp(1 - Math.pow(1 - sampleAlpha, rate), 0.05, 1)
+        const rawAlpha = alpha * (1 + ev.speedPxPerSec / ADAPTIVE_SPEED_REF_PX_PER_SEC)
+        const sampleAlpha = rawAlpha < 0.05 ? 0.05 : rawAlpha > 1 ? 1 : rawAlpha
+        const rawRate = dt / expectedIntervalMs
+        const rate = rawRate < 0.1 ? 0.1 : rawRate > 5 ? 5 : rawRate
+        const rawLambda = rate === 1 ? sampleAlpha : 1 - Math.pow(1 - sampleAlpha, rate)
+        const lambda = rawLambda < 0.05 ? 0.05 : rawLambda > 1 ? 1 : rawLambda
 
         smoothedX[relI] = nextBx + (fx - nextBx) * lambda
         smoothedY[relI] = nextBy + (fy - nextBy) * lambda

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main,macos-and-linux-versions]
   pull_request:
     branches: [main]
 
@@ -64,9 +64,25 @@ jobs:
         run: bun run typecheck
 
   test:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon environment
+        if: runner.os == 'macOS'
+        run: |
+          echo "Host Architecture: $(uname -m)"
+          echo "macOS Product Version: $(sw_vers -productVersion)"
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -75,9 +91,17 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Install dependencies
         run: bun install
+
+      - name: Build overlay WASM
+        run: bun run build:wasm:overlay
 
       - name: Download FFmpeg sidecar binaries
         run: bun run setup:ffmpeg
@@ -87,12 +111,31 @@ jobs:
 
       - name: Test Rust
         working-directory: apps/desktop/src-tauri
-        run: cargo test
+        run: cargo test -j 1
+
+      - name: Run Cross-Platform Truthfulness & Fake Adapter Tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --test cross_platform_truthfulness_and_fakes_tests -- --nocapture
+
+      - name: Run macOS Apple Silicon E2E integration tests
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --test macos_e2e_integration_tests -- --nocapture
 
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -101,9 +144,17 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
 
       - name: Install dependencies
         run: bun install
+
+      - name: Build overlay WASM
+        run: bun run build:wasm:overlay
 
       - name: Download FFmpeg sidecar binaries
         run: bun run setup:ffmpeg
@@ -117,7 +168,7 @@ jobs:
         run: cargo build --release
 
   build-wasm:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

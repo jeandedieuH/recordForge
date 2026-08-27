@@ -63,6 +63,17 @@ pub fn set_secret(account: &str, secret: &str) -> Result<()> {
         }
     }
 
+    #[cfg(not(windows))]
+    {
+        if let Ok(entry) = keyring::Entry::new(SERVICE_NAME, account) {
+            if let Err(err) = entry.set_password(secret) {
+                tracing::warn!(error = %err, "keyring set_password failed; falling back to memory vault");
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
     // Fallback store
     let store = get_in_memory_store();
     let mut map = store
@@ -111,6 +122,19 @@ pub fn get_secret(account: &str) -> Result<Option<String>> {
         }
     }
 
+    #[cfg(not(windows))]
+    {
+        if let Ok(entry) = keyring::Entry::new(SERVICE_NAME, account) {
+            match entry.get_password() {
+                Ok(secret) => return Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => return Ok(None),
+                Err(err) => {
+                    tracing::warn!(error = %err, "keyring get_password failed; checking memory vault");
+                }
+            }
+        }
+    }
+
     // Fallback store
     let store = get_in_memory_store();
     let map = store
@@ -133,6 +157,13 @@ pub fn delete_secret(account: &str) -> Result<()> {
 
         unsafe {
             let _ = CredDeleteW(PWSTR(target_utf16.as_mut_ptr()), CRED_TYPE_GENERIC, None);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(entry) = keyring::Entry::new(SERVICE_NAME, account) {
+            let _ = entry.delete_credential();
         }
     }
 

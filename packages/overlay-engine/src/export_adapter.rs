@@ -211,7 +211,8 @@ fn draw_arrow_head(
 
     let cos = angle.cos();
     let sin = angle.sin();
-    let rot = |px: f32, py: f32| -> (f32, f32) { (x + px * cos - py * sin, y + px * sin + py * cos) };
+    let rot =
+        |px: f32, py: f32| -> (f32, f32) { (x + px * cos - py * sin, y + px * sin + py * cos) };
 
     if head == "circle" {
         let r = size / 2.0;
@@ -290,7 +291,6 @@ fn draw_shadow_path(
         max_y = max_y.max(pt.y);
     }
 
-
     let sub_x0 = (min_x.floor() as i32 - pad).max(0);
     let sub_y0 = (min_y.floor() as i32 - pad).max(0);
     let sub_x1 = (max_x.ceil() as i32 + pad).min(pixmap.width() as i32);
@@ -320,7 +320,6 @@ fn draw_shadow_path(
         );
     }
 }
-
 
 fn fast_blur(pixmap: &mut Pixmap, radius: f32) {
     let r = radius.round().max(1.0) as usize;
@@ -383,11 +382,7 @@ fn fast_blur(pixmap: &mut Pixmap, radius: f32) {
     }
 }
 
-
-fn render_annotation(
-    pixmap: &mut Pixmap,
-    item: &DisplayAnnotation,
-) -> Result<(), OverlayError> {
+fn render_annotation(pixmap: &mut Pixmap, item: &DisplayAnnotation) -> Result<(), OverlayError> {
     let t = &item.transform;
     let ts = item_transform(
         t.x, t.y, t.width, t.height, t.rotation, t.anchor_x, t.anchor_y,
@@ -457,12 +452,20 @@ fn render_annotation(
         if len > 0.001 {
             let head_size = (stroke_width * 3.5).max(10.0);
             let start_offset = if item.arrow_start_head != "none" {
-                (len * 0.45).min(if item.arrow_start_head == "circle" { head_size / 2.0 } else { head_size * 0.7 })
+                (len * 0.45).min(if item.arrow_start_head == "circle" {
+                    head_size / 2.0
+                } else {
+                    head_size * 0.7
+                })
             } else {
                 0.0
             };
             let end_offset = if item.arrow_end_head != "none" {
-                (len * 0.45).min(if item.arrow_end_head == "circle" { head_size / 2.0 } else { head_size * 0.7 })
+                (len * 0.45).min(if item.arrow_end_head == "circle" {
+                    head_size / 2.0
+                } else {
+                    head_size * 0.7
+                })
             } else {
                 0.0
             };
@@ -570,7 +573,8 @@ fn render_annotation(
             tail_pb.line_to(x + 16.0, y + h + 18.0);
             tail_pb.close();
             if let Some(tail_path) = tail_pb.finish() {
-                let fill_color = parse_color(&item.fill_color, opacity * item.fill_opacity.max(0.85));
+                let fill_color =
+                    parse_color(&item.fill_color, opacity * item.fill_opacity.max(0.85));
                 let mut tail_paint = Paint::default();
                 tail_paint.set_color(fill_color);
                 tail_paint.anti_alias = true;
@@ -585,7 +589,11 @@ fn render_annotation(
     {
         if let Some(text) = &item.text {
             let fs = item.font_size.clamp(10.0, 72.0) as f32;
-            let padding = if item.annotation_type == "badge" { 24.0 } else { fs * 1.5 };
+            let padding = if item.annotation_type == "badge" {
+                24.0
+            } else {
+                fs * 1.5
+            };
             let max_chars = ((w - padding).max(20.0) / (fs * 0.58)).max(3.0) as usize;
             let lines = wrap_text_to_lines(text, max_chars);
             if !lines.is_empty() {
@@ -725,7 +733,11 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
     let base_tag_fs = (base_primary_fs * 0.35).clamp(10.0, 18.0);
     let base_tag_line_h = base_tag_fs * 1.2;
     let base_tag_gap = 6.0;
-    let base_tag_h = if has_tag { base_tag_line_h + base_tag_gap } else { 0.0 };
+    let base_tag_h = if has_tag {
+        base_tag_line_h + base_tag_gap
+    } else {
+        0.0
+    };
 
     // Optional secondary subtitle
     let has_sub = item
@@ -755,61 +767,79 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
     let initial_total_content_h = base_tag_h + base_primary_h + base_sub_h;
 
     // Determine scale factor if auto_scale_text is enabled
-    let scale = if item.auto_scale_text && initial_total_content_h > available_h && initial_total_content_h > 0.0 {
+    let scale = if item.auto_scale_text
+        && initial_total_content_h > available_h
+        && initial_total_content_h > 0.0
+    {
         (available_h / initial_total_content_h).clamp(0.55, 1.0)
     } else {
         1.0
     };
 
-    let (primary_fs, primary_line_h, primary_lines, primary_h, tag_fs, tag_line_h, tag_gap, sub_fs, sub_line_h, subtitle_gap, sub_lines, sub_h) =
-        if (scale - 1.0).abs() > 0.001 {
-            let p_fs = (base_primary_fs * scale).clamp(10.0, 120.0);
-            let p_line_h = p_fs * 1.25;
-            let p_max_chars = (usable_w / (p_fs * 0.58)).max(3.0) as usize;
-            let p_lines = wrap_text_to_lines(&primary_text, p_max_chars);
-            let p_h = (p_lines.len() as f32) * p_line_h;
+    let (
+        primary_fs,
+        primary_line_h,
+        primary_lines,
+        primary_h,
+        tag_fs,
+        tag_line_h,
+        tag_gap,
+        sub_fs,
+        sub_line_h,
+        subtitle_gap,
+        sub_lines,
+        sub_h,
+    ) = if (scale - 1.0).abs() > 0.001 {
+        let p_fs = (base_primary_fs * scale).clamp(10.0, 120.0);
+        let p_line_h = p_fs * 1.25;
+        let p_max_chars = (usable_w / (p_fs * 0.58)).max(3.0) as usize;
+        let p_lines = wrap_text_to_lines(&primary_text, p_max_chars);
+        let p_h = (p_lines.len() as f32) * p_line_h;
 
-            let t_fs = (p_fs * 0.35).clamp(9.0, 18.0);
-            let t_line_h = t_fs * 1.2;
-            let t_gap = base_tag_gap * scale;
+        let t_fs = (p_fs * 0.35).clamp(9.0, 18.0);
+        let t_line_h = t_fs * 1.2;
+        let t_gap = base_tag_gap * scale;
 
-            let s_fs = (p_fs * 0.55).clamp(9.0, 48.0);
-            let s_line_h = s_fs * 1.3;
-            let s_gap = base_subtitle_gap * scale;
-            let s_max_chars = (usable_w / (s_fs * 0.58)).max(3.0) as usize;
-            let s_lines = if let Some(subtitle) = &item.secondary_text {
-                if !subtitle.trim().is_empty() {
-                    wrap_text_to_lines(subtitle, s_max_chars)
-                } else {
-                    Vec::new()
-                }
+        let s_fs = (p_fs * 0.55).clamp(9.0, 48.0);
+        let s_line_h = s_fs * 1.3;
+        let s_gap = base_subtitle_gap * scale;
+        let s_max_chars = (usable_w / (s_fs * 0.58)).max(3.0) as usize;
+        let s_lines = if let Some(subtitle) = &item.secondary_text {
+            if !subtitle.trim().is_empty() {
+                wrap_text_to_lines(subtitle, s_max_chars)
             } else {
                 Vec::new()
-            };
-            let s_h = if has_sub && !s_lines.is_empty() {
-                (s_lines.len() as f32) * s_line_h + s_gap
-            } else {
-                0.0
-            };
-
-            (p_fs, p_line_h, p_lines, p_h, t_fs, t_line_h, t_gap, s_fs, s_line_h, s_gap, s_lines, s_h)
+            }
         } else {
-            let t_gap = base_tag_gap;
-            (
-                base_primary_fs,
-                base_primary_line_h,
-                base_primary_lines,
-                base_primary_h,
-                base_tag_fs,
-                base_tag_line_h,
-                t_gap,
-                base_sub_fs,
-                base_sub_line_h,
-                base_subtitle_gap,
-                base_sub_lines,
-                base_sub_h,
-            )
+            Vec::new()
         };
+        let s_h = if has_sub && !s_lines.is_empty() {
+            (s_lines.len() as f32) * s_line_h + s_gap
+        } else {
+            0.0
+        };
+
+        (
+            p_fs, p_line_h, p_lines, p_h, t_fs, t_line_h, t_gap, s_fs, s_line_h, s_gap, s_lines,
+            s_h,
+        )
+    } else {
+        let t_gap = base_tag_gap;
+        (
+            base_primary_fs,
+            base_primary_line_h,
+            base_primary_lines,
+            base_primary_h,
+            base_tag_fs,
+            base_tag_line_h,
+            t_gap,
+            base_sub_fs,
+            base_sub_line_h,
+            base_subtitle_gap,
+            base_sub_lines,
+            base_sub_h,
+        )
+    };
 
     let tag_h = if has_tag { tag_line_h + tag_gap } else { 0.0 };
     let total_content_h = tag_h + primary_h + sub_h;
@@ -880,7 +910,10 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
         }
     }
 
-    let clip_id = format!("clip-text-{}", item.id.replace(|c: char| !c.is_alphanumeric(), "-"));
+    let clip_id = format!(
+        "clip-text-{}",
+        item.id.replace(|c: char| !c.is_alphanumeric(), "-")
+    );
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{cw}" height="{ch}" viewBox="0 0 {cw} {ch}">
             <defs>
@@ -956,7 +989,12 @@ fn render_image(
                 } else {
                     (w, w / src_ratio.max(1e-4))
                 };
-                (scaled_w, scaled_h, x + (w - scaled_w) / 2.0, y + (h - scaled_h) / 2.0)
+                (
+                    scaled_w,
+                    scaled_h,
+                    x + (w - scaled_w) / 2.0,
+                    y + (h - scaled_h) / 2.0,
+                )
             }
             ImageFit::Cover => {
                 let src_ratio = src_w / src_h.max(1.0);
@@ -966,7 +1004,12 @@ fn render_image(
                 } else {
                     (h * src_ratio, h)
                 };
-                (scaled_w, scaled_h, x + (w - scaled_w) / 2.0, y + (h - scaled_h) / 2.0)
+                (
+                    scaled_w,
+                    scaled_h,
+                    x + (w - scaled_w) / 2.0,
+                    y + (h - scaled_h) / 2.0,
+                )
             }
         };
 
@@ -984,14 +1027,7 @@ fn render_image(
         };
 
         // If radius > 0, mask/clip or fill into rounded rect
-        pixmap.draw_pixmap(
-            0,
-            0,
-            source_image.as_ref(),
-            &paint,
-            img_transform,
-            None,
-        );
+        pixmap.draw_pixmap(0, 0, source_image.as_ref(), &paint, img_transform, None);
     } else {
         // Fallback: draw placeholder rounded rectangle
         if let Some(placeholder_path) = build_rounded_rect_path(x, y, w, h, radius) {
@@ -1000,13 +1036,7 @@ fn render_image(
             let mut fill_paint = Paint::default();
             fill_paint.set_color(placeholder_color);
             fill_paint.anti_alias = true;
-            pixmap.fill_path(
-                &placeholder_path,
-                &fill_paint,
-                FillRule::Winding,
-                ts,
-                None,
-            );
+            pixmap.fill_path(&placeholder_path, &fill_paint, FillRule::Winding, ts, None);
         }
     }
 
@@ -1028,15 +1058,10 @@ fn render_image(
     Ok(())
 }
 
-fn render_svg_markup(
-    svg: &str,
-    transform: Transform,
-    pixmap: &mut Pixmap,
-) -> Result<(), String> {
+fn render_svg_markup(svg: &str, transform: Transform, pixmap: &mut Pixmap) -> Result<(), String> {
     let mut options = resvg::usvg::Options::default();
     options.fontdb = crate::fonts::get_shared_font_database();
-    let tree = resvg::usvg::Tree::from_str(svg, &options)
-        .map_err(|e| format!("parse SVG: {e}"))?;
+    let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|e| format!("parse SVG: {e}"))?;
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     Ok(())
 }

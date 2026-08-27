@@ -15,11 +15,28 @@ env:
 
 jobs:
   release:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: "--config src-tauri/tauri.release.generated.conf.json --bundles msi,nsis"
+          - platform: macos-latest
+            args: "--config src-tauri/tauri.release.generated.conf.json --bundles dmg,app"
+          - platform: ubuntu-latest
+            args: "--config src-tauri/tauri.release.generated.conf.json --bundles deb,appimage"
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -77,7 +94,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tauriScript: bun tauri
-          args: --config src-tauri/tauri.release.generated.conf.json
+          args: ${{ matrix.args }}
           tagName: app-v__VERSION__
           releaseName: RecordForge v__VERSION__
           releaseBody: See the source tag and signed assets included in this release.
