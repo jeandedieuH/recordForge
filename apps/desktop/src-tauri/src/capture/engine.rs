@@ -32,6 +32,7 @@ pub struct CaptureEngineCapabilities {
 pub fn select_engine(source: &CaptureSource, ddagrab_available: bool) -> CaptureEngineCapabilities {
     #[cfg(target_os = "macos")]
     {
+        let _ = (source, ddagrab_available);
         if super::screencapturekit::is_screencapturekit_available() {
             return CaptureEngineCapabilities {
                 ddagrab_available: false,
