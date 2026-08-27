@@ -132,8 +132,10 @@ export function buildCameraPresetTransform(
     }
 
     case "vertical-pip": {
-      const width = Math.round(canvas.width * 0.22)
-      const height = Math.round(canvas.height * 0.42)
+      // 5:7 portrait aspect ratio (width:height = 5:7 -> height = width * 7 / 5),
+      // defaulting to a compact floating size of at most 240px width.
+      const width = Math.min(240, Math.max(1, Math.round(canvas.width * 0.22)))
+      const height = Math.round(width * (7 / 5))
       return {
         ...defaultStyle(preset),
         x: Math.max(0, canvas.width - width - PIP_PADDING),

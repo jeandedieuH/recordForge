@@ -184,8 +184,8 @@ describe("domain", () => {
         shape: "rectangle",
         shadowEnabled: true,
         borderWidth: 2,
-        width: 422,
-        height: 454,
+        width: 240,
+        height: 336,
       },
     })
 

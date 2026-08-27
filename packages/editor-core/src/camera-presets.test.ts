@@ -18,11 +18,12 @@ describe("buildCameraPresetTransform", () => {
     expect(transform.preset).toBe("camera-only")
   })
 
-  it("places the vertical PiP in the bottom-right and crops the source", () => {
+  it("places the vertical PiP in the bottom-right with 5:7 ratio and max 240 width", () => {
     const transform = buildCameraPresetTransform("vertical-pip", { canvas, source })
 
-    expect(transform.width).toBe(Math.round(canvas.width * 0.22))
-    expect(transform.height).toBe(Math.round(canvas.height * 0.42))
+    expect(transform.width).toBe(240)
+    expect(transform.height).toBe(336)
+    expect(transform.width / transform.height).toBeCloseTo(5 / 7, 2)
     expect(transform.x).toBe(canvas.width - transform.width - 24)
     expect(transform.y).toBe(canvas.height - transform.height - 24)
     expect(transform.crop).toBeDefined()
@@ -30,6 +31,20 @@ describe("buildCameraPresetTransform", () => {
     expect(transform.crop!.height).toBeGreaterThan(0)
     expect(transform.preset).toBe("vertical-pip")
     expect(transform.locked).toBe(false)
+  })
+
+  it("scales down vertical PiP width on smaller canvas while preserving 5:7 ratio", () => {
+    const smallCanvas = { width: 800, height: 600 }
+    const transform = buildCameraPresetTransform("vertical-pip", { canvas: smallCanvas, source })
+
+    const expectedWidth = Math.round(800 * 0.22) // 176 <= 240
+    const expectedHeight = Math.round(expectedWidth * (7 / 5)) // 246
+    expect(transform.width).toBe(expectedWidth)
+    expect(transform.height).toBe(expectedHeight)
+    expect(transform.width).toBeLessThanOrEqual(240)
+    expect(transform.width / transform.height).toBeCloseTo(5 / 7, 2)
+    expect(transform.x).toBe(800 - expectedWidth - 24)
+    expect(transform.y).toBe(600 - expectedHeight - 24)
   })
 
   it("creates a perfect circle overlay with a square source crop", () => {

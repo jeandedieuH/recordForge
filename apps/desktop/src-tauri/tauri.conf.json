@@ -82,7 +82,9 @@
   "plugins": {
     "updater": {
       "pubkey": "",
-      "endpoints": []
+      "endpoints": [
+        "https://github.com/jeandedieuH/recordForge/releases/latest/download/latest.json"
+      ]
     },
     "shell": {
       "open": false

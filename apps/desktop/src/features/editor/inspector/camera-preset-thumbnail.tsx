@@ -26,7 +26,7 @@ export function CameraPresetThumbnail({ preset, className }: CameraPresetThumbna
       {preset === "vertical-pip" ? (
         <>
           <rect x="2" y="2" width="76" height="46" rx="5" opacity={0.35} />
-          <rect x="54" y="10" width="18" height="38" rx="3" />
+          <rect x="60" y="24" width="15" height="21" rx="3" />
         </>
       ) : null}
 
