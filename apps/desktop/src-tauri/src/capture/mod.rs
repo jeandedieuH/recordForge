@@ -7,15 +7,19 @@ pub mod devices;
 pub mod disk;
 pub mod encoder;
 pub mod engine;
+pub mod fakes;
 pub mod ffmpeg;
 pub mod manifest;
 pub mod media;
 pub mod metrics;
 pub mod outputs;
+pub mod permissions;
 pub mod recovery;
 pub mod screencapturekit;
 pub mod session;
 pub mod source;
+pub mod source_providers;
+pub mod traits;
 pub mod webcam;
 
 pub use benchmark::{run_benchmark, BenchmarkRecommendation, BenchmarkReport};
@@ -24,6 +28,8 @@ pub use devices::{enumerate_audio_devices, enumerate_video_devices, AudioDevice,
 pub use encoder::{detect_encoders, EncoderInfo};
 pub use manifest::{RecorderState, RecordingManifest};
 pub use media::{concatenate_segments, copy_export, trim_recording};
+pub use permissions::{check_permission, check_system_permissions, SystemPermissionsReport};
 pub use recovery::{scan_recovery, RecoveryScanResult};
 pub use session::{Recorder, RecordingStatus};
 pub use source::{enumerate_sources, CaptureSource};
+pub use traits::{AudioTrack, CursorTelemetryAdapter, SourceProvider};

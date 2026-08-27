@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info, instrument};
 
-use super::audio::{WasapiCaptureKind, WasapiCaptureOptions, WasapiCaptureSession};
+use super::audio::AudioCaptureKind;
 use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::ffmpeg::FfmpegCapture;
@@ -12,6 +12,7 @@ use super::manifest::{
     RecordingStats, RecordingWebcamFragment,
 };
 use super::media;
+use super::traits::AudioTrack;
 
 /// Shared recorder state. Only one recording session can be active at a time.
 #[derive(Debug)]
@@ -53,8 +54,8 @@ struct ActiveSession {
 
 #[derive(Debug)]
 struct ActiveAudioCapture {
-    kind: WasapiCaptureKind,
-    session: WasapiCaptureSession,
+    kind: AudioCaptureKind,
+    track: Box<dyn AudioTrack>,
 }
 
 #[derive(Debug)]
@@ -569,14 +570,18 @@ impl Recorder {
                 crate::errors::InternalError::Capture("microphone device is missing".into())
             })?;
             let output_path = work_dir.join(format!("mic_{:03}.wav", index));
-            let options = WasapiCaptureOptions::microphone(Some(device_id), output_path)
-                .with_timeline_origin(timeline_origin);
-            let session = WasapiCaptureSession::start(options).map_err(|error| {
+            let track = super::audio::start_audio_track(
+                AudioCaptureKind::Microphone,
+                Some(device_id),
+                output_path,
+                timeline_origin,
+            )
+            .map_err(|error| {
                 crate::errors::InternalError::Capture(format!("start microphone capture: {error}"))
             })?;
             audio.push(ActiveAudioCapture {
-                kind: WasapiCaptureKind::Microphone,
-                session,
+                kind: AudioCaptureKind::Microphone,
+                track,
             });
         }
 
@@ -585,16 +590,20 @@ impl Recorder {
                 crate::errors::InternalError::Capture("system audio device is missing".into())
             })?;
             let output_path = work_dir.join(format!("sys_{:03}.wav", index));
-            let options = WasapiCaptureOptions::system_loopback(Some(device_id), output_path)
-                .with_timeline_origin(timeline_origin);
-            let session = WasapiCaptureSession::start(options).map_err(|error| {
+            let track = super::audio::start_audio_track(
+                AudioCaptureKind::SystemLoopback,
+                Some(device_id),
+                output_path,
+                timeline_origin,
+            )
+            .map_err(|error| {
                 crate::errors::InternalError::Capture(format!(
                     "start system audio capture: {error}"
                 ))
             })?;
             audio.push(ActiveAudioCapture {
-                kind: WasapiCaptureKind::SystemLoopback,
-                session,
+                kind: AudioCaptureKind::SystemLoopback,
+                track,
             });
         }
 
@@ -673,18 +682,18 @@ impl Recorder {
         let screen_path = screen.output_path().to_path_buf();
         let mut tracks = Vec::new();
         for mut audio_capture in audio_captures.drain(..) {
-            let path = audio_capture.session.output_path().to_path_buf();
-            if let Err(error) = audio_capture.session.stop() {
+            let path = audio_capture.track.output_path().to_path_buf();
+            if let Err(error) = audio_capture.track.stop() {
                 tracing::warn!(
                     error = ?error,
                     path = %path.display(),
-                    "WASAPI track stopped with an error"
+                    "audio track stopped with an error"
                 );
                 continue;
             }
 
             let bytes_written = match audio_capture
-                .session
+                .track
                 .align_to_timeline(timeline.head_trim, timeline.duration)
             {
                 Ok(bytes_written) => bytes_written,
@@ -692,26 +701,26 @@ impl Recorder {
                     tracing::warn!(
                         error = ?error,
                         path = %path.display(),
-                        "failed to align WASAPI track to video"
+                        "failed to align audio track to video"
                     );
                     continue;
                 }
             };
             if bytes_written <= 44 {
-                tracing::warn!(path = %path.display(), "WASAPI track contained no audio frames");
+                tracing::warn!(path = %path.display(), "audio track contained no audio frames");
                 continue;
             }
 
             let title = match audio_capture.kind {
-                WasapiCaptureKind::Microphone => "Microphone",
-                WasapiCaptureKind::SystemLoopback => "System Audio",
+                AudioCaptureKind::Microphone => "Microphone",
+                AudioCaptureKind::SystemLoopback => "System Audio",
             };
             tracks.push(media::AudioTrackInput {
                 path,
                 title,
                 kind: match audio_capture.kind {
-                    WasapiCaptureKind::Microphone => media::AudioTrackKind::Microphone,
-                    WasapiCaptureKind::SystemLoopback => media::AudioTrackKind::System,
+                    AudioCaptureKind::Microphone => media::AudioTrackKind::Microphone,
+                    AudioCaptureKind::SystemLoopback => media::AudioTrackKind::System,
                 },
             });
         }
@@ -893,8 +902,8 @@ impl Recorder {
 
     fn stop_audio_captures(&self, audio_captures: &mut Vec<ActiveAudioCapture>) {
         for mut audio_capture in audio_captures.drain(..) {
-            if let Err(error) = audio_capture.session.stop() {
-                tracing::warn!(error = ?error, "failed to stop WASAPI track during cleanup");
+            if let Err(error) = audio_capture.track.stop() {
+                tracing::warn!(error = ?error, "failed to stop audio track during cleanup");
             }
         }
     }
@@ -915,7 +924,7 @@ impl Recorder {
         let mut webcam_capture = session.webcam_capture.take();
         let webcam_quit = webcam_capture.as_mut().map(|w| w.request_stop());
         for audio in &session.audio_captures {
-            audio.session.request_stop();
+            audio.track.request_stop();
         }
 
         let mut screen = screen_capture.ok_or_else(|| {
@@ -1176,7 +1185,7 @@ impl Recorder {
         let mut webcam_capture = session.webcam_capture.take();
         let webcam_quit = webcam_capture.as_mut().map(|w| w.request_stop());
         for audio in &session.audio_captures {
-            audio.session.request_stop();
+            audio.track.request_stop();
         }
 
         let mut timeline = SegmentTimeline {

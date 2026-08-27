@@ -77,6 +77,18 @@ impl ErrorCategory {
 pub enum InternalError {
     #[error("capture failed: {0}")]
     Capture(String),
+    #[error("unsupported capability: {0}")]
+    Unsupported(String),
+    #[error("device unavailable: {0}")]
+    DeviceUnavailable(String),
+    #[error("invalid capture source: {0}")]
+    InvalidSource(String),
+    #[error("driver unavailable: {0}")]
+    DriverUnavailable(String),
+    #[error("encoder unavailable: {0}")]
+    EncoderUnavailable(String),
+    #[error("track startup failed: {0}")]
+    TrackStartFailed(String),
     #[error("media processing failed: {0}")]
     Media(String),
     #[error("storage operation failed: {0}")]
@@ -96,6 +108,24 @@ impl From<InternalError> for AppError {
         match err {
             InternalError::Capture(msg) => {
                 AppError::new(ErrorCategory::Capture, "capture_failed", msg)
+            }
+            InternalError::Unsupported(msg) => {
+                AppError::new(ErrorCategory::Capture, "unsupported_capability", msg)
+            }
+            InternalError::DeviceUnavailable(msg) => {
+                AppError::new(ErrorCategory::Capture, "device_unavailable", msg)
+            }
+            InternalError::InvalidSource(msg) => {
+                AppError::new(ErrorCategory::Capture, "invalid_source", msg)
+            }
+            InternalError::DriverUnavailable(msg) => {
+                AppError::new(ErrorCategory::Capture, "driver_unavailable", msg)
+            }
+            InternalError::EncoderUnavailable(msg) => {
+                AppError::new(ErrorCategory::Media, "encoder_unavailable", msg)
+            }
+            InternalError::TrackStartFailed(msg) => {
+                AppError::new(ErrorCategory::Capture, "track_start_failed", msg)
             }
             InternalError::Media(msg) => AppError::new(ErrorCategory::Media, "media_failed", msg),
             InternalError::Storage(msg) => {

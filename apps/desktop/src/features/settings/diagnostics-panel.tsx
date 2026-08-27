@@ -19,6 +19,22 @@ import { getSetting, setSetting } from "../../lib/settings"
 
 // User-friendly descriptions for common encoders
 const ENCODER_INFO_MAP: Record<string, { desc: string; iconLabel: string }> = {
+  h264_videotoolbox: {
+    desc: "Apple VideoToolbox hardware encoder. Delivers optimal performance on Apple Silicon and Intel Macs.",
+    iconLabel: "Apple GPU",
+  },
+  hevc_videotoolbox: {
+    desc: "Apple VideoToolbox HEVC hardware encoder for high-efficiency capture on macOS.",
+    iconLabel: "Apple HEVC",
+  },
+  h264_vaapi: {
+    desc: "Linux VAAPI hardware acceleration. Low CPU impact capture on Intel and AMD graphics.",
+    iconLabel: "Linux VAAPI",
+  },
+  hevc_vaapi: {
+    desc: "Linux VAAPI HEVC hardware acceleration for high efficiency on modern Linux GPUs.",
+    iconLabel: "Linux VAAPI",
+  },
   h264_nvenc: {
     desc: "NVIDIA hardware encoder. Delivers high performance with minimal CPU usage.",
     iconLabel: "NVIDIA GPU",

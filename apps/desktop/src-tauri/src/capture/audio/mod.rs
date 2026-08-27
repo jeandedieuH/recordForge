@@ -2,12 +2,17 @@
 //!
 //! Provides platform-native audio capture engines:
 //! - Windows: Native WASAPI capture (microphone & loopback)
-//! - macOS: Native CoreAudio capture & device enumeration
+//! - macOS: Native CoreAudio capture & ScreenCaptureKit audio streams
+//! - Linux: Native PipeWire / PulseAudio monitor streams & ALSA fallback
 //! - Shared: WAV header, repair, duration alignment, and sample conversions
 
 pub mod coreaudio;
+pub mod linux;
 pub mod wasapi;
 pub mod wav;
+
+use std::path::PathBuf;
+use std::time::Instant;
 
 pub use wav::{
     align_wav_to_duration, finalize_wav, frames_for_duration, loopback_packet_start_frames,
@@ -27,8 +32,14 @@ pub use coreaudio::{
     CoreAudioCaptureSession,
 };
 
+// Re-export Linux symbols
+pub use linux::{enumerate_linux_audio_devices, LinuxAudioCaptureSession, LinuxAudioOptions};
+
+use crate::capture::traits::AudioTrack;
+use crate::errors::Result;
+
 /// Cross-platform audio device enumeration.
-pub fn enumerate_audio_devices() -> crate::errors::Result<Vec<AudioDeviceInfo>> {
+pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
     #[cfg(windows)]
     {
         let wasapi_devices = wasapi::enumerate_wasapi_devices()?;
@@ -48,8 +59,89 @@ pub fn enumerate_audio_devices() -> crate::errors::Result<Vec<AudioDeviceInfo>> 
         coreaudio::enumerate_coreaudio_devices()
     }
 
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::enumerate_linux_audio_devices()
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         coreaudio::enumerate_coreaudio_devices()
+    }
+}
+
+/// Start an audio capture track (microphone or system audio loopback) on the active host platform.
+pub fn start_audio_track(
+    kind: AudioCaptureKind,
+    device_id: Option<String>,
+    output_path: PathBuf,
+    timeline_origin: Instant,
+) -> Result<Box<dyn AudioTrack>> {
+    #[cfg(windows)]
+    {
+        let wasapi_kind = match kind {
+            AudioCaptureKind::Microphone => wasapi::WasapiCaptureKind::Microphone,
+            AudioCaptureKind::SystemLoopback => wasapi::WasapiCaptureKind::SystemLoopback,
+        };
+        let options = match wasapi_kind {
+            wasapi::WasapiCaptureKind::Microphone => {
+                wasapi::WasapiCaptureOptions::microphone(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+            wasapi::WasapiCaptureKind::SystemLoopback => {
+                wasapi::WasapiCaptureOptions::system_loopback(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+        };
+        let session = wasapi::WasapiCaptureSession::start(options)?;
+        Ok(Box::new(session))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let options = match kind {
+            AudioCaptureKind::Microphone => {
+                coreaudio::AudioCaptureOptions::microphone(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+            AudioCaptureKind::SystemLoopback => {
+                coreaudio::AudioCaptureOptions::system_loopback(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+        };
+        let session = coreaudio::CoreAudioCaptureSession::start(options)?;
+        Ok(Box::new(session))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let options = match kind {
+            AudioCaptureKind::Microphone => {
+                linux::LinuxAudioOptions::microphone(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+            AudioCaptureKind::SystemLoopback => {
+                linux::LinuxAudioOptions::system_monitor(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+        };
+        let session = linux::LinuxAudioCaptureSession::start(options)?;
+        Ok(Box::new(session))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let options = match kind {
+            AudioCaptureKind::Microphone => {
+                coreaudio::AudioCaptureOptions::microphone(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+            AudioCaptureKind::SystemLoopback => {
+                coreaudio::AudioCaptureOptions::system_loopback(device_id, output_path)
+                    .with_timeline_origin(timeline_origin)
+            }
+        };
+        let session = coreaudio::CoreAudioCaptureSession::start(options)?;
+        Ok(Box::new(session))
     }
 }

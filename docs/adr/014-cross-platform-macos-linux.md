@@ -1,9 +1,9 @@
 # ADR 014: Cross-Platform macOS and Linux Expansion
 
-> **Status:** Accepted — Implemented  
-> **Date:** 2026-08-26  
-> **Supersedes:** `docs/adr/002-windows-first.md` (which deferred non-Windows platforms)  
-> **Scope:** Multi-platform desktop support for Windows, macOS, and Linux  
+> **Status:** Accepted — Partially implemented
+> **Date:** 2026-08-26
+> **Supersedes:** `docs/adr/002-windows-first.md` (which deferred non-Windows platforms)
+> **Scope:** Multi-platform desktop support for Windows, macOS, and Linux
 > **Related:** `apps/desktop/src-tauri/src/capture/`, `apps/desktop/src-tauri/src/storage/vault.rs`, `tooling/ffmpeg/setup.mjs`, `.github/workflows/`
 
 ## Context

@@ -142,6 +142,12 @@ pub struct RecordingManifest {
     pub updated_at: String,
     pub source: CaptureSource,
     pub profile_name: String,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub selected_encoder: Option<String>,
     pub work_dir: String,
     pub output_path: Option<String>,
     #[serde(default)]
@@ -170,6 +176,16 @@ impl RecordingManifest {
         profile_name: impl Into<String>,
     ) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
+        let host_platform = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else {
+            "unknown"
+        };
+
         Self {
             version: 1,
             session_id: session_id.into(),
@@ -178,6 +194,9 @@ impl RecordingManifest {
             updated_at: now,
             source,
             profile_name: profile_name.into(),
+            platform: Some(host_platform.into()),
+            backend: None,
+            selected_encoder: None,
             work_dir: work_dir.into(),
             output_path: None,
             thumbnail_path: None,

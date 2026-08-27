@@ -33,6 +33,8 @@ const PROBED_ENCODERS: &[(&str, &str, &str, Option<&str>)] = &[
     ("h264_nvenc", "NVIDIA NVENC", "h264", Some("nvidia")),
     ("h264_amf", "AMD AMF", "h264", Some("amd")),
     ("h264_qsv", "Intel Quick Sync", "h264", Some("intel")),
+    ("h264_vaapi", "Linux VAAPI (H.264)", "h264", Some("vaapi")),
+    ("hevc_vaapi", "Linux VAAPI (HEVC)", "hevc", Some("vaapi")),
     ("h264_mf", "Media Foundation", "h264", Some("microsoft")),
     ("libx264", "x264", "h264", None),
     ("libx265", "x265", "hevc", None),
@@ -133,8 +135,39 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
 
     // Generate a fast synthetic color pattern and encode with the target encoder.
     let mut command = crate::process::create_command(ffmpeg_path);
-    command
-        .args([
+    if encoder.contains("vaapi") {
+        #[cfg(target_os = "linux")]
+        {
+            if !std::path::Path::new("/dev/dri/renderD128").exists() {
+                return Err(crate::errors::InternalError::Media(
+                    "VAAPI render device /dev/dri/renderD128 not found".into(),
+                )
+                .into());
+            }
+            command.args([
+                "-vaapi_device",
+                "/dev/dri/renderD128",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10:duration=0.1",
+                "-vf",
+                "format=nv12,hwupload",
+                "-c:v",
+                encoder,
+                "-an",
+                "-y",
+            ]);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(crate::errors::InternalError::Media(
+                "VAAPI is only supported on Linux".into(),
+            )
+            .into());
+        }
+    } else {
+        command.args([
             "-f",
             "lavfi",
             "-i",
@@ -145,8 +178,9 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
             "yuv420p",
             "-an",
             "-y",
-        ])
-        .arg(&output);
+        ]);
+    }
+    command.arg(&output);
 
     let result = command.output().map_err(|e| {
         crate::errors::InternalError::Media(format!(
@@ -181,9 +215,9 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
             info.supports_cbr = true;
         }
         "h264_nvenc" | "h264_amf" | "h264_qsv" | "h264_mf" | "h264_videotoolbox"
-        | "hevc_videotoolbox" => {
+        | "hevc_videotoolbox" | "h264_vaapi" | "hevc_vaapi" => {
             info.supports_cbr = true;
-            // Some hardware encoders expose a QP mode instead of CRF.
+            // Hardware encoders expose a QP / CQP mode instead of pure CRF.
             info.supports_cqp = true;
         }
         _ => {}

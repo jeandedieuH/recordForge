@@ -270,6 +270,28 @@ impl CoreAudioCaptureSession {
     }
 }
 
+impl super::super::traits::AudioTrack for CoreAudioCaptureSession {
+    fn started_at(&self) -> Instant {
+        self.started_at()
+    }
+
+    fn request_stop(&self) {
+        self.request_stop();
+    }
+
+    fn stop(&mut self) -> Result<u64> {
+        self.stop()
+    }
+
+    fn align_to_timeline(&self, head_trim: Duration, duration: Duration) -> Result<u64> {
+        self.align_to_timeline(head_trim, duration)
+    }
+
+    fn output_path(&self) -> &Path {
+        self.output_path()
+    }
+}
+
 impl Drop for CoreAudioCaptureSession {
     fn drop(&mut self) {
         if self.worker.is_some() {
