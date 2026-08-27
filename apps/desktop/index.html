@@ -9,10 +9,19 @@
       ;(function () {
         var params = new URLSearchParams(window.location.search)
         var kind = window.__RECORD_FORGE_WINDOW_KIND
-        if (params.get("floating") === "1" || kind === "floating") document.documentElement.dataset.floating = "true"
-        if (params.get("boundary") === "1" || kind === "boundary") document.documentElement.dataset.boundary = "true"
-        if (params.get("countdown") === "1" || kind === "countdown") document.documentElement.dataset.countdown = "true"
-        if (params.get("region") === "1" || params.get("region_picker") === "1" || kind === "region-picker" || kind === "region") document.documentElement.dataset.regionPicker = "true"
+        if (params.get("floating") === "1" || kind === "floating")
+          document.documentElement.dataset.floating = "true"
+        if (params.get("boundary") === "1" || kind === "boundary")
+          document.documentElement.dataset.boundary = "true"
+        if (params.get("countdown") === "1" || kind === "countdown")
+          document.documentElement.dataset.countdown = "true"
+        if (
+          params.get("region") === "1" ||
+          params.get("region_picker") === "1" ||
+          kind === "region-picker" ||
+          kind === "region"
+        )
+          document.documentElement.dataset.regionPicker = "true"
 
         try {
           var theme = localStorage.getItem("recordforge:theme") || "dark"
