@@ -10,8 +10,8 @@ import {
 import { invokeValidated } from "./ipc"
 import { isTauri } from "./settings"
 
-const UPDATE_CHECK_TIMEOUT_MS = 15_000
-const UPDATE_DOWNLOAD_TIMEOUT_MS = 300_000
+const UPDATE_CHECK_TIMEOUT_MS = 30_000
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 1_800_000
 
 let pendingUpdate: Update | null = null
 let isDownloaded = false

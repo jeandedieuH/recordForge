@@ -40,6 +40,27 @@ function formatZodIssues(
   return messages.join("; ")
 }
 
+function normalizeNetworkErrorMessage(message: string): string {
+  const lower = message.toLowerCase()
+  if (
+    lower.includes("error decoding response body") ||
+    lower.includes("connection closed before message completed") ||
+    lower.includes("unexpected eof") ||
+    lower.includes("stream error") ||
+    lower.includes("connection reset by peer")
+  ) {
+    return "The update download was interrupted by a network timeout or connection reset. Please check your internet connection and try again."
+  }
+  if (
+    lower.includes("operation timed out") ||
+    lower.includes("request timed out") ||
+    lower.includes("connection timed out")
+  ) {
+    return "The network request timed out. Please check your internet connection and try again."
+  }
+  return message
+}
+
 export function toErrorMessage(error: unknown): string {
   if (error == null) {
     return "Unknown error"
@@ -55,7 +76,7 @@ export function toErrorMessage(error: unknown): string {
     const issues = (error as { issues: Array<{ path?: Array<string | number>; message?: string }> })
       .issues
     if (issues.length > 0) {
-      return formatZodIssues(issues)
+      return normalizeNetworkErrorMessage(formatZodIssues(issues))
     }
   }
 
@@ -67,13 +88,13 @@ export function toErrorMessage(error: unknown): string {
         try {
           const parsed = JSON.parse(maybe.message)
           if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.message) {
-            return formatZodIssues(parsed)
+            return normalizeNetworkErrorMessage(formatZodIssues(parsed))
           }
         } catch {
           // ignore
         }
       }
-      return maybe.message
+      return normalizeNetworkErrorMessage(maybe.message)
     }
   }
 
@@ -81,19 +102,19 @@ export function toErrorMessage(error: unknown): string {
   if (typeof error === "string") {
     if (error.startsWith("{")) {
       const parsed = safeParseAppError(error)
-      if (parsed) return parsed
+      if (parsed) return normalizeNetworkErrorMessage(parsed)
     }
     if (error.startsWith("[{") || error.startsWith("[ {")) {
       try {
         const parsed = JSON.parse(error)
         if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.message) {
-          return formatZodIssues(parsed)
+          return normalizeNetworkErrorMessage(formatZodIssues(parsed))
         }
       } catch {
         // ignore
       }
     }
-    return error
+    return normalizeNetworkErrorMessage(error)
   }
 
   // Standard Error instances and other throwables.
@@ -102,14 +123,14 @@ export function toErrorMessage(error: unknown): string {
       try {
         const parsed = JSON.parse(error.message)
         if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.message) {
-          return formatZodIssues(parsed)
+          return normalizeNetworkErrorMessage(formatZodIssues(parsed))
         }
       } catch {
         // ignore
       }
     }
-    return error.message
+    return normalizeNetworkErrorMessage(error.message)
   }
 
-  return String(error)
+  return normalizeNetworkErrorMessage(String(error))
 }

@@ -172,6 +172,7 @@ export function AppShell() {
           title: `RecordForge ${update.version} is available`,
           description: update.body ?? "A signed update is ready to install.",
           variant: "info",
+          duration: 20_000,
           action: {
             label: "View update",
             onClick: () => setActiveView("about"),
@@ -303,7 +304,7 @@ export function AppShell() {
     }
 
     closeEditor()
-    setActiveView("library")
+    setActiveView((current) => (current === "editor" || current === "export" ? "library" : current))
   }
 
   async function handleStartRecording() {
@@ -486,6 +487,7 @@ export function AppShell() {
                 <SettingsView
                   onNavigateToAbout={() => setActiveView("about")}
                   onReplayOnboarding={() => setIsOnboardingOpen(true)}
+                  onPrepareForUpdate={prepareForUpdate}
                 />
               </ViewErrorBoundary>
             ) : null}

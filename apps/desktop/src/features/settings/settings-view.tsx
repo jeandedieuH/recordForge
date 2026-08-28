@@ -45,9 +45,14 @@ export type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "st
 export interface SettingsViewProps {
   onNavigateToAbout?: () => void
   onReplayOnboarding?: () => void
+  onPrepareForUpdate?: () => Promise<void>
 }
 
-export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: SettingsViewProps) {
+export function SettingsView({
+  onNavigateToAbout,
+  onReplayOnboarding,
+  onPrepareForUpdate,
+}: SettingsViewProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general")
   const { theme, setTheme, micaEnabled, setMicaEnabled, micaActive } = useThemeStore()
   const {
@@ -597,7 +602,11 @@ export function SettingsView({ onNavigateToAbout, onReplayOnboarding }: Settings
 
       {/* Tab 5: About & Studio */}
       {activeTab === "about" ? (
-        <AboutView onNavigateToDiagnostics={() => setActiveTab("diagnostics")} />
+        <AboutView
+          onNavigateToDiagnostics={() => setActiveTab("diagnostics")}
+          onPrepareForUpdate={onPrepareForUpdate}
+          onReplayOnboarding={onReplayOnboarding}
+        />
       ) : null}
     </div>
   )
