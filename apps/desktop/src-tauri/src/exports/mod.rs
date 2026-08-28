@@ -1725,13 +1725,18 @@ fn render_timeline_composition(
             .arg("-");
     }
     if is_gif {
-        let (gif_fps, dither_opt) = match settings.preset.as_str() {
-            "gif-fast" => (15, "bayer:bayer_scale=4"),
-            "gif-high-quality" => (30, "floyd_steinberg"),
-            _ => (20, "bayer:bayer_scale=3"),
+        let (gif_fps, dither_opt, max_width) = match settings.preset.as_str() {
+            "gif-fast" => (15, "bayer:bayer_scale=4", Some(640)),
+            "gif-high-quality" => (30, "floyd_steinberg", None),
+            _ => (20, "bayer:bayer_scale=3", Some(960)),
+        };
+        let scale_filter = if let Some(max_w) = max_width {
+            format!("scale='trunc(min(iw,{max_w})/2)*2':-2:flags=lanczos,")
+        } else {
+            String::new()
         };
         filters.push(format!(
-            "[{current_label}]fps={gif_fps},split[gif_v1][gif_v2];[gif_v1]palettegen=stats_mode=diff:reserve_transparent=0[gif_pal];[gif_v2][gif_pal]paletteuse=dither={dither_opt}[gif_out]"
+            "[{current_label}]fps={gif_fps},{scale_filter}split[gif_v1][gif_v2];[gif_v1]palettegen=stats_mode=diff:reserve_transparent=0[gif_pal];[gif_v2][gif_pal]paletteuse=dither={dither_opt}[gif_out]"
         ));
         current_label = "gif_out".to_string();
     }
@@ -2576,7 +2581,23 @@ fn validate_export_output(
         .canvas
         .as_ref()
         .ok_or_else(|| InternalError::Media("render canvas is required".into()))?;
-    if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32) {
+    let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
+    if is_gif {
+        let max_width = match settings.preset.as_str() {
+            "gif-fast" => Some(640),
+            "gif-high-quality" => None,
+            _ => Some(960),
+        };
+        let expected_w = max_width
+            .map(|m| (canvas.width.min(m) / 2) * 2)
+            .unwrap_or(canvas.width);
+        if video.width != Some(expected_w as i32)
+            || video.height.is_none()
+            || video.height.unwrap_or(0) <= 0
+        {
+            return Err(InternalError::Media("export dimensions failed validation".into()).into());
+        }
+    } else if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32) {
         return Err(InternalError::Media("export dimensions failed validation".into()).into());
     }
     let expected_video_codec = if settings.container == "gif" || settings.codec == "gif" {
@@ -6333,6 +6354,115 @@ mod tests {
 
         let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
         assert!(validation.is_ok(), "validate gif failed: {:?}", validation.err());
+    }
+
+    #[test]
+    fn test_render_timeline_composition_gif_downscale_validation() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-gif-downscale-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let out_path = temp_dir.join("output_downscaled.gif");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=1280x720:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("screen-1".into(), screen_path);
+
+        let plan = RenderPlan {
+            project_id: "test-gif-downscale".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "screen-1".into(),
+                stream_index: Some(0),
+                volume: None,
+                speed: 1.0,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(1280),
+                source_height: Some(720),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 1280,
+                height: 720,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "gif-fast".into(),
+            codec: "gif".into(),
+            encoder: "auto".into(),
+            container: "gif".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-gif-downscale",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "render gif downscaled failed: {:?}", res.err());
+        assert!(out_path.is_file(), "exported downscaled gif should exist");
+
+        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        assert!(validation.is_ok(), "validate downscaled gif failed: {:?}", validation.err());
     }
 
     #[test]

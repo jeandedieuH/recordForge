@@ -2,7 +2,7 @@
   "name": "overlay-engine",
   "type": "module",
   "collaborators": [
-    "recordForge"
+    "Prestige Tech"
   ],
   "description": "Canonical overlay evaluation engine for preview and export",
   "version": "1.2.0",

@@ -138,20 +138,20 @@ const GIF_PRESETS: Array<{
   {
     id: "gif-balanced",
     label: "Balanced GIF",
-    description: "Smooth motion with optimized 256-color palette",
-    details: "GIF · 20 fps · Bayer dither",
+    description: "Scaled to 540p at 20 fps for balanced size and crisp UI text",
+    details: "GIF · 960px max · 20 fps · Bayer dither",
+  },
+  {
+    id: "gif-fast",
+    label: "Fast GIF (Web & Chat)",
+    description: "Compact 360p at 15 fps optimized for Slack, Discord, and PRs",
+    details: "GIF · 640px max · 15 fps · Lightweight",
   },
   {
     id: "gif-high-quality",
     label: "High quality GIF",
-    description: "Highest fidelity motion and differential palette",
-    details: "GIF · 30 fps · Floyd-Steinberg",
-  },
-  {
-    id: "gif-fast",
-    label: "Fast GIF",
-    description: "Lower framerate for smaller file size in chat",
-    details: "GIF · 15 fps · lightweight",
+    description: "Full resolution at 30 fps with Floyd-Steinberg dither (large file)",
+    details: "GIF · Original px · 30 fps · Max fidelity",
   },
   {
     id: "selected-range",
@@ -539,9 +539,14 @@ export function ExportView({
             {videoAccordionOpen ? (
               <div className="flex flex-col gap-5 border-t border-border p-5">
                 {isGif ? (
-                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
-                    GIF exports render video with an optimized 256-color palette, smooth dithering,
-                    and infinite looping. Cursor movements, highlights, and canvas overlays are burned in directly.
+                  <div className="flex flex-col gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
+                    <p>
+                      GIF exports render video with an optimized 256-color palette, smooth dithering,
+                      and infinite looping. Cursor movements, highlights, and canvas overlays are burned in directly.
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      💡 <strong>Tip for smaller files:</strong> Unlike MP4s with temporal compression, GIFs store every frame as an uncompressed bitmap. Use <strong>Balanced GIF</strong> (540p) or <strong>Fast GIF</strong> (360p), or select a 3–8s <strong>Selected range</strong> for compact uploads.
+                    </p>
                   </div>
                 ) : null}
 
