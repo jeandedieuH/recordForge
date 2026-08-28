@@ -257,15 +257,18 @@ impl JobManager {
             )
             .into());
         }
+        let is_gif = request.settings.container == "gif" || request.settings.preset.starts_with("gif-");
+        let expected_ext = if is_gif { "gif" } else { "mp4" };
         let destination_path = Path::new(&request.output_path);
         if !destination_path
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected_ext))
         {
-            return Err(InternalError::Media(
-                "export destination must use the MP4 extension".into(),
-            )
+            return Err(InternalError::Media(format!(
+                "export destination must use the {} extension",
+                expected_ext.to_uppercase()
+            ))
             .into());
         }
         let destination = self
@@ -356,15 +359,18 @@ impl JobManager {
             })?;
         request.plan.validate()?;
         crate::exports::validate_export_settings(&request.settings, &request.plan)?;
+        let is_gif = request.settings.container == "gif" || request.settings.preset.starts_with("gif-");
+        let expected_ext = if is_gif { "gif" } else { "mp4" };
         let destination_path = Path::new(&request.output_path);
         if !destination_path
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected_ext))
         {
-            return Err(InternalError::Media(
-                "export destination must use the MP4 extension".into(),
-            )
+            return Err(InternalError::Media(format!(
+                "export destination must use the {} extension",
+                expected_ext.to_uppercase()
+            ))
             .into());
         }
         let destination = self
@@ -517,11 +523,13 @@ impl JobManager {
                     self.fail_unresumable_job(&job.id, "stored export settings are invalid")?;
                     continue;
                 }
+                let is_gif = request.settings.container == "gif" || request.settings.preset.starts_with("gif-");
+                let expected_ext = if is_gif { "gif" } else { "mp4" };
                 let destination = Path::new(&request.output_path);
                 if !destination
                     .extension()
                     .and_then(|value| value.to_str())
-                    .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+                    .is_some_and(|value| value.eq_ignore_ascii_case(expected_ext))
                     || self
                         .path_policy
                         .validate_export_destination(destination)

@@ -88,7 +88,7 @@ interface TimelineStore {
   isListening: boolean
   unlisten: (() => void) | null
   // Pending autosave timer; cleared when a save runs or the editor closes.
-  autosaveTimeout: number | null
+  autosaveTimeout: ReturnType<typeof setTimeout> | null
   // Phase 1: revision-aware save coordinator. projectRevision is a logical
   // counter that increments on every in-memory project mutation. savingRevision
   // is the revision currently being written. pendingSaveRevision is the latest
@@ -125,8 +125,9 @@ interface TimelineStore {
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
   setChapterMode: (mode: RenderChapterMode) => void
+  setExportContainer: (container: "mp4" | "gif") => void
   setExportPreset: (preset: ExportPreset) => void
-  setExportCodec: (codec: "h264" | "hevc") => void
+  setExportCodec: (codec: "h264" | "hevc" | "gif") => void
   setExportEncoder: (encoder: ExportEncoderPreference) => void
   setExportRange: (range: ExportRange | undefined) => void
   cancelExport: () => Promise<void>
@@ -656,7 +657,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   scheduleAutosave: () => {
     const { autosaveTimeout, savePromise, projectRevision } = get()
     if (autosaveTimeout) {
-      window.clearTimeout(autosaveTimeout)
+      clearTimeout(autosaveTimeout)
     }
 
     // Phase 1: if a save is already in flight, do not start a second timeout.
@@ -668,7 +669,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
     useEditorStore.getState().setSaveStatus("idle")
 
-    const timeout = window.setTimeout(() => {
+    const timeout = setTimeout(() => {
       void get().save()
     }, AUTOSAVE_DELAY_MS)
 
@@ -695,7 +696,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     }
 
     if (state.autosaveTimeout) {
-      window.clearTimeout(state.autosaveTimeout)
+      clearTimeout(state.autosaveTimeout)
     }
 
     // Phase 1: create and store the save promise before any awaited work. This
@@ -941,12 +942,71 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
+  setExportContainer: (container) => {
+    const project = get().project
+    if (!project || project.exportSettings.container === container) return
+    const isGif = container === "gif"
+    const preset: ExportPreset = isGif
+      ? "gif-balanced"
+      : project.exportSettings.preset.startsWith("gif-")
+        ? "balanced"
+        : project.exportSettings.preset
+    const codec: "h264" | "hevc" | "gif" = isGif
+      ? "gif"
+      : project.exportSettings.codec === "gif"
+        ? "h264"
+        : project.exportSettings.codec
+    const chapterMode =
+      isGif &&
+      (project.exportSettings.chapterMode === "embed" ||
+        project.exportSettings.chapterMode === "both")
+        ? "none"
+        : project.exportSettings.chapterMode
+    const nextProject = {
+      ...project,
+      exportSettings: {
+        ...project.exportSettings,
+        container,
+        preset,
+        codec,
+        chapterMode,
+      },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
   setExportPreset: (preset) => {
     const project = get().project
     if (!project || project.exportSettings.preset === preset) return
+    const isGif =
+      preset.startsWith("gif-") ||
+      (project.exportSettings.container === "gif" && preset === "selected-range")
+    const container: "mp4" | "gif" = isGif
+      ? "gif"
+      : project.exportSettings.container === "gif"
+        ? "mp4"
+        : project.exportSettings.container
+    const codec: "h264" | "hevc" | "gif" = isGif
+      ? "gif"
+      : project.exportSettings.codec === "gif"
+        ? "h264"
+        : project.exportSettings.codec
+    const chapterMode =
+      isGif &&
+      (project.exportSettings.chapterMode === "embed" ||
+        project.exportSettings.chapterMode === "both")
+        ? "none"
+        : project.exportSettings.chapterMode
     const nextProject = {
       ...project,
-      exportSettings: { ...project.exportSettings, preset },
+      exportSettings: {
+        ...project.exportSettings,
+        preset,
+        container,
+        codec,
+        chapterMode,
+      },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)
@@ -1061,12 +1121,28 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const currentProject = get().project
     if (!currentProject) return
 
+    const isGif =
+      currentProject.exportSettings.container === "gif" ||
+      currentProject.exportSettings.preset.startsWith("gif-")
+    const sanitizedChapterMode = isGif
+      ? currentProject.exportSettings.chapterMode === "both" ||
+        currentProject.exportSettings.chapterMode === "sidecar"
+        ? "sidecar"
+        : "none"
+      : currentProject.exportSettings.chapterMode
+    const effectiveExportSettings = {
+      ...currentProject.exportSettings,
+      container: isGif ? ("gif" as const) : currentProject.exportSettings.container,
+      codec: isGif ? ("gif" as const) : currentProject.exportSettings.codec,
+      chapterMode: sanitizedChapterMode,
+    }
+
     const plan = buildRenderPlan({
       state: engine.history.present,
       projectId: currentProject.id,
-      settings: currentProject.exportSettings,
-      captionMode: currentProject.exportSettings.captionMode,
-      chapterMode: currentProject.exportSettings.chapterMode,
+      settings: effectiveExportSettings,
+      captionMode: effectiveExportSettings.captionMode,
+      chapterMode: effectiveExportSettings.chapterMode,
       assets: currentProject.assets,
       cursorTelemetry: get().cursorTelemetry,
       cursorEngine: get().cursorEngine,
@@ -1080,7 +1156,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         projectId: currentProject.id,
         outputPath,
         plan: plan.value,
-        settings: currentProject.exportSettings,
+        settings: effectiveExportSettings,
       })
       set({ activeExportJob: job })
     } catch (err) {

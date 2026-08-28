@@ -83,6 +83,7 @@ export function AppShell() {
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
   const setChapterMode = useTimelineStore((state) => state.setChapterMode)
   const timelineMarkers = useTimelineStore((state) => state.engine?.history.present.markers)
+  const setExportContainer = useTimelineStore((state) => state.setExportContainer)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
   const setExportCodec = useTimelineStore((state) => state.setExportCodec)
   const setExportEncoder = useTimelineStore((state) => state.setExportEncoder)
@@ -339,21 +340,25 @@ export function AppShell() {
   async function handleStartExport() {
     if (!timelineRecording) return
     try {
-      let defaultPath = `${timelineRecording.name}-edited.mp4`
+      const isGif = exportSettings?.container === "gif" || exportSettings?.preset?.startsWith("gif-")
+      const extension = isGif ? "gif" : "mp4"
+      let defaultPath = `${timelineRecording.name}-edited.${extension}`
       if (isTauri()) {
         const defaultFolder = await getSetting("defaultOutputFolder").catch(() => null)
         if (defaultFolder) {
           try {
-            defaultPath = await join(defaultFolder, `${timelineRecording.name}-edited.mp4`)
+            defaultPath = await join(defaultFolder, `${timelineRecording.name}-edited.${extension}`)
           } catch {
-            defaultPath = `${defaultFolder}\\${timelineRecording.name}-edited.mp4`
+            defaultPath = `${defaultFolder}\\${timelineRecording.name}-edited.${extension}`
           }
         }
       }
       const outputPath = await save({
-        title: "Export edited recording",
+        title: isGif ? "Export animated GIF" : "Export edited recording",
         defaultPath,
-        filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+        filters: isGif
+          ? [{ name: "Animated GIF", extensions: ["gif"] }]
+          : [{ name: "MP4 video", extensions: ["mp4"] }],
       })
       if (!outputPath) return
       // Phase 1: the export path flushes and freezes a durable project revision
@@ -462,6 +467,7 @@ export function AppShell() {
                   chapterMode={chapterMode}
                   onChapterModeChange={setChapterMode}
                   markers={timelineMarkers}
+                  onContainerChange={setExportContainer}
                   onPresetChange={setExportPreset}
                   onCodecChange={setExportCodec}
                   onEncoderChange={setExportEncoder}

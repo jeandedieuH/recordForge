@@ -50,8 +50,9 @@ interface ExportViewProps {
   chapterMode?: RenderChapterMode
   onChapterModeChange?: (mode: RenderChapterMode) => void
   markers?: TimelineMarker[]
+  onContainerChange?: (container: "mp4" | "gif") => void
   onPresetChange?: (preset: ExportPreset) => void
-  onCodecChange?: (codec: "h264" | "hevc") => void
+  onCodecChange?: (codec: "h264" | "hevc" | "gif") => void
   onEncoderChange?: (encoder: ExportEncoderPreference) => void
   /** Display name of the detected hardware encoder, or null when none was found. */
   hardwareEncoderName?: string | null
@@ -66,7 +67,7 @@ interface ExportViewProps {
   onStartExport?: () => void | Promise<void>
 }
 
-const PRESETS: Array<{
+const MP4_PRESETS: Array<{
   id: ExportPreset
   label: string
   description: string
@@ -128,6 +129,38 @@ const PRESETS: Array<{
   },
 ]
 
+const GIF_PRESETS: Array<{
+  id: ExportPreset
+  label: string
+  description: string
+  details: string
+}> = [
+  {
+    id: "gif-balanced",
+    label: "Balanced GIF",
+    description: "Smooth motion with optimized 256-color palette",
+    details: "GIF · 20 fps · Bayer dither",
+  },
+  {
+    id: "gif-high-quality",
+    label: "High quality GIF",
+    description: "Highest fidelity motion and differential palette",
+    details: "GIF · 30 fps · Floyd-Steinberg",
+  },
+  {
+    id: "gif-fast",
+    label: "Fast GIF",
+    description: "Lower framerate for smaller file size in chat",
+    details: "GIF · 15 fps · lightweight",
+  },
+  {
+    id: "selected-range",
+    label: "Selected range",
+    description: "Export chosen range as animated GIF",
+    details: "Non-destructive · animated GIF",
+  },
+]
+
 function isPresetSupported(
   preset: ExportPreset,
   canvas: TimelineCanvas | undefined,
@@ -139,8 +172,14 @@ function isPresetSupported(
   return true
 }
 
-function normalizePreset(preset: ExportPreset | undefined): ExportPreset {
-  return preset === "default-mp4" || !preset ? "balanced" : preset
+function normalizePreset(
+  preset: ExportPreset | undefined,
+  container: "mp4" | "gif" = "mp4",
+): ExportPreset {
+  if (!preset || preset === "default-mp4") {
+    return container === "gif" ? "gif-balanced" : "balanced"
+  }
+  return preset
 }
 
 // Internal pipeline stage slugs surfaced by the backend job; mapped here so
@@ -169,6 +208,7 @@ export function ExportView({
   chapterMode = "embed",
   onChapterModeChange,
   markers = [],
+  onContainerChange,
   onPresetChange,
   onCodecChange,
   onEncoderChange,
@@ -183,8 +223,14 @@ export function ExportView({
   onBack,
   onStartExport,
 }: ExportViewProps) {
+  const container =
+    exportSettings?.container ??
+    (exportSettings?.preset?.startsWith("gif-") ? "gif" : "mp4")
+  const isGif = container === "gif"
+  const presets = isGif ? GIF_PRESETS : MP4_PRESETS
+
   const [selectedPreset, setSelectedPreset] = useState<ExportPreset>(
-    normalizePreset(exportSettings?.preset),
+    normalizePreset(exportSettings?.preset, container),
   )
   const [isStarting, setIsStarting] = useState(false)
   const [videoAccordionOpen, setVideoAccordionOpen] = useState(true)
@@ -211,11 +257,12 @@ export function ExportView({
   }
 
   useEffect(() => {
-    const nextPreset = normalizePreset(exportSettings?.preset)
+    const nextPreset = normalizePreset(exportSettings?.preset, container)
     setSelectedPreset(nextPreset)
     setRangeStart(exportSettings?.range?.startMs ?? 0)
     setRangeEnd(exportSettings?.range?.endMs ?? durationMs)
   }, [
+    container,
     durationMs,
     exportSettings?.preset,
     exportSettings?.range?.endMs,
@@ -235,6 +282,14 @@ export function ExportView({
     setSelectedPreset(preset)
     onPresetChange?.(preset)
     if (preset === "selected-range") onRangeChange?.(selectedRange)
+  }
+
+  function handleFormatChange(nextContainer: "mp4" | "gif") {
+    if (nextContainer === container) return
+    onContainerChange?.(nextContainer)
+    const nextPreset: ExportPreset = nextContainer === "gif" ? "gif-balanced" : "balanced"
+    setSelectedPreset(nextPreset)
+    onPresetChange?.(nextPreset)
   }
 
   function updateRange(startMs: number, endMs: number) {
@@ -274,7 +329,7 @@ export function ExportView({
           <h1 className="mb-1 font-serif text-3xl font-bold tracking-tight text-foreground">
             Export project
           </h1>
-          <p className="mb-8 text-sm text-subtle-foreground">
+          <p className="mb-6 text-sm text-subtle-foreground">
             Render the saved project with the same timeline semantics used by preview.
           </p>
 
@@ -299,7 +354,7 @@ export function ExportView({
             >
               <span className="flex items-center gap-2">
                 <Check className="size-4 text-success" aria-hidden />
-                Export complete. The validated MP4 is ready.
+                Export complete. The validated {isGif ? "GIF" : "MP4"} is ready.
               </span>
               <div className="flex items-center gap-2">
                 <Button
@@ -364,13 +419,46 @@ export function ExportView({
             </div>
           ) : null}
 
+          <div className="mb-6 flex flex-col gap-3">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-subtle-foreground font-label">
+              <Film className="size-4 text-track-screen" aria-hidden />
+              <span>Export format</span>
+            </div>
+            <div className="flex w-full max-w-xs rounded-lg border border-border bg-surface p-1">
+              <button
+                type="button"
+                disabled={isRunning}
+                onClick={() => handleFormatChange("mp4")}
+                className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+                  !isGif
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-subtle-foreground hover:text-foreground"
+                }`}
+              >
+                MP4 Video
+              </button>
+              <button
+                type="button"
+                disabled={isRunning}
+                onClick={() => handleFormatChange("gif")}
+                className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+                  isGif
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-subtle-foreground hover:text-foreground"
+                }`}
+              >
+                Animated GIF
+              </button>
+            </div>
+          </div>
+
           <div className="mb-8 flex flex-col gap-3">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-subtle-foreground font-label">
               <Zap className="size-4 text-track-screen" aria-hidden />
               <span>Render preset</span>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {PRESETS.map((preset) => {
+              {presets.map((preset) => {
                 const supported = isPresetSupported(preset.id, canvas, selectedRange)
                 const selected = selectedPreset === preset.id
                 return (
@@ -388,7 +476,7 @@ export function ExportView({
                   >
                     <div className="flex items-start justify-between gap-2">
                       <span className="font-semibold text-foreground">{preset.label}</span>
-                      {preset.id === "balanced" ? (
+                      {preset.id === "balanced" || preset.id === "gif-balanced" ? (
                         <Badge variant="accent">Recommended</Badge>
                       ) : null}
                     </div>
@@ -440,7 +528,7 @@ export function ExportView({
             >
               <span className="flex items-center gap-2 font-label">
                 <Film className="size-4 text-track-screen" aria-hidden />
-                Video and captions
+                {isGif ? "GIF settings" : "Video and captions"}
               </span>
               {videoAccordionOpen ? (
                 <ChevronUp className="size-4" />
@@ -450,50 +538,64 @@ export function ExportView({
             </button>
             {videoAccordionOpen ? (
               <div className="flex flex-col gap-5 border-t border-border p-5">
-                <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                  Codec
-                  <Select
-                    value={exportSettings?.codec ?? "h264"}
-                    onValueChange={(value) => onCodecChange?.(value as "h264" | "hevc")}
-                    disabled={isRunning}
-                  >
-                    <SelectTrigger
-                      aria-label="Export codec"
-                      className="border-border bg-background text-xs text-foreground"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="h264">H.264 (AVC)</SelectItem>
-                      <SelectItem value="hevc">H.265 (HEVC)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </label>
-                <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                  Encoder
-                  <Select
-                    value={exportSettings?.encoder ?? "auto"}
-                    onValueChange={(value) => onEncoderChange?.(value as ExportEncoderPreference)}
-                    disabled={isRunning}
-                  >
-                    <SelectTrigger
-                      aria-label="Export encoder"
-                      className="border-border bg-background text-xs text-foreground"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="auto">Auto (hardware when available)</SelectItem>
-                      <SelectItem value="software">Software (x264/x265)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {hardwareEncoderName ? (
-                    <span className="flex items-center gap-1.5 text-[11px] text-subtle-foreground">
-                      <Zap className="size-3 text-track-screen" aria-hidden />
-                      {hardwareEncoderName} detected and will be used by Auto
-                    </span>
-                  ) : null}
-                </label>
+                {isGif ? (
+                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
+                    GIF exports render video with an optimized 256-color palette, smooth dithering,
+                    and infinite looping. Cursor movements, highlights, and canvas overlays are burned in directly.
+                  </div>
+                ) : null}
+
+                {!isGif ? (
+                  <>
+                    <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                      Codec
+                      <Select
+                        value={exportSettings?.codec ?? "h264"}
+                        onValueChange={(value) => onCodecChange?.(value as "h264" | "hevc")}
+                        disabled={isRunning}
+                      >
+                        <SelectTrigger
+                          aria-label="Export codec"
+                          className="border-border bg-background text-xs text-foreground"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="h264">H.264 (AVC)</SelectItem>
+                          <SelectItem value="hevc">H.265 (HEVC)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                      Encoder
+                      <Select
+                        value={exportSettings?.encoder ?? "auto"}
+                        onValueChange={(value) =>
+                          onEncoderChange?.(value as ExportEncoderPreference)
+                        }
+                        disabled={isRunning}
+                      >
+                        <SelectTrigger
+                          aria-label="Export encoder"
+                          className="border-border bg-background text-xs text-foreground"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">Auto (hardware when available)</SelectItem>
+                          <SelectItem value="software">Software (x264/x265)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      {hardwareEncoderName ? (
+                        <span className="flex items-center gap-1.5 text-[11px] text-subtle-foreground">
+                          <Zap className="size-3 text-track-screen" aria-hidden />
+                          {hardwareEncoderName} detected and will be used by Auto
+                        </span>
+                      ) : null}
+                    </label>
+                  </>
+                ) : null}
+
                 <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
                   Caption delivery
                   <Select
@@ -509,7 +611,7 @@ export function ExportView({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="burn-in">Burn into video</SelectItem>
-                      <SelectItem value="sidecar">Write SRT sidecar</SelectItem>
+                      {!isGif ? <SelectItem value="sidecar">Write SRT sidecar</SelectItem> : null}
                       <SelectItem value="none">Do not export captions</SelectItem>
                     </SelectContent>
                   </Select>
@@ -522,7 +624,7 @@ export function ExportView({
             ) : null}
           </div>
 
-          <div className="overflow-hidden rounded-xl border border-border bg-surface">
+          <div className="overflow-hidden rounded-xl border border-border bg-surface mb-4">
             <button
               type="button"
               onClick={() => setChaptersAccordionOpen((previous) => !previous)}
@@ -545,29 +647,35 @@ export function ExportView({
             </button>
             {chaptersAccordionOpen ? (
               <div className="flex flex-col gap-5 border-t border-border p-5">
-                <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                  Chapter delivery
-                  <Select
-                    value={chapterMode}
-                    onValueChange={(value) => onChapterModeChange?.(value as RenderChapterMode)}
-                    disabled={isRunning}
-                  >
-                    <SelectTrigger
-                      aria-label="Chapter export mode"
-                      className="border-border bg-background text-xs text-foreground"
+                {!isGif ? (
+                  <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
+                    Chapter delivery
+                    <Select
+                      value={chapterMode}
+                      onValueChange={(value) => onChapterModeChange?.(value as RenderChapterMode)}
+                      disabled={isRunning}
                     >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="embed">Embed in MP4 metadata (Recommended)</SelectItem>
-                      <SelectItem value="sidecar">
-                        Write YouTube chapter file (.chapters.txt)
-                      </SelectItem>
-                      <SelectItem value="both">Embed MP4 & write YouTube chapter file</SelectItem>
-                      <SelectItem value="none">Do not export chapters</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </label>
+                      <SelectTrigger
+                        aria-label="Chapter export mode"
+                        className="border-border bg-background text-xs text-foreground"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="embed">Embed in MP4 metadata (Recommended)</SelectItem>
+                        <SelectItem value="sidecar">
+                          Write YouTube chapter file (.chapters.txt)
+                        </SelectItem>
+                        <SelectItem value="both">Embed MP4 & write YouTube chapter file</SelectItem>
+                        <SelectItem value="none">Do not export chapters</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </label>
+                ) : (
+                  <p className="text-xs text-subtle-foreground">
+                    GIF containers do not support embedded chapter tracks. You can still copy YouTube chapter timestamps below.
+                  </p>
+                )}
 
                 {youtubeChapterText ? (
                   <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-3.5">
@@ -598,8 +706,7 @@ export function ExportView({
                       {youtubeChapterText}
                     </pre>
                     <p className="text-[11px] text-muted-foreground">
-                      Paste these timestamps into your YouTube video description to enable YouTube
-                      video chapters.
+                      Paste these timestamps into your video description to enable video chapters.
                     </p>
                   </div>
                 ) : (
@@ -630,7 +737,9 @@ export function ExportView({
             </button>
             {audioAccordionOpen ? (
               <div className="border-t border-border p-5 text-xs text-subtle-foreground">
-                Audio tracks use the saved mute, solo, gain, fade, role, and speed settings.
+                {isGif
+                  ? "Animated GIFs do not support audio tracks. The exported file will be video-only."
+                  : "Audio tracks use the saved mute, solo, gain, fade, role, and speed settings."}
               </div>
             ) : null}
           </div>
@@ -646,7 +755,7 @@ export function ExportView({
             <span className="truncate font-mono text-xs font-semibold text-foreground">
               {projectName} ·{" "}
               {canvas ? `${canvas.width}×${canvas.height} · ${canvas.fps}fps` : "Source canvas"} ·{" "}
-              {exportSettings?.codec?.toUpperCase() ?? "H264"}
+              {isGif ? "Animated GIF (looping)" : (exportSettings?.codec?.toUpperCase() ?? "H264")}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3">
@@ -673,7 +782,7 @@ export function ExportView({
         onOpenChange={setUploadDialogOpen}
         localPath={exportJob?.outputs?.outputPath ?? ""}
         exportId={exportJob?.id}
-        defaultName={`${projectName ?? "export"}.mp4`}
+        defaultName={`${projectName ?? "export"}.${isGif ? "gif" : "mp4"}`}
       />
     </div>
   )

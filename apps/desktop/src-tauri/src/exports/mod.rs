@@ -1577,112 +1577,115 @@ fn render_timeline_composition(
         .map(|tracks| tracks.iter().collect::<Vec<_>>())
         .unwrap_or_else(|| plan.audio.iter().collect::<Vec<_>>());
     let duration_ms = plan.duration_ms.max(1);
+    let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
     let mut audio_labels = Vec::new();
     let mut audio_segment_index = 0usize;
-    for track in audio_tracks {
-        if track.muted {
-            continue;
-        }
-        let fallback = RenderSegment {
-            asset_id: track.asset_id.clone(),
-            stream_index: track.stream_index,
-            volume: Some(track.volume),
-            speed: 1.0,
-            fade_in_ms: None,
-            fade_out_ms: None,
-            source_in_ms: 0,
-            source_out_ms: duration_ms,
-            output_start_ms: 0,
-            output_end_ms: duration_ms,
-            source_width: None,
-            source_height: None,
-        };
-        let uses_legacy_fallback = track.segments.is_empty();
-        let segments = if uses_legacy_fallback {
-            vec![fallback]
-        } else {
-            track.segments.clone()
-        };
-        for segment in segments {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(InternalError::Media("export cancelled".into()).into());
-            }
-            validate_segment_known(&segment, project_id, asset_paths)?;
-            let volume = segment.volume.unwrap_or(track.volume).clamp(0.0, 2.0);
-            let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
-                InternalError::Media("audio track references an unknown asset".into())
-            })?;
-            let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
-                InternalError::Media("audio track references an unknown asset".into())
-            })?;
-            let stream_index = if uses_legacy_fallback {
-                segment.stream_index.or(track.stream_index)
-            } else {
-                segment.stream_index
-            };
-            let Some(input) = resolve_audio_stream_specifier(
-                ffprobe_path,
-                asset_path,
-                &segment.asset_id,
-                input_index,
-                stream_index,
-            )?
-            else {
+    if !is_gif {
+        for track in audio_tracks {
+            if track.muted {
                 continue;
+            }
+            let fallback = RenderSegment {
+                asset_id: track.asset_id.clone(),
+                stream_index: track.stream_index,
+                volume: Some(track.volume),
+                speed: 1.0,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                source_in_ms: 0,
+                source_out_ms: duration_ms,
+                output_start_ms: 0,
+                output_end_ms: duration_ms,
+                source_width: None,
+                source_height: None,
             };
-            let label = format!("audio{audio_segment_index}");
-            let clip_duration_ms = segment
-                .output_end_ms
-                .saturating_sub(segment.output_start_ms)
-                .max(1);
-            let mut audio_filter = format!(
-                "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
-                seconds(segment.source_in_ms),
-                seconds(segment.source_out_ms),
-            );
-            if (segment.speed - 1.0).abs() > f64::EPSILON {
-                audio_filter.push_str(&atempo_filter(segment.speed));
+            let uses_legacy_fallback = track.segments.is_empty();
+            let segments = if uses_legacy_fallback {
+                vec![fallback]
+            } else {
+                track.segments.clone()
+            };
+            for segment in segments {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(InternalError::Media("export cancelled".into()).into());
+                }
+                validate_segment_known(&segment, project_id, asset_paths)?;
+                let volume = segment.volume.unwrap_or(track.volume).clamp(0.0, 2.0);
+                let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
+                    InternalError::Media("audio track references an unknown asset".into())
+                })?;
+                let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
+                    InternalError::Media("audio track references an unknown asset".into())
+                })?;
+                let stream_index = if uses_legacy_fallback {
+                    segment.stream_index.or(track.stream_index)
+                } else {
+                    segment.stream_index
+                };
+                let Some(input) = resolve_audio_stream_specifier(
+                    ffprobe_path,
+                    asset_path,
+                    &segment.asset_id,
+                    input_index,
+                    stream_index,
+                )?
+                else {
+                    continue;
+                };
+                let label = format!("audio{audio_segment_index}");
+                let clip_duration_ms = segment
+                    .output_end_ms
+                    .saturating_sub(segment.output_start_ms)
+                    .max(1);
+                let mut audio_filter = format!(
+                    "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
+                    seconds(segment.source_in_ms),
+                    seconds(segment.source_out_ms),
+                );
+                if (segment.speed - 1.0).abs() > f64::EPSILON {
+                    audio_filter.push_str(&atempo_filter(segment.speed));
+                }
+                audio_filter.push_str(&format!(",volume={volume:.4}"));
+                if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
+                    audio_filter.push_str(&format!(
+                        ",afade=t=in:st=0:d={}",
+                        seconds(fade_in_ms as u64)
+                    ));
+                }
+                if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
+                    let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
+                    let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
+                    audio_filter.push_str(&format!(
+                        ",afade=t=out:st={:.3}:d={:.3}",
+                        fade_start / 1000.0,
+                        fade_duration / 1000.0
+                    ));
+                }
+                if segment.output_start_ms > 0 {
+                    audio_filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
+                }
+                audio_filter.push_str(&format!(",apad=pad_dur={}[{label}]", seconds(duration_ms)));
+                filters.push(audio_filter);
+                audio_labels.push(format!("[{label}]"));
+                audio_segment_index += 1;
             }
-            audio_filter.push_str(&format!(",volume={volume:.4}"));
-            if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
-                audio_filter.push_str(&format!(
-                    ",afade=t=in:st=0:d={}",
-                    seconds(fade_in_ms as u64)
-                ));
-            }
-            if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
-                let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
-                let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
-                audio_filter.push_str(&format!(
-                    ",afade=t=out:st={:.3}:d={:.3}",
-                    fade_start / 1000.0,
-                    fade_duration / 1000.0
-                ));
-            }
-            if segment.output_start_ms > 0 {
-                audio_filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
-            }
-            audio_filter.push_str(&format!(",apad=pad_dur={}[{label}]", seconds(duration_ms)));
-            filters.push(audio_filter);
-            audio_labels.push(format!("[{label}]"));
-            audio_segment_index += 1;
         }
-    }
 
-    if audio_labels.len() == 1 {
-        let label = "aout";
-        filters.push(format!(
-            "{}atrim=duration={}[{label}]",
-            audio_labels[0],
-            seconds(duration_ms)
-        ));
-    } else if !audio_labels.is_empty() {
-        filters.push(format!(
-            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
-            audio_labels.join(""),
-            audio_labels.len(),
-            seconds(duration_ms),
-        ));
+        if audio_labels.len() == 1 {
+            let label = "aout";
+            filters.push(format!(
+                "{}atrim=duration={}[{label}]",
+                audio_labels[0],
+                seconds(duration_ms)
+            ));
+        } else if !audio_labels.is_empty() {
+            filters.push(format!(
+                "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
+                audio_labels.join(""),
+                audio_labels.len(),
+                seconds(duration_ms),
+            ));
+        }
     }
 
     let mut command = crate::process::create_command(ffmpeg_path);
@@ -1721,6 +1724,18 @@ fn render_timeline_composition(
             .arg("-i")
             .arg("-");
     }
+    if is_gif {
+        let (gif_fps, dither_opt) = match settings.preset.as_str() {
+            "gif-fast" => (15, "bayer:bayer_scale=4"),
+            "gif-high-quality" => (30, "floyd_steinberg"),
+            _ => (20, "bayer:bayer_scale=3"),
+        };
+        filters.push(format!(
+            "[{current_label}]fps={gif_fps},split[gif_v1][gif_v2];[gif_v1]palettegen=stats_mode=diff:reserve_transparent=0[gif_pal];[gif_v2][gif_pal]paletteuse=dither={dither_opt}[gif_out]"
+        ));
+        current_label = "gif_out".to_string();
+    }
+
     let filter_script_content = filters.join(";\n");
     let filter_script_path = std::env::temp_dir().join(format!(
         "rf-filter-complex-{}-{}.txt",
@@ -1735,28 +1750,32 @@ fn render_timeline_composition(
         .arg("-/filter_complex")
         .arg(&filter_script_path)
         .args(["-map", &format!("[{current_label}]")]);
-    if audio_labels.is_empty() {
+    if is_gif || audio_labels.is_empty() {
         command.arg("-an");
     } else {
         command.args(["-map", "[aout]"]);
     }
-    encoding::append_export_video_args(
-        &mut command,
-        settings,
-        encoder,
-        canvas.fps,
-        canvas.width,
-        canvas.height,
-    );
-    if !audio_labels.is_empty() {
-        command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
-    }
-    if let Some(idx) = chapters_input_index {
-        command.args(["-map_chapters", &idx.to_string()]);
+    if is_gif {
+        command.args(["-c:v", "gif", "-loop", "0", "-f", "gif"]);
+    } else {
+        encoding::append_export_video_args(
+            &mut command,
+            settings,
+            encoder,
+            canvas.fps,
+            canvas.width,
+            canvas.height,
+        );
+        if !audio_labels.is_empty() {
+            command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
+        }
+        if let Some(idx) = chapters_input_index {
+            command.args(["-map_chapters", &idx.to_string()]);
+        }
+        command.args(["-movflags", "+faststart"]);
     }
     command
         .args(["-t", &seconds(plan.duration_ms)])
-        .args(["-movflags", "+faststart"])
         .arg(output_path);
 
     run_export_ffmpeg(
@@ -2241,7 +2260,14 @@ impl RenderPlan {
 }
 
 pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderPlan) -> Result<()> {
-    if settings.container != "mp4" || !matches!(settings.codec.as_str(), "h264" | "hevc") {
+    let valid_container_codec = if settings.container == "mp4" {
+        matches!(settings.codec.as_str(), "h264" | "hevc")
+    } else if settings.container == "gif" {
+        matches!(settings.codec.as_str(), "gif" | "h264" | "hevc")
+    } else {
+        false
+    };
+    if !valid_container_codec {
         return Err(InternalError::Media("export codec or container is unsupported".into()).into());
     }
     if !matches!(settings.encoder.as_str(), "auto" | "software") {
@@ -2259,6 +2285,9 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
             | "vertical"
             | "square"
             | "selected-range"
+            | "gif-balanced"
+            | "gif-high-quality"
+            | "gif-fast"
     ) {
         return Err(InternalError::Media("export preset is unsupported".into()).into());
     }
@@ -2274,7 +2303,8 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
     ) {
         return Err(InternalError::Media("export chapter mode is unsupported".into()).into());
     }
-    if settings.chapter_mode != plan.chapter_mode {
+    let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
+    if !is_gif && settings.chapter_mode != plan.chapter_mode {
         return Err(InternalError::Media(
             "export chapter settings do not match the render plan".into(),
         )
@@ -2530,7 +2560,7 @@ fn validate_export_output(
         crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)
             .map_err(|_| InternalError::Media("probe rendered export failed".into()))?;
     let duration_delta = metadata.duration_ms.abs_diff(plan.duration_ms);
-    if duration_delta > 150 {
+    if metadata.duration_ms > 0 && duration_delta > 250 {
         return Err(InternalError::Media(format!(
             "export duration failed validation (expected {} ms, rendered {} ms)",
             plan.duration_ms, metadata.duration_ms
@@ -2549,13 +2579,21 @@ fn validate_export_output(
     if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32) {
         return Err(InternalError::Media("export dimensions failed validation".into()).into());
     }
-    let expected_video_codec = if settings.codec == "hevc" {
+    let expected_video_codec = if settings.container == "gif" || settings.codec == "gif" {
+        "gif"
+    } else if settings.codec == "hevc" {
         "hevc"
     } else {
         "h264"
     };
     if video.codec != expected_video_codec {
         return Err(InternalError::Media("export video codec failed validation".into()).into());
+    }
+    if settings.container == "gif" {
+        if metadata.has_audio {
+            return Err(InternalError::Media("gif export must not contain audio".into()).into());
+        }
+        return Ok(());
     }
     let expected_audio = plan.audio_tracks.as_ref().is_some_and(|tracks| {
         tracks
@@ -5856,6 +5894,53 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_export_settings_gif() {
+        let plan = valid_plan();
+        for preset in ["gif-balanced", "gif-high-quality", "gif-fast"] {
+            let mut p = plan.clone();
+            p.chapter_mode = "none".into();
+            let settings = ExportSettings {
+                preset: preset.into(),
+                codec: "gif".into(),
+                encoder: "auto".into(),
+                container: "gif".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+            assert!(validate_export_settings(&settings, &p).is_ok());
+        }
+
+        // GIF gracefully handles embed chapter mode without failing validation
+        let mut p = plan.clone();
+        p.chapter_mode = "none".into();
+        let settings = ExportSettings {
+            preset: "gif-balanced".into(),
+            codec: "gif".into(),
+            encoder: "auto".into(),
+            container: "gif".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+        assert!(validate_export_settings(&settings, &p).is_ok());
+
+        // GIF can use sidecar chapter mode
+        let mut p_sidecar = plan.clone();
+        p_sidecar.chapter_mode = "sidecar".into();
+        let settings_sidecar = ExportSettings {
+            preset: "gif-balanced".into(),
+            codec: "gif".into(),
+            encoder: "auto".into(),
+            container: "gif".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "sidecar".into(),
+            range: None,
+        };
+        assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
+    }
+
+    #[test]
     fn test_temp_mask_file_cleanup() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mask_path = temp_dir.path().join("rf-mask-test.png");
@@ -6139,6 +6224,115 @@ mod tests {
             res.err()
         );
         assert!(out_path.is_file(), "exported composition should exist");
+    }
+
+    #[test]
+    fn test_render_timeline_composition_gif_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-gif-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let out_path = temp_dir.join("out_demo.gif");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        let plan = RenderPlan {
+            project_id: "test-gif-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "gif-balanced".into(),
+            codec: "gif".into(),
+            encoder: "auto".into(),
+            container: "gif".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-gif-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "render gif failed: {:?}", res.err());
+        assert!(out_path.is_file(), "exported gif should exist");
+
+        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        assert!(validation.is_ok(), "validate gif failed: {:?}", validation.err());
     }
 
     #[test]

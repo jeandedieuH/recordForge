@@ -1416,4 +1416,25 @@ describe("render-plan", () => {
     // Standalone webcam asset has streamIndex omitted so FFmpeg selects its primary stream 0
     expect(plan.value.overlays[0].streamIndex).toBeUndefined()
   })
+
+  it("builds a valid render plan with GIF export settings", () => {
+    const state = makeTimeline()
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-gif-test",
+      settings: {
+        preset: "gif-balanced",
+        container: "gif",
+        codec: "gif",
+        encoder: "auto",
+        captionMode: "burn-in",
+        chapterMode: "none",
+      },
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.projectId).toBe("project-gif-test")
+    expect(plan.value.segments.length).toBeGreaterThan(0)
+  })
 })
+

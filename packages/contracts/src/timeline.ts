@@ -634,6 +634,9 @@ export const exportPresetSchema = z.enum([
   "vertical",
   "square",
   "selected-range",
+  "gif-balanced",
+  "gif-high-quality",
+  "gif-fast",
 ])
 export type ExportPreset = z.infer<typeof exportPresetSchema>
 
@@ -665,9 +668,9 @@ export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
 
 export const exportSettingsSchema = z.object({
   preset: exportPresetSchema.default("default-mp4"),
-  codec: z.enum(["h264", "hevc"]).default("h264"),
+  codec: z.enum(["h264", "hevc", "gif"]).default("h264"),
   encoder: exportEncoderSchema.default("auto"),
-  container: z.literal("mp4").default("mp4"),
+  container: z.enum(["mp4", "gif"]).default("mp4"),
   captionMode: renderCaptionModeSchema.default("burn-in"),
   chapterMode: renderChapterModeSchema.default("embed"),
   range: exportRangeSchema.nullish(),

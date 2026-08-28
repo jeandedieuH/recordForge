@@ -159,6 +159,28 @@ describe("project contract", () => {
     )
     expect(projectExportSettingsSchema.parse({ preset: "ultra-4k" }).preset).toBe("ultra-4k")
     expect(projectExportSettingsSchema.parse({ preset: "ultra-4k-60" }).preset).toBe("ultra-4k-60")
+    expect(projectExportSettingsSchema.parse({ preset: "gif-balanced" }).preset).toBe(
+      "gif-balanced",
+    )
+    expect(projectExportSettingsSchema.parse({ preset: "gif-high-quality" }).preset).toBe(
+      "gif-high-quality",
+    )
+    expect(projectExportSettingsSchema.parse({ preset: "gif-fast" }).preset).toBe("gif-fast")
+    expect(
+      projectExportSettingsSchema.parse({
+        preset: "gif-balanced",
+        container: "gif",
+        codec: "gif",
+        chapterMode: "none",
+      }),
+    ).toEqual({
+      preset: "gif-balanced",
+      container: "gif",
+      codec: "gif",
+      encoder: "auto",
+      captionMode: "burn-in",
+      chapterMode: "none",
+    })
   })
 
   it("requires project-scoped render plans and keeps media paths out of the DTO", () => {

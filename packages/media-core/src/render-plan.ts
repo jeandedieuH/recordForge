@@ -941,7 +941,14 @@ export function buildRenderPlan(
       captions,
       captionMode: input.captionMode ?? input.settings?.captionMode ?? "burn-in",
       chapters,
-      chapterMode: input.chapterMode ?? input.settings?.chapterMode ?? "embed",
+      chapterMode:
+        input.settings?.container === "gif" ||
+        (typeof input.settings?.preset === "string" && input.settings.preset.startsWith("gif-"))
+          ? (input.chapterMode ?? input.settings?.chapterMode) === "both" ||
+            (input.chapterMode ?? input.settings?.chapterMode) === "sidecar"
+            ? "sidecar"
+            : "none"
+          : (input.chapterMode ?? input.settings?.chapterMode ?? "embed"),
       masks,
       zoomSegments,
       cursorEffects,
