@@ -1578,9 +1578,10 @@ fn render_timeline_composition(
         .unwrap_or_else(|| plan.audio.iter().collect::<Vec<_>>());
     let duration_ms = plan.duration_ms.max(1);
     let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
+    let is_webp = settings.container == "webp" || settings.preset.starts_with("webp-");
     let mut audio_labels = Vec::new();
     let mut audio_segment_index = 0usize;
-    if !is_gif {
+    if !is_gif && !is_webp {
         for track in audio_tracks {
             if track.muted {
                 continue;
@@ -1739,6 +1740,21 @@ fn render_timeline_composition(
             "[{current_label}]fps={gif_fps},{scale_filter}split[gif_v1][gif_v2];[gif_v1]palettegen=stats_mode=diff:reserve_transparent=0[gif_pal];[gif_v2][gif_pal]paletteuse=dither={dither_opt}[gif_out]"
         ));
         current_label = "gif_out".to_string();
+    } else if is_webp {
+        let (webp_fps, max_width) = match settings.preset.as_str() {
+            "webp-fast" => (15, Some(800)),
+            "webp-high-quality" | "webp-lossless" => (30, None),
+            _ => (24, Some(1280)),
+        };
+        let scale_filter = if let Some(max_w) = max_width {
+            format!("scale='trunc(min(iw,{max_w})/2)*2':-2:flags=lanczos,")
+        } else {
+            String::new()
+        };
+        filters.push(format!(
+            "[{current_label}]fps={webp_fps},{scale_filter}format=yuv420p[webp_out]"
+        ));
+        current_label = "webp_out".to_string();
     }
 
     let filter_script_content = filters.join(";\n");
@@ -1755,13 +1771,34 @@ fn render_timeline_composition(
         .arg("-/filter_complex")
         .arg(&filter_script_path)
         .args(["-map", &format!("[{current_label}]")]);
-    if is_gif || audio_labels.is_empty() {
+    if is_gif || is_webp || audio_labels.is_empty() {
         command.arg("-an");
     } else {
         command.args(["-map", "[aout]"]);
     }
     if is_gif {
         command.args(["-c:v", "gif", "-loop", "0", "-f", "gif"]);
+    } else if is_webp {
+        let (lossless, quality, compression_level) = match settings.preset.as_str() {
+            "webp-lossless" => ("1", "100", "4"),
+            "webp-high-quality" => ("0", "90", "4"),
+            "webp-fast" => ("0", "60", "2"),
+            _ => ("0", "75", "4"),
+        };
+        command.args([
+            "-c:v",
+            "libwebp_anim",
+            "-loop",
+            "0",
+            "-lossless",
+            lossless,
+            "-q:v",
+            quality,
+            "-compression_level",
+            compression_level,
+            "-f",
+            "webp",
+        ]);
     } else {
         encoding::append_export_video_args(
             &mut command,
@@ -2269,6 +2306,8 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
         matches!(settings.codec.as_str(), "h264" | "hevc")
     } else if settings.container == "gif" {
         matches!(settings.codec.as_str(), "gif" | "h264" | "hevc")
+    } else if settings.container == "webp" {
+        matches!(settings.codec.as_str(), "webp" | "h264" | "hevc")
     } else {
         false
     };
@@ -2293,6 +2332,10 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
             | "gif-balanced"
             | "gif-high-quality"
             | "gif-fast"
+            | "webp-balanced"
+            | "webp-high-quality"
+            | "webp-fast"
+            | "webp-lossless"
     ) {
         return Err(InternalError::Media("export preset is unsupported".into()).into());
     }
@@ -2308,8 +2351,11 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
     ) {
         return Err(InternalError::Media("export chapter mode is unsupported".into()).into());
     }
-    let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
-    if !is_gif && settings.chapter_mode != plan.chapter_mode {
+    let is_animation = settings.container == "gif"
+        || settings.container == "webp"
+        || settings.preset.starts_with("gif-")
+        || settings.preset.starts_with("webp-");
+    if !is_animation && settings.chapter_mode != plan.chapter_mode {
         return Err(InternalError::Media(
             "export chapter settings do not match the render plan".into(),
         )
@@ -2582,6 +2628,7 @@ fn validate_export_output(
         .as_ref()
         .ok_or_else(|| InternalError::Media("render canvas is required".into()))?;
     let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
+    let is_webp = settings.container == "webp" || settings.preset.starts_with("webp-");
     if is_gif {
         let max_width = match settings.preset.as_str() {
             "gif-fast" => Some(640),
@@ -2597,22 +2644,43 @@ fn validate_export_output(
         {
             return Err(InternalError::Media("export dimensions failed validation".into()).into());
         }
+    } else if is_webp {
+        let max_width = match settings.preset.as_str() {
+            "webp-fast" => Some(800),
+            "webp-high-quality" | "webp-lossless" => None,
+            _ => Some(1280),
+        };
+        let expected_w = max_width
+            .map(|m| (canvas.width.min(m) / 2) * 2)
+            .unwrap_or(canvas.width);
+        if video.width != Some(expected_w as i32)
+            || video.height.is_none()
+            || video.height.unwrap_or(0) <= 0
+        {
+            return Err(InternalError::Media("export dimensions failed validation".into()).into());
+        }
     } else if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32) {
         return Err(InternalError::Media("export dimensions failed validation".into()).into());
     }
     let expected_video_codec = if settings.container == "gif" || settings.codec == "gif" {
         "gif"
+    } else if settings.container == "webp" || settings.codec == "webp" {
+        "webp"
     } else if settings.codec == "hevc" {
         "hevc"
     } else {
         "h264"
     };
-    if video.codec != expected_video_codec {
+    if is_webp {
+        if video.codec != "webp" && video.codec != "webp_anim" {
+            return Err(InternalError::Media("export video codec failed validation".into()).into());
+        }
+    } else if video.codec != expected_video_codec {
         return Err(InternalError::Media("export video codec failed validation".into()).into());
     }
-    if settings.container == "gif" {
+    if settings.container == "gif" || settings.container == "webp" {
         if metadata.has_audio {
-            return Err(InternalError::Media("gif export must not contain audio".into()).into());
+            return Err(InternalError::Media(format!("{} export must not contain audio", settings.container)).into());
         }
         return Ok(());
     }
@@ -5962,6 +6030,58 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_export_settings_webp() {
+        let plan = valid_plan();
+        for preset in [
+            "webp-balanced",
+            "webp-high-quality",
+            "webp-fast",
+            "webp-lossless",
+        ] {
+            let mut p = plan.clone();
+            p.chapter_mode = "none".into();
+            let settings = ExportSettings {
+                preset: preset.into(),
+                codec: "webp".into(),
+                encoder: "auto".into(),
+                container: "webp".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+            assert!(validate_export_settings(&settings, &p).is_ok());
+        }
+
+        // WebP gracefully handles embed chapter mode without failing validation
+        let mut p = plan.clone();
+        p.chapter_mode = "none".into();
+        let settings = ExportSettings {
+            preset: "webp-balanced".into(),
+            codec: "webp".into(),
+            encoder: "auto".into(),
+            container: "webp".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+        assert!(validate_export_settings(&settings, &p).is_ok());
+
+        // WebP can use sidecar chapter mode
+        let mut p_sidecar = plan.clone();
+        p_sidecar.chapter_mode = "sidecar".into();
+        let settings_sidecar = ExportSettings {
+            preset: "webp-balanced".into(),
+            codec: "webp".into(),
+            encoder: "auto".into(),
+            container: "webp".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "sidecar".into(),
+            range: None,
+        };
+        assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
+    }
+
+    #[test]
     fn test_temp_mask_file_cleanup() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mask_path = temp_dir.path().join("rf-mask-test.png");
@@ -6354,6 +6474,115 @@ mod tests {
 
         let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
         assert!(validation.is_ok(), "validate gif failed: {:?}", validation.err());
+    }
+
+    #[test]
+    fn test_render_timeline_composition_webp_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-webp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let out_path = temp_dir.join("out_demo.webp");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        let plan = RenderPlan {
+            project_id: "test-webp-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            chapters: Vec::new(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "webp-balanced".into(),
+            codec: "webp".into(),
+            encoder: "auto".into(),
+            container: "webp".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-webp-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "render webp failed: {:?}", res.err());
+        assert!(out_path.is_file(), "exported webp should exist");
+
+        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        assert!(validation.is_ok(), "validate webp failed: {:?}", validation.err());
     }
 
     #[test]

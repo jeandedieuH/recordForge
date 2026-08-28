@@ -943,7 +943,9 @@ export function buildRenderPlan(
       chapters,
       chapterMode:
         input.settings?.container === "gif" ||
-        (typeof input.settings?.preset === "string" && input.settings.preset.startsWith("gif-"))
+        input.settings?.container === "webp" ||
+        (typeof input.settings?.preset === "string" &&
+          (input.settings.preset.startsWith("gif-") || input.settings.preset.startsWith("webp-")))
           ? (input.chapterMode ?? input.settings?.chapterMode) === "both" ||
             (input.chapterMode ?? input.settings?.chapterMode) === "sidecar"
             ? "sidecar"

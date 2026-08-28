@@ -341,7 +341,8 @@ export function AppShell() {
     if (!timelineRecording) return
     try {
       const isGif = exportSettings?.container === "gif" || exportSettings?.preset?.startsWith("gif-")
-      const extension = isGif ? "gif" : "mp4"
+      const isWebp = exportSettings?.container === "webp" || exportSettings?.preset?.startsWith("webp-")
+      const extension = isGif ? "gif" : isWebp ? "webp" : "mp4"
       let defaultPath = `${timelineRecording.name}-edited.${extension}`
       if (isTauri()) {
         const defaultFolder = await getSetting("defaultOutputFolder").catch(() => null)
@@ -354,11 +355,17 @@ export function AppShell() {
         }
       }
       const outputPath = await save({
-        title: isGif ? "Export animated GIF" : "Export edited recording",
+        title: isGif
+          ? "Export animated GIF"
+          : isWebp
+            ? "Export animated WebP"
+            : "Export edited recording",
         defaultPath,
         filters: isGif
           ? [{ name: "Animated GIF", extensions: ["gif"] }]
-          : [{ name: "MP4 video", extensions: ["mp4"] }],
+          : isWebp
+            ? [{ name: "Animated WebP", extensions: ["webp"] }]
+            : [{ name: "MP4 video", extensions: ["mp4"] }],
       })
       if (!outputPath) return
       // Phase 1: the export path flushes and freezes a durable project revision

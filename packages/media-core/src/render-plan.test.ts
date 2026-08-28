@@ -1435,6 +1435,29 @@ describe("render-plan", () => {
     if (!plan.ok) return
     expect(plan.value.projectId).toBe("project-gif-test")
     expect(plan.value.segments.length).toBeGreaterThan(0)
+    expect(plan.value.chapterMode).toBe("none")
+  })
+
+  it("builds a valid render plan with WebP export settings", () => {
+    const state = makeTimeline()
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-webp-test",
+      settings: {
+        preset: "webp-balanced",
+        container: "webp",
+        codec: "webp",
+        encoder: "auto",
+        captionMode: "burn-in",
+        chapterMode: "embed",
+      },
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.projectId).toBe("project-webp-test")
+    expect(plan.value.segments.length).toBeGreaterThan(0)
+    // Embed chapterMode should sanitize to none for WebP
+    expect(plan.value.chapterMode).toBe("none")
   })
 })
 

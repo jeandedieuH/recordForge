@@ -70,6 +70,16 @@ pub struct ExportRequest {
     pub settings: ExportSettings,
 }
 
+fn expected_export_extension(settings: &ExportSettings) -> &'static str {
+    if settings.container == "gif" || settings.preset.starts_with("gif-") {
+        "gif"
+    } else if settings.container == "webp" || settings.preset.starts_with("webp-") {
+        "webp"
+    } else {
+        "mp4"
+    }
+}
+
 /// Manages background media preparation and export jobs.
 #[derive(Debug)]
 pub struct JobManager {
@@ -257,8 +267,7 @@ impl JobManager {
             )
             .into());
         }
-        let is_gif = request.settings.container == "gif" || request.settings.preset.starts_with("gif-");
-        let expected_ext = if is_gif { "gif" } else { "mp4" };
+        let expected_ext = expected_export_extension(&request.settings);
         let destination_path = Path::new(&request.output_path);
         if !destination_path
             .extension()
@@ -359,8 +368,7 @@ impl JobManager {
             })?;
         request.plan.validate()?;
         crate::exports::validate_export_settings(&request.settings, &request.plan)?;
-        let is_gif = request.settings.container == "gif" || request.settings.preset.starts_with("gif-");
-        let expected_ext = if is_gif { "gif" } else { "mp4" };
+        let expected_ext = expected_export_extension(&request.settings);
         let destination_path = Path::new(&request.output_path);
         if !destination_path
             .extension()
@@ -523,8 +531,7 @@ impl JobManager {
                     self.fail_unresumable_job(&job.id, "stored export settings are invalid")?;
                     continue;
                 }
-                let is_gif = request.settings.container == "gif" || request.settings.preset.starts_with("gif-");
-                let expected_ext = if is_gif { "gif" } else { "mp4" };
+                let expected_ext = expected_export_extension(&request.settings);
                 let destination = Path::new(&request.output_path);
                 if !destination
                     .extension()

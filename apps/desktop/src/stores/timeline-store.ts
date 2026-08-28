@@ -125,9 +125,9 @@ interface TimelineStore {
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
   setChapterMode: (mode: RenderChapterMode) => void
-  setExportContainer: (container: "mp4" | "gif") => void
+  setExportContainer: (container: "mp4" | "gif" | "webp") => void
   setExportPreset: (preset: ExportPreset) => void
-  setExportCodec: (codec: "h264" | "hevc" | "gif") => void
+  setExportCodec: (codec: "h264" | "hevc" | "gif" | "webp") => void
   setExportEncoder: (encoder: ExportEncoderPreference) => void
   setExportRange: (range: ExportRange | undefined) => void
   cancelExport: () => Promise<void>
@@ -946,18 +946,25 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const project = get().project
     if (!project || project.exportSettings.container === container) return
     const isGif = container === "gif"
+    const isWebp = container === "webp"
+    const isAnimation = isGif || isWebp
     const preset: ExportPreset = isGif
       ? "gif-balanced"
-      : project.exportSettings.preset.startsWith("gif-")
-        ? "balanced"
-        : project.exportSettings.preset
-    const codec: "h264" | "hevc" | "gif" = isGif
+      : isWebp
+        ? "webp-balanced"
+        : project.exportSettings.preset.startsWith("gif-") ||
+            project.exportSettings.preset.startsWith("webp-")
+          ? "balanced"
+          : project.exportSettings.preset
+    const codec: "h264" | "hevc" | "gif" | "webp" = isGif
       ? "gif"
-      : project.exportSettings.codec === "gif"
-        ? "h264"
-        : project.exportSettings.codec
+      : isWebp
+        ? "webp"
+        : project.exportSettings.codec === "gif" || project.exportSettings.codec === "webp"
+          ? "h264"
+          : project.exportSettings.codec
     const chapterMode =
-      isGif &&
+      isAnimation &&
       (project.exportSettings.chapterMode === "embed" ||
         project.exportSettings.chapterMode === "both")
         ? "none"
@@ -982,18 +989,27 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const isGif =
       preset.startsWith("gif-") ||
       (project.exportSettings.container === "gif" && preset === "selected-range")
-    const container: "mp4" | "gif" = isGif
+    const isWebp =
+      preset.startsWith("webp-") ||
+      (project.exportSettings.container === "webp" && preset === "selected-range")
+    const isAnimation = isGif || isWebp
+    const container: "mp4" | "gif" | "webp" = isGif
       ? "gif"
-      : project.exportSettings.container === "gif"
-        ? "mp4"
-        : project.exportSettings.container
-    const codec: "h264" | "hevc" | "gif" = isGif
+      : isWebp
+        ? "webp"
+        : project.exportSettings.container === "gif" ||
+            project.exportSettings.container === "webp"
+          ? "mp4"
+          : project.exportSettings.container
+    const codec: "h264" | "hevc" | "gif" | "webp" = isGif
       ? "gif"
-      : project.exportSettings.codec === "gif"
-        ? "h264"
-        : project.exportSettings.codec
+      : isWebp
+        ? "webp"
+        : project.exportSettings.codec === "gif" || project.exportSettings.codec === "webp"
+          ? "h264"
+          : project.exportSettings.codec
     const chapterMode =
-      isGif &&
+      isAnimation &&
       (project.exportSettings.chapterMode === "embed" ||
         project.exportSettings.chapterMode === "both")
         ? "none"
@@ -1124,7 +1140,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const isGif =
       currentProject.exportSettings.container === "gif" ||
       currentProject.exportSettings.preset.startsWith("gif-")
-    const sanitizedChapterMode = isGif
+    const isWebp =
+      currentProject.exportSettings.container === "webp" ||
+      currentProject.exportSettings.preset.startsWith("webp-")
+    const isAnimation = isGif || isWebp
+    const sanitizedChapterMode = isAnimation
       ? currentProject.exportSettings.chapterMode === "both" ||
         currentProject.exportSettings.chapterMode === "sidecar"
         ? "sidecar"
@@ -1132,8 +1152,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       : currentProject.exportSettings.chapterMode
     const effectiveExportSettings = {
       ...currentProject.exportSettings,
-      container: isGif ? ("gif" as const) : currentProject.exportSettings.container,
-      codec: isGif ? ("gif" as const) : currentProject.exportSettings.codec,
+      container: isGif
+        ? ("gif" as const)
+        : isWebp
+          ? ("webp" as const)
+          : currentProject.exportSettings.container,
+      codec: isGif
+        ? ("gif" as const)
+        : isWebp
+          ? ("webp" as const)
+          : currentProject.exportSettings.codec,
       chapterMode: sanitizedChapterMode,
     }
 

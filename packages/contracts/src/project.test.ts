@@ -166,6 +166,16 @@ describe("project contract", () => {
       "gif-high-quality",
     )
     expect(projectExportSettingsSchema.parse({ preset: "gif-fast" }).preset).toBe("gif-fast")
+    expect(projectExportSettingsSchema.parse({ preset: "webp-balanced" }).preset).toBe(
+      "webp-balanced",
+    )
+    expect(projectExportSettingsSchema.parse({ preset: "webp-high-quality" }).preset).toBe(
+      "webp-high-quality",
+    )
+    expect(projectExportSettingsSchema.parse({ preset: "webp-fast" }).preset).toBe("webp-fast")
+    expect(projectExportSettingsSchema.parse({ preset: "webp-lossless" }).preset).toBe(
+      "webp-lossless",
+    )
     expect(
       projectExportSettingsSchema.parse({
         preset: "gif-balanced",
@@ -177,6 +187,21 @@ describe("project contract", () => {
       preset: "gif-balanced",
       container: "gif",
       codec: "gif",
+      encoder: "auto",
+      captionMode: "burn-in",
+      chapterMode: "none",
+    })
+    expect(
+      projectExportSettingsSchema.parse({
+        preset: "webp-balanced",
+        container: "webp",
+        codec: "webp",
+        chapterMode: "none",
+      }),
+    ).toEqual({
+      preset: "webp-balanced",
+      container: "webp",
+      codec: "webp",
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "none",

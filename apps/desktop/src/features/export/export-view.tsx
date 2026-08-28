@@ -38,6 +38,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@recordforge/ui"
+import { formatDuration } from "../../lib/format"
 import { UploadDialog } from "../storage/components/upload-dialog"
 
 interface ExportViewProps {
@@ -50,9 +51,9 @@ interface ExportViewProps {
   chapterMode?: RenderChapterMode
   onChapterModeChange?: (mode: RenderChapterMode) => void
   markers?: TimelineMarker[]
-  onContainerChange?: (container: "mp4" | "gif") => void
+  onContainerChange?: (container: "mp4" | "gif" | "webp") => void
   onPresetChange?: (preset: ExportPreset) => void
-  onCodecChange?: (codec: "h264" | "hevc" | "gif") => void
+  onCodecChange?: (codec: "h264" | "hevc" | "gif" | "webp") => void
   onEncoderChange?: (encoder: ExportEncoderPreference) => void
   /** Display name of the detected hardware encoder, or null when none was found. */
   hardwareEncoderName?: string | null
@@ -161,6 +162,44 @@ const GIF_PRESETS: Array<{
   },
 ]
 
+const WEBP_PRESETS: Array<{
+  id: ExportPreset
+  label: string
+  description: string
+  details: string
+}> = [
+  {
+    id: "webp-balanced",
+    label: "Balanced WebP",
+    description: "Scaled to 1280px at 24 fps for lightweight, crisp screen demos",
+    details: "WebP · 1280px max · 24 fps · 24-bit color",
+  },
+  {
+    id: "webp-fast",
+    label: "Fast WebP (Web & Chat)",
+    description: "Compact 800px at 15 fps optimized for Slack, Discord, and PRs",
+    details: "WebP · 800px max · 15 fps · Ultra-compact",
+  },
+  {
+    id: "webp-high-quality",
+    label: "High quality WebP",
+    description: "Full resolution at 30 fps with high quality for sharp UI text",
+    details: "WebP · Original px · 30 fps · Max fidelity",
+  },
+  {
+    id: "webp-lossless",
+    label: "Lossless WebP",
+    description: "Pixel-perfect lossless rendering for text and vector coding demos",
+    details: "WebP · Original px · 30 fps · Lossless",
+  },
+  {
+    id: "selected-range",
+    label: "Selected range",
+    description: "Export chosen range as animated WebP",
+    details: "Non-destructive · animated WebP",
+  },
+]
+
 function isPresetSupported(
   preset: ExportPreset,
   canvas: TimelineCanvas | undefined,
@@ -174,10 +213,14 @@ function isPresetSupported(
 
 function normalizePreset(
   preset: ExportPreset | undefined,
-  container: "mp4" | "gif" = "mp4",
+  container: "mp4" | "gif" | "webp" = "mp4",
 ): ExportPreset {
   if (!preset || preset === "default-mp4") {
-    return container === "gif" ? "gif-balanced" : "balanced"
+    return container === "webp"
+      ? "webp-balanced"
+      : container === "gif"
+        ? "gif-balanced"
+        : "balanced"
   }
   return preset
 }
@@ -225,9 +268,15 @@ export function ExportView({
 }: ExportViewProps) {
   const container =
     exportSettings?.container ??
-    (exportSettings?.preset?.startsWith("gif-") ? "gif" : "mp4")
+    (exportSettings?.preset?.startsWith("gif-")
+      ? "gif"
+      : exportSettings?.preset?.startsWith("webp-")
+        ? "webp"
+        : "mp4")
   const isGif = container === "gif"
-  const presets = isGif ? GIF_PRESETS : MP4_PRESETS
+  const isWebp = container === "webp"
+  const isAnimation = isGif || isWebp
+  const presets = isWebp ? WEBP_PRESETS : isGif ? GIF_PRESETS : MP4_PRESETS
 
   const [selectedPreset, setSelectedPreset] = useState<ExportPreset>(
     normalizePreset(exportSettings?.preset, container),
@@ -284,10 +333,15 @@ export function ExportView({
     if (preset === "selected-range") onRangeChange?.(selectedRange)
   }
 
-  function handleFormatChange(nextContainer: "mp4" | "gif") {
+  function handleFormatChange(nextContainer: "mp4" | "gif" | "webp") {
     if (nextContainer === container) return
     onContainerChange?.(nextContainer)
-    const nextPreset: ExportPreset = nextContainer === "gif" ? "gif-balanced" : "balanced"
+    const nextPreset: ExportPreset =
+      nextContainer === "webp"
+        ? "webp-balanced"
+        : nextContainer === "gif"
+          ? "gif-balanced"
+          : "balanced"
     setSelectedPreset(nextPreset)
     onPresetChange?.(nextPreset)
   }
@@ -320,22 +374,35 @@ export function ExportView({
           <ArrowLeft className="size-4" aria-hidden />
           <span>Editor</span>
           <span aria-hidden>&gt;</span>
-          <span className="font-semibold text-foreground">{projectName}</span>
+          <span className="text-foreground">Export</span>
         </button>
+
+        <div className="flex items-center gap-3">
+          <Badge variant="outline" className="font-mono text-[11px]">
+            {formatDuration(durationMs)}
+          </Badge>
+          {canvas ? (
+            <Badge variant="outline" className="font-mono text-[11px]">
+              {canvas.width}×{canvas.height} @ {canvas.fps}fps
+            </Badge>
+          ) : null}
+        </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-5xl flex-col p-8 pb-12">
-          <h1 className="mb-1 font-serif text-3xl font-bold tracking-tight text-foreground">
-            Export project
-          </h1>
-          <p className="mb-6 text-sm text-subtle-foreground">
-            Render the saved project with the same timeline semantics used by preview.
-          </p>
+      <div className="flex-1 overflow-y-auto p-8">
+        <div className="mx-auto max-w-5xl">
+          <div className="mb-6 flex flex-col gap-1">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground font-display">
+              Export {projectName}
+            </h1>
+            <p className="text-sm text-subtle-foreground">
+              Configure video encoding, animations, audio tracks, and chapter metadata.
+            </p>
+          </div>
 
           {error ? (
             <div
-              className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-recording/30 bg-recording/10 px-3 py-2 text-sm"
+              className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-recording/30 bg-recording/10 px-3 py-2 text-xs text-recording"
               role="alert"
             >
               <span>{error}</span>
@@ -354,7 +421,7 @@ export function ExportView({
             >
               <span className="flex items-center gap-2">
                 <Check className="size-4 text-success" aria-hidden />
-                Export complete. The validated {isGif ? "GIF" : "MP4"} is ready.
+                Export complete. The validated {isWebp ? "WebP" : isGif ? "GIF" : "MP4"} is ready.
               </span>
               <div className="flex items-center gap-2">
                 <Button
@@ -424,13 +491,13 @@ export function ExportView({
               <Film className="size-4 text-track-screen" aria-hidden />
               <span>Export format</span>
             </div>
-            <div className="flex w-full max-w-xs rounded-lg border border-border bg-surface p-1">
+            <div className="flex w-full max-w-md rounded-lg border border-border bg-surface p-1">
               <button
                 type="button"
                 disabled={isRunning}
                 onClick={() => handleFormatChange("mp4")}
                 className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
-                  !isGif
+                  !isAnimation
                     ? "bg-primary text-primary-foreground shadow-sm"
                     : "text-subtle-foreground hover:text-foreground"
                 }`}
@@ -448,6 +515,18 @@ export function ExportView({
                 }`}
               >
                 Animated GIF
+              </button>
+              <button
+                type="button"
+                disabled={isRunning}
+                onClick={() => handleFormatChange("webp")}
+                className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+                  isWebp
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-subtle-foreground hover:text-foreground"
+                }`}
+              >
+                Animated WebP
               </button>
             </div>
           </div>
@@ -476,7 +555,9 @@ export function ExportView({
                   >
                     <div className="flex items-start justify-between gap-2">
                       <span className="font-semibold text-foreground">{preset.label}</span>
-                      {preset.id === "balanced" || preset.id === "gif-balanced" ? (
+                      {preset.id === "balanced" ||
+                      preset.id === "gif-balanced" ||
+                      preset.id === "webp-balanced" ? (
                         <Badge variant="accent">Recommended</Badge>
                       ) : null}
                     </div>
@@ -528,7 +609,7 @@ export function ExportView({
             >
               <span className="flex items-center gap-2 font-label">
                 <Film className="size-4 text-track-screen" aria-hidden />
-                {isGif ? "GIF settings" : "Video and captions"}
+                {isWebp ? "WebP settings" : isGif ? "GIF settings" : "Video and captions"}
               </span>
               {videoAccordionOpen ? (
                 <ChevronUp className="size-4" />
@@ -538,7 +619,17 @@ export function ExportView({
             </button>
             {videoAccordionOpen ? (
               <div className="flex flex-col gap-5 border-t border-border p-5">
-                {isGif ? (
+                {isWebp ? (
+                  <div className="flex flex-col gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
+                    <p>
+                      Animated WebP renders with true 24-bit full color, smooth frame rates, and
+                      efficient compression. Cursor movements, highlights, and canvas overlays are burned in directly.
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      💡 <strong>50–80% smaller than GIF:</strong> WebP delivers crisp high-resolution playback with significantly lower file sizes. Ideal for modern documentation, GitHub PRs, Notion, and chat apps.
+                    </p>
+                  </div>
+                ) : isGif ? (
                   <div className="flex flex-col gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
                     <p>
                       GIF exports render video with an optimized 256-color palette, smooth dithering,
@@ -550,7 +641,7 @@ export function ExportView({
                   </div>
                 ) : null}
 
-                {!isGif ? (
+                {!isAnimation ? (
                   <>
                     <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
                       Codec
@@ -616,7 +707,7 @@ export function ExportView({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="burn-in">Burn into video</SelectItem>
-                      {!isGif ? <SelectItem value="sidecar">Write SRT sidecar</SelectItem> : null}
+                      {!isAnimation ? <SelectItem value="sidecar">Write SRT sidecar</SelectItem> : null}
                       <SelectItem value="none">Do not export captions</SelectItem>
                     </SelectContent>
                   </Select>
@@ -652,7 +743,7 @@ export function ExportView({
             </button>
             {chaptersAccordionOpen ? (
               <div className="flex flex-col gap-5 border-t border-border p-5">
-                {!isGif ? (
+                {!isAnimation ? (
                   <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
                     Chapter delivery
                     <Select
@@ -678,7 +769,7 @@ export function ExportView({
                   </label>
                 ) : (
                   <p className="text-xs text-subtle-foreground">
-                    GIF containers do not support embedded chapter tracks. You can still copy YouTube chapter timestamps below.
+                    {isWebp ? "WebP" : "GIF"} containers do not support embedded chapter tracks. You can still copy YouTube chapter timestamps below.
                   </p>
                 )}
 
@@ -742,8 +833,8 @@ export function ExportView({
             </button>
             {audioAccordionOpen ? (
               <div className="border-t border-border p-5 text-xs text-subtle-foreground">
-                {isGif
-                  ? "Animated GIFs do not support audio tracks. The exported file will be video-only."
+                {isAnimation
+                  ? `Animated ${isWebp ? "WebP" : "GIF"} files do not support audio tracks. The exported file will be video-only.`
                   : "Audio tracks use the saved mute, solo, gain, fade, role, and speed settings."}
               </div>
             ) : null}
@@ -760,7 +851,11 @@ export function ExportView({
             <span className="truncate font-mono text-xs font-semibold text-foreground">
               {projectName} ·{" "}
               {canvas ? `${canvas.width}×${canvas.height} · ${canvas.fps}fps` : "Source canvas"} ·{" "}
-              {isGif ? "Animated GIF (looping)" : (exportSettings?.codec?.toUpperCase() ?? "H264")}
+              {isWebp
+                ? "Animated WebP (looping)"
+                : isGif
+                  ? "Animated GIF (looping)"
+                  : (exportSettings?.codec?.toUpperCase() ?? "H264")}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3">
@@ -787,7 +882,7 @@ export function ExportView({
         onOpenChange={setUploadDialogOpen}
         localPath={exportJob?.outputs?.outputPath ?? ""}
         exportId={exportJob?.id}
-        defaultName={`${projectName ?? "export"}.${isGif ? "gif" : "mp4"}`}
+        defaultName={`${projectName ?? "export"}.${isWebp ? "webp" : isGif ? "gif" : "mp4"}`}
       />
     </div>
   )

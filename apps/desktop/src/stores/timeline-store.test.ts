@@ -114,4 +114,81 @@ describe("TimelineStore Export Settings Actions", () => {
     expect(updated?.exportSettings.container).toBe("gif")
     expect(updated?.exportSettings.codec).toBe("gif")
   })
+
+  it("switches container to webp and automatically sets webp-balanced preset and webp codec", () => {
+    useTimelineStore.setState({
+      project: createMockProject(),
+    })
+
+    const { setExportContainer } = useTimelineStore.getState()
+    setExportContainer("webp")
+
+    const updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.container).toBe("webp")
+    expect(updated?.exportSettings.preset).toBe("webp-balanced")
+    expect(updated?.exportSettings.codec).toBe("webp")
+    expect(updated?.exportSettings.chapterMode).toBe("none")
+  })
+
+  it("switches container from webp back to mp4 and restores standard balanced preset and h264 codec", () => {
+    useTimelineStore.setState({
+      project: {
+        ...createMockProject(),
+        exportSettings: {
+          preset: "webp-high-quality",
+          container: "webp",
+          codec: "webp",
+          encoder: "auto",
+          captionMode: "burn-in",
+          chapterMode: "none",
+        },
+      },
+    })
+
+    const { setExportContainer } = useTimelineStore.getState()
+    setExportContainer("mp4")
+
+    const updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.container).toBe("mp4")
+    expect(updated?.exportSettings.preset).toBe("balanced")
+    expect(updated?.exportSettings.codec).toBe("h264")
+  })
+
+  it("selecting a webp preset updates container and codec to webp", () => {
+    useTimelineStore.setState({
+      project: createMockProject(),
+    })
+
+    const { setExportPreset } = useTimelineStore.getState()
+    setExportPreset("webp-fast")
+
+    const updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.preset).toBe("webp-fast")
+    expect(updated?.exportSettings.container).toBe("webp")
+    expect(updated?.exportSettings.codec).toBe("webp")
+  })
+
+  it("selecting selected-range while in webp mode retains webp container", () => {
+    useTimelineStore.setState({
+      project: {
+        ...createMockProject(),
+        exportSettings: {
+          preset: "webp-balanced",
+          container: "webp",
+          codec: "webp",
+          encoder: "auto",
+          captionMode: "burn-in",
+          chapterMode: "none",
+        },
+      },
+    })
+
+    const { setExportPreset } = useTimelineStore.getState()
+    setExportPreset("selected-range")
+
+    const updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.preset).toBe("selected-range")
+    expect(updated?.exportSettings.container).toBe("webp")
+    expect(updated?.exportSettings.codec).toBe("webp")
+  })
 })
