@@ -2659,7 +2659,8 @@ fn validate_export_output(
         {
             return Err(InternalError::Media("export dimensions failed validation".into()).into());
         }
-    } else if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32) {
+    } else if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32)
+    {
         return Err(InternalError::Media("export dimensions failed validation".into()).into());
     }
     let expected_video_codec = if settings.container == "gif" || settings.codec == "gif" {
@@ -2680,7 +2681,11 @@ fn validate_export_output(
     }
     if settings.container == "gif" || settings.container == "webp" {
         if metadata.has_audio {
-            return Err(InternalError::Media(format!("{} export must not contain audio", settings.container)).into());
+            return Err(InternalError::Media(format!(
+                "{} export must not contain audio",
+                settings.container
+            ))
+            .into());
         }
         return Ok(());
     }
@@ -6378,8 +6383,7 @@ mod tests {
             Err(_) => return,
         };
 
-        let temp_dir =
-            std::env::temp_dir().join(format!("rf-test-gif-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!("rf-test-gif-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let screen_path = temp_dir.join("screen.mp4");
         let out_path = temp_dir.join("out_demo.gif");
@@ -6473,7 +6477,11 @@ mod tests {
         assert!(out_path.is_file(), "exported gif should exist");
 
         let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
-        assert!(validation.is_ok(), "validate gif failed: {:?}", validation.err());
+        assert!(
+            validation.is_ok(),
+            "validate gif failed: {:?}",
+            validation.err()
+        );
     }
 
     #[test]
@@ -6487,8 +6495,7 @@ mod tests {
             Err(_) => return,
         };
 
-        let temp_dir =
-            std::env::temp_dir().join(format!("rf-test-webp-{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!("rf-test-webp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let screen_path = temp_dir.join("screen.mp4");
         let out_path = temp_dir.join("out_demo.webp");
@@ -6582,7 +6589,11 @@ mod tests {
         assert!(out_path.is_file(), "exported webp should exist");
 
         let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
-        assert!(validation.is_ok(), "validate webp failed: {:?}", validation.err());
+        assert!(
+            validation.is_ok(),
+            "validate webp failed: {:?}",
+            validation.err()
+        );
     }
 
     #[test]
@@ -6691,7 +6702,11 @@ mod tests {
         assert!(out_path.is_file(), "exported downscaled gif should exist");
 
         let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
-        assert!(validation.is_ok(), "validate downscaled gif failed: {:?}", validation.err());
+        assert!(
+            validation.is_ok(),
+            "validate downscaled gif failed: {:?}",
+            validation.err()
+        );
     }
 
     #[test]
