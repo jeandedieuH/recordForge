@@ -623,20 +623,27 @@ export function ExportView({
                   <div className="flex flex-col gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
                     <p>
                       Animated WebP renders with true 24-bit full color, smooth frame rates, and
-                      efficient compression. Cursor movements, highlights, and canvas overlays are burned in directly.
+                      efficient compression. Cursor movements, highlights, and canvas overlays are
+                      burned in directly.
                     </p>
                     <p className="text-[11px] text-muted-foreground">
-                      💡 <strong>50–80% smaller than GIF:</strong> WebP delivers crisp high-resolution playback with significantly lower file sizes. Ideal for modern documentation, GitHub PRs, Notion, and chat apps.
+                      💡 <strong>50–80% smaller than GIF:</strong> WebP delivers crisp
+                      high-resolution playback with significantly lower file sizes. Ideal for modern
+                      documentation, GitHub PRs, Notion, and chat apps.
                     </p>
                   </div>
                 ) : isGif ? (
                   <div className="flex flex-col gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3.5 text-xs text-subtle-foreground">
                     <p>
-                      GIF exports render video with an optimized 256-color palette, smooth dithering,
-                      and infinite looping. Cursor movements, highlights, and canvas overlays are burned in directly.
+                      GIF exports render video with an optimized 256-color palette, smooth
+                      dithering, and infinite looping. Cursor movements, highlights, and canvas
+                      overlays are burned in directly.
                     </p>
                     <p className="text-[11px] text-muted-foreground">
-                      💡 <strong>Tip for smaller files:</strong> Unlike MP4s with temporal compression, GIFs store every frame as an uncompressed bitmap. Use <strong>Balanced GIF</strong> (540p) or <strong>Fast GIF</strong> (360p), or select a 3–8s <strong>Selected range</strong> for compact uploads.
+                      💡 <strong>Tip for smaller files:</strong> Unlike MP4s with temporal
+                      compression, GIFs store every frame as an uncompressed bitmap. Use{" "}
+                      <strong>Balanced GIF</strong> (540p) or <strong>Fast GIF</strong> (360p), or
+                      select a 3–8s <strong>Selected range</strong> for compact uploads.
                     </p>
                   </div>
                 ) : null}
@@ -707,7 +714,9 @@ export function ExportView({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="burn-in">Burn into video</SelectItem>
-                      {!isAnimation ? <SelectItem value="sidecar">Write SRT sidecar</SelectItem> : null}
+                      {!isAnimation ? (
+                        <SelectItem value="sidecar">Write SRT sidecar</SelectItem>
+                      ) : null}
                       <SelectItem value="none">Do not export captions</SelectItem>
                     </SelectContent>
                   </Select>
@@ -769,7 +778,8 @@ export function ExportView({
                   </label>
                 ) : (
                   <p className="text-xs text-subtle-foreground">
-                    {isWebp ? "WebP" : "GIF"} containers do not support embedded chapter tracks. You can still copy YouTube chapter timestamps below.
+                    {isWebp ? "WebP" : "GIF"} containers do not support embedded chapter tracks. You
+                    can still copy YouTube chapter timestamps below.
                   </p>
                 )}
 

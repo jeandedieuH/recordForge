@@ -340,8 +340,10 @@ export function AppShell() {
   async function handleStartExport() {
     if (!timelineRecording) return
     try {
-      const isGif = exportSettings?.container === "gif" || exportSettings?.preset?.startsWith("gif-")
-      const isWebp = exportSettings?.container === "webp" || exportSettings?.preset?.startsWith("webp-")
+      const isGif =
+        exportSettings?.container === "gif" || exportSettings?.preset?.startsWith("gif-")
+      const isWebp =
+        exportSettings?.container === "webp" || exportSettings?.preset?.startsWith("webp-")
       const extension = isGif ? "gif" : isWebp ? "webp" : "mp4"
       let defaultPath = `${timelineRecording.name}-edited.${extension}`
       if (isTauri()) {

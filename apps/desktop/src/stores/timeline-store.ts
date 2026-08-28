@@ -997,8 +997,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       ? "gif"
       : isWebp
         ? "webp"
-        : project.exportSettings.container === "gif" ||
-            project.exportSettings.container === "webp"
+        : project.exportSettings.container === "gif" || project.exportSettings.container === "webp"
           ? "mp4"
           : project.exportSettings.container
     const codec: "h264" | "hevc" | "gif" | "webp" = isGif
