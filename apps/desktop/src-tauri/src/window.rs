@@ -44,9 +44,9 @@ impl FloatingWindow {
     pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
         if let Some(window) = app.get_webview_window("floating") {
             tracing::info!("floating window already exists, showing and focusing");
-            window.set_content_protected(true).map_err(|error| {
-                InternalError::Unknown(format!("protect floating window from capture: {error}"))
-            })?;
+            if let Err(error) = window.set_content_protected(true) {
+                tracing::warn!(error = ?error, "protect floating window from capture failed");
+            }
             let _ = window.show();
             let _ = window.set_focus();
             return Ok(());
@@ -134,9 +134,9 @@ impl BoundaryWindow {
             window.set_size(size).map_err(|error| {
                 InternalError::Unknown(format!("size boundary window: {error}"))
             })?;
-            window.set_content_protected(true).map_err(|error| {
-                InternalError::Unknown(format!("protect boundary window from capture: {error}"))
-            })?;
+            if let Err(error) = window.set_content_protected(true) {
+                tracing::warn!(error = ?error, "protect boundary window from capture failed");
+            }
             let _ = window.set_ignore_cursor_events(true);
             let _ = window.show();
             return Ok(());

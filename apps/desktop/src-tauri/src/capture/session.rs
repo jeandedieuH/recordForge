@@ -530,11 +530,40 @@ impl Recorder {
             Ok(capture) => capture,
             Err(error) if self.ddagrab_available => {
                 tracing::warn!(%error, "ddagrab display capture failed; falling back to gdigrab");
-                FfmpegCapture::start(
+                match FfmpegCapture::start(
                     &ffmpeg,
                     config,
                     profile,
                     &encoder,
+                    &screen_output.to_string_lossy(),
+                    index,
+                    Some(Arc::clone(&manifest)),
+                    false,
+                ) {
+                    Ok(capture) => capture,
+                    Err(gdi_err) if encoder != "libx264" => {
+                        tracing::warn!(%gdi_err, "gdigrab with hardware encoder failed; falling back to libx264 software encoder");
+                        FfmpegCapture::start(
+                            &ffmpeg,
+                            config,
+                            profile,
+                            "libx264",
+                            &screen_output.to_string_lossy(),
+                            index,
+                            Some(manifest),
+                            false,
+                        )?
+                    }
+                    Err(gdi_err) => return Err(gdi_err),
+                }
+            }
+            Err(error) if encoder != "libx264" => {
+                tracing::warn!(%error, "capture with hardware encoder failed; falling back to libx264 software encoder");
+                FfmpegCapture::start(
+                    &ffmpeg,
+                    config,
+                    profile,
+                    "libx264",
                     &screen_output.to_string_lossy(),
                     index,
                     Some(manifest),
@@ -568,45 +597,49 @@ impl Recorder {
 
         let mut audio = Vec::new();
         if config.capture_microphone {
-            let device_id = config.microphone_device_id.clone().ok_or_else(|| {
-                crate::errors::InternalError::Capture("microphone device is missing".into())
-            })?;
             let output_path = work_dir.join(format!("mic_{:03}.wav", index));
-            let track = super::audio::start_audio_track(
+            match super::audio::start_audio_track(
                 AudioCaptureKind::Microphone,
-                Some(device_id),
+                config.microphone_device_id.clone(),
                 output_path,
                 timeline_origin,
-            )
-            .map_err(|error| {
-                crate::errors::InternalError::Capture(format!("start microphone capture: {error}"))
-            })?;
-            audio.push(ActiveAudioCapture {
-                kind: AudioCaptureKind::Microphone,
-                track,
-            });
+            ) {
+                Ok(track) => {
+                    audio.push(ActiveAudioCapture {
+                        kind: AudioCaptureKind::Microphone,
+                        track,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to start microphone capture; continuing recording without microphone"
+                    );
+                }
+            }
         }
 
         if config.capture_system_audio {
-            let device_id = config.system_audio_device_id.clone().ok_or_else(|| {
-                crate::errors::InternalError::Capture("system audio device is missing".into())
-            })?;
             let output_path = work_dir.join(format!("sys_{:03}.wav", index));
-            let track = super::audio::start_audio_track(
+            match super::audio::start_audio_track(
                 AudioCaptureKind::SystemLoopback,
-                Some(device_id),
+                config.system_audio_device_id.clone(),
                 output_path,
                 timeline_origin,
-            )
-            .map_err(|error| {
-                crate::errors::InternalError::Capture(format!(
-                    "start system audio capture: {error}"
-                ))
-            })?;
-            audio.push(ActiveAudioCapture {
-                kind: AudioCaptureKind::SystemLoopback,
-                track,
-            });
+            ) {
+                Ok(track) => {
+                    audio.push(ActiveAudioCapture {
+                        kind: AudioCaptureKind::SystemLoopback,
+                        track,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to start system audio capture; continuing recording without system audio"
+                    );
+                }
+            }
         }
 
         let mut webcam = None;

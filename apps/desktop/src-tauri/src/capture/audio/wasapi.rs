@@ -542,15 +542,45 @@ fn capture_worker_inner(
         WasapiCaptureKind::SystemLoopback => Direction::Render,
     };
     let device = match options.device_id.as_deref() {
-        Some(device_id) => enumerator
-            .get_device(device_id)
-            .map_err(|error| error.to_string()),
-        None => enumerator
+        Some(device_id)
+            if device_id != "default"
+                && device_id != "system-loopback"
+                && !device_id.trim().is_empty() =>
+        {
+            match enumerator.get_device(device_id) {
+                Ok(dev) => Ok(dev),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        device_id,
+                        "failed to open specific WASAPI endpoint; falling back to default device"
+                    );
+                    enumerator
+                        .get_default_device(&endpoint_direction)
+                        .map_err(|error| error.to_string())
+                }
+            }
+        }
+        _ => enumerator
             .get_default_device(&endpoint_direction)
             .map_err(|error| error.to_string()),
     };
     let device = match device {
-        Ok(device) => device,
+        Ok(device) if device.get_direction() == endpoint_direction => device,
+        Ok(_) => {
+            tracing::warn!(
+                "selected WASAPI endpoint direction mismatch; falling back to default device"
+            );
+            match enumerator.get_default_device(&endpoint_direction) {
+                Ok(default_dev) => default_dev,
+                Err(err) => {
+                    return signal_start_error(
+                        &ready_tx,
+                        format!("open default WASAPI {} endpoint: {err}", endpoint_direction),
+                    );
+                }
+            }
+        }
         Err(error) => {
             return signal_start_error(
                 &ready_tx,
@@ -558,15 +588,6 @@ fn capture_worker_inner(
             )
         }
     };
-    if device.get_direction() != endpoint_direction {
-        return signal_start_error(
-            &ready_tx,
-            format!(
-                "selected WASAPI endpoint direction does not match {} capture",
-                endpoint_direction
-            ),
-        );
-    }
 
     let mut audio_client = match device.get_iaudioclient() {
         Ok(client) => client,

@@ -533,6 +533,18 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         state = get()
       }
 
+      // Ensure audio devices are loaded and reconciled before starting capture
+      if (!state.audioDevicesLoaded) {
+        await get().loadAudioDevices()
+        state = get()
+      }
+
+      // Ensure video devices are loaded if webcam is requested
+      if (!state.videoDevicesLoaded && state.preferences.webcamEnabled) {
+        await get().loadVideoDevices()
+        state = get()
+      }
+
       let source = state.selectedSource
       if (!source && state.sources.length > 0) {
         const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
@@ -551,15 +563,57 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         return
       }
 
+      let micId = state.selectedMicrophoneId
+      if (state.preferences.microphoneEnabled) {
+        if (!micId || micId === "default") {
+          const mics = state.audioDevices.filter((d) => d.kind === "microphone")
+          const rec = reconcileMicrophone(mics, state.preferences)
+          micId = rec.id
+          if (micId && micId !== state.selectedMicrophoneId) {
+            set({ selectedMicrophoneId: micId })
+          }
+        }
+      } else {
+        micId = ""
+      }
+
+      let sysId = state.selectedSystemAudioId
+      if (state.preferences.systemAudioEnabled) {
+        if (!sysId || sysId === "system-loopback") {
+          const sysAudios = state.audioDevices.filter((d) => d.kind === "system")
+          const rec = reconcileSystemAudio(sysAudios, state.preferences)
+          sysId = rec.id
+          if (sysId && sysId !== state.selectedSystemAudioId) {
+            set({ selectedSystemAudioId: sysId })
+          }
+        }
+      } else {
+        sysId = ""
+      }
+
+      let camId = state.selectedWebcamId
+      if (state.preferences.webcamEnabled) {
+        if (!camId || camId === "default") {
+          const cams = state.videoDevices.filter((d) => d.kind === "webcam")
+          const rec = reconcileWebcam(cams, state.preferences)
+          camId = rec.id
+          if (camId && camId !== state.selectedWebcamId) {
+            set({ selectedWebcamId: camId })
+          }
+        }
+      } else {
+        camId = ""
+      }
+
       const config: RecordingConfig = {
         source,
         profile: state.selectedProfileId,
-        captureMicrophone: !!state.selectedMicrophoneId,
-        captureSystemAudio: !!state.selectedSystemAudioId,
-        captureWebcam: !!state.selectedWebcamId,
-        microphoneDeviceId: state.selectedMicrophoneId || undefined,
-        systemAudioDeviceId: state.selectedSystemAudioId || undefined,
-        webcamDeviceId: state.selectedWebcamId || undefined,
+        captureMicrophone: Boolean(micId),
+        captureSystemAudio: Boolean(sysId),
+        captureWebcam: Boolean(camId),
+        microphoneDeviceId: micId || undefined,
+        systemAudioDeviceId: sysId || undefined,
+        webcamDeviceId: camId || undefined,
         smartZoomEnabled: state.preferences.smartZoomEnabled,
         smartZoomPreset: state.preferences.smartZoomPreset,
       }
@@ -570,12 +624,12 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         sourceName: source.name,
         regionBounds: source.kind === "region" ? source.bounds : get().preferences.regionBounds,
         profile: state.selectedProfileId,
-        microphoneEnabled: Boolean(state.selectedMicrophoneId),
-        microphoneId: state.selectedMicrophoneId || get().preferences.microphoneId,
-        systemAudioEnabled: Boolean(state.selectedSystemAudioId),
-        systemAudioId: state.selectedSystemAudioId || get().preferences.systemAudioId,
-        webcamEnabled: Boolean(state.selectedWebcamId),
-        webcamId: state.selectedWebcamId || get().preferences.webcamId,
+        microphoneEnabled: Boolean(micId),
+        microphoneId: micId || get().preferences.microphoneId,
+        systemAudioEnabled: Boolean(sysId),
+        systemAudioId: sysId || get().preferences.systemAudioId,
+        webcamEnabled: Boolean(camId),
+        webcamId: camId || get().preferences.webcamId,
       })
 
       const configuredCountdown = isTauri()

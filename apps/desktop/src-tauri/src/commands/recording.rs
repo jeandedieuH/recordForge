@@ -303,16 +303,8 @@ fn start_prepared_session(
     session_id: &str,
     bounds: crate::capture::source::Bounds,
 ) -> Result<()> {
-    // Build auxiliary windows before starting capture so a missing control path
-    // aborts startup instead of leaving an active, uncontrollable recording.
-    open_recording_windows(app, bounds)?;
-
-    let result = state.recorder.start_prepared(session_id);
-    if let Err(error) = result {
-        cleanup_recording_windows(app);
-        return Err(error);
-    }
-
+    state.recorder.start_prepared(session_id)?;
+    open_recording_windows_async(app, bounds);
     Ok(())
 }
 
