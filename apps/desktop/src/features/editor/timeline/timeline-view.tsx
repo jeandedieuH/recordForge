@@ -1699,6 +1699,7 @@ export function TimelineView({
                   playheadMs={view.playheadMs}
                   isPlaying={view.isPlaying}
                   playbackRate={view.playbackRate}
+                  frameMs={frameMs}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
                   onSelectClip={(clipId) =>
@@ -1826,6 +1827,7 @@ export function TimelineView({
               playheadMs={view.playheadMs}
               isPlaying={view.isPlaying}
               playbackRate={view.playbackRate}
+              frameMs={frameMs}
               assetPaths={assetPaths}
               workDir={recording?.workDir}
             />

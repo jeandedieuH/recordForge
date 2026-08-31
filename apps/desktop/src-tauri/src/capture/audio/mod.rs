@@ -12,11 +12,11 @@ pub mod wasapi;
 pub mod wav;
 
 use std::path::PathBuf;
-use std::time::Instant;
 
 pub use wav::{
-    align_wav_to_duration, finalize_wav, frames_for_duration, loopback_packet_start_frames,
-    repair_wav_header_if_needed, write_wav_header, AudioSampleFormat, DEFAULT_CHANNELS,
+    align_wav_to_duration, finalize_wav, frames_for_duration, frames_to_duration,
+    loopback_packet_start_frames, read_wav_format, repair_wav_header_if_needed,
+    snap_wav_to_whole_frames, write_wav_header, AudioSampleFormat, WavFormat, DEFAULT_CHANNELS,
     DEFAULT_SAMPLE_RATE, SILENCE_CHUNK_FRAMES, WAV_HEADER_SIZE,
 };
 
@@ -35,7 +35,7 @@ pub use coreaudio::{
 // Re-export Linux symbols
 pub use linux::{enumerate_linux_audio_devices, LinuxAudioCaptureSession, LinuxAudioOptions};
 
-use crate::capture::traits::AudioTrack;
+use crate::capture::traits::{AudioTrack, TimelineAnchor};
 use crate::errors::Result;
 
 /// Cross-platform audio device enumeration.
@@ -75,7 +75,7 @@ pub fn start_audio_track(
     kind: AudioCaptureKind,
     device_id: Option<String>,
     output_path: PathBuf,
-    timeline_origin: Instant,
+    timeline_origin: TimelineAnchor,
 ) -> Result<Box<dyn AudioTrack>> {
     #[cfg(windows)]
     {
@@ -86,11 +86,11 @@ pub fn start_audio_track(
         let options = match wasapi_kind {
             wasapi::WasapiCaptureKind::Microphone => {
                 wasapi::WasapiCaptureOptions::microphone(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_anchor(timeline_origin)
             }
             wasapi::WasapiCaptureKind::SystemLoopback => {
                 wasapi::WasapiCaptureOptions::system_loopback(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_anchor(timeline_origin)
             }
         };
         let session = wasapi::WasapiCaptureSession::start(options)?;
@@ -102,11 +102,11 @@ pub fn start_audio_track(
         let options = match kind {
             AudioCaptureKind::Microphone => {
                 coreaudio::AudioCaptureOptions::microphone(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_origin(timeline_origin.instant)
             }
             AudioCaptureKind::SystemLoopback => {
                 coreaudio::AudioCaptureOptions::system_loopback(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_origin(timeline_origin.instant)
             }
         };
         let session = coreaudio::CoreAudioCaptureSession::start(options)?;
@@ -118,11 +118,11 @@ pub fn start_audio_track(
         let options = match kind {
             AudioCaptureKind::Microphone => {
                 linux::LinuxAudioOptions::microphone(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_origin(timeline_origin.instant)
             }
             AudioCaptureKind::SystemLoopback => {
                 linux::LinuxAudioOptions::system_monitor(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_origin(timeline_origin.instant)
             }
         };
         let session = linux::LinuxAudioCaptureSession::start(options)?;
@@ -134,11 +134,11 @@ pub fn start_audio_track(
         let options = match kind {
             AudioCaptureKind::Microphone => {
                 coreaudio::AudioCaptureOptions::microphone(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_origin(timeline_origin.instant)
             }
             AudioCaptureKind::SystemLoopback => {
                 coreaudio::AudioCaptureOptions::system_loopback(device_id, output_path)
-                    .with_timeline_origin(timeline_origin)
+                    .with_timeline_origin(timeline_origin.instant)
             }
         };
         let session = coreaudio::CoreAudioCaptureSession::start(options)?;

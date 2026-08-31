@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { defaultCursorSettings, type TimelineState } from "@recordforge/domain"
-import { createPlaybackClock, shouldCorrectDrift } from "./playback-clock"
+import { computePreviewMediaSync, createPlaybackClock, shouldCorrectDrift } from "./playback-clock"
 
 function makeState(): TimelineState {
   return {
@@ -209,5 +209,95 @@ describe("PlaybackClock", () => {
     clock.reportDrift(3_000, 3_005)
     expect(clock.drift().sampleCount).toBe(2)
     expect(clock.drift().maxDriftMs).toBe(20)
+  })
+
+  it("nudges camera playback within the 60fps hard-seek budget", () => {
+    const clip = makeState().tracks[0].clips[0]
+    const ahead = computePreviewMediaSync({
+      kind: "camera",
+      clip,
+      playheadMs: 2_000,
+      currentTimeMs: 2_020,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 1000 / 60,
+    })
+    const behind = computePreviewMediaSync({
+      kind: "camera",
+      clip,
+      playheadMs: 2_000,
+      currentTimeMs: 1_980,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 1000 / 60,
+    })
+
+    expect(ahead.shouldSeek).toBe(false)
+    expect(ahead.playbackRate).toBeCloseTo(0.98)
+    expect(behind.playbackRate).toBeCloseTo(1.02)
+  })
+
+  it("hard-seeks camera but avoids seeking continuous audio within its click-safe budget", () => {
+    const clip = makeState().tracks[0].clips[0]
+    const camera = computePreviewMediaSync({
+      kind: "camera",
+      clip,
+      playheadMs: 2_000,
+      currentTimeMs: 2_040,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 1000 / 60,
+    })
+    const audio = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 2_000,
+      currentTimeMs: 2_040,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 1000 / 60,
+    })
+    const largeAudioDrift = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 2_000,
+      currentTimeMs: 2_300,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 1000 / 60,
+    })
+
+    expect(camera.shouldSeek).toBe(true)
+    expect(audio.shouldSeek).toBe(false)
+    expect(audio.playbackRate).toBe(1)
+    expect(audio.preservesPitch).toBe(true)
+    expect(largeAudioDrift.shouldSeek).toBe(true)
+  })
+
+  it("seeks paused media at sub-frame precision and pauses outside the clip", () => {
+    const clip = makeState().tracks[0].clips[0]
+    const paused = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 2_000,
+      currentTimeMs: 2_005,
+      playbackRate: 1,
+      isPlaying: false,
+      frameMs: 1000 / 60,
+    })
+    const outside = computePreviewMediaSync({
+      kind: "camera",
+      clip,
+      playheadMs: 12_000,
+      currentTimeMs: 10_000,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 1000 / 60,
+    })
+
+    expect(paused.shouldSeek).toBe(true)
+    expect(paused.shouldPause).toBe(true)
+    expect(outside.shouldPlay).toBe(false)
+    expect(outside.shouldPause).toBe(true)
   })
 })

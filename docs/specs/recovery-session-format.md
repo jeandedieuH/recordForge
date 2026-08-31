@@ -10,7 +10,7 @@
 
 Each recording session creates a directory under `{app_data_dir}/sessions/{session_id}/`:
 
-```
+```text
 sessions/
   {uuid}/
     session.json           # The manifest (authoritative session state)
@@ -97,7 +97,7 @@ stateDiagram-v2
 ### Fragment Fields
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ------- | ------ | ------------- |
 | `index` | `u32` | Zero-based segment index |
 | `fileName` | `string` | File name relative to `workDir` (e.g., `seg_000.mp4`) |
 | `startedAt` | `datetime` | UTC timestamp when FFmpeg started |
@@ -111,7 +111,9 @@ stateDiagram-v2
 ## 4. Manifest Write Protocol
 
 ### Atomic writes
+
 The manifest is written atomically using a temp-file + durable replacement pattern:
+
 1. Serialize to JSON pretty-print
 2. Write to `session.json.tmp`
 3. Flush the temporary file to disk
@@ -120,7 +122,9 @@ The manifest is written atomically using a temp-file + durable replacement patte
 This avoids the Windows overwrite failure mode of a plain `std::fs::rename` and leaves no temporary file after a successful write.
 
 ### Write triggers
+
 The manifest MUST be written on every state transition:
+
 - `Recording` → opened
 - Fragment validated (segment rollover)
 - `Paused` → fragment finalized
@@ -149,7 +153,7 @@ for each session_dir in sessions/:
 ### 5.2 Recovery Classification
 
 | Manifest State | Valid Fragments | Existing `output.mp4` | Classification |
-|----------------|----------------|----------------------|----------------|
+| ---------------- | ---------------- | ---------------------- | ---------------- |
 | `completed` | Any | Any | Skip (already done) |
 | `recording`/`paused`/`finalizing` | > 0 | No | Recoverable — concat fragments |
 | `recording`/`paused`/`finalizing` | > 0 | Yes (> 1KB) | Already recovered or partial — use existing output |
@@ -162,10 +166,11 @@ for each session_dir in sessions/:
 1. Collect manifest fragments and physical `seg_*.mp4` files that are inside the session directory and larger than 1 KB
 2. Sort by numeric segment index
 3. Validate candidate fragments with FFmpeg before concatenation
-4. Create an `output.partial.mp4` concat result and atomically publish `output.mp4`
-5. Validate the published output with FFmpeg
-6. Write `finalizing` metadata, insert the session idempotently into SQLite as `recovered`, then write `state → Completed`
-7. A retry returns the existing row for the same `session_id` rather than creating a duplicate
+4. For each valid segment without an audio stream, mux its orphaned `mic_NNN.wav` / `sys_NNN.wav` assets: repair unfinalized WAV headers, snap any torn trailing frame, then align each WAV to the segment's probed video duration (head-trim the WAV-minus-video startup delta, bounded by the shared plausible-startup cap, and silence-pad or tail-trim to the video duration) before muxing as separate AAC streams
+5. Create an `output.partial.mp4` concat result and atomically publish `output.mp4`
+6. Validate the published output with FFmpeg
+7. Write `finalizing` metadata, insert the session idempotently into SQLite as `recovered`, then write `state → Completed`
+8. A retry returns the existing row for the same `session_id` rather than creating a duplicate
 
 ### 5.4 Recovery Deletion
 
@@ -186,7 +191,7 @@ std::fs::remove_dir_all(&work_dir);
 Each session will track multiple asset types:
 
 | Asset Kind | File Pattern | Track Independence |
-|------------|-------------|-------------------|
+| ------------ | ------------- | ------------------- |
 | `screen` | `seg_NNN.mp4` | Primary video track |
 | `microphone` | `mic_NNN.wav` | Separate audio from native WASAPI |
 | `system_audio` | `sys_NNN.wav` | Separate audio from native WASAPI loopback |
@@ -202,7 +207,7 @@ Microphone and system audio are captured by native WASAPI workers into the indep
 ## 7. Version Migration
 
 | Version | Changes |
-|---------|---------|
+| --------- | --------- |
 | 1 (current) | Initial manifest schema; segment files, native WASAPI audio muxing, and optional standalone webcam asset |
 | 2 (planned) | Add asset registry; persist separate audio assets and periodic rollover config |
 | 3 (Phase 5) | Add project reference; derivative recipe versions |

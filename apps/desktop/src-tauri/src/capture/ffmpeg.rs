@@ -11,6 +11,7 @@ use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::manifest::{RecordingFragment, RecordingManifest, RecordingStats};
 use super::source::{Bounds, CaptureSource};
+use super::traits::TimelineAnchor;
 
 /// Manages a running FFmpeg capture process.
 pub struct FfmpegCapture {
@@ -19,7 +20,7 @@ pub struct FfmpegCapture {
     manifest: Option<Arc<Mutex<RecordingManifest>>>,
     output_path: PathBuf,
     fragment_index: u32,
-    start_time: Instant,
+    timeline_anchor: TimelineAnchor,
 }
 
 impl std::fmt::Debug for FfmpegCapture {
@@ -93,7 +94,7 @@ impl FfmpegCapture {
 
     /// Elapsed milliseconds since this capture was started.
     pub fn elapsed_ms(&self) -> u64 {
-        self.start_time.elapsed().as_millis() as u64
+        self.timeline_anchor.instant.elapsed().as_millis() as u64
     }
 
     pub fn output_path(&self) -> &Path {
@@ -101,7 +102,11 @@ impl FfmpegCapture {
     }
 
     pub fn started_at(&self) -> Instant {
-        self.start_time
+        self.timeline_anchor.instant
+    }
+
+    pub fn timeline_anchor(&self) -> TimelineAnchor {
+        self.timeline_anchor
     }
 
     /// Send the graceful stop signal ("q\n") to FFmpeg immediately and record the
@@ -155,10 +160,10 @@ impl FfmpegCapture {
 
         let mut stats = extract_final_stats(&self.manifest, status.code())?;
 
-        let duration_ms = self.start_time.elapsed().as_millis() as u64;
+        let duration_ms = self.timeline_anchor.instant.elapsed().as_millis() as u64;
         stats.duration_ms = duration_ms;
         stats.quit_span_ms = quit_at
-            .saturating_duration_since(self.start_time)
+            .saturating_duration_since(self.timeline_anchor.instant)
             .as_millis() as u64;
 
         let output_size = std::fs::metadata(&self.output_path)
@@ -673,7 +678,7 @@ fn run(
     // The timeline origin must be captured before FFmpeg startup probing. The
     // old implementation recorded it only after the 400 ms startup window,
     // which made the screen and webcam appear to start at different moments.
-    let start_time = Instant::now();
+    let timeline_anchor = TimelineAnchor::now();
     let mut child = command.spawn().map_err(|e| {
         crate::errors::InternalError::Capture(format!("failed to start ffmpeg: {e}"))
     })?;
@@ -806,7 +811,7 @@ fn run(
         manifest,
         output_path: PathBuf::from(output),
         fragment_index,
-        start_time,
+        timeline_anchor,
     })
 }
 

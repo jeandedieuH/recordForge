@@ -180,7 +180,9 @@ impl SegmentTimeline {
 /// Largest plausible startup gap between process spawn and the first captured
 /// frame. Larger deltas indicate a probe or clock anomaly; alignment falls
 /// back to the wall clock instead of shifting tracks by a bogus amount.
-const MAX_VIDEO_STARTUP_GAP_MS: u64 = 5_000;
+/// Shared with crash recovery, which applies the same rejection rule to its
+/// WAV-derived startup-gap estimate.
+pub(crate) const MAX_VIDEO_STARTUP_GAP_MS: u64 = 5_000;
 
 /// Re-read a window source's current bounds from its HWND and update the
 /// session config when the window moved since it was enumerated. No-op for
@@ -545,7 +547,7 @@ impl Recorder {
         // Every auxiliary capture and the cursor tracker share the screen
         // process origin. Starting the tracker before webcam initialization
         // prevents a slow camera from creating a telemetry blind spot.
-        let timeline_origin = screen.started_at();
+        let timeline_origin = screen.timeline_anchor();
         let bounds = config.source.bounds;
         let capture_bounds = super::cursor::CursorCaptureBounds {
             x: bounds.x,
@@ -559,7 +561,7 @@ impl Recorder {
             capture_bounds,
             profile.width.max(1) as u32,
             profile.height.max(1) as u32,
-            timeline_origin,
+            timeline_origin.instant,
             cursor_time_offset_ms,
             super::cursor_v2::CursorCaptureMode::Full,
         );
@@ -683,27 +685,62 @@ impl Recorder {
         let mut tracks = Vec::new();
         for mut audio_capture in audio_captures.drain(..) {
             let path = audio_capture.track.output_path().to_path_buf();
-            if let Err(error) = audio_capture.track.stop() {
-                tracing::warn!(
-                    error = ?error,
-                    path = %path.display(),
-                    "audio track stopped with an error"
-                );
-                continue;
-            }
-
-            let bytes_written = match audio_capture
-                .track
-                .align_to_timeline(timeline.head_trim, timeline.duration)
-            {
+            let stopped_bytes = match audio_capture.track.stop() {
                 Ok(bytes_written) => bytes_written,
                 Err(error) => {
                     tracing::warn!(
                         error = ?error,
                         path = %path.display(),
-                        "failed to align audio track to video"
+                        "audio track stopped with an error"
                     );
                     continue;
+                }
+            };
+
+            let timing = audio_capture.track.timing();
+            let alignment = if audio_capture.kind == AudioCaptureKind::Microphone {
+                timing.and_then(|timing| {
+                    super::audio::wav::compute_audio_timeline_alignment(
+                        timing,
+                        timeline.head_trim,
+                        timeline.duration,
+                    )
+                })
+            } else {
+                None
+            };
+            let bytes_written = if let Some(alignment) = alignment {
+                info!(
+                    start_offset_ms = alignment.start_offset.as_millis() as u64,
+                    source_duration_ms = alignment.source_duration.as_millis() as u64,
+                    wall_duration_ms = alignment.wall_duration.as_millis() as u64,
+                    drift_ms = alignment.drift_ms,
+                    correction_ppm = ((alignment.pts_scale - 1.0) * 1_000_000.0).round() as i64,
+                    "aligned microphone capture clock to the video timeline"
+                );
+                stopped_bytes
+            } else {
+                if let Some(timing) = timing {
+                    tracing::warn!(
+                        captured_frames = timing.captured_frames,
+                        timestamp_errors = timing.timestamp_errors,
+                        discontinuities = timing.discontinuities,
+                        "microphone timing was not safe to correct; using duration alignment"
+                    );
+                }
+                match audio_capture
+                    .track
+                    .align_to_timeline(timeline.head_trim, timeline.duration)
+                {
+                    Ok(bytes_written) => bytes_written,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = ?error,
+                            path = %path.display(),
+                            "failed to align audio track to video"
+                        );
+                        continue;
+                    }
                 }
             };
             if bytes_written <= 44 {
@@ -722,6 +759,7 @@ impl Recorder {
                     AudioCaptureKind::Microphone => media::AudioTrackKind::Microphone,
                     AudioCaptureKind::SystemLoopback => media::AudioTrackKind::System,
                 },
+                alignment,
             });
         }
 

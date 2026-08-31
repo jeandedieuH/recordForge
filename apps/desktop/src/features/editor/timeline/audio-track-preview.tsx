@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react"
 import type { AudioClip, MediaAudioTrackOutput, TimelineTrack } from "@recordforge/contracts"
+import { computePreviewMediaSync } from "@recordforge/editor-core"
 import { toAssetUrl } from "../../../lib/assets"
 
 interface PreviewAudioTrack {
@@ -16,6 +17,7 @@ interface AudioTrackPreviewProps {
   playheadMs: number
   isPlaying: boolean
   playbackRate: number
+  frameMs: number
   assetPaths?: Record<string, string>
   workDir?: string | null
 }
@@ -74,6 +76,7 @@ export function AudioTrackPreview({
   playheadMs,
   isPlaying,
   playbackRate,
+  frameMs,
   assetPaths = {},
   workDir,
 }: AudioTrackPreviewProps) {
@@ -87,44 +90,35 @@ export function AudioTrackPreview({
     for (const previewTrack of previewTracks) {
       const element = audioRefs.current[previewTrack.id]
       if (!element) continue
+      const canPlay = !previewTrack.muted && previewTrack.volume > 0
+      const decision = computePreviewMediaSync({
+        kind: "audio",
+        clip: previewTrack.clip,
+        playheadMs,
+        currentTimeMs: element.currentTime * 1000,
+        playbackRate,
+        isPlaying: isPlaying && canPlay,
+        frameMs,
+      })
       element.volume = Math.min(
         1,
         previewTrack.volume * fadeMultiplier(previewTrack.clip, playheadMs),
       )
-      element.playbackRate = Math.max(0.25, Math.min(4, previewTrack.clip.speed * playbackRate))
-      element.muted = previewTrack.muted || previewTrack.volume === 0
-    }
-  }, [playbackRate, playheadMs, previewTracks])
-
-  useEffect(() => {
-    for (const previewTrack of previewTracks) {
-      const element = audioRefs.current[previewTrack.id]
-      if (!element) continue
-      const clipTimeMs = Math.max(
-        0,
-        (playheadMs - previewTrack.clip.startMs) * previewTrack.clip.speed +
-          previewTrack.clip.sourceInMs,
-      )
-      if (Math.abs(element.currentTime * 1000 - clipTimeMs) > 80) {
-        element.currentTime = clipTimeMs / 1000
+      element.muted = !canPlay
+      element.preservesPitch = decision.preservesPitch
+      if (Math.abs(element.playbackRate - decision.playbackRate) > 0.001) {
+        element.playbackRate = decision.playbackRate
       }
-    }
-  }, [playheadMs, previewTracks])
-
-  useEffect(() => {
-    for (const previewTrack of previewTracks) {
-      const element = audioRefs.current[previewTrack.id]
-      if (!element) continue
-      const isInsideClip =
-        playheadMs >= previewTrack.clip.startMs &&
-        playheadMs < previewTrack.clip.startMs + previewTrack.clip.durationMs
-      if (isPlaying && isInsideClip && !previewTrack.muted && previewTrack.volume > 0) {
-        void element.play().catch(() => undefined)
-      } else {
+      if (decision.shouldSeek || (decision.shouldPlay && element.paused)) {
+        element.currentTime = decision.targetSourceMs / 1000
+      }
+      if (decision.shouldPlay) {
+        if (element.paused) void element.play().catch(() => undefined)
+      } else if (decision.shouldPause) {
         element.pause()
       }
     }
-  }, [isPlaying, playheadMs, previewTracks])
+  }, [frameMs, isPlaying, playbackRate, playheadMs, previewTracks])
 
   return (
     <div className="hidden" aria-hidden>

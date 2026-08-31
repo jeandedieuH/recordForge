@@ -49,6 +49,25 @@ export interface DriftMetrics {
   lastDriftMs: number
 }
 
+export interface PreviewMediaSyncOptions {
+  kind: "camera" | "audio"
+  clip: TimelineClip
+  playheadMs: number
+  currentTimeMs: number
+  playbackRate: number
+  isPlaying: boolean
+  frameMs: number
+}
+
+export interface PreviewMediaSyncDecision {
+  targetSourceMs: number
+  shouldPlay: boolean
+  shouldPause: boolean
+  shouldSeek: boolean
+  playbackRate: number
+  preservesPitch: boolean
+}
+
 export interface PlaybackClock {
   /** Active preview quality mode. */
   mode: PreviewQualityMode
@@ -317,6 +336,48 @@ export function createPlaybackClock(
     reportDrift,
     drift,
     resetDrift,
+  }
+}
+
+export function computePreviewMediaSync(
+  options: PreviewMediaSyncOptions,
+): PreviewMediaSyncDecision {
+  const frameMs = Math.max(1, options.frameMs)
+  const basePlaybackRate = effectivePlaybackRate(options.playbackRate, options.clip.speed)
+  const isActive =
+    options.playheadMs >= options.clip.startMs &&
+    options.playheadMs < options.clip.startMs + options.clip.durationMs
+  const unclampedSourceMs =
+    options.clip.sourceInMs + (options.playheadMs - options.clip.startMs) * options.clip.speed
+  const targetSourceMs = Math.max(
+    options.clip.sourceInMs,
+    Math.min(options.clip.sourceOutMs, unclampedSourceMs),
+  )
+  const shouldPlay = options.isPlaying && isActive
+  const driftMs = options.currentTimeMs - targetSourceMs
+  const absoluteDriftMs = Number.isFinite(driftMs) ? Math.abs(driftMs) : Number.POSITIVE_INFINITY
+  const pausedSeekThresholdMs = frameMs * 0.25
+  const hardSeekThresholdMs = options.kind === "audio" ? Math.max(80, frameMs * 3) : frameMs * 2
+  let playbackRate = basePlaybackRate
+  let shouldSeek = false
+
+  if (isActive) {
+    if (!options.isPlaying) {
+      shouldSeek = absoluteDriftMs > pausedSeekThresholdMs
+    } else if (absoluteDriftMs > hardSeekThresholdMs) {
+      shouldSeek = true
+    } else if (options.kind === "camera" && absoluteDriftMs > frameMs * 0.5) {
+      playbackRate = Math.max(0.25, Math.min(4, basePlaybackRate * (driftMs > 0 ? 0.98 : 1.02)))
+    }
+  }
+
+  return {
+    targetSourceMs,
+    shouldPlay,
+    shouldPause: !shouldPlay,
+    shouldSeek,
+    playbackRate,
+    preservesPitch: options.kind === "audio",
   }
 }
 

@@ -157,3 +157,12 @@
 4. Run each scenario 3 times; report median
 5. Record CPU/memory at 1-second intervals during capture tests
 6. Log FFmpeg stderr for frame/speed/stats extraction
+
+### A/V sync protocol
+
+1. Use a separate webcam and microphone with the same recording profile for every comparison.
+2. Record visible and audible hand claps near the start, middle, and end of a continuous capture.
+3. Measure the camera frame and microphone transient for each clap in both timeline playback and a fresh export.
+4. Pass when every camera-minus-audio offset is within one output frame and the offsets show no increasing or decreasing trend.
+5. Repeat with one pause/resume boundary and verify each segment independently meets the same threshold.
+6. Confirm by listening that correction introduced no clicks, gaps, or pitch changes.

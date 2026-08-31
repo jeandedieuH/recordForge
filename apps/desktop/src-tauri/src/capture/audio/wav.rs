@@ -5,6 +5,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
+use crate::capture::traits::AudioCaptureTiming;
+
 pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 pub const DEFAULT_CHANNELS: u16 = 2;
 pub const WAV_HEADER_SIZE: u64 = 44;
@@ -42,6 +44,18 @@ impl AudioSampleFormat {
 pub fn frames_for_duration(duration: Duration, sample_rate: u32) -> u64 {
     let frames = duration.as_nanos().saturating_mul(u128::from(sample_rate)) / 1_000_000_000;
     u64::try_from(frames).unwrap_or(u64::MAX)
+}
+
+/// Convert an integer frame count at the given sample rate to a duration.
+pub fn frames_to_duration(frames: u64, sample_rate: u32) -> Duration {
+    if sample_rate == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = (frames as u128)
+        .saturating_mul(1_000_000_000)
+        .checked_div(u128::from(sample_rate))
+        .unwrap_or(u128::MAX);
+    Duration::from_nanos(nanos.min(u64::MAX as u128) as u64)
 }
 
 /// Write standard 44-byte unfinalized RIFF/WAVE header.
@@ -144,6 +158,95 @@ pub fn repair_wav_header_if_needed(path: &Path) -> std::io::Result<u64> {
     }
 
     Ok(file_len)
+}
+
+/// Parsed canonical 44-byte WAV header fields needed for timeline alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WavFormat {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub sample_format: AudioSampleFormat,
+}
+
+/// Read the canonical 44-byte RIFF/WAVE header written by `write_wav_header`.
+///
+/// Returns `Ok(None)` when the file is not a canonical PCM/float WAV this
+/// module can align (wrong magic, unknown format tag, or a zero channel count
+/// or sample rate). Callers treat that as "mux unaligned" rather than an error.
+pub fn read_wav_format(path: &Path) -> std::io::Result<Option<WavFormat>> {
+    let mut file = std::fs::File::open(path)?;
+    let mut header = [0u8; WAV_HEADER_SIZE as usize];
+    file.read_exact(&mut header)?;
+
+    // Same magic checks as `repair_wav_header_if_needed`, plus the fmt chunk.
+    if &header[0..4] != b"RIFF"
+        || &header[8..12] != b"WAVE"
+        || &header[12..16] != b"fmt "
+        || &header[36..40] != b"data"
+    {
+        return Ok(None);
+    }
+
+    let format_tag = u16::from_le_bytes([header[20], header[21]]);
+    let channels = u16::from_le_bytes([header[22], header[23]]);
+    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]);
+
+    let sample_format = match format_tag {
+        1 if bits_per_sample == AudioSampleFormat::Pcm16.bits_per_sample() => {
+            AudioSampleFormat::Pcm16
+        }
+        3 if bits_per_sample == AudioSampleFormat::Float32.bits_per_sample() => {
+            AudioSampleFormat::Float32
+        }
+        _ => return Ok(None),
+    };
+    if channels == 0 || sample_rate == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(WavFormat {
+        sample_rate,
+        channels,
+        sample_format,
+    }))
+}
+
+/// Truncate a torn crash tail so the WAV payload is a whole number of audio
+/// frames, patching the RIFF/data sizes, and return the aligned payload bytes.
+///
+/// `repair_wav_header_if_needed` sizes the header from the on-disk length,
+/// which can include a partially written frame when the recording process
+/// died mid-write; `align_wav_to_duration` requires a frame-aligned payload.
+pub fn snap_wav_to_whole_frames(path: &Path, block_align: usize) -> std::io::Result<u64> {
+    if block_align == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WAV block alignment must be positive",
+        ));
+    }
+
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < WAV_HEADER_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAV file is missing its header",
+        ));
+    }
+
+    let data_bytes = file_len - WAV_HEADER_SIZE;
+    let aligned_bytes = data_bytes - data_bytes % block_align as u64;
+    if aligned_bytes != data_bytes {
+        file.set_len(WAV_HEADER_SIZE + aligned_bytes)?;
+        finalize_wav(&mut file, aligned_bytes)?;
+        tracing::info!(
+            path = %path.display(),
+            dropped_bytes = data_bytes - aligned_bytes,
+            "snapped torn WAV tail to whole audio frames"
+        );
+    }
+    Ok(aligned_bytes)
 }
 
 /// Append zero-valued PCM silence frames to `file` until `target_frames` are written.
@@ -328,6 +431,93 @@ pub fn loopback_packet_start_frames(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AudioTimelineAlignment {
+    pub sample_rate: u32,
+    pub synthetic_leading_frames: u64,
+    pub start_offset: Duration,
+    pub source_duration: Duration,
+    pub wall_duration: Duration,
+    pub pts_scale: f64,
+    pub head_trim: Duration,
+    pub duration: Duration,
+    pub drift_ms: i64,
+}
+
+pub fn compute_audio_timeline_alignment(
+    timing: AudioCaptureTiming,
+    head_trim: Duration,
+    duration: Duration,
+) -> Option<AudioTimelineAlignment> {
+    const HNS_PER_SECOND: u128 = 10_000_000;
+    const MAX_RATE_CORRECTION: f64 = 0.02;
+
+    if timing.sample_rate == 0
+        || timing.captured_frames == 0
+        || timing.last_packet_frames == 0
+        || timing.timestamp_errors > 0
+        || timing.discontinuities > 0
+        || duration.is_zero()
+        || timing.first_packet_qpc_100ns < timing.timeline_origin_qpc_100ns
+        || timing.last_packet_qpc_100ns < timing.first_packet_qpc_100ns
+    {
+        return None;
+    }
+
+    let frame_duration_hns = u128::from(timing.last_packet_frames)
+        .saturating_mul(HNS_PER_SECOND)
+        .checked_div(u128::from(timing.sample_rate))?;
+    let packet_end_hns =
+        u128::from(timing.last_packet_qpc_100ns).checked_add(frame_duration_hns)?;
+    let wall_duration_hns =
+        packet_end_hns.checked_sub(u128::from(timing.first_packet_qpc_100ns))?;
+    let source_duration_hns = u128::from(timing.captured_frames)
+        .saturating_mul(HNS_PER_SECOND)
+        .checked_div(u128::from(timing.sample_rate))?;
+    if wall_duration_hns == 0 || source_duration_hns == 0 {
+        return None;
+    }
+
+    let pts_scale = wall_duration_hns as f64 / source_duration_hns as f64;
+    if !pts_scale.is_finite() || (pts_scale - 1.0).abs() > MAX_RATE_CORRECTION {
+        return None;
+    }
+
+    let start_offset_hns = timing
+        .first_packet_qpc_100ns
+        .checked_sub(timing.timeline_origin_qpc_100ns)?;
+    let start_offset = duration_from_hns(u128::from(start_offset_hns))?;
+    if start_offset > head_trim.saturating_add(duration) {
+        return None;
+    }
+
+    let source_duration = duration_from_hns(source_duration_hns)?;
+    let wall_duration = duration_from_hns(wall_duration_hns)?;
+    let drift_hns = wall_duration_hns as i128 - source_duration_hns as i128;
+    let drift_ms = i64::try_from(drift_hns / 10_000).ok()?;
+
+    Some(AudioTimelineAlignment {
+        sample_rate: timing.sample_rate,
+        synthetic_leading_frames: timing.synthetic_leading_frames,
+        start_offset,
+        source_duration,
+        wall_duration,
+        pts_scale,
+        head_trim,
+        duration,
+        drift_ms,
+    })
+}
+
+fn duration_from_hns(hns: u128) -> Option<Duration> {
+    let seconds = hns / 10_000_000;
+    let nanos = (hns % 10_000_000).saturating_mul(100);
+    Some(Duration::new(
+        u64::try_from(seconds).ok()?,
+        u32::try_from(nanos).ok()?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +586,129 @@ mod tests {
         let data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]);
         assert_eq!(data_size, 1000);
         assert_eq!(riff_size, 1036);
+    }
+
+    #[test]
+    fn test_reads_wav_format_back_from_the_header() {
+        let directory = tempfile::tempdir().expect("create temp dir");
+
+        let pcm_path = directory.path().join("format_pcm.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&pcm_path)
+            .expect("open wav");
+        write_wav_header(&mut file, 48_000, 2, AudioSampleFormat::Pcm16).expect("write header");
+        drop(file);
+        assert_eq!(
+            read_wav_format(&pcm_path).expect("read pcm format"),
+            Some(WavFormat {
+                sample_rate: 48_000,
+                channels: 2,
+                sample_format: AudioSampleFormat::Pcm16,
+            })
+        );
+
+        let float_path = directory.path().join("format_float.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&float_path)
+            .expect("open wav");
+        write_wav_header(&mut file, 44_100, 1, AudioSampleFormat::Float32).expect("write header");
+        drop(file);
+        assert_eq!(
+            read_wav_format(&float_path).expect("read float format"),
+            Some(WavFormat {
+                sample_rate: 44_100,
+                channels: 1,
+                sample_format: AudioSampleFormat::Float32,
+            })
+        );
+
+        // An unknown format tag (e.g. a-law) cannot be aligned; readers get
+        // None instead of an error so recovery can fall back to an unaligned mux.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pcm_path)
+            .expect("open wav");
+        file.seek(SeekFrom::Start(20)).expect("seek format tag");
+        file.write_all(&6u16.to_le_bytes())
+            .expect("patch format tag");
+        drop(file);
+        assert_eq!(
+            read_wav_format(&pcm_path).expect("read patched format"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_read_wav_format_rejects_non_wav_files() {
+        let directory = tempfile::tempdir().expect("create temp dir");
+        let path = directory.path().join("not-a-wav.bin");
+        std::fs::write(&path, vec![0u8; 64]).expect("write junk file");
+        assert_eq!(read_wav_format(&path).expect("read junk"), None);
+    }
+
+    #[test]
+    fn test_snap_wav_to_whole_frames_trims_a_torn_tail() {
+        let directory = tempfile::tempdir().expect("create temp dir");
+        let path = directory.path().join("torn.wav");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open wav");
+        write_wav_header(&mut file, 48_000, 2, AudioSampleFormat::Pcm16).expect("write header");
+        // Stereo 16-bit: 4 bytes per frame. 1003 bytes = 250 frames + 3 torn bytes.
+        file.seek(SeekFrom::End(0)).expect("seek end");
+        file.write_all(&vec![0x11u8; 1_003])
+            .expect("write torn payload");
+        drop(file);
+
+        let aligned_bytes = snap_wav_to_whole_frames(&path, 4).expect("snap torn wav");
+        assert_eq!(aligned_bytes, 1_000);
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            1_000 + WAV_HEADER_SIZE
+        );
+
+        let mut read_file = std::fs::File::open(&path).unwrap();
+        let mut header = [0u8; 44];
+        read_file.read_exact(&mut header).unwrap();
+        let data_size = u32::from_le_bytes([header[40], header[41], header[42], header[43]]);
+        assert_eq!(data_size, 1_000);
+
+        // An already aligned payload is left untouched.
+        assert_eq!(
+            snap_wav_to_whole_frames(&path, 4).expect("snap aligned wav"),
+            1_000
+        );
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            1_000 + WAV_HEADER_SIZE
+        );
+    }
+
+    #[test]
+    fn test_frames_to_duration_round_trips_frame_counts() {
+        assert_eq!(
+            frames_to_duration(216_000, 48_000),
+            Duration::from_millis(4_500)
+        );
+        assert_eq!(frames_to_duration(0, 48_000), Duration::ZERO);
+        assert_eq!(frames_to_duration(480, 0), Duration::ZERO);
+        assert_eq!(
+            frames_for_duration(frames_to_duration(24_000, 48_000), 48_000),
+            24_000
+        );
     }
 
     #[test]
@@ -468,5 +781,79 @@ mod tests {
 
         assert_eq!(final_size, 192000 + 44);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 192000 + 44);
+    }
+
+    #[test]
+    fn derives_audio_alignment_from_qpc_packet_timing() {
+        let origin = 10_000_000_000;
+        let first_packet = origin + 2_000_000;
+        let timing = crate::capture::traits::AudioCaptureTiming {
+            sample_rate: 48_000,
+            synthetic_leading_frames: 9_600,
+            captured_frames: 480_000,
+            timeline_origin_qpc_100ns: origin,
+            first_packet_qpc_100ns: first_packet,
+            last_packet_qpc_100ns: first_packet + 100_900_000,
+            last_packet_frames: 480,
+            timestamp_errors: 0,
+            discontinuities: 0,
+        };
+
+        let alignment = compute_audio_timeline_alignment(
+            timing,
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+        )
+        .expect("valid QPC alignment");
+
+        assert_eq!(alignment.start_offset, Duration::from_millis(200));
+        assert_eq!(alignment.source_duration, Duration::from_secs(10));
+        assert_eq!(alignment.wall_duration, Duration::from_millis(10_100));
+        assert!((alignment.pts_scale - 1.01).abs() < 0.000_001);
+        assert_eq!(alignment.drift_ms, 100);
+    }
+
+    #[test]
+    fn rejects_discontinuous_or_implausible_audio_alignment() {
+        let origin = 20_000_000_000;
+        let base = crate::capture::traits::AudioCaptureTiming {
+            sample_rate: 48_000,
+            synthetic_leading_frames: 4_800,
+            captured_frames: 480_000,
+            timeline_origin_qpc_100ns: origin,
+            first_packet_qpc_100ns: origin + 1_000_000,
+            last_packet_qpc_100ns: origin + 100_900_000,
+            last_packet_frames: 480,
+            timestamp_errors: 0,
+            discontinuities: 0,
+        };
+
+        assert!(compute_audio_timeline_alignment(
+            crate::capture::traits::AudioCaptureTiming {
+                discontinuities: 1,
+                ..base
+            },
+            Duration::ZERO,
+            Duration::from_secs(10),
+        )
+        .is_none());
+        assert!(compute_audio_timeline_alignment(
+            crate::capture::traits::AudioCaptureTiming {
+                timestamp_errors: 1,
+                ..base
+            },
+            Duration::ZERO,
+            Duration::from_secs(10),
+        )
+        .is_none());
+        assert!(compute_audio_timeline_alignment(
+            crate::capture::traits::AudioCaptureTiming {
+                last_packet_qpc_100ns: origin + 109_900_000,
+                ..base
+            },
+            Duration::ZERO,
+            Duration::from_secs(10),
+        )
+        .is_none());
     }
 }

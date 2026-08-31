@@ -5,6 +5,7 @@
 //! paths write independent WAV assets using the requested sample format so
 //! FFmpeg never needs a DirectShow audio device or a virtual Stereo Mix device.
 
+use crate::capture::traits::{AudioCaptureTiming, TimelineAnchor};
 use crate::errors::Result;
 #[cfg(any(windows, test))]
 use std::fs::OpenOptions;
@@ -203,6 +204,7 @@ pub struct WasapiCaptureOptions {
     pub sample_format: WasapiSampleFormat,
     pub output_path: PathBuf,
     pub timeline_origin: Instant,
+    pub timeline_origin_qpc_100ns: Option<u64>,
 }
 
 impl WasapiCaptureOptions {
@@ -218,6 +220,7 @@ impl WasapiCaptureOptions {
             sample_format: WasapiSampleFormat::Pcm16,
             output_path,
             timeline_origin: Instant::now(),
+            timeline_origin_qpc_100ns: None,
         }
     }
 
@@ -230,14 +233,28 @@ impl WasapiCaptureOptions {
             sample_format: WasapiSampleFormat::Pcm16,
             output_path,
             timeline_origin: Instant::now(),
+            timeline_origin_qpc_100ns: None,
         }
     }
 
     /// Set the common video-origin clock used to timestamp this audio track.
     pub fn with_timeline_origin(mut self, timeline_origin: Instant) -> Self {
         self.timeline_origin = timeline_origin;
+        self.timeline_origin_qpc_100ns = None;
         self
     }
+
+    pub fn with_timeline_anchor(mut self, timeline_origin: TimelineAnchor) -> Self {
+        self.timeline_origin = timeline_origin.instant;
+        self.timeline_origin_qpc_100ns = timeline_origin.qpc_100ns;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WasapiWorkerResult {
+    bytes_written: u64,
+    timing: Option<AudioCaptureTiming>,
 }
 
 /// A running audio capture worker writing one independent WAV track.
@@ -249,7 +266,8 @@ pub struct WasapiCaptureSession {
     channels: u16,
     sample_format: WasapiSampleFormat,
     stop_requested: Arc<AtomicBool>,
-    worker: Option<JoinHandle<std::result::Result<u64, String>>>,
+    worker: Option<JoinHandle<std::result::Result<WasapiWorkerResult, String>>>,
+    timing: Option<AudioCaptureTiming>,
 }
 
 impl WasapiCaptureSession {
@@ -341,6 +359,7 @@ impl WasapiCaptureSession {
             sample_format,
             stop_requested,
             worker: Some(worker),
+            timing: None,
         })
     }
 
@@ -350,6 +369,10 @@ impl WasapiCaptureSession {
 
     pub fn started_at(&self) -> Instant {
         self.started_at
+    }
+
+    pub fn timing(&self) -> Option<AudioCaptureTiming> {
+        self.timing
     }
 
     /// Signal the capture worker thread to stop reading audio samples immediately,
@@ -368,7 +391,9 @@ impl WasapiCaptureSession {
         let result = worker.join().map_err(|_| {
             crate::errors::InternalError::Capture("Audio capture worker panicked".into())
         })?;
-        result.map_err(|error| crate::errors::InternalError::Capture(error).into())
+        let result = result.map_err(crate::errors::InternalError::Capture)?;
+        self.timing = result.timing;
+        Ok(result.bytes_written)
     }
 
     /// Make the finalized track exactly as long as the segment's video clock.
@@ -410,6 +435,10 @@ impl super::super::traits::AudioTrack for WasapiCaptureSession {
         self.stop()
     }
 
+    fn timing(&self) -> Option<AudioCaptureTiming> {
+        self.timing()
+    }
+
     fn align_to_timeline(&self, head_trim: Duration, duration: Duration) -> Result<u64> {
         self.align_to_timeline(head_trim, duration)
     }
@@ -434,7 +463,7 @@ fn cross_platform_capture_worker(
     options: WasapiCaptureOptions,
     stop_requested: Arc<AtomicBool>,
     ready_tx: SyncSender<std::result::Result<Instant, String>>,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<WasapiWorkerResult, String> {
     let mut file = match std::fs::File::create(&options.output_path) {
         Ok(f) => f,
         Err(e) => {
@@ -471,8 +500,12 @@ fn cross_platform_capture_worker(
         }
     }
 
-    let _ = finalize_wav(&mut file, total_bytes);
-    Ok(total_bytes)
+    let bytes_written =
+        finalize_wav(&mut file, total_bytes).map_err(|error| format!("finalize WAV: {error}"))?;
+    Ok(WasapiWorkerResult {
+        bytes_written,
+        timing: None,
+    })
 }
 
 #[cfg(windows)]
@@ -480,7 +513,7 @@ fn capture_worker(
     options: WasapiCaptureOptions,
     stop_requested: Arc<AtomicBool>,
     ready_tx: SyncSender<std::result::Result<Instant, String>>,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<WasapiWorkerResult, String> {
     if let Err(error) = initialize_mta().ok() {
         return signal_start_error(&ready_tx, format!("initialize WASAPI COM: {error}"));
     }
@@ -495,7 +528,7 @@ fn capture_worker_inner(
     options: WasapiCaptureOptions,
     stop_requested: Arc<AtomicBool>,
     ready_tx: SyncSender<std::result::Result<Instant, String>>,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<WasapiWorkerResult, String> {
     let enumerator = DeviceEnumerator::new().map_err(|error| error.to_string());
     let enumerator = match enumerator {
         Ok(enumerator) => enumerator,
@@ -635,6 +668,12 @@ fn capture_worker_inner(
     let mut data_frames = data_bytes / block_align as u64;
     let mut last_flush_bytes = data_bytes;
     let is_system_loopback = options.kind == WasapiCaptureKind::SystemLoopback;
+    let mut captured_frames = 0u64;
+    let mut first_packet_qpc_100ns = None;
+    let mut last_packet_qpc_100ns = None;
+    let mut last_packet_frames = 0u32;
+    let mut timestamp_errors = 0u32;
+    let mut discontinuities = 0u32;
 
     let capture_result = 'capture: loop {
         if stop_requested.load(Ordering::Acquire) {
@@ -666,6 +705,17 @@ fn capture_worker_inner(
                 Ok(result) => result,
                 Err(error) => break 'capture Err(format!("read WASAPI audio packet: {error}")),
             };
+            if buffer_info.flags.timestamp_error || buffer_info.timestamp == 0 {
+                timestamp_errors = timestamp_errors.saturating_add(1);
+            } else {
+                first_packet_qpc_100ns.get_or_insert(buffer_info.timestamp);
+                last_packet_qpc_100ns = Some(buffer_info.timestamp);
+                last_packet_frames = frames_read;
+            }
+            if buffer_info.flags.data_discontinuity && captured_frames > 0 {
+                discontinuities = discontinuities.saturating_add(1);
+            }
+
             // Loopback can stop delivering packets while the output endpoint is
             // silent. Restore that missing interval from a bounded device
             // position/wall-clock estimate, but never trim packets: microphone
@@ -707,6 +757,7 @@ fn capture_worker_inner(
                 Some(data_bytes) => data_bytes,
                 None => break 'capture Err("WASAPI WAV payload size overflow".into()),
             };
+            captured_frames = captured_frames.saturating_add(u64::from(frames_read));
             data_frames = data_bytes / block_align as u64;
 
             // Periodically flush OS write buffers every ~1 second (~192KB) so abrupt power loss or crashes
@@ -738,14 +789,43 @@ fn capture_worker_inner(
         return Err(error);
     }
 
-    finalize_wav(&mut file, data_bytes).map_err(|error| format!("finalize WASAPI WAV: {error}"))
+    let bytes_written = finalize_wav(&mut file, data_bytes)
+        .map_err(|error| format!("finalize WASAPI WAV: {error}"))?;
+    let timing = if is_system_loopback {
+        None
+    } else {
+        options
+            .timeline_origin_qpc_100ns
+            .zip(first_packet_qpc_100ns)
+            .zip(last_packet_qpc_100ns)
+            .map(
+                |((timeline_origin_qpc_100ns, first_packet_qpc_100ns), last_packet_qpc_100ns)| {
+                    AudioCaptureTiming {
+                        sample_rate: options.sample_rate,
+                        synthetic_leading_frames: stream_offset_frames,
+                        captured_frames,
+                        timeline_origin_qpc_100ns,
+                        first_packet_qpc_100ns,
+                        last_packet_qpc_100ns,
+                        last_packet_frames,
+                        timestamp_errors,
+                        discontinuities,
+                    }
+                },
+            )
+    };
+
+    Ok(WasapiWorkerResult {
+        bytes_written,
+        timing,
+    })
 }
 
 #[cfg(windows)]
 fn signal_start_error(
     ready_tx: &SyncSender<std::result::Result<Instant, String>>,
     error: String,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<WasapiWorkerResult, String> {
     let _ = ready_tx.send(Err(error.clone()));
     Err(error)
 }
