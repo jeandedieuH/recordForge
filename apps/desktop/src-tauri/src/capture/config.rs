@@ -158,7 +158,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(2500),
             crf: Some(28),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 128,
         },
         RecordingProfile {
@@ -170,7 +170,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(4000),
             crf: Some(23),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 128,
         },
         RecordingProfile {
@@ -182,7 +182,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(5000),
             crf: Some(24),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 128,
         },
         RecordingProfile {
@@ -194,7 +194,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(6000),
             crf: Some(20),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 128,
         },
         RecordingProfile {
@@ -206,7 +206,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(8000),
             crf: Some(18),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 192,
         },
         RecordingProfile {
@@ -218,7 +218,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(12000),
             crf: Some(18),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 192,
         },
         RecordingProfile {
@@ -230,7 +230,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(20000),
             crf: Some(18),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 192,
         },
         RecordingProfile {
@@ -242,7 +242,7 @@ pub fn builtin_profiles() -> Vec<RecordingProfile> {
             video_bitrate_kbps: Some(4000),
             crf: Some(23),
             encoder_priority: default_encoder_priority(),
-            audio_codec: "aac".into(),
+            audio_codec: "pcm_s16le".into(),
             audio_bitrate_kbps: 128,
         },
     ]

@@ -540,7 +540,7 @@ fn mux_orphaned_segment_audio(
         .into_iter()
         .find(|profile| profile.id == manifest.profile_name)
         .map(|p| (p.audio_codec, p.audio_bitrate_kbps))
-        .unwrap_or_else(|| ("aac".to_string(), 128));
+        .unwrap_or_else(|| ("pcm_s16le".to_string(), 128));
 
     let stem = segment_path
         .file_stem()
@@ -757,10 +757,6 @@ mod tests {
     const MARKER_AMPLITUDE: u16 = 15_000;
     /// Marker bursts are 480 samples (10 ms) of full-scale PCM.
     const MARKER_FRAMES: usize = 480;
-    /// The segment mux encodes AAC with `-avoid_negative_ts make_zero`, so the
-    /// decoder emits one encoder-delay frame (~1024 samples at 48 kHz) before
-    /// the first real sample. Marker expectations include this constant bias.
-    const AAC_PRIMING_MS: u64 = 21;
 
     fn test_source() -> CaptureSource {
         CaptureSource {
@@ -954,11 +950,7 @@ mod tests {
         );
         let (markers, _duration_ms) = decode_audio_markers(&ffmpeg, &segment);
         assert_eq!(markers.len(), 3, "all markers must survive recovery muxing");
-        let expected_markers = [
-            805 + AAC_PRIMING_MS,
-            1_805 + AAC_PRIMING_MS,
-            2_805 + AAC_PRIMING_MS,
-        ];
+        let expected_markers = [805, 1_805, 2_805];
         for (actual, expected) in markers.iter().zip(expected_markers) {
             assert!(
                 actual.abs_diff(expected) <= 17,
@@ -1002,16 +994,15 @@ mod tests {
         assert_eq!(markers.len(), 2, "all markers must survive recovery muxing");
         // No head trim applies when the WAV is shorter than the video, so the
         // markers stay at their WAV positions (synthetic silence included).
-        let expected_markers = [1_305 + AAC_PRIMING_MS, 2_305 + AAC_PRIMING_MS];
+        let expected_markers = [1_305, 2_305];
         for (actual, expected) in markers.iter().zip(expected_markers) {
             assert!(
                 actual.abs_diff(expected) <= 17,
                 "marker at {actual}ms should be within one frame of {expected}ms"
             );
         }
-        // The padded tail also carries the AAC encoder-delay frame.
         assert!(
-            (3_950..=4_060).contains(&duration_ms),
+            (3_980..=4_020).contains(&duration_ms),
             "padded audio duration {duration_ms}ms should match the 4000ms video segment"
         );
     }

@@ -45,7 +45,7 @@ export const recordingProfileSchema = z.object({
   videoBitrateKbps: z.number().int().min(1).nullish(),
   crf: z.number().int().min(0).max(51).nullish(),
   encoderPriority: z.array(z.string()).default(["libx264"]),
-  audioCodec: z.string().default("aac"),
+  audioCodec: z.string().default("pcm_s16le"),
   audioBitrateKbps: z.number().int().min(1).default(128),
 })
 

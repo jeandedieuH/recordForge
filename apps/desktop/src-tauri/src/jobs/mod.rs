@@ -1074,7 +1074,7 @@ impl Worker {
                             format!("Audio {}", track_index + 1)
                         }
                     });
-                let audio_path = audio_dir.join(format!("stream_{:03}.m4a", stream.index));
+                let audio_path = audio_dir.join(format!("stream_{:03}.wav", stream.index));
                 if self.options.force || !audio_path.is_file() {
                     if let Err(error) = extract_audio_track(
                         &self.ffmpeg_path.to_string_lossy(),

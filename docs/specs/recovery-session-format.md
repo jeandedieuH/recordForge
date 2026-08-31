@@ -166,7 +166,7 @@ for each session_dir in sessions/:
 1. Collect manifest fragments and physical `seg_*.mp4` files that are inside the session directory and larger than 1 KB
 2. Sort by numeric segment index
 3. Validate candidate fragments with FFmpeg before concatenation
-4. For each valid segment without an audio stream, mux its orphaned `mic_NNN.wav` / `sys_NNN.wav` assets: repair unfinalized WAV headers, snap any torn trailing frame, then align each WAV to the segment's probed video duration (head-trim the WAV-minus-video startup delta, bounded by the shared plausible-startup cap, and silence-pad or tail-trim to the video duration) before muxing as separate AAC streams
+4. For each valid segment without an audio stream, mux its orphaned `mic_NNN.wav` / `sys_NNN.wav` assets: repair unfinalized WAV headers, snap any torn trailing frame, then align each WAV to the segment's probed video duration (head-trim the WAV-minus-video startup delta, bounded by the shared plausible-startup cap, and silence-pad or tail-trim to the video duration) before muxing as separate uncompressed PCM (`pcm_s16le`) streams (0 ms encoder delay)
 5. Create an `output.partial.mp4` concat result and atomically publish `output.mp4`
 6. Validate the published output with FFmpeg
 7. Write `finalizing` metadata, insert the session idempotently into SQLite as `recovered`, then write `state → Completed`
@@ -200,7 +200,7 @@ Each session will track multiple asset types:
 | `cursor_events` | `cursor.json` | Metadata (Phase 6) |
 
 ### Current implementation
-Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg applies the microphone cleanup filter and muxes the available audio assets as separate AAC streams in `seg_NNN.mp4`; the audio streams remain independently addressable during preparation. Webcam capture stays outside that mux: each `webcam_NNN.mp4` sidecar records its screen-relative startup offset, and finalization builds a separate, timeline-aligned `webcam.mp4` asset. This keeps camera editing independent from the screen/audio output and preserves pause/resume timing.
+Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg applies the microphone cleanup filter and muxes the available audio assets as separate uncompressed PCM (`pcm_s16le`) streams in `seg_NNN.mp4`; the audio streams remain independently addressable with 0 ms encoder delay during preparation and editing, while AAC encoding is applied once during final render export. Webcam capture stays outside that mux: each `webcam_NNN.mp4` sidecar records its screen-relative startup offset, and finalization builds a separate, timeline-aligned `webcam.mp4` asset. This keeps camera editing independent from the screen/audio output and preserves pause/resume timing.
 
 ---
 

@@ -374,12 +374,16 @@ pub fn mux_audio_tracks(
     ]);
 
     if !audio_tracks.is_empty() {
-        command.args([
-            "-c:a",
-            audio_codec,
-            "-b:a",
-            &format!("{audio_bitrate_kbps}k"),
-        ]);
+        if audio_codec.starts_with("pcm_") {
+            command.args(["-c:a", audio_codec]);
+        } else {
+            command.args([
+                "-c:a",
+                audio_codec,
+                "-b:a",
+                &format!("{audio_bitrate_kbps}k"),
+            ]);
+        }
     }
 
     command.args(["-t", &format!("{:.6}", duration.as_secs_f64())]);

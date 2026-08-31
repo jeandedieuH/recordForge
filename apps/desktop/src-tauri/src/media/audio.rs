@@ -33,7 +33,8 @@ pub fn extract_audio_track(
     }
 
     let map = format!("0:{stream_index}");
-    let result = crate::process::create_command(ffmpeg_path)
+    let mut command = crate::process::create_command(ffmpeg_path);
+    command
         .args(["-y", "-hide_banner", "-loglevel", "error"])
         .arg("-i")
         .arg(input)
@@ -45,8 +46,13 @@ pub fn extract_audio_track(
             "copy",
             "-avoid_negative_ts",
             "make_zero",
-        ])
-        .args(["-movflags", "+faststart"])
+        ]);
+
+    if output.extension().and_then(|ext| ext.to_str()) == Some("m4a") {
+        command.args(["-movflags", "+faststart"]);
+    }
+
+    let result = command
         .arg(output)
         .output()
         .map_err(|error| InternalError::Media(format!("audio track extraction: {error}")))?;
