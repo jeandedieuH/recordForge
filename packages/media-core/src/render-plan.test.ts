@@ -1459,4 +1459,170 @@ describe("render-plan", () => {
     // Embed chapterMode should sanitize to none for WebP
     expect(plan.value.chapterMode).toBe("none")
   })
+
+  it("windows shifted camera overlays so outputEndMs does not exceed screen duration", () => {
+    const state = makeTimeline(1) // 20_000 ms screen clip (0 to 20_000)
+    // Move camera clip 500 ms from the start on its track
+    state.tracks.push({
+      id: "camera-track",
+      kind: "camera",
+      name: "Camera",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "camera-clip-shifted",
+          kind: "camera",
+          assetId: "rec-1",
+          streamIndex: 1,
+          startMs: 500,
+          durationMs: 20_000, // extends to 20_500 ms
+          sourceInMs: 0,
+          sourceOutMs: 20_000,
+          speed: 1,
+          transform: {
+            x: 100,
+            y: 100,
+            width: 320,
+            height: 240,
+            opacity: 1,
+            shape: "rectangle",
+            visible: true,
+          },
+        },
+      ],
+    })
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-camera-shifted-test",
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+
+    expect(plan.value.durationMs).toBe(20_000)
+    expect(plan.value.overlays).toHaveLength(1)
+    expect(plan.value.overlays[0].outputStartMs).toBe(500)
+    expect(plan.value.overlays[0].outputEndMs).toBe(20_000)
+    expect(plan.value.overlays[0].sourceInMs).toBe(0)
+    expect(plan.value.overlays[0].sourceOutMs).toBe(19_500)
+
+    // Ensure it strictly validates against the contracts schema
+    const validated = renderPlanSchema.safeParse(plan.value)
+    expect(validated.success).toBe(true)
+
+    const validatedExport = exportTimelineOptionsSchema.safeParse({
+      projectId: "project-camera-shifted-test",
+      outputPath: "D:/Exports/output.mp4",
+      plan: plan.value,
+      settings: {
+        preset: "balanced",
+        codec: "h264",
+        encoder: "auto",
+        container: "mp4",
+        captionMode: "burn-in",
+        chapterMode: "embed",
+      },
+    })
+    expect(validatedExport.success).toBe(true)
+  })
+
+  it("windows shifted audio tracks, effects, and captions so they never exceed screen duration", () => {
+    const state = makeTimeline(1) // 20_000 ms screen clip
+    state.tracks.push(
+      {
+        id: "audio-track",
+        kind: "audio",
+        name: "Microphone",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "audio-clip-shifted",
+            kind: "audio",
+            assetId: "rec-1",
+            streamIndex: 1,
+            startMs: 1_000,
+            durationMs: 20_000, // extends to 21_000 ms
+            sourceInMs: 0,
+            sourceOutMs: 20_000,
+            speed: 1,
+            volume: 1,
+            fadeInMs: 0,
+            fadeOutMs: 0,
+          },
+        ],
+      },
+      {
+        id: "captions-track",
+        kind: "captions",
+        name: "Captions",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "caption-shifted",
+            kind: "caption",
+            assetId: "captions-track",
+            startMs: 18_000,
+            durationMs: 5_000, // extends to 23_000 ms
+            sourceInMs: 0,
+            sourceOutMs: 5_000,
+            speed: 1,
+            text: "Ending note",
+            style: "default",
+          },
+        ],
+      },
+      {
+        id: "effects-track",
+        kind: "effects",
+        name: "Effects",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: [
+          {
+            id: "mask-shifted",
+            kind: "mask",
+            assetId: "rec-1",
+            startMs: 19_000,
+            durationMs: 3_000, // extends to 22_000 ms
+            sourceInMs: 0,
+            sourceOutMs: 3_000,
+            speed: 1,
+            mode: "blur",
+            rect: { x: 50, y: 50, width: 200, height: 100 },
+            blurRadius: 24,
+            pixelSize: 12,
+            redactColor: "black",
+            enabled: true,
+          },
+        ],
+      },
+    )
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-shifted-effects-test",
+    })
+
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+
+    expect(plan.value.audioTracks[0].segments[0].outputEndMs).toBe(20_000)
+    expect(plan.value.captions[0].endMs).toBe(20_000)
+    expect(plan.value.masks[0].endMs).toBe(20_000)
+
+    const validated = renderPlanSchema.safeParse(plan.value)
+    expect(validated.success).toBe(true)
+  })
 })

@@ -862,24 +862,26 @@ export function buildRenderPlan(
     }
   }
 
-  const cameraTrack = state.tracks.find((track) => track.kind === "camera")
-  const audioTracks = buildAudioTracks(state, range)
-  const zoomSegments = toZoomSegments(state, range, {
-    cursorTelemetry: input.cursorTelemetry,
-    cursorEngine: input.cursorEngine,
-  })
-  const cursorEffects = toCursorEffects(state, range, input.assets)
-  const captions = toCaptions(state, range)
-  const masks = toMasks(state, range)
-  const annotations = toAnnotations(state, range)
-  const texts = toTexts(state, range)
-  const images = toImages(state, range)
-  const overlayRenderPlan = toOverlayRenderPlan(state, range, input.assets)
   const screenDurationMs = segments.reduce(
     (duration, segment) => Math.max(duration, segment.outputEndMs),
     0,
   )
   const durationMs = Math.round(range ? range.endMs - range.startMs : screenDurationMs)
+  const effectiveRange: ExportRange = range ?? { startMs: 0, endMs: screenDurationMs }
+
+  const cameraTrack = state.tracks.find((track) => track.kind === "camera")
+  const audioTracks = buildAudioTracks(state, effectiveRange)
+  const zoomSegments = toZoomSegments(state, effectiveRange, {
+    cursorTelemetry: input.cursorTelemetry,
+    cursorEngine: input.cursorEngine,
+  })
+  const cursorEffects = toCursorEffects(state, effectiveRange, input.assets)
+  const captions = toCaptions(state, effectiveRange)
+  const masks = toMasks(state, effectiveRange)
+  const annotations = toAnnotations(state, effectiveRange)
+  const texts = toTexts(state, effectiveRange)
+  const images = toImages(state, effectiveRange)
+  const overlayRenderPlan = toOverlayRenderPlan(state, effectiveRange, input.assets)
   const gaps = toGaps(segments, durationMs)
   const chapters = timelineMarkersToChapters(
     state.markers,
@@ -919,7 +921,7 @@ export function buildRenderPlan(
   }
 
   const overlays = cameraTrack
-    ? toOverlays(cameraTrack.clips, state.canvas, !cameraTrack.muted, range, input.assets)
+    ? toOverlays(cameraTrack.clips, state.canvas, !cameraTrack.muted, effectiveRange, input.assets)
     : []
   const firstScreenAssetId = segments[0].assetId
   return {
