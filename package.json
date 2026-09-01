@@ -1,7 +1,7 @@
 {
   "name": "recordforge",
   "private": true,
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Local-first screen recorder and lightweight editor",
   "license": "GPL-3.0-or-later",
   "author": "Prestige Tech & recordForge Contributors",

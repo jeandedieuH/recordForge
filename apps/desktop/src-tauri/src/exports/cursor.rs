@@ -45,7 +45,7 @@ pub struct RenderCanvas {
 }
 
 fn default_canvas_background() -> String {
-    "#000000".into()
+    "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)".into()
 }
 
 #[derive(Debug, Clone, Copy)]

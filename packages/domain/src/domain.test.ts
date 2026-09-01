@@ -174,6 +174,10 @@ describe("domain", () => {
     }
 
     const timeline = createTimelineFromRecording(recording, metadata)
+    expect(timeline.canvas.background).toBe(
+      "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
+    )
+    expect(timeline.canvas.padding).toBe(96)
     expect(timeline.tracks.map((track) => track.kind)).toEqual(["screen", "camera"])
     expect(timeline.tracks[1].clips[0]).toMatchObject({
       kind: "camera",
@@ -190,6 +194,10 @@ describe("domain", () => {
     })
 
     const project = createProjectFromRecording(recording, metadata)
+    expect(project.canvas.background).toBe(
+      "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
+    )
+    expect(project.canvas.padding).toBe(96)
     expect(project.assets).toContainEqual(
       expect.objectContaining({
         role: "webcam",
@@ -205,4 +213,32 @@ describe("domain", () => {
       },
     })
   })
+
+  it("defaults to Northern Lights background gradient and 0 padding without camera", () => {
+    const recording = makeRecording()
+    const metadata: MediaMetadata = {
+      recordingId: recording.id,
+      path: recording.outputPath ?? "",
+      durationMs: 10_000,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      hasAudio: false,
+      streams: [{ index: 0, kind: "video", codec: "h264" }],
+      format: { name: "mp4" },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+    const timeline = createTimelineFromRecording(recording, metadata)
+    expect(timeline.canvas.background).toBe(
+      "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
+    )
+    expect(timeline.canvas.padding).toBe(0)
+
+    const project = createProjectFromRecording(recording, metadata)
+    expect(project.canvas.background).toBe(
+      "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
+    )
+    expect(project.canvas.padding).toBe(0)
+  })
 })
+

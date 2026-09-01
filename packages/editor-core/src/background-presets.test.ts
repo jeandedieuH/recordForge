@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 import {
+  DEFAULT_CANVAS_BACKGROUND,
   GRADIENT_PRESETS,
   IMAGE_BACKGROUND_PRESETS,
+  NORTHERN_LIGHTS_GRADIENT,
   SOLID_COLOR_PRESETS,
   buildLinearGradient,
   buildRadialGradient,
@@ -13,6 +15,16 @@ import {
 } from "./background-presets"
 
 describe("background-presets", () => {
+  it("exports Northern Lights as default canvas background", () => {
+    expect(DEFAULT_CANVAS_BACKGROUND).toBe(NORTHERN_LIGHTS_GRADIENT)
+    expect(DEFAULT_CANVAS_BACKGROUND).toBe(
+      "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
+    )
+    const northernLightsPreset = GRADIENT_PRESETS.find((p) => p.name === "Northern Lights")
+    expect(northernLightsPreset).toBeDefined()
+    expect(northernLightsPreset?.gradient).toBe(DEFAULT_CANVAS_BACKGROUND)
+  })
+
   it("defines solid color presets correctly", () => {
     expect(SOLID_COLOR_PRESETS.length).toBeGreaterThan(10)
     for (const preset of SOLID_COLOR_PRESETS) {
@@ -36,7 +48,6 @@ describe("background-presets", () => {
     expect(IMAGE_BACKGROUND_PRESETS.length).toBe(24)
     for (const preset of IMAGE_BACKGROUND_PRESETS) {
       expect(preset.id).toMatch(/^bg-\d+$/)
-      expect(preset.name).toBeTruthy()
       expect(preset.src).toMatch(/^\/backgrounds\/bg-\d+\.jpg$/)
       expect(preset.dominantColor).toMatch(/^#[0-9a-fA-F]{6}$/)
     }

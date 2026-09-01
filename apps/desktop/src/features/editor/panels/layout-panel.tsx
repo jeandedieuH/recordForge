@@ -1,6 +1,7 @@
 import { useState } from "react"
 import type { CanvasAspectRatio } from "@recordforge/contracts"
 import {
+  DEFAULT_CANVAS_BACKGROUND,
   createUpdateCanvasCommand,
   getBackgroundKind,
   type BackgroundKind,
@@ -45,7 +46,7 @@ export function LayoutPanel() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const isLoading = useTimelineStore((state) => state.isLoading)
 
-  const currentBackground = timeline?.canvas.background ?? "#070b14"
+  const currentBackground = timeline?.canvas.background ?? DEFAULT_CANVAS_BACKGROUND
   const detectedKind = getBackgroundKind(currentBackground)
   const [activeBgTab, setActiveBgTab] = useState<BackgroundKind>(detectedKind)
 

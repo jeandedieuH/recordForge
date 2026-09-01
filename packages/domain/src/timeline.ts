@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CANVAS_BACKGROUND,
   defaultCursorSettings,
   defaultProjectExportSettings,
   defaultSmartZoomSettings,
@@ -287,13 +288,14 @@ export function createTimelineFromRecording(
   // Standalone webcam captures and legacy secondary-video streams use the same
   // camera track shape; only their asset resolution differs.
   const cameraStream = cameraStreams[0]
+  const hasCamera = Boolean(cameraStream)
   if (cameraStream) {
     const width = metadata.width ?? recording.width
     const height = metadata.height ?? recording.height
     const cameraSourceWidth = cameraStream.width ?? (recording.webcamPath ? 1280 : width)
     const cameraSourceHeight = cameraStream.height ?? (recording.webcamPath ? 720 : height)
     const transform = buildCameraPresetTransform("vertical-pip", {
-      canvas: { width, height },
+      canvas: { width, height, padding: 96 },
       source: { width: cameraSourceWidth, height: cameraSourceHeight },
     })
     const cameraClip: CameraClip = {
@@ -327,8 +329,8 @@ export function createTimelineFromRecording(
       width: metadata.width ?? recording.width,
       height: metadata.height ?? recording.height,
       fps: metadata.fps ? Math.round(metadata.fps) : recording.fps,
-      background: "#000000",
-      padding: 0,
+      background: DEFAULT_CANVAS_BACKGROUND,
+      padding: hasCamera ? 96 : 0,
       borderRadius: 0,
       shadow: false,
       cursorSettings: defaultCursorSettings,

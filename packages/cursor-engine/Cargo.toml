@@ -1,6 +1,6 @@
 [package]
 name = "cursor-engine"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2021"
 authors = ["Prestige Tech"]
 description = "Canonical cursor evaluation engine for preview and export"

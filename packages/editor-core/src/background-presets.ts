@@ -26,14 +26,9 @@ export interface GradientPreset {
   dominantColor: string
 }
 
-export type ImageBackgroundCategory =
-  "abstract" | "gradient-mesh" | "dark" | "nature" | "studio" | "minimal"
-
 export interface ImageBackgroundPreset {
   id: string
-  name: string
   src: string
-  category: ImageBackgroundCategory
   dominantColor: string
 }
 
@@ -266,174 +261,30 @@ export const GRADIENT_PRESETS: GradientPreset[] = [
 // ---------------------------------------------------------------------------
 
 export const IMAGE_BACKGROUND_PRESETS: ImageBackgroundPreset[] = [
-  {
-    id: "bg-1",
-    name: "Deep Indigo Nebula",
-    src: "/backgrounds/bg-1.jpg",
-    category: "abstract",
-    dominantColor: "#1e1b4b",
-  },
-  {
-    id: "bg-2",
-    name: "Sunset Horizon",
-    src: "/backgrounds/bg-2.jpg",
-    category: "gradient-mesh",
-    dominantColor: "#ea580c",
-  },
-  {
-    id: "bg-3",
-    name: "Cyber Silk",
-    src: "/backgrounds/bg-3.jpg",
-    category: "abstract",
-    dominantColor: "#4f46e5",
-  },
-  {
-    id: "bg-4",
-    name: "Ethereal Aura",
-    src: "/backgrounds/bg-4.jpg",
-    category: "gradient-mesh",
-    dominantColor: "#ec4899",
-  },
-  {
-    id: "bg-5",
-    name: "Obsidian Flow",
-    src: "/backgrounds/bg-5.jpg",
-    category: "dark",
-    dominantColor: "#09090b",
-  },
-  {
-    id: "bg-6",
-    name: "Aurora Borealis",
-    src: "/backgrounds/bg-6.jpg",
-    category: "nature",
-    dominantColor: "#059669",
-  },
-  {
-    id: "bg-7",
-    name: "Cosmic Twilight",
-    src: "/backgrounds/bg-7.jpg",
-    category: "abstract",
-    dominantColor: "#312e81",
-  },
-  {
-    id: "bg-8",
-    name: "Warm Studio",
-    src: "/backgrounds/bg-8.jpg",
-    category: "studio",
-    dominantColor: "#78350f",
-  },
-  {
-    id: "bg-9",
-    name: "Velvet Midnight",
-    src: "/backgrounds/bg-9.jpg",
-    category: "dark",
-    dominantColor: "#0f172a",
-  },
-  {
-    id: "bg-10",
-    name: "Minimal Slate",
-    src: "/backgrounds/bg-10.jpg",
-    category: "minimal",
-    dominantColor: "#1e293b",
-  },
-  {
-    id: "bg-11",
-    name: "Neon Fluid",
-    src: "/backgrounds/bg-11.jpg",
-    category: "abstract",
-    dominantColor: "#6366f1",
-  },
-  {
-    id: "bg-12",
-    name: "Vibrant Wave",
-    src: "/backgrounds/bg-12.jpg",
-    category: "gradient-mesh",
-    dominantColor: "#f43f5e",
-  },
-  {
-    id: "bg-13",
-    name: "Prism Glass",
-    src: "/backgrounds/bg-13.jpg",
-    category: "abstract",
-    dominantColor: "#0284c7",
-  },
-  {
-    id: "bg-14",
-    name: "Emerald Glow",
-    src: "/backgrounds/bg-14.jpg",
-    category: "nature",
-    dominantColor: "#065f46",
-  },
-  {
-    id: "bg-15",
-    name: "Studio Neutral",
-    src: "/backgrounds/bg-15.jpg",
-    category: "studio",
-    dominantColor: "#27272a",
-  },
-  {
-    id: "bg-16",
-    name: "Golden Hour",
-    src: "/backgrounds/bg-16.jpg",
-    category: "gradient-mesh",
-    dominantColor: "#d97706",
-  },
-  {
-    id: "bg-17",
-    name: "Dark Chroma",
-    src: "/backgrounds/bg-17.jpg",
-    category: "dark",
-    dominantColor: "#18181b",
-  },
-  {
-    id: "bg-18",
-    name: "Pastel Swirl",
-    src: "/backgrounds/bg-18.jpg",
-    category: "minimal",
-    dominantColor: "#a855f7",
-  },
-  {
-    id: "bg-19",
-    name: "Hyper Violet",
-    src: "/backgrounds/bg-19.jpg",
-    category: "abstract",
-    dominantColor: "#7c3aed",
-  },
-  {
-    id: "bg-20",
-    name: "Arctic Mist",
-    src: "/backgrounds/bg-20.jpg",
-    category: "minimal",
-    dominantColor: "#334155",
-  },
-  {
-    id: "bg-21",
-    name: "Solar Flare",
-    src: "/backgrounds/bg-21.jpg",
-    category: "gradient-mesh",
-    dominantColor: "#dc2626",
-  },
-  {
-    id: "bg-22",
-    name: "Deep Forest",
-    src: "/backgrounds/bg-22.jpg",
-    category: "nature",
-    dominantColor: "#064e3b",
-  },
-  {
-    id: "bg-23",
-    name: "Modern Loft",
-    src: "/backgrounds/bg-23.jpg",
-    category: "studio",
-    dominantColor: "#3f3f46",
-  },
-  {
-    id: "bg-24",
-    name: "Cyberpunk Grid",
-    src: "/backgrounds/bg-24.jpg",
-    category: "abstract",
-    dominantColor: "#06b6d4",
-  },
+  { id: "bg-1", src: "/backgrounds/bg-1.jpg", dominantColor: "#1e1b4b" },
+  { id: "bg-2", src: "/backgrounds/bg-2.jpg", dominantColor: "#ea580c" },
+  { id: "bg-3", src: "/backgrounds/bg-3.jpg", dominantColor: "#4f46e5" },
+  { id: "bg-4", src: "/backgrounds/bg-4.jpg", dominantColor: "#ec4899" },
+  { id: "bg-5", src: "/backgrounds/bg-5.jpg", dominantColor: "#09090b" },
+  { id: "bg-6", src: "/backgrounds/bg-6.jpg", dominantColor: "#059669" },
+  { id: "bg-7", src: "/backgrounds/bg-7.jpg", dominantColor: "#312e81" },
+  { id: "bg-8", src: "/backgrounds/bg-8.jpg", dominantColor: "#78350f" },
+  { id: "bg-9", src: "/backgrounds/bg-9.jpg", dominantColor: "#0f172a" },
+  { id: "bg-10", src: "/backgrounds/bg-10.jpg", dominantColor: "#1e293b" },
+  { id: "bg-11", src: "/backgrounds/bg-11.jpg", dominantColor: "#6366f1" },
+  { id: "bg-12", src: "/backgrounds/bg-12.jpg", dominantColor: "#f43f5e" },
+  { id: "bg-13", src: "/backgrounds/bg-13.jpg", dominantColor: "#0284c7" },
+  { id: "bg-14", src: "/backgrounds/bg-14.jpg", dominantColor: "#065f46" },
+  { id: "bg-15", src: "/backgrounds/bg-15.jpg", dominantColor: "#27272a" },
+  { id: "bg-16", src: "/backgrounds/bg-16.jpg", dominantColor: "#d97706" },
+  { id: "bg-17", src: "/backgrounds/bg-17.jpg", dominantColor: "#18181b" },
+  { id: "bg-18", src: "/backgrounds/bg-18.jpg", dominantColor: "#a855f7" },
+  { id: "bg-19", src: "/backgrounds/bg-19.jpg", dominantColor: "#7c3aed" },
+  { id: "bg-20", src: "/backgrounds/bg-20.jpg", dominantColor: "#334155" },
+  { id: "bg-21", src: "/backgrounds/bg-21.jpg", dominantColor: "#dc2626" },
+  { id: "bg-22", src: "/backgrounds/bg-22.jpg", dominantColor: "#064e3b" },
+  { id: "bg-23", src: "/backgrounds/bg-23.jpg", dominantColor: "#3f3f46" },
+  { id: "bg-24", src: "/backgrounds/bg-24.jpg", dominantColor: "#06b6d4" },
 ]
 
 // ---------------------------------------------------------------------------
@@ -570,6 +421,11 @@ export const BACKGROUND_DIM_PRESETS = [
   { label: "60%", value: 0.6 },
 ]
 
+export const NORTHERN_LIGHTS_GRADIENT =
+  "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)"
+
+export const DEFAULT_CANVAS_BACKGROUND = NORTHERN_LIGHTS_GRADIENT
+
 /**
  * Compute CSS filter & overlay style rules for an image background layer.
  */
@@ -590,3 +446,4 @@ export function computeBackgroundImageLayerStyle(
     overlayOpacity: safeDim > 0 ? safeDim : undefined,
   }
 }
+

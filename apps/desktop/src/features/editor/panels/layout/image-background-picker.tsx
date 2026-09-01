@@ -1,10 +1,9 @@
-import { useMemo, useRef, useState } from "react"
+import { useRef } from "react"
 import { Check, Upload, Trash2, Sliders, RotateCcw } from "lucide-react"
 import {
   BACKGROUND_BLUR_PRESETS,
   BACKGROUND_DIM_PRESETS,
   IMAGE_BACKGROUND_PRESETS,
-  type ImageBackgroundCategory,
 } from "@recordforge/editor-core"
 import { Button, Slider, cn } from "@recordforge/ui"
 
@@ -19,16 +18,6 @@ interface ImageBackgroundPickerProps {
   onFitChange?: (fit: "cover" | "contain" | "fill") => void
 }
 
-const CATEGORIES: { value: ImageBackgroundCategory | "all"; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "abstract", label: "Abstract" },
-  { value: "gradient-mesh", label: "Mesh" },
-  { value: "dark", label: "Dark" },
-  { value: "nature", label: "Nature" },
-  { value: "studio", label: "Studio" },
-  { value: "minimal", label: "Minimal" },
-]
-
 export function ImageBackgroundPicker({
   value,
   onChange,
@@ -39,13 +28,7 @@ export function ImageBackgroundPicker({
   backgroundFit = "cover",
   onFitChange,
 }: ImageBackgroundPickerProps) {
-  const [activeCategory, setActiveCategory] = useState<ImageBackgroundCategory | "all">("all")
   const fileInputRef = useRef<HTMLInputElement>(null)
-
-  const filteredPresets = useMemo(() => {
-    if (activeCategory === "all") return IMAGE_BACKGROUND_PRESETS
-    return IMAGE_BACKGROUND_PRESETS.filter((p) => p.category === activeCategory)
-  }, [activeCategory])
 
   const isPresetSelected = (presetSrc: string) => {
     return value.includes(presetSrc) || (value.startsWith("url(") && value.includes(presetSrc))
@@ -73,32 +56,13 @@ export function ImageBackgroundPicker({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Category Pills */}
-      <div className="flex flex-wrap items-center gap-1">
-        {CATEGORIES.map((cat) => (
-          <button
-            key={cat.value}
-            type="button"
-            onClick={() => setActiveCategory(cat.value)}
-            className={cn(
-              "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
-              activeCategory === cat.value
-                ? "border-primary/40 bg-primary/15 font-semibold text-primary"
-                : "border-transparent bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground",
-            )}
-          >
-            {cat.label}
-          </button>
-        ))}
-      </div>
-
       {/* Preset Images Grid */}
       <div
-        className="grid grid-cols-3 gap-2 max-h-55 overflow-y-auto pr-1"
+        className="grid grid-cols-3 gap-2 max-h-56 overflow-y-auto pr-1"
         role="listbox"
         aria-label="Image background presets"
       >
-        {filteredPresets.map((preset) => {
+        {IMAGE_BACKGROUND_PRESETS.map((preset) => {
           const selected = isPresetSelected(preset.src)
 
           return (
@@ -107,22 +71,22 @@ export function ImageBackgroundPicker({
               type="button"
               role="option"
               aria-selected={selected}
-              title={preset.name}
+              aria-label={`Background preset ${preset.id.replace("bg-", "")}`}
               onClick={() => onChange(preset.src)}
               className={cn(
-                "group relative flex flex-col items-center overflow-hidden rounded-lg border border-border/80 p-1 text-left transition-all",
+                "group relative aspect-video w-full overflow-hidden rounded-md border border-border/80 p-0.5 transition-all",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
                 selected
-                  ? "border-primary bg-primary/10 ring-2 ring-primary ring-offset-1 ring-offset-background shadow-xs"
-                  : "hover:border-border-hover hover:scale-[1.02] bg-surface-dim/50",
+                  ? "border-primary bg-primary/10 ring-2 ring-primary ring-offset-1 ring-offset-background shadow-xs scale-105"
+                  : "hover:border-border-hover hover:scale-105 bg-surface-dim/50",
               )}
             >
-              <div className="relative aspect-video w-full overflow-hidden rounded-md bg-surface-dim shadow-xs">
+              <div className="relative size-full overflow-hidden rounded-[4px] bg-surface-dim shadow-xs">
                 <img
                   src={preset.src}
-                  alt={preset.name}
+                  alt={`Background ${preset.id.replace("bg-", "")}`}
                   loading="lazy"
-                  className="size-full object-cover transition-transform duration-300 group-hover:scale-105"
+                  className="size-full object-cover transition-transform duration-300 group-hover:scale-110"
                 />
                 {selected && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/40">
@@ -130,9 +94,6 @@ export function ImageBackgroundPicker({
                   </div>
                 )}
               </div>
-              <span className="mt-1 w-full truncate text-center text-[10px] font-medium text-foreground">
-                {preset.name}
-              </span>
             </button>
           )
         })}
