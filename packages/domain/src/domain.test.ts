@@ -241,4 +241,3 @@ describe("domain", () => {
     expect(project.canvas.padding).toBe(0)
   })
 })
-

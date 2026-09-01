@@ -760,10 +760,10 @@ fn run(
                 .into());
             }
         }
-        if probe_start.elapsed() >= std::time::Duration::from_millis(400) {
+        if probe_start.elapsed() >= std::time::Duration::from_millis(100) {
             break None;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     };
 
     if let Some(status) = early_status {

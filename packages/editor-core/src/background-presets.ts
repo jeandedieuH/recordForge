@@ -446,4 +446,3 @@ export function computeBackgroundImageLayerStyle(
     overlayOpacity: safeDim > 0 ? safeDim : undefined,
   }
 }
-
