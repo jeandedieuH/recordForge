@@ -1,6 +1,6 @@
 [package]
 name = "overlay-engine"
-version = "1.2.4"
+version = "1.2.6"
 edition = "2021"
 authors = ["Prestige Tech"]
 description = "Canonical overlay evaluation engine for preview and export"
