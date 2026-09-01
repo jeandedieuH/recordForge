@@ -15,8 +15,9 @@
   --color-surface-container-highest: #182438;
   --color-elevated: #121c2e; /* Floating popovers, dropdowns, dialogs */
   --color-overlay: #141f33; /* Tooltips, hover fills */
-  --color-accent: #094db2; /* Primary interactive accent */
+  --color-accent: #d97706; /* Primary interactive accent */
   --color-accent-foreground: #ffffff;
+  --color-primary-foreground: #DAE9FF;
   --color-accent-soft: rgba(9, 77, 178, 0.15);
 
   /* Borders & Outlines */
