@@ -140,12 +140,22 @@ fn signed_start_offset_ms(a: std::time::Instant, b: std::time::Instant) -> i64 {
     }
 }
 
+/// Physical latency constant for USB / UVC webcam hardware sensor readout,
+/// USB transfer packetization, and driver capture buffering relative
+/// to instantaneous native WASAPI / CoreAudio microphone capture.
+///
+/// Standard UVC camera sensors expose, digitize, and transfer frames across a
+/// 1-frame driver queue (~21 ms at standard capture rates). Compensating for this
+/// hardware pipeline latency shifts webcam video into frame-accurate lip-sync with
+/// the microphone track automatically during segment stitching.
+pub(crate) const WEBCAM_HARDWARE_LATENCY_COMPENSATION_MS: i64 = 21;
+
 /// Compute the webcam segment start offset relative to the master screen timeline.
 ///
 /// Master timeline starts at `screen_spawn + screen_head_trim`.
 /// The webcam's first frame was captured at `webcam_spawn + webcam_head_trim`.
 /// The offset on the master timeline is:
-/// `(webcam_spawn - screen_spawn) + webcam_head_trim - screen_head_trim`.
+/// `(webcam_spawn - screen_spawn) + webcam_head_trim - screen_head_trim - WEBCAM_HARDWARE_LATENCY_COMPENSATION_MS`.
 ///
 /// Positive offset: webcam started after master timeline (needs leading padding).
 /// Negative offset: webcam started before master timeline (needs head trimming).
@@ -157,6 +167,7 @@ fn compute_webcam_start_offset_ms(
     spawn_offset_ms
         .saturating_add(webcam_head_trim_ms as i64)
         .saturating_sub(screen_head_trim_ms as i64)
+        .saturating_sub(WEBCAM_HARDWARE_LATENCY_COMPENSATION_MS)
 }
 
 /// The segment's rendered video timeline. FFmpeg only starts producing frames
@@ -1836,23 +1847,23 @@ mod tests {
     #[test]
     fn webcam_start_offset_accounts_for_camera_and_screen_startup_gaps() {
         // Camera spawned 150ms after screen, but camera DirectShow init took 800ms
-        // while screen took 500ms. Camera first frame is 150 + 800 - 500 = +450ms
-        // relative to master timeline (needs 450ms black padding).
+        // while screen took 500ms. Camera first frame is 150 + 800 - 500 - 21 = +429ms
+        // relative to master timeline (needs 429ms black padding).
         let offset = compute_webcam_start_offset_ms(150, 800, 500);
-        assert_eq!(offset, 450);
+        assert_eq!(offset, 429);
 
         // Camera started faster than screen: screen took 900ms, camera took 200ms
-        // with 100ms spawn delay. Offset is 100 + 200 - 900 = -600ms (needs 600ms trim).
+        // with 100ms spawn delay. Offset is 100 + 200 - 900 - 21 = -621ms (needs 621ms trim).
         let early_offset = compute_webcam_start_offset_ms(100, 200, 900);
-        assert_eq!(early_offset, -600);
+        assert_eq!(early_offset, -621);
 
-        // Equal startup gaps: offset matches process spawn delta.
+        // Equal startup gaps: offset matches process spawn delta minus camera latency compensation.
         let equal_offset = compute_webcam_start_offset_ms(200, 400, 400);
-        assert_eq!(equal_offset, 200);
+        assert_eq!(equal_offset, 179);
 
-        // Fallback without probes (0ms trims): offset is purely spawn delta.
+        // Fallback without probes (0ms trims): offset is spawn delta minus camera latency compensation.
         let fallback_offset = compute_webcam_start_offset_ms(180, 0, 0);
-        assert_eq!(fallback_offset, 180);
+        assert_eq!(fallback_offset, 159);
     }
 
     #[test]
