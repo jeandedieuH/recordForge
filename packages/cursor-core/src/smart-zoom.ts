@@ -407,17 +407,24 @@ export function resolveInertialFollowCenter(
 
 export function sourcePointToCanvas(
   telemetry: CursorTelemetryFile,
-  canvas: Pick<TimelineCanvas, "width" | "height">,
+  canvas: Pick<TimelineCanvas, "width" | "height"> &
+    Partial<Pick<TimelineCanvas, "padding" | "aspectRatio" | "videoPositionY">>,
   point: { x: number; y: number },
 ): { x: number; y: number } {
   const sourceWidth = Math.max(1, telemetry.sourceWidth)
   const sourceHeight = Math.max(1, telemetry.sourceHeight)
   const sourceX = clampRange(point.x, 0, sourceWidth)
   const sourceY = clampRange(point.y, 0, sourceHeight)
-  const scale = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight)
+  const padding = canvas.padding ?? 0
+  const contentWidth = Math.max(1, canvas.width - padding * 2)
+  const contentHeight = Math.max(1, canvas.height - padding * 2)
+  const scale = Math.min(contentWidth / sourceWidth, contentHeight / sourceHeight)
+  const fitWidth = sourceWidth * scale
+  const fitHeight = sourceHeight * scale
+  const positionY = canvas.aspectRatio === "16:9" ? 0.5 : (canvas.videoPositionY ?? 0.5)
   return {
-    x: (canvas.width - sourceWidth * scale) / 2 + sourceX * scale,
-    y: (canvas.height - sourceHeight * scale) / 2 + sourceY * scale,
+    x: padding + (contentWidth - fitWidth) / 2 + sourceX * scale,
+    y: padding + (contentHeight - fitHeight) * positionY + sourceY * scale,
   }
 }
 

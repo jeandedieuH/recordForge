@@ -191,7 +191,16 @@ function initWebGL(canvas: HTMLCanvasElement): WebGLContextBundle | null {
 }
 
 function parseHexColor(hex: string): [number, number, number, number] {
-  const clean = hex.replace("#", "")
+  const lower = hex.trim().toLowerCase()
+  if (lower === "black") return [0.0, 0.0, 0.0, 1.0]
+  if (lower === "white") return [1.0, 1.0, 1.0, 1.0]
+  if (lower === "red") return [239 / 255, 68 / 255, 68 / 255, 1.0]
+  if (lower === "blue") return [59 / 255, 130 / 255, 246 / 255, 1.0]
+  if (lower === "green") return [16 / 255, 185 / 255, 129 / 255, 1.0]
+  if (lower === "yellow") return [245 / 255, 158 / 255, 11 / 255, 1.0]
+  if (lower === "transparent") return [0.0, 0.0, 0.0, 0.0]
+
+  const clean = hex.replace("#", "").trim()
   if (clean.length === 6) {
     return [
       parseInt(clean.slice(0, 2), 16) / 255,
@@ -200,7 +209,7 @@ function parseHexColor(hex: string): [number, number, number, number] {
       1.0,
     ]
   }
-  return [0.08, 0.09, 0.12, 1.0]
+  return [0.0, 0.0, 0.0, 1.0]
 }
 
 function isMaskActive(clip: MaskClip, playheadMs: number): boolean {

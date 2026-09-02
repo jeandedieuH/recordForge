@@ -6,13 +6,14 @@ import type {
 } from "@recordforge/contracts"
 import { buildCameraPresetTransform } from "@recordforge/editor-core"
 import { useEffect, useMemo } from "react"
-import { Sparkles } from "lucide-react"
-import { ColorPicker, Switch } from "@recordforge/ui"
+import { Sparkles, Video } from "lucide-react"
+import { Button, ColorPicker, Switch, useToast } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 import { CameraPresetPicker } from "./camera-preset-picker"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { useRecorderStore } from "../../../stores/recorder-store"
 
 interface CameraClipInspectorProps {
   clip: CameraClip
@@ -137,6 +138,23 @@ export function CameraClipInspector({
     interaction.updateClipTransform(clip.id, next, { phase: "commit" })
   }
 
+  const savePreferences = useRecorderStore((state) => state.savePreferences)
+  const { toast } = useToast()
+
+  function nudgeOffset(deltaMs: number) {
+    const nextStartMs = Math.max(0, clip.startMs + deltaMs)
+    interaction.moveClip(clip, track, nextStartMs, { phase: "commit" })
+  }
+
+  function handleSaveAsDefault() {
+    void savePreferences({ cameraSyncOffsetMs: clip.startMs }).then(() => {
+      toast({
+        title: "Lip-sync default saved",
+        description: `Set ${clip.startMs > 0 ? `+${clip.startMs}` : clip.startMs} ms as the default camera sync offset for future recordings.`,
+      })
+    })
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <InspectorSection title="Basic" defaultOpen>
@@ -146,6 +164,79 @@ export function CameraClipInspector({
           metadata={metadata}
           selectedClipCount={selectedClipCount}
         />
+      </InspectorSection>
+
+      <InspectorSection title="Lip-Sync & Timing" defaultOpen>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+              <Video className="size-4 text-primary" aria-hidden />
+              <span>Camera Sync Offset</span>
+            </div>
+            <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-mono font-semibold text-primary">
+              {clip.startMs > 0 ? `+${clip.startMs}` : clip.startMs} ms
+            </span>
+          </div>
+
+          <p className="text-[11px] leading-relaxed text-subtle-foreground">
+            Nudge this camera clip forward or backward to achieve perfect lip-sync with audio.
+            Moving right (positive) delays the camera video.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => nudgeOffset(-250)}
+              className="h-7 px-2 text-xs font-mono"
+            >
+              -250ms
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => nudgeOffset(-50)}
+              className="h-7 px-2 text-xs font-mono"
+            >
+              -50ms
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => nudgeOffset(50)}
+              className="h-7 px-2 text-xs font-mono"
+            >
+              +50ms
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => nudgeOffset(250)}
+              className="h-7 px-2 text-xs font-mono"
+            >
+              +250ms
+            </Button>
+            {clip.startMs !== 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => interaction.moveClip(clip, track, 0, { phase: "commit" })}
+                className="h-7 px-2 text-xs text-subtle-foreground hover:text-foreground"
+              >
+                Reset (0ms)
+              </Button>
+            )}
+          </div>
+
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleSaveAsDefault}
+            className="w-full text-xs cursor-pointer"
+          >
+            Save current offset ({clip.startMs}ms) as default
+          </Button>
+        </div>
       </InspectorSection>
 
       <InspectorSection title="Placement" defaultOpen>

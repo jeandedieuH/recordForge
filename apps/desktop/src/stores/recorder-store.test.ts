@@ -59,6 +59,7 @@ describe("recorder-store preferences & fallback", () => {
         webcamEnabled: false,
         webcamId: null,
         webcamName: null,
+        cameraSyncOffsetMs: 0,
       },
       preferencesLoaded: false,
       error: null,

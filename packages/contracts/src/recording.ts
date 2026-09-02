@@ -435,6 +435,7 @@ export const recordingPreferencesSchema = z.object({
   webcamEnabled: z.boolean().default(false),
   webcamId: z.string().nullable().default(null),
   webcamName: z.string().nullable().default(null),
+  cameraSyncOffsetMs: z.number().int().min(-2000).max(5000).default(0),
 })
 
 export type RecordingPreferences = z.infer<typeof recordingPreferencesSchema>
@@ -456,6 +457,7 @@ export const defaultRecordingPreferences: RecordingPreferences = {
   webcamEnabled: false,
   webcamId: null,
   webcamName: null,
+  cameraSyncOffsetMs: 0,
 }
 
 export function reconcileMicrophone(

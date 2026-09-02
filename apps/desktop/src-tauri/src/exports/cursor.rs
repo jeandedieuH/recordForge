@@ -41,6 +41,8 @@ pub struct RenderCanvas {
     pub background_fit: Option<String>,
     #[serde(default)]
     pub aspect_ratio: Option<String>,
+    #[serde(default)]
+    pub video_position_y: Option<f64>,
     pub cursor_settings: CursorSettings,
 }
 
@@ -294,9 +296,14 @@ impl CursorRenderer {
                 .min(content_height / telemetry.source_height);
             let fit_width = telemetry.source_width * fit_scale;
             let fit_height = telemetry.source_height * fit_scale;
+            let position_y = if canvas.aspect_ratio.as_deref() == Some("16:9") {
+                0.5
+            } else {
+                canvas.video_position_y.unwrap_or(0.5).clamp(0.0, 1.0)
+            };
             ClipRect {
                 x: (padding + (content_width - fit_width) / 2.0).floor() as u32,
-                y: (padding + (content_height - fit_height) / 2.0).floor() as u32,
+                y: (padding + (content_height - fit_height) * position_y).floor() as u32,
                 w: fit_width.floor().max(1.0) as u32,
                 h: fit_height.floor().max(1.0) as u32,
                 border_radius: canvas.border_radius,

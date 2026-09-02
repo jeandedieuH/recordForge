@@ -407,7 +407,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         project = loaded.project
         missingAssets = loaded.missingAssets
       } else {
-        project = createProjectFromRecording(recording, meta, recording.name)
+        const cameraSyncOffsetMs = storedPreferences?.cameraSyncOffsetMs ?? 0
+        project = createProjectFromRecording(
+          recording,
+          meta,
+          recording.name,
+          undefined,
+          undefined,
+          { cameraSyncOffsetMs },
+        )
         if (defaultCursorRaw) {
           try {
             const parsed = cursorSettingsSchema.safeParse(JSON.parse(defaultCursorRaw))

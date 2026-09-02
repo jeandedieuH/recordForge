@@ -8,7 +8,6 @@ import {
 } from "@recordforge/editor-core"
 import {
   Button,
-  Input,
   Skeleton,
   Slider,
   Tabs,
@@ -19,6 +18,7 @@ import {
 } from "@recordforge/ui"
 import {
   LayoutTemplate,
+  MoveVertical,
   Palette,
   RotateCcw,
   Sparkles,
@@ -111,18 +111,16 @@ export function LayoutPanel() {
     width: number
     height: number
   }) => {
-    if (option.value === "custom") {
-      execute(createUpdateCanvasCommand({ aspectRatio: "custom" }))
-    } else {
-      execute(
-        createUpdateCanvasCommand({
-          aspectRatio: option.value,
-          width: option.width,
-          height: option.height,
-        }),
-      )
-    }
+    execute(
+      createUpdateCanvasCommand({
+        aspectRatio: option.value,
+        width: option.width,
+        height: option.height,
+      }),
+    )
   }
+
+  const isCustomYRatio = canvas.aspectRatio && canvas.aspectRatio !== "16:9"
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-3 pr-2">
@@ -146,46 +144,73 @@ export function LayoutPanel() {
         />
       </div>
 
+      {/* Video Positioning along Y (for non-16:9 ratios) */}
+      {isCustomYRatio && (
+        <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-dim/40 p-3">
+          <div className="flex items-center justify-between text-xs font-semibold text-foreground">
+            <span className="flex items-center gap-1.5">
+              <MoveVertical className="size-3.5 text-primary" aria-hidden />
+              <span>Video Position (Y)</span>
+            </span>
+            <span className="font-mono text-[10px] text-muted-foreground">
+              {Math.round((canvas.videoPositionY ?? 0.5) * 100)}%
+            </span>
+          </div>
+          <p className="text-[11px] text-subtle-foreground">
+            Adjust vertical placement within the {canvas.aspectRatio} canvas.
+          </p>
+          <Slider
+            value={[Math.round((canvas.videoPositionY ?? 0.5) * 100)]}
+            min={0}
+            max={100}
+            step={1}
+            onValueChange={([val]) =>
+              val !== undefined && execute(createUpdateCanvasCommand({ videoPositionY: val / 100 }))
+            }
+          />
+          <div className="flex items-center justify-between gap-1 pt-0.5">
+            <button
+              type="button"
+              onClick={() => execute(createUpdateCanvasCommand({ videoPositionY: 0 }))}
+              className={cn(
+                "flex-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+                (canvas.videoPositionY ?? 0.5) === 0
+                  ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                  : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
+              )}
+            >
+              Top
+            </button>
+            <button
+              type="button"
+              onClick={() => execute(createUpdateCanvasCommand({ videoPositionY: 0.5 }))}
+              className={cn(
+                "flex-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+                (canvas.videoPositionY ?? 0.5) === 0.5
+                  ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                  : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
+              )}
+            >
+              Center
+            </button>
+            <button
+              type="button"
+              onClick={() => execute(createUpdateCanvasCommand({ videoPositionY: 1 }))}
+              className={cn(
+                "flex-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+                (canvas.videoPositionY ?? 0.5) === 1
+                  ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
+                  : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
+              )}
+            >
+              Bottom
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Dimensions & Insets */}
       <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface-dim/40 p-3">
-        {/* Custom Width & Height */}
-        <div className="grid grid-cols-2 gap-2">
-          <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-            <span>Width (px)</span>
-            <Input
-              type="number"
-              min={320}
-              max={7680}
-              value={canvas.width}
-              onChange={(e) =>
-                execute(
-                  createUpdateCanvasCommand({
-                    width: Math.max(1, Number(e.target.value) || 1920),
-                    aspectRatio: "custom",
-                  }),
-                )
-              }
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-            <span>Height (px)</span>
-            <Input
-              type="number"
-              min={240}
-              max={4320}
-              value={canvas.height}
-              onChange={(e) =>
-                execute(
-                  createUpdateCanvasCommand({
-                    height: Math.max(1, Number(e.target.value) || 1080),
-                    aspectRatio: "custom",
-                  }),
-                )
-              }
-            />
-          </label>
-        </div>
-
         {/* Canvas Padding */}
         <div className="flex flex-col gap-1.5 pt-1">
           <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
@@ -331,6 +356,7 @@ export function LayoutPanel() {
                 padding: 0,
                 borderRadius: 0,
                 aspectRatio: "16:9",
+                videoPositionY: 0.5,
                 background: "#070b14",
                 backgroundBlur: 0,
                 backgroundDim: 0,

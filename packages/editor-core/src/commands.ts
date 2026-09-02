@@ -2126,10 +2126,13 @@ function applyUpdateCanvas(
       error: editorError("invalid_canvas", "Canvas dimensions and frame rate must be positive"),
     }
   }
-  if (nextCanvas.aspectRatio && nextCanvas.aspectRatio !== "custom") {
+  if (nextCanvas.aspectRatio) {
     const size = canvasSizeForAspectRatio(nextCanvas.aspectRatio, nextCanvas)
     nextCanvas.width = size.width
     nextCanvas.height = size.height
+  }
+  if (nextCanvas.videoPositionY !== undefined) {
+    nextCanvas.videoPositionY = Math.min(1, Math.max(0, nextCanvas.videoPositionY))
   }
   if (nextCanvas.padding * 2 >= Math.min(nextCanvas.width, nextCanvas.height)) {
     return {

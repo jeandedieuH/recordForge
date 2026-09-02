@@ -244,11 +244,16 @@ function recordingVideoDurationMs(recording: LibraryRecording, metadata: MediaMe
   return Math.round(probedDuration > 0 ? probedDuration : recording.durationMs)
 }
 
+export interface CreateTimelineOptions {
+  cameraSyncOffsetMs?: number
+}
+
 export function createTimelineFromRecording(
   recording: LibraryRecording,
   metadata: MediaMetadata,
   name?: string,
   projectId?: string,
+  options?: CreateTimelineOptions,
 ): TimelineState {
   const now = new Date().toISOString()
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
@@ -298,15 +303,20 @@ export function createTimelineFromRecording(
       canvas: { width, height, padding: 96 },
       source: { width: cameraSourceWidth, height: cameraSourceHeight },
     })
+    const rawOffset = Math.round(options?.cameraSyncOffsetMs ?? 0)
+    const startMs = Math.max(0, rawOffset)
+    const sourceInMs = rawOffset < 0 ? Math.min(duration, Math.abs(rawOffset)) : 0
+    const clipDuration = Math.max(0, duration - sourceInMs)
+
     const cameraClip: CameraClip = {
       id: crypto.randomUUID(),
       kind: "camera",
       assetId: recording.id,
       streamIndex: cameraStream.index,
-      startMs: 0,
-      durationMs: duration,
-      sourceInMs: 0,
-      sourceOutMs: duration,
+      startMs,
+      durationMs: clipDuration,
+      sourceInMs,
+      sourceOutMs: sourceInMs + clipDuration,
       speed: 1,
       transform,
     }
@@ -463,9 +473,10 @@ export function createProjectFromRecording(
   name?: string,
   exportSettings?: ProjectExportSettings,
   cursorTelemetryAsset?: ProjectAsset,
+  options?: CreateTimelineOptions,
 ): Project {
   const projectId = crypto.randomUUID()
-  const baseTimeline = createTimelineFromRecording(recording, metadata, name, projectId)
+  const baseTimeline = createTimelineFromRecording(recording, metadata, name, projectId, options)
 
   // Bootstrap projects register semantic stream assets while keeping every
   // asset path relative to the recording session for safe export resolution.

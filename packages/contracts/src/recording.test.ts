@@ -469,6 +469,20 @@ describe("recording contracts", () => {
       expect(parsed.microphoneId).toBe("mic-custom")
       expect(parsed.sourceType).toBe("screen")
       expect(parsed.systemAudioEnabled).toBe(false)
+      expect(parsed.cameraSyncOffsetMs).toBe(0)
+    })
+
+    it("parses and validates custom cameraSyncOffsetMs", () => {
+      const parsed = recordingPreferencesSchema.parse({
+        cameraSyncOffsetMs: 250,
+      })
+      expect(parsed.cameraSyncOffsetMs).toBe(250)
+
+      expect(() =>
+        recordingPreferencesSchema.parse({
+          cameraSyncOffsetMs: 10000,
+        }),
+      ).toThrow()
     })
 
     it("reconciles microphone by ID when available", () => {

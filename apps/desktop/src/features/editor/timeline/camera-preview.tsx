@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { CameraClip, ClipTransform, MediaVideoTrackOutput } from "@recordforge/contracts"
 import { computePreviewMediaSync } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
+import { Circle, Square } from "lucide-react"
 import { toAssetUrl } from "../media/derivative-resources"
 
 interface CameraPreviewProps {
@@ -14,6 +15,7 @@ interface CameraPreviewProps {
   frameMs: number
   canvasWidth: number
   canvasHeight: number
+  selectedClipId?: string | null
   onSelectClip?: (clipId: string) => void
   onUpdateTransform?: (
     clipId: string,
@@ -25,6 +27,8 @@ interface CameraPreviewProps {
 interface CameraGesture {
   clipId: string
   pointerId: number
+  mode: "move" | "resize"
+  handle?: "nw" | "ne" | "se" | "sw"
   startX: number
   startY: number
   transform: ClipTransform
@@ -35,12 +39,83 @@ function isClipActive(clip: CameraClip, playheadMs: number): boolean {
   return playheadMs >= clip.startMs && playheadMs < clip.startMs + clip.durationMs
 }
 
-// Apply the user-controlled border opacity to a solid color. This keeps the
-// color picker showing an opaque swatch while the preview respects opacity.
 function mixBorderColor(color: string | undefined, opacity: number | undefined): string {
   const source = color ?? "var(--color-foreground)"
   const alpha = Math.max(0, Math.min(1, opacity ?? 1))
   return `color-mix(in srgb, ${source} ${Math.round(alpha * 100)}%, transparent)`
+}
+
+function computeNextCameraTransform(
+  gesture: CameraGesture,
+  deltaX: number,
+  deltaY: number,
+  canvasWidth: number,
+  _canvasHeight: number,
+): ClipTransform {
+  if (gesture.mode === "resize") {
+    const handle = gesture.handle ?? "se"
+    const aspect = gesture.transform.width / Math.max(1, gesture.transform.height)
+
+    if (handle === "se") {
+      const scaleDelta = Math.max(deltaX, deltaY * aspect)
+      const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
+      const nextH = Math.round(nextW / aspect)
+      return {
+        ...gesture.transform,
+        width: Math.round(nextW),
+        height: nextH,
+        preset: undefined,
+      }
+    }
+    if (handle === "nw") {
+      const scaleDelta = Math.max(-deltaX, -deltaY * aspect)
+      const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
+      const nextH = Math.round(nextW / aspect)
+      const nextX = gesture.transform.x + (gesture.transform.width - nextW)
+      const nextY = gesture.transform.y + (gesture.transform.height - nextH)
+      return {
+        ...gesture.transform,
+        x: Math.round(nextX),
+        y: Math.round(nextY),
+        width: Math.round(nextW),
+        height: nextH,
+        preset: undefined,
+      }
+    }
+    if (handle === "ne") {
+      const scaleDelta = Math.max(deltaX, -deltaY * aspect)
+      const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
+      const nextH = Math.round(nextW / aspect)
+      const nextY = gesture.transform.y + (gesture.transform.height - nextH)
+      return {
+        ...gesture.transform,
+        y: Math.round(nextY),
+        width: Math.round(nextW),
+        height: nextH,
+        preset: undefined,
+      }
+    }
+    // "sw"
+    const scaleDelta = Math.max(-deltaX, deltaY * aspect)
+    const nextW = Math.max(80, Math.min(canvasWidth, gesture.transform.width + scaleDelta))
+    const nextH = Math.round(nextW / aspect)
+    const nextX = gesture.transform.x + (gesture.transform.width - nextW)
+    return {
+      ...gesture.transform,
+      x: Math.round(nextX),
+      width: Math.round(nextW),
+      height: nextH,
+      preset: undefined,
+    }
+  }
+
+  return {
+    ...gesture.transform,
+    x: Math.round(gesture.transform.x + deltaX),
+    y: Math.round(gesture.transform.y + deltaY),
+    preset: undefined,
+    locked: false,
+  }
 }
 
 /**
@@ -57,6 +132,7 @@ export function CameraPreview({
   frameMs,
   canvasWidth,
   canvasHeight,
+  selectedClipId,
   onSelectClip,
   onUpdateTransform,
 }: CameraPreviewProps) {
@@ -106,7 +182,12 @@ export function CameraPreview({
     }
   }, [clips, frameMs, isPlaying, outputsByStream, playheadMs, playbackRate])
 
-  function beginDrag(event: React.PointerEvent<HTMLDivElement>, clip: CameraClip) {
+  function beginDrag(
+    event: React.PointerEvent<HTMLDivElement>,
+    clip: CameraClip,
+    mode: CameraGesture["mode"] = "move",
+    handle?: CameraGesture["handle"],
+  ) {
     onSelectClip?.(clip.id)
     if (!onUpdateTransform || event.button !== 0 || clip.transform.locked) return
     event.stopPropagation()
@@ -115,6 +196,8 @@ export function CameraPreview({
     gestureRef.current = {
       clipId: clip.id,
       pointerId: event.pointerId,
+      mode,
+      handle,
       startX: event.clientX,
       startY: event.clientY,
       transform: clip.transform,
@@ -135,13 +218,7 @@ export function CameraPreview({
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && !gesture.moved) return
     gesture.moved = true
     event.preventDefault()
-    const next: ClipTransform = {
-      ...gesture.transform,
-      x: gesture.transform.x + dx,
-      y: gesture.transform.y + dy,
-      preset: undefined,
-      locked: false,
-    }
+    const next = computeNextCameraTransform(gesture, dx, dy, canvasWidth, canvasHeight)
     onUpdateTransform(gesture.clipId, next, { phase: "draft" })
   }
 
@@ -168,14 +245,47 @@ export function CameraPreview({
     const dy =
       ((event.clientY - gesture.startY) / Math.max(1, canvasElement?.clientHeight ?? 1)) *
       canvasHeight
-    const next: ClipTransform = {
-      ...gesture.transform,
-      x: gesture.transform.x + dx,
-      y: gesture.transform.y + dy,
-      preset: undefined,
-      locked: false,
-    }
+    const next = computeNextCameraTransform(gesture, dx, dy, canvasWidth, canvasHeight)
     onUpdateTransform(gesture.clipId, next, { phase: "commit" })
+  }
+
+  const handleSnapPreset = (clip: CameraClip, position: "TL" | "TR" | "BL" | "BR") => {
+    if (!onUpdateTransform) return
+    const margin = 32
+    const w = clip.transform.width
+    const h = clip.transform.height
+    let x = margin
+    let y = margin
+    if (position === "TR") {
+      x = canvasWidth - w - margin
+    } else if (position === "BL") {
+      y = canvasHeight - h - margin
+    } else if (position === "BR") {
+      x = canvasWidth - w - margin
+      y = canvasHeight - h - margin
+    }
+    onUpdateTransform(
+      clip.id,
+      {
+        ...clip.transform,
+        x: Math.max(0, x),
+        y: Math.max(0, y),
+        preset: undefined,
+      },
+      { phase: "commit" },
+    )
+  }
+
+  const handleSetShape = (clip: CameraClip, shape: "circle" | "rounded" | "rectangle") => {
+    if (!onUpdateTransform) return
+    onUpdateTransform(
+      clip.id,
+      {
+        ...clip.transform,
+        shape,
+      },
+      { phase: "commit" },
+    )
   }
 
   return (
@@ -187,6 +297,7 @@ export function CameraPreview({
         if (!source || transform.visible === false) return null
         const isActive = isClipActive(clip, playheadMs)
         const isLocked = transform.locked === true
+        const isSelected = selectedClipId === clip.id
         const radius =
           transform.shape === "circle" ? "50%" : transform.shape === "rounded" ? "12%" : 0
         const crop = transform.crop
@@ -206,13 +317,13 @@ export function CameraPreview({
             role="button"
             tabIndex={isActive ? 0 : -1}
             aria-label={
-              isLocked ? "Camera overlay, select to edit" : "Camera overlay, drag to move"
+              isLocked ? "Camera overlay, select to edit" : "Camera overlay, drag to move or resize"
             }
             aria-disabled={false}
             className={cn(
-              "absolute z-20 overflow-hidden",
+              "group absolute z-30 overflow-visible",
               isActive && (isLocked ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"),
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
+              "focus-visible:outline-none",
             )}
             style={{
               left: `${(transform.x / canvasWidth) * 100}%`,
@@ -220,13 +331,6 @@ export function CameraPreview({
               width: `${(transform.width / canvasWidth) * 100}%`,
               height: `${(transform.height / canvasHeight) * 100}%`,
               opacity: isActive ? transform.opacity : 0,
-              borderRadius: radius,
-              border: transform.borderWidth
-                ? `${transform.borderWidth}px solid ${borderColor}`
-                : undefined,
-              boxShadow: transform.shadowEnabled
-                ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "var(--color-pip-shadow)"}`
-                : undefined,
               pointerEvents: isActive ? "auto" : "none",
             }}
             onClick={() => onSelectClip?.(clip.id)}
@@ -257,52 +361,196 @@ export function CameraPreview({
                 { phase: "commit" },
               )
             }}
-            onPointerDown={(event) => beginDrag(event, clip)}
+            onPointerDown={(event) => beginDrag(event, clip, "move")}
             onPointerMove={moveDrag}
             onPointerUp={finishDrag}
             onPointerCancel={finishDrag}
           >
-            <video
-              ref={(element) => {
-                videoRefs.current[clip.id] = element
-              }}
-              src={source}
-              muted
-              playsInline
-              preload="auto"
-              className={cn(
-                "pointer-events-none absolute max-h-none max-w-none",
-                crop ? "object-fill" : "object-cover",
-              )}
+            {/* Camera Video Surface */}
+            <div
+              className="relative size-full overflow-hidden"
               style={{
-                left: `${cropLeft}%`,
-                top: `${cropTop}%`,
-                width: `${cropVideoWidth}%`,
-                height: `${cropVideoHeight}%`,
+                borderRadius: radius,
+                border: transform.borderWidth
+                  ? `${transform.borderWidth}px solid ${borderColor}`
+                  : undefined,
+                boxShadow: transform.shadowEnabled
+                  ? `${transform.shadowOffsetX ?? 0}px ${transform.shadowOffsetY ?? 4}px ${transform.shadowBlur ?? 12}px ${transform.shadowColor ?? "var(--color-pip-shadow)"}`
+                  : undefined,
               }}
-              onLoadedMetadata={(event) => {
-                const target = event.currentTarget
-                if (target.videoWidth > 0 && target.videoHeight > 0) {
-                  setLoadedDimensions((previous) => {
-                    const current = previous[clip.id]
-                    if (
-                      current &&
-                      current.width === target.videoWidth &&
-                      current.height === target.videoHeight
-                    ) {
-                      return previous
-                    }
-                    return {
-                      ...previous,
-                      [clip.id]: {
-                        width: target.videoWidth,
-                        height: target.videoHeight,
-                      },
-                    }
-                  })
-                }
-              }}
-            />
+            >
+              <video
+                ref={(element) => {
+                  videoRefs.current[clip.id] = element
+                }}
+                src={source}
+                muted
+                playsInline
+                preload="auto"
+                className={cn(
+                  "pointer-events-none absolute max-h-none max-w-none",
+                  crop ? "object-fill" : "object-cover",
+                )}
+                style={{
+                  left: `${cropLeft}%`,
+                  top: `${cropTop}%`,
+                  width: `${cropVideoWidth}%`,
+                  height: `${cropVideoHeight}%`,
+                }}
+                onLoadedMetadata={(event) => {
+                  const target = event.currentTarget
+                  if (target.videoWidth > 0 && target.videoHeight > 0) {
+                    setLoadedDimensions((previous) => {
+                      const current = previous[clip.id]
+                      if (
+                        current &&
+                        current.width === target.videoWidth &&
+                        current.height === target.videoHeight
+                      ) {
+                        return previous
+                      }
+                      return {
+                        ...previous,
+                        [clip.id]: {
+                          width: target.videoWidth,
+                          height: target.videoHeight,
+                        },
+                      }
+                    })
+                  }
+                }}
+              />
+            </div>
+
+            {/* Selection Ring & On-Canvas Direct Manipulation Handles */}
+            {isSelected && (
+              <div className="pointer-events-none absolute inset-0 rounded-[inherit] ring-2 ring-primary ring-offset-1 ring-offset-background/40" />
+            )}
+
+            {isSelected && !isLocked && onUpdateTransform ? (
+              <>
+                {/* 4 Corner Resize Handles */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Resize camera northwest"
+                  className="absolute -top-1.5 -left-1.5 z-40 size-3 cursor-nwse-resize rounded-full border-2 border-primary bg-background shadow-e2"
+                  onPointerDown={(e) => beginDrag(e, clip, "resize", "nw")}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Resize camera northeast"
+                  className="absolute -top-1.5 -right-1.5 z-40 size-3 cursor-nesw-resize rounded-full border-2 border-primary bg-background shadow-e2"
+                  onPointerDown={(e) => beginDrag(e, clip, "resize", "ne")}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Resize camera southwest"
+                  className="absolute -bottom-1.5 -left-1.5 z-40 size-3 cursor-nesw-resize rounded-full border-2 border-primary bg-background shadow-e2"
+                  onPointerDown={(e) => beginDrag(e, clip, "resize", "sw")}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Resize camera southeast"
+                  className="absolute -bottom-1.5 -right-1.5 z-40 size-3 cursor-nwse-resize rounded-full border-2 border-primary bg-background shadow-e2"
+                  onPointerDown={(e) => beginDrag(e, clip, "resize", "se")}
+                  onClick={(e) => e.stopPropagation()}
+                />
+
+                {/* Floating Direct Action Toolbar */}
+                <div
+                  className="absolute -top-8 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 rounded-full border border-border/80 bg-background/90 px-2 py-0.5 shadow-e3 backdrop-blur-md"
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  {/* Shape Switchers */}
+                  <button
+                    type="button"
+                    title="Circle Shape"
+                    aria-label="Circle Shape"
+                    onClick={() => handleSetShape(clip, "circle")}
+                    className={cn(
+                      "flex size-5 items-center justify-center rounded transition-colors",
+                      transform.shape === "circle"
+                        ? "bg-primary text-primary-foreground font-bold"
+                        : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
+                    )}
+                  >
+                    <Circle className="size-2.5" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    title="Rounded Shape"
+                    aria-label="Rounded Shape"
+                    onClick={() => handleSetShape(clip, "rounded")}
+                    className={cn(
+                      "flex size-5 items-center justify-center rounded transition-colors",
+                      transform.shape === "rounded"
+                        ? "bg-primary text-primary-foreground font-bold"
+                        : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
+                    )}
+                  >
+                    <Square className="size-2.5 rounded-xs" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    title="Rectangle Shape"
+                    aria-label="Rectangle Shape"
+                    onClick={() => handleSetShape(clip, "rectangle")}
+                    className={cn(
+                      "flex size-5 items-center justify-center rounded transition-colors",
+                      transform.shape === "rectangle"
+                        ? "bg-primary text-primary-foreground font-bold"
+                        : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
+                    )}
+                  >
+                    <Square className="size-2.5" aria-hidden />
+                  </button>
+
+                  <div className="h-3 w-px bg-border/80 mx-0.5" aria-hidden />
+
+                  {/* Corner Snap Buttons */}
+                  <button
+                    type="button"
+                    title="Snap Top-Left"
+                    onClick={() => handleSnapPreset(clip, "TL")}
+                    className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
+                  >
+                    TL
+                  </button>
+                  <button
+                    type="button"
+                    title="Snap Top-Right"
+                    onClick={() => handleSnapPreset(clip, "TR")}
+                    className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
+                  >
+                    TR
+                  </button>
+                  <button
+                    type="button"
+                    title="Snap Bottom-Left"
+                    onClick={() => handleSnapPreset(clip, "BL")}
+                    className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
+                  >
+                    BL
+                  </button>
+                  <button
+                    type="button"
+                    title="Snap Bottom-Right"
+                    onClick={() => handleSnapPreset(clip, "BR")}
+                    className="px-1 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:bg-surface-hover hover:text-foreground rounded"
+                  >
+                    BR
+                  </button>
+                </div>
+              </>
+            ) : null}
           </div>
         )
       })}

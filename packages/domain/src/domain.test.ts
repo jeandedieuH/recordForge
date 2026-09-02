@@ -240,4 +240,64 @@ describe("domain", () => {
     )
     expect(project.canvas.padding).toBe(0)
   })
+
+  it("applies positive cameraSyncOffsetMs to shift camera clip startMs to the right", () => {
+    const recording = {
+      ...makeRecording(),
+      webcamPath: "webcam.mp4",
+      durationMs: 10_000,
+    }
+    const metadata: MediaMetadata = {
+      recordingId: recording.id,
+      path: recording.outputPath ?? "",
+      durationMs: 10_000,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      hasAudio: false,
+      streams: [{ index: 0, kind: "video", codec: "h264" }],
+      format: { name: "mp4" },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+
+    const timeline = createTimelineFromRecording(recording, metadata, undefined, undefined, {
+      cameraSyncOffsetMs: 250,
+    })
+    const cameraClip = timeline.tracks.find((t) => t.kind === "camera")?.clips[0]
+    expect(cameraClip).toBeDefined()
+    expect(cameraClip?.startMs).toBe(250)
+    expect(cameraClip?.sourceInMs).toBe(0)
+    expect(cameraClip?.durationMs).toBe(10_000)
+    expect(cameraClip?.sourceOutMs).toBe(10_000)
+  })
+
+  it("applies negative cameraSyncOffsetMs to trim camera clip sourceInMs", () => {
+    const recording = {
+      ...makeRecording(),
+      webcamPath: "webcam.mp4",
+      durationMs: 10_000,
+    }
+    const metadata: MediaMetadata = {
+      recordingId: recording.id,
+      path: recording.outputPath ?? "",
+      durationMs: 10_000,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      hasAudio: false,
+      streams: [{ index: 0, kind: "video", codec: "h264" }],
+      format: { name: "mp4" },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+
+    const timeline = createTimelineFromRecording(recording, metadata, undefined, undefined, {
+      cameraSyncOffsetMs: -200,
+    })
+    const cameraClip = timeline.tracks.find((t) => t.kind === "camera")?.clips[0]
+    expect(cameraClip).toBeDefined()
+    expect(cameraClip?.startMs).toBe(0)
+    expect(cameraClip?.sourceInMs).toBe(200)
+    expect(cameraClip?.durationMs).toBe(9_800)
+    expect(cameraClip?.sourceOutMs).toBe(10_000)
+  })
 })

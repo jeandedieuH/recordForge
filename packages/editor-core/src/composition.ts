@@ -40,25 +40,32 @@ const DEFAULT_SHADOW_BLUR = 24
 /** Return a stable numeric aspect ratio for a framing preset. */
 export function aspectRatioValue(aspectRatio: CanvasAspectRatio | undefined): number | null {
   if (aspectRatio === "16:9") return 16 / 9
-  if (aspectRatio === "1:1") return 1
   if (aspectRatio === "9:16") return 9 / 16
-  if (aspectRatio === "4:3") return 4 / 3
-  if (aspectRatio === "21:9") return 21 / 9
+  if (aspectRatio === "1:1") return 1
+  if (aspectRatio === "5:4") return 5 / 4
+  if (aspectRatio === "4:5") return 4 / 5
   return null
 }
 
 /** Fit a requested framing preset while preserving the supplied output area. */
 export function canvasSizeForAspectRatio(
   aspectRatio: CanvasAspectRatio,
-  current: CanvasSize,
+  current?: CanvasSize,
 ): CanvasSize {
-  const ratio = aspectRatioValue(aspectRatio)
-  if (!ratio || current.width <= 0 || current.height <= 0) return current
+  const baseDimension = current && Math.max(current.width, current.height) >= 2160 ? 2160 : 1080
 
-  if (current.width / current.height >= ratio) {
-    return { width: Math.max(1, Math.round(current.height * ratio)), height: current.height }
+  switch (aspectRatio) {
+    case "16:9":
+      return { width: Math.round((baseDimension * 16) / 9), height: baseDimension }
+    case "9:16":
+      return { width: baseDimension, height: Math.round((baseDimension * 16) / 9) }
+    case "1:1":
+      return { width: baseDimension, height: baseDimension }
+    case "5:4":
+      return { width: Math.round((baseDimension * 5) / 4), height: baseDimension }
+    case "4:5":
+      return { width: baseDimension, height: Math.round((baseDimension * 5) / 4) }
   }
-  return { width: current.width, height: Math.max(1, Math.round(current.width / ratio)) }
 }
 
 export function zoomEasedProgress(progress: number, easing: ManualZoomSegment["easing"]): number {

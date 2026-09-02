@@ -1,5 +1,5 @@
 import type { CanvasAspectRatio } from "@recordforge/contracts"
-import { Monitor, Smartphone, Square, Tv, Clapperboard, Sliders } from "lucide-react"
+import { Monitor, Smartphone, Square, Tv } from "lucide-react"
 import { cn } from "@recordforge/ui"
 
 interface AspectRatioOption {
@@ -41,31 +41,22 @@ export const ASPECT_RATIO_OPTIONS: AspectRatioOption[] = [
     height: 1080,
   },
   {
-    value: "4:3",
-    label: "4:3",
-    resolution: "1440 × 1080",
-    sublabel: "Classic / Presentation",
+    value: "5:4",
+    label: "5:4",
+    resolution: "1350 × 1080",
+    sublabel: "Desktop / Classic",
     icon: Tv,
-    width: 1440,
+    width: 1350,
     height: 1080,
   },
   {
-    value: "21:9",
-    label: "21:9",
-    resolution: "2560 × 1080",
-    sublabel: "Ultrawide / Cinematic",
-    icon: Clapperboard,
-    width: 2560,
-    height: 1080,
-  },
-  {
-    value: "custom",
-    label: "Custom",
-    resolution: "Variable",
-    sublabel: "Manual Width & Height",
-    icon: Sliders,
-    width: 1920,
-    height: 1080,
+    value: "4:5",
+    label: "4:5",
+    resolution: "1080 × 1350",
+    sublabel: "Portrait / Social Feed",
+    icon: Smartphone,
+    width: 1080,
+    height: 1350,
   },
 ]
 
@@ -75,7 +66,7 @@ interface AspectRatioSelectorProps {
 }
 
 export function AspectRatioSelector({ value = "16:9", onChange }: AspectRatioSelectorProps) {
-  const current = value ?? "custom"
+  const current = value ?? "16:9"
 
   return (
     <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="Canvas aspect ratio">

@@ -70,10 +70,13 @@ export function CanvasInspector() {
                 : timeline.canvas.background
           }
         />
-        <InfoField
-          label="Aspect ratio"
-          value={timeline.canvas.aspectRatio?.toString() ?? "custom"}
-        />
+        <InfoField label="Aspect ratio" value={timeline.canvas.aspectRatio?.toString() ?? "16:9"} />
+        {timeline.canvas.aspectRatio && timeline.canvas.aspectRatio !== "16:9" ? (
+          <InfoField
+            label="Video Y position"
+            value={`${Math.round((timeline.canvas.videoPositionY ?? 0.5) * 100)}%`}
+          />
+        ) : null}
         {(timeline.canvas.backgroundBlur ?? 0) > 0 ? (
           <InfoField label="Background blur" value={`${timeline.canvas.backgroundBlur}px`} />
         ) : null}

@@ -11,6 +11,7 @@ import {
   Sliders,
   Sparkles,
   Sun,
+  Video,
   Volume2,
 } from "lucide-react"
 import type {
@@ -203,6 +204,11 @@ export function SettingsView({
 
   function handleSmartZoomPresetChange(preset: RecordingSmartZoomPreset) {
     void savePreferences({ smartZoomPreset: preset })
+  }
+
+  function handleCameraSyncOffsetChange(offsetMs: number) {
+    const clamped = Math.max(-2000, Math.min(5000, Math.round(offsetMs)))
+    void savePreferences({ cameraSyncOffsetMs: clamped })
   }
 
   return (
@@ -576,6 +582,71 @@ export function SettingsView({
                   <Volume2 className="size-4 text-sky-400" />
                   <span>Hardware Timestamp Synchronized</span>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Camera Lip-Sync & Audio Alignment */}
+          <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Video className="size-4 text-primary" />
+                  <h3 className="text-sm font-semibold text-foreground">Camera Lip-Sync Offset</h3>
+                </div>
+                <p className="text-xs text-subtle-foreground mt-0.5">
+                  Calibrate the timing offset between camera video and microphone audio for new
+                  recordings.
+                </p>
+              </div>
+              <span className="rounded bg-primary/10 px-2.5 py-1 text-xs font-mono font-semibold text-primary">
+                {preferences.cameraSyncOffsetMs > 0
+                  ? `+${preferences.cameraSyncOffsetMs}`
+                  : preferences.cameraSyncOffsetMs}{" "}
+                ms
+              </span>
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-subtle-foreground">
+              If mouth movement appears before voice is heard, set a positive offset (e.g. +150ms to
+              +300ms) to delay the camera video. If voice is heard before mouth movement, set a
+              negative offset.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  step="25"
+                  min="-2000"
+                  max="5000"
+                  value={preferences.cameraSyncOffsetMs}
+                  onChange={(e) => {
+                    const parsed = Number.parseInt(e.target.value, 10)
+                    if (!Number.isNaN(parsed)) {
+                      handleCameraSyncOffsetChange(parsed)
+                    }
+                  }}
+                  className="w-28 font-mono text-xs"
+                />
+                <span className="text-xs text-subtle-foreground font-mono">ms</span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {[0, 150, 250, 350].map((presetMs) => (
+                  <button
+                    key={presetMs}
+                    type="button"
+                    onClick={() => handleCameraSyncOffsetChange(presetMs)}
+                    className={`rounded-lg px-2.5 py-1 text-xs font-mono transition-all ${
+                      preferences.cameraSyncOffsetMs === presetMs
+                        ? "bg-primary text-white shadow-xs"
+                        : "border border-border bg-surface-dim text-subtle-foreground hover:bg-surface hover:text-foreground"
+                    }`}
+                  >
+                    {presetMs === 0 ? "0 ms (Default)" : `+${presetMs} ms`}
+                  </button>
+                ))}
               </div>
             </div>
           </div>

@@ -89,6 +89,8 @@ import { usePlaybackClock } from "./use-playback-clock"
 import { CustomCursorOverlay } from "../cursor"
 import { ResizableHandle } from "../shell/resizable-handle"
 import { useResizableDimension } from "../shell/use-resizable-dimension"
+import { VideoCanvasControls } from "../canvas/video-canvas-controls"
+import { CanvasToolbarOverlay } from "../canvas/canvas-toolbar-overlay"
 
 interface TimelineViewProps {
   recordingId: string
@@ -575,9 +577,11 @@ export function TimelineView({
       const screenWidth = sourceWidth * screenScale
       const screenHeight = sourceHeight * screenScale
       const screenLeft = padding * canvasScale + (targetScreenWidth * canvasScale - screenWidth) / 2
+      const positionY =
+        timeline?.canvas.aspectRatio === "16:9" ? 0.5 : (timeline?.canvas.videoPositionY ?? 0.5)
       const screenTop =
         (padding + (usableHeight - targetScreenHeight) / 2) * canvasScale +
-        (targetScreenHeight * canvasScale - screenHeight) / 2
+        (targetScreenHeight * canvasScale - screenHeight) * positionY
 
       const nextBounds = {
         left: screenLeft,
@@ -610,9 +614,13 @@ export function TimelineView({
     const screenWidth = sourceWidth * screenScale
     const screenHeight = sourceHeight * screenScale
 
+    const positionY =
+      timeline?.canvas.aspectRatio === "16:9" ? 0.5 : (timeline?.canvas.videoPositionY ?? 0.5)
+    const screenTop = padding * canvasScale + (maxScreenHeight - screenHeight) * positionY
+
     const nextBounds = {
       left: (canvasRect.width - screenWidth) / 2,
-      top: (canvasRect.height - screenHeight) / 2,
+      top: screenTop,
       width: screenWidth,
       height: screenHeight,
       scale: canvasScale,
@@ -635,6 +643,8 @@ export function TimelineView({
     timeline?.canvas.width,
     timeline?.canvas.height,
     timeline?.canvas.padding,
+    timeline?.canvas.aspectRatio,
+    timeline?.canvas.videoPositionY,
   ])
 
   const canvasStyle = useMemo<React.CSSProperties>(() => {
@@ -1582,6 +1592,9 @@ export function TimelineView({
             ref={monitorRef}
             className="@container-size relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border bg-black p-2 shadow-e2"
           >
+            {/* Direct On-Canvas Framing & Aspect Ratio Toolbar */}
+            <CanvasToolbarOverlay />
+
             <div
               ref={canvasRef}
               className="relative flex items-center justify-center overflow-visible"
@@ -1637,7 +1650,57 @@ export function TimelineView({
                   />
                 )}
               </div>
-              {mediaUrl && !mediaError ? (
+              {mediaUrl && !mediaError && videoBounds ? (
+                <VideoCanvasControls
+                  videoBounds={videoBounds}
+                  canvasWidth={
+                    canvasRef.current?.clientWidth ?? timeline.canvas.width * videoBounds.scale
+                  }
+                  canvasHeight={
+                    canvasRef.current?.clientHeight ?? timeline.canvas.height * videoBounds.scale
+                  }
+                  padding={timeline.canvas.padding}
+                  aspectRatio={timeline.canvas.aspectRatio}
+                  videoPositionY={timeline.canvas.videoPositionY ?? 0.5}
+                  onTogglePlay={togglePlay}
+                  isPlaying={view.isPlaying}
+                  style={screenStyle}
+                >
+                  <video
+                    key={mediaUrl}
+                    ref={videoRef}
+                    src={mediaUrl}
+                    className="size-full object-contain cursor-pointer"
+                    style={
+                      zoomTransformStyle
+                        ? {
+                            transform: zoomTransformStyle,
+                            transformOrigin: "0 0",
+                            willChange: "transform",
+                          }
+                        : undefined
+                    }
+                    muted={isPreviewMuted}
+                    playsInline
+                    onError={() => {
+                      setVideoBounds(null)
+                      if (isUsingProxy && originalPath) {
+                        setUseOriginalMedia(true)
+                        setMediaError(false)
+                        return
+                      }
+                      setMediaError(true)
+                    }}
+                    onLoadedMetadata={() => {
+                      updateVideoBounds()
+                    }}
+                    onLoadedData={() => {
+                      setMediaError(false)
+                      updateVideoBounds()
+                    }}
+                  />
+                </VideoCanvasControls>
+              ) : mediaUrl && !mediaError ? (
                 <div style={screenStyle} onClick={togglePlay}>
                   <video
                     key={mediaUrl}
@@ -1702,6 +1765,9 @@ export function TimelineView({
                   frameMs={frameMs}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
+                  selectedClipId={
+                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                  }
                   onSelectClip={(clipId) =>
                     setSelection({ kind: "clip", primaryClipId: clipId, clipIds: [clipId] })
                   }
@@ -1718,7 +1784,11 @@ export function TimelineView({
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
                   videoElement={videoRef.current}
-                  useShaderOptimization={view.previewQuality !== "quality"}
+                  videoBounds={videoBounds}
+                  selectedClipId={
+                    view.selection?.kind === "clip" ? view.selection.primaryClipId : null
+                  }
+                  useShaderOptimization={false}
                   onSelectMask={selectMask}
                   onUpdateMask={(clipId, rect, options) =>
                     interaction.updateMaskRect(clipId, rect, options)

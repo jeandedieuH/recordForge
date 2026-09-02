@@ -159,13 +159,46 @@ describe("Phase 6 composition and editing", () => {
   })
 
   it("applies canvas aspect presets and rejects fades longer than an audio clip", () => {
-    const canvas = executeCommand(
-      createEngine(makeState()),
-      createUpdateCanvasCommand({ aspectRatio: "1:1" }),
+    const engine = createEngine(makeState())
+
+    const c169 = executeCommand(engine, createUpdateCanvasCommand({ aspectRatio: "16:9" }))
+    expect(c169.ok).toBe(true)
+    if (c169.ok)
+      expect(c169.value.history.present.canvas).toMatchObject({ width: 1920, height: 1080 })
+
+    const c916 = executeCommand(
+      engine,
+      createUpdateCanvasCommand({ aspectRatio: "9:16", videoPositionY: 0.25 }),
     )
-    expect(canvas.ok).toBe(true)
-    if (!canvas.ok) return
-    expect(canvas.value.history.present.canvas).toMatchObject({ width: 1080, height: 1080 })
+    expect(c916.ok).toBe(true)
+    if (c916.ok)
+      expect(c916.value.history.present.canvas).toMatchObject({
+        width: 1080,
+        height: 1920,
+        videoPositionY: 0.25,
+      })
+
+    const c11 = executeCommand(engine, createUpdateCanvasCommand({ aspectRatio: "1:1" }))
+    expect(c11.ok).toBe(true)
+    if (c11.ok)
+      expect(c11.value.history.present.canvas).toMatchObject({ width: 1080, height: 1080 })
+
+    const c54 = executeCommand(engine, createUpdateCanvasCommand({ aspectRatio: "5:4" }))
+    expect(c54.ok).toBe(true)
+    if (c54.ok)
+      expect(c54.value.history.present.canvas).toMatchObject({ width: 1350, height: 1080 })
+
+    const c45 = executeCommand(
+      engine,
+      createUpdateCanvasCommand({ aspectRatio: "4:5", videoPositionY: 0.8 }),
+    )
+    expect(c45.ok).toBe(true)
+    if (c45.ok)
+      expect(c45.value.history.present.canvas).toMatchObject({
+        width: 1080,
+        height: 1350,
+        videoPositionY: 0.8,
+      })
 
     const invalidFade = executeCommand(
       createEngine(makeState()),

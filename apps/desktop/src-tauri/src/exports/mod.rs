@@ -756,6 +756,11 @@ fn video_screen_rect(
     let padding = canvas.padding as f64;
     let content_width = (canvas.width as f64 - padding * 2.0).max(1.0);
     let content_height = (canvas.height as f64 - padding * 2.0).max(1.0);
+    let position_y = if canvas.aspect_ratio.as_deref() == Some("16:9") {
+        0.5
+    } else {
+        canvas.video_position_y.unwrap_or(0.5).clamp(0.0, 1.0)
+    };
     if is_side_by_side {
         let target_w = (content_width * 0.76).round().max(1.0);
         let target_h = ((target_w / canvas.width as f64) * canvas.height as f64)
@@ -770,7 +775,8 @@ fn video_screen_rect(
         let fit_height = (source_h * fit_scale).floor();
         let x = (padding + (target_w - fit_width) / 2.0).floor();
         let y =
-            (padding + (content_height - target_h) / 2.0 + (target_h - fit_height) / 2.0).floor();
+            (padding + (content_height - target_h) / 2.0 + (target_h - fit_height) * position_y)
+                .floor();
         (x, y, fit_width, fit_height)
     } else {
         let (source_w, source_h) = match source {
@@ -781,7 +787,7 @@ fn video_screen_rect(
         let fit_width = (source_w * fit_scale).floor();
         let fit_height = (source_h * fit_scale).floor();
         let x = (padding + (content_width - fit_width) / 2.0).floor();
-        let y = (padding + (content_height - fit_height) / 2.0).floor();
+        let y = (padding + (content_height - fit_height) * position_y).floor();
         (x, y, fit_width, fit_height)
     }
 }
@@ -1473,26 +1479,32 @@ fn render_timeline_composition(
             continue;
         }
         validate_mask(mask, project_id, asset_paths, canvas)?;
-        let x = mask
+        let x_raw = mask
             .rect
             .x
             .round()
-            .clamp(0.0, canvas.width.saturating_sub(1) as f64);
-        let y = mask
+            .clamp(0.0, canvas.width.saturating_sub(1) as f64) as u32;
+        let y_raw = mask
             .rect
             .y
             .round()
-            .clamp(0.0, canvas.height.saturating_sub(1) as f64);
-        let width = mask
-            .rect
-            .width
+            .clamp(0.0, canvas.height.saturating_sub(1) as f64) as u32;
+        let right_raw = (mask.rect.x + mask.rect.width)
             .round()
-            .clamp(1.0, (canvas.width as f64 - x).max(1.0));
-        let height = mask
-            .rect
-            .height
+            .clamp(1.0, canvas.width as f64) as u32;
+        let bottom_raw = (mask.rect.y + mask.rect.height)
             .round()
-            .clamp(1.0, (canvas.height as f64 - y).max(1.0));
+            .clamp(1.0, canvas.height as f64) as u32;
+
+        // Snap outward to even coordinates and dimensions within canvas bounds
+        // to prevent YUV420 chroma subsampling truncation from leaving 1px unmasked gaps.
+        let x = (x_raw / 2 * 2).min(canvas.width.saturating_sub(2));
+        let y = (y_raw / 2 * 2).min(canvas.height.saturating_sub(2));
+        let right = ((right_raw + 1) / 2 * 2).min(canvas.width);
+        let bottom = ((bottom_raw + 1) / 2 * 2).min(canvas.height);
+        let width = right.saturating_sub(x).max(2);
+        let height = bottom.saturating_sub(y).max(2);
+
         let enable = format!(
             "between(t,{},{})",
             seconds(mask.start_ms),
@@ -1503,7 +1515,7 @@ fn render_timeline_composition(
             "redact" => {
                 let color = safe_filter_color(&mask.redact_color);
                 filters.push(format!(
-                    "[{current_label}]drawbox=x={x:.0}:y={y:.0}:w={width:.0}:h={height:.0}:color={color}:t=fill:enable='{enable}'[{next_label}]"
+                    "[{current_label}]drawbox=x={x}:y={y}:w={width}:h={height}:color={color}:t=fill:enable='{enable}'[{next_label}]"
                 ));
             }
             "blur" | "pixelate" => {
@@ -1514,24 +1526,24 @@ fn render_timeline_composition(
                     "[{current_label}]split=2[{base_label}][{source_label}]"
                 ));
                 let mut region_filter =
-                    format!("[{source_label}]crop=w={width:.0}:h={height:.0}:x={x:.0}:y={y:.0}");
+                    format!("[{source_label}]crop=w={width}:h={height}:x={x}:y={y}");
                 if mask.mode == "blur" {
+                    let radius = mask.blur_radius.clamp(1.0, 128.0);
                     region_filter.push_str(&format!(
-                        ",boxblur=luma_radius={:.0}:luma_power=2",
-                        mask.blur_radius.clamp(1.0, 128.0)
+                        ",gblur=sigma={radius:.0}:steps=2"
                     ));
                 } else {
                     let pixel_size = mask.pixel_size.clamp(2, 128) as f64;
-                    let small_width = (width / pixel_size).floor().max(1.0);
-                    let small_height = (height / pixel_size).floor().max(1.0);
+                    let small_width = ((width as f64) / pixel_size).floor().max(1.0);
+                    let small_height = ((height as f64) / pixel_size).floor().max(1.0);
                     region_filter.push_str(&format!(
-                        ",scale=w={small_width:.0}:h={small_height:.0}:flags=neighbor,scale=w={width:.0}:h={height:.0}:flags=neighbor"
+                        ",scale=w={small_width:.0}:h={small_height:.0}:flags=neighbor,scale=w={width}:h={height}:flags=neighbor"
                     ));
                 }
                 region_filter.push_str(&format!("[{filtered_label}]"));
                 filters.push(region_filter);
                 filters.push(format!(
-                    "[{base_label}][{filtered_label}]overlay=x={x:.0}:y={y:.0}:eof_action=pass:enable='{enable}'[{next_label}]"
+                    "[{base_label}][{filtered_label}]overlay=x={x}:y={y}:eof_action=pass:enable='{enable}'[{next_label}]"
                 ));
             }
             _ => {
@@ -2811,6 +2823,19 @@ fn validate_canvas(canvas: &cursor::RenderCanvas) -> Result<()> {
     {
         return Err(InternalError::Media("render canvas background dim is invalid".into()).into());
     }
+    if let Some(ratio) = &canvas.aspect_ratio {
+        if !matches!(ratio.as_str(), "16:9" | "9:16" | "1:1" | "5:4" | "4:5") {
+            return Err(InternalError::Media(format!("unsupported aspect ratio: {ratio}")).into());
+        }
+    }
+    if canvas
+        .video_position_y
+        .is_some_and(|y| !y.is_finite() || !(0.0..=1.0).contains(&y))
+    {
+        return Err(
+            InternalError::Media("render canvas video position Y is invalid".into()).into(),
+        );
+    }
     Ok(())
 }
 
@@ -2832,12 +2857,15 @@ fn safe_filter_color(value: &str) -> String {
         }
     }
     match trimmed.to_ascii_lowercase().as_str() {
+        "black" => "#000000".into(),
         "white" => "#ffffff".into(),
         "red" => "#ef4444".into(),
         "blue" => "#3b82f6".into(),
-        "yellow" => "#facc15".into(),
+        "green" => "#10b981".into(),
+        "yellow" => "#f59e0b".into(),
+        "gray" | "grey" => "#6b7280".into(),
         "transparent" => "#00000000".into(),
-        _ => "#070b14".into(),
+        _ => "#000000".into(),
     }
 }
 fn parse_color_hex(hex: &str, default_alpha: f32) -> Color {
@@ -5778,42 +5806,102 @@ mod tests {
     #[test]
     fn test_video_screen_rect_aspect_ratios() {
         // 16:9 canvas (1920x1080) with 16:9 source (1920x1080) and 0 padding
+        // For 16:9, video is always centered even if video_position_y is specified
         let canvas_16_9 = cursor::RenderCanvas {
             width: 1920,
             height: 1080,
             padding: 0,
+            aspect_ratio: Some("16:9".into()),
+            video_position_y: Some(0.0), // Ignored for 16:9
             ..Default::default()
         };
         let rect = video_screen_rect(&canvas_16_9, Some((1920, 1080)), false);
         assert_eq!(rect, (0.0, 0.0, 1920.0, 1080.0));
 
-        // 9:16 vertical canvas (1080x1920) with 16:9 source (1920x1080) and 0 padding
-        let canvas_9_16 = cursor::RenderCanvas {
+        // 9:16 vertical canvas (1080x1920) with 16:9 source (1920x1080)
+        // Source 1920x1080 fit into 1080x1920: scale = 1080/1920 = 0.5625 -> 1080 x 607
+        // Slack = 1920 - 607 = 1313
+        let mut canvas_9_16 = cursor::RenderCanvas {
             width: 1080,
             height: 1920,
             padding: 0,
+            aspect_ratio: Some("9:16".into()),
+            video_position_y: Some(0.5), // Center
             ..Default::default()
         };
-        let rect_9_16 = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
-        // Source 1920x1080 fit into 1080x1920: scale = 1080/1920 = 0.5625 -> 1080 x 607, centered at y = (1920 - 607)/2 = 656
-        assert_eq!(rect_9_16.0, 0.0);
-        assert_eq!(rect_9_16.2, 1080.0);
-        assert_eq!(rect_9_16.3, 607.0);
-        assert_eq!(rect_9_16.1, 656.0);
+        let rect_9_16_center = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        assert_eq!(rect_9_16_center, (0.0, 656.0, 1080.0, 607.0));
+
+        canvas_9_16.video_position_y = Some(0.0); // Top
+        let rect_9_16_top = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        assert_eq!(rect_9_16_top, (0.0, 0.0, 1080.0, 607.0));
+
+        canvas_9_16.video_position_y = Some(1.0); // Bottom
+        let rect_9_16_bottom = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
+        assert_eq!(rect_9_16_bottom, (0.0, 1313.0, 1080.0, 607.0));
 
         // 1:1 square canvas (1080x1080) with 16:9 source (1920x1080) and 40px padding
-        let canvas_1_1 = cursor::RenderCanvas {
+        // Content area: 1000 x 1000. Source fit: 1000 x 562. Slack = 1000 - 562 = 438
+        let mut canvas_1_1 = cursor::RenderCanvas {
             width: 1080,
             height: 1080,
             padding: 40,
+            aspect_ratio: Some("1:1".into()),
+            video_position_y: Some(0.5),
             ..Default::default()
         };
         let rect_1_1 = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
-        // Content area: 1000 x 1000. Source fit: 1000 x 562. Centered: x=40, y = 40 + (1000 - 562)/2 = 259
-        assert_eq!(rect_1_1.0, 40.0);
-        assert_eq!(rect_1_1.2, 1000.0);
-        assert_eq!(rect_1_1.3, 562.0);
-        assert_eq!(rect_1_1.1, 259.0);
+        assert_eq!(rect_1_1, (40.0, 259.0, 1000.0, 562.0));
+
+        canvas_1_1.video_position_y = Some(0.0); // Top
+        let rect_1_1_top = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
+        assert_eq!(rect_1_1_top, (40.0, 40.0, 1000.0, 562.0));
+
+        canvas_1_1.video_position_y = Some(1.0); // Bottom
+        let rect_1_1_bottom = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
+        assert_eq!(rect_1_1_bottom, (40.0, 478.0, 1000.0, 562.0));
+
+        // 5:4 canvas (1350x1080) with 16:9 source (1920x1080) and 0 padding
+        // Source fit: 1350 x 759. Slack = 1080 - 759 = 321
+        let mut canvas_5_4 = cursor::RenderCanvas {
+            width: 1350,
+            height: 1080,
+            padding: 0,
+            aspect_ratio: Some("5:4".into()),
+            video_position_y: Some(0.5),
+            ..Default::default()
+        };
+        let rect_5_4_center = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
+        assert_eq!(rect_5_4_center, (0.0, 160.0, 1350.0, 759.0));
+
+        canvas_5_4.video_position_y = Some(0.0); // Top
+        let rect_5_4_top = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
+        assert_eq!(rect_5_4_top, (0.0, 0.0, 1350.0, 759.0));
+
+        canvas_5_4.video_position_y = Some(1.0); // Bottom
+        let rect_5_4_bottom = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
+        assert_eq!(rect_5_4_bottom, (0.0, 321.0, 1350.0, 759.0));
+
+        // 4:5 canvas (1080x1350) with 16:9 source (1920x1080) and 0 padding
+        // Source fit: 1080 x 607. Slack = 1350 - 607 = 743
+        let mut canvas_4_5 = cursor::RenderCanvas {
+            width: 1080,
+            height: 1350,
+            padding: 0,
+            aspect_ratio: Some("4:5".into()),
+            video_position_y: Some(0.5),
+            ..Default::default()
+        };
+        let rect_4_5_center = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
+        assert_eq!(rect_4_5_center, (0.0, 371.0, 1080.0, 607.0));
+
+        canvas_4_5.video_position_y = Some(0.0); // Top
+        let rect_4_5_top = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
+        assert_eq!(rect_4_5_top, (0.0, 0.0, 1080.0, 607.0));
+
+        canvas_4_5.video_position_y = Some(1.0); // Bottom
+        let rect_4_5_bottom = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
+        assert_eq!(rect_4_5_bottom, (0.0, 743.0, 1080.0, 607.0));
 
         // 16:9 canvas (1920x1080) with 16:9 source in side-by-side mode (76% screen width)
         let rect_sbs = video_screen_rect(&canvas_16_9, Some((1920, 1080)), true);
@@ -5821,6 +5909,42 @@ mod tests {
         assert_eq!(rect_sbs.2, 1459.0);
         assert_eq!(rect_sbs.3, 820.0);
         assert_eq!(rect_sbs.1, 130.0);
+    }
+
+    #[test]
+    fn test_validate_canvas_aspect_ratio_and_video_position_y() {
+        let mut canvas = cursor::RenderCanvas {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            ..Default::default()
+        };
+        for valid_ratio in &["16:9", "9:16", "1:1", "5:4", "4:5"] {
+            canvas.aspect_ratio = Some((*valid_ratio).into());
+            assert!(validate_canvas(&canvas).is_ok());
+        }
+
+        canvas.aspect_ratio = Some("4:3".into());
+        assert!(validate_canvas(&canvas).is_err());
+        canvas.aspect_ratio = Some("21:9".into());
+        assert!(validate_canvas(&canvas).is_err());
+        canvas.aspect_ratio = Some("custom".into());
+        assert!(validate_canvas(&canvas).is_err());
+        canvas.aspect_ratio = Some("16:9".into());
+
+        canvas.video_position_y = Some(0.0);
+        assert!(validate_canvas(&canvas).is_ok());
+        canvas.video_position_y = Some(0.5);
+        assert!(validate_canvas(&canvas).is_ok());
+        canvas.video_position_y = Some(1.0);
+        assert!(validate_canvas(&canvas).is_ok());
+
+        canvas.video_position_y = Some(-0.1);
+        assert!(validate_canvas(&canvas).is_err());
+        canvas.video_position_y = Some(1.05);
+        assert!(validate_canvas(&canvas).is_err());
+        canvas.video_position_y = Some(f64::NAN);
+        assert!(validate_canvas(&canvas).is_err());
     }
 
     #[test]
@@ -7766,5 +7890,193 @@ mod tests {
             res.err()
         );
         assert!(out_path.is_file(), "exported composition should exist");
+    }
+
+    #[test]
+    fn test_safe_filter_color_resolution() {
+        assert_eq!(safe_filter_color("black"), "#000000");
+        assert_eq!(safe_filter_color("BLACK"), "#000000");
+        assert_eq!(safe_filter_color("white"), "#ffffff");
+        assert_eq!(safe_filter_color("red"), "#ef4444");
+        assert_eq!(safe_filter_color("blue"), "#3b82f6");
+        assert_eq!(safe_filter_color("green"), "#10b981");
+        assert_eq!(safe_filter_color("yellow"), "#f59e0b");
+        assert_eq!(safe_filter_color("gray"), "#6b7280");
+        assert_eq!(safe_filter_color("grey"), "#6b7280");
+        assert_eq!(safe_filter_color("transparent"), "#00000000");
+        assert_eq!(safe_filter_color("#123456"), "#123456");
+        assert_eq!(safe_filter_color("#12345678"), "#12345678");
+        assert_eq!(safe_filter_color("unknown_color"), "#000000");
+    }
+
+    #[test]
+    fn test_privacy_mask_export_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir = std::env::temp_dir().join(format!("rf-mask-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        struct CleanupDir(PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = CleanupDir(temp_dir.clone());
+
+        let screen_path = temp_dir.join("screen.mp4");
+        let out_path = temp_dir.join("out_mask_test.mp4");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        // Include all 3 modes (redact, blur, pixelate) with odd coordinates to verify outward even snapping
+        let plan = RenderPlan {
+            project_id: "test-mask-export-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: vec![
+                RenderPlanMask {
+                    id: "mask-redact".into(),
+                    asset_id: None,
+                    start_ms: 0,
+                    end_ms: 1000,
+                    mode: "redact".into(),
+                    rect: RenderCropFloat {
+                        x: 15.0, // odd coordinate
+                        y: 15.0, // odd coordinate
+                        width: 81.0, // odd dimension
+                        height: 41.0, // odd dimension
+                    },
+                    blur_radius: 24.0,
+                    pixel_size: 16,
+                    redact_color: "black".into(),
+                    enabled: true,
+                },
+                RenderPlanMask {
+                    id: "mask-blur".into(),
+                    asset_id: None,
+                    start_ms: 0,
+                    end_ms: 1000,
+                    mode: "blur".into(),
+                    rect: RenderCropFloat {
+                        x: 100.0,
+                        y: 20.0,
+                        width: 80.0,
+                        height: 50.0,
+                    },
+                    blur_radius: 16.0,
+                    pixel_size: 16,
+                    redact_color: "black".into(),
+                    enabled: true,
+                },
+                RenderPlanMask {
+                    id: "mask-pixelate".into(),
+                    asset_id: None,
+                    start_ms: 0,
+                    end_ms: 1000,
+                    mode: "pixelate".into(),
+                    rect: RenderCropFloat {
+                        x: 191.0, // odd coordinate
+                        y: 31.0,  // odd coordinate
+                        width: 81.0, // odd dimension
+                        height: 51.0, // odd dimension
+                    },
+                    blur_radius: 24.0,
+                    pixel_size: 8,
+                    redact_color: "black".into(),
+                    enabled: true,
+                },
+            ],
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-mask-export-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "export composition with redact, blur, and pixelate masks failed: {:?}",
+            res.err()
+        );
+        assert!(out_path.is_file(), "exported composition with masks should exist and be created");
+        assert!(out_path.metadata().unwrap().len() > 0, "exported video must not be empty");
     }
 }

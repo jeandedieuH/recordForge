@@ -17,7 +17,7 @@ import type { OverlayRenderPlan } from "./overlay"
 
 // Output framing presets are intentionally explicit so preview and export can
 // reject unsupported aspect ratios instead of silently cropping the recording.
-export const canvasAspectRatioSchema = z.enum(["16:9", "1:1", "9:16", "4:3", "21:9", "custom"])
+export const canvasAspectRatioSchema = z.enum(["16:9", "9:16", "1:1", "5:4", "4:5"])
 export type CanvasAspectRatio = z.infer<typeof canvasAspectRatioSchema>
 
 export const zoomEasingSchema = z.enum([
@@ -96,6 +96,7 @@ export const timelineCanvasSchema = z.object({
   // These fields are optional for backwards-compatible v1 project files. New
   // canvas edits persist them, and render helpers apply safe defaults when absent.
   aspectRatio: canvasAspectRatioSchema.optional(),
+  videoPositionY: z.number().min(0).max(1).default(0.5).optional(),
   shadowColor: z.string().optional(),
   shadowBlur: z.number().min(0).optional(),
   shadowOffsetX: z.number().optional(),

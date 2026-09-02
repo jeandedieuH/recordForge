@@ -113,7 +113,7 @@ const MP4_PRESETS: Array<{
   {
     id: "vertical",
     label: "Vertical",
-    description: "Use a 9:16 project canvas",
+    description: "Use a vertical project canvas (9:16 or 4:5)",
     details: "MP4 · social framing",
   },
   {
