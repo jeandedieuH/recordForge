@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MutableRefObject } from "react"
+import { useCallback, useEffect, useRef, type MutableRefObject } from "react"
 import type { MaskClip, MaskRect } from "@recordforge/contracts"
 import { renderMasksToCanvas } from "../canvas/mask-shader-renderer"
 
@@ -168,7 +168,7 @@ function PixelateMaskVisual({
 }: PixelateMaskVisualProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  const drawFrame = () => {
+  const drawFrame = useCallback(() => {
     const canvas = canvasRef.current
     const video = videoElement
     if (!canvas || !video || video.readyState < 2 || video.videoWidth === 0) return
@@ -227,23 +227,22 @@ function PixelateMaskVisual({
 
     ctx.imageSmoothingEnabled = false
     ctx.drawImage(video, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
-  }
+  }, [
+    canvasHeight,
+    canvasWidth,
+    clip.pixelSize,
+    rect.height,
+    rect.width,
+    rect.x,
+    rect.y,
+    videoBounds,
+    videoElement,
+  ])
 
   // Draw on playhead change or geometry update
   useEffect(() => {
     drawFrame()
-  }, [
-    clip.pixelSize,
-    rect.x,
-    rect.y,
-    rect.width,
-    rect.height,
-    canvasWidth,
-    canvasHeight,
-    videoElement,
-    videoBounds,
-    playheadMs,
-  ])
+  }, [drawFrame, playheadMs])
 
   // Also update continuously during video playback
   useEffect(() => {
@@ -260,17 +259,7 @@ function PixelateMaskVisual({
       video.removeEventListener("timeupdate", handleTimeUpdate)
       video.removeEventListener("seeked", handleTimeUpdate)
     }
-  }, [
-    clip.pixelSize,
-    rect.x,
-    rect.y,
-    rect.width,
-    rect.height,
-    canvasWidth,
-    canvasHeight,
-    videoElement,
-    videoBounds,
-  ])
+  }, [drawFrame, videoElement])
 
   return (
     <canvas

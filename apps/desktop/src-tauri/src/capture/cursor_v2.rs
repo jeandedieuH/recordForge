@@ -1508,7 +1508,7 @@ fn capture_cursor_shape(
 
 #[cfg(target_os = "macos")]
 fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
-    use std::ffi::{c_char, c_void};
+    use std::ffi::{c_char, c_void, CStr};
     use std::sync::OnceLock;
 
     #[repr(C)]
@@ -1525,6 +1525,9 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
         height: f64,
     }
 
+    type FnMsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSPoint;
+    type FnMsgSendSize = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSSize;
+
     extern "C" {
         fn objc_getClass(name: *const c_char) -> *mut c_void;
         fn sel_registerName(name: *const c_char) -> *mut c_void;
@@ -1532,14 +1535,13 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
     }
 
     unsafe {
-        let nscursor_cls = objc_getClass(b"NSCursor\0".as_ptr() as *const c_char);
+        let nscursor_cls = objc_getClass(c"NSCursor".as_ptr());
         if nscursor_cls.is_null() {
             return None;
         }
 
-        let sel_current_system =
-            sel_registerName(b"currentSystemCursor\0".as_ptr() as *const c_char);
-        let sel_current = sel_registerName(b"currentCursor\0".as_ptr() as *const c_char);
+        let sel_current_system = sel_registerName(c"currentSystemCursor".as_ptr());
+        let sel_current = sel_registerName(c"currentCursor".as_ptr());
         let mut cursor = objc_msgSend(nscursor_cls, sel_current_system);
         if cursor.is_null() {
             cursor = objc_msgSend(nscursor_cls, sel_current);
@@ -1564,21 +1566,21 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
 
         static POINTERS: OnceLock<MacosCursorPointers> = OnceLock::new();
         let pointers = POINTERS.get_or_init(|| {
-            let get_ptr = |sel_name: &[u8]| -> usize {
-                let sel = sel_registerName(sel_name.as_ptr() as *const c_char);
+            let get_ptr = |sel_name: &CStr| -> usize {
+                let sel = sel_registerName(sel_name.as_ptr());
                 objc_msgSend(nscursor_cls, sel) as usize
             };
             MacosCursorPointers {
-                arrow: get_ptr(b"arrowCursor\0"),
-                ibeam: get_ptr(b"IBeamCursor\0"),
-                pointing_hand: get_ptr(b"pointingHandCursor\0"),
-                closed_hand: get_ptr(b"closedHandCursor\0"),
-                open_hand: get_ptr(b"openHandCursor\0"),
-                crosshair: get_ptr(b"crosshairCursor\0"),
-                resize_left_right: get_ptr(b"resizeLeftRightCursor\0"),
-                resize_up_down: get_ptr(b"resizeUpDownCursor\0"),
-                operation_not_allowed: get_ptr(b"operationNotAllowedCursor\0"),
-                disappearing_item: get_ptr(b"disappearingItemCursor\0"),
+                arrow: get_ptr(c"arrowCursor"),
+                ibeam: get_ptr(c"IBeamCursor"),
+                pointing_hand: get_ptr(c"pointingHandCursor"),
+                closed_hand: get_ptr(c"closedHandCursor"),
+                open_hand: get_ptr(c"openHandCursor"),
+                crosshair: get_ptr(c"crosshairCursor"),
+                resize_left_right: get_ptr(c"resizeLeftRightCursor"),
+                resize_up_down: get_ptr(c"resizeUpDownCursor"),
+                operation_not_allowed: get_ptr(c"operationNotAllowedCursor"),
+                disappearing_item: get_ptr(c"disappearingItemCursor"),
             }
         });
 
@@ -1605,18 +1607,18 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             "unavailable"
         } else {
             // Check hotSpot and image size for custom cursors
-            let sel_hotspot = sel_registerName(b"hotSpot\0".as_ptr() as *const c_char);
-            let sel_image = sel_registerName(b"image\0".as_ptr() as *const c_char);
-            let sel_size = sel_registerName(b"size\0".as_ptr() as *const c_char);
+            let sel_hotspot = sel_registerName(c"hotSpot".as_ptr());
+            let sel_image = sel_registerName(c"image".as_ptr());
+            let sel_size = sel_registerName(c"size".as_ptr());
 
-            let msg_send_point: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSPoint =
-                std::mem::transmute(objc_msgSend as *const ());
+            let msg_send_point: FnMsgSendPoint =
+                std::mem::transmute::<*const (), FnMsgSendPoint>(objc_msgSend as *const ());
             let hotspot = msg_send_point(cursor, sel_hotspot);
 
             let image = objc_msgSend(cursor, sel_image);
             let size = if !image.is_null() {
-                let msg_send_size: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSSize =
-                    std::mem::transmute(objc_msgSend as *const ());
+                let msg_send_size: FnMsgSendSize =
+                    std::mem::transmute::<*const (), FnMsgSendSize>(objc_msgSend as *const ());
                 msg_send_size(image, sel_size)
             } else {
                 NSSize {
@@ -1640,9 +1642,9 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             });
         };
 
-        let sel_hotspot = sel_registerName(b"hotSpot\0".as_ptr() as *const c_char);
-        let msg_send_point: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSPoint =
-            std::mem::transmute(objc_msgSend as *const ());
+        let sel_hotspot = sel_registerName(c"hotSpot".as_ptr());
+        let msg_send_point: FnMsgSendPoint =
+            std::mem::transmute::<*const (), FnMsgSendPoint>(objc_msgSend as *const ());
         let hotspot = msg_send_point(cursor, sel_hotspot);
 
         Some(CursorShapeInfo {
@@ -1770,9 +1772,9 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
         }
         const RTLD_LAZY: c_int = 1;
 
-        let lib_x11 = dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, RTLD_LAZY);
+        let lib_x11 = dlopen(c"libX11.so.6".as_ptr(), RTLD_LAZY);
         let lib_x11 = if lib_x11.is_null() {
-            dlopen(b"libX11.so\0".as_ptr() as *const c_char, RTLD_LAZY)
+            dlopen(c"libX11.so".as_ptr(), RTLD_LAZY)
         } else {
             lib_x11
         };
@@ -1780,9 +1782,9 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
             return None;
         }
 
-        let lib_xfixes = dlopen(b"libXfixes.so.3\0".as_ptr() as *const c_char, RTLD_LAZY);
+        let lib_xfixes = dlopen(c"libXfixes.so.3".as_ptr(), RTLD_LAZY);
         let lib_xfixes = if lib_xfixes.is_null() {
-            dlopen(b"libXfixes.so\0".as_ptr() as *const c_char, RTLD_LAZY)
+            dlopen(c"libXfixes.so".as_ptr(), RTLD_LAZY)
         } else {
             lib_xfixes
         };
@@ -1790,13 +1792,10 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
             return None;
         }
 
-        let sym_open = dlsym(lib_x11, b"XOpenDisplay\0".as_ptr() as *const c_char);
-        let sym_close = dlsym(lib_x11, b"XCloseDisplay\0".as_ptr() as *const c_char);
-        let sym_free = dlsym(lib_x11, b"XFree\0".as_ptr() as *const c_char);
-        let sym_get_cursor = dlsym(
-            lib_xfixes,
-            b"XFixesGetCursorImage\0".as_ptr() as *const c_char,
-        );
+        let sym_open = dlsym(lib_x11, c"XOpenDisplay".as_ptr());
+        let sym_close = dlsym(lib_x11, c"XCloseDisplay".as_ptr());
+        let sym_free = dlsym(lib_x11, c"XFree".as_ptr());
+        let sym_get_cursor = dlsym(lib_xfixes, c"XFixesGetCursorImage".as_ptr());
 
         if sym_open.is_null()
             || sym_close.is_null()
@@ -1807,10 +1806,12 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
         }
 
         Some(X11Functions {
-            open_display: std::mem::transmute(sym_open),
-            close_display: std::mem::transmute(sym_close),
-            free: std::mem::transmute(sym_free),
-            get_cursor_image: std::mem::transmute(sym_get_cursor),
+            open_display: std::mem::transmute::<*mut c_void, FnXOpenDisplay>(sym_open),
+            close_display: std::mem::transmute::<*mut c_void, FnXCloseDisplay>(sym_close),
+            free: std::mem::transmute::<*mut c_void, FnXFree>(sym_free),
+            get_cursor_image: std::mem::transmute::<*mut c_void, FnXFixesGetCursorImage>(
+                sym_get_cursor,
+            ),
         })
     });
 
