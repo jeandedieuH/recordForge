@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import type {
+  AudioClip,
+  AudioVolumeKeyframe,
   CursorSmoothing,
   ManualZoomSegment,
   TimelineClip,
@@ -28,8 +30,10 @@ import type {
 import { toAssetUrl } from "../media/derivative-resources"
 import { TimelineClipItem } from "./timeline-clip-item"
 import { TimelineMarquee } from "./timeline-marquee"
+import { TimelineMinimap } from "./timeline-minimap"
 import { TimelinePlayhead } from "./timeline-playhead"
 import { TimelineRuler, formatTimelineTime, getVisibleTickInterval } from "./timeline-ruler"
+import { TimelineSnapBadge } from "./timeline-snap-badge"
 import { TimelineTrackHeader } from "./timeline-track-header"
 import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
@@ -115,6 +119,16 @@ export interface TimelineLanesProps {
   onToggleTrackLocked: (track: TimelineTrack) => void
   onToggleTrackCollapsed: (track: TimelineTrack) => void
   onCycleTrackHeight: (track: TimelineTrack) => void
+  onMoveTrack?: (trackId: string, newIndex: number) => void
+  onUpdateClipAudio?: (
+    clip: AudioClip,
+    update: {
+      volume?: number
+      fadeInMs?: number
+      fadeOutMs?: number
+      volumeKeyframes?: AudioVolumeKeyframe[]
+    },
+  ) => void
   onSpriteError: () => void
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
@@ -122,6 +136,8 @@ export interface TimelineLanesProps {
   onAddAssetAtTime?: (assetId: string, timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
+  showMinimap?: boolean
+  onRippleDeleteRange?: (startMs: number, endMs: number) => void
   onSplitAllAtPlayhead?: () => void
   onDeselectAll?: () => void
 }
@@ -140,6 +156,7 @@ export function TimelineLanes({
   timeline,
   view,
   tool = "select",
+  showMinimap = true,
   timelineWidth: propTimelineWidth,
   pixelsPerMs: propPixelsPerMs,
   tickInterval: propTickInterval,
@@ -168,6 +185,8 @@ export function TimelineLanes({
   onToggleTrackLocked,
   onToggleTrackCollapsed,
   onCycleTrackHeight,
+  onMoveTrack,
+  onUpdateClipAudio,
   onSpriteError,
   onDuplicateClip,
   onSplitClip,
@@ -177,6 +196,7 @@ export function TimelineLanes({
   onZoomSegmentAction,
   onMoveZoomSegment,
   onResizeZoomSegment,
+  onRippleDeleteRange,
   onSplitAllAtPlayhead,
   onDeselectAll,
 }: TimelineLanesProps) {
@@ -515,26 +535,138 @@ export function TimelineLanes({
     null,
   )
 
+  const screenGaps = useMemo(() => {
+    const screenTrack = timeline.tracks.find((t) => t.kind === "screen")
+    if (!screenTrack || screenTrack.clips.length < 2) return []
+    const sortedClips = [...screenTrack.clips].sort((a, b) => a.startMs - b.startMs)
+    const gaps: Array<{ startMs: number; endMs: number }> = []
+    for (let i = 0; i < sortedClips.length - 1; i++) {
+      const currentClip = sortedClips[i]
+      const nextClip = sortedClips[i + 1]
+      if (!currentClip || !nextClip) continue
+      const currentEnd = currentClip.startMs + currentClip.durationMs
+      const nextStart = nextClip.startMs
+      if (nextStart - currentEnd > 100) {
+        gaps.push({ startMs: currentEnd, endMs: nextStart })
+      }
+    }
+    return gaps
+  }, [timeline.tracks])
+
+  const trackHeadersContainerRef = useRef<HTMLDivElement>(null)
+  const [reorderingTrack, setReorderingTrack] = useState<{
+    trackId: string
+    startY: number
+    currentY: number
+    targetIndex: number
+  } | null>(null)
+
+  const handleStartReorder = useCallback(
+    (track: TimelineTrack, startY: number) => {
+      const currentIndex = timeline.tracks.findIndex((t) => t.id === track.id)
+      setReorderingTrack({
+        trackId: track.id,
+        startY,
+        currentY: startY,
+        targetIndex: currentIndex,
+      })
+    },
+    [timeline.tracks],
+  )
+
+  useEffect(() => {
+    if (!reorderingTrack) return
+
+    function onPointerMove(e: PointerEvent) {
+      if (!reorderingTrack) return
+      const headersEl = trackHeadersContainerRef.current
+      if (!headersEl) return
+      const rect = headersEl.getBoundingClientRect()
+      const relY = e.clientY - rect.top + scrollTop
+      let closestIndex = 0
+      let minDiff = Infinity
+      virtualTracks.forEach((vt, idx) => {
+        const center = vt.start - scrollMargin + vt.size / 2
+        const diff = Math.abs(relY - center)
+        if (diff < minDiff) {
+          minDiff = diff
+          closestIndex = idx
+        }
+      })
+      const clampedIndex = Math.max(0, Math.min(timeline.tracks.length - 1, closestIndex))
+      setReorderingTrack((prev) =>
+        prev ? { ...prev, currentY: e.clientY, targetIndex: clampedIndex } : null,
+      )
+    }
+
+    function onPointerUp() {
+      if (reorderingTrack && onMoveTrack) {
+        const currentIndex = timeline.tracks.findIndex((t) => t.id === reorderingTrack.trackId)
+        if (currentIndex !== -1 && currentIndex !== reorderingTrack.targetIndex) {
+          onMoveTrack(reorderingTrack.trackId, reorderingTrack.targetIndex)
+        }
+      }
+      setReorderingTrack(null)
+    }
+
+    window.addEventListener("pointermove", onPointerMove)
+    window.addEventListener("pointerup", onPointerUp)
+    window.addEventListener("pointercancel", onPointerUp)
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove)
+      window.removeEventListener("pointerup", onPointerUp)
+      window.removeEventListener("pointercancel", onPointerUp)
+    }
+  }, [reorderingTrack, onMoveTrack, timeline.tracks, scrollTop, scrollMargin, virtualTracks])
+
+  const handleMoveTrackDelta = useCallback(
+    (track: TimelineTrack, delta: -1 | 1) => {
+      const currentIndex = timeline.tracks.findIndex((t) => t.id === track.id)
+      if (currentIndex === -1 || !onMoveTrack) return
+      const newIndex = Math.max(0, Math.min(timeline.tracks.length - 1, currentIndex + delta))
+      if (newIndex !== currentIndex) {
+        onMoveTrack(track.id, newIndex)
+      }
+    },
+    [timeline.tracks, onMoveTrack],
+  )
+
   return (
     <div
-      className="flex min-h-0 flex-1 select-none overflow-hidden"
+      className="flex min-h-0 flex-1 flex-col select-none overflow-hidden"
       aria-label="Timeline editor tracks"
       onWheel={handleWheel}
     >
-      {/* Left Column: Track Headers */}
-      <div className="w-56 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20">
-        {/* Top Header Placeholder corresponding to Ruler Height */}
-        <div className="flex h-13 flex-col justify-center border-b border-border/80 bg-surface-dim/95 px-3">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-            Tracks & Layers
-          </span>
-          <span className="text-[9px] text-subtle-foreground font-mono">
-            {timeline.tracks.length} active tracks
-          </span>
-        </div>
+      {/* Overview Minimap */}
+      {showMinimap ? (
+        <TimelineMinimap
+          timeline={timeline}
+          durationMs={view.durationMs}
+          visibleStartMs={visibleStartMs}
+          visibleEndMs={visibleEndMs}
+          playheadMs={view.playheadMs}
+          onSeek={onSeek}
+          onSetScrollMs={(scrollMs) => onSetScroll(scrollMs)}
+        />
+      ) : null}
+
+      <div className="flex min-h-0 flex-1 select-none overflow-hidden">
+        {/* Left Column: Track Headers */}
+        <div className="w-56 shrink-0 overflow-hidden border-r border-border bg-surface shadow-e1 z-20">
+          {/* Top Header Placeholder corresponding to Ruler Height */}
+          <div className="flex h-13 flex-col justify-center border-b border-border/80 bg-surface-dim/95 px-3">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+              Tracks & Layers
+            </span>
+            <span className="text-[9px] text-subtle-foreground font-mono">
+              {timeline.tracks.length} active tracks
+            </span>
+          </div>
 
         {/* Scrollable Track Header Cards */}
         <div
+          ref={trackHeadersContainerRef}
           className="relative overflow-hidden"
           style={{ height: `${Math.max(0, viewportHeight - scrollMargin)}px` }}
         >
@@ -547,10 +679,31 @@ export function TimelineLanes({
           >
             {visibleTrackRows.map(({ track, virtualTrack }) => {
               if (!track) return null
+              const isDraggingThisTrack = reorderingTrack?.trackId === track.id
+              const isTargetTrack = Boolean(
+                reorderingTrack &&
+                  !isDraggingThisTrack &&
+                  virtualTrack.index === reorderingTrack.targetIndex,
+              )
+              const originalIndex = reorderingTrack
+                ? timeline.tracks.findIndex((t) => t.id === reorderingTrack.trackId)
+                : -1
+              const dropIndicator = isTargetTrack
+                ? reorderingTrack && reorderingTrack.targetIndex <= originalIndex
+                  ? "above"
+                  : "below"
+                : null
+
               return (
                 <TimelineTrackHeader
                   key={track.id}
                   track={track}
+                  trackIndex={virtualTrack.index}
+                  totalTracks={timeline.tracks.length}
+                  isDragging={isDraggingThisTrack}
+                  dropIndicator={dropIndicator}
+                  onStartReorder={onMoveTrack ? handleStartReorder : undefined}
+                  onMoveTrackDelta={onMoveTrack ? handleMoveTrackDelta : undefined}
                   selected={
                     track.clips.some((clip) => selectedClipIds.has(clip.id)) ||
                     (track.kind === "zoom" && selectedZoomId !== null)
@@ -656,13 +809,9 @@ export function TimelineLanes({
                 )
               })()}
 
-              {/* Magnetic Snapping Guide Line */}
+              {/* Magnetic Snapping Guide Line & Smart Badge */}
               {snapGuide ? (
-                <div
-                  className="pointer-events-none absolute inset-y-0 z-30 w-px bg-primary shadow-[0_0_8px_rgba(9,77,178,0.9)]"
-                  style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
-                  aria-hidden
-                />
+                <TimelineSnapBadge target={snapGuide} pixelsPerMs={pixelsPerMs} />
               ) : null}
 
               {/* Razor Tool Hover Indicator */}
@@ -749,6 +898,42 @@ export function TimelineLanes({
                     className="absolute inset-x-0 flex items-center border-b border-border/70"
                     style={{ top: virtualTrack.start, height: virtualTrack.size }}
                   >
+                    {/* Render Gap-Closing Affordances on Screen Track */}
+                    {isScreenTrack
+                      ? screenGaps
+                          .filter(
+                            (gap) =>
+                              gap.startMs <= visibleEndMs && gap.endMs >= visibleStartMs,
+                          )
+                          .map((gap) => {
+                            const gapLeft = gap.startMs * pixelsPerMs
+                            const gapWidth = Math.max(16, (gap.endMs - gap.startMs) * pixelsPerMs)
+                            const gapSec = ((gap.endMs - gap.startMs) / 1000).toFixed(1)
+                            return (
+                              <div
+                                key={`gap-${gap.startMs}-${gap.endMs}`}
+                                className="group/gap absolute inset-y-1.5 z-10 flex items-center justify-center rounded-md border border-dashed border-border/80 bg-surface-dim/30 hover:border-primary/80 hover:bg-primary/10 transition-colors"
+                                style={{ left: `${gapLeft}px`, width: `${gapWidth}px` }}
+                              >
+                                {onRippleDeleteRange && gapWidth >= 48 ? (
+                                  <button
+                                    type="button"
+                                    className="flex items-center gap-1 rounded bg-surface/95 border border-border/80 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-muted-foreground hover:text-primary hover:border-primary/80 shadow-xs opacity-0 group-hover/gap:opacity-100 transition-opacity whitespace-nowrap cursor-pointer"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      onRippleDeleteRange(gap.startMs, gap.endMs)
+                                    }}
+                                    title={`Close ${gapSec}s gap (ripple delete)`}
+                                  >
+                                    <Sparkles className="size-2.5 text-primary" />
+                                    <span>Close {gapSec}s</span>
+                                  </button>
+                                ) : null}
+                              </div>
+                            )
+                          })
+                      : null}
+
                     {visibleClips.map((clip) => (
                       <TimelineClipItem
                         key={clip.id}
@@ -778,6 +963,7 @@ export function TimelineLanes({
                         onSplitClip={onSplitClip}
                         onDeleteClip={onDeleteClip}
                         onCursorRangeAction={onCursorRangeAction}
+                        onUpdateAudio={onUpdateClipAudio}
                       />
                     ))}
                   </div>
@@ -856,6 +1042,7 @@ export function TimelineLanes({
           </ContextMenuContent>
         </ContextMenu>
       </div>
+    </div>
     </div>
   )
 }

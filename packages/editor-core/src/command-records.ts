@@ -2,6 +2,7 @@ import { z } from "zod"
 import {
   annotationClipSchema,
   audioRoleSchema,
+  audioVolumeKeyframeSchema,
   captionCueSchema,
   captionPlacementSchema,
   captionStylePresetSchema,
@@ -92,6 +93,21 @@ export const deleteTrackCommandSchema = commandMetaSchema.extend({
 })
 
 export type DeleteTrackCommand = z.infer<typeof deleteTrackCommandSchema>
+
+export const moveTrackCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("move-track"),
+  trackId: z.string(),
+  newIndex: z.number().int().min(0),
+})
+
+export type MoveTrackCommand = z.infer<typeof moveTrackCommandSchema>
+
+export const reorderTracksCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("reorder-tracks"),
+  trackIds: z.array(z.string()),
+})
+
+export type ReorderTracksCommand = z.infer<typeof reorderTracksCommandSchema>
 
 export const trimClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("trim-clip"),
@@ -208,6 +224,7 @@ export const updateClipAudioCommandSchema = commandMetaSchema.extend({
   volume: z.number().min(0).max(2).optional(),
   fadeInMs: z.number().min(0).optional(),
   fadeOutMs: z.number().min(0).optional(),
+  volumeKeyframes: z.array(audioVolumeKeyframeSchema).optional(),
 })
 
 export type UpdateClipAudioCommand = z.infer<typeof updateClipAudioCommandSchema>
@@ -525,6 +542,8 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   deleteMarkerCommandSchema,
   addTrackCommandSchema,
   deleteTrackCommandSchema,
+  moveTrackCommandSchema,
+  reorderTracksCommandSchema,
   trimClipCommandSchema,
   splitClipCommandSchema,
   moveClipCommandSchema,

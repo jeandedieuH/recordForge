@@ -220,6 +220,15 @@ export const maskRectSchema = z.object({
 })
 export type MaskRect = z.infer<typeof maskRectSchema>
 
+// Audio volume keyframe: a point in the clip's dynamic volume envelope.
+export const audioVolumeKeyframeSchema = z.object({
+  id: z.string(),
+  timeMs: z.number().min(0),
+  volume: z.number().min(0).max(2),
+})
+
+export type AudioVolumeKeyframe = z.infer<typeof audioVolumeKeyframeSchema>
+
 // Audio clip: an audio source slice with volume and fade controls.
 export const audioClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("audio"),
@@ -227,6 +236,7 @@ export const audioClipSchema = timelineClipBaseSchema.extend({
   volume: z.number().min(0).max(2).default(1),
   fadeInMs: z.number().min(0).default(0),
   fadeOutMs: z.number().min(0).default(0),
+  volumeKeyframes: z.array(audioVolumeKeyframeSchema).optional(),
 })
 
 export type AudioClip = z.infer<typeof audioClipSchema>
@@ -697,6 +707,8 @@ export const renderSegmentSchema = z.object({
   volume: z.number().min(0).max(2).optional(),
   fadeInMs: z.number().min(0).optional(),
   fadeOutMs: z.number().min(0).optional(),
+  volumeKeyframes: z.array(audioVolumeKeyframeSchema).optional(),
+  audioFilter: z.string().optional(),
   speed: z.number().positive().default(1),
   sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   sourceOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),

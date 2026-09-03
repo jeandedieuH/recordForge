@@ -1,6 +1,8 @@
 import { useState } from "react"
 import {
+  Compass,
   Flag,
+  Keyboard,
   Magnet,
   Maximize2,
   MousePointer2,
@@ -37,10 +39,12 @@ import {
 } from "@recordforge/ui"
 import { formatTime } from "@recordforge/editor-core"
 import type { MaskClip, ZoomPreset } from "@recordforge/contracts"
+import { formatTimelineTime } from "./timeline-ruler"
+import { TimelineShortcutsDialog } from "./timeline-shortcuts-dialog"
 
 export type TimelineTool = "select" | "split" | "range"
 
-interface TimelineToolbarProps {
+export interface TimelineToolbarProps {
   tool: TimelineTool
   onSelectTool: (tool: TimelineTool) => void
   snapEnabled: boolean
@@ -54,6 +58,8 @@ interface TimelineToolbarProps {
   zoom: number
   canRippleDelete?: boolean
   selectedRange?: { startMs: number; endMs: number } | null
+  showMinimap?: boolean
+  onToggleMinimap?: () => void
   onTogglePlay: () => void
   onSeek: (timeMs: number) => void
   onStepFrame: (direction: -1 | 1) => void
@@ -81,6 +87,8 @@ export function TimelineToolbar({
   zoom,
   canRippleDelete = false,
   selectedRange = null,
+  showMinimap = true,
+  onToggleMinimap,
   onTogglePlay,
   onSeek,
   onStepFrame,
@@ -94,18 +102,46 @@ export function TimelineToolbar({
   onRippleDeleteSelected,
 }: TimelineToolbarProps) {
   const [snapPopoverOpen, setSnapPopoverOpen] = useState(false)
+  const [jumpTimePopoverOpen, setJumpTimePopoverOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [jumpInputText, setJumpInputText] = useState("")
 
   function adjustZoom(delta: number) {
     onSetZoom(Math.max(0, Math.min(100, Math.round(zoom + delta))))
   }
 
+  function handleJumpSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!jumpInputText.trim()) return
+
+    // Parse input: support mm:ss or seconds (e.g. 12.5)
+    let parsedMs: number | null = null
+    if (jumpInputText.includes(":")) {
+      const parts = jumpInputText.split(":")
+      const minutes = parseFloat(parts[0] || "0")
+      const seconds = parseFloat(parts[1] || "0")
+      parsedMs = Math.round((minutes * 60 + seconds) * 1000)
+    } else {
+      const seconds = parseFloat(jumpInputText)
+      if (!isNaN(seconds)) parsedMs = Math.round(seconds * 1000)
+    }
+
+    if (parsedMs !== null && !isNaN(parsedMs)) {
+      onSeek(Math.max(0, Math.min(durationMs, parsedMs)))
+      setJumpTimePopoverOpen(false)
+      setJumpInputText("")
+    }
+  }
+
   return (
     <div
-      className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-dim/80 px-3 py-1.5 backdrop-blur-md"
+      className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-dim/90 px-3 py-1.5 backdrop-blur-md"
       role="toolbar"
       aria-label="Timeline editing and transport controls"
     >
-      {/* Left Section: Tool Selection & Quick Actions */}
+      <TimelineShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+
+      {/* Cluster 1: Tools & Quick Actions */}
       <div className="flex items-center gap-1.5">
         {/* Tool Mode Pill Selector */}
         <div
@@ -120,7 +156,7 @@ export function TimelineToolbar({
             className={cn(
               "size-7 rounded-md transition-all duration-fast",
               tool === "select"
-                ? "bg-primary text-white shadow-xs"
+                ? "bg-primary text-white shadow-xs font-semibold"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
             )}
             onClick={() => onSelectTool("select")}
@@ -136,7 +172,7 @@ export function TimelineToolbar({
             className={cn(
               "size-7 rounded-md transition-all duration-fast",
               tool === "split"
-                ? "bg-primary text-white shadow-xs"
+                ? "bg-primary text-white shadow-xs font-semibold"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
             )}
             onClick={() => onSelectTool("split")}
@@ -152,7 +188,7 @@ export function TimelineToolbar({
             className={cn(
               "size-7 rounded-md transition-all duration-fast",
               tool === "range"
-                ? "bg-primary text-white shadow-xs"
+                ? "bg-primary text-white shadow-xs font-semibold"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
             )}
             onClick={() => onSelectTool("range")}
@@ -165,7 +201,7 @@ export function TimelineToolbar({
 
         <div className="h-4 w-px bg-border/60" />
 
-        {/* Snapping Popover */}
+        {/* Magnetic Snapping Popover */}
         <Popover open={snapPopoverOpen} onOpenChange={setSnapPopoverOpen}>
           <PopoverTrigger asChild>
             <Button
@@ -174,7 +210,7 @@ export function TimelineToolbar({
               className={cn(
                 "h-7 gap-1.5 px-2 text-xs font-medium transition-all duration-fast",
                 snapEnabled &&
-                  "border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20",
+                  "border border-primary/40 bg-primary/15 text-primary hover:bg-primary/25 shadow-xs",
               )}
               aria-label="Timeline snapping settings"
             >
@@ -185,7 +221,7 @@ export function TimelineToolbar({
               <span className="font-mono text-[10px] opacity-75">{snapThresholdMs}ms</span>
             </Button>
           </PopoverTrigger>
-          <PopoverContent className="w-56 p-3" align="start">
+          <PopoverContent className="w-56 p-3 bg-surface border-border shadow-e2" align="start">
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-foreground">Timeline Snapping</span>
@@ -224,15 +260,15 @@ export function TimelineToolbar({
                 <kbd className="rounded border border-border bg-surface px-1 py-0.5 font-mono text-[9px]">
                   Alt
                 </kbd>{" "}
-                while dragging to bypass snap temporarily.
+                while dragging to temporarily bypass magnetic snap.
               </p>
             </div>
           </PopoverContent>
         </Popover>
 
-        {/* Quick Edit Actions */}
+        {/* Split at Playhead */}
         <IconButton
-          label="Split at playhead"
+          label="Split selected at playhead"
           shortcut="S"
           tooltipSide="top"
           className="size-7 text-muted-foreground hover:text-foreground"
@@ -241,8 +277,9 @@ export function TimelineToolbar({
           <Scissors className="size-3.5" />
         </IconButton>
 
+        {/* Add Marker */}
         <IconButton
-          label="Add marker"
+          label="Add marker at playhead"
           shortcut="M"
           tooltipSide="top"
           className="size-7 text-muted-foreground hover:text-foreground"
@@ -264,7 +301,7 @@ export function TimelineToolbar({
               <span className="hidden md:inline">Mask</span>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-40">
+          <DropdownMenuContent align="start" className="w-40 bg-surface border-border shadow-e2">
             <DropdownMenuLabel className="text-xs">Add Privacy Mask</DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => onAddMask("blur")}>
@@ -298,7 +335,7 @@ export function TimelineToolbar({
               </kbd>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-60">
+          <DropdownMenuContent align="start" className="w-60 bg-surface border-border shadow-e2">
             <DropdownMenuLabel className="flex items-center justify-between text-xs">
               <span className="font-semibold text-foreground">Add Smart Zoom</span>
               <kbd className="font-mono text-[10px] text-muted-foreground">Z</kbd>
@@ -387,7 +424,7 @@ export function TimelineToolbar({
 
         {canRippleDelete ? (
           <IconButton
-            label="Ripple delete selected"
+            label="Ripple delete selected (Shift+Del)"
             shortcut="Shift+Del"
             tooltipSide="top"
             className="size-7 text-destructive hover:bg-destructive/10"
@@ -398,7 +435,7 @@ export function TimelineToolbar({
         ) : null}
       </div>
 
-      {/* Center Section: Transport Controls & Timecode */}
+      {/* Cluster 2: Transport & Precision Timecode */}
       <div className="flex items-center gap-2">
         <IconButton
           label="Go to start"
@@ -412,7 +449,7 @@ export function TimelineToolbar({
 
         <IconButton
           label="Step backward 1 frame"
-          shortcut="Left Arrow"
+          shortcut="←"
           tooltipSide="top"
           className="size-7 text-muted-foreground hover:text-foreground"
           onClick={() => onStepFrame(-1)}
@@ -420,12 +457,13 @@ export function TimelineToolbar({
           <StepBack className="size-3.5" />
         </IconButton>
 
+        {/* Main Play/Pause Button */}
         <Button
           size="icon"
           className={cn(
             "size-8 rounded-full shadow-e2 transition-transform active:scale-95",
             isPlaying
-              ? "bg-primary text-white hover:bg-primary-hover"
+              ? "bg-primary text-white hover:bg-primary-hover ring-2 ring-primary/40"
               : "bg-primary text-white hover:bg-primary-hover",
           )}
           onClick={onTogglePlay}
@@ -440,7 +478,7 @@ export function TimelineToolbar({
 
         <IconButton
           label="Step forward 1 frame"
-          shortcut="Right Arrow"
+          shortcut="→"
           tooltipSide="top"
           className="size-7 text-muted-foreground hover:text-foreground"
           onClick={() => onStepFrame(1)}
@@ -458,21 +496,77 @@ export function TimelineToolbar({
           <SkipForward className="size-3.5" />
         </IconButton>
 
-        {/* Formatted Precision Timecode Badge */}
-        <div
-          className="flex items-center gap-1 rounded-md border border-border/80 bg-surface/90 px-2 py-0.5 font-mono text-xs shadow-xs"
-          title="Current playhead position / Total duration"
-        >
-          <span className="font-semibold tabular-nums text-foreground">
-            {formatTime(playheadMs)}
-          </span>
-          <span className="text-subtle-foreground">/</span>
-          <span className="tabular-nums text-muted-foreground">{formatTime(durationMs)}</span>
-        </div>
+        {/* Interactive Clickable Timecode Badge & Jump-To Popover */}
+        <Popover open={jumpTimePopoverOpen} onOpenChange={setJumpTimePopoverOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className="flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/90 px-2 py-0.5 font-mono text-xs shadow-xs transition-all duration-fast hover:border-primary/60 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer"
+              title="Click to jump to specific timestamp"
+            >
+              <span className="font-semibold tabular-nums text-foreground">
+                {formatTimelineTime(playheadMs)}
+              </span>
+              <span className="text-subtle-foreground font-sans">/</span>
+              <span className="tabular-nums text-muted-foreground">{formatTimelineTime(durationMs)}</span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent className="w-64 p-3 bg-surface border-border shadow-e2" align="center">
+            <form onSubmit={handleJumpSubmit} className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-foreground">Jump to Timestamp</span>
+                <span className="font-mono text-[10px] text-muted-foreground">MM:SS.ms</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  placeholder="e.g. 01:23 or 45"
+                  value={jumpInputText}
+                  onChange={(e) => setJumpInputText(e.target.value)}
+                  className="flex-1 h-7 rounded border border-border bg-surface-dim px-2 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  autoFocus
+                />
+                <Button type="submit" size="sm" className="h-7 px-2.5 text-xs">
+                  Go
+                </Button>
+              </div>
+              <div className="flex items-center justify-between pt-1 border-t border-border/40 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => onSeek(0)}
+                  className="text-primary hover:underline"
+                >
+                  Start
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSeek(Math.max(0, playheadMs - 5000))}
+                  className="text-primary hover:underline"
+                >
+                  -5s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSeek(Math.min(durationMs, playheadMs + 5000))}
+                  className="text-primary hover:underline"
+                >
+                  +5s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSeek(durationMs)}
+                  className="text-primary hover:underline"
+                >
+                  End
+                </button>
+              </div>
+            </form>
+          </PopoverContent>
+        </Popover>
       </div>
 
-      {/* Right Section: Playback Speed & Zoom Controls */}
-      <div className="flex items-center gap-2">
+      {/* Cluster 3: View Controls, Speed, Minimap & Help */}
+      <div className="flex items-center gap-1.5">
         {/* Playback Rate Dropdown */}
         <NativeSelect
           aria-label="Playback speed"
@@ -509,7 +603,7 @@ export function TimelineToolbar({
             max={100}
             step={1}
             aria-label="Timeline zoom scale"
-            className="w-20 lg:w-24"
+            className="w-18 lg:w-22"
             onValueChange={(value) => onSetZoom(value[0] ?? zoom)}
           />
 
@@ -534,11 +628,38 @@ export function TimelineToolbar({
             <Maximize2 className="size-3 mr-1" />
             Fit
           </Button>
-
-          <span className="w-10 text-right font-mono text-[10px] tabular-nums text-subtle-foreground">
-            {Math.round(zoom)}%
-          </span>
         </div>
+
+        <div className="hidden h-4 w-px bg-border/60 sm:block" />
+
+        {/* Minimap Overview Toggle Button */}
+        {onToggleMinimap ? (
+          <IconButton
+            label={showMinimap ? "Hide overview minimap" : "Show overview minimap"}
+            tooltipSide="top"
+            className={cn(
+              "size-7 transition-colors duration-fast",
+              showMinimap
+                ? "bg-primary/20 text-primary border border-primary/30"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            onClick={onToggleMinimap}
+            aria-pressed={showMinimap}
+          >
+            <Compass className="size-3.5" />
+          </IconButton>
+        ) : null}
+
+        {/* Keyboard Shortcuts Dialog Trigger */}
+        <IconButton
+          label="Timeline keyboard shortcuts"
+          shortcut="?"
+          tooltipSide="top"
+          className="size-7 text-muted-foreground hover:text-foreground"
+          onClick={() => setShortcutsOpen(true)}
+        >
+          <Keyboard className="size-3.5" />
+        </IconButton>
       </div>
     </div>
   )

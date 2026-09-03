@@ -5,7 +5,6 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
-  ContextMenuSeparator,
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
@@ -22,6 +21,8 @@ interface TimelineRulerProps {
   zoomSegments?: ManualZoomSegment[]
   selectedZoomId: string | null
   isPlaying?: boolean
+  hoverTimeMs?: number | null
+  onHoverTimeChange?: (timeMs: number | null) => void
   getTimelineTime: (clientX: number) => number
   onSeek: (ms: number) => void
   onPause?: () => void
@@ -63,6 +64,8 @@ export const TimelineRuler = memo(function TimelineRuler({
   zoomSegments = [],
   selectedZoomId,
   isPlaying,
+  hoverTimeMs: externalHoverTimeMs,
+  onHoverTimeChange,
   getTimelineTime,
   onSeek,
   onPause,
@@ -74,7 +77,10 @@ export const TimelineRuler = memo(function TimelineRuler({
 }: TimelineRulerProps) {
   const rulerRef = useRef<HTMLDivElement>(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
+  const [internalHoverTimeMs, setInternalHoverTimeMs] = useState<number | null>(null)
   const [rulerContextMenuTimeMs, setRulerContextMenuTimeMs] = useState<number | null>(null)
+
+  const activeHoverTimeMs = externalHoverTimeMs !== undefined ? externalHoverTimeMs : internalHoverTimeMs
 
   // Sub-tick subdivisions: 5 minor divisions per major tick
   const minorInterval = tickInterval / 5
@@ -135,10 +141,12 @@ export const TimelineRuler = memo(function TimelineRuler({
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const timeMs = getTimelineTime(e.clientX)
     if (isScrubbing) {
-      const timeMs = getTimelineTime(e.clientX)
       onSeek(timeMs)
     }
+    setInternalHoverTimeMs(timeMs)
+    onHoverTimeChange?.(timeMs)
   }
 
   function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
@@ -147,6 +155,13 @@ export const TimelineRuler = memo(function TimelineRuler({
       if (e.currentTarget.hasPointerCapture(e.pointerId)) {
         e.currentTarget.releasePointerCapture(e.pointerId)
       }
+    }
+  }
+
+  function handlePointerLeave() {
+    if (!isScrubbing) {
+      setInternalHoverTimeMs(null)
+      onHoverTimeChange?.(null)
     }
   }
 
@@ -166,6 +181,7 @@ export const TimelineRuler = memo(function TimelineRuler({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onPointerLeave={handlePointerLeave}
       onDoubleClick={handleDoubleClick}
       role="presentation"
     >
@@ -181,6 +197,19 @@ export const TimelineRuler = memo(function TimelineRuler({
               setRulerContextMenuTimeMs(Math.round(timeMs))
             }}
           >
+            {/* Playhead Hover Ghost Needle on Ruler */}
+            {activeHoverTimeMs !== null && !isScrubbing ? (
+              <div
+                className="pointer-events-none absolute top-0 bottom-0 z-10 w-px -translate-x-1/2 bg-primary/40 border-l border-dashed border-primary/60"
+                style={{ left: `${activeHoverTimeMs * pixelsPerMs}px` }}
+              >
+                {/* Floating Hover Timecode Tooltip */}
+                <div className="absolute -top-6 left-1/2 -translate-x-1/2 rounded bg-surface border border-border/80 px-1.5 py-0.2 font-mono text-[9px] font-semibold text-foreground shadow-e1 whitespace-nowrap">
+                  {formatTimelineTime(activeHoverTimeMs)}
+                </div>
+              </div>
+            ) : null}
+
             {visibleTicks.map(({ timeMs, left, isMajor }) =>
               isMajor ? (
                 <div
@@ -249,10 +278,10 @@ export const TimelineRuler = memo(function TimelineRuler({
                   type="button"
                   data-timeline-marker
                   className={cn(
-                    "group absolute top-0.5 flex h-5 max-w-36 -translate-x-1/2 items-center gap-1.5 rounded-full border px-2 text-[10px] font-medium transition-all duration-fast focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                    "group absolute top-0.5 flex h-5 max-w-36 -translate-x-1/2 items-center gap-1.5 rounded-full border px-2 text-[10px] font-medium transition-all duration-fast focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary shadow-xs",
                     selectedMarkerId === marker.id
-                      ? "border-primary bg-primary/20 text-foreground shadow-xs ring-1 ring-primary"
-                      : "border-border/60 bg-surface/90 text-muted-foreground hover:border-border hover:bg-surface hover:text-foreground",
+                      ? "border-primary bg-primary/25 text-foreground shadow-xs ring-1 ring-primary"
+                      : "border-border/80 bg-surface/95 text-muted-foreground hover:border-primary/60 hover:bg-surface hover:text-foreground",
                   )}
                   style={{ left: `${marker.timeMs * pixelsPerMs}px` }}
                   onContextMenu={() => {
@@ -278,7 +307,6 @@ export const TimelineRuler = memo(function TimelineRuler({
                 <ContextMenuItem onSelect={() => onSeek(marker.timeMs)}>
                   Go to marker ({formatTimelineTime(marker.timeMs)})
                 </ContextMenuItem>
-                <ContextMenuSeparator />
                 <ContextMenuItem
                   className="text-destructive focus:bg-destructive/10 focus:text-destructive"
                   onSelect={() => onDeleteMarker(marker.id)}
@@ -303,10 +331,10 @@ export const TimelineRuler = memo(function TimelineRuler({
               data-timeline-zoom-pill
               aria-label={`Zoom segment ${segment.scale}x`}
               className={cn(
-                "absolute bottom-0.5 h-1.5 rounded-full transition-all duration-fast",
+                "absolute bottom-0.5 h-1.5 rounded-full transition-all duration-fast shadow-xs",
                 selectedZoomId === segment.id
                   ? "bg-primary shadow-xs ring-1 ring-primary"
-                  : "bg-primary/50 hover:bg-primary/80",
+                  : "bg-primary/60 hover:bg-primary",
               )}
               style={{
                 left: `${segment.startMs * pixelsPerMs}px`,

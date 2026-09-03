@@ -17,7 +17,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -1267,7 +1267,117 @@ fn capture_cursor_position() -> (i32, i32, bool) {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn capture_cursor_position() -> (i32, i32, bool) {
+    if let Some(snapshot) = get_pipewire_cursor_metadata() {
+        if snapshot.active {
+            return (snapshot.x, snapshot.y, true);
+        }
+    }
     (0, 0, true)
+}
+
+// ---------------------------------------------------------------------------
+// PipeWire stream buffer metadata support (Wayland desktop sharing)
+// ---------------------------------------------------------------------------
+
+/// Layout of `struct spa_meta_cursor` from PipeWire's `spa/buffer/meta.h`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpaMetaCursor {
+    pub id: i32,
+    pub flags: u32,
+    pub x: i32,
+    pub y: i32,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub offset: u32,
+}
+
+/// Shared snapshot of cursor state delivered by a PipeWire screen capture stream.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipeWireCursorSnapshot {
+    pub active: bool,
+    pub x: i32,
+    pub y: i32,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub shape_name: Option<String>,
+    pub bitmap_hash: u64,
+    pub cursor_mode: Option<crate::capture::linux_portal::PortalCursorMode>,
+    pub updated_at_ms: u64,
+}
+
+static PIPEWIRE_CURSOR: RwLock<Option<PipeWireCursorSnapshot>> = RwLock::new(None);
+
+/// Update cursor metadata from an active PipeWire stream frame buffer.
+pub fn update_pipewire_cursor_metadata(snapshot: PipeWireCursorSnapshot) {
+    if let Ok(mut lock) = PIPEWIRE_CURSOR.write() {
+        *lock = Some(snapshot);
+    }
+}
+
+/// Retrieve the latest cursor snapshot emitted by the PipeWire stream, if any.
+pub fn get_pipewire_cursor_metadata() -> Option<PipeWireCursorSnapshot> {
+    if let Ok(lock) = PIPEWIRE_CURSOR.read() {
+        lock.clone()
+    } else {
+        None
+    }
+}
+
+/// Reset PipeWire cursor state (e.g. when recording stops or restarts).
+pub fn clear_pipewire_cursor_metadata() {
+    if let Ok(mut lock) = PIPEWIRE_CURSOR.write() {
+        *lock = None;
+    }
+}
+
+/// Parse a raw buffer containing PipeWire `SPA_META_Cursor` metadata.
+pub fn parse_pipewire_spa_meta_cursor(raw: &[u8]) -> Option<PipeWireCursorSnapshot> {
+    if raw.len() < std::mem::size_of::<SpaMetaCursor>() {
+        return None;
+    }
+
+    let mut meta = SpaMetaCursor::default();
+    // SAFETY: raw buffer has at least size_of::<SpaMetaCursor>() bytes
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            raw.as_ptr(),
+            &mut meta as *mut SpaMetaCursor as *mut u8,
+            std::mem::size_of::<SpaMetaCursor>(),
+        );
+    }
+
+    let mut bitmap_hash = 0u64;
+    let offset = meta.offset as usize;
+    let pixel_bytes = (meta.width as usize)
+        .saturating_mul(meta.height as usize)
+        .saturating_mul(4);
+
+    if offset > 0 && offset.saturating_add(pixel_bytes) <= raw.len() && pixel_bytes > 0 {
+        let pixels = &raw[offset..offset + pixel_bytes];
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pixels.hash(&mut hasher);
+        bitmap_hash = hasher.finish();
+    }
+
+    Some(PipeWireCursorSnapshot {
+        active: true,
+        x: meta.x,
+        y: meta.y,
+        hotspot_x: meta.hotspot_x,
+        hotspot_y: meta.hotspot_y,
+        width: meta.width,
+        height: meta.height,
+        shape_name: None,
+        bitmap_hash,
+        cursor_mode: Some(crate::capture::linux_portal::PortalCursorMode::Metadata),
+        updated_at_ms: 0,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1388,7 +1498,368 @@ fn capture_cursor_shape(
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn capture_cursor_shape(
+    _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
+    _known: &[CursorShapeInfo],
+) -> Option<CursorShapeInfo> {
+    macos_capture_cursor_shape()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
+    use std::ffi::{c_char, c_void};
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    struct NSPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug)]
+    struct NSSize {
+        width: f64,
+        height: f64,
+    }
+
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend(receiver: *mut c_void, op: *mut c_void, ...) -> *mut c_void;
+    }
+
+    unsafe {
+        let nscursor_cls = objc_getClass(b"NSCursor\0".as_ptr() as *const c_char);
+        if nscursor_cls.is_null() {
+            return None;
+        }
+
+        let sel_current_system = sel_registerName(b"currentSystemCursor\0".as_ptr() as *const c_char);
+        let sel_current = sel_registerName(b"currentCursor\0".as_ptr() as *const c_char);
+        let mut cursor = objc_msgSend(nscursor_cls, sel_current_system);
+        if cursor.is_null() {
+            cursor = objc_msgSend(nscursor_cls, sel_current);
+        }
+        if cursor.is_null() {
+            return None;
+        }
+
+        // Cache selectors and singleton cursor pointers
+        struct MacosCursorPointers {
+            arrow: usize,
+            ibeam: usize,
+            pointing_hand: usize,
+            closed_hand: usize,
+            open_hand: usize,
+            crosshair: usize,
+            resize_left_right: usize,
+            resize_up_down: usize,
+            operation_not_allowed: usize,
+            disappearing_item: usize,
+        }
+
+        static POINTERS: OnceLock<MacosCursorPointers> = OnceLock::new();
+        let pointers = POINTERS.get_or_init(|| {
+            let get_ptr = |sel_name: &[u8]| -> usize {
+                let sel = sel_registerName(sel_name.as_ptr() as *const c_char);
+                objc_msgSend(nscursor_cls, sel) as usize
+            };
+            MacosCursorPointers {
+                arrow: get_ptr(b"arrowCursor\0"),
+                ibeam: get_ptr(b"IBeamCursor\0"),
+                pointing_hand: get_ptr(b"pointingHandCursor\0"),
+                closed_hand: get_ptr(b"closedHandCursor\0"),
+                open_hand: get_ptr(b"openHandCursor\0"),
+                crosshair: get_ptr(b"crosshairCursor\0"),
+                resize_left_right: get_ptr(b"resizeLeftRightCursor\0"),
+                resize_up_down: get_ptr(b"resizeUpDownCursor\0"),
+                operation_not_allowed: get_ptr(b"operationNotAllowedCursor\0"),
+                disappearing_item: get_ptr(b"disappearingItemCursor\0"),
+            }
+        });
+
+        let cursor_addr = cursor as usize;
+        let kind = if cursor_addr == pointers.arrow {
+            "arrow"
+        } else if cursor_addr == pointers.ibeam {
+            "ibeam"
+        } else if cursor_addr == pointers.pointing_hand {
+            "hand"
+        } else if cursor_addr == pointers.closed_hand {
+            "grabbing"
+        } else if cursor_addr == pointers.open_hand {
+            "grab"
+        } else if cursor_addr == pointers.crosshair {
+            "crosshair"
+        } else if cursor_addr == pointers.resize_left_right {
+            "resize-horizontal"
+        } else if cursor_addr == pointers.resize_up_down {
+            "resize-vertical"
+        } else if cursor_addr == pointers.operation_not_allowed
+            || cursor_addr == pointers.disappearing_item
+        {
+            "unavailable"
+        } else {
+            // Check hotSpot and image size for custom cursors
+            let sel_hotspot = sel_registerName(b"hotSpot\0".as_ptr() as *const c_char);
+            let sel_image = sel_registerName(b"image\0".as_ptr() as *const c_char);
+            let sel_size = sel_registerName(b"size\0".as_ptr() as *const c_char);
+
+            let msg_send_point: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSPoint =
+                std::mem::transmute(objc_msgSend as *const ());
+            let hotspot = msg_send_point(cursor, sel_hotspot);
+
+            let image = objc_msgSend(cursor, sel_image);
+            let size = if !image.is_null() {
+                let msg_send_size: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSSize =
+                    std::mem::transmute(objc_msgSend as *const ());
+                msg_send_size(image, sel_size)
+            } else {
+                NSSize { width: 32.0, height: 32.0 }
+            };
+
+            let w = size.width.max(1.0) as u32;
+            let h = size.height.max(1.0) as u32;
+            let hx = hotspot.x as i32;
+            let hy = hotspot.y as i32;
+            let classified = classify_cursor_kind_by_geometry(w, h, hx, hy);
+            return Some(CursorShapeInfo {
+                shape_id: format!("macos-{w}x{h}-{hx}-{hy}-{cursor_addr}"),
+                hotspot_x: hx,
+                hotspot_y: hy,
+                width: w,
+                height: h,
+                kind: classified,
+            });
+        };
+
+        let sel_hotspot = sel_registerName(b"hotSpot\0".as_ptr() as *const c_char);
+        let msg_send_point: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSPoint =
+            std::mem::transmute(objc_msgSend as *const ());
+        let hotspot = msg_send_point(cursor, sel_hotspot);
+
+        Some(CursorShapeInfo {
+            shape_id: format!("macos-{kind}-{cursor_addr}"),
+            hotspot_x: hotspot.x as i32,
+            hotspot_y: hotspot.y as i32,
+            width: 32,
+            height: 32,
+            kind: kind.into(),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_cursor_shape(
+    _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
+    _known: &[CursorShapeInfo],
+) -> Option<CursorShapeInfo> {
+    linux_capture_cursor_shape()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
+    // 1. Check active PipeWire stream metadata first (Wayland portal desktop sharing)
+    if let Some(snapshot) = get_pipewire_cursor_metadata() {
+        if snapshot.active && (snapshot.width > 0 || snapshot.hotspot_x > 0 || snapshot.hotspot_y > 0) {
+            let width = snapshot.width.max(1);
+            let height = snapshot.height.max(1);
+            let hx = snapshot.hotspot_x;
+            let hy = snapshot.hotspot_y;
+
+            let kind = if let Some(ref name) = snapshot.shape_name {
+                match name.to_ascii_lowercase().as_str() {
+                    "arrow" | "default" | "left_ptr" | "top_left_arrow" => "arrow".into(),
+                    "pointer" | "hand" | "hand2" | "pointing_hand" => "hand".into(),
+                    "text" | "ibeam" | "xterm" => "ibeam".into(),
+                    "crosshair" | "cross" => "crosshair".into(),
+                    "wait" | "watch" => "wait".into(),
+                    "progress" | "left_ptr_watch" => "progress".into(),
+                    "help" | "question_arrow" => "help".into(),
+                    "move" | "all-scroll" | "fleur" => "move".into(),
+                    "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => "resize-horizontal".into(),
+                    "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => "resize-vertical".into(),
+                    "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
+                    "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
+                    "not-allowed" | "circle" | "crossed_circle" => "unavailable".into(),
+                    "grab" | "openhand" => "grab".into(),
+                    "grabbing" | "closedhand" => "grabbing".into(),
+                    "zoom-in" => "zoom-in".into(),
+                    "zoom-out" => "zoom-out".into(),
+                    "copy" => "copy".into(),
+                    "cell" => "cell".into(),
+                    _ => classify_cursor_kind_by_geometry(width, height, hx, hy),
+                }
+            } else {
+                classify_cursor_kind_by_geometry(width, height, hx, hy)
+            };
+
+            let shape_id = if snapshot.bitmap_hash != 0 {
+                format!("pipewire-{width}x{height}-{hx}-{hy}-{:x}", snapshot.bitmap_hash)
+            } else {
+                format!("pipewire-{kind}-{width}x{height}-{hx}-{hy}")
+            };
+
+            return Some(CursorShapeInfo {
+                shape_id,
+                hotspot_x: hx,
+                hotspot_y: hy,
+                width,
+                height,
+                kind,
+            });
+        }
+    }
+
+    // 2. Fall back to X11 XFixes query
+    linux_capture_x11_cursor_shape()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
+    use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    struct XFixesCursorImage {
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        xhot: u16,
+        yhot: u16,
+        cursor_serial: c_ulong,
+        pixels: *mut c_ulong,
+        atom: c_ulong,
+        name: *const c_char,
+    }
+
+    type FnXOpenDisplay = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type FnXCloseDisplay = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type FnXFree = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type FnXFixesGetCursorImage = unsafe extern "C" fn(*mut c_void) -> *mut XFixesCursorImage;
+
+    struct X11Functions {
+        open_display: FnXOpenDisplay,
+        close_display: FnXCloseDisplay,
+        free: FnXFree,
+        get_cursor_image: FnXFixesGetCursorImage,
+    }
+
+    static X11: OnceLock<Option<X11Functions>> = OnceLock::new();
+    let fns = X11.get_or_init(|| {
+        unsafe {
+            extern "C" {
+                fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+                fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+            }
+            const RTLD_LAZY: c_int = 1;
+
+            let lib_x11 = dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, RTLD_LAZY);
+            let lib_x11 = if lib_x11.is_null() {
+                dlopen(b"libX11.so\0".as_ptr() as *const c_char, RTLD_LAZY)
+            } else {
+                lib_x11
+            };
+            if lib_x11.is_null() {
+                return None;
+            }
+
+            let lib_xfixes = dlopen(b"libXfixes.so.3\0".as_ptr() as *const c_char, RTLD_LAZY);
+            let lib_xfixes = if lib_xfixes.is_null() {
+                dlopen(b"libXfixes.so\0".as_ptr() as *const c_char, RTLD_LAZY)
+            } else {
+                lib_xfixes
+            };
+            if lib_xfixes.is_null() {
+                return None;
+            }
+
+            let sym_open = dlsym(lib_x11, b"XOpenDisplay\0".as_ptr() as *const c_char);
+            let sym_close = dlsym(lib_x11, b"XCloseDisplay\0".as_ptr() as *const c_char);
+            let sym_free = dlsym(lib_x11, b"XFree\0".as_ptr() as *const c_char);
+            let sym_get_cursor = dlsym(lib_xfixes, b"XFixesGetCursorImage\0".as_ptr() as *const c_char);
+
+            if sym_open.is_null() || sym_close.is_null() || sym_free.is_null() || sym_get_cursor.is_null() {
+                return None;
+            }
+
+            Some(X11Functions {
+                open_display: std::mem::transmute(sym_open),
+                close_display: std::mem::transmute(sym_close),
+                free: std::mem::transmute(sym_free),
+                get_cursor_image: std::mem::transmute(sym_get_cursor),
+            })
+        }
+    });
+
+    let fns = fns.as_ref()?;
+
+    unsafe {
+        let display = (fns.open_display)(std::ptr::null());
+        if display.is_null() {
+            return None;
+        }
+
+        let img_ptr = (fns.get_cursor_image)(display);
+        if img_ptr.is_null() {
+            (fns.close_display)(display);
+            return None;
+        }
+
+        let img = &*img_ptr;
+        let width = img.width as u32;
+        let height = img.height as u32;
+        let hotspot_x = img.xhot as i32;
+        let hotspot_y = img.yhot as i32;
+        let serial = img.cursor_serial;
+
+        let kind = if !img.name.is_null() {
+            let name_str = CStr::from_ptr(img.name).to_string_lossy().to_ascii_lowercase();
+            match name_str.as_str() {
+                "arrow" | "default" | "left_ptr" | "top_left_arrow" => "arrow".into(),
+                "pointer" | "hand" | "hand2" | "pointing_hand" => "hand".into(),
+                "text" | "ibeam" | "xterm" => "ibeam".into(),
+                "crosshair" | "cross" => "crosshair".into(),
+                "wait" | "watch" => "wait".into(),
+                "progress" | "left_ptr_watch" => "progress".into(),
+                "help" | "question_arrow" => "help".into(),
+                "move" | "all-scroll" | "fleur" => "move".into(),
+                "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => "resize-horizontal".into(),
+                "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => "resize-vertical".into(),
+                "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
+                "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
+                "not-allowed" | "circle" | "crossed_circle" => "unavailable".into(),
+                "grab" | "openhand" => "grab".into(),
+                "grabbing" | "closedhand" => "grabbing".into(),
+                "zoom-in" => "zoom-in".into(),
+                "zoom-out" => "zoom-out".into(),
+                "copy" => "copy".into(),
+                "cell" => "cell".into(),
+                _ => classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y),
+            }
+        } else {
+            classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y)
+        };
+
+        (fns.free)(img_ptr as *mut c_void);
+        (fns.close_display)(display);
+
+        Some(CursorShapeInfo {
+            shape_id: format!("linux-{width}x{height}-{hotspot_x}-{hotspot_y}-{serial}"),
+            hotspot_x,
+            hotspot_y,
+            width: width.max(1),
+            height: height.max(1),
+            kind,
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn capture_cursor_shape(
     _registry: &mut std::collections::HashMap<String, CursorShapeInfo>,
     _known: &[CursorShapeInfo],
@@ -1420,8 +1891,8 @@ fn classify_cursor_kind(
 fn system_cursor_kinds() -> &'static [(usize, &'static str)] {
     use std::sync::OnceLock;
     use windows::Win32::UI::WindowsAndMessaging::{
-        LoadCursorW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
-        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_UPARROW, IDC_WAIT,
+        LoadCursorW, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO,
+        IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_UPARROW, IDC_WAIT,
     };
 
     static CURSORS: OnceLock<Vec<(usize, &'static str)>> = OnceLock::new();
@@ -1432,6 +1903,7 @@ fn system_cursor_kinds() -> &'static [(usize, &'static str)] {
             (IDC_IBEAM, "ibeam"),
             (IDC_CROSS, "crosshair"),
             (IDC_WAIT, "wait"),
+            (IDC_APPSTARTING, "progress"),
             (IDC_HELP, "help"),
             (IDC_SIZEALL, "move"),
             (IDC_SIZENWSE, "resize-diagonal-1"),
@@ -1453,7 +1925,6 @@ fn system_cursor_kinds() -> &'static [(usize, &'static str)] {
 }
 
 /// Geometry-based fallback for cursors that are not standard system cursors.
-#[cfg(target_os = "windows")]
 fn classify_cursor_kind_by_geometry(
     width: u32,
     height: u32,
@@ -1470,29 +1941,46 @@ fn classify_cursor_kind_by_geometry(
     let aspect = width as f64 / height as f64;
     let size = width.max(height) as i32;
 
-    if aspect < 0.5 {
+    // Narrow tall cursor: I-beam text selector (typically 6-12px wide, aspect <= 0.45)
+    if aspect <= 0.45 {
         return "ibeam".into();
     }
-    if aspect > 2.5 {
+    // Very wide cursor: horizontal resize
+    if aspect > 2.2 {
         return "resize-horizontal".into();
     }
+    // Moderately tall cursor with centered hotspot: vertical resize with arrowheads (aspect 0.45..0.85)
+    if aspect <= 0.85 && distance_from_center < 4.0 {
+        return "resize-vertical".into();
+    }
 
+    // Centered hotspot
     if distance_from_center < 4.0 {
-        if size >= 28 {
+        if size >= 26 {
             return "crosshair".into();
         }
         return "wait".into();
     }
 
     // Hotspot in the upper-left quadrant usually indicates an arrow or hand.
-    let near_top_left =
-        hotspot_x < (width as i32 / 3).max(2) && hotspot_y < (height as i32 / 3).max(2);
-    if near_top_left {
-        let is_squareish = (width as i32 - height as i32).abs() <= 4;
-        if is_squareish && size >= 24 {
+    let in_upper_left =
+        hotspot_x < (width as i32 / 2) && hotspot_y < (height as i32 / 2);
+    if in_upper_left {
+        let is_squareish = (width as i32 - height as i32).abs() <= 6;
+        // Pointing hands have the index fingertip offset inward (typically x: 20%-45% of width)
+        let is_hand_hotspot = hotspot_x >= (width as i32 / 6).max(3);
+        if is_squareish && size >= 20 && is_hand_hotspot {
             return "hand".into();
         }
         return "arrow".into();
+    }
+
+    // Diagonal resize checks
+    if hotspot_x < 5 && hotspot_y < 5 && (width as i32 - height as i32).abs() <= 4 {
+        return "resize-diagonal-1".into();
+    }
+    if hotspot_x >= (width as i32 - 5) && hotspot_y < 5 && (width as i32 - height as i32).abs() <= 4 {
+        return "resize-diagonal-2".into();
     }
 
     "arrow".into()
@@ -1961,5 +2449,72 @@ mod tests {
         assert_eq!(v2.metadata.schema_version, V2_SCHEMA_VERSION);
         assert_eq!(v2.events.len(), 1);
         assert_eq!(v2.events[0].raw_x, 10);
+    }
+
+    #[test]
+    fn geometry_classification() {
+        assert_eq!(classify_cursor_kind_by_geometry(10, 32, 5, 16), "ibeam");
+        assert_eq!(classify_cursor_kind_by_geometry(32, 12, 16, 6), "resize-horizontal");
+        assert_eq!(classify_cursor_kind_by_geometry(20, 32, 10, 16), "resize-vertical");
+        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 16, 16), "crosshair");
+        assert_eq!(classify_cursor_kind_by_geometry(18, 18, 9, 9), "wait");
+        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 10, 2), "hand");
+        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 1, 1), "arrow");
+        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 30, 2), "resize-diagonal-2");
+    }
+
+    #[test]
+    fn pipewire_cursor_metadata() {
+        // 1. Buffer too small returns None
+        assert_eq!(parse_pipewire_spa_meta_cursor(&[0u8; 10]), None);
+
+        // 2. Build synthetic SPA_META_Cursor buffer
+        let mut buffer = vec![0u8; std::mem::size_of::<SpaMetaCursor>() + 64];
+        let meta = SpaMetaCursor {
+            id: 1,
+            flags: 0,
+            x: 250,
+            y: 400,
+            hotspot_x: 3,
+            hotspot_y: 3,
+            width: 24,
+            height: 24,
+            offset: 0,
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &meta as *const SpaMetaCursor as *const u8,
+                buffer.as_mut_ptr(),
+                std::mem::size_of::<SpaMetaCursor>(),
+            );
+        }
+
+        let parsed = parse_pipewire_spa_meta_cursor(&buffer).expect("valid parse");
+        assert!(parsed.active);
+        assert_eq!(parsed.x, 250);
+        assert_eq!(parsed.y, 400);
+        assert_eq!(parsed.hotspot_x, 3);
+        assert_eq!(parsed.hotspot_y, 3);
+        assert_eq!(parsed.width, 24);
+        assert_eq!(parsed.height, 24);
+
+        // 3. Test state registry update and retrieval
+        clear_pipewire_cursor_metadata();
+        assert_eq!(get_pipewire_cursor_metadata(), None);
+
+        update_pipewire_cursor_metadata(parsed);
+        let retrieved = get_pipewire_cursor_metadata().expect("retrieved");
+        assert_eq!(retrieved.x, 250);
+        assert_eq!(retrieved.y, 400);
+        assert_eq!(retrieved.cursor_mode, Some(crate::capture::linux_portal::PortalCursorMode::Metadata));
+
+        // Verify geometry classification works directly with PipeWire stream dimensions
+        assert_eq!(
+            classify_cursor_kind_by_geometry(retrieved.width, retrieved.height, retrieved.hotspot_x, retrieved.hotspot_y),
+            "arrow"
+        );
+
+        clear_pipewire_cursor_metadata();
+        assert_eq!(get_pipewire_cursor_metadata(), None);
     }
 }

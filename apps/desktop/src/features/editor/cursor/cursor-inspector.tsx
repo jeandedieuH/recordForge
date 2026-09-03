@@ -308,6 +308,7 @@ function BasicCursorSettings({
                   <RenderCursorPreset
                     preset={item.id}
                     isPreview
+                    className="size-7"
                     fillColor={settings.fillColor ?? "#3b82f6"}
                     fillOpacity={settings.fillOpacity ?? 1}
                     strokeColor={settings.strokeColor ?? "#ffffff"}
@@ -329,11 +330,28 @@ function BasicCursorSettings({
       <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
         <div className="flex items-center justify-between">
           <Label className="font-semibold">Size ({Math.round(scale * 100)}%)</Label>
+          <div className="flex items-center gap-1">
+            {[0.5, 1.0, 1.5, 2.0].map((presetScale) => (
+              <button
+                key={presetScale}
+                type="button"
+                onClick={() => onChange({ scale: presetScale })}
+                className={cn(
+                  "px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors",
+                  Math.abs(scale - presetScale) < 0.05
+                    ? "border-primary bg-primary/10 text-primary font-semibold"
+                    : "border-border bg-surface-dim hover:bg-surface-elevated text-muted-foreground",
+                )}
+              >
+                {Math.round(presetScale * 100)}%
+              </button>
+            ))}
+          </div>
         </div>
         <DebouncedSlider
           value={[scale]}
           min={0.5}
-          max={3.0}
+          max={4.0}
           step={0.1}
           onValueCommit={([val]) => onChange({ scale: val })}
           aria-label="Cursor size"

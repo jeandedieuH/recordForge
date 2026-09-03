@@ -38,6 +38,10 @@ pub struct RenderSegment {
     pub volume: Option<f64>,
     pub fade_in_ms: Option<f64>,
     pub fade_out_ms: Option<f64>,
+    #[serde(default)]
+    pub volume_keyframes: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub audio_filter: Option<String>,
     pub speed: f64,
     pub source_in_ms: u64,
     pub source_out_ms: u64,
@@ -1605,6 +1609,8 @@ fn render_timeline_composition(
                 speed: 1.0,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 source_in_ms: 0,
                 source_out_ms: duration_ms,
                 output_start_ms: 0,
@@ -1658,21 +1664,25 @@ fn render_timeline_composition(
                 if (segment.speed - 1.0).abs() > f64::EPSILON {
                     audio_filter.push_str(&atempo_filter(segment.speed));
                 }
-                audio_filter.push_str(&format!(",volume={volume:.4}"));
-                if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
-                    audio_filter.push_str(&format!(
-                        ",afade=t=in:st=0:d={}",
-                        seconds(fade_in_ms as u64)
-                    ));
-                }
-                if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
-                    let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
-                    let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
-                    audio_filter.push_str(&format!(
-                        ",afade=t=out:st={:.3}:d={:.3}",
-                        fade_start / 1000.0,
-                        fade_duration / 1000.0
-                    ));
+                if let Some(custom_filter) = &segment.audio_filter {
+                    audio_filter.push_str(&format!(",{custom_filter}"));
+                } else {
+                    audio_filter.push_str(&format!(",volume={volume:.4}"));
+                    if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
+                        audio_filter.push_str(&format!(
+                            ",afade=t=in:st=0:d={}",
+                            seconds(fade_in_ms as u64)
+                        ));
+                    }
+                    if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
+                        let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
+                        let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
+                        audio_filter.push_str(&format!(
+                            ",afade=t=out:st={:.3}:d={:.3}",
+                            fade_start / 1000.0,
+                            fade_duration / 1000.0
+                        ));
+                    }
                 }
                 if segment.output_start_ms > 0 {
                     audio_filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
@@ -4961,6 +4971,8 @@ mod tests {
                     volume: None,
                     fade_in_ms: None,
                     fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
                     speed: 1.0,
                     source_in_ms: 0,
                     source_out_ms: 1_000,
@@ -4975,6 +4987,8 @@ mod tests {
                     volume: None,
                     fade_in_ms: None,
                     fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
                     speed: 2.0,
                     source_in_ms: 2_000,
                     source_out_ms: 4_000,
@@ -6409,6 +6423,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 2000,
@@ -6543,6 +6559,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -6655,6 +6673,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -6769,6 +6789,8 @@ mod tests {
                 speed: 1.0,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 source_in_ms: 0,
                 source_out_ms: 1000,
                 output_start_ms: 0,
@@ -6950,6 +6972,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -6987,6 +7011,8 @@ mod tests {
                     volume: Some(1.0),
                     fade_in_ms: None,
                     fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
                     speed: 1.0,
                     source_in_ms: 0,
                     source_out_ms: 1000,
@@ -7591,6 +7617,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -7764,6 +7792,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 1000,
@@ -7847,6 +7877,8 @@ mod tests {
                     volume: Some(1.0),
                     fade_in_ms: None,
                     fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
                     speed: 1.0,
                     source_in_ms: 0,
                     source_out_ms: 1000,
@@ -7965,6 +7997,8 @@ mod tests {
                 volume: None,
                 fade_in_ms: None,
                 fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
                 speed: 1.0,
                 source_in_ms: 0,
                 source_out_ms: 1000,

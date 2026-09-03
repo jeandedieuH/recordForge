@@ -60,7 +60,9 @@ import type {
   ImportCaptionCuesCommand,
   MoveClipCommand,
   MoveClipsCommand,
+  MoveTrackCommand,
   RegenerateZoomSuggestionsCommand,
+  ReorderTracksCommand,
   ResizeCursorRangeCommand,
   ResizeZoomSegmentCommand,
   RippleDeleteClipCommand,
@@ -311,6 +313,13 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       return { ok: true, value: undefined }
     }
     case "add-track":
+      return { ok: true, value: undefined }
+    case "move-track": {
+      const track = findTrack(state, command.trackId)
+      if (!track) return { ok: false, error: editorError("track_not_found", "Track not found") }
+      return { ok: true, value: undefined }
+    }
+    case "reorder-tracks":
       return { ok: true, value: undefined }
     case "delete-track": {
       const track = findTrack(state, command.trackId)
@@ -694,6 +703,10 @@ export function applyCommand(
       return applyAddTrack(state, command)
     case "delete-track":
       return applyDeleteTrack(state, command)
+    case "move-track":
+      return applyMoveTrack(state, command)
+    case "reorder-tracks":
+      return applyReorderTracks(state, command)
     case "trim-clip":
       return applyTrimClip(state, command)
     case "split-clip":
@@ -879,6 +892,61 @@ function applyDeleteTrack(
     value: {
       ...state,
       tracks: state.tracks.filter((t) => t.id !== command.trackId),
+      updatedAt: now(),
+    },
+  }
+}
+
+function applyMoveTrack(
+  state: TimelineState,
+  command: MoveTrackCommand,
+): CommandResult<TimelineState> {
+  const currentIndex = state.tracks.findIndex((t) => t.id === command.trackId)
+  if (currentIndex === -1) {
+    return { ok: false, error: editorError("track_not_found", "Track not found") }
+  }
+  const track = state.tracks[currentIndex]
+  if (!track) {
+    return { ok: false, error: editorError("track_not_found", "Track not found") }
+  }
+  const targetIndex = Math.max(0, Math.min(state.tracks.length - 1, command.newIndex))
+  if (currentIndex === targetIndex) {
+    return { ok: true, value: state }
+  }
+  const tracks = [...state.tracks]
+  tracks.splice(currentIndex, 1)
+  tracks.splice(targetIndex, 0, track)
+  return {
+    ok: true,
+    value: {
+      ...state,
+      tracks,
+      updatedAt: now(),
+    },
+  }
+}
+
+function applyReorderTracks(
+  state: TimelineState,
+  command: ReorderTracksCommand,
+): CommandResult<TimelineState> {
+  const trackMap = new Map(state.tracks.map((t) => [t.id, t]))
+  const nextTracks: TimelineTrack[] = []
+  for (const trackId of command.trackIds) {
+    const track = trackMap.get(trackId)
+    if (track) {
+      nextTracks.push(track)
+      trackMap.delete(trackId)
+    }
+  }
+  for (const remaining of trackMap.values()) {
+    nextTracks.push(remaining)
+  }
+  return {
+    ok: true,
+    value: {
+      ...state,
+      tracks: nextTracks,
       updatedAt: now(),
     },
   }
@@ -1597,10 +1665,11 @@ function applyUpdateClipAudio(
     }
   }
 
-  const update: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs">> = {}
+  const update: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs" | "volumeKeyframes">> = {}
   if (command.volume !== undefined) update.volume = command.volume
   if (command.fadeInMs !== undefined) update.fadeInMs = command.fadeInMs
   if (command.fadeOutMs !== undefined) update.fadeOutMs = command.fadeOutMs
+  if (command.volumeKeyframes !== undefined) update.volumeKeyframes = command.volumeKeyframes
 
   const next: AudioClip = { ...clip, ...update }
   if (next.volume < 0 || next.volume > 2) {
@@ -2626,6 +2695,23 @@ export function createDeleteTrackCommand(trackId: string): CommandRecord {
   }
 }
 
+export function createMoveTrackCommand(trackId: string, newIndex: number): CommandRecord {
+  return {
+    kind: "move-track",
+    name: "Move track",
+    trackId,
+    newIndex,
+  }
+}
+
+export function createReorderTracksCommand(trackIds: string[]): CommandRecord {
+  return {
+    kind: "reorder-tracks",
+    name: "Reorder tracks",
+    trackIds,
+  }
+}
+
 export function createTrimClipCommand(
   clipId: string,
   sourceInMs: number,
@@ -2982,7 +3068,7 @@ export function createUpdateTrackCommand(trackId: string, update: TrackUpdate): 
 
 export function createUpdateClipAudioCommand(
   clipId: string,
-  command: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs">>,
+  command: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs" | "volumeKeyframes">>,
 ): CommandRecord {
   return {
     kind: "update-clip-audio",
@@ -2991,6 +3077,7 @@ export function createUpdateClipAudioCommand(
     volume: command.volume,
     fadeInMs: command.fadeInMs,
     fadeOutMs: command.fadeOutMs,
+    volumeKeyframes: command.volumeKeyframes,
     coalesce: true,
     coalesceKey: `audio:${clipId}`,
   }

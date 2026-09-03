@@ -9,7 +9,13 @@ import {
   type ProjectAsset,
   type TimelineState,
 } from "@recordforge/domain"
-import { buildOverlayRenderPlan, buildRenderPlan, isTimelineAudioMuted } from "./render-plan"
+import {
+  buildOverlayRenderPlan,
+  buildRenderPlan,
+  generateAudioSegmentFilter,
+  generateAudioVolumeFilter,
+  isTimelineAudioMuted,
+} from "./render-plan"
 import { createCursorEngine, normalizeCursorTelemetry } from "@recordforge/cursor-core"
 import { buildFollowCursorMotionPlan, resolveFollowCursorTarget } from "@recordforge/editor-core"
 
@@ -1624,5 +1630,132 @@ describe("render-plan", () => {
 
     const validated = renderPlanSchema.safeParse(plan.value)
     expect(validated.success).toBe(true)
+  })
+
+  describe("FFmpeg audio filter generator", () => {
+    it("generates static volume filter", () => {
+      const filter = generateAudioVolumeFilter({
+        durationMs: 5000,
+        volume: 1.25,
+      })
+      expect(filter).toBe("volume=1.2500")
+    })
+
+    it("generates standard afade filters for fade-in and fade-out", () => {
+      const filter = generateAudioVolumeFilter({
+        durationMs: 10000,
+        volume: 1.0,
+        fadeInMs: 1500,
+        fadeOutMs: 2500,
+      })
+      expect(filter).toBe("volume=1.0000,afade=t=in:st=0:d=1.500,afade=t=out:st=7.500:d=2.500")
+    })
+
+    it("generates volume=eval=frame when multi-point keyframes are present", () => {
+      const filter = generateAudioVolumeFilter({
+        durationMs: 10000,
+        volume: 1.0,
+        volumeKeyframes: [
+          { id: "kf1", timeMs: 2000, volume: 0.5 },
+          { id: "kf2", timeMs: 6000, volume: 1.5 },
+        ],
+      })
+      expect(filter).toContain(":eval=frame")
+      expect(filter).toContain(
+        "volume='if(lt(t,2.000),0.5000,if(lt(t,6.000),0.5000+(1.0000)*(t-2.000)/4.000,1.5000))':eval=frame",
+      )
+    })
+
+    it("combines keyframes with fade-in and fade-out ramps in eval=frame", () => {
+      const filter = generateAudioVolumeFilter({
+        durationMs: 10000,
+        volume: 1.0,
+        fadeInMs: 1000,
+        fadeOutMs: 2000,
+        volumeKeyframes: [
+          { id: "kf1", timeMs: 3000, volume: 0.8 },
+          { id: "kf2", timeMs: 7000, volume: 1.2 },
+        ],
+      })
+      expect(filter).toContain(":eval=frame")
+      // Fade in ramp before kf1
+      expect(filter).toContain("0.8000*t/1.000")
+      // Fade out ramp after kf2
+      expect(filter).toContain("1.2000*(10.000-t)/2.000")
+    })
+
+    it("generates full audio segment filter chain", () => {
+      const segment = {
+        id: "seg-1",
+        assetId: "audio-asset-1",
+        sourceInMs: 1000,
+        sourceOutMs: 6000,
+        outputStartMs: 2000,
+        outputEndMs: 7000,
+        speed: 1.5,
+        volume: 1.0,
+        fadeInMs: 500,
+        fadeOutMs: 1000,
+      }
+      const filter = generateAudioSegmentFilter(segment, {
+        includeAtempo: true,
+        includeDelay: true,
+        includePad: true,
+        projectDurationMs: 10000,
+        label: "audio0",
+      })
+      expect(filter).toContain("atrim=start=1.000:end=6.000,asetpts=PTS-STARTPTS")
+      expect(filter).toContain("atempo=1.5000")
+      expect(filter).toContain("volume=1.0000,afade=t=in:st=0:d=0.500,afade=t=out:st=4.000:d=1.000")
+      expect(filter).toContain("adelay=2000:all=1")
+      expect(filter).toContain("apad=pad_dur=10.000[audio0]")
+    })
+
+    it("attaches generated audioFilter to audio segments during buildRenderPlan", () => {
+      const state = makeTimeline(1)
+      state.tracks.push({
+        id: "keyframed-mic-track",
+        kind: "audio",
+        name: "Microphone",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 0.9,
+        clips: [
+          {
+            id: "kf-audio-clip",
+            kind: "audio",
+            assetId: "audio-source",
+            startMs: 0,
+            durationMs: 10000,
+            sourceInMs: 0,
+            sourceOutMs: 10000,
+            speed: 1,
+            volume: 1.0,
+            fadeInMs: 500,
+            fadeOutMs: 1000,
+            volumeKeyframes: [
+              { id: "kf1", timeMs: 2000, volume: 0.4 },
+              { id: "kf2", timeMs: 5000, volume: 1.6 },
+            ],
+          },
+        ],
+      })
+
+      const plan = buildRenderPlan({ state, projectId: "project-audio-eval-test" })
+      expect(plan.ok).toBe(true)
+      if (!plan.ok) return
+
+      const audioTrack = plan.value.audioTracks.find((t) => t.assetId === "audio-source")
+      expect(audioTrack).toBeDefined()
+      const segment = audioTrack?.segments[0]
+      expect(segment?.audioFilter).toBeDefined()
+      expect(segment?.audioFilter).toContain(":eval=frame")
+      expect(segment?.volumeKeyframes).toHaveLength(2)
+
+      // RenderPlan schema validation must pass
+      const validated = renderPlanSchema.safeParse(plan.value)
+      expect(validated.success).toBe(true)
+    })
   })
 })

@@ -33,7 +33,11 @@ describe("resolveRedactColor", () => {
 describe("maskFallbackVisual", () => {
   const baseClip: MaskClip = {
     id: "test-clip",
-    trackId: "track-1",
+    kind: "mask",
+    assetId: "mask-asset",
+    speed: 1,
+    sourceInMs: 0,
+    sourceOutMs: 3000,
     startMs: 1000,
     durationMs: 3000,
     mode: "redact",
@@ -150,7 +154,11 @@ describe("computeNextMaskRect", () => {
 describe("isActive", () => {
   const clip: MaskClip = {
     id: "clip-1",
-    trackId: "track-1",
+    kind: "mask",
+    assetId: "mask-asset",
+    speed: 1,
+    sourceInMs: 0,
+    sourceOutMs: 2000,
     startMs: 1000,
     durationMs: 2000,
     mode: "blur",

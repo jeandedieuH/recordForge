@@ -1457,6 +1457,8 @@ mod tests {
             volume: None,
             fade_in_ms: None,
             fade_out_ms: None,
+            volume_keyframes: None,
+            audio_filter: None,
             speed: 1.0,
             source_in_ms: 0,
             source_out_ms: 1_000,

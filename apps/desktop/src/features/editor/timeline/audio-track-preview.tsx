@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react"
 import type { AudioClip, MediaAudioTrackOutput, TimelineTrack } from "@recordforge/contracts"
-import { computePreviewMediaSync } from "@recordforge/editor-core"
+import { computePreviewMediaSync, evaluateVolumeEnvelope } from "@recordforge/editor-core"
 import { toAssetUrl } from "../../../lib/assets"
 
 interface PreviewAudioTrack {
@@ -24,15 +24,8 @@ interface AudioTrackPreviewProps {
 
 function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
   const clipTimeMs = (playheadMs - clip.startMs) * clip.speed
-  const fadeIn = Math.min(clip.fadeInMs, clip.durationMs)
-  const fadeOut = Math.min(clip.fadeOutMs, clip.durationMs)
-  const fadeInGain = fadeIn > 0 ? Math.min(1, Math.max(0, clipTimeMs / fadeIn)) : 1
-  const fadeOutStart = Math.max(0, clip.durationMs - fadeOut)
-  const fadeOutGain =
-    fadeOut > 0 && clipTimeMs > fadeOutStart
-      ? Math.min(1, Math.max(0, (clip.durationMs - clipTimeMs) / fadeOut))
-      : 1
-  return Math.min(fadeInGain, fadeOutGain)
+  const envelopeVolume = evaluateVolumeEnvelope(clip, clipTimeMs)
+  return clip.volume > 0 ? envelopeVolume / clip.volume : 0
 }
 
 function buildPreviewTracks(

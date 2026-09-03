@@ -3,6 +3,7 @@ import { MousePointer2, Wand2 } from "lucide-react"
 import { Badge, Button, Slider, Switch, cn } from "@recordforge/ui"
 import type { ClickFeedback, CursorSettings } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
+import { RenderCursorPreset } from "../../editor/cursor/cursor-asset"
 import { getSetting, isTauri, setSetting } from "../../../lib/settings"
 
 interface RippleEffect {
@@ -196,20 +197,27 @@ export function CursorStep() {
           <div
             className="absolute pointer-events-none transition-transform will-change-transform z-30"
             style={{
-              left: `${smoothPos.x}px`,
-              top: `${smoothPos.y}px`,
-              transform: `translate(-2px, -2px) scale(${cursorScale})`,
+              left: `${smoothPos.x - 9.33 * cursorScale}px`,
+              top: `${smoothPos.y - 9.33 * cursorScale}px`,
+              transform: `scale(${cursorScale})`,
+              transformOrigin: "top left",
+              filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.4))",
             }}
           >
             <div className="relative">
               {/* Highlight Aura */}
               <div
-                className="absolute -inset-2 rounded-full blur-xs opacity-60 pointer-events-none"
+                className="absolute -inset-2 rounded-full blur-xs opacity-40 pointer-events-none"
                 style={{ backgroundColor: activeColor }}
               />
-              <MousePointer2
-                className="size-5 drop-shadow-md relative z-10"
-                style={{ fill: activeColor, stroke: "#ffffff", strokeWidth: 1.5 }}
+              <RenderCursorPreset
+                preset="recorded-system"
+                fillColor={activeColor}
+                fillOpacity={1}
+                strokeColor="#ffffff"
+                strokeWidth={2}
+                strokeOpacity={1}
+                className="relative z-10"
               />
             </div>
           </div>
@@ -279,7 +287,7 @@ export function CursorStep() {
           <Slider
             value={[cursorScale]}
             min={0.8}
-            max={2.0}
+            max={3.5}
             step={0.1}
             onValueChange={([val]) => {
               setCursorScale(val)

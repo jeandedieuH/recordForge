@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+  CURSOR_ASSET_MANIFEST,
+  SHAPE_ID_TO_ASSET,
   cursorRangeOverrideLabels,
   findCursorEventAtTime,
   fitCursorPoint,
@@ -7,9 +9,11 @@ import {
   isCursorButtonEnabled,
   isCursorIdle,
   normalizeCursorTelemetry,
+  renderCursorAssetSvg,
   resolveCursorAsset,
   timelineToCursorSourceTime,
   zoomSegmentBadges,
+  type CursorAssetId,
 } from "./index"
 import {
   defaultCursorSettings,
@@ -222,8 +226,8 @@ describe("cursor-core", () => {
     })
     expect(asset.id).toBe("shape-hand:hand-32")
     expect(asset.effectiveId).toBe("hand-32")
-    expect(asset.width).toBe(32)
-    expect(asset.height).toBe(32)
+    expect(asset.width).toBe(64)
+    expect(asset.height).toBe(64)
   })
 
   it("produces zoom segment source and lock badges", () => {
@@ -294,5 +298,81 @@ describe("cursor-core", () => {
       updatedAt: "2026-01-01T00:00:00Z",
     } satisfies TimelineState
     expect(timelineToCursorSourceTime(state, 1250)).toBe(325)
+  })
+
+  it("manifest contains valid modern vector geometries for all cursor types", () => {
+    const ids = Object.keys(CURSOR_ASSET_MANIFEST) as CursorAssetId[]
+    expect(ids.length).toBeGreaterThanOrEqual(22)
+
+    for (const id of ids) {
+      const asset = CURSOR_ASSET_MANIFEST[id]
+      expect(asset.id).toBe(id)
+      expect(asset.label.length).toBeGreaterThan(0)
+      expect(asset.viewBox).toBe("0 0 24 24")
+      expect(asset.width).toBeGreaterThan(0)
+      expect(asset.height).toBeGreaterThan(0)
+      expect(asset.hotspotX).toBeGreaterThanOrEqual(0)
+      expect(asset.hotspotX).toBeLessThanOrEqual(24)
+      expect(asset.hotspotY).toBeGreaterThanOrEqual(0)
+      expect(asset.hotspotY).toBeLessThanOrEqual(24)
+
+      // Test token substitution produces complete SVG markup
+      const rendered = renderCursorAssetSvg(asset, {
+        fill: "#ff0000",
+        fillOpacity: 0.9,
+        stroke: "#000000",
+        strokeWidth: 2,
+        strokeOpacity: 0.8,
+      })
+      expect(rendered).not.toContain("{fill}")
+      expect(rendered).not.toContain("{stroke}")
+      expect(rendered).toContain("#ff0000")
+      expect(rendered).toContain("#000000")
+      // Ensure no raw text nodes that break headless usvg rasterizers
+      expect(rendered).not.toContain("<text")
+    }
+  })
+
+  it("maps modern cursor kind aliases to canonical shape assets", () => {
+    const mappings: [string, CursorAssetId][] = [
+      ["arrow", "shape-arrow"],
+      ["default", "shape-arrow"],
+      ["pointer", "shape-hand"],
+      ["hand", "shape-hand"],
+      ["text", "shape-ibeam"],
+      ["ibeam", "shape-ibeam"],
+      ["crosshair", "shape-crosshair"],
+      ["cross", "shape-crosshair"],
+      ["wait", "shape-wait"],
+      ["help", "shape-help"],
+      ["move", "shape-move"],
+      ["all-scroll", "shape-move"],
+      ["resize-diagonal-1", "shape-resize-diagonal-1"],
+      ["nwse-resize", "shape-resize-diagonal-1"],
+      ["resize-diagonal-2", "shape-resize-diagonal-2"],
+      ["nesw-resize", "shape-resize-diagonal-2"],
+      ["resize-horizontal", "shape-resize-horizontal"],
+      ["ew-resize", "shape-resize-horizontal"],
+      ["col-resize", "shape-col-resize"],
+      ["resize-vertical", "shape-resize-vertical"],
+      ["ns-resize", "shape-resize-vertical"],
+      ["row-resize", "shape-row-resize"],
+      ["unavailable", "shape-unavailable"],
+      ["not-allowed", "shape-unavailable"],
+      ["no-drop", "shape-unavailable"],
+      ["grab", "shape-grab"],
+      ["grabbing", "shape-grabbing"],
+      ["zoom-in", "shape-zoom-in"],
+      ["zoom-out", "shape-zoom-out"],
+      ["copy", "shape-copy"],
+      ["progress", "shape-progress"],
+      ["cell", "shape-cell"],
+    ]
+
+    for (const [kind, expectedAssetId] of mappings) {
+      expect(SHAPE_ID_TO_ASSET[kind]).toBe(expectedAssetId)
+      const resolved = resolveCursorAsset(kind, "recorded-system", { shapeMode: "optimized" })
+      expect(resolved.id).toBe(expectedAssetId)
+    }
   })
 })

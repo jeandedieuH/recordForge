@@ -1,5 +1,6 @@
 import type {
   AppError,
+  AudioVolumeKeyframe,
   CursorTelemetryFile,
   ExportRange,
   OverlayRenderPlan,
@@ -138,6 +139,9 @@ function toSegments(
               volume: clip.volume,
               fadeInMs: Math.round(Math.min(clip.fadeInMs, durationMs)),
               fadeOutMs: Math.round(Math.min(clip.fadeOutMs, durationMs)),
+              ...(clip.volumeKeyframes && clip.volumeKeyframes.length > 0
+                ? { volumeKeyframes: clip.volumeKeyframes }
+                : {}),
             }
           : {}),
         sourceInMs: window.sourceInMs,
@@ -771,6 +775,211 @@ export function isTimelineAudioMuted(state: TimelineState): boolean {
   return audioTracks.every((track) => track.muted || (hasSoloTrack && !track.solo))
 }
 
+export interface AudioVolumeFilterOptions {
+  durationMs: number
+  volume?: number
+  fadeInMs?: number
+  fadeOutMs?: number
+  volumeKeyframes?: AudioVolumeKeyframe[]
+  forceEval?: boolean
+}
+
+/**
+ * Generates an FFmpeg audio filter string for volume control, fades, and dynamic keyframed envelopes.
+ *
+ * - When multi-point keyframes are present (or forceEval is true):
+ *   Generates a `volume='<expr>':eval=frame` filter with continuous piecewise linear interpolation
+ *   across keyframes, including optional fade-in and fade-out ramps.
+ *
+ * - When only static volume and/or standard fades are present:
+ *   Generates standard FFmpeg `volume=X.XXXX` and `afade=t=in:...`, `afade=t=out:...` filters.
+ */
+export function generateAudioVolumeFilter(options: AudioVolumeFilterOptions): string {
+  const durationMs = Math.max(1, Math.round(options.durationMs))
+  const durationSec = durationMs / 1000
+  const baseVolume = Math.max(0, Math.min(2, options.volume ?? 1))
+  const fadeInMs = Math.max(0, Math.min(durationMs, Math.round(options.fadeInMs ?? 0)))
+  const fadeOutMs = Math.max(0, Math.min(durationMs, Math.round(options.fadeOutMs ?? 0)))
+  const fadeInSec = fadeInMs / 1000
+  const fadeOutSec = fadeOutMs / 1000
+  const fadeOutStartSec = Math.max(0, (durationMs - fadeOutMs) / 1000)
+
+  const rawKeyframes = (options.volumeKeyframes ?? [])
+    .filter((kf) => typeof kf.timeMs === "number" && typeof kf.volume === "number")
+    .sort((a, b) => a.timeMs - b.timeMs)
+
+  if (rawKeyframes.length > 0 || options.forceEval) {
+    return generateKeyframedVolumeFilter({
+      durationSec,
+      baseVolume,
+      fadeInSec,
+      fadeOutSec,
+      fadeOutStartSec,
+      keyframes: rawKeyframes,
+    })
+  }
+
+  // Standard volume with optional afade filters
+  const filters: string[] = []
+  filters.push(`volume=${baseVolume.toFixed(4)}`)
+
+  if (fadeInSec > 0) {
+    filters.push(`afade=t=in:st=0:d=${fadeInSec.toFixed(3)}`)
+  }
+
+  if (fadeOutSec > 0) {
+    filters.push(`afade=t=out:st=${fadeOutStartSec.toFixed(3)}:d=${fadeOutSec.toFixed(3)}`)
+  }
+
+  return filters.join(",")
+}
+
+function generateKeyframedVolumeFilter(params: {
+  durationSec: number
+  baseVolume: number
+  fadeInSec: number
+  fadeOutSec: number
+  fadeOutStartSec: number
+  keyframes: AudioVolumeKeyframe[]
+}): string {
+  const { durationSec, baseVolume, fadeInSec, fadeOutSec, fadeOutStartSec, keyframes } = params
+
+  if (keyframes.length === 0) {
+    let expr = baseVolume.toFixed(4)
+    if (fadeOutSec > 0) {
+      expr = `if(gt(t,${fadeOutStartSec.toFixed(3)}),(${baseVolume.toFixed(4)}*(${durationSec.toFixed(3)}-t)/${fadeOutSec.toFixed(3)}),${expr})`
+    }
+    if (fadeInSec > 0) {
+      expr = `if(lt(t,${fadeInSec.toFixed(3)}),(${baseVolume.toFixed(4)}*t/${fadeInSec.toFixed(3)}),${expr})`
+    }
+    return `volume='${expr}':eval=frame`
+  }
+
+  const kfs = keyframes.map((kf) => ({
+    t: Math.max(0, Math.min(durationSec, kf.timeMs / 1000)),
+    v: Math.max(0, Math.min(2, kf.volume * baseVolume)),
+  }))
+
+  const firstKf = kfs[0]!
+  const lastKf = kfs[kfs.length - 1]!
+
+  let afterLastKfExpr: string
+  const effectiveFadeOutStart = Math.max(lastKf.t, fadeOutStartSec)
+  const effectiveFadeOutDuration = durationSec - effectiveFadeOutStart
+  if (fadeOutSec > 0 && effectiveFadeOutDuration > 0.001) {
+    afterLastKfExpr = `if(gt(t,${effectiveFadeOutStart.toFixed(3)}),(${lastKf.v.toFixed(4)}*(${durationSec.toFixed(3)}-t)/${effectiveFadeOutDuration.toFixed(3)}),${lastKf.v.toFixed(4)})`
+  } else {
+    afterLastKfExpr = lastKf.v.toFixed(4)
+  }
+
+  let expr = afterLastKfExpr
+  for (let i = kfs.length - 2; i >= 0; i--) {
+    const kfA = kfs[i]!
+    const kfB = kfs[i + 1]!
+    const spanT = kfB.t - kfA.t
+    const spanV = kfB.v - kfA.v
+
+    let segExpr: string
+    if (spanT > 0.0001) {
+      if (Math.abs(spanV) > 0.0001) {
+        segExpr = `${kfA.v.toFixed(4)}+(${spanV.toFixed(4)})*(t-${kfA.t.toFixed(3)})/${spanT.toFixed(3)}`
+      } else {
+        segExpr = kfA.v.toFixed(4)
+      }
+    } else {
+      segExpr = kfA.v.toFixed(4)
+    }
+
+    expr = `if(lt(t,${kfB.t.toFixed(3)}),${segExpr},${expr})`
+  }
+
+  if (firstKf.t > 0.001) {
+    let beforeFirstKfExpr: string
+    const effectiveFadeInEnd = Math.min(firstKf.t, fadeInSec)
+    if (fadeInSec > 0 && effectiveFadeInEnd > 0.001) {
+      beforeFirstKfExpr = `if(lt(t,${effectiveFadeInEnd.toFixed(3)}),(${firstKf.v.toFixed(4)}*t/${effectiveFadeInEnd.toFixed(3)}),${firstKf.v.toFixed(4)})`
+    } else {
+      beforeFirstKfExpr = firstKf.v.toFixed(4)
+    }
+    expr = `if(lt(t,${firstKf.t.toFixed(3)}),${beforeFirstKfExpr},${expr})`
+  } else if (fadeInSec > 0) {
+    expr = `if(lt(t,${fadeInSec.toFixed(3)}),(${firstKf.v.toFixed(4)}*t/${fadeInSec.toFixed(3)}),${expr})`
+  }
+
+  return `volume='${expr}':eval=frame`
+}
+
+export interface AudioSegmentFilterOptions {
+  includeAtempo?: boolean
+  includeDelay?: boolean
+  includePad?: boolean
+  projectDurationMs?: number
+  label?: string
+}
+
+/**
+ * Generates the complete FFmpeg audio filter for an individual segment, including atrim,
+ * optional atempo speed adjustment, volume/afade/eval filters, adelay, and apad.
+ */
+export function generateAudioSegmentFilter(
+  segment: RenderSegment,
+  options?: AudioSegmentFilterOptions,
+): string {
+  const parts: string[] = []
+
+  // 1. atrim and pts normalization
+  parts.push(
+    `atrim=start=${(segment.sourceInMs / 1000).toFixed(3)}:end=${(segment.sourceOutMs / 1000).toFixed(3)}`,
+  )
+  parts.push("asetpts=PTS-STARTPTS")
+
+  // 2. atempo speed correction
+  if (options?.includeAtempo && Math.abs(segment.speed - 1) > 0.001) {
+    parts.push(buildAtempoFilter(segment.speed))
+  }
+
+  // 3. volume / afade / eval filter
+  const durationMs = segment.outputEndMs - segment.outputStartMs
+  const volumeFilter =
+    segment.audioFilter ??
+    generateAudioVolumeFilter({
+      durationMs,
+      volume: segment.volume,
+      fadeInMs: segment.fadeInMs,
+      fadeOutMs: segment.fadeOutMs,
+      volumeKeyframes: segment.volumeKeyframes,
+    })
+  parts.push(volumeFilter)
+
+  // 4. adelay for timeline offset
+  if (options?.includeDelay && segment.outputStartMs > 0) {
+    parts.push(`adelay=${Math.round(segment.outputStartMs)}:all=1`)
+  }
+
+  // 5. apad for total project duration
+  if (options?.includePad && options.projectDurationMs && options.projectDurationMs > 0) {
+    parts.push(`apad=pad_dur=${(options.projectDurationMs / 1000).toFixed(3)}`)
+  }
+
+  const filterChain = parts.join(",")
+  return options?.label ? `${filterChain}[${options.label}]` : filterChain
+}
+
+function buildAtempoFilter(speed: number): string {
+  let remaining = Math.max(0.01, speed)
+  const filters: string[] = []
+  while (remaining > 2.0) {
+    filters.push("atempo=2.0")
+    remaining /= 2.0
+  }
+  while (remaining < 0.5) {
+    filters.push("atempo=0.5")
+    remaining /= 0.5
+  }
+  filters.push(`atempo=${remaining.toFixed(4)}`)
+  return filters.join(",")
+}
+
 function buildAudioTracks(state: TimelineState, range: ExportRange | undefined): RenderPlanAudio[] {
   const audioTracks = state.tracks.filter(
     (track) => track.kind === "audio" && track.clips.length > 0,
@@ -781,10 +990,22 @@ function buildAudioTracks(state: TimelineState, range: ExportRange | undefined):
       (clip): clip is Extract<TimelineClip, { kind: "audio" }> => clip.kind === "audio",
     )
     const segments = clips.flatMap((clip) =>
-      toSegments([clip], range, true).map((segment) => ({
-        ...segment,
-        volume: Math.min(2, clip.volume * track.volume),
-      })),
+      toSegments([clip], range, true).map((segment) => {
+        const segDurationMs = segment.outputEndMs - segment.outputStartMs
+        const effectiveVolume = Math.min(2, clip.volume * track.volume)
+        const audioFilter = generateAudioVolumeFilter({
+          durationMs: segDurationMs,
+          volume: effectiveVolume,
+          fadeInMs: segment.fadeInMs,
+          fadeOutMs: segment.fadeOutMs,
+          volumeKeyframes: segment.volumeKeyframes,
+        })
+        return {
+          ...segment,
+          volume: effectiveVolume,
+          audioFilter,
+        }
+      }),
     )
     const firstAudioClip = clips[0]
     if (!firstAudioClip || segments.length === 0) return []

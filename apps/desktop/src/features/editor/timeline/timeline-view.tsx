@@ -33,6 +33,7 @@ import {
   createDuplicateClipsCommand,
   createMoveClipCommand,
   createMoveClipsCommand,
+  createMoveTrackCommand,
   createRippleDeleteClipCommand,
   createRippleDeleteClipsCommand,
   createRippleDeleteRangeCommand,
@@ -41,6 +42,7 @@ import {
   createSplitCursorRangeCommand,
   createSplitZoomSegmentCommand,
   createTrimClipCommand,
+  createUpdateClipAudioCommand,
   createUpdateCursorRangeCommand,
   createUpdateTrackCommand,
   createUpdateZoomSegmentCommand,
@@ -349,6 +351,7 @@ export function TimelineView({
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
+  const [showMinimap, setShowMinimap] = useState(true)
 
   const [timelineHeight, setTimelineHeight] = useResizableDimension({
     defaultValue: 340,
@@ -830,6 +833,18 @@ export function TimelineView({
       setSelection(null)
     },
     [view.selection, selectedClip, timeline, execute, setSelection],
+  )
+
+  const handleRippleDeleteRange = useCallback(
+    (startMs: number, endMs: number) => {
+      const command = createRippleDeleteRangeCommand(startMs, endMs)
+      execute(command)
+      toast({
+        title: "Gap Closed",
+        description: `Ripple deleted ${((endMs - startMs) / 1000).toFixed(2)}s gap`,
+      })
+    },
+    [execute, toast],
   )
 
   const nudgeSelected = useCallback(
@@ -1951,6 +1966,8 @@ export function TimelineView({
               ? { startMs: view.selection.startMs, endMs: view.selection.endMs }
               : null
           }
+          showMinimap={showMinimap}
+          onToggleMinimap={() => setShowMinimap((prev) => !prev)}
           onTogglePlay={togglePlay}
           onSeek={seek}
           onStepFrame={stepFrame}
@@ -1968,6 +1985,8 @@ export function TimelineView({
           timeline={timeline}
           view={view}
           tool={tool}
+          showMinimap={showMinimap}
+          onRippleDeleteRange={handleRippleDeleteRange}
           cursorClickTimesMs={cursorClickTimesMs}
           thumbnailResource={effectiveThumbnailResource}
           videoThumbnailResources={videoThumbnailResources}
@@ -2009,6 +2028,12 @@ export function TimelineView({
           }
           onToggleTrackCollapsed={(track) => toggleTrackCollapsed(track.id)}
           onCycleTrackHeight={cycleTrackHeight}
+          onMoveTrack={(trackId, newIndex) => {
+            execute(createMoveTrackCommand(trackId, newIndex))
+          }}
+          onUpdateClipAudio={(clip, update) => {
+            execute(createUpdateClipAudioCommand(clip.id, update))
+          }}
           onSpriteError={() => setThumbnailSpriteError(true)}
         />
       </div>

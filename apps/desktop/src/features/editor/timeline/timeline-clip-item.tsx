@@ -1,5 +1,11 @@
 import { memo, useRef, useState } from "react"
-import type { CursorSmoothing, TimelineClip, TimelineTrack } from "@recordforge/contracts"
+import type {
+  AudioClip,
+  AudioVolumeKeyframe,
+  CursorSmoothing,
+  TimelineClip,
+  TimelineTrack,
+} from "@recordforge/contracts"
 import {
   AudioLines,
   Captions,
@@ -33,7 +39,10 @@ import {
 } from "@recordforge/ui"
 import { snapClipStart, snapTrimEdge, type SnapTarget } from "@recordforge/editor-core"
 import type { ThumbnailManifest, WaveformResources } from "../media/derivative-resources"
-import { ThumbnailStrip, WaveformStrip } from "./timeline-derivatives"
+import { ThumbnailStrip } from "./timeline-derivatives"
+import { TimelineCanvasWaveform } from "./timeline-canvas-waveform"
+import { TimelineAudioEnvelope } from "./timeline-audio-envelope"
+import { formatTimelineTime } from "./timeline-ruler"
 import type { CursorRangeAction } from "./timeline-lanes"
 
 interface ClipGesture {
@@ -84,6 +93,15 @@ export interface TimelineClipItemProps {
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
+  onUpdateAudio?: (
+    clip: AudioClip,
+    update: {
+      volume?: number
+      fadeInMs?: number
+      fadeOutMs?: number
+      volumeKeyframes?: AudioVolumeKeyframe[]
+    },
+  ) => void
 }
 
 function getClipIcon(clip: TimelineClip, track: TimelineTrack): LucideIcon {
@@ -233,6 +251,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   onSplitClip,
   onDeleteClip,
   onCursorRangeAction,
+  onUpdateAudio,
 }: TimelineClipItemProps) {
   const gestureRef = useRef<ClipGesture | null>(null)
   const suppressClickRef = useRef(false)
@@ -259,6 +278,12 @@ export const TimelineClipItem = memo(function TimelineClipItem({
 
   function beginGesture(event: React.PointerEvent<HTMLElement>, mode: ClipGesture["mode"]) {
     if (event.button !== 0 || isLocked) return
+    if (
+      event.target instanceof Element &&
+      event.target.closest("[data-envelope-interactive]")
+    ) {
+      return
+    }
     event.stopPropagation()
     event.preventDefault()
     const target = event.currentTarget.closest("[data-timeline-clip]")
@@ -294,7 +319,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       onSnapGuide(snapped.snapped ? snapped.target : null)
       setGestureDelta({
         mode: "Move",
-        text: `${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s (${(snapped.timeMs / 1000).toFixed(2)}s)`,
+        text: `${formatTimelineTime(snapped.timeMs)} (${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s)`,
       })
       onMoveClip(clip, track, snapped.timeMs, { phase: "draft" })
       return
@@ -309,7 +334,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     onSnapGuide(snapped.snapped ? snapped.target : null)
     setGestureDelta({
       mode: edge === "start" ? "Trim In" : "Trim Out",
-      text: `${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s`,
+      text: `${formatTimelineTime(snapped.timeMs)} (${deltaMs >= 0 ? "+" : ""}${(deltaMs / 1000).toFixed(2)}s)`,
     })
     onTrimClip(clip, track, edge, snapped.timeMs, { phase: "draft" })
   }
@@ -393,7 +418,15 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             width: `${Math.max(clip.durationMs * pixelsPerMs, 32)}px`,
             height: `${clipHeight}px`,
           }}
-          onPointerDown={(event) => beginGesture(event, "move")}
+          onPointerDown={(event) => {
+            if (
+              event.target instanceof Element &&
+              event.target.closest("[data-envelope-interactive]")
+            ) {
+              return
+            }
+            beginGesture(event, "move")
+          }}
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
@@ -405,6 +438,13 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             }
           }}
           onClick={(event) => {
+            if (
+              event.target instanceof Element &&
+              event.target.closest("[data-envelope-interactive]")
+            ) {
+              event.stopPropagation()
+              return
+            }
             event.stopPropagation()
             if (suppressClickRef.current) {
               suppressClickRef.current = false
@@ -449,15 +489,24 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             }
           }}
         >
-          {/* Start Trim Handle */}
+          {/* Top Accent Strip */}
+          <div className={cn("absolute inset-x-0 top-0 h-0.5 opacity-80", theme.handleGlow)} />
+
+          {/* Start Trim Handle (Tactile Bracket) */}
           {!isLocked ? (
             <div
-              className="absolute left-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:w-3.5 hover:bg-primary/30"
+              className="group/handle-start absolute left-0 inset-y-0 z-30 flex w-3 cursor-col-resize items-center justify-start opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:opacity-100"
               onPointerDown={(e) => beginGesture(e, "trim-start")}
               onClick={(e) => e.stopPropagation()}
-              title="Drag to trim start"
+              title="Drag to trim start (In-point)"
             >
-              <div className="h-4 w-1 rounded-full bg-primary/90 shadow-xs" />
+              <div className="flex h-full w-2 items-center justify-center rounded-l-md border-y border-l border-primary/90 bg-primary/40 backdrop-blur-xs transition-colors group-hover/handle-start:bg-primary/80 shadow-xs">
+                <div className="flex flex-col gap-0.5">
+                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
+                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
+                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
+                </div>
+              </div>
             </div>
           ) : null}
 
@@ -474,9 +523,9 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             />
           ) : null}
 
-          {/* Waveforms */}
+          {/* High-Performance Canvas Waveforms */}
           {waveformData ? (
-            <WaveformStrip
+            <TimelineCanvasWaveform
               clip={clip}
               data={waveformData}
               pixelsPerMs={pixelsPerMs}
@@ -485,8 +534,20 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             />
           ) : null}
 
+          {/* Interactive Audio Volume Envelope Curve Overlay */}
+          {clip.kind === "audio" && onUpdateAudio && !collapsed ? (
+            <TimelineAudioEnvelope
+              clip={clip}
+              pixelsPerMs={pixelsPerMs}
+              height={clipHeight}
+              isLocked={isLocked}
+              className="z-20"
+              onUpdateAudio={(update) => onUpdateAudio(clip, update)}
+            />
+          ) : null}
+
           {/* Clip Header Details */}
-          <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-2">
+          <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1.5 px-2 pointer-events-none select-none">
             <ClipIcon className="size-3 shrink-0 opacity-80" aria-hidden />
             <span className="truncate font-medium text-[11px] text-foreground drop-shadow-xs">
               {getClipLabel(clip, track)}
@@ -504,23 +565,30 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             ) : null}
           </div>
 
-          {/* End Trim Handle */}
+          {/* End Trim Handle (Tactile Bracket) */}
           {!isLocked ? (
             <div
-              className="absolute right-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:w-3.5 hover:bg-primary/30"
+              className="group/handle-end absolute right-0 inset-y-0 z-30 flex w-3 cursor-col-resize items-center justify-end opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:opacity-100"
               onPointerDown={(e) => beginGesture(e, "trim-end")}
               onClick={(e) => e.stopPropagation()}
-              title="Drag to trim end"
+              title="Drag to trim end (Out-point)"
             >
-              <div className="h-4 w-1 rounded-full bg-primary/90 shadow-xs" />
+              <div className="flex h-full w-2 items-center justify-center rounded-r-md border-y border-r border-primary/90 bg-primary/40 backdrop-blur-xs transition-colors group-hover/handle-end:bg-primary/80 shadow-xs">
+                <div className="flex flex-col gap-0.5">
+                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
+                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
+                  <div className="h-0.5 w-1 rounded-full bg-white/90" />
+                </div>
+              </div>
             </div>
           ) : null}
 
-          {/* Live Drag/Trim Feedback Tooltip */}
+          {/* Live Drag/Trim Floating HUD Pill */}
           {gestureDelta ? (
-            <div className="absolute -top-7 left-1/2 -translate-x-1/2 z-50 rounded-md border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] font-semibold text-foreground shadow-e2 whitespace-nowrap">
-              <span className="text-primary mr-1">{gestureDelta.mode}:</span>
-              {gestureDelta.text}
+            <div className="absolute -top-7.5 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 rounded-full border border-primary/90 bg-surface/95 px-2 py-0.5 font-mono text-[10px] font-semibold text-foreground shadow-e3 backdrop-blur-md whitespace-nowrap animate-in fade-in zoom-in-95">
+              <span className="text-primary font-bold">{gestureDelta.mode}</span>
+              <span className="text-subtle-foreground">·</span>
+              <span className="tabular-nums">{gestureDelta.text}</span>
             </div>
           ) : null}
         </div>
