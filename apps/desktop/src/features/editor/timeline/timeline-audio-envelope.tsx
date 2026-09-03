@@ -101,7 +101,14 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
 
   // Compute curve points
   const points = useMemo(() => {
-    const pts: Array<{ x: number; y: number; timeMs: number; volume: number; id?: string; isKf?: boolean }> = []
+    const pts: Array<{
+      x: number
+      y: number
+      timeMs: number
+      volume: number
+      id?: string
+      isKf?: boolean
+    }> = []
     const sustainedY = volumeToY(clip.volume)
 
     if (clip.volumeKeyframes && clip.volumeKeyframes.length > 0) {
@@ -178,17 +185,30 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
     }
 
     return pts
-  }, [clip.durationMs, clip.fadeInMs, clip.fadeOutMs, clip.volume, clip.volumeKeyframes, clipWidth, pixelsPerMs, volumeToY])
+  }, [
+    clip.durationMs,
+    clip.fadeInMs,
+    clip.fadeOutMs,
+    clip.volume,
+    clip.volumeKeyframes,
+    clipWidth,
+    pixelsPerMs,
+    volumeToY,
+  ])
 
   // Build SVG path strings
   const svgPathData = useMemo(() => {
     if (points.length === 0) return ""
-    return points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")
+    return points
+      .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+      .join(" ")
   }, [points])
 
   const svgAreaPathData = useMemo(() => {
     if (points.length === 0) return ""
-    const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")
+    const linePath = points
+      .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+      .join(" ")
     return `${linePath} L ${clipWidth.toFixed(1)} ${height} L 0 ${height} Z`
   }, [clipWidth, height, points])
 
@@ -264,7 +284,9 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       startVolume: kf.volume,
       moved: false,
     })
-    showHud(`Keyframe: ${formatTimelineTime(kf.timeMs)} · ${Math.round(kf.volume * 100)}% (${volumeToDb(kf.volume)})`)
+    showHud(
+      `Keyframe: ${formatTimelineTime(kf.timeMs)} · ${Math.round(kf.volume * 100)}% (${volumeToDb(kf.volume)})`,
+    )
   }
 
   function handleKeyframeDoubleClick(e: React.MouseEvent, kfId: string) {
@@ -377,7 +399,10 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         }
         const nextKfs = [...(clip.volumeKeyframes ?? []), newKf].sort((a, b) => a.timeMs - b.timeMs)
         onUpdateAudio({ volumeKeyframes: nextKfs })
-        showHud(`Added keyframe: ${formatTimelineTime(timeMs)} · ${Math.round(volume * 100)}%`, 1500)
+        showHud(
+          `Added keyframe: ${formatTimelineTime(timeMs)} · ${Math.round(volume * 100)}%`,
+          1500,
+        )
       } else {
         showHud(null)
       }
@@ -394,7 +419,18 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
       window.removeEventListener("pointerup", onPointerUp, { capture: true })
       window.removeEventListener("pointercancel", onPointerUp, { capture: true })
     }
-  }, [activeDrag, clip.durationMs, clip.fadeInMs, clip.fadeOutMs, clip.volumeKeyframes, onUpdateAudio, pixelsPerMs, showHud, usableHeight, yToVolume])
+  }, [
+    activeDrag,
+    clip.durationMs,
+    clip.fadeInMs,
+    clip.fadeOutMs,
+    clip.volumeKeyframes,
+    onUpdateAudio,
+    pixelsPerMs,
+    showHud,
+    usableHeight,
+    yToVolume,
+  ])
 
   return (
     <div
@@ -403,10 +439,7 @@ export const TimelineAudioEnvelope = memo(function TimelineAudioEnvelope({
         className,
       )}
     >
-      <svg
-        ref={containerRef}
-        className="size-full overflow-visible pointer-events-none"
-      >
+      <svg ref={containerRef} className="size-full overflow-visible pointer-events-none">
         <defs>
           <linearGradient id={`env-grad-${clip.id}`} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="rgba(245, 158, 11, 0.28)" />

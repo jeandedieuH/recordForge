@@ -508,7 +508,9 @@ export function TimelineToolbar({
                 {formatTimelineTime(playheadMs)}
               </span>
               <span className="text-subtle-foreground font-sans">/</span>
-              <span className="tabular-nums text-muted-foreground">{formatTimelineTime(durationMs)}</span>
+              <span className="tabular-nums text-muted-foreground">
+                {formatTimelineTime(durationMs)}
+              </span>
             </button>
           </PopoverTrigger>
           <PopoverContent className="w-64 p-3 bg-surface border-border shadow-e2" align="center">

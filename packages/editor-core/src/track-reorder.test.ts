@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type AudioClip, type TimelineState, type TimelineTrack } from "@recordforge/contracts"
+import {
+  defaultCursorSettings,
+  type AudioClip,
+  type TimelineState,
+  type TimelineTrack,
+} from "@recordforge/contracts"
 import {
   applyCommand,
   createMoveTrackCommand,

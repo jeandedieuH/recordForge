@@ -1665,7 +1665,8 @@ function applyUpdateClipAudio(
     }
   }
 
-  const update: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs" | "volumeKeyframes">> = {}
+  const update: Partial<Pick<AudioClip, "volume" | "fadeInMs" | "fadeOutMs" | "volumeKeyframes">> =
+    {}
   if (command.volume !== undefined) update.volume = command.volume
   if (command.fadeInMs !== undefined) update.fadeInMs = command.fadeInMs
   if (command.fadeOutMs !== undefined) update.fadeOutMs = command.fadeOutMs

@@ -92,7 +92,10 @@ export const TimelineShortcutsDialog = memo(function TimelineShortcutsDialog({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-3 max-h-[65vh] overflow-y-auto pr-1">
           {SHORTCUT_GROUPS.map((group) => (
-            <div key={group.title} className="space-y-2 rounded-lg border border-border/60 bg-surface-dim/50 p-3">
+            <div
+              key={group.title}
+              className="space-y-2 rounded-lg border border-border/60 bg-surface-dim/50 p-3"
+            >
               <h4 className="text-[11px] font-bold uppercase tracking-wider text-primary">
                 {group.title}
               </h4>

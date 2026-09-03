@@ -80,7 +80,8 @@ export const TimelineRuler = memo(function TimelineRuler({
   const [internalHoverTimeMs, setInternalHoverTimeMs] = useState<number | null>(null)
   const [rulerContextMenuTimeMs, setRulerContextMenuTimeMs] = useState<number | null>(null)
 
-  const activeHoverTimeMs = externalHoverTimeMs !== undefined ? externalHoverTimeMs : internalHoverTimeMs
+  const activeHoverTimeMs =
+    externalHoverTimeMs !== undefined ? externalHoverTimeMs : internalHoverTimeMs
 
   // Sub-tick subdivisions: 5 minor divisions per major tick
   const minorInterval = tickInterval / 5

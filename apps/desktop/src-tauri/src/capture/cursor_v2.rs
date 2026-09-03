@@ -1537,7 +1537,8 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             return None;
         }
 
-        let sel_current_system = sel_registerName(b"currentSystemCursor\0".as_ptr() as *const c_char);
+        let sel_current_system =
+            sel_registerName(b"currentSystemCursor\0".as_ptr() as *const c_char);
         let sel_current = sel_registerName(b"currentCursor\0".as_ptr() as *const c_char);
         let mut cursor = objc_msgSend(nscursor_cls, sel_current_system);
         if cursor.is_null() {
@@ -1618,7 +1619,10 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
                     std::mem::transmute(objc_msgSend as *const ());
                 msg_send_size(image, sel_size)
             } else {
-                NSSize { width: 32.0, height: 32.0 }
+                NSSize {
+                    width: 32.0,
+                    height: 32.0,
+                }
             };
 
             let w = size.width.max(1.0) as u32;
@@ -1664,7 +1668,9 @@ fn capture_cursor_shape(
 fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
     // 1. Check active PipeWire stream metadata first (Wayland portal desktop sharing)
     if let Some(snapshot) = get_pipewire_cursor_metadata() {
-        if snapshot.active && (snapshot.width > 0 || snapshot.hotspot_x > 0 || snapshot.hotspot_y > 0) {
+        if snapshot.active
+            && (snapshot.width > 0 || snapshot.hotspot_x > 0 || snapshot.hotspot_y > 0)
+        {
             let width = snapshot.width.max(1);
             let height = snapshot.height.max(1);
             let hx = snapshot.hotspot_x;
@@ -1680,8 +1686,12 @@ fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
                     "progress" | "left_ptr_watch" => "progress".into(),
                     "help" | "question_arrow" => "help".into(),
                     "move" | "all-scroll" | "fleur" => "move".into(),
-                    "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => "resize-horizontal".into(),
-                    "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => "resize-vertical".into(),
+                    "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => {
+                        "resize-horizontal".into()
+                    }
+                    "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => {
+                        "resize-vertical".into()
+                    }
                     "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
                     "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
                     "not-allowed" | "circle" | "crossed_circle" => "unavailable".into(),
@@ -1698,7 +1708,10 @@ fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
             };
 
             let shape_id = if snapshot.bitmap_hash != 0 {
-                format!("pipewire-{width}x{height}-{hx}-{hy}-{:x}", snapshot.bitmap_hash)
+                format!(
+                    "pipewire-{width}x{height}-{hx}-{hy}-{:x}",
+                    snapshot.bitmap_hash
+                )
             } else {
                 format!("pipewire-{kind}-{width}x{height}-{hx}-{hy}")
             };
@@ -1750,50 +1763,55 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
     }
 
     static X11: OnceLock<Option<X11Functions>> = OnceLock::new();
-    let fns = X11.get_or_init(|| {
-        unsafe {
-            extern "C" {
-                fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-                fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-            }
-            const RTLD_LAZY: c_int = 1;
-
-            let lib_x11 = dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, RTLD_LAZY);
-            let lib_x11 = if lib_x11.is_null() {
-                dlopen(b"libX11.so\0".as_ptr() as *const c_char, RTLD_LAZY)
-            } else {
-                lib_x11
-            };
-            if lib_x11.is_null() {
-                return None;
-            }
-
-            let lib_xfixes = dlopen(b"libXfixes.so.3\0".as_ptr() as *const c_char, RTLD_LAZY);
-            let lib_xfixes = if lib_xfixes.is_null() {
-                dlopen(b"libXfixes.so\0".as_ptr() as *const c_char, RTLD_LAZY)
-            } else {
-                lib_xfixes
-            };
-            if lib_xfixes.is_null() {
-                return None;
-            }
-
-            let sym_open = dlsym(lib_x11, b"XOpenDisplay\0".as_ptr() as *const c_char);
-            let sym_close = dlsym(lib_x11, b"XCloseDisplay\0".as_ptr() as *const c_char);
-            let sym_free = dlsym(lib_x11, b"XFree\0".as_ptr() as *const c_char);
-            let sym_get_cursor = dlsym(lib_xfixes, b"XFixesGetCursorImage\0".as_ptr() as *const c_char);
-
-            if sym_open.is_null() || sym_close.is_null() || sym_free.is_null() || sym_get_cursor.is_null() {
-                return None;
-            }
-
-            Some(X11Functions {
-                open_display: std::mem::transmute(sym_open),
-                close_display: std::mem::transmute(sym_close),
-                free: std::mem::transmute(sym_free),
-                get_cursor_image: std::mem::transmute(sym_get_cursor),
-            })
+    let fns = X11.get_or_init(|| unsafe {
+        extern "C" {
+            fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         }
+        const RTLD_LAZY: c_int = 1;
+
+        let lib_x11 = dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, RTLD_LAZY);
+        let lib_x11 = if lib_x11.is_null() {
+            dlopen(b"libX11.so\0".as_ptr() as *const c_char, RTLD_LAZY)
+        } else {
+            lib_x11
+        };
+        if lib_x11.is_null() {
+            return None;
+        }
+
+        let lib_xfixes = dlopen(b"libXfixes.so.3\0".as_ptr() as *const c_char, RTLD_LAZY);
+        let lib_xfixes = if lib_xfixes.is_null() {
+            dlopen(b"libXfixes.so\0".as_ptr() as *const c_char, RTLD_LAZY)
+        } else {
+            lib_xfixes
+        };
+        if lib_xfixes.is_null() {
+            return None;
+        }
+
+        let sym_open = dlsym(lib_x11, b"XOpenDisplay\0".as_ptr() as *const c_char);
+        let sym_close = dlsym(lib_x11, b"XCloseDisplay\0".as_ptr() as *const c_char);
+        let sym_free = dlsym(lib_x11, b"XFree\0".as_ptr() as *const c_char);
+        let sym_get_cursor = dlsym(
+            lib_xfixes,
+            b"XFixesGetCursorImage\0".as_ptr() as *const c_char,
+        );
+
+        if sym_open.is_null()
+            || sym_close.is_null()
+            || sym_free.is_null()
+            || sym_get_cursor.is_null()
+        {
+            return None;
+        }
+
+        Some(X11Functions {
+            open_display: std::mem::transmute(sym_open),
+            close_display: std::mem::transmute(sym_close),
+            free: std::mem::transmute(sym_free),
+            get_cursor_image: std::mem::transmute(sym_get_cursor),
+        })
     });
 
     let fns = fns.as_ref()?;
@@ -1818,7 +1836,9 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
         let serial = img.cursor_serial;
 
         let kind = if !img.name.is_null() {
-            let name_str = CStr::from_ptr(img.name).to_string_lossy().to_ascii_lowercase();
+            let name_str = CStr::from_ptr(img.name)
+                .to_string_lossy()
+                .to_ascii_lowercase();
             match name_str.as_str() {
                 "arrow" | "default" | "left_ptr" | "top_left_arrow" => "arrow".into(),
                 "pointer" | "hand" | "hand2" | "pointing_hand" => "hand".into(),
@@ -1828,8 +1848,12 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
                 "progress" | "left_ptr_watch" => "progress".into(),
                 "help" | "question_arrow" => "help".into(),
                 "move" | "all-scroll" | "fleur" => "move".into(),
-                "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => "resize-horizontal".into(),
-                "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => "resize-vertical".into(),
+                "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => {
+                    "resize-horizontal".into()
+                }
+                "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => {
+                    "resize-vertical".into()
+                }
                 "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
                 "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
                 "not-allowed" | "circle" | "crossed_circle" => "unavailable".into(),
@@ -1963,8 +1987,7 @@ fn classify_cursor_kind_by_geometry(
     }
 
     // Hotspot in the upper-left quadrant usually indicates an arrow or hand.
-    let in_upper_left =
-        hotspot_x < (width as i32 / 2) && hotspot_y < (height as i32 / 2);
+    let in_upper_left = hotspot_x < (width as i32 / 2) && hotspot_y < (height as i32 / 2);
     if in_upper_left {
         let is_squareish = (width as i32 - height as i32).abs() <= 6;
         // Pointing hands have the index fingertip offset inward (typically x: 20%-45% of width)
@@ -1979,7 +2002,8 @@ fn classify_cursor_kind_by_geometry(
     if hotspot_x < 5 && hotspot_y < 5 && (width as i32 - height as i32).abs() <= 4 {
         return "resize-diagonal-1".into();
     }
-    if hotspot_x >= (width as i32 - 5) && hotspot_y < 5 && (width as i32 - height as i32).abs() <= 4 {
+    if hotspot_x >= (width as i32 - 5) && hotspot_y < 5 && (width as i32 - height as i32).abs() <= 4
+    {
         return "resize-diagonal-2".into();
     }
 
@@ -2454,13 +2478,25 @@ mod tests {
     #[test]
     fn geometry_classification() {
         assert_eq!(classify_cursor_kind_by_geometry(10, 32, 5, 16), "ibeam");
-        assert_eq!(classify_cursor_kind_by_geometry(32, 12, 16, 6), "resize-horizontal");
-        assert_eq!(classify_cursor_kind_by_geometry(20, 32, 10, 16), "resize-vertical");
-        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 16, 16), "crosshair");
+        assert_eq!(
+            classify_cursor_kind_by_geometry(32, 12, 16, 6),
+            "resize-horizontal"
+        );
+        assert_eq!(
+            classify_cursor_kind_by_geometry(20, 32, 10, 16),
+            "resize-vertical"
+        );
+        assert_eq!(
+            classify_cursor_kind_by_geometry(32, 32, 16, 16),
+            "crosshair"
+        );
         assert_eq!(classify_cursor_kind_by_geometry(18, 18, 9, 9), "wait");
         assert_eq!(classify_cursor_kind_by_geometry(32, 32, 10, 2), "hand");
         assert_eq!(classify_cursor_kind_by_geometry(32, 32, 1, 1), "arrow");
-        assert_eq!(classify_cursor_kind_by_geometry(32, 32, 30, 2), "resize-diagonal-2");
+        assert_eq!(
+            classify_cursor_kind_by_geometry(32, 32, 30, 2),
+            "resize-diagonal-2"
+        );
     }
 
     #[test]
@@ -2506,11 +2542,19 @@ mod tests {
         let retrieved = get_pipewire_cursor_metadata().expect("retrieved");
         assert_eq!(retrieved.x, 250);
         assert_eq!(retrieved.y, 400);
-        assert_eq!(retrieved.cursor_mode, Some(crate::capture::linux_portal::PortalCursorMode::Metadata));
+        assert_eq!(
+            retrieved.cursor_mode,
+            Some(crate::capture::linux_portal::PortalCursorMode::Metadata)
+        );
 
         // Verify geometry classification works directly with PipeWire stream dimensions
         assert_eq!(
-            classify_cursor_kind_by_geometry(retrieved.width, retrieved.height, retrieved.hotspot_x, retrieved.hotspot_y),
+            classify_cursor_kind_by_geometry(
+                retrieved.width,
+                retrieved.height,
+                retrieved.hotspot_x,
+                retrieved.hotspot_y
+            ),
             "arrow"
         );
 

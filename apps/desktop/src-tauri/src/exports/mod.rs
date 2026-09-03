@@ -1504,8 +1504,8 @@ fn render_timeline_composition(
         // to prevent YUV420 chroma subsampling truncation from leaving 1px unmasked gaps.
         let x = (x_raw / 2 * 2).min(canvas.width.saturating_sub(2));
         let y = (y_raw / 2 * 2).min(canvas.height.saturating_sub(2));
-        let right = ((right_raw + 1) / 2 * 2).min(canvas.width);
-        let bottom = ((bottom_raw + 1) / 2 * 2).min(canvas.height);
+        let right = (right_raw.div_ceil(2) * 2).min(canvas.width);
+        let bottom = (bottom_raw.div_ceil(2) * 2).min(canvas.height);
         let width = right.saturating_sub(x).max(2);
         let height = bottom.saturating_sub(y).max(2);
 
@@ -1533,9 +1533,7 @@ fn render_timeline_composition(
                     format!("[{source_label}]crop=w={width}:h={height}:x={x}:y={y}");
                 if mask.mode == "blur" {
                     let radius = mask.blur_radius.clamp(1.0, 128.0);
-                    region_filter.push_str(&format!(
-                        ",gblur=sigma={radius:.0}:steps=2"
-                    ));
+                    region_filter.push_str(&format!(",gblur=sigma={radius:.0}:steps=2"));
                 } else {
                     let pixel_size = mask.pixel_size.clamp(2, 128) as f64;
                     let small_width = ((width as f64) / pixel_size).floor().max(1.0);
@@ -8021,9 +8019,9 @@ mod tests {
                     end_ms: 1000,
                     mode: "redact".into(),
                     rect: RenderCropFloat {
-                        x: 15.0, // odd coordinate
-                        y: 15.0, // odd coordinate
-                        width: 81.0, // odd dimension
+                        x: 15.0,      // odd coordinate
+                        y: 15.0,      // odd coordinate
+                        width: 81.0,  // odd dimension
                         height: 41.0, // odd dimension
                     },
                     blur_radius: 24.0,
@@ -8055,9 +8053,9 @@ mod tests {
                     end_ms: 1000,
                     mode: "pixelate".into(),
                     rect: RenderCropFloat {
-                        x: 191.0, // odd coordinate
-                        y: 31.0,  // odd coordinate
-                        width: 81.0, // odd dimension
+                        x: 191.0,     // odd coordinate
+                        y: 31.0,      // odd coordinate
+                        width: 81.0,  // odd dimension
                         height: 51.0, // odd dimension
                     },
                     blur_radius: 24.0,
@@ -8110,7 +8108,13 @@ mod tests {
             "export composition with redact, blur, and pixelate masks failed: {:?}",
             res.err()
         );
-        assert!(out_path.is_file(), "exported composition with masks should exist and be created");
-        assert!(out_path.metadata().unwrap().len() > 0, "exported video must not be empty");
+        assert!(
+            out_path.is_file(),
+            "exported composition with masks should exist and be created"
+        );
+        assert!(
+            out_path.metadata().unwrap().len() > 0,
+            "exported video must not be empty"
+        );
     }
 }

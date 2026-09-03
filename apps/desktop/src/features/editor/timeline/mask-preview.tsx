@@ -55,7 +55,11 @@ export function clampRect(rect: MaskRect, canvasWidth: number, canvasHeight: num
   }
 }
 
-export function computeNextMaskRect(gesture: MaskGesture, deltaX: number, deltaY: number): MaskRect {
+export function computeNextMaskRect(
+  gesture: MaskGesture,
+  deltaX: number,
+  deltaY: number,
+): MaskRect {
   const dx = Math.round(deltaX)
   const dy = Math.round(deltaY)
 

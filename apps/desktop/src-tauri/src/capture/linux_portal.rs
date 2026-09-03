@@ -218,7 +218,10 @@ mod tests {
         // 2. Verified in SelectSources arguments
         let args = negotiator.build_select_sources_args("/org/freedesktop/portal/session/123");
         assert_eq!(args["cursor_mode"], 4);
-        assert_eq!(args["session_handle"], "/org/freedesktop/portal/session/123");
+        assert_eq!(
+            args["session_handle"],
+            "/org/freedesktop/portal/session/123"
+        );
 
         // 3. Parse Start response confirming granted cursor mode 4
         let streams = vec![serde_json::json!({

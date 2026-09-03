@@ -278,10 +278,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
 
   function beginGesture(event: React.PointerEvent<HTMLElement>, mode: ClipGesture["mode"]) {
     if (event.button !== 0 || isLocked) return
-    if (
-      event.target instanceof Element &&
-      event.target.closest("[data-envelope-interactive]")
-    ) {
+    if (event.target instanceof Element && event.target.closest("[data-envelope-interactive]")) {
       return
     }
     event.stopPropagation()

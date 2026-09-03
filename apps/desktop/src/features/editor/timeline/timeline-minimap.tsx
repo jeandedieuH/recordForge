@@ -113,7 +113,10 @@ export const TimelineMinimap = memo(function TimelineMinimap({
     const rect = containerRef.current.getBoundingClientRect()
     const deltaPixels = e.clientX - gesture.clientX
     const deltaMs = (deltaPixels / rect.width) * effectiveDuration
-    const nextScroll = Math.max(0, Math.min(effectiveDuration - visibleSpanMs, gesture.initialScrollMs + deltaMs))
+    const nextScroll = Math.max(
+      0,
+      Math.min(effectiveDuration - visibleSpanMs, gesture.initialScrollMs + deltaMs),
+    )
     onSetScrollMs(nextScroll)
   }
 

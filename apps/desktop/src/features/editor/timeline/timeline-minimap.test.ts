@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 describe("timeline minimap viewport and coordinate calculations", () => {
-  function computeLensGeometry(
-    durationMs: number,
-    visibleStartMs: number,
-    visibleEndMs: number,
-  ) {
+  function computeLensGeometry(durationMs: number, visibleStartMs: number, visibleEndMs: number) {
     const effectiveDuration = Math.max(1, durationMs)
     const lensLeftPercent = Math.max(0, Math.min(100, (visibleStartMs / effectiveDuration) * 100))
     const visibleSpanMs = Math.max(1, visibleEndMs - visibleStartMs)
