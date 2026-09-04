@@ -107,4 +107,3 @@ pub fn request_export_attention(app: tauri::AppHandle) -> Result<()> {
     }
     Ok(())
 }
-
