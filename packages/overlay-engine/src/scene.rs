@@ -266,7 +266,7 @@ impl OverlayItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayAnnotation {
     pub id: String,
@@ -296,7 +296,7 @@ pub struct DisplayAnnotation {
     pub font_size: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayText {
     pub id: String,
@@ -333,7 +333,7 @@ pub struct DisplayText {
     pub auto_scale_text: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayImage {
     pub id: String,
@@ -350,7 +350,7 @@ pub struct DisplayImage {
     pub shadow_blur: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DisplayItem {
     Annotation {
@@ -385,7 +385,7 @@ impl DisplayItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayList {
     pub time_ms: u64,

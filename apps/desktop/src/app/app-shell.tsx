@@ -102,10 +102,17 @@ export function AppShell() {
   const checkForUpdate = useUpdaterStore((state) => state.checkForUpdate)
   const markUpdateNotified = useUpdaterStore((state) => state.markUpdateNotified)
 
-  // Mirror the Rust hardware priority (NVENC, QSV, AMF, Media Foundation) when
-  // surfacing which encoder the Auto export preference would use.
+  // Mirror the Rust hardware priority (VideoToolbox, NVENC, QSV, AMF, VAAPI, Media Foundation)
+  // when surfacing which encoder the Auto export preference would use.
   const hardwareEncoderName = useMemo(() => {
-    const priority = ["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"]
+    const priority = [
+      "h264_videotoolbox",
+      "h264_nvenc",
+      "h264_qsv",
+      "h264_amf",
+      "h264_vaapi",
+      "h264_mf",
+    ]
     const available = new Set(
       (detectedEncoders ?? [])
         .filter((encoder) => encoder?.available)

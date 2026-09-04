@@ -11,7 +11,9 @@ use std::time::Duration;
 use tauri::Manager;
 use tracing::{info, instrument, warn};
 
-use tiny_skia::{Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, Rect, Transform};
+use tiny_skia::{
+    Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, PixmapPaint, Rect, Transform,
+};
 
 mod annotations;
 mod captions;
@@ -617,14 +619,12 @@ pub fn run_render_plan(
             error = %error,
             "hardware export encoder failed; retrying with software"
         );
-        update_progress(
-            &db,
-            app,
-            job_id,
-            0.15,
-            "rendering",
-            Some("retrying with the software encoder"),
-        )?;
+        let retry_detail = format!(
+            "Hardware encoder ({}) failed: {}; retrying with software",
+            encoder.display_name(),
+            error
+        );
+        update_progress(&db, app, job_id, 0.15, "rendering", Some(&retry_detail))?;
         render_timeline_composition(
             &ffmpeg,
             &partial_path,
@@ -766,21 +766,27 @@ fn video_screen_rect(
         canvas.video_position_y.unwrap_or(0.5).clamp(0.0, 1.0)
     };
     if is_side_by_side {
-        let target_w = (content_width * 0.76).round().max(1.0);
-        let target_h = ((target_w / canvas.width as f64) * canvas.height as f64)
-            .round()
-            .max(1.0);
+        let target_w = ((content_width * 0.76).round() as u32 / 2 * 2).max(2) as f64;
+        let target_h =
+            (((target_w / canvas.width as f64) * canvas.height as f64).round() as u32 / 2 * 2)
+                .max(2) as f64;
         let (source_w, source_h) = match source {
             Some((w, h)) => (w as f64, h as f64),
             None => (target_w, target_h),
         };
         let fit_scale = (target_w / source_w).min(target_h / source_h);
-        let fit_width = (source_w * fit_scale).floor();
-        let fit_height = (source_h * fit_scale).floor();
-        let x = (padding + (target_w - fit_width) / 2.0).floor();
+        // Video dimensions and coordinates must be even integers for YUV420 chroma alignment
+        // and hardware encoder macroblock requirements.
+        let fit_width = ((source_w * fit_scale).round() as u32 / 2 * 2).max(2) as f64;
+        let fit_height = ((source_h * fit_scale).round() as u32 / 2 * 2).max(2) as f64;
+        let x = (((padding + (target_w - fit_width) / 2.0).round() as u32 / 2 * 2) as f64)
+            .min(canvas.width as f64);
         let y =
-            (padding + (content_height - target_h) / 2.0 + (target_h - fit_height) * position_y)
-                .floor();
+            (((padding + (content_height - target_h) / 2.0 + (target_h - fit_height) * position_y)
+                .round() as u32
+                / 2
+                * 2) as f64)
+                .min(canvas.height as f64);
         (x, y, fit_width, fit_height)
     } else {
         let (source_w, source_h) = match source {
@@ -788,10 +794,15 @@ fn video_screen_rect(
             None => (content_width, content_height),
         };
         let fit_scale = (content_width / source_w).min(content_height / source_h);
-        let fit_width = (source_w * fit_scale).floor();
-        let fit_height = (source_h * fit_scale).floor();
-        let x = (padding + (content_width - fit_width) / 2.0).floor();
-        let y = (padding + (content_height - fit_height) * position_y).floor();
+        // Video dimensions and coordinates must be even integers for YUV420 chroma alignment
+        // and hardware encoder macroblock requirements.
+        let fit_width = ((source_w * fit_scale).round() as u32 / 2 * 2).max(2) as f64;
+        let fit_height = ((source_h * fit_scale).round() as u32 / 2 * 2).max(2) as f64;
+        let x = (((padding + (content_width - fit_width) / 2.0).round() as u32 / 2 * 2) as f64)
+            .min(canvas.width as f64);
+        let y = (((padding + (content_height - fit_height) * position_y).round() as u32 / 2 * 2)
+            as f64)
+            .min(canvas.height as f64);
         (x, y, fit_width, fit_height)
     }
 }
@@ -849,9 +860,33 @@ fn render_timeline_composition(
         .as_ref()
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
-    let bg_image_path =
-        resolve_background_image_with_resource_dir(&canvas.background, asset_paths, resource_dir);
+    let is_side_by_side = plan.overlays.iter().any(|overlay| {
+        if !overlay.visible {
+            return false;
+        }
+        if overlay.preset.as_deref() == Some("side-by-side") {
+            return true;
+        }
+        let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
+        let target_camera_x =
+            (canvas.padding as f64) + (usable_w * 0.76).round() + (usable_w * 0.02).round();
+        let legacy_camera_x =
+            (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
+        (overlay.x - target_camera_x).abs() <= 3.0 || (overlay.x - legacy_camera_x).abs() <= 3.0
+    });
+    let (screen_x, screen_y, screen_w, screen_h) = video_screen_rect(
+        canvas,
+        common_screen_source(&plan.segments, asset_paths, ffprobe_path),
+        is_side_by_side,
+    );
+
     let mut temp_mask_guards = Vec::new();
+    let bg_image_path = prepare_canvas_background_plate(
+        canvas,
+        (screen_x, screen_y, screen_w, screen_h),
+        asset_paths,
+        resource_dir,
+    );
     if let Some(bg_path) = &bg_image_path {
         if bg_path.starts_with(std::env::temp_dir())
             && bg_path
@@ -889,33 +924,6 @@ fn render_timeline_composition(
     } else {
         None
     };
-    let content_width = canvas
-        .width
-        .saturating_sub(canvas.padding.saturating_mul(2))
-        .max(1);
-    let content_height = canvas
-        .height
-        .saturating_sub(canvas.padding.saturating_mul(2))
-        .max(1);
-    let is_side_by_side = plan.overlays.iter().any(|overlay| {
-        if !overlay.visible {
-            return false;
-        }
-        if overlay.preset.as_deref() == Some("side-by-side") {
-            return true;
-        }
-        let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
-        let target_camera_x =
-            (canvas.padding as f64) + (usable_w * 0.76).round() + (usable_w * 0.02).round();
-        let legacy_camera_x =
-            (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
-        (overlay.x - target_camera_x).abs() <= 3.0 || (overlay.x - legacy_camera_x).abs() <= 3.0
-    });
-    let (screen_x, screen_y, screen_w, screen_h) = video_screen_rect(
-        canvas,
-        common_screen_source(&plan.segments, asset_paths, ffprobe_path),
-        is_side_by_side,
-    );
 
     let canvas_mask_idx = if canvas.border_radius > 0 {
         let radius = (canvas.border_radius as f32)
@@ -944,32 +952,6 @@ fn render_timeline_composition(
         None
     };
 
-    let shadow_input_index = if canvas.shadow {
-        let shadow_path = generate_shadow_plate_png(
-            canvas.width,
-            canvas.height,
-            screen_x,
-            screen_y,
-            screen_w,
-            screen_h,
-            canvas.border_radius,
-            canvas.shadow_color.as_deref(),
-            canvas.shadow_blur,
-            canvas.shadow_offset_x,
-            canvas.shadow_offset_y,
-        );
-        if let Some(sp) = &shadow_path {
-            let idx = input_assets.len();
-            input_assets.push(("canvas:shadow".to_string(), sp.clone()));
-            temp_mask_guards.push(TempMaskFile(sp.clone()));
-            Some(idx)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     let mut camera_mask_indices = HashMap::new();
     let mut camera_border_indices = HashMap::new();
     let mut camera_shadow_indices = HashMap::new();
@@ -977,17 +959,21 @@ fn render_timeline_composition(
         if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
             continue;
         }
-        let overlay_w = overlay.width.round().max(1.0) as u32;
-        let overlay_h = overlay.height.round().max(1.0) as u32;
+        // Snap camera overlay dimensions and coordinates to even integers to prevent
+        // YUV420 chroma subsampling misalignment and encoder EINVAL errors.
+        let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
+        let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
+        let overlay_x = (overlay.x.round() as i32) / 2 * 2;
+        let overlay_y = (overlay.y.round() as i32) / 2 * 2;
 
         if overlay.shadow_enabled.unwrap_or(false) {
             if let Some(sp) = generate_camera_shadow_plate_png(
                 canvas.width,
                 canvas.height,
-                overlay.x,
-                overlay.y,
-                overlay.width,
-                overlay.height,
+                overlay_x as f64,
+                overlay_y as f64,
+                overlay_w as f64,
+                overlay_h as f64,
                 &overlay.shape,
                 overlay.shadow_color.as_deref(),
                 overlay.shadow_blur,
@@ -1071,18 +1057,23 @@ fn render_timeline_composition(
         .enumerate()
         .map(|(index, (asset_id, _))| (asset_id.clone(), index))
         .collect::<HashMap<_, _>>();
-    let (segment_w, segment_h) = if is_side_by_side {
-        (
-            (content_width as f64 * 0.76).round().max(1.0) as u32,
-            ((content_width as f64 * 0.76 / canvas.width as f64) * canvas.height as f64)
-                .round()
-                .max(1.0) as u32,
-        )
+    let has_zoom = plan.zoom_segments.iter().any(|segment| segment.enabled);
+    let can_pad_canvas = bg_input_index.is_none()
+        && canvas.border_radius == 0
+        && !canvas.shadow
+        && !is_side_by_side
+        && canvas.background_dim.unwrap_or(0.0) <= 0.0;
+    let can_direct_pad = can_pad_canvas && !has_zoom;
+
+    // When direct padding is enabled, each segment is scaled to screen dimensions
+    // and padded directly onto the full canvas at (screen_x, screen_y), avoiding
+    // synthetic background generation, cropping, and software overlay blending.
+    let (target_seg_w, target_seg_h) = if can_direct_pad {
+        (canvas.width, canvas.height)
     } else {
-        (content_width, content_height)
+        (screen_w.round() as u32, screen_h.round() as u32)
     };
-    let crop_x = ((segment_w as f64 - screen_w) / 2.0).floor();
-    let crop_y = ((segment_h as f64 - screen_h) / 2.0).floor();
+
     let background = safe_filter_color(&canvas.background);
     let mut filters = Vec::new();
     let mut video_labels = Vec::new();
@@ -1099,7 +1090,7 @@ fn render_timeline_composition(
                 background.clone()
             };
             filters.push(format!(
-                "color=c={gap_color}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
+                "color=c={gap_color}:s={target_seg_w}x{target_seg_h}:r={}:d={}[{gap_label}]",
                 canvas.fps,
                 seconds(segment.output_start_ms - cursor_ms),
             ));
@@ -1138,10 +1129,19 @@ fn render_timeline_composition(
                 .output_end_ms
                 .saturating_sub(segment.output_start_ms),
         );
-        filter.push_str(&format!(
-            ",scale={segment_w}:{segment_h}:force_original_aspect_ratio=decrease,pad={segment_w}:{segment_h}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
-            canvas.fps,
-        ));
+        let canvas_w = canvas.width;
+        let canvas_h = canvas.height;
+        if can_direct_pad {
+            filter.push_str(&format!(
+                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
+                canvas.fps,
+            ));
+        } else {
+            filter.push_str(&format!(
+                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={screen_w:.0}:{screen_h:.0}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
+                canvas.fps,
+            ));
+        }
         filters.push(filter);
         video_labels.push(format!("[{label}]"));
         cursor_ms = segment.output_end_ms;
@@ -1154,7 +1154,7 @@ fn render_timeline_composition(
             background.clone()
         };
         filters.push(format!(
-            "color=c={gap_color}:s={segment_w}x{segment_h}:r={}:d={}[{gap_label}]",
+            "color=c={gap_color}:s={target_seg_w}x{target_seg_h}:r={}:d={}[{gap_label}]",
             canvas.fps,
             seconds(plan.duration_ms - cursor_ms),
         ));
@@ -1185,74 +1185,39 @@ fn render_timeline_composition(
         && canvas.border_radius == 0
         && !canvas.shadow
         && !is_side_by_side
+        && canvas.background_dim.unwrap_or(0.0) <= 0.0
         && screen_w >= (canvas.width as f64 - 0.5)
         && screen_h >= (canvas.height as f64 - 0.5)
         && screen_x.abs() < 0.5
-        && screen_y.abs() < 0.5
-        && crop_x.abs() < 0.5
-        && crop_y.abs() < 0.5;
+        && screen_y.abs() < 0.5;
 
     let base_label = "canvas_base";
-    if is_fullscreen_canvas {
-        if plan.zoom_segments.iter().any(|segment| segment.enabled) {
-            let (z_expr, x_expr, y_expr) =
-                build_zoompan_expressions(plan, canvas, canvas.width as f64, canvas.height as f64);
-            filters.push(format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1[{base_label}]",
-                canvas.width, canvas.height, canvas.fps
-            ));
-        } else {
-            filters.push(format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,setsar=1[{base_label}]"
-            ));
-        }
+    if can_direct_pad {
+        filters.push(format!(
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,setsar=1[{base_label}]"
+        ));
+    } else if is_fullscreen_canvas && has_zoom {
+        let (z_expr, x_expr, y_expr) =
+            build_zoompan_expressions(plan, canvas, canvas.width as f64, canvas.height as f64);
+        filters.push(format!(
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1[{base_label}]",
+            canvas.width, canvas.height, canvas.fps
+        ));
+    } else if can_pad_canvas && has_zoom {
+        let (z_expr, x_expr, y_expr) = build_zoompan_expressions(plan, canvas, screen_w, screen_h);
+        let canvas_w = canvas.width;
+        let canvas_h = canvas.height;
+        let canvas_fps = canvas.fps;
+        filters.push(format!(
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={canvas_fps},pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1[{base_label}]"
+        ));
     } else {
         // 1. Generate the background plate [bg_plate]
         if let Some(bg_idx) = bg_input_index {
-            let fit_mode = canvas.background_fit.as_deref().unwrap_or("cover");
-            let mut bg_filter = match fit_mode {
-                "contain" | "fit" => {
-                    format!(
-                        "[{bg_idx}:v]loop=loop=-1:size=1:start=0,split=2[bg_underlay_src][bg_main_src];\
-                         [bg_underlay_src]scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},boxblur=luma_radius=30:luma_power=2:chroma_radius=30:chroma_power=2,drawbox=x=0:y=0:w={}:h={}:color=black@0.25:t=fill,setsar=1[bg_underlay];\
-                         [bg_main_src]scale={}:{}:force_original_aspect_ratio=decrease,setsar=1[bg_main];\
-                         [bg_underlay][bg_main]overlay=(W-w)/2:(H-h)/2:format=auto,format=yuv420p",
-                        canvas.width,
-                        canvas.height,
-                        canvas.width,
-                        canvas.height,
-                        canvas.width,
-                        canvas.height,
-                        canvas.width,
-                        canvas.height
-                    )
-                }
-                _ => {
-                    format!(
-                        "[{bg_idx}:v]loop=loop=-1:size=1:start=0,scale={}:{}:force_original_aspect_ratio=increase,crop={}:{},setsar=1,format=yuv420p",
-                        canvas.width, canvas.height, canvas.width, canvas.height
-                    )
-                }
-            };
-            let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
-            if bg_blur > 0.0 {
-                let radius = (bg_blur.round() as u32).clamp(1, 50);
-                bg_filter.push_str(&format!(
-                    ",boxblur=luma_radius={radius}:luma_power=2:chroma_radius={radius}:chroma_power=2"
-                ));
-            }
-            let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
-            if bg_dim > 0.0 {
-                bg_filter.push_str(&format!(
-                    ",drawbox=x=0:y=0:w={}:h={}:color=black@{:.3}:t=fill",
-                    canvas.width, canvas.height, bg_dim
-                ));
-            }
-            bg_filter.push_str(&format!(
-                ",fps={},tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS[bg_plate]",
+            filters.push(format!(
+                "[{bg_idx}:v]format=yuv420p,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS[bg_plate]",
                 canvas.fps
             ));
-            filters.push(bg_filter);
         } else {
             let mut solid_filter = format!(
                 "color=c={background}:s={}x{}:r={}:d={}",
@@ -1269,17 +1234,17 @@ fn render_timeline_composition(
             filters.push(solid_filter);
         }
 
-        // 2. Crop and format the fitted video layer [screen_fitted]
-        let mut screen_filter = if plan.zoom_segments.iter().any(|segment| segment.enabled) {
+        // 2. Format the fitted video layer [screen_fitted]
+        let mut screen_filter = if has_zoom {
             let (z_expr, x_expr, y_expr) =
                 build_zoompan_expressions(plan, canvas, screen_w, screen_h);
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
                 canvas.fps
             )
         } else {
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,crop={screen_w:.0}:{screen_h:.0}:{crop_x:.0}:{crop_y:.0},setsar=1"
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,setsar=1"
             )
         };
         if let Some(mask_idx) = canvas_mask_idx {
@@ -1288,33 +1253,23 @@ fn render_timeline_composition(
             screen_filter.push_str(&format!(",format=rgba[{raw_label}]"));
             filters.push(screen_filter);
             filters.push(format!(
-                "[{mask_idx}:v]format=gray,scale={screen_w:.0}:{screen_h:.0},setsar=1,loop=loop=-1:size=1:start=0[{mask_label}];\
-                 [{raw_label}][{mask_label}]alphamerge[screen_fitted]"
+                "[{mask_idx}:v]format=gray,scale={screen_w:.0}:{screen_h:.0},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS[{mask_label}];\
+                 [{raw_label}][{mask_label}]alphamerge[screen_fitted]",
+                canvas.fps
             ));
         } else {
             screen_filter.push_str("[screen_fitted]");
             filters.push(screen_filter);
         }
 
-        // 3. Composite shadow and screen layer onto background plate [canvas_base]
-        let mut bg_current = "[bg_plate]".to_string();
-        if let Some(shadow_idx) = shadow_input_index {
-            filters.push(format!(
-                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS[shadow_loop]",
-                canvas.width, canvas.height, canvas.fps
-            ));
-            filters.push(format!(
-                "{bg_current}[shadow_loop]overlay=x=0:y=0:shortest=1:format=auto[bg_with_shadow]"
-            ));
-            bg_current = "[bg_with_shadow]".to_string();
-        }
+        // 3. Composite screen layer onto background plate [canvas_base]
         let overlay_format = if canvas_mask_idx.is_some() {
             "format=auto"
         } else {
             "format=yuv420"
         };
         filters.push(format!(
-            "{bg_current}[screen_fitted]overlay=x={screen_x:.0}:y={screen_y:.0}:shortest=1:{overlay_format}[{base_label}]"
+            "[bg_plate][screen_fitted]overlay=x={screen_x:.0}:y={screen_y:.0}:shortest=1:{overlay_format}[{base_label}]"
         ));
     }
 
@@ -1388,63 +1343,64 @@ fn render_timeline_composition(
 
         // 1. Composite shadow underlay if present
         if let Some(&shadow_idx) = camera_shadow_indices.get(&index) {
-            let shadow_loop_label = format!("cam_shadow_loop{index}");
             let after_shadow_label = format!("cam_with_shadow{index}");
+            let shadow_loop_label = format!("cam_shadow_loop{index}");
             filters.push(format!(
-                "[{shadow_idx}:v]loop=loop=-1:size=1:start=0,scale={}x{},format=rgba,setsar=1,fps={},tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS[{shadow_loop_label}]",
-                canvas.width, canvas.height, canvas.fps
-            ));
-            filters.push(format!(
-                "[{current_label}][{shadow_loop_label}]overlay=x=0:y=0:eof_action=pass:enable='{enable}':format=auto[{after_shadow_label}]"
+                "[{shadow_idx}:v]format=rgba,setsar=1,loop=loop=-1:size=1:start=0[{shadow_loop_label}];\
+                 [{current_label}][{shadow_loop_label}]overlay=x=0:y=0:eof_action=repeat:enable='{enable}':format=auto[{after_shadow_label}]"
             ));
             current_label = after_shadow_label;
         }
 
         // 2. Format camera video stream (trim, speed, crop/cover, scale, opacity)
         let mut camera_filter = format!(
-            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS)/{:.6}+{}/TB",
+            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS)/{:.6}",
             seconds(overlay.source_in_ms),
             seconds(overlay.source_out_ms),
             overlay.speed,
-            seconds(overlay.output_start_ms),
         );
+        let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
+        let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
+        let overlay_x = (overlay.x.round() as i32) / 2 * 2;
+        let overlay_y = (overlay.y.round() as i32) / 2 * 2;
+        let overlay_duration = seconds(
+            overlay
+                .output_end_ms
+                .saturating_sub(overlay.output_start_ms),
+        );
+
         if let Some(crop) = &overlay.crop {
             camera_filter.push_str(&format!(
                 ",crop={}:{}:{}:{}",
                 crop.width, crop.height, crop.x, crop.y
             ));
             camera_filter.push_str(&format!(
-                ",scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba",
-                overlay.width.max(1.0),
-                overlay.height.max(1.0),
-                overlay.width.max(1.0),
-                overlay.height.max(1.0)
+                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ));
         } else {
             camera_filter.push_str(&format!(
-                ",scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}:(iw-ow)/2:(ih-oh)/2,format=rgba",
-                overlay.width.max(1.0),
-                overlay.height.max(1.0),
-                overlay.width.max(1.0),
-                overlay.height.max(1.0)
+                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2,crop={overlay_w}:{overlay_h}:(iw-ow)/2:(ih-oh)/2"
             ));
         }
         if overlay.opacity < 1.0 {
             camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
         }
+        camera_filter.push_str(&format!(
+            ",fps={},setsar=1,tpad=stop_mode=clone:stop_duration={overlay_duration},trim=duration={overlay_duration},setpts=PTS-STARTPTS,format=rgba",
+            canvas.fps
+        ));
 
         // 3. Mask camera video stream (for circle and rounded shapes)
         let masked_camera_label = if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
             let raw_label = format!("camera_unmasked{index}");
             let mask_label = format!("cam_mask_loop{index}");
             let masked_label = format!("camera_masked{index}");
-            let overlay_w = overlay.width.max(1.0).round() as u32;
-            let overlay_h = overlay.height.max(1.0).round() as u32;
             camera_filter.push_str(&format!("[{raw_label}]"));
             filters.push(camera_filter);
             filters.push(format!(
-                "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{mask_label}];\
-                 [{raw_label}][{mask_label}]alphamerge[{masked_label}]"
+                "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={overlay_duration},setpts=PTS-STARTPTS[{mask_label}];\
+                 [{raw_label}][{mask_label}]alphamerge[{masked_label}]",
+                canvas.fps
             ));
             masked_label
         } else {
@@ -1454,28 +1410,34 @@ fn render_timeline_composition(
             raw_label
         };
 
-        // 4. Overlay border stroke if present
-        let final_camera_label = if let Some(&border_idx) = camera_border_indices.get(&index) {
-            let border_loop_label = format!("cam_border_loop{index}");
-            let bordered_label = format!("camera_bordered{index}");
-            let overlay_w = overlay.width.max(1.0).round() as u32;
-            let overlay_h = overlay.height.max(1.0).round() as u32;
+        // 4. Shift timestamps to output_start_ms and composite camera on top of current canvas
+        let timed_camera_label = if overlay.output_start_ms > 0 {
+            let label = format!("camera_timed{index}");
+            let offset = seconds(overlay.output_start_ms);
             filters.push(format!(
-                "[{border_idx}:v]format=rgba,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{border_loop_label}];\
-                 [{masked_camera_label}][{border_loop_label}]overlay=x=0:y=0:shortest=1:format=auto[{bordered_label}]"
+                "[{masked_camera_label}]setpts=PTS+{offset}/TB[{label}]"
             ));
-            bordered_label
+            label
         } else {
             masked_camera_label
         };
 
-        // 5. Composite camera on top of current canvas
-        let next_label = format!("composite{index}");
+        let after_camera_label = format!("cam_composite{index}");
         filters.push(format!(
-            "[{current_label}][{final_camera_label}]overlay=x={:.2}:y={:.2}:eof_action=pass:enable='{enable}'[{next_label}]",
-            overlay.x, overlay.y
+            "[{current_label}][{timed_camera_label}]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:enable='{enable}':format=auto[{after_camera_label}]"
         ));
-        current_label = next_label;
+        current_label = after_camera_label;
+
+        // 5. Overlay border stroke directly on top of canvas if present
+        if let Some(&border_idx) = camera_border_indices.get(&index) {
+            let border_loop_label = format!("cam_border_loop{index}");
+            let after_border_label = format!("cam_with_border{index}");
+            filters.push(format!(
+                "[{border_idx}:v]format=rgba,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0[{border_loop_label}];\
+                 [{current_label}][{border_loop_label}]overlay=x={overlay_x}:y={overlay_y}:eof_action=repeat:enable='{enable}':format=auto[{after_border_label}]"
+            ));
+            current_label = after_border_label;
+        }
     }
 
     for (index, mask) in plan.masks.iter().enumerate() {
@@ -1533,19 +1495,32 @@ fn render_timeline_composition(
                     format!("[{source_label}]crop=w={width}:h={height}:x={x}:y={y}");
                 if mask.mode == "blur" {
                     let radius = mask.blur_radius.clamp(1.0, 128.0);
-                    region_filter.push_str(&format!(",gblur=sigma={radius:.0}:steps=2"));
+                    if radius > 3.0 {
+                        // Multi-scale fast blur approximation: downscale, average blur, upscale.
+                        // Up to 100x faster than software gblur and avoids starving hardware encoders.
+                        let factor = ((radius / 4.0).round() as u32).clamp(2, 16);
+                        let small_w = ((width / factor) / 2 * 2).max(2);
+                        let small_h = ((height / factor) / 2 * 2).max(2);
+                        region_filter.push_str(&format!(
+                            ",scale=w={small_w}:h={small_h}:flags=bilinear,avgblur=sizeX=3:sizeY=3,scale=w={width}:h={height}:flags=bilinear"
+                        ));
+                    } else {
+                        let r = (radius.round() as u32).max(1);
+                        region_filter.push_str(&format!(",avgblur=sizeX={r}:sizeY={r}"));
+                    }
                 } else {
                     let pixel_size = mask.pixel_size.clamp(2, 128) as f64;
-                    let small_width = ((width as f64) / pixel_size).floor().max(1.0);
-                    let small_height = ((height as f64) / pixel_size).floor().max(1.0);
+                    let small_width = (((width as f64) / pixel_size).round() as u32 / 2 * 2).max(2);
+                    let small_height =
+                        (((height as f64) / pixel_size).round() as u32 / 2 * 2).max(2);
                     region_filter.push_str(&format!(
-                        ",scale=w={small_width:.0}:h={small_height:.0}:flags=neighbor,scale=w={width}:h={height}:flags=neighbor"
+                        ",scale=w={small_width}:h={small_height}:flags=neighbor,scale=w={width}:h={height}:flags=neighbor"
                     ));
                 }
                 region_filter.push_str(&format!("[{filtered_label}]"));
                 filters.push(region_filter);
                 filters.push(format!(
-                    "[{base_label}][{filtered_label}]overlay=x={x}:y={y}:eof_action=pass:enable='{enable}'[{next_label}]"
+                    "[{base_label}][{filtered_label}]overlay=x={x}:y={y}:eof_action=pass:enable='{enable}':format=yuv420[{next_label}]"
                 ));
             }
             _ => {
@@ -1581,8 +1556,14 @@ fn render_timeline_composition(
         current_label = next_label;
     }
 
+    let final_pix_fmt = match encoder {
+        encoding::ExportEncoder::Qsv => "nv12",
+        _ => "yuv420p",
+    };
     let final_label = "export_output";
-    filters.push(format!("[{current_label}]format=yuv420p[{final_label}]"));
+    filters.push(format!(
+        "[{current_label}]format={final_pix_fmt}[{final_label}]"
+    ));
     current_label = final_label.to_string();
 
     let audio_tracks = plan
@@ -1712,28 +1693,15 @@ fn render_timeline_composition(
     let mut command = crate::process::create_command(ffmpeg_path);
     command
         .arg("-y")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-threads",
-            "0",
-            "-filter_threads",
-            "0",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-threads", "0"])
         // Machine-readable progress blocks on stderr; the runner parses
         // `out_time=` from them and keeps them out of failure diagnostics.
         .args(["-progress", "pipe:2"]);
-    for (asset_kind, asset_path) in &input_assets {
-        if asset_kind == "canvas:background"
-            || asset_kind == "canvas:shadow"
-            || asset_kind.starts_with("mask:")
-            || asset_kind.starts_with("shadow:")
-            || asset_kind.starts_with("border:")
-        {
-            command.args(["-loop", "1"]);
-        }
-        command.arg("-i").arg(asset_path);
+    for (_, asset_path) in &input_assets {
+        command
+            .args(["-thread_queue_size", "128"])
+            .arg("-i")
+            .arg(asset_path);
     }
     if cursor_plan.is_some() {
         // The generated cursor layer is a transparent RGBA stream fed frame by
@@ -1742,6 +1710,7 @@ fn render_timeline_composition(
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{}x{}", canvas.width, canvas.height)])
             .args(["-r", &canvas.fps.to_string()])
+            .args(["-thread_queue_size", "128"])
             .arg("-i")
             .arg("-");
     }
@@ -2052,6 +2021,14 @@ fn feed_cursor_frames(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     let mut writer = std::io::BufWriter::with_capacity(256 * 1024, stdin);
+    let frame_byte_len = (cursor.width as usize) * (cursor.height as usize) * 4;
+    let zero_frame = vec![0u8; frame_byte_len];
+
+    // Cache the rendered overlay layer (annotations, titles, images) when evaluated items are unchanged
+    let mut last_display_items: Option<Vec<overlay_engine::DisplayItem>> = None;
+    let mut cached_overlay_pixmap: Option<resvg::tiny_skia::Pixmap> = None;
+    let mut cached_unpremultiplied_frame: Option<Vec<u8>> = None;
+
     for frame_index in 0..cursor.frame_count {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
@@ -2061,30 +2038,114 @@ fn feed_cursor_frames(
         // of cursor timing error over long exports.
         let output_time_ms = cursor::frame_time_ms(frame_index, cursor.fps);
         let overlay_time_ms = output_time_ms.floor().max(0.0) as u64;
-        cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
 
-        // 1. Render active overlay items (annotations, text presets, images)
-        if let Some(engine) = &cursor.overlay_engine {
-            engine
-                .render_to_pixmap(overlay_time_ms, &mut cursor.pixmap)
-                .map_err(|error| InternalError::Media(format!("render overlay frame: {error}")))?;
-        }
-
-        // 2. Render cursor telemetry (if active at the exact frame PTS)
-        if let Some((_, _, renderer)) = cursor.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
+        let active_cursor_renderer = cursor.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
             output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
-        }) {
-            renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
-        }
+        });
 
-        // Unpremultiply directly in-place without heap allocations
-        cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
+        if let Some(engine) = &cursor.overlay_engine {
+            let display_list = engine.evaluate(overlay_time_ms);
+            let has_items = !display_list.items.is_empty();
 
-        if let Err(error) = writer.write_all(cursor.pixmap.data()) {
-            if is_pipe_closed(&error) {
-                return Ok(());
+            if !has_items && active_cursor_renderer.is_none() {
+                // Completely empty frame — stream pre-zeroed frame directly with zero CPU work
+                last_display_items = Some(Vec::new());
+                cached_overlay_pixmap = None;
+                cached_unpremultiplied_frame = None;
+                if let Err(error) = writer.write_all(&zero_frame) {
+                    if is_pipe_closed(&error) {
+                        return Ok(());
+                    }
+                    return Err(
+                        InternalError::Media(format!("write overlay frame: {error}")).into(),
+                    );
+                }
+                continue;
             }
-            return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
+
+            // If overlay items have changed, re-render the overlay layer into cached_overlay_pixmap
+            let items_changed = last_display_items.as_ref() != Some(&display_list.items);
+            if items_changed {
+                if has_items {
+                    let mut layer = resvg::tiny_skia::Pixmap::new(cursor.width, cursor.height)
+                        .ok_or_else(|| {
+                            InternalError::Media("allocate overlay pixmap failed".into())
+                        })?;
+                    engine
+                        .render_to_pixmap(overlay_time_ms, &mut layer)
+                        .map_err(|error| {
+                            InternalError::Media(format!("render overlay frame: {error}"))
+                        })?;
+                    let mut unprem = layer.data().to_vec();
+                    cursor::unpremultiply_rgba(&mut unprem);
+                    cached_unpremultiplied_frame = Some(unprem);
+                    cached_overlay_pixmap = Some(layer);
+                } else {
+                    cached_overlay_pixmap = None;
+                    cached_unpremultiplied_frame = None;
+                }
+                last_display_items = Some(display_list.items);
+            }
+
+            if let Some((_, _, renderer)) = active_cursor_renderer {
+                // Cursor telemetry is active on this frame: composite cursor on top of overlay layer
+                if let Some(cached_layer) = &cached_overlay_pixmap {
+                    cursor
+                        .pixmap
+                        .data_mut()
+                        .copy_from_slice(cached_layer.data());
+                } else {
+                    cursor.pixmap.data_mut().copy_from_slice(&zero_frame);
+                }
+                renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
+                cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
+
+                if let Err(error) = writer.write_all(cursor.pixmap.data()) {
+                    if is_pipe_closed(&error) {
+                        return Ok(());
+                    }
+                    return Err(
+                        InternalError::Media(format!("write overlay frame: {error}")).into(),
+                    );
+                }
+            } else if let Some(unprem_frame) = &cached_unpremultiplied_frame {
+                // Static overlay items, no cursor: stream the cached unpremultiplied layer directly!
+                if let Err(error) = writer.write_all(unprem_frame) {
+                    if is_pipe_closed(&error) {
+                        return Ok(());
+                    }
+                    return Err(
+                        InternalError::Media(format!("write overlay frame: {error}")).into(),
+                    );
+                }
+            } else {
+                if let Err(error) = writer.write_all(&zero_frame) {
+                    if is_pipe_closed(&error) {
+                        return Ok(());
+                    }
+                    return Err(
+                        InternalError::Media(format!("write overlay frame: {error}")).into(),
+                    );
+                }
+            }
+        } else if let Some((_, _, renderer)) = active_cursor_renderer {
+            cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
+            renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
+            cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
+
+            if let Err(error) = writer.write_all(cursor.pixmap.data()) {
+                if is_pipe_closed(&error) {
+                    return Ok(());
+                }
+                return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
+            }
+        } else {
+            if let Err(error) = writer.write_all(&zero_frame) {
+                if is_pipe_closed(&error) {
+                    return Ok(());
+                }
+                return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
+            }
         }
     }
     let _ = writer.flush();
@@ -2986,6 +3047,61 @@ fn fast_blur_pixmap(pixmap: &mut Pixmap, radius: f32) {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn render_shadow_onto_pixmap(
+    pixmap: &mut Pixmap,
+    screen_x: f64,
+    screen_y: f64,
+    screen_w: f64,
+    screen_h: f64,
+    border_radius: u32,
+    shadow_color: Option<&str>,
+    shadow_blur: Option<f64>,
+    shadow_offset_x: Option<f64>,
+    shadow_offset_y: Option<f64>,
+) {
+    let canvas_w = pixmap.width();
+    let canvas_h = pixmap.height();
+    let blur = shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
+    let off_x = shadow_offset_x.unwrap_or(0.0);
+    let off_y = shadow_offset_y.unwrap_or(blur / 2.0);
+    let x = (screen_x + off_x) as f32;
+    let y = (screen_y + off_y) as f32;
+    let w = screen_w as f32;
+    let h = screen_h as f32;
+    let r = (border_radius as f32).min(w / 2.0).min(h / 2.0);
+
+    let hex_color = shadow_color.unwrap_or("#000000");
+    let color = parse_color_hex(hex_color, 0.4);
+
+    let Some(path) = build_rounded_rect_path(x, y, w, h, r) else {
+        return;
+    };
+    let Some(mut shadow_pixmap) = Pixmap::new(canvas_w, canvas_h) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    shadow_pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    fast_blur_pixmap(&mut shadow_pixmap, (blur / 2.0).clamp(1.0, 32.0) as f32);
+
+    pixmap.draw_pixmap(
+        0,
+        0,
+        shadow_pixmap.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn generate_shadow_plate_png(
     canvas_w: u32,
     canvas_h: u32,
@@ -3000,31 +3116,18 @@ pub(crate) fn generate_shadow_plate_png(
     shadow_offset_y: Option<f64>,
 ) -> Option<PathBuf> {
     let mut pixmap = Pixmap::new(canvas_w, canvas_h)?;
-    let blur = shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
-    let off_x = shadow_offset_x.unwrap_or(0.0);
-    let off_y = shadow_offset_y.unwrap_or(blur / 2.0);
-    let x = (screen_x + off_x) as f32;
-    let y = (screen_y + off_y) as f32;
-    let w = screen_w as f32;
-    let h = screen_h as f32;
-    let r = (border_radius as f32).min(w / 2.0).min(h / 2.0);
-
-    let hex_color = shadow_color.unwrap_or("#000000");
-    let color = parse_color_hex(hex_color, 0.4);
-
-    let path = build_rounded_rect_path(x, y, w, h, r)?;
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
-    pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::Winding,
-        Transform::identity(),
-        None,
+    render_shadow_onto_pixmap(
+        &mut pixmap,
+        screen_x,
+        screen_y,
+        screen_w,
+        screen_h,
+        border_radius,
+        shadow_color,
+        shadow_blur,
+        shadow_offset_x,
+        shadow_offset_y,
     );
-    fast_blur_pixmap(&mut pixmap, (blur / 2.0).clamp(1.0, 32.0) as f32);
-
     let temp_path = std::env::temp_dir().join(format!(
         "recordforge_bg_shadow_{}.png",
         uuid::Uuid::new_v4()
@@ -3589,6 +3692,16 @@ pub(crate) fn resolve_background_image_with_resource_dir(
     asset_paths: &HashMap<String, PathBuf>,
     resource_dir: Option<&Path>,
 ) -> Option<PathBuf> {
+    resolve_background_image_with_dimensions(background, asset_paths, resource_dir, 1920, 1080)
+}
+
+pub(crate) fn resolve_background_image_with_dimensions(
+    background: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    resource_dir: Option<&Path>,
+    width: u32,
+    height: u32,
+) -> Option<PathBuf> {
     let trimmed = background.trim();
     if trimmed.is_empty() {
         return None;
@@ -3602,9 +3715,12 @@ pub(crate) fn resolve_background_image_with_resource_dir(
         return None;
     }
 
+    let target_w = if width > 0 { width } else { 1920 };
+    let target_h = if height > 0 { height } else { 1080 };
+
     // Try generating CSS gradients (linear, radial, mesh) to a temporary PNG
     if trimmed.contains("-gradient(") {
-        if let Some(grad_path) = generate_background_plate_png(trimmed, 1920, 1080) {
+        if let Some(grad_path) = generate_background_plate_png(trimmed, target_w, target_h) {
             return Some(grad_path);
         }
         return None;
@@ -3642,7 +3758,7 @@ pub(crate) fn resolve_background_image_with_resource_dir(
 
             if let Some(bytes) = bytes {
                 if is_svg || bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
-                    return rasterize_svg_bytes_to_png(&bytes, 1920, 1080);
+                    return rasterize_svg_bytes_to_png(&bytes, target_w, target_h);
                 } else {
                     let ext = if mime.contains("jpeg")
                         || mime.contains("jpg")
@@ -3722,7 +3838,7 @@ pub(crate) fn resolve_background_image_with_resource_dir(
             .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
         {
             if let Ok(bytes) = std::fs::read(&direct) {
-                if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, target_w, target_h) {
                     return Some(png_path);
                 }
             }
@@ -3843,7 +3959,9 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                     .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
                 {
                     if let Ok(bytes) = std::fs::read(&candidate) {
-                        if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                        if let Some(png_path) =
+                            rasterize_svg_bytes_to_png(&bytes, target_w, target_h)
+                        {
                             return Some(png_path);
                         }
                     }
@@ -3862,7 +3980,7 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                 .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
             {
                 if let Ok(bytes) = std::fs::read(&candidate) {
-                    if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                    if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, target_w, target_h) {
                         return Some(png_path);
                     }
                 }
@@ -3879,7 +3997,7 @@ pub(crate) fn resolve_background_image_with_resource_dir(
                 .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
             {
                 if let Ok(bytes) = std::fs::read(&candidate) {
-                    if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, 1920, 1080) {
+                    if let Some(png_path) = rasterize_svg_bytes_to_png(&bytes, target_w, target_h) {
                         return Some(png_path);
                     }
                 }
@@ -3889,6 +4007,159 @@ pub(crate) fn resolve_background_image_with_resource_dir(
     }
 
     None
+}
+
+/// Pre-render and composite the complete background canvas plate in Rust at exact
+/// target dimensions (width x height), including fitting/cropping source images,
+/// background blur, background dim, and screen drop shadow.
+///
+/// This completely eliminates:
+/// 1. FFmpeg upscaling 16:9 background images to 3.4K/6.8K on vertical or square canvases.
+/// 2. Redundant secondary 60-FPS RGBA video streams for shadows (`shadow_loop`).
+/// 3. Multi-pass software overlay blending between background and shadow.
+pub(crate) fn prepare_canvas_background_plate(
+    canvas: &cursor::RenderCanvas,
+    screen_rect: (f64, f64, f64, f64),
+    asset_paths: &HashMap<String, PathBuf>,
+    resource_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let (screen_x, screen_y, screen_w, screen_h) = screen_rect;
+    let width = canvas.width;
+    let height = canvas.height;
+    let trimmed = canvas.background.trim();
+
+    let is_solid_color = trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("rgb(")
+        || trimmed.starts_with("rgba(")
+        || trimmed.starts_with("hsl(")
+        || trimmed.starts_with("hsla(");
+
+    // If it's a solid color and there is no shadow, no border radius, and no dim/blur:
+    // return None so direct padding can be used in FFmpeg without any plate files or overlays.
+    if is_solid_color
+        && !canvas.shadow
+        && canvas.border_radius == 0
+        && canvas.background_dim.unwrap_or(0.0) <= 0.0
+        && canvas.background_blur.unwrap_or(0.0) <= 0.0
+    {
+        return None;
+    }
+
+    let mut pixmap = if is_solid_color {
+        let mut p = Pixmap::new(width, height)?;
+        let color_str = if trimmed.is_empty() {
+            "#000000"
+        } else {
+            trimmed
+        };
+        let hex = safe_filter_color(color_str);
+        let color = parse_color_hex(&hex, 1.0);
+        p.fill(color);
+        p
+    } else if trimmed.contains("-gradient(") {
+        let svg = parse_css_gradient_to_svg(trimmed, width, height)?;
+        let options = resvg::usvg::Options {
+            fontdb: overlay_engine::get_shared_font_database(),
+            ..Default::default()
+        };
+        let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
+        let mut p = Pixmap::new(width, height)?;
+        resvg::render(&tree, Transform::identity(), &mut p.as_mut());
+        p
+    } else {
+        let resolved_file = resolve_background_image_with_dimensions(
+            trimmed,
+            asset_paths,
+            resource_dir,
+            width,
+            height,
+        )?;
+        let is_temp_svg = resolved_file
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|n| n.starts_with("recordforge_bg_svg_"));
+        if is_temp_svg {
+            let bytes = std::fs::read(&resolved_file).ok()?;
+            Pixmap::decode_png(&bytes).ok()?
+        } else {
+            let dynamic_img = image::open(&resolved_file).ok().or_else(|| {
+                let bytes = std::fs::read(&resolved_file).ok()?;
+                image::load_from_memory(&bytes).ok()
+            })?;
+            let fit_mode = canvas.background_fit.as_deref().unwrap_or("cover");
+            let resized = match fit_mode {
+                "contain" | "fit" => {
+                    let aspect_img = dynamic_img.width() as f64 / dynamic_img.height() as f64;
+                    let aspect_canvas = width as f64 / height as f64;
+                    let (new_w, new_h) = if aspect_img > aspect_canvas {
+                        (width, ((width as f64 / aspect_img).round() as u32).max(1))
+                    } else {
+                        (((height as f64 * aspect_img).round() as u32).max(1), height)
+                    };
+                    let scaled =
+                        dynamic_img.resize(new_w, new_h, image::imageops::FilterType::Triangle);
+                    let mut base = image::RgbaImage::new(width, height);
+                    let offset_x = (width.saturating_sub(new_w)) / 2;
+                    let offset_y = (height.saturating_sub(new_h)) / 2;
+                    image::imageops::overlay(
+                        &mut base,
+                        &scaled.to_rgba8(),
+                        offset_x as i64,
+                        offset_y as i64,
+                    );
+                    image::DynamicImage::ImageRgba8(base)
+                }
+                "fill" => {
+                    dynamic_img.resize_exact(width, height, image::imageops::FilterType::Triangle)
+                }
+                _ => {
+                    dynamic_img.resize_to_fill(width, height, image::imageops::FilterType::Triangle)
+                }
+            };
+            let mut png_bytes = std::io::Cursor::new(Vec::new());
+            resized
+                .write_to(&mut png_bytes, image::ImageFormat::Png)
+                .ok()?;
+            Pixmap::decode_png(png_bytes.get_ref()).ok()?
+        }
+    };
+
+    let bg_blur = canvas.background_blur.unwrap_or(0.0).clamp(0.0, 100.0);
+    if bg_blur > 0.0 {
+        fast_blur_pixmap(&mut pixmap, (bg_blur.round() as f32).clamp(1.0, 50.0));
+    }
+
+    let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
+    if bg_dim > 0.0 {
+        let dim_color = Color::from_rgba(0.0, 0.0, 0.0, bg_dim as f32).unwrap_or(Color::BLACK);
+        let mut paint = Paint::default();
+        paint.set_color(dim_color);
+        paint.anti_alias = false;
+        if let Some(rect) = Rect::from_xywh(0.0, 0.0, width as f32, height as f32) {
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+    }
+
+    if canvas.shadow {
+        render_shadow_onto_pixmap(
+            &mut pixmap,
+            screen_x,
+            screen_y,
+            screen_w,
+            screen_h,
+            canvas.border_radius,
+            canvas.shadow_color.as_deref(),
+            canvas.shadow_blur,
+            canvas.shadow_offset_x,
+            canvas.shadow_offset_y,
+        );
+    }
+
+    let temp_path =
+        std::env::temp_dir().join(format!("recordforge_bg_plate_{}.png", uuid::Uuid::new_v4()));
+    pixmap.save_png(&temp_path).ok()?;
+    Some(temp_path)
 }
 
 fn compact_num(val: f64) -> String {
@@ -5831,8 +6102,8 @@ mod tests {
         assert_eq!(rect, (0.0, 0.0, 1920.0, 1080.0));
 
         // 9:16 vertical canvas (1080x1920) with 16:9 source (1920x1080)
-        // Source 1920x1080 fit into 1080x1920: scale = 1080/1920 = 0.5625 -> 1080 x 607
-        // Slack = 1920 - 607 = 1313
+        // Source 1920x1080 fit into 1080x1920: scale = 1080/1920 = 0.5625 -> snapped to even 1080 x 608
+        // Slack = 1920 - 608 = 1312
         let mut canvas_9_16 = cursor::RenderCanvas {
             width: 1080,
             height: 1920,
@@ -5842,15 +6113,15 @@ mod tests {
             ..Default::default()
         };
         let rect_9_16_center = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
-        assert_eq!(rect_9_16_center, (0.0, 656.0, 1080.0, 607.0));
+        assert_eq!(rect_9_16_center, (0.0, 656.0, 1080.0, 608.0));
 
         canvas_9_16.video_position_y = Some(0.0); // Top
         let rect_9_16_top = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
-        assert_eq!(rect_9_16_top, (0.0, 0.0, 1080.0, 607.0));
+        assert_eq!(rect_9_16_top, (0.0, 0.0, 1080.0, 608.0));
 
         canvas_9_16.video_position_y = Some(1.0); // Bottom
         let rect_9_16_bottom = video_screen_rect(&canvas_9_16, Some((1920, 1080)), false);
-        assert_eq!(rect_9_16_bottom, (0.0, 1313.0, 1080.0, 607.0));
+        assert_eq!(rect_9_16_bottom, (0.0, 1312.0, 1080.0, 608.0));
 
         // 1:1 square canvas (1080x1080) with 16:9 source (1920x1080) and 40px padding
         // Content area: 1000 x 1000. Source fit: 1000 x 562. Slack = 1000 - 562 = 438
@@ -5863,7 +6134,7 @@ mod tests {
             ..Default::default()
         };
         let rect_1_1 = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
-        assert_eq!(rect_1_1, (40.0, 259.0, 1000.0, 562.0));
+        assert_eq!(rect_1_1, (40.0, 258.0, 1000.0, 562.0));
 
         canvas_1_1.video_position_y = Some(0.0); // Top
         let rect_1_1_top = video_screen_rect(&canvas_1_1, Some((1920, 1080)), false);
@@ -5874,7 +6145,7 @@ mod tests {
         assert_eq!(rect_1_1_bottom, (40.0, 478.0, 1000.0, 562.0));
 
         // 5:4 canvas (1350x1080) with 16:9 source (1920x1080) and 0 padding
-        // Source fit: 1350 x 759. Slack = 1080 - 759 = 321
+        // Source fit: 1350 x 758. Slack = 1080 - 758 = 322
         let mut canvas_5_4 = cursor::RenderCanvas {
             width: 1350,
             height: 1080,
@@ -5884,18 +6155,18 @@ mod tests {
             ..Default::default()
         };
         let rect_5_4_center = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
-        assert_eq!(rect_5_4_center, (0.0, 160.0, 1350.0, 759.0));
+        assert_eq!(rect_5_4_center, (0.0, 160.0, 1350.0, 758.0));
 
         canvas_5_4.video_position_y = Some(0.0); // Top
         let rect_5_4_top = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
-        assert_eq!(rect_5_4_top, (0.0, 0.0, 1350.0, 759.0));
+        assert_eq!(rect_5_4_top, (0.0, 0.0, 1350.0, 758.0));
 
         canvas_5_4.video_position_y = Some(1.0); // Bottom
         let rect_5_4_bottom = video_screen_rect(&canvas_5_4, Some((1920, 1080)), false);
-        assert_eq!(rect_5_4_bottom, (0.0, 321.0, 1350.0, 759.0));
+        assert_eq!(rect_5_4_bottom, (0.0, 322.0, 1350.0, 758.0));
 
         // 4:5 canvas (1080x1350) with 16:9 source (1920x1080) and 0 padding
-        // Source fit: 1080 x 607. Slack = 1350 - 607 = 743
+        // Source fit: 1080 x 608. Slack = 1350 - 608 = 742
         let mut canvas_4_5 = cursor::RenderCanvas {
             width: 1080,
             height: 1350,
@@ -5905,20 +6176,20 @@ mod tests {
             ..Default::default()
         };
         let rect_4_5_center = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
-        assert_eq!(rect_4_5_center, (0.0, 371.0, 1080.0, 607.0));
+        assert_eq!(rect_4_5_center, (0.0, 370.0, 1080.0, 608.0));
 
         canvas_4_5.video_position_y = Some(0.0); // Top
         let rect_4_5_top = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
-        assert_eq!(rect_4_5_top, (0.0, 0.0, 1080.0, 607.0));
+        assert_eq!(rect_4_5_top, (0.0, 0.0, 1080.0, 608.0));
 
         canvas_4_5.video_position_y = Some(1.0); // Bottom
         let rect_4_5_bottom = video_screen_rect(&canvas_4_5, Some((1920, 1080)), false);
-        assert_eq!(rect_4_5_bottom, (0.0, 743.0, 1080.0, 607.0));
+        assert_eq!(rect_4_5_bottom, (0.0, 742.0, 1080.0, 608.0));
 
         // 16:9 canvas (1920x1080) with 16:9 source in side-by-side mode (76% screen width)
         let rect_sbs = video_screen_rect(&canvas_16_9, Some((1920, 1080)), true);
         assert_eq!(rect_sbs.0, 0.0);
-        assert_eq!(rect_sbs.2, 1459.0);
+        assert_eq!(rect_sbs.2, 1458.0);
         assert_eq!(rect_sbs.3, 820.0);
         assert_eq!(rect_sbs.1, 130.0);
     }
@@ -6622,6 +6893,542 @@ mod tests {
             "validate gif failed: {:?}",
             validation.err()
         );
+    }
+
+    #[test]
+    fn test_render_timeline_composition_aspect_ratios_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-aspect-ratios-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen_16_9.mp4");
+
+        // Generate a 1-second 16:9 test video (320x180)
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x180:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate 16:9 source test video");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        let test_cases = [
+            ("9:16", 180, 320),
+            ("1:1", 240, 240),
+            ("5:4", 300, 240),
+            ("4:5", 240, 300),
+        ];
+
+        for (ratio, w, h) in test_cases {
+            let out_path = temp_dir.join(format!("out_{}.mp4", ratio.replace(':', "_")));
+            let plan = RenderPlan {
+                project_id: format!("test-ratio-{}", ratio),
+                duration_ms: 500,
+                segments: vec![RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 500,
+                    output_start_ms: 0,
+                    output_end_ms: 500,
+                    source_width: Some(320),
+                    source_height: Some(180),
+                }],
+                overlays: Vec::new(),
+                zoom_segments: Vec::new(),
+                cursor_effects: Vec::new(),
+                overlay_render_plan: None,
+                canvas: Some(cursor::RenderCanvas {
+                    width: w,
+                    height: h,
+                    fps: 10,
+                    aspect_ratio: Some(ratio.into()),
+                    background: "#070b14".into(),
+                    video_position_y: Some(0.5),
+                    ..Default::default()
+                }),
+                audio: None,
+                audio_tracks: None,
+                annotations: Vec::new(),
+                texts: Vec::new(),
+                images: Vec::new(),
+                masks: Vec::new(),
+                gaps: Vec::new(),
+                captions: Vec::new(),
+                caption_mode: "burn-in".into(),
+                chapters: Vec::new(),
+                chapter_mode: "none".into(),
+            };
+
+            let settings = ExportSettings {
+                preset: "balanced".into(),
+                codec: "h264".into(),
+                encoder: "auto".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+
+            let res = render_timeline_composition(
+                &*ffmpeg.to_string_lossy(),
+                &out_path,
+                &plan,
+                &plan.project_id,
+                &asset_paths,
+                &settings,
+                encoding::ExportEncoder::Software,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &|_| {},
+                None,
+                Some(&ffprobe),
+            );
+            assert!(
+                res.is_ok(),
+                "render aspect ratio {} failed: {:?}",
+                ratio,
+                res.err()
+            );
+            assert!(
+                out_path.is_file(),
+                "exported mp4 for {} should exist",
+                ratio
+            );
+
+            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            assert!(
+                validation.is_ok(),
+                "validate mp4 for {} failed: {:?}",
+                ratio,
+                validation.err()
+            );
+        }
+
+        // Also test non-16:9 with gradient background plate (tests resolution match & no infinite -loop 1 queue)
+        {
+            let out_path = temp_dir.join("out_9_16_gradient.mp4");
+            let plan = RenderPlan {
+                project_id: "test-ratio-9-16-gradient".into(),
+                duration_ms: 500,
+                segments: vec![RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 500,
+                    output_start_ms: 0,
+                    output_end_ms: 500,
+                    source_width: Some(320),
+                    source_height: Some(180),
+                }],
+                overlays: Vec::new(),
+                zoom_segments: Vec::new(),
+                cursor_effects: Vec::new(),
+                overlay_render_plan: None,
+                canvas: Some(cursor::RenderCanvas {
+                    width: 180,
+                    height: 320,
+                    fps: 10,
+                    aspect_ratio: Some("9:16".into()),
+                    background: "linear-gradient(135deg, #1e1e2f 0%, #2a2a40 100%)".into(),
+                    video_position_y: Some(0.5),
+                    ..Default::default()
+                }),
+                audio: None,
+                audio_tracks: None,
+                annotations: Vec::new(),
+                texts: Vec::new(),
+                images: Vec::new(),
+                masks: Vec::new(),
+                gaps: Vec::new(),
+                captions: Vec::new(),
+                caption_mode: "burn-in".into(),
+                chapters: Vec::new(),
+                chapter_mode: "none".into(),
+            };
+
+            let settings = ExportSettings {
+                preset: "balanced".into(),
+                codec: "h264".into(),
+                encoder: "auto".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+
+            let res = render_timeline_composition(
+                &*ffmpeg.to_string_lossy(),
+                &out_path,
+                &plan,
+                &plan.project_id,
+                &asset_paths,
+                &settings,
+                encoding::ExportEncoder::Software,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &|_| {},
+                None,
+                Some(&ffprobe),
+            );
+            assert!(
+                res.is_ok(),
+                "render aspect ratio 9:16 with gradient failed: {:?}",
+                res.err()
+            );
+            assert!(
+                out_path.is_file(),
+                "exported mp4 for 9:16 gradient should exist"
+            );
+            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            assert!(
+                validation.is_ok(),
+                "validate mp4 for 9:16 gradient failed: {:?}",
+                validation.err()
+            );
+        }
+
+        // Also test non-16:9 with zoompan direct padding
+        {
+            let out_path = temp_dir.join("out_9_16_zoom.mp4");
+            let plan = RenderPlan {
+                project_id: "test-ratio-9-16-zoom".into(),
+                duration_ms: 500,
+                segments: vec![RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 500,
+                    output_start_ms: 0,
+                    output_end_ms: 500,
+                    source_width: Some(320),
+                    source_height: Some(180),
+                }],
+                overlays: Vec::new(),
+                zoom_segments: vec![RenderPlanZoomSegment {
+                    id: "zoom-1".into(),
+                    start_ms: 0,
+                    end_ms: 500,
+                    target: RenderCropFloat {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 160.0,
+                        height: 90.0,
+                    },
+                    scale: 1.5,
+                    from_scale: None,
+                    from_target: None,
+                    transition_in_ms: 100,
+                    transition_out_ms: 100,
+                    easing: "ease-in-out".into(),
+                    enabled: true,
+                    mode: "fixed".into(),
+                    source: "manual".into(),
+                    preset: "custom".into(),
+                    follow_deadzone_percent: None,
+                    follow_smoothing_alpha: None,
+                    label: None,
+                    keyframes: None,
+                    motion_plan: None,
+                }],
+                cursor_effects: Vec::new(),
+                overlay_render_plan: None,
+                canvas: Some(cursor::RenderCanvas {
+                    width: 180,
+                    height: 320,
+                    fps: 10,
+                    aspect_ratio: Some("9:16".into()),
+                    background: "#070b14".into(),
+                    video_position_y: Some(0.5),
+                    ..Default::default()
+                }),
+                audio: None,
+                audio_tracks: None,
+                annotations: Vec::new(),
+                texts: Vec::new(),
+                images: Vec::new(),
+                masks: Vec::new(),
+                gaps: Vec::new(),
+                captions: Vec::new(),
+                caption_mode: "burn-in".into(),
+                chapters: Vec::new(),
+                chapter_mode: "none".into(),
+            };
+
+            let settings = ExportSettings {
+                preset: "balanced".into(),
+                codec: "h264".into(),
+                encoder: "auto".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+
+            let res = render_timeline_composition(
+                &*ffmpeg.to_string_lossy(),
+                &out_path,
+                &plan,
+                &plan.project_id,
+                &asset_paths,
+                &settings,
+                encoding::ExportEncoder::Software,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &|_| {},
+                None,
+                Some(&ffprobe),
+            );
+            assert!(
+                res.is_ok(),
+                "render aspect ratio 9:16 with zoom failed: {:?}",
+                res.err()
+            );
+            assert!(
+                out_path.is_file(),
+                "exported mp4 for 9:16 zoom should exist"
+            );
+            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            assert!(
+                validation.is_ok(),
+                "validate mp4 for 9:16 zoom failed: {:?}",
+                validation.err()
+            );
+        }
+
+        // Also test non-16:9 with canvas shadow and rounded border
+        {
+            let out_path = temp_dir.join("out_9_16_shadow_border.mp4");
+            let plan = RenderPlan {
+                project_id: "test-ratio-9-16-shadow-border".into(),
+                duration_ms: 500,
+                segments: vec![RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 500,
+                    output_start_ms: 0,
+                    output_end_ms: 500,
+                    source_width: Some(320),
+                    source_height: Some(180),
+                }],
+                overlays: Vec::new(),
+                zoom_segments: Vec::new(),
+                cursor_effects: Vec::new(),
+                overlay_render_plan: None,
+                canvas: Some(cursor::RenderCanvas {
+                    width: 180,
+                    height: 320,
+                    fps: 10,
+                    aspect_ratio: Some("9:16".into()),
+                    background: "#070b14".into(),
+                    padding: 8,
+                    border_radius: 6,
+                    shadow: true,
+                    shadow_color: Some("#000000".into()),
+                    shadow_blur: Some(12.0),
+                    shadow_offset_x: Some(0.0),
+                    shadow_offset_y: Some(4.0),
+                    video_position_y: Some(0.5),
+                    ..Default::default()
+                }),
+                audio: None,
+                audio_tracks: None,
+                annotations: Vec::new(),
+                texts: Vec::new(),
+                images: Vec::new(),
+                masks: Vec::new(),
+                gaps: Vec::new(),
+                captions: Vec::new(),
+                caption_mode: "burn-in".into(),
+                chapters: Vec::new(),
+                chapter_mode: "none".into(),
+            };
+
+            let settings = ExportSettings {
+                preset: "balanced".into(),
+                codec: "h264".into(),
+                encoder: "auto".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+
+            let res = render_timeline_composition(
+                &*ffmpeg.to_string_lossy(),
+                &out_path,
+                &plan,
+                &plan.project_id,
+                &asset_paths,
+                &settings,
+                encoding::ExportEncoder::Software,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &|_| {},
+                None,
+                Some(&ffprobe),
+            );
+            assert!(
+                res.is_ok(),
+                "render aspect ratio 9:16 with shadow and border failed: {:?}",
+                res.err()
+            );
+            assert!(
+                out_path.is_file(),
+                "exported mp4 for 9:16 shadow border should exist"
+            );
+            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            assert!(
+                validation.is_ok(),
+                "validate mp4 for 9:16 shadow border failed: {:?}",
+                validation.err()
+            );
+        }
+
+        // Also test non-16:9 with image background asset
+        {
+            let img_path = temp_dir.join("bg_wallpaper.png");
+            let img_pixmap = tiny_skia::Pixmap::new(320, 180).unwrap();
+            img_pixmap.save_png(&img_path).unwrap();
+            let mut test_asset_paths = asset_paths.clone();
+            test_asset_paths.insert("asset-bg-wall".to_string(), img_path.clone());
+
+            let out_path = temp_dir.join("out_9_16_image_bg.mp4");
+            let plan = RenderPlan {
+                project_id: "test-ratio-9-16-image-bg".into(),
+                duration_ms: 500,
+                segments: vec![RenderSegment {
+                    asset_id: "asset-screen".into(),
+                    stream_index: Some(0),
+                    volume: None,
+                    fade_in_ms: None,
+                    fade_out_ms: None,
+                    volume_keyframes: None,
+                    audio_filter: None,
+                    speed: 1.0,
+                    source_in_ms: 0,
+                    source_out_ms: 500,
+                    output_start_ms: 0,
+                    output_end_ms: 500,
+                    source_width: Some(320),
+                    source_height: Some(180),
+                }],
+                overlays: Vec::new(),
+                zoom_segments: Vec::new(),
+                cursor_effects: Vec::new(),
+                overlay_render_plan: None,
+                canvas: Some(cursor::RenderCanvas {
+                    width: 180,
+                    height: 320,
+                    fps: 10,
+                    aspect_ratio: Some("9:16".into()),
+                    background: "asset-bg-wall".into(),
+                    background_fit: Some("cover".into()),
+                    background_blur: Some(10.0),
+                    background_dim: Some(0.2),
+                    video_position_y: Some(0.5),
+                    ..Default::default()
+                }),
+                audio: None,
+                audio_tracks: None,
+                annotations: Vec::new(),
+                texts: Vec::new(),
+                images: Vec::new(),
+                masks: Vec::new(),
+                gaps: Vec::new(),
+                captions: Vec::new(),
+                caption_mode: "burn-in".into(),
+                chapters: Vec::new(),
+                chapter_mode: "none".into(),
+            };
+
+            let settings = ExportSettings {
+                preset: "balanced".into(),
+                codec: "h264".into(),
+                encoder: "auto".into(),
+                container: "mp4".into(),
+                caption_mode: "burn-in".into(),
+                chapter_mode: "none".into(),
+                range: None,
+            };
+
+            let res = render_timeline_composition(
+                &*ffmpeg.to_string_lossy(),
+                &out_path,
+                &plan,
+                &plan.project_id,
+                &test_asset_paths,
+                &settings,
+                encoding::ExportEncoder::Software,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &|_| {},
+                None,
+                Some(&ffprobe),
+            );
+            assert!(
+                res.is_ok(),
+                "render aspect ratio 9:16 with image bg failed: {:?}",
+                res.err()
+            );
+            assert!(
+                out_path.is_file(),
+                "exported mp4 for 9:16 image bg should exist"
+            );
+            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            assert!(
+                validation.is_ok(),
+                "validate mp4 for 9:16 image bg failed: {:?}",
+                validation.err()
+            );
+        }
+
+        // Also run camera overlay alignment with shadow to ensure camera shadow loop elimination works
+        test_camera_overlay_odd_dimensions_alignment();
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -8116,5 +8923,387 @@ mod tests {
             out_path.metadata().unwrap().len() > 0,
             "exported video must not be empty"
         );
+    }
+
+    #[test]
+    fn test_camera_overlay_odd_dimensions_alignment() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-cam-align-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let screen_path = temp_dir.join("screen.mp4");
+        let camera_path = temp_dir.join("camera.mp4");
+        let out_path = temp_dir.join("aligned_out.mp4");
+
+        // 1-second screen source (320x180)
+        let s1 = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x180:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(s1.success(), "create screen source");
+
+        // 1-second camera source (320x240)
+        let s2 = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&camera_path)
+            .status()
+            .unwrap();
+        assert!(s2.success(), "create camera source");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("screen-asset".to_string(), screen_path);
+        asset_paths.insert("camera-asset".to_string(), camera_path);
+
+        // Canvas 4:5 (240x300) with two overlays having ODD dimensions and float coordinates
+        let plan = RenderPlan {
+            project_id: "test-cam-align".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "screen-asset".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(180),
+            }],
+            overlays: vec![
+                RenderPlanOverlay {
+                    asset_id: "camera-asset".into(),
+                    stream_index: Some(0),
+                    source_in_ms: 0,
+                    source_out_ms: 500,
+                    output_start_ms: 0,
+                    output_end_ms: 500,
+                    speed: 1.0,
+                    x: 21.5,
+                    y: 35.5,
+                    width: 75.0,  // ODD dimension
+                    height: 75.0, // ODD dimension
+                    shape: "rounded".into(),
+                    opacity: 1.0,
+                    border_color: Some("#ffffff".into()),
+                    border_width: Some(2.0),
+                    border_opacity: Some(1.0),
+                    shadow_enabled: Some(true),
+                    shadow_color: Some("#000000".into()),
+                    shadow_blur: Some(8.0),
+                    shadow_offset_x: Some(0.0),
+                    shadow_offset_y: Some(4.0),
+                    crop: None,
+                    visible: true,
+                    preset: None,
+                },
+                RenderPlanOverlay {
+                    asset_id: "camera-asset".into(),
+                    stream_index: Some(0),
+                    source_in_ms: 500,
+                    source_out_ms: 1000,
+                    output_start_ms: 500,
+                    output_end_ms: 1000,
+                    speed: 1.0,
+                    x: 37.3,
+                    y: 49.7,
+                    width: 81.0,  // ODD dimension
+                    height: 81.0, // ODD dimension
+                    shape: "circle".into(),
+                    opacity: 1.0,
+                    border_color: Some("#3884f3".into()),
+                    border_width: Some(3.0),
+                    border_opacity: Some(0.5),
+                    shadow_enabled: Some(true),
+                    shadow_color: Some("#000000".into()),
+                    shadow_blur: Some(12.0),
+                    shadow_offset_x: Some(0.0),
+                    shadow_offset_y: Some(6.0),
+                    crop: None,
+                    visible: true,
+                    preset: None,
+                },
+            ],
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 240,
+                height: 300,
+                fps: 10,
+                aspect_ratio: Some("4:5".into()),
+                background: "#070b14".into(),
+                padding: 10,
+                border_radius: 8,
+                shadow: true,
+                video_position_y: Some(0.5),
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            masks: Vec::new(),
+            gaps: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            &plan.project_id,
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "render with odd overlay dimensions: {:?}",
+            res.err()
+        );
+        assert!(out_path.is_file(), "output video exists");
+
+        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        assert!(validation.is_ok(), "validation: {:?}", validation.err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_camera_overlay_renders_throughout_duration() {
+        use image::GenericImageView;
+
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-cam-render-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let screen_path = temp_dir.join("screen.mp4");
+        let camera_path = temp_dir.join("camera.mp4");
+        let out_path = temp_dir.join("out.mp4");
+        let frame_path = temp_dir.join("extracted_frame.png");
+
+        // 1-second solid black screen source (320x240)
+        let s1 = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:r=10:d=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(s1.success(), "create screen source");
+
+        // 1-second solid red camera source (100x100)
+        let s2 = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=100x100:r=10:d=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&camera_path)
+            .status()
+            .unwrap();
+        assert!(s2.success(), "create camera source");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("screen-asset".to_string(), screen_path);
+        asset_paths.insert("camera-asset".to_string(), camera_path);
+
+        let plan = RenderPlan {
+            project_id: "test-cam-render".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "screen-asset".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            overlays: vec![RenderPlanOverlay {
+                asset_id: "camera-asset".into(),
+                stream_index: Some(0),
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                speed: 1.0,
+                x: 50.0,
+                y: 50.0,
+                width: 100.0,
+                height: 100.0,
+                shape: "circle".into(),
+                opacity: 1.0,
+                border_color: Some("#ffffff".into()),
+                border_width: Some(2.0),
+                border_opacity: Some(1.0),
+                shadow_enabled: Some(true),
+                shadow_color: Some("#000000".into()),
+                shadow_blur: Some(8.0),
+                shadow_offset_x: Some(0.0),
+                shadow_offset_y: Some(4.0),
+                crop: None,
+                visible: true,
+                preset: None,
+            }],
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                aspect_ratio: None,
+                background: "#000000".into(),
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            masks: Vec::new(),
+            gaps: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            &plan.project_id,
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "render camera overlay: {:?}", res.err());
+        assert!(out_path.is_file(), "output video exists");
+
+        // Extract a frame at t=0.5s (500ms into the 1s export)
+        let extract = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args(["-y", "-ss", "0.5", "-i"])
+            .arg(&out_path)
+            .args(["-vframes", "1"])
+            .arg(&frame_path)
+            .status()
+            .unwrap();
+        assert!(extract.success(), "extract frame at 0.5s");
+        assert!(frame_path.is_file(), "frame extracted");
+
+        let img = image::open(&frame_path).expect("open extracted frame");
+        // Check pixel at the center of the camera circle: (x = 50 + 50 = 100, y = 50 + 50 = 100)
+        let pixel = img.get_pixel(100, 100);
+        // Red camera video should produce a high red channel (>= 150) and low blue channel (< 80)
+        assert!(
+            pixel[0] > 150 && pixel[2] < 80,
+            "Center of camera overlay at 0.5s should show camera video (red), but got RGBA: {:?}",
+            pixel
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

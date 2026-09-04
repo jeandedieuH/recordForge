@@ -223,10 +223,14 @@ pub(crate) fn append_export_video_args(
                 .arg(format!("{bitrate_kbps}k"));
         }
     }
+    let pix_fmt = match encoder {
+        ExportEncoder::Qsv => "nv12",
+        _ => "yuv420p",
+    };
     command
         .arg("-r")
         .arg(target_fps.to_string())
-        .args(["-pix_fmt", "yuv420p"]);
+        .args(["-pix_fmt", pix_fmt]);
 }
 
 #[cfg(test)]
@@ -374,6 +378,7 @@ mod tests {
             .any(|pair| pair == ["-global_quality", "20"]));
         // Lookahead is only exposed for the h264 qsv encoder.
         assert!(!args.contains(&"-look_ahead".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"]));
     }
 
     #[test]
