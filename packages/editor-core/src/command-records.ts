@@ -130,6 +130,14 @@ export const splitClipCommandSchema = commandMetaSchema.extend({
 
 export type SplitClipCommand = z.infer<typeof splitClipCommandSchema>
 
+export const splitAllClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("split-all-clips"),
+  splitTimeMs: z.number().int().min(0),
+  trackIds: z.array(z.string()).optional(),
+})
+
+export type SplitAllClipsCommand = z.infer<typeof splitAllClipsCommandSchema>
+
 export const moveClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("move-clip"),
   clipId: z.string(),
@@ -546,6 +554,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   reorderTracksCommandSchema,
   trimClipCommandSchema,
   splitClipCommandSchema,
+  splitAllClipsCommandSchema,
   moveClipCommandSchema,
   duplicateClipCommandSchema,
   duplicateClipsCommandSchema,

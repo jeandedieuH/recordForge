@@ -61,6 +61,7 @@ export interface ZoomTrackRowProps {
     endMs: number,
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
+  tool?: "select" | "split" | "range"
 }
 
 interface SegmentGesture {
@@ -78,6 +79,7 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
   track,
   top,
   height,
+  tool = "select",
   visibleStartMs,
   visibleEndMs,
   pixelsPerMs,
@@ -179,6 +181,7 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
           track={track}
           height={height}
           pixelsPerMs={pixelsPerMs}
+          tool={tool}
           selected={selectedZoomId === segment.id}
           snapTargets={snapTargets}
           snapEnabled={snapEnabled}
@@ -200,6 +203,7 @@ interface ZoomSegmentItemProps {
   track: TimelineTrack
   height: number
   pixelsPerMs: number
+  tool?: "select" | "split" | "range"
   selected: boolean
   snapTargets: SnapTarget[]
   snapEnabled: boolean
@@ -227,6 +231,7 @@ function ZoomSegmentItem({
   track,
   height,
   pixelsPerMs,
+  tool = "select",
   selected,
   snapTargets,
   snapEnabled,
@@ -371,7 +376,8 @@ function ZoomSegmentItem({
           aria-label={`${segment.enabled ? "Zoom" : "Disabled zoom"} segment ${segment.scale.toFixed(1)}x`}
           aria-pressed={selected}
           className={cn(
-            "group/zoom absolute flex items-center overflow-hidden rounded-lg border border-primary/70 bg-linear-to-b from-primary/30 to-primary/15 px-2 text-left text-[11px] transition-all duration-fast select-none cursor-grab active:cursor-grabbing hover:from-primary/40 hover:to-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            "group/zoom absolute flex items-center overflow-hidden rounded-lg border border-primary/70 bg-linear-to-b from-primary/30 to-primary/15 px-2 text-left text-[11px] transition-all duration-fast select-none hover:from-primary/40 hover:to-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            tool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing",
             selected
               ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-[0_0_12px_rgba(9,77,178,0.45)] z-20"
               : "z-10",
@@ -383,7 +389,12 @@ function ZoomSegmentItem({
             width: `${width}px`,
             height: `${barHeight}px`,
           }}
-          onPointerDown={(event) => beginGesture(event, "move")}
+          onPointerDown={(event) => {
+            if (tool === "split") {
+              return
+            }
+            beginGesture(event, "move")
+          }}
           onPointerMove={handlePointerMove}
           onPointerUp={finishGesture}
           onPointerCancel={finishGesture}
@@ -393,6 +404,9 @@ function ZoomSegmentItem({
             }
           }}
           onClick={(event) => {
+            if (tool === "split") {
+              return
+            }
             event.stopPropagation()
             if (suppressClickRef.current) {
               suppressClickRef.current = false
@@ -403,7 +417,7 @@ function ZoomSegmentItem({
           title={`${segment.label ? `${segment.label} · ` : ""}${segment.scale.toFixed(1)}× (${formatZoomTime(segment.startMs)} → ${formatZoomTime(segment.startMs + segment.durationMs)})`}
         >
           {/* Start Resize Handle */}
-          {!segment.locked && !track.locked ? (
+          {!segment.locked && !track.locked && tool !== "split" ? (
             <div
               className="absolute left-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/zoom:opacity-100 hover:w-3.5 hover:bg-primary/30"
               onPointerDown={(e) => beginGesture(e, "resize-start")}
@@ -454,7 +468,7 @@ function ZoomSegmentItem({
           </div>
 
           {/* End Resize Handle */}
-          {!segment.locked && !track.locked ? (
+          {!segment.locked && !track.locked && tool !== "split" ? (
             <div
               className="absolute right-0 inset-y-0 z-30 flex w-3 cursor-ew-resize items-center justify-center opacity-0 transition-all duration-fast group-hover/zoom:opacity-100 hover:w-3.5 hover:bg-primary/30"
               onPointerDown={(e) => beginGesture(e, "resize-end")}

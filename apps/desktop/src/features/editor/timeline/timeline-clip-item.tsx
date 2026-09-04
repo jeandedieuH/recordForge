@@ -87,6 +87,7 @@ export interface TimelineClipItemProps {
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   getTimelineTime: (clientX: number) => number
+  tool?: "select" | "split" | "range"
   onSnapGuide: (target: SnapTarget | null) => void
   onSpriteError: () => void
   onDuplicateClip: (clip: TimelineClip) => void
@@ -241,6 +242,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   snapTargets,
   snapEnabled,
   snapThresholdMs,
+  tool = "select",
   onSelectClip,
   onMoveClip,
   onTrimClip,
@@ -402,7 +404,8 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           aria-label={`${getClipLabel(clip, track)}`}
           aria-pressed={selected}
           className={cn(
-            "group/clip absolute flex min-w-8 items-center overflow-hidden rounded-lg border text-left shadow-xs transition-all duration-fast select-none cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            "group/clip absolute flex min-w-8 items-center overflow-hidden rounded-lg border text-left shadow-xs transition-all duration-fast select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            tool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing",
             theme.cardClass,
             selected
               ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-[0_0_12px_rgba(9,77,178,0.45)] z-20"
@@ -416,6 +419,9 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             height: `${clipHeight}px`,
           }}
           onPointerDown={(event) => {
+            if (tool === "split") {
+              return
+            }
             if (
               event.target instanceof Element &&
               event.target.closest("[data-envelope-interactive]")
@@ -435,6 +441,9 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             }
           }}
           onClick={(event) => {
+            if (tool === "split") {
+              return
+            }
             if (
               event.target instanceof Element &&
               event.target.closest("[data-envelope-interactive]")
@@ -490,7 +499,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           <div className={cn("absolute inset-x-0 top-0 h-0.5 opacity-80", theme.handleGlow)} />
 
           {/* Start Trim Handle (Tactile Bracket) */}
-          {!isLocked ? (
+          {!isLocked && tool !== "split" ? (
             <div
               className="group/handle-start absolute left-0 inset-y-0 z-30 flex w-3 cursor-col-resize items-center justify-start opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:opacity-100"
               onPointerDown={(e) => beginGesture(e, "trim-start")}
@@ -563,7 +572,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           </div>
 
           {/* End Trim Handle (Tactile Bracket) */}
-          {!isLocked ? (
+          {!isLocked && tool !== "split" ? (
             <div
               className="group/handle-end absolute right-0 inset-y-0 z-30 flex w-3 cursor-col-resize items-center justify-end opacity-0 transition-all duration-fast group-hover/clip:opacity-100 hover:opacity-100"
               onPointerDown={(e) => beginGesture(e, "trim-end")}

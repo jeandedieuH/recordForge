@@ -12,7 +12,7 @@
     },
     "apps/desktop": {
       "name": "@recordforge/desktop",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@dnd-kit/core": "^6.3.1",
         "@dnd-kit/sortable": "^10.0.0",
@@ -53,7 +53,7 @@
     },
     "apps/marketing": {
       "name": "@recordforge/marketing",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@astrojs/react": "^6.0.3",
         "astro": "^7.2.3",
@@ -73,7 +73,7 @@
     },
     "packages/config": {
       "name": "@recordforge/config",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "devDependencies": {
         "@eslint/js": "^10.0.1",
         "eslint": "^10.8.0",
@@ -86,7 +86,7 @@
     },
     "packages/contracts": {
       "name": "@recordforge/contracts",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "zod": "^3.25.11",
       },
@@ -100,7 +100,7 @@
     },
     "packages/cursor-core": {
       "name": "@recordforge/cursor-core",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -114,7 +114,7 @@
     },
     "packages/domain": {
       "name": "@recordforge/domain",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -128,7 +128,7 @@
     },
     "packages/editor-core": {
       "name": "@recordforge/editor-core",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
@@ -145,7 +145,7 @@
     },
     "packages/media-core": {
       "name": "@recordforge/media-core",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
@@ -162,7 +162,7 @@
     },
     "packages/overlay-core": {
       "name": "@recordforge/overlay-core",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -176,7 +176,7 @@
     },
     "packages/storage-core": {
       "name": "@recordforge/storage-core",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/domain": "workspace:*",
@@ -191,7 +191,7 @@
     },
     "packages/ui": {
       "name": "@recordforge/ui",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@radix-ui/react-alert-dialog": "^1.1.23",
         "@radix-ui/react-context-menu": "^2.3.7",
@@ -208,11 +208,10 @@
         "@radix-ui/react-toggle-group": "^1.1.19",
         "@radix-ui/react-tooltip": "^1.2.16",
         "class-variance-authority": "^0.7.1",
-        "clsx": "^2.1.1",
+        "cn": "^0.2.5",
         "lucide-react": "1.27.0",
         "react": "^19.1.0",
         "react-dom": "^19.1.0",
-        "tailwind-merge": "^3.6.0",
       },
       "devDependencies": {
         "@recordforge/config": "workspace:*",
@@ -231,7 +230,7 @@
     },
     "tooling/benchmarks": {
       "name": "@recordforge/editor-benchmarks",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
         "@recordforge/cursor-core": "workspace:*",
@@ -248,11 +247,11 @@
     },
     "tooling/ffmpeg": {
       "name": "@recordforge/setup-ffmpeg",
-      "version": "1.0.0",
+      "version": "1.3.2",
     },
     "tooling/golden-fixtures": {
       "name": "@recordforge/golden-fixtures",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "dependencies": {
         "@recordforge/contracts": "workspace:*",
       },
@@ -265,7 +264,7 @@
     },
     "tooling/scripts": {
       "name": "@recordforge/tooling-scripts",
-      "version": "1.0.0",
+      "version": "1.3.2",
       "devDependencies": {
         "sharp": "^0.35.3",
       },
@@ -968,6 +967,8 @@
 
     "clsx": ["clsx@2.1.1", "", {}, "sha512-eYm0QWBtUrBWZWG0d386OGAw16Z995PiOVo2B7bjWSbHedGl5e0ZWaq65kOGgUSNesEIDkB9ISbTg/JK9dhCZA=="],
 
+    "cn": ["cn@0.2.5", "", { "bin": { "cn": "bin/cn.mjs" } }, "sha512-OCjZtMeQfXbI4Es1+EIjkd77gvWzaE689gD8KhfexlqjClC06qR1MQBR+Z35ZMSPNEBWyHiItW1Soy0UvwNv9w=="],
+
     "color-convert": ["color-convert@2.0.1", "", { "dependencies": { "color-name": "~1.1.4" } }, "sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ=="],
 
     "color-name": ["color-name@1.1.4", "", {}, "sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA=="],
@@ -1373,8 +1374,6 @@
     "supports-color": ["supports-color@7.2.0", "", { "dependencies": { "has-flag": "^4.0.0" } }, "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw=="],
 
     "svgo": ["svgo@4.0.2", "", { "dependencies": { "commander": "^11.1.0", "css-select": "^5.1.0", "css-tree": "^3.0.1", "css-what": "^6.1.0", "csso": "^5.0.5", "picocolors": "^1.1.1", "sax": "^1.5.0" }, "bin": "./bin/svgo.js" }, "sha512-ekx94z1rRc5LDi6oSUaeRnYhd0UOJxdtQCL2rF8xpWxD3TPAsISWOrxezqGovqS38GRZOdpDfvQe3ts6F7nsng=="],
-
-    "tailwind-merge": ["tailwind-merge@3.6.0", "", {}, "sha512-uxL7qAVQriqRQPAyK3pj66VqskWqoZ37PW94jwOTwNfq/z9oyu1V+eqrZqtR2+fCiXdYOZe/Modt8GtvqNzu+w=="],
 
     "tailwindcss": ["tailwindcss@4.3.3", "", {}, "sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ=="],
 

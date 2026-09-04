@@ -38,6 +38,7 @@ import {
   createRippleDeleteClipsCommand,
   createRippleDeleteRangeCommand,
   createResizeCursorRangeCommand,
+  createSplitAllClipsCommand,
   createSplitClipCommand,
   createSplitCursorRangeCommand,
   createSplitZoomSegmentCommand,
@@ -745,25 +746,37 @@ export function TimelineView({
     setScroll(0)
   }, [setZoom, setScroll])
 
+  const handleSplitAllAtTime = useCallback(
+    (timeMs: number) => {
+      const command = createSplitAllClipsCommand(timeMs)
+      const success = execute(command)
+      if (success) {
+        toast({
+          title: "Timeline split",
+          description: `Split clips across unlocked tracks at ${formatTimelineTime(timeMs)}`,
+        })
+      } else {
+        toast({
+          title: "Cannot split here",
+          description: "No clips or zoom segments intersect this position to split.",
+        })
+      }
+    },
+    [execute, toast],
+  )
+
   const splitSelected = useCallback(() => {
     if (!selectedClip || selectedClip.track.locked) {
-      // If no clip is explicitly selected, attempt to split the top clip at playhead
-      if (timeline) {
-        for (const track of timeline.tracks) {
-          if (track.locked) continue
-          const clipAtPlayhead = track.clips.find(
-            (c) => view.playheadMs > c.startMs && view.playheadMs < c.startMs + c.durationMs,
-          )
-          if (clipAtPlayhead) {
-            execute(
-              clipAtPlayhead.kind === "cursor-effect"
-                ? createSplitCursorRangeCommand(clipAtPlayhead.id, view.playheadMs)
-                : createSplitClipCommand(clipAtPlayhead.id, view.playheadMs),
-            )
-            return
-          }
-        }
-      }
+      // If no clip is explicitly selected, split all clips at playhead
+      handleSplitAllAtTime(view.playheadMs)
+      return
+    }
+    const isIntersecting =
+      view.playheadMs > selectedClip.clip.startMs &&
+      view.playheadMs < selectedClip.clip.startMs + selectedClip.clip.durationMs
+    if (!isIntersecting) {
+      // If playhead does not intersect the selected clip, split all clips at playhead
+      handleSplitAllAtTime(view.playheadMs)
       return
     }
     if (selectedClip.clip.kind === "cursor-effect") {
@@ -771,7 +784,7 @@ export function TimelineView({
       return
     }
     execute(createSplitClipCommand(selectedClip.clip.id, view.playheadMs))
-  }, [selectedClip, view.playheadMs, timeline, execute])
+  }, [selectedClip, view.playheadMs, execute, handleSplitAllAtTime])
 
   const deleteSelected = useCallback(
     (ripple: boolean) => {
@@ -956,32 +969,7 @@ export function TimelineView({
   }
 
   function splitAllAtPlayhead() {
-    if (!timeline) return
-    const clipsToSplit = timeline.tracks.flatMap((track) => {
-      if (track.locked) return []
-      return track.clips.filter(
-        (c) => view.playheadMs > c.startMs + 1 && view.playheadMs < c.startMs + c.durationMs - 1,
-      )
-    })
-    for (const clip of clipsToSplit) {
-      if (clip.kind === "cursor-effect") {
-        execute(createSplitCursorRangeCommand(clip.id, view.playheadMs))
-      } else {
-        execute(createSplitClipCommand(clip.id, view.playheadMs))
-      }
-    }
-    const zoomTrack = timeline.tracks.find((t) => t.kind === "zoom")
-    if (!zoomTrack?.locked) {
-      const zoomToSplit = getManualZoomSegments(timeline).find(
-        (s) =>
-          !s.locked &&
-          view.playheadMs > s.startMs + 1 &&
-          view.playheadMs < s.startMs + s.durationMs - 1,
-      )
-      if (zoomToSplit) {
-        execute(createSplitZoomSegmentCommand(zoomToSplit.id, view.playheadMs))
-      }
-    }
+    handleSplitAllAtTime(view.playheadMs)
   }
 
   function deleteClip(clip: TimelineClip, ripple = false) {
@@ -1105,14 +1093,8 @@ export function TimelineView({
   }
 
   function selectClip(clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) {
-    if (tool === "split" && !track.locked && !(clip.kind === "cursor-effect" && clip.locked)) {
-      if (view.playheadMs > clip.startMs && view.playheadMs < clip.startMs + clip.durationMs) {
-        execute(
-          clip.kind === "cursor-effect"
-            ? createSplitCursorRangeCommand(clip.id, view.playheadMs)
-            : createSplitClipCommand(clip.id, view.playheadMs),
-        )
-      }
+    if (tool === "split") {
+      // Split clicks are handled directly at the pointer position by TimelineLanes
       return
     }
     if (event.shiftKey && view.selection?.kind === "clip") {
@@ -1390,15 +1372,18 @@ export function TimelineView({
       } else if (key === "escape") {
         event.preventDefault()
         overlayInteraction.cancel()
+        if (tool !== "select") {
+          setTool("select")
+        }
         if (view.selection) {
           setSelection(null)
         }
       } else if (key === "v") {
         setTool("select")
       } else if (key === "c") {
-        setTool("split")
+        setTool((prev) => (prev === "split" ? "select" : "split"))
       } else if (key === "r") {
-        setTool("range")
+        setTool((prev) => (prev === "range" ? "select" : "range"))
       } else if (key === "s") {
         event.preventDefault()
         splitSelected()
@@ -2015,6 +2000,7 @@ export function TimelineView({
           onAddAssetAtTime={addAssetAtTime}
           onCursorRangeAction={onCursorRangeAction}
           onZoomSegmentAction={onZoomSegmentAction}
+          onSplitAllAtTime={handleSplitAllAtTime}
           onSplitAllAtPlayhead={splitAllAtPlayhead}
           onDeselectAll={() => setSelection(null)}
           onToggleTrackMuted={(track) =>

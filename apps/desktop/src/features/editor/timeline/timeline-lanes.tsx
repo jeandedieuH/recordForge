@@ -12,7 +12,7 @@ import type {
   TimelineViewState,
   ZoomPreset,
 } from "@recordforge/contracts"
-import { buildSnapTargets, type SnapTarget } from "@recordforge/editor-core"
+import { buildSnapTargets, snapTime, type SnapTarget } from "@recordforge/editor-core"
 import { BookmarkPlus, Scissors, Sparkles, Trash2, X, ZoomIn } from "lucide-react"
 import {
   ContextMenu,
@@ -20,6 +20,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
+  cn,
 } from "@recordforge/ui"
 import type {
   DerivativeResource,
@@ -138,6 +139,7 @@ export interface TimelineLanesProps {
   onZoomSegmentAction?: (action: ZoomSegmentAction) => void
   showMinimap?: boolean
   onRippleDeleteRange?: (startMs: number, endMs: number) => void
+  onSplitAllAtTime?: (timeMs: number) => void
   onSplitAllAtPlayhead?: () => void
   onDeselectAll?: () => void
 }
@@ -197,6 +199,7 @@ export function TimelineLanes({
   onMoveZoomSegment,
   onResizeZoomSegment,
   onRippleDeleteRange,
+  onSplitAllAtTime,
   onSplitAllAtPlayhead,
   onDeselectAll,
 }: TimelineLanesProps) {
@@ -389,6 +392,17 @@ export function TimelineLanes({
     }
   }
 
+  function isMenuTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof Element &&
+      Boolean(
+        target.closest(
+          "[role='menu'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-radix-collection-item]",
+        ),
+      )
+    )
+  }
+
   function isInteractiveTarget(target: EventTarget | null): boolean {
     return (
       target instanceof Element &&
@@ -408,7 +422,21 @@ export function TimelineLanes({
   } | null>(null)
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    if (e.button !== 0 || isInteractiveTarget(e.target)) return
+    if (e.button !== 0 || isMenuTarget(e.target)) return
+
+    if (tool === "split") {
+      const rawMs = timelineTimeFromClientX(e.clientX)
+      const snap = snapTime(rawMs, snapTargets, {
+        enabled: view.snapEnabled && !e.altKey,
+        thresholdMs: view.snapThresholdMs,
+      })
+      const splitTimeMs = snap.snapped ? snap.timeMs : Math.round(rawMs)
+      onSeek(splitTimeMs)
+      onSplitAllAtTime?.(splitTimeMs)
+      return
+    }
+
+    if (isInteractiveTarget(e.target)) return
     const startMs = timelineTimeFromClientX(e.clientX)
 
     const now = Date.now()
@@ -435,25 +463,27 @@ export function TimelineLanes({
     onSeek(startMs)
     onDeselectAll?.()
 
-    if (tool === "split") {
-      return
-    }
-
     // Set up marquee in case user drags
     marqueePointerRef.current = { pointerId: e.pointerId, startMs, moved: false }
     e.currentTarget.setPointerCapture(e.pointerId)
   }
 
   function handleLanesDoubleClick(e: React.MouseEvent<HTMLDivElement>) {
-    if (isInteractiveTarget(e.target)) return
+    if (tool === "split" || isInteractiveTarget(e.target)) return
     const startMs = timelineTimeFromClientX(e.clientX)
     onAddZoomAtTime?.(startMs)
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     if (tool === "split") {
-      const currentMs = timelineTimeFromClientX(e.clientX)
+      const rawMs = timelineTimeFromClientX(e.clientX)
+      const snap = snapTime(rawMs, snapTargets, {
+        enabled: view.snapEnabled && !e.altKey,
+        thresholdMs: view.snapThresholdMs,
+      })
+      const currentMs = snap.snapped ? snap.timeMs : Math.round(rawMs)
       setRazorHoverMs(currentMs)
+      setSnapGuide(snap.snapped ? snap.target : null)
     }
 
     const gesture = marqueePointerRef.current
@@ -726,14 +756,20 @@ export function TimelineLanes({
         {/* Right Column: Scrollable Ruler & Tracks Area */}
         <div
           ref={scrollRef}
-          className="min-w-0 flex-1 overflow-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+          className={cn(
+            "min-w-0 flex-1 overflow-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
+            tool === "split" && "cursor-crosshair",
+          )}
           onScroll={handleScroll}
           onPointerDown={handlePointerDown}
           onDoubleClick={handleLanesDoubleClick}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
-          onPointerLeave={() => setRazorHoverMs(null)}
+          onPointerLeave={() => {
+            setRazorHoverMs(null)
+            setSnapGuide(null)
+          }}
           onDragOver={handleAssetDragOver}
           onDrop={handleAssetDrop}
           onKeyDown={(e) => {
@@ -821,8 +857,11 @@ export function TimelineLanes({
                     className="pointer-events-none absolute inset-y-0 z-30 flex flex-col items-center -translate-x-1/2"
                     style={{ left: `${razorHoverMs * pixelsPerMs}px` }}
                   >
-                    <div className="rounded bg-destructive p-1 text-white shadow-e2">
+                    <div className="flex items-center gap-1 rounded-md bg-destructive px-1.5 py-0.5 text-foreground shadow-e2">
                       <Scissors className="size-3" />
+                      <span className="font-mono text-[10px] font-semibold leading-none">
+                        {formatTimelineTime(razorHoverMs)}
+                      </span>
                     </div>
                     <div className="h-full w-px bg-destructive shadow-[0_0_6px_rgba(239,68,68,0.8)]" />
                   </div>
@@ -861,6 +900,7 @@ export function TimelineLanes({
                         playheadMs={view.playheadMs}
                         cursorClickTimesMs={cursorClickTimesMs}
                         getTimelineTime={timelineTimeFromClientX}
+                        tool={tool}
                         onSelectZoom={onSelectZoom}
                         onAddZoomAtTime={onAddZoomAtTime}
                         onZoomSegmentAction={onZoomSegmentAction}
@@ -896,7 +936,10 @@ export function TimelineLanes({
                   return (
                     <div
                       key={track.id}
-                      className="absolute inset-x-0 flex items-center border-b border-border/70"
+                      className={cn(
+                        "absolute inset-x-0 flex items-center border-b border-border/70",
+                        tool === "split" && "cursor-crosshair",
+                      )}
                       style={{ top: virtualTrack.start, height: virtualTrack.size }}
                     >
                       {/* Render Gap-Closing Affordances on Screen Track */}
@@ -942,6 +985,7 @@ export function TimelineLanes({
                           height={virtualTrack.size}
                           pixelsPerMs={pixelsPerMs}
                           selected={selectedClipIds.has(clip.id)}
+                          tool={tool}
                           playheadMs={view.playheadMs}
                           frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
                           collapsed={view.collapsedTrackIds.includes(track.id)}

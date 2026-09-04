@@ -69,6 +69,7 @@ import type {
   RippleDeleteClipsCommand,
   RippleDeleteRangeCommand,
   SplitClipCommand,
+  SplitAllClipsCommand,
   SplitCursorRangeCommand,
   SplitZoomSegmentCommand,
   TrimClipCommand,
@@ -463,6 +464,15 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "split-all-clips": {
+      if (command.splitTimeMs < 0) {
+        return {
+          ok: false,
+          error: editorError("invalid_split", "Split time cannot be negative"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
     case "update-track": {
       const track = findTrack(state, command.trackId)
       if (!track) return { ok: false, error: editorError("track_not_found", "Track not found") }
@@ -711,6 +721,8 @@ export function applyCommand(
       return applyTrimClip(state, command)
     case "split-clip":
       return applySplitClip(state, command)
+    case "split-all-clips":
+      return applySplitAllClips(state, command)
     case "move-clip":
       return applyMoveClip(state, command)
     case "duplicate-clip":
@@ -1068,6 +1080,142 @@ function applySplitClip(
   if (!trackResult.ok) return trackResult
 
   return { ok: true, value: updateTrackInState(state, track.id, trackResult.value) }
+}
+
+function applySplitAllClips(
+  state: TimelineState,
+  command: SplitAllClipsCommand,
+): CommandResult<TimelineState> {
+  const splitTimeMs = command.splitTimeMs
+  const targetTrackIds = command.trackIds ? new Set(command.trackIds) : null
+
+  let nextState = state
+  let splitCount = 0
+
+  for (const track of state.tracks) {
+    if (track.locked) continue
+    if (targetTrackIds && !targetTrackIds.has(track.id)) continue
+
+    // Find any clip on this track spanning splitTimeMs
+    const eligibleClips = track.clips.filter((clip) => {
+      if ("locked" in clip && Boolean((clip as { locked?: boolean }).locked)) return false
+      const clipEndMs = clip.startMs + clip.durationMs
+      return splitTimeMs > clip.startMs + 1 && splitTimeMs < clipEndMs - 1
+    })
+
+    if (eligibleClips.length === 0) continue
+
+    let updatedClips = [...track.clips]
+    let trackModified = false
+
+    for (const clip of eligibleClips) {
+      if (clip.kind === "cursor-effect") {
+        const splitOffset = splitTimeMs - clip.startMs
+        const left: CursorEffectClip = {
+          ...clip,
+          id: `${clip.id}:left:${splitTimeMs}`,
+          durationMs: splitOffset,
+        }
+        const right: CursorEffectClip = {
+          ...clip,
+          id: `${clip.id}:right:${splitTimeMs}`,
+          startMs: splitTimeMs,
+          durationMs: clip.durationMs - splitOffset,
+        }
+        updatedClips = updatedClips.filter((c) => c.id !== clip.id).concat(left, right)
+        splitCount++
+        trackModified = true
+        continue
+      }
+
+      const mappedSplitSource = timelineToSource(clip, splitTimeMs)
+      if (mappedSplitSource === null) continue
+      const splitSource = Math.round(mappedSplitSource)
+      if (splitSource <= clip.sourceInMs || splitSource >= clip.sourceOutMs) continue
+
+      const leftDuration = Math.round((splitSource - clip.sourceInMs) / clip.speed)
+      const rightDuration = Math.round((clip.sourceOutMs - splitSource) / clip.speed)
+      const leftClipId = `${clip.id}:split:${splitTimeMs}:left`
+      const rightClipId = `${clip.id}:split:${splitTimeMs}:right`
+
+      const left: TimelineClip = {
+        ...clip,
+        id: leftClipId,
+        durationMs: leftDuration,
+        sourceOutMs: splitSource,
+      }
+
+      const right: TimelineClip = {
+        ...clip,
+        id: rightClipId,
+        startMs: splitTimeMs,
+        durationMs: rightDuration,
+        sourceInMs: splitSource,
+      }
+
+      updatedClips = updatedClips.filter((c) => c.id !== clip.id).concat(left, right)
+      splitCount++
+      trackModified = true
+    }
+
+    if (!trackModified) continue
+
+    const updatedTrack: TimelineTrack = { ...track, clips: updatedClips }
+    if (track.kind === "cursor") {
+      const valid = validateCursorRanges(updatedTrack)
+      if (!valid.ok) return valid
+      nextState = updateTrackInState(nextState, track.id, valid.value)
+    } else {
+      const trackResult = sortAndValidateTrack(
+        updateTrackInState(nextState, track.id, updatedTrack),
+        track.id,
+      )
+      if (!trackResult.ok) return trackResult
+      nextState = updateTrackInState(nextState, track.id, trackResult.value)
+    }
+  }
+
+  // Handle zoom segments if zoom track is present and unlocked
+  const zoomTrack = nextState.tracks.find((t) => t.kind === "zoom")
+  if (!zoomTrack?.locked && (!targetTrackIds || (zoomTrack && targetTrackIds.has(zoomTrack.id)))) {
+    const zoomSegments = getManualZoomSegments(nextState)
+    const eligibleZoom = zoomSegments.find(
+      (segment) =>
+        !segment.locked &&
+        splitTimeMs > segment.startMs + 1 &&
+        splitTimeMs < segment.startMs + segment.durationMs - 1,
+    )
+    if (eligibleZoom) {
+      const leftDuration = splitTimeMs - eligibleZoom.startMs
+      const left: ManualZoomSegment = {
+        ...eligibleZoom,
+        id: `${eligibleZoom.id}:left:${splitTimeMs}`,
+        durationMs: leftDuration,
+      }
+      const right: ManualZoomSegment = {
+        ...eligibleZoom,
+        id: `${eligibleZoom.id}:right:${splitTimeMs}`,
+        startMs: splitTimeMs,
+        durationMs: eligibleZoom.durationMs - leftDuration,
+      }
+      const updatedSegments = zoomSegments
+        .filter((s) => s.id !== eligibleZoom.id)
+        .concat(left, right)
+      const valid = validateZoomSegments(updatedSegments)
+      if (!valid.ok) return valid
+      nextState = { ...nextState, zoomSegments: valid.value, updatedAt: now() }
+      splitCount++
+    }
+  }
+
+  if (splitCount === 0) {
+    return {
+      ok: false,
+      error: editorError("no_clips_to_split", "No clips found at split position"),
+    }
+  }
+
+  return { ok: true, value: { ...nextState, updatedAt: now() } }
 }
 
 function applyMoveClip(
@@ -2739,6 +2887,18 @@ export function createSplitClipCommand(clipId: string, splitTimeMs: number): Com
     splitTimeMs,
     leftClipId: crypto.randomUUID(),
     rightClipId: crypto.randomUUID(),
+  }
+}
+
+export function createSplitAllClipsCommand(
+  splitTimeMs: number,
+  trackIds?: string[],
+): CommandRecord {
+  return {
+    kind: "split-all-clips",
+    name: "Split all clips",
+    splitTimeMs,
+    ...(trackIds ? { trackIds } : {}),
   }
 }
 

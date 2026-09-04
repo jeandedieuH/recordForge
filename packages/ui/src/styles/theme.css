@@ -13,6 +13,8 @@
   --color-surface-container: #0c1220;
   --color-surface-container-high: #121c2e;
   --color-surface-container-highest: #182438;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
   --color-elevated: #121c2e; /* Floating popovers, dropdowns, dialogs */
   --color-overlay: #141f33; /* Tooltips, hover fills */
   --color-accent: #d97706; /* Primary interactive accent */

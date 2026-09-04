@@ -167,7 +167,7 @@ export function TimelineToolbar({
           </IconButton>
           <IconButton
             label="Razor / Split tool"
-            shortcut="S"
+            shortcut="C"
             tooltipSide="top"
             className={cn(
               "size-7 rounded-md transition-all duration-fast",
@@ -175,7 +175,7 @@ export function TimelineToolbar({
                 ? "bg-primary text-white shadow-xs font-semibold"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
             )}
-            onClick={() => onSelectTool("split")}
+            onClick={() => onSelectTool(tool === "split" ? "select" : "split")}
             aria-checked={tool === "split"}
             role="radio"
           >

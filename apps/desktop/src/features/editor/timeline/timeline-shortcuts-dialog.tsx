@@ -38,7 +38,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Tools & Quick Actions",
     items: [
       { description: "Selection tool", keys: ["V"] },
-      { description: "Razor / Split tool", keys: ["S", "C"] },
+      { description: "Razor / Split tool", keys: ["C"] },
       { description: "Range selection tool", keys: ["R"] },
       { description: "Add chapter / note marker", keys: ["M"] },
       { description: "Add smart zoom segment", keys: ["Z"] },
