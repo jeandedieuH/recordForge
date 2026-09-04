@@ -30,7 +30,8 @@ const numberInputContainerVariants = cva(
 )
 
 interface NumberInputProps
-  extends Omit<
+  extends
+    Omit<
       React.InputHTMLAttributes<HTMLInputElement>,
       "size" | "onChange" | "value" | "defaultValue"
     >,

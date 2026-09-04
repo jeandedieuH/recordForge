@@ -162,9 +162,7 @@ function AudioClipsList() {
               min={0}
               step={50}
               value={clip.fadeInMs}
-              onChange={(val) =>
-                execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))
-              }
+              onChange={(val) => execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))}
             />
             <NumberInputField
               size="sm"
@@ -173,9 +171,7 @@ function AudioClipsList() {
               min={0}
               step={50}
               value={clip.fadeOutMs}
-              onChange={(val) =>
-                execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))
-              }
+              onChange={(val) => execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))}
             />
           </div>
         </div>

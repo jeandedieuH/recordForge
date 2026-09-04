@@ -229,9 +229,7 @@ export function ExportProgressCard({
             </h2>
             <p className="text-xs text-subtle-foreground">
               {job.message ||
-                (isCompleted
-                  ? `Saved as ${containerBadge} video`
-                  : `Exporting ${projectName}`)}
+                (isCompleted ? `Saved as ${containerBadge} video` : `Exporting ${projectName}`)}
             </p>
           </div>
         </div>

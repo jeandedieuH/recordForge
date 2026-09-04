@@ -221,7 +221,6 @@ function normalizePreset(
   return preset
 }
 
-
 export function ExportView({
   projectName = "Recording",
   canvas,

@@ -449,7 +449,8 @@ export function SettingsView({
             <div>
               <h3 className="text-sm font-semibold text-foreground">Export Completion Alerts</h3>
               <p className="text-xs text-subtle-foreground mt-0.5">
-                Configure system notifications and audio alerts when an export finishes in the background.
+                Configure system notifications and audio alerts when an export finishes in the
+                background.
               </p>
             </div>
 
@@ -457,7 +458,8 @@ export function SettingsView({
               <div>
                 <p className="text-xs font-medium text-foreground">System Desktop Notifications</p>
                 <p className="text-[11px] text-subtle-foreground">
-                  Show an OS desktop notification when a lengthy export finishes while minimized or in the background.
+                  Show an OS desktop notification when a lengthy export finishes while minimized or
+                  in the background.
                 </p>
               </div>
               <Switch checked={notifyOnExport} onCheckedChange={handleNotifyOnExportChange} />

@@ -25,20 +25,13 @@ const selectTriggerVariants = cva(
 )
 
 interface SelectTriggerProps
-  extends ComponentProps<typeof SelectPrimitive.Trigger>,
+  extends
+    ComponentProps<typeof SelectPrimitive.Trigger>,
     VariantProps<typeof selectTriggerVariants> {}
 
-function SelectTrigger({
-  className,
-  size,
-  children,
-  ...props
-}: SelectTriggerProps) {
+function SelectTrigger({ className, size, children, ...props }: SelectTriggerProps) {
   return (
-    <SelectPrimitive.Trigger
-      className={cn(selectTriggerVariants({ size }), className)}
-      {...props}
-    >
+    <SelectPrimitive.Trigger className={cn(selectTriggerVariants({ size }), className)} {...props}>
       {children}
       <SelectPrimitive.Icon asChild>
         <ChevronDown
@@ -182,11 +175,7 @@ function SimpleSelect({
       onValueChange={onValueChange}
       disabled={disabled}
     >
-      <SelectTrigger
-        size={size}
-        className={cn(className, triggerClassName)}
-        aria-label={ariaLabel}
-      >
+      <SelectTrigger size={size} className={cn(className, triggerClassName)} aria-label={ariaLabel}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent className={contentClassName}>

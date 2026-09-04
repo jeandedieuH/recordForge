@@ -103,9 +103,7 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
             aria-label="Preview quality"
             size="sm"
             value={previewQuality}
-            onValueChange={(val) =>
-              setPreviewQuality(val as "quality" | "performance" | "power")
-            }
+            onValueChange={(val) => setPreviewQuality(val as "quality" | "performance" | "power")}
             className="w-32"
             options={[
               { value: "quality", label: "Quality" },

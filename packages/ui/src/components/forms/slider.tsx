@@ -71,22 +71,15 @@ const sliderRootVariants = cva(
 )
 
 interface SliderProps
-  extends ComponentProps<typeof SliderPrimitive.Root>,
+  extends
+    ComponentProps<typeof SliderPrimitive.Root>,
     VariantProps<typeof sliderRootVariants>,
     VariantProps<typeof sliderRangeVariants> {
   /** Optional tick marks at percentage points (0..100) */
   ticks?: number[]
 }
 
-function Slider({
-  className,
-  size,
-  variant,
-  ticks,
-  value,
-  defaultValue,
-  ...props
-}: SliderProps) {
+function Slider({ className, size, variant, ticks, value, defaultValue, ...props }: SliderProps) {
   const values = value ?? defaultValue ?? [0]
 
   return (
@@ -123,8 +116,7 @@ interface SliderPreset {
   label: string
 }
 
-interface SliderFieldProps
-  extends Omit<SliderProps, "value" | "onValueChange" | "onChange"> {
+interface SliderFieldProps extends Omit<SliderProps, "value" | "onValueChange" | "onChange"> {
   label: ReactNode
   value: number
   onChange?: (value: number) => void
