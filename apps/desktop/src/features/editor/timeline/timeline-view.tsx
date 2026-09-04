@@ -1372,9 +1372,7 @@ export function TimelineView({
       } else if (key === "escape") {
         event.preventDefault()
         overlayInteraction.cancel()
-        if (tool !== "select") {
-          setTool("select")
-        }
+        setTool("select")
         if (view.selection) {
           setSelection(null)
         }
