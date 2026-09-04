@@ -9,7 +9,7 @@ import {
   IconButton,
   Input,
   Label,
-  NativeSelect,
+  SimpleSelect,
   Switch,
   Tabs,
   TabsContent,
@@ -195,19 +195,18 @@ export function CursorInspector({
 
           {Object.keys(savedPresets).length > 0 ? (
             <div className="flex items-center gap-2">
-              <NativeSelect
+              <SimpleSelect
                 aria-label="Load cursor preset"
+                size="sm"
                 value={selectedPreset}
-                onChange={(event) => loadPreset(event.target.value)}
+                onValueChange={(val) => loadPreset(val)}
                 className="flex-1 text-[10px]"
-              >
-                <option value="">Load a preset…</option>
-                {Object.keys(savedPresets).map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </NativeSelect>
+                placeholder="Load a preset…"
+                options={Object.keys(savedPresets).map((name) => ({
+                  value: name,
+                  label: name,
+                }))}
+              />
               <IconButton
                 label="Delete selected preset"
                 variant="ghost"
@@ -364,8 +363,9 @@ function BasicCursorSettings({
             <p className="font-medium text-[11px]">Motion style</p>
             <p className="text-[10px] text-muted-foreground">Choose how the cursor moves</p>
           </div>
-          <NativeSelect
+          <SimpleSelect
             aria-label="Cursor motion style"
+            size="sm"
             value={
               MOTION_PRESETS.find(
                 (p) =>
@@ -373,8 +373,8 @@ function BasicCursorSettings({
                   p.smoothFactor === (settings.smoothFactor ?? 0.25),
               )?.id ?? "custom"
             }
-            onChange={(event) => {
-              const preset = MOTION_PRESETS.find((p) => p.id === event.target.value)
+            onValueChange={(val) => {
+              const preset = MOTION_PRESETS.find((p) => p.id === val)
               if (preset) {
                 onChange({
                   smoothMovement: preset.smoothMovement,
@@ -383,14 +383,14 @@ function BasicCursorSettings({
               }
             }}
             className="w-36 text-[10px]"
-          >
-            {MOTION_PRESETS.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.label}
-              </option>
-            ))}
-            <option value="custom">Custom</option>
-          </NativeSelect>
+            options={[
+              ...MOTION_PRESETS.map((preset) => ({
+                value: preset.id,
+                label: preset.label,
+              })),
+              { value: "custom", label: "Custom" },
+            ]}
+          />
         </div>
 
         <div className="flex items-center justify-between">
@@ -409,8 +409,9 @@ function BasicCursorSettings({
             <p className="font-medium text-[11px]">Click style</p>
             <p className="text-[10px] text-muted-foreground">Choose how clicks are emphasized</p>
           </div>
-          <NativeSelect
+          <SimpleSelect
             aria-label="Cursor click style"
+            size="sm"
             value={
               CLICK_PRESETS.find(
                 (p) =>
@@ -420,8 +421,8 @@ function BasicCursorSettings({
                     p.clickDurationMs === settings.clickDurationMs),
               )?.id ?? "custom"
             }
-            onChange={(event) => {
-              const preset = CLICK_PRESETS.find((p) => p.id === event.target.value)
+            onValueChange={(val) => {
+              const preset = CLICK_PRESETS.find((p) => p.id === val)
               if (preset) {
                 onChange({
                   clickFeedback: preset.clickFeedback,
@@ -431,14 +432,14 @@ function BasicCursorSettings({
               }
             }}
             className="w-36 text-[10px]"
-          >
-            {CLICK_PRESETS.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.label}
-              </option>
-            ))}
-            <option value="custom">Custom</option>
-          </NativeSelect>
+            options={[
+              ...CLICK_PRESETS.map((preset) => ({
+                value: preset.id,
+                label: preset.label,
+              })),
+              { value: "custom", label: "Custom" },
+            ]}
+          />
         </div>
 
         <div className="flex items-center justify-between pt-1">

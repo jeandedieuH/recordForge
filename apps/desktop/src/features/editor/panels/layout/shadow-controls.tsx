@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { SunMedium } from "lucide-react"
 import type { TimelineCanvas } from "@recordforge/contracts"
-import { ColorPicker, Slider, Switch, cn } from "@recordforge/ui"
+import { ColorPicker, SliderField, Switch, cn } from "@recordforge/ui"
 
 interface ShadowControlsProps {
   canvas: TimelineCanvas
@@ -101,49 +101,40 @@ export function ShadowControls({ canvas, onChange }: ShadowControlsProps) {
           {showAdvanced && (
             <div className="flex flex-col gap-2.5 border-t border-border pt-2">
               {/* Blur Slider */}
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-                  <span>Blur</span>
-                  <span className="font-mono text-[10px] text-foreground">{currentBlur}px</span>
-                </div>
-                <Slider
-                  value={[currentBlur]}
-                  min={0}
-                  max={64}
-                  step={2}
-                  onValueChange={([val]) => val !== undefined && onChange({ shadowBlur: val })}
-                />
-              </div>
+              <SliderField
+                label="Blur"
+                size="sm"
+                value={currentBlur}
+                min={0}
+                max={64}
+                step={2}
+                unit="px"
+                onChange={(val) => onChange({ shadowBlur: val })}
+              />
 
               {/* X Offset Slider */}
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-                  <span>X Offset</span>
-                  <span className="font-mono text-[10px] text-foreground">{currentOffsetX}px</span>
-                </div>
-                <Slider
-                  value={[currentOffsetX]}
-                  min={-32}
-                  max={48}
-                  step={2}
-                  onValueChange={([val]) => val !== undefined && onChange({ shadowOffsetX: val })}
-                />
-              </div>
+              <SliderField
+                label="X Offset"
+                size="sm"
+                value={currentOffsetX}
+                min={-32}
+                max={48}
+                step={2}
+                unit="px"
+                onChange={(val) => onChange({ shadowOffsetX: val })}
+              />
 
               {/* Y Offset Slider */}
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-                  <span>Y Offset</span>
-                  <span className="font-mono text-[10px] text-foreground">{currentOffsetY}px</span>
-                </div>
-                <Slider
-                  value={[currentOffsetY]}
-                  min={-32}
-                  max={48}
-                  step={2}
-                  onValueChange={([val]) => val !== undefined && onChange({ shadowOffsetY: val })}
-                />
-              </div>
+              <SliderField
+                label="Y Offset"
+                size="sm"
+                value={currentOffsetY}
+                min={-32}
+                max={48}
+                step={2}
+                unit="px"
+                onChange={(val) => onChange({ shadowOffsetY: val })}
+              />
 
               {/* Shadow Color */}
               <div className="flex items-center justify-between pt-1">

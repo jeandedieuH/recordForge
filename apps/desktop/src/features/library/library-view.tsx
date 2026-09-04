@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { save } from "@tauri-apps/plugin-dialog"
 import { join } from "@tauri-apps/api/path"
 import { LayoutGrid, List } from "lucide-react"
-import { Button, Input } from "@recordforge/ui"
+import { Button, NumberInputField } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { getSetting, isTauri } from "../../lib/settings"
 import { useRecorderStore } from "../../stores/recorder-store"
@@ -224,36 +224,24 @@ export function LibraryView() {
         <div className="rounded-lg border border-border bg-surface p-4">
           <h3 className="mb-2 text-sm font-medium text-foreground">Trim {trimTarget.name}</h3>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label
-                className="mb-1 block text-xs font-medium text-subtle-foreground"
-                htmlFor="trim-start"
-              >
-                Start (ms)
-              </label>
-              <Input
-                id="trim-start"
-                type="number"
-                min={0}
-                value={trimStart}
-                onChange={(e) => setTrimStart(e.target.value)}
-              />
-            </div>
-            <div>
-              <label
-                className="mb-1 block text-xs font-medium text-subtle-foreground"
-                htmlFor="trim-end"
-              >
-                End (ms)
-              </label>
-              <Input
-                id="trim-end"
-                type="number"
-                min={0}
-                value={trimEnd}
-                onChange={(e) => setTrimEnd(e.target.value)}
-              />
-            </div>
+            <NumberInputField
+              id="trim-start"
+              label="Start"
+              unit="ms"
+              min={0}
+              step={100}
+              value={trimStart === "" ? 0 : Number(trimStart)}
+              onChange={(val) => setTrimStart(String(val))}
+            />
+            <NumberInputField
+              id="trim-end"
+              label="End"
+              unit="ms"
+              min={0}
+              step={100}
+              value={trimEnd === "" ? 0 : Number(trimEnd)}
+              onChange={(val) => setTrimEnd(String(val))}
+            />
           </div>
           {trimError ? <p className="mt-2 text-sm text-red-500">{trimError}</p> : null}
           <div className="mt-3 flex gap-2">

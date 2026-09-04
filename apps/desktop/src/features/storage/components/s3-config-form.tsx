@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { AlertCircle, CheckCircle2, Eye, EyeOff, KeyRound, Loader2, Server } from "lucide-react"
-import { Button, Card, Input, Label, NativeSelect } from "@recordforge/ui"
+import { Button, Card, Input, Label, SimpleSelect } from "@recordforge/ui"
 import type { S3Config, SaveS3ProfileInput, StorageProfile } from "@recordforge/contracts"
 import { testS3Credentials } from "../storage-api"
 
@@ -196,16 +196,14 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
 
         <div className="col-span-2">
           <Label className="mb-1 block font-medium">Provider Preset</Label>
-          <NativeSelect
-            onChange={(e) => handlePresetChange(e.target.value)}
+          <SimpleSelect
             defaultValue={S3_PRESETS[0].name}
-          >
-            {S3_PRESETS.map((preset) => (
-              <option key={preset.name} value={preset.name}>
-                {preset.name}
-              </option>
-            ))}
-          </NativeSelect>
+            onValueChange={(val) => handlePresetChange(val)}
+            options={S3_PRESETS.map((preset) => ({
+              value: preset.name,
+              label: preset.name,
+            }))}
+          />
         </div>
 
         <div className="col-span-2 sm:col-span-1">

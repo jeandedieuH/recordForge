@@ -2,7 +2,9 @@ import type { SelectHTMLAttributes } from "react"
 import { ChevronDown } from "lucide-react"
 import { cn } from "../../lib/cn"
 
-interface NativeSelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
+interface NativeSelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, "size"> {
+  /** Size variant */
+  size?: "sm" | "default"
   /** Optional class name for the wrapper element. */
   containerClassName?: string
   /** Optional class name for the select element itself. */
@@ -15,6 +17,7 @@ interface NativeSelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
  */
 function NativeSelect({
   className,
+  size = "default",
   containerClassName,
   selectClassName,
   children,
@@ -24,7 +27,8 @@ function NativeSelect({
   return (
     <div
       className={cn(
-        "relative inline-flex h-8 w-full items-center rounded-md border border-border bg-surface text-xs font-medium text-foreground transition-colors duration-fast ease-forge hover:border-border-strong focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/30",
+        "relative inline-flex w-full items-center rounded-md border border-border bg-surface/90 text-foreground transition-[border-color,background-color,box-shadow] duration-fast ease-forge hover:border-border-strong hover:bg-surface focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/25",
+        size === "sm" ? "h-7 text-[11px]" : "h-8 text-xs font-medium",
         disabled && "cursor-not-allowed opacity-50",
         className,
         containerClassName,
@@ -33,7 +37,7 @@ function NativeSelect({
       <select
         disabled={disabled}
         className={cn(
-          "h-full w-full cursor-pointer appearance-none bg-transparent px-3 py-1 pr-8 text-inherit font-inherit outline-none disabled:cursor-not-allowed",
+          "h-full w-full cursor-pointer appearance-none bg-transparent px-2.5 py-1 pr-7 text-inherit font-inherit outline-none disabled:cursor-not-allowed",
           selectClassName,
         )}
         {...props}
@@ -42,7 +46,7 @@ function NativeSelect({
       </select>
       <ChevronDown
         className={cn(
-          "pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-subtle-foreground opacity-70 transition-opacity",
+          "pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-subtle-foreground opacity-70 transition-opacity",
           disabled && "opacity-30",
         )}
         aria-hidden

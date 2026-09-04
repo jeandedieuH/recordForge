@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Clock, Mic, MicOff, Volume2, VolumeX } from "lucide-react"
-import { AudioLevelMeter, Button, NativeSelect, Switch, cn } from "@recordforge/ui"
+import { AudioLevelMeter, Button, SimpleSelect, Switch, cn } from "@recordforge/ui"
 import { useRecorderStore } from "../../../hooks/use-recorder"
 import { getSetting, isTauri, setSetting } from "../../../lib/settings"
 
@@ -126,25 +126,20 @@ export function DevicesStep() {
                 <label className="text-xs text-subtle-foreground font-medium block">
                   Input Device:
                 </label>
-                <NativeSelect
+                <SimpleSelect
                   value={selectedMicrophoneId || (microPhones[0]?.id ?? "")}
-                  onChange={(e) => {
-                    const id = e.target.value
-                    setSelectedMicrophoneId(id)
-                  }}
+                  onValueChange={(val) => setSelectedMicrophoneId(val)}
                   disabled={!audioDevicesLoaded || microPhones.length === 0}
                   className="w-full text-xs"
-                >
-                  {microPhones.length === 0 ? (
-                    <option value="">Default System Microphone</option>
-                  ) : (
-                    microPhones.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} {m.isDefault ? "(Default)" : ""}
-                      </option>
-                    ))
-                  )}
-                </NativeSelect>
+                  options={
+                    microPhones.length === 0
+                      ? [{ value: "", label: "Default System Microphone" }]
+                      : microPhones.map((m) => ({
+                          value: m.id,
+                          label: `${m.name} ${m.isDefault ? "(Default)" : ""}`,
+                        }))
+                  }
+                />
               </div>
             )}
           </div>

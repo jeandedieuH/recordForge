@@ -2,12 +2,13 @@ import type { TimelineTrack } from "@recordforge/contracts"
 import { createUpdateClipTransformCommand } from "@recordforge/editor-core"
 import {
   Button,
-  Input,
+  NumberInputField,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Slider,
 } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
@@ -45,13 +46,6 @@ export function PipControls({ track, selectedClipId, onClose }: PipControlsProps
     )
   }
 
-  function handleNumberChange(field: keyof typeof transform, value: string) {
-    const parsed = Number.parseFloat(value)
-    if (!Number.isNaN(parsed)) {
-      updateTransform({ [field]: parsed })
-    }
-  }
-
   return (
     <div className="space-y-3 rounded border border-border bg-muted p-3 text-sm">
       <div className="flex items-center justify-between">
@@ -62,50 +56,52 @@ export function PipControls({ track, selectedClipId, onClose }: PipControlsProps
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <div>
-          <label className="mb-1 block text-xs font-medium">X</label>
-          <Input
-            type="number"
-            value={transform.x}
-            onChange={(e) => handleNumberChange("x", e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium">Y</label>
-          <Input
-            type="number"
-            value={transform.y}
-            onChange={(e) => handleNumberChange("y", e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium">Width</label>
-          <Input
-            type="number"
-            value={transform.width}
-            onChange={(e) => handleNumberChange("width", e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium">Height</label>
-          <Input
-            type="number"
-            value={transform.height}
-            onChange={(e) => handleNumberChange("height", e.target.value)}
-          />
-        </div>
+        <NumberInputField
+          size="sm"
+          label="X"
+          unit="px"
+          value={transform.x}
+          onChange={(val) => updateTransform({ x: val })}
+        />
+        <NumberInputField
+          size="sm"
+          label="Y"
+          unit="px"
+          value={transform.y}
+          onChange={(val) => updateTransform({ y: val })}
+        />
+        <NumberInputField
+          size="sm"
+          label="Width"
+          unit="px"
+          min={10}
+          value={transform.width}
+          onChange={(val) => updateTransform({ width: val })}
+        />
+        <NumberInputField
+          size="sm"
+          label="Height"
+          unit="px"
+          min={10}
+          value={transform.height}
+          onChange={(val) => updateTransform({ height: val })}
+        />
       </div>
 
-      <div>
-        <label className="mb-1 block text-xs font-medium">Opacity</label>
-        <input
-          type="range"
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between text-xs font-medium">
+          <span>Opacity</span>
+          <span className="font-mono text-[10px] text-muted-foreground">
+            {Math.round(transform.opacity * 100)}%
+          </span>
+        </div>
+        <Slider
+          size="sm"
           min={0}
           max={1}
           step={0.05}
-          value={transform.opacity}
-          onChange={(e) => updateTransform({ opacity: Number.parseFloat(e.target.value) })}
-          className="w-full"
+          value={[transform.opacity]}
+          onValueChange={([val]) => val !== undefined && updateTransform({ opacity: val })}
         />
       </div>
 

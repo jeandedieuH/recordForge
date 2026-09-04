@@ -18,7 +18,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react"
-import { Button, Card, CardContent, EmptyState, Skeleton, cn, useToast } from "@recordforge/ui"
+import { Button, Card, CardContent, EmptyState, SimpleSelect, Skeleton, cn, useToast } from "@recordforge/ui"
 import {
   deleteAsset,
   importAssets,
@@ -395,21 +395,23 @@ export function ProjectAssetsPanel() {
             </button>
           ))}
         </div>
-        <label className="mt-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
           <span>Role</span>
-          <select
+          <SimpleSelect
+            size="sm"
             value={roleFilter}
-            onChange={(event) => setRoleFilter(event.target.value as RoleFilter)}
-            className="h-7 rounded-md border border-border bg-surface-dim px-2 text-[11px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            onValueChange={(val) => setRoleFilter(val as RoleFilter)}
+            className="w-32"
             aria-label="Filter assets by role"
-          >
-            <option value="all">All roles</option>
-            <option value="music">Music</option>
-            <option value="graphic">Graphic</option>
-            <option value="audio_track">Audio track</option>
-            <option value="b_roll">B-roll</option>
-          </select>
-        </label>
+            options={[
+              { value: "all", label: "All roles" },
+              { value: "music", label: "Music" },
+              { value: "graphic", label: "Graphic" },
+              { value: "audio_track", label: "Audio track" },
+              { value: "b_roll", label: "B-roll" },
+            ]}
+          />
+        </div>
       </div>
 
       <div

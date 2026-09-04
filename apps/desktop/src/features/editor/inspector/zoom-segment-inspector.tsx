@@ -10,7 +10,7 @@ import {
   createSplitZoomSegmentCommand,
 } from "@recordforge/editor-core"
 import { Lock, Unlock, ZoomIn } from "lucide-react"
-import { Badge, Button, Input, NativeSelect, Switch, cn } from "@recordforge/ui"
+import { Badge, Button, Input, SimpleSelect, Switch, cn } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { NumberField } from "./fields"
@@ -295,19 +295,21 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           </span>
         </div>
 
-        <label className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
+        <div className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
           <span>Easing Curve</span>
-          <NativeSelect
+          <SimpleSelect
             aria-label="Zoom easing"
+            size="sm"
             value={segment.easing === "cinematic" ? "cinematic" : "smooth"}
-            onChange={(event) => handleUpdate({ easing: event.target.value as ZoomEasing })}
+            onValueChange={(val) => handleUpdate({ easing: val as ZoomEasing })}
             disabled={segment.locked}
             className="w-36"
-          >
-            <option value="smooth">Smooth</option>
-            <option value="cinematic">Cinematic</option>
-          </NativeSelect>
-        </label>
+            options={[
+              { value: "smooth", label: "Smooth" },
+              { value: "cinematic", label: "Cinematic" },
+            ]}
+          />
+        </div>
 
         {/* Transition In / Out Durations */}
         <div className="grid grid-cols-2 gap-2 pt-2 border-t border-border">

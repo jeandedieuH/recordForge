@@ -10,6 +10,7 @@ import {
   Button,
   Skeleton,
   Slider,
+  SliderField,
   Tabs,
   TabsContent,
   TabsList,
@@ -212,72 +213,28 @@ export function LayoutPanel() {
       {/* Dimensions & Insets */}
       <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface-dim/40 p-3">
         {/* Canvas Padding */}
-        <div className="flex flex-col gap-1.5 pt-1">
-          <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-            <span>Canvas Padding</span>
-            <span className="font-mono text-[10px] text-foreground">{canvas.padding}px</span>
-          </div>
-          <Slider
-            value={[canvas.padding]}
-            min={0}
-            max={160}
-            step={4}
-            onValueChange={([val]) =>
-              val !== undefined && execute(createUpdateCanvasCommand({ padding: val }))
-            }
-          />
-          <div className="flex items-center justify-between gap-1 pt-0.5">
-            {PADDING_PRESETS.map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => execute(createUpdateCanvasCommand({ padding: p }))}
-                className={cn(
-                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
-                  canvas.padding === p
-                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
-                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
-                )}
-              >
-                {p}px
-              </button>
-            ))}
-          </div>
-        </div>
+        <SliderField
+          label="Canvas Padding"
+          value={canvas.padding}
+          min={0}
+          max={160}
+          step={4}
+          unit="px"
+          onValueChange={(val) => execute(createUpdateCanvasCommand({ padding: val }))}
+          presets={PADDING_PRESETS.map((p) => ({ value: p, label: `${p}px` }))}
+        />
 
         {/* Corner Radius */}
-        <div className="flex flex-col gap-1.5 pt-1">
-          <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-            <span>Corner Radius</span>
-            <span className="font-mono text-[10px] text-foreground">{canvas.borderRadius}px</span>
-          </div>
-          <Slider
-            value={[canvas.borderRadius]}
-            min={0}
-            max={64}
-            step={2}
-            onValueChange={([val]) =>
-              val !== undefined && execute(createUpdateCanvasCommand({ borderRadius: val }))
-            }
-          />
-          <div className="flex items-center justify-between gap-1 pt-0.5">
-            {RADIUS_PRESETS.map((r) => (
-              <button
-                key={r.value}
-                type="button"
-                onClick={() => execute(createUpdateCanvasCommand({ borderRadius: r.value }))}
-                className={cn(
-                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
-                  canvas.borderRadius === r.value
-                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
-                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
-                )}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <SliderField
+          label="Corner Radius"
+          value={canvas.borderRadius}
+          min={0}
+          max={64}
+          step={2}
+          unit="px"
+          onValueChange={(val) => execute(createUpdateCanvasCommand({ borderRadius: val }))}
+          presets={RADIUS_PRESETS.map((r) => ({ value: r.value, label: r.label }))}
+        />
       </div>
 
       {/* Background Studio */}

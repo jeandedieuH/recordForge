@@ -23,6 +23,7 @@ import { cursorSettingsSchema, defaultCursorSettings } from "@recordforge/contra
 import {
   Button,
   Input,
+  NumberInput,
   Select,
   SelectContent,
   SelectItem,
@@ -35,6 +36,7 @@ import { join, videoDir } from "@tauri-apps/api/path"
 import { useThemeStore } from "../../stores/theme-store"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, isTauri, setSetting } from "../../lib/settings"
+import { playExportChime } from "../../lib/export-notifications"
 import { DiagnosticsPanel } from "./diagnostics-panel"
 import { CursorInspector } from "../editor/cursor"
 import { StorageSettings } from "./storage-settings"
@@ -68,6 +70,8 @@ export function SettingsView({
   const [savePath, setSavePath] = useState("")
   const [countdownSec, setCountdownSec] = useState("3")
   const [minimizeToTray, setMinimizeToTray] = useState(false)
+  const [notifyOnExport, setNotifyOnExport] = useState(true)
+  const [soundOnExport, setSoundOnExport] = useState(true)
   const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
   const [appVersion, setAppVersion] = useState("development")
 
@@ -96,11 +100,15 @@ export function SettingsView({
           getSetting("startMinimized").catch(() => null),
           getSetting("defaultCursorSettings").catch(() => null),
           getSetting("defaultOutputFolder").catch(() => null),
+          getSetting("notifyOnExportComplete").catch(() => null),
+          getSetting("soundOnExportComplete").catch(() => null),
         ])
         countdown = results[0]
         minimized = results[1] ?? results[2]
         cursorRaw = results[3]
         folder = results[4]
+        if (results[5] !== null) setNotifyOnExport(results[5] === "true")
+        if (results[6] !== null) setSoundOnExport(results[6] === "true")
 
         if (!folder) {
           try {
@@ -172,6 +180,20 @@ export function SettingsView({
     if (isTauri()) {
       void setSetting("minimizeToTray", String(value))
       void setSetting("startMinimized", String(value))
+    }
+  }
+
+  function handleNotifyOnExportChange(value: boolean) {
+    setNotifyOnExport(value)
+    if (isTauri()) {
+      void setSetting("notifyOnExportComplete", String(value))
+    }
+  }
+
+  function handleSoundOnExportChange(value: boolean) {
+    setSoundOnExport(value)
+    if (isTauri()) {
+      void setSetting("soundOnExportComplete", String(value))
     }
   }
 
@@ -422,6 +444,48 @@ export function SettingsView({
             </div>
           </div>
 
+          {/* Export Alerts & Notifications Card */}
+          <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Export Completion Alerts</h3>
+              <p className="text-xs text-subtle-foreground mt-0.5">
+                Configure system notifications and audio alerts when an export finishes in the background.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-medium text-foreground">System Desktop Notifications</p>
+                <p className="text-[11px] text-subtle-foreground">
+                  Show an OS desktop notification when a lengthy export finishes while minimized or in the background.
+                </p>
+              </div>
+              <Switch checked={notifyOnExport} onCheckedChange={handleNotifyOnExportChange} />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-medium text-foreground">Audio Completion Chime</p>
+                <p className="text-[11px] text-subtle-foreground">
+                  Play a soft harmonic audio chime when rendering completes.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => playExportChime()}
+                  className="h-7 px-2.5 text-xs gap-1.5 cursor-pointer text-muted-foreground hover:text-foreground"
+                  title="Preview completion chime"
+                >
+                  <Volume2 className="size-3.5 text-accent" />
+                  Test Sound
+                </Button>
+                <Switch checked={soundOnExport} onCheckedChange={handleSoundOnExportChange} />
+              </div>
+            </div>
+          </div>
+
           {/* Welcome & Onboarding Tour Card */}
           <div className="rounded-2xl border border-border bg-surface p-5 space-y-3">
             <div className="flex items-center justify-between">
@@ -614,23 +678,16 @@ export function SettingsView({
             </p>
 
             <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  step="25"
-                  min="-2000"
-                  max="5000"
-                  value={preferences.cameraSyncOffsetMs}
-                  onChange={(e) => {
-                    const parsed = Number.parseInt(e.target.value, 10)
-                    if (!Number.isNaN(parsed)) {
-                      handleCameraSyncOffsetChange(parsed)
-                    }
-                  }}
-                  className="w-28 font-mono text-xs"
-                />
-                <span className="text-xs text-subtle-foreground font-mono">ms</span>
-              </div>
+              <NumberInput
+                step={25}
+                min={-2000}
+                max={5000}
+                unit="ms"
+                size="sm"
+                value={preferences.cameraSyncOffsetMs}
+                onChange={(val) => handleCameraSyncOffsetChange(val)}
+                className="w-32"
+              />
 
               <div className="flex items-center gap-1.5">
                 {[0, 150, 250, 350].map((presetMs) => (

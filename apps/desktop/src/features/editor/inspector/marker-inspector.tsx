@@ -7,7 +7,7 @@ import {
   getTotalDuration,
 } from "@recordforge/editor-core"
 import { Check, Copy, Flag as FlagIcon } from "lucide-react"
-import { Button, Input } from "@recordforge/ui"
+import { Button, Input, NumberInputField } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
 interface MarkerInspectorProps {
@@ -20,20 +20,11 @@ export function MarkerInspector({ marker, onClear }: MarkerInspectorProps) {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const recording = useTimelineStore((state) => state.recording)
   const [markerLabel, setMarkerLabel] = useState(marker.label)
-  const [markerTimeText, setMarkerTimeText] = useState(String(marker.timeMs))
   const [copiedTimestamps, setCopiedTimestamps] = useState(false)
 
   useEffect(() => {
     setMarkerLabel(marker.label)
-    setMarkerTimeText(String(marker.timeMs))
   }, [marker])
-
-  function handleTimeBlur() {
-    const timeMs = Number.parseInt(markerTimeText, 10)
-    if (Number.isFinite(timeMs) && timeMs >= 0) {
-      execute(createUpdateMarkerCommand(marker.id, { timeMs }))
-    }
-  }
 
   async function handleCopyYouTubeChapters() {
     if (!timeline || !timeline.markers || timeline.markers.length === 0) return
@@ -71,13 +62,13 @@ export function MarkerInspector({ marker, onClear }: MarkerInspectorProps) {
           onChange={(event) => setMarkerLabel(event.target.value)}
           onBlur={() => execute(createUpdateMarkerCommand(marker.id, { label: markerLabel }))}
         />
-        <Input
-          aria-label="Marker time in milliseconds"
-          type="number"
+        <NumberInputField
+          label="Marker time"
+          unit="ms"
           min={0}
-          value={markerTimeText}
-          onChange={(event) => setMarkerTimeText(event.target.value)}
-          onBlur={handleTimeBlur}
+          step={100}
+          value={marker.timeMs}
+          onChange={(timeMs) => execute(createUpdateMarkerCommand(marker.id, { timeMs }))}
         />
         <p className="font-mono text-xs tabular-nums text-subtle-foreground">
           {formatMarkerTime(marker.timeMs)}

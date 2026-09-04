@@ -158,6 +158,7 @@ pub fn run() {
             commands::exports::export_timeline,
             commands::exports::retry_export,
             commands::exports::reveal_export,
+            commands::exports::request_export_attention,
             commands::settings::get_setting,
             commands::settings::set_setting,
             commands::settings::set_window_transparency,

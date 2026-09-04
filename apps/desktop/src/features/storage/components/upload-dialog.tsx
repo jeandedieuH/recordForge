@@ -10,7 +10,7 @@ import {
   DialogTitle,
   Input,
   Label,
-  NativeSelect,
+  SimpleSelect,
 } from "@recordforge/ui"
 import { toErrorMessage } from "../../../lib/errors"
 import { useStorageStore } from "../storage-store"
@@ -142,16 +142,14 @@ export function UploadDialog({
           <div className="space-y-3 text-xs">
             <div>
               <Label className="mb-1 block font-medium">Destination Profile</Label>
-              <NativeSelect
+              <SimpleSelect
                 value={selectedProfileId || defaultProfile?.id}
-                onChange={(e) => setSelectedProfileId(e.target.value)}
-              >
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.kind.toUpperCase()}) {p.isDefault ? "★ Default" : ""}
-                  </option>
-                ))}
-              </NativeSelect>
+                onValueChange={(val) => setSelectedProfileId(val)}
+                options={profiles.map((p) => ({
+                  value: p.id,
+                  label: `${p.name} (${p.kind.toUpperCase()})${p.isDefault ? " ★ Default" : ""}`,
+                }))}
+              />
             </div>
 
             {activeProfile ? (

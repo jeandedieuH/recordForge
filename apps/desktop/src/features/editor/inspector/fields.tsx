@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import type { LucideIcon } from "lucide-react"
 import { ChevronDown } from "lucide-react"
-import { Button, Input, Slider } from "@recordforge/ui"
+import { Button, NumberInput, NumberInputField, Slider } from "@recordforge/ui"
 
 export function InfoField({ label, value }: { label: string; value: string }) {
   return (
@@ -17,25 +17,31 @@ export function NumberField({
   value,
   onChange,
   min,
+  max,
   step,
+  unit,
+  size = "sm",
 }: {
   label: string
   value: number
   onChange: (value: number) => void
   min?: number
+  max?: number
   step?: number
+  unit?: string
+  size?: "sm" | "default" | "lg"
 }) {
   return (
-    <label className="flex flex-col gap-1 text-xs text-subtle-foreground">
-      <span>{label}</span>
-      <Input
-        type="number"
-        min={min ?? 0}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </label>
+    <NumberInputField
+      size={size}
+      label={label}
+      value={value}
+      min={min ?? 0}
+      max={max}
+      step={step}
+      unit={unit}
+      onChange={onChange}
+    />
   )
 }
 
@@ -111,16 +117,17 @@ export function TrimField({
   onChange: (value: string) => void
 }) {
   return (
-    <label className="flex flex-col gap-1 rounded-md bg-surface-dim px-2 py-1.5 text-[10px] uppercase tracking-wider text-subtle-foreground">
+    <div className="flex flex-col gap-1 rounded-md bg-surface-dim px-2 py-1.5 text-[10px] uppercase tracking-wider text-subtle-foreground">
       <span>{label}</span>
-      <Input
-        type="number"
+      <NumberInput
+        size="sm"
         min={0}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
+        value={Number.parseFloat(value) || 0}
+        onChange={(val) => onChange(String(val))}
         className="h-6 border-0 bg-transparent p-0 font-mono text-xs normal-case tracking-normal text-foreground shadow-none"
+        containerClassName="border-0 bg-transparent shadow-none"
       />
-    </label>
+    </div>
   )
 }
 

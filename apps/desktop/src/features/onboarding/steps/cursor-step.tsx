@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { MousePointer2, Wand2 } from "lucide-react"
-import { Badge, Button, Slider, Switch, cn } from "@recordforge/ui"
+import { Badge, Button, SliderField, Switch, cn } from "@recordforge/ui"
 import type { ClickFeedback, CursorSettings } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
 import { RenderCursorPreset } from "../../editor/cursor/cursor-asset"
@@ -277,25 +277,23 @@ export function CursorStep() {
         </div>
 
         {/* Cursor Scale */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-subtle-foreground">Cursor Scale</span>
-            <span className="text-xs font-mono text-foreground font-semibold">
-              {cursorScale.toFixed(1)}x
-            </span>
-          </div>
-          <Slider
-            value={[cursorScale]}
-            min={0.8}
-            max={3.5}
-            step={0.1}
-            onValueChange={([val]) => {
-              setCursorScale(val)
-              saveCurrentCursorSettings({ scale: val })
-            }}
-            className="w-full"
-          />
-        </div>
+        <SliderField
+          label="Cursor Scale"
+          value={cursorScale}
+          min={0.8}
+          max={3.5}
+          step={0.1}
+          formatValue={(val) => `${val.toFixed(1)}x`}
+          presets={[
+            { label: "1.0x", value: 1.0 },
+            { label: "1.5x", value: 1.5 },
+            { label: "2.0x", value: 2.0 },
+          ]}
+          onChange={(val) => {
+            setCursorScale(val)
+            saveCurrentCursorSettings({ scale: val })
+          }}
+        />
       </div>
     </div>
   )

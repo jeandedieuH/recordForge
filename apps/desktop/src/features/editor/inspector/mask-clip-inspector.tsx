@@ -1,6 +1,6 @@
 import type { MaskClip, MediaMetadata } from "@recordforge/contracts"
 import { Sparkles } from "lucide-react"
-import { ColorPicker, NativeSelect, Switch } from "@recordforge/ui"
+import { ColorPicker, SimpleSelect, Switch } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { InspectorSection, NumberField } from "./fields"
@@ -41,18 +41,20 @@ export function MaskClipInspector({
             <Sparkles className="size-4 text-primary" aria-hidden />
             <span>Privacy mask</span>
           </div>
-          <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-            Mode
-            <NativeSelect
+          <div className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+            <span>Mode</span>
+            <SimpleSelect
               aria-label="Mask mode"
+              size="sm"
               value={clip.mode}
-              onChange={(event) => updateMask({ mode: event.target.value as typeof clip.mode })}
-            >
-              <option value="blur">Blur</option>
-              <option value="pixelate">Pixelate</option>
-              <option value="redact">Redact</option>
-            </NativeSelect>
-          </label>
+              onValueChange={(val) => updateMask({ mode: val as typeof clip.mode })}
+              options={[
+                { value: "blur", label: "Blur" },
+                { value: "pixelate", label: "Pixelate" },
+                { value: "redact", label: "Redact" },
+              ]}
+            />
+          </div>
           <div className="grid grid-cols-2 gap-2">
             {(["x", "y", "width", "height"] as const).map((field) => (
               <NumberField

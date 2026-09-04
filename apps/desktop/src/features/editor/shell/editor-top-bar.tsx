@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import { ArrowLeft, FileOutput, ListTodo, Redo2, Save, Undo2, X } from "lucide-react"
 import { getRedoLabel, getUndoLabel } from "@recordforge/editor-core"
-import { Badge, Button, IconButton, NativeSelect, Separator } from "@recordforge/ui"
+import { Badge, Button, IconButton, Separator, SimpleSelect } from "@recordforge/ui"
 import { useEditorStore, type SaveStatus } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { HealthPopover } from "./health-popover"
@@ -99,18 +99,20 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
 
         <div className="hidden items-center gap-2 lg:flex" aria-label="Preview quality">
           <span className="text-[11px] text-subtle-foreground">Preview</span>
-          <NativeSelect
+          <SimpleSelect
             aria-label="Preview quality"
+            size="sm"
             value={previewQuality}
-            onChange={(event) =>
-              setPreviewQuality(event.target.value as "quality" | "performance" | "power")
+            onValueChange={(val) =>
+              setPreviewQuality(val as "quality" | "performance" | "power")
             }
-            className="w-36"
-          >
-            <option value="quality">Quality</option>
-            <option value="performance">Performance</option>
-            <option value="power">Power Saving</option>
-          </NativeSelect>
+            className="w-32"
+            options={[
+              { value: "quality", label: "Quality" },
+              { value: "performance", label: "Performance" },
+              { value: "power", label: "Power Saving" },
+            ]}
+          />
         </div>
 
         <Separator orientation="vertical" className="hidden h-5 lg:block" />

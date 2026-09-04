@@ -1,7 +1,7 @@
 import { memo } from "react"
 import type { ZoomPreset } from "@recordforge/contracts"
 import { AlertCircle, Loader2, Sparkles, Wand2 } from "lucide-react"
-import { Button, NativeSelect } from "@recordforge/ui"
+import { Button, SimpleSelect } from "@recordforge/ui"
 
 interface SmartZoomCardProps {
   preset: ZoomPreset
@@ -30,18 +30,20 @@ export const SmartZoomCard = memo(function SmartZoomCard({
           <span className="text-xs font-semibold text-foreground">Smart Zoom</span>
         </div>
 
-        <NativeSelect
+        <SimpleSelect
           aria-label="Smart zoom preset"
+          size="sm"
           value={preset}
-          onChange={(event) => onPresetChange(event.target.value as ZoomPreset)}
+          onValueChange={(val) => onPresetChange(val as ZoomPreset)}
           className="h-7 w-36 text-[11px]"
-        >
-          <option value="product-demo">Product Demo</option>
-          <option value="developer">Developer (Code)</option>
-          <option value="cinematic">Cinematic</option>
-          <option value="subtle">Subtle</option>
-          <option value="manual-only">Manual Only</option>
-        </NativeSelect>
+          options={[
+            { value: "product-demo", label: "Product Demo" },
+            { value: "developer", label: "Developer (Code)" },
+            { value: "cinematic", label: "Cinematic" },
+            { value: "subtle", label: "Subtle" },
+            { value: "manual-only", label: "Manual Only" },
+          ]}
+        />
       </div>
 
       <p className="text-[11px] leading-relaxed text-subtle-foreground">

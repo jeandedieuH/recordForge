@@ -17,27 +17,23 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  Cloud,
   Copy,
   Film,
-  FolderOpen,
   Pause,
   Play,
-  RotateCcw,
-  Square,
   Zap,
 } from "lucide-react"
 import {
   Badge,
   Button,
-  Input,
-  Progress,
+  NumberInputField,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@recordforge/ui"
+import { ExportProgressCard } from "./components/export-progress-card"
 import { formatDuration } from "../../lib/format"
 import { UploadDialog } from "../storage/components/upload-dialog"
 
@@ -225,21 +221,6 @@ function normalizePreset(
   return preset
 }
 
-// Internal pipeline stage slugs surfaced by the backend job; mapped here so
-// users see a label instead of an identifier like "cursor".
-const STAGE_LABELS: Record<string, string> = {
-  queued: "Preparing export",
-  "resolving-assets": "Resolving assets",
-  rendering: "Rendering timeline",
-  cursor: "Rendering cursor",
-  captions: "Writing captions",
-  validating: "Validating output",
-}
-
-function stageLabel(stage: string | null | undefined): string {
-  if (!stage) return "Preparing export"
-  return STAGE_LABELS[stage] ?? stage
-}
 
 export function ExportView({
   projectName = "Recording",
@@ -324,7 +305,7 @@ export function ExportView({
   }, [durationMs, rangeEnd, rangeStart])
   const isRunning = exportJob?.status === "running" || exportJob?.status === "pending"
   const canStart = isPresetSupported(selectedPreset, canvas, selectedRange)
-  const progress = Math.round((exportJob?.progress ?? 0) * 100)
+  const exportPercent = Math.min(100, Math.max(0, Math.round((exportJob?.progress ?? 0) * 100)))
 
   function selectPreset(preset: ExportPreset) {
     if (!isPresetSupported(preset, canvas, selectedRange)) return
@@ -378,11 +359,11 @@ export function ExportView({
         </button>
 
         <div className="flex items-center gap-3">
-          <Badge variant="outline" className="font-mono text-[11px]">
+          <Badge variant="outline" className="font-mono text-[11px] leading-none">
             {formatDuration(durationMs)}
           </Badge>
           {canvas ? (
-            <Badge variant="outline" className="font-mono text-[11px]">
+            <Badge variant="outline" className="font-mono text-[11px] leading-none">
               {canvas.width}×{canvas.height} @ {canvas.fps}fps
             </Badge>
           ) : null}
@@ -414,76 +395,20 @@ export function ExportView({
             </div>
           ) : null}
 
-          {exportJob?.status === "completed" ? (
-            <div
-              className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-sm"
-              role="status"
-            >
-              <span className="flex items-center gap-2">
-                <Check className="size-4 text-success" aria-hidden />
-                Export complete. The validated {isWebp ? "WebP" : isGif ? "GIF" : "MP4"} is ready.
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-1.5"
-                  onClick={() => setUploadDialogOpen(true)}
-                >
-                  <Cloud className="size-4 text-primary" aria-hidden />
-                  Upload to Cloud
-                </Button>
-                {onRevealExport ? (
-                  <Button variant="ghost" size="sm" onClick={() => void onRevealExport()}>
-                    <FolderOpen className="mr-2 size-4" aria-hidden />
-                    Reveal file
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
-          {isRunning ? (
-            <div
-              className="mb-6 rounded-xl border border-primary/30 bg-primary/10 p-4"
-              role="status"
-              aria-live="polite"
-            >
-              <div className="mb-2 flex items-center justify-between text-sm">
-                <span className="font-semibold">{stageLabel(exportJob?.stage)}</span>
-                <span className="font-mono text-subtle-foreground">{progress}%</span>
-              </div>
-              <Progress value={progress} aria-label={`Export progress ${progress}%`} />
-              <div className="mt-3 flex items-center justify-between gap-3 text-xs text-subtle-foreground">
-                <span>{exportJob?.message ?? "Rendering project"}</span>
-                {onCancelExport ? (
-                  <Button variant="secondary" size="sm" onClick={() => void onCancelExport()}>
-                    <Square className="mr-2 size-3.5 fill-current" aria-hidden />
-                    Cancel export
-                  </Button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-
-          {exportJob?.status === "failed" ? (
-            <div
-              className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-recording/30 bg-recording/10 p-4"
-              role="alert"
-            >
-              <div>
-                <p className="font-semibold">Export failed</p>
-                <p className="mt-1 text-xs text-subtle-foreground">
-                  {exportJob.error ?? "The output was not published. You can retry this same job."}
-                </p>
-              </div>
-              {onRetryExport ? (
-                <Button variant="secondary" size="sm" onClick={() => void onRetryExport()}>
-                  <RotateCcw className="mr-2 size-3.5" aria-hidden />
-                  Retry job
-                </Button>
-              ) : null}
-            </div>
+          {exportJob ? (
+            <ExportProgressCard
+              job={exportJob}
+              projectName={projectName}
+              canvas={canvas}
+              durationMs={durationMs}
+              exportSettings={exportSettings}
+              hardwareEncoderName={hardwareEncoderName}
+              selectedPreset={selectedPreset}
+              onCancel={onCancelExport ? () => void onCancelExport() : undefined}
+              onRetry={onRetryExport ? () => void onRetryExport() : undefined}
+              onReveal={onRevealExport ? () => void onRevealExport() : undefined}
+              onUploadCloud={() => setUploadDialogOpen(true)}
+            />
           ) : null}
 
           <div className="mb-6 flex flex-col gap-3">
@@ -578,26 +503,22 @@ export function ExportView({
 
           {selectedPreset === "selected-range" ? (
             <div className="mb-4 grid grid-cols-1 gap-4 rounded-xl border border-border bg-surface p-5 sm:grid-cols-2">
-              <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                Range start (ms)
-                <Input
-                  type="number"
-                  min={0}
-                  max={Math.max(0, durationMs - 1)}
-                  value={rangeStart}
-                  onChange={(event) => updateRange(Number(event.target.value), rangeEnd)}
-                />
-              </label>
-              <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                Range end (ms)
-                <Input
-                  type="number"
-                  min={1}
-                  max={durationMs}
-                  value={rangeEnd}
-                  onChange={(event) => updateRange(rangeStart, Number(event.target.value))}
-                />
-              </label>
+              <NumberInputField
+                label="Range start"
+                unit="ms"
+                min={0}
+                max={Math.max(0, durationMs - 1)}
+                value={rangeStart}
+                onChange={(val) => updateRange(val, rangeEnd)}
+              />
+              <NumberInputField
+                label="Range end"
+                unit="ms"
+                min={1}
+                max={durationMs}
+                value={rangeEnd}
+                onChange={(val) => updateRange(rangeStart, val)}
+              />
             </div>
           ) : null}
 
@@ -880,7 +801,7 @@ export function ExportView({
               {isStarting
                 ? "Choosing destination…"
                 : isRunning
-                  ? `Exporting ${progress}%`
+                  ? `Exporting ${exportPercent}%`
                   : "Choose destination"}
             </Button>
           </div>

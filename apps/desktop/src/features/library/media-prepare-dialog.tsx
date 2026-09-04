@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Button, Input } from "@recordforge/ui"
+import { Button, NumberInputField } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 
 interface MediaPrepareDialogProps {
@@ -50,18 +50,14 @@ export function MediaPrepareDialog({
         <h3 className="mb-4 text-lg font-semibold">Prepare {recording.name}</h3>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium" htmlFor="thumbnail-interval">
-              Thumbnail interval (seconds)
-            </label>
-            <Input
-              id="thumbnail-interval"
-              type="number"
-              min={1}
-              value={thumbnailIntervalSec}
-              onChange={(e) => setThumbnailIntervalSec(Number.parseInt(e.target.value, 10) || 1)}
-            />
-          </div>
+          <NumberInputField
+            id="thumbnail-interval"
+            label="Thumbnail interval"
+            unit="s"
+            min={1}
+            value={thumbnailIntervalSec}
+            onChange={(val) => setThumbnailIntervalSec(val || 1)}
+          />
 
           <label className="flex items-center gap-2 text-sm">
             <input

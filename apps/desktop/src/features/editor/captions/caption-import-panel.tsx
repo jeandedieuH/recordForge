@@ -6,7 +6,7 @@ import {
   createImportCaptionCuesCommand,
   parseCaptionText,
 } from "@recordforge/editor-core"
-import { Badge, Button, EmptyState, NativeSelect } from "@recordforge/ui"
+import { Badge, Button, EmptyState, SimpleSelect } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
 export function CaptionImportPanel() {
@@ -81,31 +81,35 @@ export function CaptionImportPanel() {
 
       <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-dim p-3">
         <div className="grid grid-cols-2 gap-2">
-          <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-            Style
-            <NativeSelect
+          <div className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+            <span>Style</span>
+            <SimpleSelect
               aria-label="Caption style"
+              size="sm"
               value={style}
-              onChange={(event) => setStyle(event.target.value as CaptionStylePreset)}
-            >
-              <option value="default">Default</option>
-              <option value="minimal">Minimal</option>
-              <option value="boxed">Boxed</option>
-              <option value="highlight">Highlight</option>
-            </NativeSelect>
-          </label>
-          <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-            Placement
-            <NativeSelect
+              onValueChange={(val) => setStyle(val as CaptionStylePreset)}
+              options={[
+                { value: "default", label: "Default" },
+                { value: "minimal", label: "Minimal" },
+                { value: "boxed", label: "Boxed" },
+                { value: "highlight", label: "Highlight" },
+              ]}
+            />
+          </div>
+          <div className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+            <span>Placement</span>
+            <SimpleSelect
               aria-label="Caption placement"
+              size="sm"
               value={placement}
-              onChange={(event) => setPlacement(event.target.value as CaptionPlacement)}
-            >
-              <option value="top">Top safe area</option>
-              <option value="center">Center safe area</option>
-              <option value="bottom">Bottom safe area</option>
-            </NativeSelect>
-          </label>
+              onValueChange={(val) => setPlacement(val as CaptionPlacement)}
+              options={[
+                { value: "top", label: "Top safe area" },
+                { value: "center", label: "Center safe area" },
+                { value: "bottom", label: "Bottom safe area" },
+              ]}
+            />
+          </div>
         </div>
         <input
           ref={inputRef}

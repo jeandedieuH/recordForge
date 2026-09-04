@@ -1,5 +1,5 @@
 use std::path::Path;
-use tauri::State;
+use tauri::{Manager, State};
 use tracing::instrument;
 
 use crate::database::media::MediaJob;
@@ -97,3 +97,14 @@ pub fn reveal_export(job_id: String, state: State<'_, AppState>) -> Result<()> {
         Err(InternalError::Media("reveal is only implemented on Windows".into()).into())
     }
 }
+
+/// Flash taskbar or request dock attention when an export finishes in the background.
+#[tauri::command]
+#[instrument(skip(app))]
+pub fn request_export_attention(app: tauri::AppHandle) -> Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
+    Ok(())
+}
+

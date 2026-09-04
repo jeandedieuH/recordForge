@@ -1,6 +1,6 @@
 import type { CaptionClip, MediaMetadata } from "@recordforge/contracts"
 import { Sparkles } from "lucide-react"
-import { NativeSelect, Textarea } from "@recordforge/ui"
+import { SimpleSelect, Textarea } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { InspectorSection, NumberField } from "./fields"
@@ -46,45 +46,49 @@ export function CaptionClipInspector({
             }
           />
           <div className="grid grid-cols-2 gap-2">
-            <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-              Style
-              <NativeSelect
+            <div className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+              <span>Style</span>
+              <SimpleSelect
                 aria-label="Caption style"
+                size="sm"
                 value={clip.style}
-                onChange={(event) =>
+                onValueChange={(val) =>
                   interaction.updateCaption(
                     clip.id,
-                    { style: event.target.value as typeof clip.style },
+                    { style: val as typeof clip.style },
                     { phase: "commit" },
                   )
                 }
-              >
-                <option value="default">Default</option>
-                <option value="minimal">Minimal</option>
-                <option value="boxed">Boxed</option>
-                <option value="highlight">Highlight</option>
-              </NativeSelect>
-            </label>
-            <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-              Placement
-              <NativeSelect
+                options={[
+                  { value: "default", label: "Default" },
+                  { value: "minimal", label: "Minimal" },
+                  { value: "boxed", label: "Boxed" },
+                  { value: "highlight", label: "Highlight" },
+                ]}
+              />
+            </div>
+            <div className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+              <span>Placement</span>
+              <SimpleSelect
                 aria-label="Caption placement"
+                size="sm"
                 value={clip.placement ?? "bottom"}
-                onChange={(event) =>
+                onValueChange={(val) =>
                   interaction.updateCaption(
                     clip.id,
                     {
-                      placement: event.target.value as NonNullable<typeof clip.placement>,
+                      placement: val as NonNullable<typeof clip.placement>,
                     },
                     { phase: "commit" },
                   )
                 }
-              >
-                <option value="top">Top</option>
-                <option value="center">Center</option>
-                <option value="bottom">Bottom</option>
-              </NativeSelect>
-            </label>
+                options={[
+                  { value: "top", label: "Top" },
+                  { value: "center", label: "Center" },
+                  { value: "bottom", label: "Bottom" },
+                ]}
+              />
+            </div>
           </div>
           <NumberField
             label="Safe area margin (ms)"

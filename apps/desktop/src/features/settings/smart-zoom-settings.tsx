@@ -1,7 +1,7 @@
 import { memo } from "react"
 import { Sparkles } from "lucide-react"
 import type { RecordingSmartZoomPreset } from "@recordforge/contracts"
-import { NativeSelect, Switch } from "@recordforge/ui"
+import { SimpleSelect, Switch } from "@recordforge/ui"
 
 interface SmartZoomSettingsProps {
   enabled: boolean
@@ -52,20 +52,20 @@ export const SmartZoomSettings = memo(function SmartZoomSettings({
         <label htmlFor="smart-zoom-preset" className="text-xs font-medium text-foreground">
           Smart zoom style
         </label>
-        <NativeSelect
-          id="smart-zoom-preset"
-          aria-describedby="smart-zoom-preset-help"
+        <SimpleSelect
+          aria-label="Smart zoom style"
           value={preset}
           disabled={disabled}
-          onChange={(event) => onPresetChange(event.target.value as RecordingSmartZoomPreset)}
-          className="h-9 w-full bg-surface text-xs sm:w-60"
-        >
-          <option value="subtle">Subtle · 1.25×</option>
-          <option value="product-demo">Product demo · 1.5×</option>
-          <option value="cinematic">Cinematic · 1.8×</option>
-          <option value="developer">Developer · 2.2×</option>
-          <option value="manual-only">Manual only</option>
-        </NativeSelect>
+          onValueChange={(val) => onPresetChange(val as RecordingSmartZoomPreset)}
+          className="w-full sm:w-60"
+          options={[
+            { value: "subtle", label: "Subtle · 1.25×" },
+            { value: "product-demo", label: "Product demo · 1.5×" },
+            { value: "cinematic", label: "Cinematic · 1.8×" },
+            { value: "developer", label: "Developer · 2.2×" },
+            { value: "manual-only", label: "Manual only" },
+          ]}
+        />
         <p
           id="smart-zoom-preset-help"
           className="text-[11px] leading-relaxed text-subtle-foreground"

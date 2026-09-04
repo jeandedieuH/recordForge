@@ -535,7 +535,7 @@ pub fn run_render_plan(
         &db,
         app,
         job_id,
-        0.08,
+        0.02,
         "resolving-assets",
         Some("resolving project assets"),
     )?;
@@ -560,7 +560,7 @@ pub fn run_render_plan(
         "selected export encoder"
     );
 
-    // Composition owns 0.15..0.80 of the job; FFmpeg reports elapsed time.
+    // Composition is the primary export workload (0.05..0.96 of the job); FFmpeg reports elapsed time.
     let progress_reporter = {
         let db = Arc::clone(&db);
         let app_handle = app.clone();
@@ -575,7 +575,7 @@ pub fn run_render_plan(
             }
             *last = Some(std::time::Instant::now());
             drop(last);
-            let progress = 0.15 + ratio.clamp(0.0, 1.0) * 0.65;
+            let progress = 0.05 + ratio.clamp(0.0, 1.0) * 0.91;
             let _ = update_progress(&db, &app_handle, &job, progress, "rendering", None);
         }
     };
@@ -584,7 +584,7 @@ pub fn run_render_plan(
         &db,
         app,
         job_id,
-        0.15,
+        0.05,
         "rendering",
         Some("compositing timeline tracks"),
     )?;
@@ -624,7 +624,7 @@ pub fn run_render_plan(
             encoder.display_name(),
             error
         );
-        update_progress(&db, app, job_id, 0.15, "rendering", Some(&retry_detail))?;
+        update_progress(&db, app, job_id, 0.05, "rendering", Some(&retry_detail))?;
         render_timeline_composition(
             &ffmpeg,
             &partial_path,
@@ -650,7 +650,7 @@ pub fn run_render_plan(
             &db,
             app,
             job_id,
-            0.84,
+            0.97,
             "captions",
             Some("writing caption sidecar"),
         )?;
@@ -663,7 +663,7 @@ pub fn run_render_plan(
             &db,
             app,
             job_id,
-            0.87,
+            0.98,
             "chapters",
             Some("writing chapter sidecar"),
         )?;
@@ -677,7 +677,7 @@ pub fn run_render_plan(
         &db,
         app,
         job_id,
-        0.9,
+        0.99,
         "validating",
         Some("validating rendered media"),
     )?;

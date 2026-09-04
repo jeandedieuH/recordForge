@@ -20,6 +20,12 @@ export { Input, type InputProps } from "./components/forms/input"
 export { Label } from "./components/forms/label"
 export { NativeSelect, type NativeSelectProps } from "./components/forms/native-select"
 export {
+  NumberInput,
+  NumberInputField,
+  type NumberInputFieldProps,
+  type NumberInputProps,
+} from "./components/forms/number-input"
+export {
   Select,
   SelectContent,
   SelectGroup,
@@ -28,8 +34,18 @@ export {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
+  SimpleSelect,
+  type SelectOption,
+  type SelectTriggerProps,
+  type SimpleSelectProps,
 } from "./components/forms/select"
-export { Slider } from "./components/forms/slider"
+export {
+  Slider,
+  SliderField,
+  type SliderFieldProps,
+  type SliderPreset,
+  type SliderProps,
+} from "./components/forms/slider"
 export { Switch } from "./components/forms/switch"
 export { Textarea, type TextareaProps } from "./components/forms/textarea"
 

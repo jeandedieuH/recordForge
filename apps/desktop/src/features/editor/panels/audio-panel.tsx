@@ -1,7 +1,7 @@
 import type { AudioClip, TimelineTrack } from "@recordforge/contracts"
 import { createUpdateClipAudioCommand, createUpdateTrackCommand } from "@recordforge/editor-core"
 import { Volume2 } from "lucide-react"
-import { Skeleton, Slider, Switch } from "@recordforge/ui"
+import { NumberInputField, Skeleton, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
 export function AudioPanel() {
@@ -144,6 +144,7 @@ function AudioClipsList() {
             </span>
           </div>
           <Slider
+            variant="emerald"
             value={[clip.volume ?? 1]}
             min={0}
             max={2}
@@ -154,38 +155,28 @@ function AudioClipsList() {
             }
           />
           <div className="grid grid-cols-2 gap-2">
-            <label className="flex flex-col gap-1 text-[10px] text-subtle-foreground">
-              Fade in (ms)
-              <input
-                type="number"
-                min={0}
-                value={clip.fadeInMs}
-                onChange={(event) =>
-                  execute(
-                    createUpdateClipAudioCommand(clip.id, {
-                      fadeInMs: Number(event.target.value),
-                    }),
-                  )
-                }
-                className="h-7 rounded border border-border bg-surface px-2 text-foreground"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[10px] text-subtle-foreground">
-              Fade out (ms)
-              <input
-                type="number"
-                min={0}
-                value={clip.fadeOutMs}
-                onChange={(event) =>
-                  execute(
-                    createUpdateClipAudioCommand(clip.id, {
-                      fadeOutMs: Number(event.target.value),
-                    }),
-                  )
-                }
-                className="h-7 rounded border border-border bg-surface px-2 text-foreground"
-              />
-            </label>
+            <NumberInputField
+              size="sm"
+              label="Fade in"
+              unit="ms"
+              min={0}
+              step={50}
+              value={clip.fadeInMs}
+              onChange={(val) =>
+                execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))
+              }
+            />
+            <NumberInputField
+              size="sm"
+              label="Fade out"
+              unit="ms"
+              min={0}
+              step={50}
+              value={clip.fadeOutMs}
+              onChange={(val) =>
+                execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))
+              }
+            />
           </div>
         </div>
       ))}

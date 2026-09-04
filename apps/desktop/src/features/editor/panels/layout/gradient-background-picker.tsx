@@ -6,7 +6,7 @@ import {
   parseGradientColors,
   type GradientCategory,
 } from "@recordforge/editor-core"
-import { ColorPicker, Slider, cn } from "@recordforge/ui"
+import { ColorPicker, SliderField, cn } from "@recordforge/ui"
 
 interface GradientBackgroundPickerProps {
   value: string
@@ -192,49 +192,24 @@ export function GradientBackgroundPicker({ value, onChange }: GradientBackground
             </label>
 
             {/* Angle Control */}
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
+            <SliderField
+              label={
                 <span className="flex items-center gap-1">
                   <Compass className="size-3 text-primary" aria-hidden />
                   Angle
                 </span>
-                <span className="font-mono text-[10px] text-foreground">{customAngle}°</span>
-              </div>
-              <Slider
-                value={[customAngle]}
-                min={0}
-                max={360}
-                step={5}
-                onValueChange={([val]) => {
-                  if (val !== undefined) {
-                    setCustomAngle(val)
-                    applyCustomLinear(customColor1, customColor2, val, customColor3)
-                  }
-                }}
-              />
-
-              {/* Quick Angle Chips */}
-              <div className="flex items-center justify-between gap-1 pt-1">
-                {QUICK_ANGLES.map((angle) => (
-                  <button
-                    key={angle}
-                    type="button"
-                    onClick={() => {
-                      setCustomAngle(angle)
-                      applyCustomLinear(customColor1, customColor2, angle, customColor3)
-                    }}
-                    className={cn(
-                      "rounded border px-1.5 py-0.5 font-mono text-[9px] font-medium transition-colors",
-                      customAngle === angle
-                        ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
-                        : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
-                    )}
-                  >
-                    {angle}°
-                  </button>
-                ))}
-              </div>
-            </div>
+              }
+              value={customAngle}
+              min={0}
+              max={360}
+              step={5}
+              unit="°"
+              presets={QUICK_ANGLES.map((a) => ({ label: `${a}°`, value: a }))}
+              onChange={(val) => {
+                setCustomAngle(val)
+                applyCustomLinear(customColor1, customColor2, val, customColor3)
+              }}
+            />
 
             {/* Live Gradient Preview Bar */}
             <div

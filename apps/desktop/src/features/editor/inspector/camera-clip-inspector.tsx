@@ -7,7 +7,7 @@ import type {
 import { buildCameraPresetTransform } from "@recordforge/editor-core"
 import { useEffect, useMemo } from "react"
 import { Sparkles, Video } from "lucide-react"
-import { Button, ColorPicker, Switch, useToast } from "@recordforge/ui"
+import { Button, ColorPicker, SimpleSelect, Switch, useToast } from "@recordforge/ui"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
 import { ClipPropertiesInspector } from "./clip-properties-inspector"
 import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
@@ -298,23 +298,25 @@ export function CameraClipInspector({
               onCheckedChange={(visible) => updateTransform({ visible })}
             />
           </label>
-          <label className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
+          <div className="flex items-center justify-between gap-3 text-xs text-subtle-foreground">
             <span>Shape</span>
-            <select
+            <SimpleSelect
               aria-label="Camera shape"
+              size="sm"
               value={clip.transform.shape}
-              onChange={(event) =>
+              onValueChange={(val) =>
                 updateTransform({
-                  shape: event.target.value as ClipTransform["shape"],
+                  shape: val as ClipTransform["shape"],
                 })
               }
-              className="h-8 rounded-md border border-border bg-surface px-2 text-xs text-foreground"
-            >
-              <option value="rectangle">Rectangle</option>
-              <option value="rounded">Rounded</option>
-              <option value="circle">Circle</option>
-            </select>
-          </label>
+              className="w-32"
+              options={[
+                { value: "rectangle", label: "Rectangle" },
+                { value: "rounded", label: "Rounded" },
+                { value: "circle", label: "Circle" },
+              ]}
+            />
+          </div>
 
           <div className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">

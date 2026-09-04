@@ -29,10 +29,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   IconButton,
-  NativeSelect,
   Popover,
   PopoverContent,
   PopoverTrigger,
+  SimpleSelect,
   Slider,
   Switch,
   cn,
@@ -570,19 +570,17 @@ export function TimelineToolbar({
       {/* Cluster 3: View Controls, Speed, Minimap & Help */}
       <div className="flex items-center gap-1.5">
         {/* Playback Rate Dropdown */}
-        <NativeSelect
+        <SimpleSelect
           aria-label="Playback speed"
+          size="sm"
           value={String(playbackRate)}
-          onChange={(event) => onSetPlaybackRate(Number(event.target.value))}
+          onValueChange={(val) => onSetPlaybackRate(Number(val))}
           className="h-7 w-18 text-[11px] font-mono font-medium"
-          selectClassName="pl-2 pr-6"
-        >
-          {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4].map((rate) => (
-            <option key={rate} value={rate}>
-              {rate}×
-            </option>
-          ))}
-        </NativeSelect>
+          options={[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4].map((rate) => ({
+            value: String(rate),
+            label: `${rate}×`,
+          }))}
+        />
 
         <div className="hidden h-4 w-px bg-border/60 sm:block" />
 
@@ -600,6 +598,7 @@ export function TimelineToolbar({
           </IconButton>
 
           <Slider
+            size="sm"
             value={[zoom]}
             min={0}
             max={100}

@@ -5,7 +5,7 @@ import {
   BACKGROUND_DIM_PRESETS,
   IMAGE_BACKGROUND_PRESETS,
 } from "@recordforge/editor-core"
-import { Button, Slider, cn } from "@recordforge/ui"
+import { Button, SliderField, cn } from "@recordforge/ui"
 
 interface ImageBackgroundPickerProps {
   value: string
@@ -194,69 +194,32 @@ export function ImageBackgroundPicker({
         </div>
 
         {/* Background Blur */}
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-            <span>Background Blur</span>
-            <span className="font-mono text-[10px] text-foreground">{backgroundBlur}px</span>
-          </div>
-          <Slider
-            value={[backgroundBlur]}
-            min={0}
-            max={64}
-            step={1}
-            onValueChange={([val]) => val !== undefined && onBlurChange?.(val)}
-          />
-          <div className="flex items-center justify-between gap-1 pt-0.5">
-            {BACKGROUND_BLUR_PRESETS.map((p) => (
-              <button
-                key={p.value}
-                type="button"
-                onClick={() => onBlurChange?.(p.value)}
-                className={cn(
-                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
-                  backgroundBlur === p.value
-                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
-                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
-                )}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <SliderField
+          label="Background Blur"
+          value={backgroundBlur}
+          min={0}
+          max={64}
+          step={1}
+          unit="px"
+          presets={BACKGROUND_BLUR_PRESETS.map((p) => ({ label: p.label, value: p.value }))}
+          onChange={(val) => onBlurChange?.(val)}
+        />
 
         {/* Background Dim */}
-        <div className="flex flex-col gap-1.5 pt-1 border-t border-border/50">
-          <div className="flex items-center justify-between text-[11px] text-subtle-foreground">
-            <span>Background Dim</span>
-            <span className="font-mono text-[10px] text-foreground">
-              {Math.round(backgroundDim * 100)}%
-            </span>
-          </div>
-          <Slider
-            value={[Math.round(backgroundDim * 100)]}
+        <div className="pt-1 border-t border-border/50">
+          <SliderField
+            label="Background Dim"
+            value={Math.round(backgroundDim * 100)}
             min={0}
             max={90}
             step={5}
-            onValueChange={([val]) => val !== undefined && onDimChange?.(val / 100)}
+            unit="%"
+            presets={BACKGROUND_DIM_PRESETS.map((p) => ({
+              label: p.label,
+              value: Math.round(p.value * 100),
+            }))}
+            onChange={(val) => onDimChange?.(val / 100)}
           />
-          <div className="flex items-center justify-between gap-1 pt-0.5">
-            {BACKGROUND_DIM_PRESETS.map((p) => (
-              <button
-                key={p.label}
-                type="button"
-                onClick={() => onDimChange?.(p.value)}
-                className={cn(
-                  "flex-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium transition-colors",
-                  Math.abs(backgroundDim - p.value) < 0.01
-                    ? "border-primary/60 bg-primary/15 font-semibold text-primary shadow-xs"
-                    : "border-border/60 bg-surface text-subtle-foreground hover:border-border hover:bg-surface-hover hover:text-foreground",
-                )}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
         </div>
       </div>
     </div>

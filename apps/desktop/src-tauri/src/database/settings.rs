@@ -21,6 +21,8 @@ const ALLOWED_KEYS: &[&str] = &[
     "editorTextPresetFavorites",
     "recordingPreferences",
     "onboardingCompleted",
+    "notifyOnExportComplete",
+    "soundOnExportComplete",
 ];
 
 pub fn validate_key(key: &str) -> Result<()> {

@@ -60,6 +60,7 @@ import {
   prepareRecordingMedia,
 } from "../lib/media"
 import { exportTimeline, retryExport as retryExportRequest, revealExport } from "../lib/timeline"
+import { notifyExportFinished } from "../lib/export-notifications"
 import { useEditorStore } from "./editor-store"
 
 interface TimelineStore {
@@ -533,7 +534,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
       // Track export jobs for the editor's export progress UI.
       if (job.kind === "export") {
+        const previousJob = get().activeExportJob
         updates.activeExportJob = job
+
+        if (
+          previousJob &&
+          (previousJob.status === "running" || previousJob.status === "pending") &&
+          job.status === "completed"
+        ) {
+          void notifyExportFinished(job, recording?.name)
+        }
       }
 
       // Track the active proxy/prepare job. We follow a prepare job when it is
