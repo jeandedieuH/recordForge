@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react"
 import { X } from "lucide-react"
-import { Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
-import type { AnnotationType } from "@recordforge/contracts"
+import { Button, Kbd, Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
+import {
+  DEFAULT_ANNOTATION_DRAW_SETTINGS,
+  type AnnotationDrawSettings,
+} from "./annotations/annotation-tools"
 import { useTimelineStore } from "../../stores/timeline-store"
 import {
   useThumbnailManifest,
@@ -44,8 +47,9 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false)
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false)
   const [drawMode, setDrawMode] = useState(false)
-  const [drawType, setDrawType] = useState<AnnotationType>("rectangle")
-  const [drawColor, setDrawColor] = useState("#38bdf8")
+  const [drawSettings, setDrawSettings] = useState<AnnotationDrawSettings>(
+    DEFAULT_ANNOTATION_DRAW_SETTINGS,
+  )
 
   const [activePanelWidth, setActivePanelWidth] = useResizableDimension({
     defaultValue: 260,
@@ -98,15 +102,25 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
     }
   }, [view.selection, mobileInspectorOpen])
 
+  useEffect(() => {
+    if (!drawMode) return
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setDrawMode(false)
+    }
+    window.addEventListener("keydown", handleEscape)
+    return () => window.removeEventListener("keydown", handleEscape)
+  }, [drawMode])
+
   function handleSelectTask(task: EditorTask) {
     setActiveTask(task)
+    if (task !== "annotations") setDrawMode(false)
     if (isNarrow) setMobilePanelOpen(true)
   }
 
-  function handleToggleDrawMode(enabled: boolean, type: AnnotationType, color: string) {
+  function handleToggleDrawMode(enabled: boolean) {
     setDrawMode(enabled)
-    setDrawType(type)
-    setDrawColor(color)
+    if (enabled) useTimelineStore.getState().pause()
+    if (isNarrow) setMobilePanelOpen(false)
   }
 
   const activePanel = (
@@ -118,6 +132,8 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
       thumbnailResource={thumbnailResource}
       waveformResources={waveformResources}
       drawMode={drawMode}
+      drawSettings={drawSettings}
+      onDrawSettingsChange={setDrawSettings}
       onToggleDrawMode={handleToggleDrawMode}
       onOpenExport={onOpenExport}
     />
@@ -154,14 +170,25 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
         ) : null}
 
         <section className="flex min-w-0 flex-1 flex-col" aria-label="Editor workspace">
+          {drawMode ? (
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-primary/10 px-4 py-2">
+              <p className="text-xs text-foreground" role="status">
+                Drawing {drawSettings.preset.name.toLowerCase()} · Drag on the canvas ·{" "}
+                <Kbd>Shift</Kbd> to constrain
+              </p>
+              <Button variant="ghost" size="sm" onClick={() => setDrawMode(false)}>
+                Done <Kbd>Esc</Kbd>
+              </Button>
+            </div>
+          ) : null}
           <TimelineView
             recordingId={recordingId}
             thumbnailResource={thumbnailResource}
             videoThumbnailResources={videoThumbnailResources}
             waveformResources={waveformResources}
             drawMode={drawMode}
-            drawType={drawType}
-            drawColor={drawColor}
+            drawSettings={drawSettings}
+            onFinishDrawing={() => setDrawMode(false)}
           />
         </section>
 

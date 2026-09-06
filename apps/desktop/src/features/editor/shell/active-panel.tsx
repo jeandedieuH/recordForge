@@ -16,6 +16,7 @@ import { ActivePanelErrorBoundary } from "./active-panel-error-boundary"
 import { MediaPanel } from "../panels/media-panel"
 import { TitlesPanel } from "../panels/titles-panel"
 import { AnnotationsPanel } from "../panels/annotations-panel"
+import type { AnnotationDrawSettings } from "../annotations/annotation-tools"
 import { FocusPanel } from "../panels/focus-panel"
 import { CursorPanel } from "../panels/cursor-panel"
 import { CaptionsPanel } from "../panels/captions-panel"
@@ -28,12 +29,7 @@ import type {
   ThumbnailManifest,
   WaveformResources,
 } from "../media/derivative-resources"
-import type {
-  AnnotationType,
-  LibraryRecording,
-  MediaMetadata,
-  TimelineState,
-} from "@recordforge/contracts"
+import type { LibraryRecording, MediaMetadata, TimelineState } from "@recordforge/contracts"
 
 export const TASK_ICONS: Record<EditorTask, LucideIcon> = {
   media: Library,
@@ -55,8 +51,10 @@ interface ActivePanelProps {
   metadata: MediaMetadata | null
   thumbnailResource: DerivativeResource<ThumbnailManifest> & { retry: () => void }
   waveformResources: WaveformResources
-  drawMode?: boolean
-  onToggleDrawMode?: (enabled: boolean, type: AnnotationType, color: string) => void
+  drawMode: boolean
+  drawSettings: AnnotationDrawSettings
+  onDrawSettingsChange: (settings: AnnotationDrawSettings) => void
+  onToggleDrawMode: (enabled: boolean) => void
   onOpenExport?: () => void
 }
 
@@ -68,6 +66,8 @@ export function ActivePanel({
   thumbnailResource,
   waveformResources,
   drawMode,
+  drawSettings,
+  onDrawSettingsChange,
   onToggleDrawMode,
   onOpenExport,
 }: ActivePanelProps) {
@@ -86,7 +86,14 @@ export function ActivePanel({
       case "titles":
         return <TitlesPanel />
       case "annotations":
-        return <AnnotationsPanel drawMode={drawMode} onToggleDrawMode={onToggleDrawMode} />
+        return (
+          <AnnotationsPanel
+            drawMode={drawMode}
+            drawSettings={drawSettings}
+            onDrawSettingsChange={onDrawSettingsChange}
+            onToggleDrawMode={onToggleDrawMode}
+          />
+        )
       case "focus":
         return <FocusPanel />
       case "cursor":

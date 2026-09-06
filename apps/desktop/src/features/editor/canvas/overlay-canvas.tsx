@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { AnnotationClip, AnnotationType, OverlayRenderPlan } from "@recordforge/contracts"
-import { createAnnotationClip } from "@recordforge/editor-core"
-import { createOverlayWasmEngine, type OverlayEngine } from "@recordforge/overlay-core"
+import type { AnnotationClip, OverlayRenderPlan } from "@recordforge/contracts"
+import {
+  createOverlayWasmEngine,
+  renderOverlayDisplayList,
+  type OverlayEngine,
+} from "@recordforge/overlay-core"
 import { cn } from "@recordforge/ui"
+import {
+  DEFAULT_ANNOTATION_DRAW_SETTINGS,
+  type AnnotationDrawSettings,
+} from "../annotations/annotation-tools"
 import { usePlayheadMs } from "../timeline/use-playback-state"
+import { getAnnotationDrawingPreview } from "./annotation-drawing"
+import { createAnnotationDrawingSession } from "./annotation-drawing-session"
 
 interface OverlayCanvasProps {
   renderPlan: OverlayRenderPlan
@@ -11,18 +20,9 @@ interface OverlayCanvasProps {
   canvasHeight: number
   assetUrls?: Readonly<Record<string, string>>
   drawMode?: boolean
-  drawType?: AnnotationType
-  drawColor?: string
+  drawSettings?: AnnotationDrawSettings
   onCreateClip?: (clip: AnnotationClip) => void
   className?: string
-}
-
-interface DrawState {
-  pointerId: number
-  startX: number
-  startY: number
-  currentX: number
-  currentY: number
 }
 
 export function OverlayCanvas({
@@ -31,8 +31,7 @@ export function OverlayCanvas({
   canvasHeight,
   assetUrls = {},
   drawMode = false,
-  drawType = "rectangle",
-  drawColor = "#38bdf8",
+  drawSettings = DEFAULT_ANNOTATION_DRAW_SETTINGS,
   onCreateClip,
   className,
 }: OverlayCanvasProps) {
@@ -41,8 +40,19 @@ export function OverlayCanvas({
   const engineRef = useRef<OverlayEngine | null>(null)
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>())
   const renderFrameRef = useRef<() => void>(() => undefined)
+  const onCreateClipRef = useRef(onCreateClip)
+  onCreateClipRef.current = onCreateClip
   const [engineVersion, setEngineVersion] = useState(0)
-  const [drawState, setDrawState] = useState<DrawState | null>(null)
+  const drawingRef = useRef<ReturnType<typeof createAnnotationDrawingSession> | null>(null)
+  if (!drawingRef.current) {
+    drawingRef.current = createAnnotationDrawingSession({
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (id) => cancelAnimationFrame(id),
+      onInvalidate: () => renderFrameRef.current(),
+      onCreateClip: (clip) => onCreateClipRef.current?.(clip),
+    })
+  }
+  const drawing = drawingRef.current
 
   useEffect(() => {
     let isCancelled = false
@@ -70,11 +80,34 @@ export function OverlayCanvas({
 
   useEffect(() => {
     return () => {
+      drawing.dispose()
       const engine = engineRef.current
       engineRef.current = null
       engine?.dispose()
     }
-  }, [])
+  }, [drawing])
+
+  useEffect(() => {
+    drawing.cancel()
+  }, [drawMode, drawSettings, canvasWidth, canvasHeight, drawing])
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape" || !drawing.isActive()) return
+      event.preventDefault()
+      event.stopPropagation()
+      drawing.cancel()
+    }
+    function handleBlur() {
+      drawing.cancel()
+    }
+    window.addEventListener("keydown", handleKeyDown, true)
+    window.addEventListener("blur", handleBlur)
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true)
+      window.removeEventListener("blur", handleBlur)
+    }
+  }, [drawing])
 
   const renderFrame = useCallback(() => {
     const canvas = canvasRef.current
@@ -84,35 +117,27 @@ export function OverlayCanvas({
     if (canvas.width !== canvasWidth) canvas.width = canvasWidth
     if (canvas.height !== canvasHeight) canvas.height = canvasHeight
 
-    if (engine) {
-      try {
-        engine.renderToCanvas(playheadMs, canvas, {
+    try {
+      // Existing clips retain canonical WASM evaluation. Only the transient draft bypasses
+      // timeline animation, sharing the renderer so arrow heads, fills and stroke styles match.
+      const displayList = engine?.evaluate(playheadMs) ?? { timeMs: 0, items: [] }
+      const draft = drawing.getPreview()
+      renderOverlayDisplayList(
+        draft
+          ? { ...displayList, items: [...displayList.items, getAnnotationDrawingPreview(draft)] }
+          : displayList,
+        canvas,
+        {
           assetUrls,
           imageCache: imageCacheRef.current,
           onImageLoad: () => renderFrameRef.current(),
-        })
-      } catch (err) {
-        console.warn("Overlay renderToCanvas error:", err)
-      }
+        },
+      )
+    } catch (err) {
+      canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height)
+      console.warn("Overlay renderToCanvas error:", err)
     }
-
-    const currentDrawState = drawState
-    if (!currentDrawState) return
-    const context = canvas.getContext("2d")
-    if (!context) return
-    context.save()
-    context.globalAlpha = 0.7
-    context.strokeStyle = drawColor
-    context.fillStyle = drawColor
-    context.setLineDash([6, 6])
-    const x = Math.min(currentDrawState.startX, currentDrawState.currentX)
-    const y = Math.min(currentDrawState.startY, currentDrawState.currentY)
-    const width = Math.abs(currentDrawState.currentX - currentDrawState.startX)
-    const height = Math.abs(currentDrawState.currentY - currentDrawState.startY)
-    context.fillRect(x, y, width, height)
-    context.strokeRect(x, y, width, height)
-    context.restore()
-  }, [assetUrls, canvasHeight, canvasWidth, drawColor, drawState, playheadMs])
+  }, [assetUrls, canvasHeight, canvasWidth, drawing, playheadMs])
 
   renderFrameRef.current = renderFrame
 
@@ -133,64 +158,50 @@ export function OverlayCanvas({
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (!drawMode || event.button !== 0) return
+    if (!drawMode || event.button !== 0 || !event.isPrimary) return
     event.preventDefault()
     event.stopPropagation()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    const point = getCanvasCoords(event.clientX, event.clientY)
-    setDrawState({
+    const rect = event.currentTarget.getBoundingClientRect()
+    drawing.start({
       pointerId: event.pointerId,
-      startX: point.x,
-      startY: point.y,
-      currentX: point.x,
-      currentY: point.y,
+      target: event.currentTarget,
+      point: getCanvasCoords(event.clientX, event.clientY),
+      shiftKey: event.shiftKey,
+      settings: drawSettings,
+      startMs: playheadMs,
+      bounds: {
+        width: canvasWidth,
+        height: canvasHeight,
+        // Keep the dead zone at five screen pixels even when the preview is scaled down.
+        minimumWidth: (5 * canvasWidth) / Math.max(1, rect.width),
+        minimumHeight: (5 * canvasHeight) / Math.max(1, rect.height),
+      },
     })
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (!drawState || drawState.pointerId !== event.pointerId) return
-    event.preventDefault()
-    const point = getCanvasCoords(event.clientX, event.clientY)
-    setDrawState((current) =>
-      current ? { ...current, currentX: point.x, currentY: point.y } : null,
-    )
+    if (
+      drawing.move({
+        pointerId: event.pointerId,
+        point: getCanvasCoords(event.clientX, event.clientY),
+        shiftKey: event.shiftKey,
+      })
+    ) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
   }
 
   function handlePointerUp(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (!drawState || drawState.pointerId !== event.pointerId) return
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
-    }
-    const point = getCanvasCoords(event.clientX, event.clientY)
-    const current = drawState
-    setDrawState(null)
-
-    const width = Math.abs(point.x - current.startX)
-    const height = Math.abs(point.y - current.startY)
-    if ((drawType === "arrow" || drawType === "line") && width < 5 && height < 5) return
-    if (drawType !== "arrow" && drawType !== "line" && (width < 10 || height < 10)) return
-
-    const clip = createAnnotationClip(drawType, {
-      startMs: Math.round(playheadMs),
-      durationMs: 3_500,
-      strokeColor: drawColor,
-      canvasWidth,
-      canvasHeight,
+    drawing.finish({
+      pointerId: event.pointerId,
+      point: getCanvasCoords(event.clientX, event.clientY),
+      shiftKey: event.shiftKey,
     })
-    if (drawType === "arrow" || drawType === "line") {
-      clip.x = current.startX
-      clip.y = current.startY
-      clip.endX = point.x
-      clip.endY = point.y
-      clip.width = width
-      clip.height = height
-    } else {
-      clip.x = Math.min(current.startX, point.x)
-      clip.y = Math.min(current.startY, point.y)
-      clip.width = width
-      clip.height = height
-    }
-    onCreateClip?.(clip)
+  }
+
+  function handlePointerCancel(event: React.PointerEvent<HTMLCanvasElement>) {
+    drawing.cancel(event.pointerId)
   }
 
   return (
@@ -201,13 +212,14 @@ export function OverlayCanvas({
       aria-label="Overlay preview canvas"
       className={cn(
         "absolute inset-0 size-full",
-        drawMode ? "pointer-events-auto cursor-crosshair" : "pointer-events-none",
+        drawMode ? "pointer-events-auto touch-none cursor-crosshair" : "pointer-events-none",
         className,
       )}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
     />
   )
 }

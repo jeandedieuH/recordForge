@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { toAssetUrl } from "../../../lib/assets"
 import {
   type AnnotationClip,
-  type AnnotationType,
   type CursorSmoothing,
   type ImageClip,
   type ManualZoomSegment,
@@ -80,6 +79,7 @@ import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
 import { OverlayCanvas } from "../canvas/overlay-canvas"
+import { getAnnotationEditTime, type AnnotationDrawSettings } from "../annotations/annotation-tools"
 import { OverlaySelectionLayer } from "../canvas/overlay-selection-layer"
 import { usePreRenderedBackground } from "../canvas/background-cache"
 import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
@@ -101,8 +101,8 @@ interface TimelineViewProps {
   videoThumbnailResources?: VideoTrackThumbnailResources
   waveformResources: WaveformResources
   drawMode?: boolean
-  drawType?: AnnotationType
-  drawColor?: string
+  drawSettings?: AnnotationDrawSettings
+  onFinishDrawing?: () => void
 }
 
 interface SelectedClip {
@@ -302,8 +302,8 @@ export function TimelineView({
   videoThumbnailResources,
   waveformResources,
   drawMode = false,
-  drawType = "rectangle",
-  drawColor = "#38bdf8",
+  drawSettings,
+  onFinishDrawing,
 }: TimelineViewProps) {
   const engine = useTimelineStore((state) => state.engine)
   const draftTimeline = useTimelineStore((state) => state.draftTimeline)
@@ -1850,19 +1850,21 @@ export function TimelineView({
                     canvasHeight={timeline.canvas.height}
                     assetUrls={overlayAssetUrls}
                     drawMode={drawMode}
-                    drawType={drawType}
-                    drawColor={drawColor}
+                    drawSettings={drawSettings}
                     onCreateClip={(clip) => {
                       const track = timeline.tracks.find(
-                        (candidate) => candidate.kind === "annotations",
+                        (candidate) => candidate.kind === "annotations" && !candidate.locked,
                       )
                       const ok = execute(createAddAnnotationClipCommand(clip, track?.id))
                       if (ok) {
+                        pause()
                         setSelection({
                           kind: "clip",
                           clipIds: [clip.id],
                           primaryClipId: clip.id,
                         })
+                        seek(getAnnotationEditTime(clip))
+                        onFinishDrawing?.()
                       }
                     }}
                     className="z-35"

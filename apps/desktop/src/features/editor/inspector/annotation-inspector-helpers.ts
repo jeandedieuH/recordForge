@@ -4,11 +4,11 @@ import {
   type AnnotationType,
   type OverlayAnimation,
 } from "@recordforge/contracts"
+import { getAnnotationShapePreset, type AnnotationShapePreset } from "@recordforge/editor-core"
 import {
-  applyPresetToAnnotationClip,
-  getAnnotationShapePreset,
-  type AnnotationShapePreset,
-} from "@recordforge/editor-core"
+  annotationSettingsFromPreset,
+  applyAnnotationToolToClip,
+} from "../annotations/annotation-tools"
 
 export interface AnnotationInspectorProps {
   clip: AnnotationClip
@@ -23,7 +23,7 @@ export function changeAnnotationType(
   clip: AnnotationClip,
   annotationType: AnnotationType,
 ): Partial<AnnotationClip> {
-  if (annotationType === clip.annotationType) return {}
+  if (clip.locked || annotationType === clip.annotationType) return {}
   const defaults = getAnnotationShapePreset(annotationType)
   const wasLine = isAnnotationLine(clip.annotationType)
   const isLine = isAnnotationLine(annotationType)
@@ -54,7 +54,8 @@ export function changeAnnotationType(
     update.cornerRadius = defaults.defaultCornerRadius
   }
   if (annotationType === "callout" || annotationType === "badge") {
-    update.text = clip.text || defaults.text || (annotationType === "callout" ? "Note here" : "IMPORTANT")
+    update.text =
+      clip.text ?? defaults.text ?? (annotationType === "callout" ? "Note here" : "IMPORTANT")
     update.fillColor = defaults.defaultFillColor
     update.fillOpacity = defaults.defaultFillOpacity
   }
@@ -70,14 +71,17 @@ export function changeAnnotationLayout(
   clip: AnnotationClip,
   update: Partial<Pick<AnnotationClip, "x" | "y" | "width" | "height" | "endX" | "endY">>,
 ): Partial<AnnotationClip> {
+  if (clip.locked) return {}
   if (!isAnnotationLine(clip.annotationType)) return update
   const x = update.x ?? clip.x
   const y = update.y ?? clip.y
   const dx = (clip.endX ?? clip.x + clip.width) - clip.x
   const dy = (clip.endY ?? clip.y + clip.height) - clip.y
   // Moving translates both ends; resizing preserves backwards-pointing connectors.
-  const endX = update.endX ?? x + (update.width === undefined ? dx : (Math.sign(dx) || 1) * update.width)
-  const endY = update.endY ?? y + (update.height === undefined ? dy : (Math.sign(dy) || 1) * update.height)
+  const endX =
+    update.endX ?? x + (update.width === undefined ? dx : (Math.sign(dx) || 1) * update.width)
+  const endY =
+    update.endY ?? y + (update.height === undefined ? dy : (Math.sign(dy) || 1) * update.height)
   return { ...update, endX, endY, width: Math.abs(endX - x), height: Math.abs(endY - y) }
 }
 
@@ -96,11 +100,18 @@ export function changeAnnotationAnimation(
   }
 }
 
-export function applyAnnotationInspectorPreset(clip: AnnotationClip, shape: AnnotationShapePreset): AnnotationClip {
-  const updated = applyPresetToAnnotationClip(clip, shape)
+export function applyAnnotationInspectorPreset(
+  clip: AnnotationClip,
+  shape: AnnotationShapePreset,
+): AnnotationClip {
+  // Shape conversion can move a connector's origin; a position lock must also guard preset changes.
+  if (clip.locked && shape.type !== clip.annotationType) return clip
+  const updated = applyAnnotationToolToClip({ clip, settings: annotationSettingsFromPreset(shape) })
   // Older custom presets may only supply legacy animation fields. Do not retain stale engine motion.
-  const legacyOut = shape.animationOut === "draw" || shape.animationOut === "scale-up"
-    ? "scale-down" : shape.animationOut
+  const legacyOut =
+    shape.animationOut === "draw" || shape.animationOut === "scale-up"
+      ? "scale-down"
+      : shape.animationOut
   const motion = changeAnnotationAnimation(updated, {
     ...clip.overlayAnimation,
     ...(shape.animationIn !== undefined ? { inType: shape.animationIn } : {}),

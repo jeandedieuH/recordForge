@@ -1,224 +1,265 @@
-import { useState } from "react"
-import type { AnnotationType } from "@recordforge/contracts"
+import { useMemo, useState } from "react"
 import {
   ANNOTATION_PALETTES,
   annotationPresetToShapePreset,
-  applyPresetToAnnotationClip,
   createAddAnnotationClipCommand,
-  createAnnotationClip,
   createUpdateAnnotationClipCommand,
+  getAnnotationShapePreset,
   type AnnotationPresetRecord,
 } from "@recordforge/editor-core"
+import { annotationPresetValuesSchema } from "@recordforge/editor-core"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { Button, cn } from "@recordforge/ui"
-import { Pencil, Shapes } from "lucide-react"
+import {
+  Button,
+  ColorPicker,
+  IconButton,
+  Kbd,
+  NumberInputField,
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@recordforge/ui"
+import { Check, FolderOpen, MousePointer2, Pencil, Plus, Shapes } from "lucide-react"
 import { PresetBrowser, type BrowserPreset } from "./preset-browser"
+import { PresetThumbnail } from "../presets/preset-thumbnail"
+import { AnnotationShapePicker } from "../annotations/annotation-shape-picker"
+import {
+  annotationSettingsFromPreset,
+  applyAnnotationToolToClip,
+  createAnnotationFromTool,
+  getAnnotationEditTime,
+  type AnnotationDrawSettings,
+} from "../annotations/annotation-tools"
 
 interface AnnotationsPanelProps {
-  drawMode?: boolean
-  onToggleDrawMode?: (enabled: boolean, type: AnnotationType, color: string) => void
+  drawMode: boolean
+  drawSettings: AnnotationDrawSettings
+  onDrawSettingsChange: (settings: AnnotationDrawSettings) => void
+  onToggleDrawMode: (enabled: boolean) => void
 }
 
-export function AnnotationsPanel({ drawMode = false, onToggleDrawMode }: AnnotationsPanelProps) {
-  const [selectedColor, setSelectedColor] = useState<string>("#38bdf8")
-  const [strokeWidth, setStrokeWidth] = useState<number>(4)
-  const [strokeStyle, setStrokeStyle] = useState<"solid" | "dashed" | "dotted">("solid")
+export function AnnotationsPanel({
+  drawMode,
+  drawSettings,
+  onDrawSettingsChange,
+  onToggleDrawMode,
+}: AnnotationsPanelProps) {
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const selectedId = useTimelineStore((state) =>
+    state.view.selection?.kind === "clip" ? state.view.selection.primaryClipId : null,
+  )
+  const selected = timeline?.tracks
+    .flatMap((track) => track.clips)
+    .find((clip) => clip.id === selectedId)
+  const selectedAnnotation = selected?.kind === "annotation" ? selected : null
+  const { preset, strokeColor, strokeWidth, strokeStyle } = drawSettings
 
-  const engine = useTimelineStore((state) => state.engine)
-  const view = useTimelineStore((state) => state.view)
-  const execute = useTimelineStore((state) => state.execute)
-  const setSelection = useTimelineStore((state) => state.setSelection)
+  const previewPreset = useMemo<AnnotationPresetRecord>(
+    () => ({
+      id: preset.presetId ?? preset.type,
+      name: preset.name,
+      description: preset.description,
+      category: preset.type,
+      tags: [preset.type],
+      definition: {
+        ...preset,
+        defaultStrokeColor: strokeColor,
+        defaultStrokeWidth: strokeWidth,
+        defaultStrokeStyle: strokeStyle,
+      },
+    }),
+    [preset, strokeColor, strokeWidth, strokeStyle],
+  )
 
-  const timeline = engine?.history.present
-  const canvasWidth = timeline?.canvas.width ?? 1920
-  const canvasHeight = timeline?.canvas.height ?? 1080
-
-  const selectedAnnotationClip = (() => {
-    if (!timeline || view.selection?.kind !== "clip") return null
-    const primaryClipId = view.selection.primaryClipId
-    for (const track of timeline.tracks) {
-      const clip = track.clips.find((candidate) => candidate.id === primaryClipId)
-      if (clip?.kind === "annotation") return { clip }
-    }
-    return null
-  })()
-
-  function handleAddPreset(preset: BrowserPreset) {
-    const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)
-    if (selectedAnnotationClip) {
-      const updated = applyPresetToAnnotationClip(selectedAnnotationClip.clip, shape)
-      execute(createUpdateAnnotationClipCommand(selectedAnnotationClip.clip.id, updated))
-      return
-    }
-
-    const startMs = Math.round(view.playheadMs)
-    const clip = createAnnotationClip(shape.type, {
-      startMs,
-      durationMs: 3500,
-      strokeColor: selectedColor,
-      strokeWidth,
-      text: shape.text,
-      canvasWidth,
-      canvasHeight,
-    })
-    clip.strokeStyle = strokeStyle
-    clip.fillColor = shape.defaultFillColor
-    clip.fillOpacity = shape.defaultFillOpacity
-
-    const annotationsTrack = timeline?.tracks.find((track) => track.kind === "annotations")
-    const ok = execute(createAddAnnotationClipCommand(clip, annotationsTrack?.id))
-    if (ok) {
-      setSelection({
-        kind: "clip",
-        clipIds: [clip.id],
-        primaryClipId: clip.id,
-      })
-    }
+  function updateSettings(update: Partial<AnnotationDrawSettings>) {
+    onDrawSettingsChange({ ...drawSettings, ...update })
   }
 
-  function handleQuickDraw(type: AnnotationType, color: string) {
-    onToggleDrawMode?.(true, type, color)
+  function handleChoosePreset(candidate: BrowserPreset) {
+    const result = annotationPresetValuesSchema.safeParse(candidate.definition)
+    if (!result.success) return
+    const shape = annotationPresetToShapePreset({ ...candidate, definition: result.data })
+    onDrawSettingsChange(annotationSettingsFromPreset(shape))
+  }
+
+  function handleAddAnnotation() {
+    const store = useTimelineStore.getState()
+    const current = store.engine?.history.present
+    if (!current) return
+    store.pause()
+    const clip = createAnnotationFromTool({
+      settings: drawSettings,
+      startMs: store.view.playheadMs,
+      canvasWidth: current.canvas.width,
+      canvasHeight: current.canvas.height,
+    })
+    const track = current.tracks.find((item) => item.kind === "annotations" && !item.locked)
+    if (!store.execute(createAddAnnotationClipCommand(clip, track?.id))) return
+    store.setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
+    store.seek(getAnnotationEditTime(clip))
+    onToggleDrawMode(false)
+  }
+
+  function handleApplyToSelected() {
+    if (!selectedAnnotation || selectedAnnotation.locked) return
+    const store = useTimelineStore.getState()
+    const updated = applyAnnotationToolToClip({ clip: selectedAnnotation, settings: drawSettings })
+    if (!store.execute(createUpdateAnnotationClipCommand(selectedAnnotation.id, updated))) return
+    store.pause()
+    store.seek(getAnnotationEditTime(updated))
+    onToggleDrawMode(false)
   }
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface">
       {/* Header */}
-      <div className="border-b border-border p-3.5 pb-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <div className="flex size-7 items-center justify-center rounded-md bg-secondary/20 text-secondary">
-              <Shapes className="size-4 text-purple-400" aria-hidden />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-foreground">Annotations & Shapes</h3>
-              <p className="text-[11px] text-muted-foreground">
-                {selectedAnnotationClip
-                  ? "Click a preset to apply it to the selected annotation"
-                  : "Draw and place vector callouts"}
-              </p>
-            </div>
-          </div>
+      <div className="flex shrink-0 items-center gap-3 border-b border-border p-4">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <Shapes className="size-4" aria-hidden />
         </div>
-
-        {/* Color Palette Selector */}
-        <div className="mt-3">
-          <label className="text-[11px] font-medium text-muted-foreground mb-1.5 block">
-            Color Theme
-          </label>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {ANNOTATION_PALETTES.map((palette) => {
-              const isSelected = selectedColor.toLowerCase() === palette.color.toLowerCase()
-              return (
-                <button
-                  key={palette.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedColor(palette.color)
-                    if (drawMode && onToggleDrawMode) {
-                      handleQuickDraw("rectangle", palette.color)
-                    }
-                  }}
-                  className={cn(
-                    "size-6 rounded-full border border-border transition-all duration-fast hover:scale-110",
-                    isSelected
-                      ? "ring-2 ring-primary ring-offset-2 ring-offset-surface scale-105 border-white"
-                      : "",
-                  )}
-                  style={{ backgroundColor: palette.color }}
-                  title={palette.name}
-                  aria-label={palette.name}
-                />
-              )
-            })}
-          </div>
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-foreground">Annotations</h3>
+          <p className="text-xs text-muted-foreground">Make the important part clear.</p>
         </div>
+      </div>
 
-        {/* Stroke Width & Style */}
-        <div className="mt-3 flex items-center justify-between gap-2">
-          <div>
-            <label className="text-[11px] font-medium text-muted-foreground mb-1 block">
-              Width
-            </label>
-            <div
-              className="flex items-center gap-0.5 rounded-lg border border-border bg-surface-dim p-0.5"
-              role="group"
-              aria-label="Stroke width"
-            >
-              {[2, 4, 6, 8].map((width) => (
-                <button
-                  key={width}
-                  type="button"
-                  onClick={() => setStrokeWidth(width)}
-                  className={cn(
-                    "h-6 px-2 text-[11px] rounded-md transition-colors",
-                    strokeWidth === width
-                      ? "bg-surface text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {width}px
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <label className="text-[11px] font-medium text-muted-foreground mb-1 block">
-              Style
-            </label>
-            <div
-              className="flex items-center gap-0.5 rounded-lg border border-border bg-surface-dim p-0.5"
-              role="group"
-              aria-label="Stroke style"
-            >
-              {(["solid", "dashed"] as const).map((style) => (
-                <button
-                  key={style}
-                  type="button"
-                  onClick={() => setStrokeStyle(style)}
-                  className={cn(
-                    "h-6 px-2 text-[11px] rounded-md transition-colors capitalize",
-                    strokeStyle === style
-                      ? "bg-surface text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {style}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Draw on Canvas Mode toggle */}
-        {onToggleDrawMode ? (
-          <div className="mt-3">
-            <Button
-              variant={drawMode ? "primary" : "outline"}
-              size="sm"
-              onClick={() => onToggleDrawMode(!drawMode, "rectangle", selectedColor)}
-              className="w-full gap-2 text-xs font-medium"
-            >
-              <Pencil className="size-3.5" aria-hidden />
-              {drawMode ? "Drawing Mode Active (Click-drag on player)" : "Enable Draw on Player"}
+      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-3">
+        <section className="flex flex-col gap-2" aria-label="Choose a shape">
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-xs font-medium text-foreground">Shape</h4>
+            <Button variant="ghost" size="sm" onClick={() => setBrowserOpen(true)}>
+              <FolderOpen aria-hidden />
+              Presets
             </Button>
           </div>
+          <AnnotationShapePicker
+            value={preset.type}
+            onChange={(type) => updateSettings({ preset: getAnnotationShapePreset(type) })}
+          />
+        </section>
+
+        <section className="flex flex-col gap-2" aria-label="Annotation preview">
+          <div className="rounded-xl border border-border bg-surface-dim p-1.5">
+            <PresetThumbnail kind="annotation" preset={previewPreset} />
+          </div>
+          <div className="flex flex-col gap-0.5 px-1">
+            <p className="truncate text-xs font-medium text-foreground" title={preset.name}>
+              {preset.name}
+            </p>
+            <p className="text-xs leading-relaxed text-muted-foreground">{preset.description}</p>
+          </div>
+        </section>
+
+        {/* Color Palette Selector */}
+        <section className="flex flex-col gap-3" aria-label="Drawing appearance">
+          <div className="flex items-center justify-between gap-2">
+            <h4 className="text-xs font-medium text-foreground">Stroke color</h4>
+            <ColorPicker
+              aria-label="Custom annotation color"
+              size="sm"
+              value={strokeColor}
+              onChange={(color) => updateSettings({ strokeColor: color })}
+            />
+          </div>
+          <div className="flex flex-wrap gap-1" role="group" aria-label="Annotation color palette">
+            {ANNOTATION_PALETTES.map((palette) => (
+              <IconButton
+                key={palette.id}
+                label={palette.name}
+                aria-pressed={strokeColor.toLowerCase() === palette.color.toLowerCase()}
+                onClick={() => updateSettings({ strokeColor: palette.color })}
+                className="size-8 shrink-0"
+              >
+                <span
+                  className="flex size-5 items-center justify-center rounded-full border border-border"
+                  style={{ backgroundColor: palette.color }}
+                >
+                  {strokeColor.toLowerCase() === palette.color.toLowerCase() ? (
+                    <Check
+                      className="size-3 rounded-full bg-background text-foreground"
+                      aria-hidden
+                    />
+                  ) : null}
+                </span>
+              </IconButton>
+            ))}
+          </div>
+
+          {/* Stroke Width & Style */}
+          <NumberInputField
+            label="Stroke width"
+            value={strokeWidth}
+            min={0}
+            max={64}
+            step={1}
+            unit="px"
+            size="sm"
+            onChange={(width) => updateSettings({ strokeWidth: width })}
+          />
+          <ToggleGroup
+            type="single"
+            value={strokeStyle}
+            aria-label="Stroke style"
+            onValueChange={(style) => {
+              if (style === "solid" || style === "dashed" || style === "dotted")
+                updateSettings({ strokeStyle: style })
+            }}
+            className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-surface-dim p-1"
+          >
+            {["solid", "dashed", "dotted"].map((style) => (
+              <ToggleGroupItem key={style} value={style} className="px-1 text-xs capitalize">
+                {style}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </section>
+      </div>
+
+      {/* Draw on Canvas Mode toggle */}
+      <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-surface p-3">
+        <Button onClick={handleAddAnnotation} disabled={!timeline} className="w-full">
+          <Plus aria-hidden />
+          Add annotation
+        </Button>
+        <Button
+          variant={drawMode ? "secondary" : "outline"}
+          aria-pressed={drawMode}
+          onClick={() => onToggleDrawMode(!drawMode)}
+          disabled={!timeline}
+          className="w-full"
+        >
+          {drawMode ? <MousePointer2 aria-hidden /> : <Pencil aria-hidden />}
+          {drawMode ? "Finish drawing" : "Draw on canvas"}
+        </Button>
+        {selectedAnnotation ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleApplyToSelected}
+            disabled={selectedAnnotation.locked}
+            className="w-full"
+          >
+            {selectedAnnotation.locked ? "Unlock annotation to restyle" : "Apply to selected"}
+          </Button>
         ) : null}
+        <p className="text-center text-xs leading-relaxed text-muted-foreground" role="status">
+          {drawMode ? (
+            <>
+              Drag to draw · <Kbd>Shift</Kbd> constrains · <Kbd>Esc</Kbd> exits
+            </>
+          ) : (
+            "Adds at the playhead. Existing annotations stay unchanged."
+          )}
+        </p>
       </div>
 
       {/* Preset Browser */}
       <PresetBrowser
         kind="annotation"
-        selectedPresetId={selectedAnnotationClip?.clip.presetId}
-        onSelect={(preset) => {
-          if (drawMode && onToggleDrawMode) {
-            const shape = annotationPresetToShapePreset(preset as AnnotationPresetRecord)
-            handleQuickDraw(shape.type, selectedColor)
-          } else {
-            handleAddPreset(preset)
-          }
-        }}
-        className="p-3"
+        open={browserOpen}
+        onOpenChange={setBrowserOpen}
+        selectedPresetId={preset.presetId}
+        onSelect={handleChoosePreset}
       />
     </div>
   )
