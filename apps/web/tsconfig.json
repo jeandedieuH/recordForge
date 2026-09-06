@@ -1,0 +1,13 @@
+{
+  "extends": "../../packages/config/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client", "@types/node"],
+    "paths": {
+      "#/*": ["./src/*"],
+      "@/*": ["./src/*"],
+      "@recordforge/*": ["../../packages/*/src"]
+    }
+  },
+  "include": ["src", "convex", "*.config.ts"]
+}

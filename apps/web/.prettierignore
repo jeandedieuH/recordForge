@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-ssr
+.convex
+.tanstack
+.vinxi
+.output
+.nitro
+.cta.json
+src/routeTree.gen.ts
+convex/_generated
