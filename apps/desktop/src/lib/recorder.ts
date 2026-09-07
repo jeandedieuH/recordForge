@@ -169,4 +169,3 @@ export async function openWebcamPreview(): Promise<void> {
 export async function hideWebcamPreview(): Promise<void> {
   return invokeValidated<void>("hide_webcam_preview")
 }
-

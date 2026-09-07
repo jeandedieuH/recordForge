@@ -3,6 +3,7 @@ use crate::scene::{
     DisplayAnnotation, DisplayImage, DisplayItem, DisplayList, DisplayText, OverlayItem,
     OverlayTransform, Scene,
 };
+use crate::titles;
 
 pub(crate) fn evaluate(scene: &Scene, time_ms: u64) -> DisplayList {
     let items = scene
@@ -99,6 +100,14 @@ fn display_item_at_time(item: &OverlayItem, time_ms: u64) -> Option<DisplayItem>
                 shadow_color: details.shadow_color.clone(),
                 shadow_blur: details.shadow_blur,
                 auto_scale_text: details.auto_scale_text,
+                title_scene: titles::compile_and_evaluate(
+                    details,
+                    &transform,
+                    time_ms.saturating_sub(start_ms),
+                    end_ms.saturating_sub(start_ms),
+                )
+                .ok()
+                .flatten(),
             },
         },
         OverlayItem::Image { details, .. } => DisplayItem::Image {

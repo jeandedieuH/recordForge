@@ -191,6 +191,7 @@ fn parity_test_renders_fixture_project_overlays() {
                                         auto_scale_text: clip["autoScaleText"]
                                             .as_bool()
                                             .unwrap_or(true),
+                                        title_design: None,
                                     },
                                 });
                             }

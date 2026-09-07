@@ -640,6 +640,18 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
     );
     let opacity = t.opacity;
 
+    // Designed titles carry a pre-computed scene graph; render it as SVG so
+    // native export matches the browser preview path element for element.
+    if let Some(scene) = &item.title_scene {
+        let svg = build_title_scene_svg(scene, t, pixmap.width(), pixmap.height());
+        // The SVG itself carries translate/rotate for the item, so do not apply
+        // the external transform a second time.
+        if let Err(err) = render_svg_markup(&svg, Transform::identity(), pixmap) {
+            eprintln!("failed to render title scene SVG: {err}");
+        }
+        return Ok(());
+    }
+
     let x = t.x as f32;
     let y = t.y as f32;
     let w = t.width.max(20.0) as f32;
@@ -1056,6 +1068,56 @@ fn render_image(
     }
 
     Ok(())
+}
+
+fn build_title_scene_svg(
+    scene: &crate::titles::TitleScene,
+    t: &crate::scene::OverlayTransform,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> String {
+    use std::fmt::Write;
+    let mut defs = String::new();
+    let mut content = String::new();
+    let opacity = t.opacity.clamp(0.0, 1.0);
+    for (i, el) in scene.elements.iter().enumerate() {
+        if el.path.is_empty() {
+            continue;
+        }
+        let clip_attr = if let Some(c) = &el.clip {
+            let _ = write!(
+                defs,
+                r#"<clipPath id="ts-clip-{i}"><rect x="{}" y="{}" width="{}" height="{}" /></clipPath>"#,
+                c.x, c.y, c.width, c.height
+            );
+            format!(r#" clip-path="url(#ts-clip-{i})""#)
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            content,
+            r#"<g transform="translate({}, {}) scale({}, {})"{clip_attr} opacity="{}"><path d="{}" fill="{}" /></g>"#,
+            el.translate_x,
+            el.translate_y,
+            el.scale_x,
+            el.scale_y,
+            el.opacity.clamp(0.0, 1.0),
+            escape_xml(&el.path),
+            escape_xml(&el.fill),
+        );
+    }
+    let anchor_x = t.width * t.anchor_x;
+    let anchor_y = t.height * t.anchor_y;
+    let rotation = t.rotation;
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w}" height="{canvas_h}" viewBox="0 0 {canvas_w} {canvas_h}">
+            <defs>{defs}</defs>
+            <g opacity="{opacity}" transform="translate({}, {}) rotate({rotation} {} {})">
+                {content}
+            </g>
+        </svg>"#,
+        t.x, t.y, anchor_x, anchor_y,
+    )
 }
 
 fn render_svg_markup(svg: &str, transform: Transform, pixmap: &mut Pixmap) -> Result<(), String> {

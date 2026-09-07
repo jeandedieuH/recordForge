@@ -69,7 +69,9 @@ function findMatchingCamera(
   if (cleanReq) {
     const byClean = devices.find((d) => {
       const cleanLabel = cleanDeviceName(d.label)
-      return cleanLabel === cleanReq || cleanLabel.includes(cleanReq) || cleanReq.includes(cleanLabel)
+      return (
+        cleanLabel === cleanReq || cleanLabel.includes(cleanReq) || cleanReq.includes(cleanLabel)
+      )
     })
     if (byClean) return byClean
   }
@@ -106,7 +108,9 @@ export function WebcamPreviewWindow() {
   const [userSelectedDeviceId, setUserSelectedDeviceId] = useState<string>("")
   const [activeDeviceId, setActiveDeviceId] = useState<string>("")
   const [activeCameraLabel, setActiveCameraLabel] = useState<string>("")
-  const [streamState, setStreamState] = useState<"connecting" | "active" | "disconnected">("connecting")
+  const [streamState, setStreamState] = useState<"connecting" | "active" | "disconnected">(
+    "connecting",
+  )
   const [isLagging, setIsLagging] = useState(false)
   const [isMirrored, setIsMirrored] = useState(true)
   const [retryNonce, setRetryNonce] = useState(0)
@@ -198,10 +202,7 @@ export function WebcamPreviewWindow() {
 
   // Determine requested camera identifier
   const storedPrefs = getStoredWebcamPreference()
-  const activePreviewUrl =
-    injectedParams?.previewUrl ||
-    status?.webcamPreviewUrl ||
-    ""
+  const activePreviewUrl = injectedParams?.previewUrl || status?.webcamPreviewUrl || ""
 
   const targetCameraIdentifier =
     userSelectedDeviceId ||
@@ -249,7 +250,10 @@ export function WebcamPreviewWindow() {
         // If labels are blank, request permission to expose hardware device labels
         if (videoInputs.length > 0 && !videoInputs[0].label) {
           try {
-            const tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+            const tempStream = await navigator.mediaDevices.getUserMedia({
+              video: true,
+              audio: false,
+            })
             tempStream.getTracks().forEach((t) => t.stop())
             // Give driver brief moment to release before re-enumerating
             await new Promise((resolve) => setTimeout(resolve, 150))
@@ -365,7 +369,16 @@ export function WebcamPreviewWindow() {
         videoRef.current.srcObject = null
       }
     }
-  }, [activePreviewUrl, targetCameraIdentifier, userSelectedDeviceId, retryNonce])
+  }, [
+    activePreviewUrl,
+    targetCameraIdentifier,
+    userSelectedDeviceId,
+    retryNonce,
+    injectedParams?.deviceId,
+    injectedParams?.deviceName,
+    status?.webcamDeviceId,
+    status?.webcamDeviceName,
+  ])
 
   // Frame delivery monitor to detect frozen or severely lagging camera feeds
   useEffect(() => {
@@ -409,13 +422,13 @@ export function WebcamPreviewWindow() {
       }
       if (checkInterval) clearInterval(checkInterval)
     }
-  }, [streamState])
+  }, [streamState, activePreviewUrl])
 
   return (
     <div className="flex h-screen w-screen items-center justify-center p-2 select-none overflow-hidden bg-transparent">
       {/* Square Rounded Card */}
       <div
-        className="group relative flex size-[204px] flex-col overflow-hidden rounded-2xl border border-border-strong/90 bg-surface/95 shadow-[0_8px_24px_rgba(0,0,0,0.5)] backdrop-blur-md"
+        className="group relative flex size-51 flex-col overflow-hidden rounded-2xl border border-border-strong/90 bg-surface/95 shadow-[0_8px_24px_rgba(0,0,0,0.5)] backdrop-blur-md"
         role="region"
         aria-label="Webcam Recording Preview"
       >
@@ -470,10 +483,13 @@ export function WebcamPreviewWindow() {
                 {activePreviewUrl ? "Connecting Feed…" : "Camera Unavailable"}
               </span>
               <span
-                className="text-[10px] text-muted-foreground leading-tight px-1 truncate max-w-[180px]"
+                className="text-[10px] text-muted-foreground leading-tight px-1 truncate max-w-45"
                 title={activeCameraLabel}
               >
-                {activeCameraLabel || (activePreviewUrl ? "Awaiting live recording feed" : "Feed unavailable or in use")}
+                {activeCameraLabel ||
+                  (activePreviewUrl
+                    ? "Awaiting live recording feed"
+                    : "Feed unavailable or in use")}
               </span>
 
               <div className="flex items-center gap-1.5 mt-1">
@@ -503,7 +519,7 @@ export function WebcamPreviewWindow() {
         </div>
 
         {/* Top Header Overlay with Drag Handle & Controls */}
-        <div className="absolute inset-x-0 top-0 flex h-9 items-center justify-between bg-gradient-to-b from-black/75 via-black/40 to-transparent px-2 transition-opacity duration-200">
+        <div className="absolute inset-x-0 top-0 flex h-9 items-center justify-between bg-linear-to-b from-black/75 via-black/40 to-transparent px-2 transition-opacity duration-200">
           {/* Drag grip handle + status indicator — ONLY this area is the drag region */}
           <div
             data-tauri-drag-region
@@ -529,8 +545,8 @@ export function WebcamPreviewWindow() {
                     isLagging
                       ? "bg-warning animate-pulse"
                       : activePreviewUrl
-                      ? "bg-rose-500 animate-pulse"
-                      : "bg-emerald-400 animate-pulse"
+                        ? "bg-rose-500 animate-pulse"
+                        : "bg-emerald-400 animate-pulse"
                   }`}
                 />
                 <span className="text-[9px] font-semibold tracking-wider uppercase text-white/90">
@@ -552,7 +568,9 @@ export function WebcamPreviewWindow() {
               <button
                 type="button"
                 className={`flex size-6 cursor-pointer items-center justify-center rounded-md text-white/80 backdrop-blur-sm transition-colors ${
-                  cameraPickerOpen ? "bg-primary text-white" : "bg-black/40 hover:bg-black/70 hover:text-white"
+                  cameraPickerOpen
+                    ? "bg-primary text-white"
+                    : "bg-black/40 hover:bg-black/70 hover:text-white"
                 }`}
                 title="Switch camera device"
                 aria-label="Switch camera device"
@@ -648,7 +666,9 @@ export function WebcamPreviewWindow() {
         {isLagging && streamState === "active" && (
           <div className="absolute inset-x-2 bottom-2 z-10 flex items-center gap-1.5 rounded-lg border border-warning/40 bg-warning/20 px-2 py-1 text-warning backdrop-blur-md">
             <AlertTriangle className="size-3 shrink-0" />
-            <span className="text-[10px] font-medium leading-none truncate">Camera feed lagging</span>
+            <span className="text-[10px] font-medium leading-none truncate">
+              Camera feed lagging
+            </span>
           </div>
         )}
       </div>

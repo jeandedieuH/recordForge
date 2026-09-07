@@ -5,6 +5,8 @@ import {
   textAnimationSchema,
   textBackdropStyleSchema,
   textFontFamilySchema,
+  titleDesignSchema,
+  type TitleDesign,
   type OverlayAnimation,
   type TextAnimation,
   type TextBackdropStyle,
@@ -14,6 +16,7 @@ import {
   type TitlePresetCategory,
 } from "@recordforge/domain"
 import textPresetCatalogJson from "./presets/text-presets.json"
+import { CREATOR_TITLE_PRESET_CATALOG } from "./creator-title-presets"
 import {
   parsePresetCatalog,
   type PresetCatalog,
@@ -65,6 +68,7 @@ export interface TextPresetDefinition {
   animationOut: TextAnimation
   overlayAnimation?: Partial<OverlayAnimation>
   autoScaleText?: boolean
+  titleDesign?: TitleDesign
   rotation?: number
   anchorX?: number
   anchorY?: number
@@ -105,6 +109,8 @@ export const textPresetValuesSchema = z.object({
   animationOut: textAnimationSchema,
   overlayAnimation: overlayAnimationSchema.partial().optional(),
   autoScaleText: z.boolean().optional(),
+  // The registry models normalized values as both input and output; parsing still fills defaults.
+  titleDesign: (titleDesignSchema as z.ZodType<TitleDesign>).optional(),
   rotation: z.number().optional(),
   anchorX: z.number().min(0).max(1).optional(),
   anchorY: z.number().min(0).max(1).optional(),
@@ -112,8 +118,13 @@ export const textPresetValuesSchema = z.object({
   opacity: z.number().min(0).max(1).optional(),
 })
 
-export const TEXT_PRESET_CATALOG: PresetCatalog<TextPresetValues> = parsePresetCatalog(
+export const LEGACY_TEXT_PRESET_CATALOG: PresetCatalog<TextPresetValues> = parsePresetCatalog(
   textPresetCatalogJson,
+  textPresetValuesSchema,
+)
+
+export const TEXT_PRESET_CATALOG: PresetCatalog<TextPresetValues> = parsePresetCatalog(
+  CREATOR_TITLE_PRESET_CATALOG,
   textPresetValuesSchema,
 )
 
@@ -131,7 +142,9 @@ export function textPresetToDefinition(preset: TextPresetRecord): TextPresetDefi
 }
 
 export function getTextPresetRecordById(presetId: string): TextPresetRecord {
-  const found = TEXT_PRESET_CATALOG.presets.find((preset) => preset.id === presetId)
+  const found =
+    TEXT_PRESET_CATALOG.presets.find((preset) => preset.id === presetId) ??
+    LEGACY_TEXT_PRESET_CATALOG.presets.find((preset) => preset.id === presetId)
   return found ?? TEXT_PRESET_CATALOG.presets[0]
 }
 
@@ -174,10 +187,40 @@ export function createTextClipFromDefinition(
   const durationMs = options?.durationMs ?? 4000
   const canvasWidth = options?.canvasWidth ?? 1920
   const canvasHeight = options?.canvasHeight ?? 1080
+  const titleDesign = preset.titleDesign ? titleDesignSchema.parse(preset.titleDesign) : undefined
+  // Legacy clips retain their original pixel geometry and category-based placement.
+  const basisScale = titleDesign ? Math.min(canvasWidth / 1920, canvasHeight / 1080) : 1
+  const margin = 80 * basisScale
+  const scale = titleDesign
+    ? Math.min(
+        basisScale,
+        (canvasWidth - margin * 2) / preset.width,
+        (canvasHeight - margin * 2) / preset.height,
+      )
+    : 1
+  const width = preset.width * scale
+  const height = preset.height * scale
 
-  let x = Math.round((canvasWidth - preset.width) / 2)
-  let y = Math.round((canvasHeight - preset.height) / 2)
-  if (preset.category === "lower-third") {
+  let x = Math.round((canvasWidth - width) / 2)
+  let y = Math.round((canvasHeight - height) / 2)
+  if (titleDesign) {
+    const template = titleDesign.template
+    if (template === "speaker-id" || template === "source-credit") {
+      x = margin
+      y = canvasHeight - height - margin
+    } else if (template === "step-guide" || template === "note") {
+      x = margin
+      y = margin
+    } else if (
+      template === "shortcut" ||
+      template === "command-line" ||
+      template === "call-to-action"
+    ) {
+      y = canvasHeight - height - margin
+    }
+    x = Math.min(Math.max(margin, x), canvasWidth - width - margin)
+    y = Math.min(Math.max(margin, y), canvasHeight - height - margin)
+  } else if (preset.category === "lower-third") {
     x = 80
     y = canvasHeight - preset.height - 90
   } else if (preset.category === "callout" || preset.category === "badge") {
@@ -211,8 +254,8 @@ export function createTextClipFromDefinition(
     speed: 1,
     x: Math.max(0, x),
     y: Math.max(0, y),
-    width: preset.width,
-    height: preset.height,
+    width,
+    height,
     rotation: preset.rotation ?? 0,
     anchorX: preset.anchorX ?? 0.5,
     anchorY: preset.anchorY ?? 0.5,
@@ -220,7 +263,7 @@ export function createTextClipFromDefinition(
     opacity: preset.opacity ?? 1,
     alignment: preset.alignment,
     fontFamily: preset.fontFamily,
-    fontSize: preset.fontSize,
+    fontSize: titleDesign ? Math.min(200, Math.max(8, preset.fontSize * scale)) : preset.fontSize,
     fontWeight: preset.fontWeight,
     textColor: preset.textColor,
     secondaryTextColor: preset.secondaryTextColor,
@@ -228,27 +271,42 @@ export function createTextClipFromDefinition(
     backdropStyle: preset.backdropStyle,
     backdropColor: preset.backdropColor,
     backdropOpacity: preset.backdropOpacity,
-    backdropBlur: preset.backdropBlur,
-    backdropBorderRadius: preset.backdropBorderRadius,
-    backdropPaddingX: preset.backdropPaddingX,
-    backdropPaddingY: preset.backdropPaddingY,
+    backdropBlur: Math.min(64, preset.backdropBlur * scale),
+    backdropBorderRadius: Math.min(100, preset.backdropBorderRadius * scale),
+    backdropPaddingX: Math.min(200, preset.backdropPaddingX * scale),
+    backdropPaddingY: Math.min(200, preset.backdropPaddingY * scale),
     shadowEnabled: preset.shadowEnabled,
     shadowColor: preset.shadowColor,
-    shadowBlur: preset.shadowBlur,
+    shadowBlur: Math.min(100, preset.shadowBlur * scale),
     animationIn: preset.animationIn,
     animationOut: preset.animationOut,
     overlayAnimation: animation,
     autoScaleText: preset.autoScaleText ?? true,
+    ...(titleDesign ? { titleDesign } : {}),
     enabled: true,
     locked: false,
   }
 }
 
-export function applyPresetToTextClip(clip: TextClip, presetId: string): TextClip {
-  return applyTextPresetToClip(clip, getTextPresetById(presetId))
+export interface ApplyTextPresetOptions {
+  // Omitted options retain the original reset semantics; browser swaps should opt in.
+  preserveLayout?: boolean
+  preserveStyle?: boolean
 }
 
-export function applyTextPresetToClip(clip: TextClip, preset: TextPresetDefinition): TextClip {
+export function applyPresetToTextClip(
+  clip: TextClip,
+  presetId: string,
+  options?: ApplyTextPresetOptions,
+): TextClip {
+  return applyTextPresetToClip(clip, getTextPresetById(presetId), options)
+}
+
+export function applyTextPresetToClip(
+  clip: TextClip,
+  preset: TextPresetDefinition,
+  options?: ApplyTextPresetOptions,
+): TextClip {
   const overlayAnimation = preset.overlayAnimation
     ? { ...clip.overlayAnimation, ...preset.overlayAnimation }
     : {
@@ -288,6 +346,51 @@ export function applyTextPresetToClip(clip: TextClip, preset: TextPresetDefiniti
     ...(preset.anchorY !== undefined ? { anchorY: preset.anchorY } : {}),
     ...(preset.zIndex !== undefined ? { zIndex: preset.zIndex } : {}),
     ...(preset.opacity !== undefined ? { opacity: preset.opacity } : {}),
+    ...(preset.autoScaleText !== undefined ? { autoScaleText: preset.autoScaleText } : {}),
+    ...(options?.preserveLayout
+      ? {
+          width: clip.width,
+          height: clip.height,
+          rotation: clip.rotation,
+          anchorX: clip.anchorX,
+          anchorY: clip.anchorY,
+          zIndex: clip.zIndex,
+        }
+      : {}),
+    ...(options?.preserveStyle
+      ? {
+          alignment: clip.alignment,
+          fontFamily: clip.fontFamily,
+          fontSize: clip.fontSize,
+          fontWeight: clip.fontWeight,
+          textColor: clip.textColor,
+          secondaryTextColor: clip.secondaryTextColor,
+          accentColor: clip.accentColor,
+          backdropStyle: clip.backdropStyle,
+          backdropColor: clip.backdropColor,
+          backdropOpacity: clip.backdropOpacity,
+          backdropBlur: clip.backdropBlur,
+          backdropBorderRadius: clip.backdropBorderRadius,
+          backdropPaddingX: clip.backdropPaddingX,
+          backdropPaddingY: clip.backdropPaddingY,
+          shadowEnabled: clip.shadowEnabled,
+          shadowColor: clip.shadowColor,
+          shadowBlur: clip.shadowBlur,
+          opacity: clip.opacity,
+          animationIn: clip.animationIn,
+          animationOut: clip.animationOut,
+          overlayAnimation: { ...clip.overlayAnimation },
+          autoScaleText: clip.autoScaleText,
+        }
+      : {}),
+    titleDesign: preset.titleDesign
+      ? titleDesignSchema.parse({
+          ...preset.titleDesign,
+          ...(options?.preserveStyle ? clip.titleDesign : {}),
+          version: preset.titleDesign.version,
+          template: preset.titleDesign.template,
+        })
+      : undefined,
   }
 }
 
@@ -326,7 +429,9 @@ export function textPresetFromClip(
       shadowBlur: clip.shadowBlur,
       animationIn: clip.animationIn,
       animationOut: clip.animationOut,
-      overlayAnimation: clip.overlayAnimation,
+      overlayAnimation: { ...clip.overlayAnimation },
+      autoScaleText: clip.autoScaleText,
+      ...(clip.titleDesign ? { titleDesign: titleDesignSchema.parse(clip.titleDesign) } : {}),
       rotation: clip.rotation,
       anchorX: clip.anchorX,
       anchorY: clip.anchorY,

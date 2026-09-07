@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { titleDesignSchema } from "./title-design"
 import { boundsSchema, recordingSmartZoomPresetSchema } from "./recording"
 import {
   cursorEffectSettingsSchema,
@@ -472,6 +473,7 @@ export type TextAnimation = z.infer<typeof textAnimationSchema>
 export const textClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("text"),
   presetId: z.string().default("title-modern"),
+  titleDesign: titleDesignSchema.optional(),
   category: titlePresetCategorySchema.default("title"),
   primaryText: z.string().min(1).default("Title Text"),
   secondaryText: z.string().optional(),
@@ -954,6 +956,7 @@ export const renderPlanTextSchema = z.object({
   startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   presetId: z.string(),
+  titleDesign: titleDesignSchema.optional(),
   category: titlePresetCategorySchema,
   primaryText: z.string().min(1),
   secondaryText: z.string().optional(),

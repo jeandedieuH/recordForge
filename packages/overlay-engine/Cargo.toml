@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-native-render = ["dep:tiny-skia", "dep:resvg", "dep:fontdb"]
+native-render = ["dep:tiny-skia", "dep:resvg", "dep:fontdb", "dep:svgtypes"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +21,9 @@ thiserror = "1"
 tiny-skia = { version = "0.11.4", optional = true }
 resvg = { version = "0.45.1", default-features = false, features = ["text"], optional = true }
 fontdb = { version = "0.23.0", features = ["memmap"], optional = true }
+rustybuzz = "=0.20.1"
+unicode-segmentation = "=1.12.0"
+svgtypes = { version = "=0.15.3", optional = true }
 
 
 

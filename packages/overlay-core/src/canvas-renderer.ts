@@ -173,6 +173,13 @@ function renderText(
   const { transform } = item
   context.save()
   applyTransform(context, transform)
+
+  if (item.titleScene) {
+    renderTitleScene(context, item.titleScene, transform)
+    context.restore()
+    return
+  }
+
   context.shadowColor = "transparent"
   context.shadowBlur = 0
   context.textBaseline = "top"
@@ -346,6 +353,30 @@ function renderText(
   }
 
   context.restore()
+}
+
+function renderTitleScene(
+  context: CanvasRenderingContext2D,
+  scene: NonNullable<Extract<OverlayDisplayItem, { kind: "text" }>["titleScene"]>,
+  transform: OverlayTransform,
+): void {
+  // Scene elements are authored in the item's local coordinate space (0,0 at top-left).
+  // Translate to the item's world position after the rotation/opacity transform.
+  context.translate(transform.x, transform.y)
+  for (const element of scene.elements) {
+    context.save()
+    context.globalAlpha *= element.opacity
+    context.fillStyle = withOpacity(element.fill, 1)
+    if (element.clip) {
+      context.beginPath()
+      context.rect(element.clip.x, element.clip.y, element.clip.width, element.clip.height)
+      context.clip()
+    }
+    context.translate(element.translateX, element.translateY)
+    context.scale(element.scaleX, element.scaleY)
+    context.fill(new Path2D(element.path))
+    context.restore()
+  }
 }
 
 function renderImage(

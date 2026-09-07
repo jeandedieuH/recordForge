@@ -6,6 +6,7 @@ use crate::animation::OverlayAnimation;
 use crate::fonts::FontCache;
 use crate::fonts::FontSpec;
 use crate::images::ImageCache;
+use crate::titles::{TitleDesign, TitleScene};
 use crate::OverlayError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -193,6 +194,8 @@ pub struct TextDetails {
     pub shadow_blur: f64,
     #[serde(default = "default_true")]
     pub auto_scale_text: bool,
+    #[serde(default)]
+    pub title_design: Option<TitleDesign>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +334,8 @@ pub struct DisplayText {
     pub shadow_blur: f64,
     #[serde(default = "default_true")]
     pub auto_scale_text: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_scene: Option<TitleScene>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

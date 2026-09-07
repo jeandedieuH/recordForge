@@ -109,6 +109,8 @@ pub struct RenderPlanText {
     pub end_ms: u64,
     #[serde(default)]
     pub preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_design: Option<overlay_engine::titles::TitleDesign>,
     #[serde(default = "default_category")]
     pub category: String,
     pub primary_text: String,
@@ -1157,6 +1159,7 @@ pub fn build_overlay_render_plan_from_legacy(
                 enabled: true,
             },
             details: overlay_engine::TextDetails {
+                title_design: txt.title_design.clone(),
                 preset_id: txt
                     .preset_id
                     .clone()
@@ -1295,12 +1298,39 @@ mod tests {
     }
 
     #[test]
+    fn designed_title_survives_legacy_export_transport() {
+        let text: RenderPlanText = serde_json::from_value(serde_json::json!({
+            "id": "designed-title",
+            "startMs": 0,
+            "endMs": 4000,
+            "primaryText": "Make it clear",
+            "x": 80,
+            "y": 80,
+            "width": 640,
+            "height": 240,
+            "titleDesign": {
+                "version": 1,
+                "template": "emphasis",
+                "motion": "none",
+                "emphasisText": "clear"
+            }
+        }))
+        .expect("valid designed title");
+        let plan = build_overlay_render_plan_from_legacy(1920, 1080, &[], &[text], &[]);
+        let value = serde_json::to_value(plan).expect("serializable overlay plan");
+        assert_eq!(value["items"][0]["titleDesign"]["template"], "emphasis");
+        assert_eq!(value["items"][0]["titleDesign"]["motion"], "none");
+        assert_eq!(value["items"][0]["titleDesign"]["emphasisText"], "clear");
+    }
+
+    #[test]
     fn test_build_text_preset_svg_glass() {
         let text = RenderPlanText {
             id: "text-1".into(),
             start_ms: 500,
             end_ms: 6000,
             preset_id: Some("glass-title".into()),
+            title_design: None,
             category: "title".into(),
             primary_text: "Next Generation Audio".into(),
             secondary_text: Some("High fidelity screen recording".into()),
@@ -1391,6 +1421,7 @@ mod tests {
             start_ms: 500,
             end_ms: 6000,
             preset_id: Some("glass-title".into()),
+            title_design: None,
             category: "title".into(),
             primary_text: "Line 1 Main Title\nLine 2 Main Title".into(),
             secondary_text: Some("Subtitle Line 1\nSubtitle Line 2".into()),

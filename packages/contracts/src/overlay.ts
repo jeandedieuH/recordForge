@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { titleDesignSchema, titleSceneSchema } from "./title-design"
 import {
   annotationHeadSchema,
   annotationStrokeStyleSchema,
@@ -70,6 +71,7 @@ export type OverlayAnnotationItem = z.infer<typeof overlayAnnotationItemSchema>
 
 export const overlayTextItemSchema = overlayRenderItemBaseSchema.extend({
   kind: z.literal("text"),
+  titleDesign: titleDesignSchema.optional(),
   presetId: z.string(),
   category: titlePresetCategorySchema,
   primaryText: z.string().min(1),
@@ -181,6 +183,7 @@ export const overlayDisplayAnnotationSchema = overlayDisplayItemBaseSchema.exten
 
 export const overlayDisplayTextSchema = overlayDisplayItemBaseSchema.extend({
   kind: z.literal("text"),
+  titleScene: titleSceneSchema.optional(),
   textProgress: z.number().min(0).max(1).default(1),
   presetId: z.string(),
   category: titlePresetCategorySchema,

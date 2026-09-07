@@ -4,6 +4,7 @@
 export * from "./recording"
 export * from "./project"
 export * from "./timeline"
+export * from "./title-design"
 export * from "./cursor"
 export * from "./media"
 export * from "./assets"

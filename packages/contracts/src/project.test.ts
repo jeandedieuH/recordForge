@@ -107,6 +107,55 @@ describe("project contract", () => {
     expect(parsed.tracks[0].clips[0].assetId).toBe("asset-1")
   })
 
+  it("preserves designed and legacy titles together across project serialization", () => {
+    const base = {
+      kind: "text",
+      assetId: "synthetic:text:title",
+      startMs: 0,
+      durationMs: 4_000,
+      sourceInMs: 0,
+      sourceOutMs: 4_000,
+      primaryText: "A title with meaning",
+    }
+    const project = projectSchema.parse({
+      ...minimalProject,
+      tracks: [
+        {
+          id: "titles",
+          kind: "titles",
+          name: "Text & Titles",
+          clips: [
+            { ...base, id: "legacy", presetId: "title-cinematic" },
+            {
+              ...base,
+              id: "designed",
+              presetId: "text-emphasis",
+              titleDesign: {
+                version: 1,
+                template: "emphasis",
+                emphasisText: "meaning",
+                appearance: "light",
+                motion: "none",
+              },
+            },
+          ],
+        },
+      ],
+    })
+    const restored = projectSchema.parse(JSON.parse(JSON.stringify(project)))
+    expect(restored.tracks[0].clips[0]).not.toHaveProperty("titleDesign")
+    expect(restored.tracks[0].clips[1]).toMatchObject({
+      primaryText: "A title with meaning",
+      titleDesign: {
+        version: 1,
+        template: "emphasis",
+        emphasisText: "meaning",
+        appearance: "light",
+        motion: "none",
+      },
+    })
+  })
+
   it("keeps generated zoom metadata editable in the durable project shape", () => {
     const parsed = projectSchema.parse({
       ...minimalProject,

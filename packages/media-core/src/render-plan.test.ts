@@ -841,6 +841,12 @@ describe("render-plan", () => {
       y: 80,
       zIndex: 1,
       primaryText: "Overlay title",
+      titleDesign: {
+        version: 1,
+        template: "kinetic-hook",
+        motion: "subtle",
+        tempo: 1.5,
+      },
     })
     const image = imageClipSchema.parse({
       ...baseClip,
@@ -892,6 +898,10 @@ describe("render-plan", () => {
     expect(plan.ok).toBe(true)
     if (!plan.ok) return
     expect(plan.value.overlayRenderPlan).toBeDefined()
+    expect(previewPlan.items.find((item) => item.id === "overlay-text")).toMatchObject({
+      titleDesign: { version: 1, template: "kinetic-hook", motion: "subtle", tempo: 1.5 },
+    })
+    expect(plan.value.overlayRenderPlan?.items).toEqual(previewPlan.items)
     expect(plan.value.overlayRenderPlan?.items.map((item) => item.kind)).toEqual([
       "image",
       "annotation",

@@ -15,6 +15,7 @@ pub mod images;
 #[cfg(target_arch = "wasm32")]
 mod preview_adapter;
 pub mod scene;
+pub mod titles;
 
 pub use animation::{
     animation_at, eased_progress, opacity_at, OverlayAnimation, OverlayAnimationFrame,
@@ -409,6 +410,7 @@ mod tests {
                 shadow_color: "rgba(0,0,0,0.5)".to_string(),
                 shadow_blur: 12.0,
                 auto_scale_text: true,
+                title_design: None,
             },
         };
 
@@ -476,6 +478,7 @@ mod tests {
                 shadow_color: "#000000".to_string(),
                 shadow_blur: 0.0,
                 auto_scale_text: true,
+                title_design: None,
             },
         };
 

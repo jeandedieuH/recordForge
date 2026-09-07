@@ -1,51 +1,59 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import type {
-  OverlayDisplayAnnotation,
-  OverlayDisplayList,
-  OverlayDisplayText,
-} from "@recordforge/contracts"
+import type { OverlayDisplayAnnotation, OverlayDisplayList } from "@recordforge/contracts"
 import {
   annotationPresetToShapePreset,
   createAnnotationClipFromPreset,
-  createTextClipFromDefinition,
-  textPresetToDefinition,
   type AnnotationPresetRecord,
   type PresetDefinition,
-  type TextPresetDefinition,
   type TextPresetRecord,
 } from "@recordforge/editor-core"
 import { renderOverlayDisplayList } from "@recordforge/overlay-core"
 import { Skeleton, cn } from "@recordforge/ui"
-import { AlertTriangle, Shapes, Type } from "lucide-react"
+import { AlertTriangle, Shapes } from "lucide-react"
+import { TitlePreview } from "../titles/title-preview"
 
 const THUMBNAIL_WIDTH = 640
 const THUMBNAIL_HEIGHT = 360
 
 type AnnotationPreset = PresetDefinition<AnnotationPresetRecord["definition"]>
-type TextPreset = TextPresetRecord
 
 interface PresetThumbnailProps {
   kind: "annotation" | "text"
-  preset: AnnotationPreset | TextPreset
+  preset: AnnotationPreset | TextPresetRecord
   className?: string
 }
 
 export function PresetThumbnail({ kind, preset, className }: PresetThumbnailProps) {
+  if (kind === "text") {
+    return (
+      <TitlePreview
+        preset={preset as TextPresetRecord}
+        className={className}
+        interactiveRetry={false}
+      />
+    )
+  }
+  return <AnnotationPresetThumbnail preset={preset as AnnotationPreset} className={className} />
+}
+
+function AnnotationPresetThumbnail({
+  preset,
+  className,
+}: {
+  preset: AnnotationPreset
+  className?: string
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
 
   const displayList = useMemo<OverlayDisplayList | null>(() => {
     try {
-      if (kind === "annotation") {
-        const item = createAnnotationDisplayItem(preset as AnnotationPreset)
-        return { timeMs: 1_000, items: [item] }
-      }
-      const item = createTextDisplayItem(preset as TextPreset)
+      const item = createAnnotationDisplayItem(preset)
       return { timeMs: 1_000, items: [item] }
     } catch {
       return null
     }
-  }, [kind, preset])
+  }, [preset])
 
   useEffect(() => {
     if (!displayList) {
@@ -84,72 +92,11 @@ export function PresetThumbnail({ kind, preset, className }: PresetThumbnailProp
       ) : null}
       {status === "ready" ? null : (
         <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-black/50 p-1.5 text-white/70">
-          {kind === "annotation" ? (
-            <Shapes className="size-3.5" aria-hidden />
-          ) : (
-            <Type className="size-3.5" aria-hidden />
-          )}
+          <Shapes className="size-3.5" aria-hidden />
         </div>
       )}
     </div>
   )
-}
-
-function createTextDisplayItem(preset: TextPreset): OverlayDisplayText {
-  const def =
-    "definition" in preset && preset.definition
-      ? textPresetToDefinition(preset as TextPreset)
-      : (preset as unknown as TextPresetDefinition)
-
-  const clip = createTextClipFromDefinition(def, {
-    id: `thumb-${preset.id}`,
-    startMs: 0,
-    durationMs: 2_000,
-    canvasWidth: THUMBNAIL_WIDTH,
-    canvasHeight: THUMBNAIL_HEIGHT,
-  })
-
-  return {
-    id: clip.id,
-    kind: "text",
-    zIndex: 0,
-    transform: {
-      x: clip.x,
-      y: clip.y,
-      width: clip.width,
-      height: clip.height,
-      rotation: 0,
-      anchorX: 0.5,
-      anchorY: 0.5,
-      zIndex: 0,
-      opacity: 1,
-    },
-    animationProgress: 1,
-    textProgress: 1,
-    presetId: clip.presetId,
-    category: clip.category,
-    primaryText: clip.primaryText,
-    secondaryText: clip.secondaryText,
-    tagText: clip.tagText,
-    alignment: clip.alignment,
-    fontFamily: clip.fontFamily,
-    fontSize: clip.fontSize,
-    fontWeight: clip.fontWeight,
-    textColor: clip.textColor,
-    secondaryTextColor: clip.secondaryTextColor,
-    accentColor: clip.accentColor,
-    backdropStyle: clip.backdropStyle,
-    backdropColor: clip.backdropColor,
-    backdropOpacity: clip.backdropOpacity,
-    backdropBlur: clip.backdropBlur,
-    backdropBorderRadius: clip.backdropBorderRadius,
-    backdropPaddingX: clip.backdropPaddingX,
-    backdropPaddingY: clip.backdropPaddingY,
-    shadowEnabled: clip.shadowEnabled,
-    shadowColor: clip.shadowColor,
-    shadowBlur: clip.shadowBlur,
-    autoScaleText: clip.autoScaleText ?? true,
-  }
 }
 
 function createAnnotationDisplayItem(preset: AnnotationPreset): OverlayDisplayAnnotation {
