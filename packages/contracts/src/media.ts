@@ -194,7 +194,7 @@ export const mediaJobSchema = z.object({
   updatedAt: z.string().datetime({ offset: true }),
   startedAt: z.string().datetime({ offset: true }).nullish(),
   completedAt: z.string().datetime({ offset: true }).nullish(),
-  outputs: mediaJobOutputsSchema.default({}),
+  outputs: mediaJobOutputsSchema.default(() => mediaJobOutputsSchema.parse({})),
 })
 
 export type MediaJob = z.infer<typeof mediaJobSchema>

@@ -197,7 +197,7 @@ export type ScreenClip = z.infer<typeof screenClipSchema>
 // Camera clip: a picture-in-picture webcam slice with position, size, and shape.
 export const cameraClipSchema = timelineClipBaseSchema.extend({
   kind: z.literal("camera"),
-  transform: clipTransformSchema.default({}),
+  transform: clipTransformSchema.default(() => clipTransformSchema.parse({})),
 })
 
 export type CameraClip = z.infer<typeof cameraClipSchema>
@@ -395,7 +395,7 @@ export const annotationClipSchema = timelineClipBaseSchema.extend({
   fontSize: z.number().min(8).max(120).default(16),
   animationIn: annotationAnimationSchema.default("fade"),
   animationOut: annotationAnimationSchema.default("fade"),
-  overlayAnimation: overlayAnimationSchema.default({}),
+  overlayAnimation: overlayAnimationSchema.default(() => overlayAnimationSchema.parse({})),
   presetId: z.string().default(""),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
@@ -506,7 +506,7 @@ export const textClipSchema = timelineClipBaseSchema.extend({
   shadowBlur: z.number().min(0).max(100).default(10),
   animationIn: textAnimationSchema.default("fade"),
   animationOut: textAnimationSchema.default("fade"),
-  overlayAnimation: overlayAnimationSchema.default({}),
+  overlayAnimation: overlayAnimationSchema.default(() => overlayAnimationSchema.parse({})),
   autoScaleText: z.boolean().default(true),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
@@ -538,7 +538,7 @@ export const imageClipSchema = timelineClipBaseSchema.extend({
   fit: imageFitSchema.default("contain"),
   animationIn: z.enum(["none", "fade", "scale-up", "slide-up"]).default("fade"),
   animationOut: z.enum(["none", "fade", "scale-down"]).default("fade"),
-  overlayAnimation: overlayAnimationSchema.default({}),
+  overlayAnimation: overlayAnimationSchema.default(() => overlayAnimationSchema.parse({})),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
 })
@@ -633,7 +633,7 @@ export const timelineViewStateSchema = z.object({
   snapEnabled: z.boolean().default(true),
   snapThresholdMs: z.number().int().min(1).max(5_000).default(120),
   collapsedTrackIds: z.array(z.string()).default([]),
-  trackHeights: z.record(z.number().int().min(28).max(240)).default({}),
+  trackHeights: z.record(z.string(), z.number().int().min(28).max(240)).default({}),
 })
 
 export type TimelineViewState = z.infer<typeof timelineViewStateSchema>

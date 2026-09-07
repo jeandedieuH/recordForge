@@ -8,11 +8,11 @@ import { z } from "zod"
 export async function invokeValidated<T>(
   command: string,
   args?: Record<string, unknown>,
-  schema?: z.ZodType<T, z.ZodTypeDef, unknown>,
+  schema?: z.ZodType<T, unknown>,
 ): Promise<T> {
   const raw = await invoke(command, args)
   if (schema) {
-    return schema.parse(raw)
+    return schema.parse(raw) as T
   }
   return raw as T
 }

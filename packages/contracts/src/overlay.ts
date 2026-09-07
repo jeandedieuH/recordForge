@@ -42,7 +42,7 @@ const overlayRenderItemBaseSchema = z.object({
   startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   transform: overlayTransformSchema,
-  animation: overlayAnimationSchema.default({}),
+  animation: overlayAnimationSchema.default(() => overlayAnimationSchema.parse({})),
   enabled: z.boolean().default(true),
 })
 

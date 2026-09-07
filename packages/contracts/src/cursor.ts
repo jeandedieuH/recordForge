@@ -192,7 +192,7 @@ export const cursorTelemetryMetadataSchema = z.object({
   coordinateTransform: cursorCoordinateTransformSchema,
   topology: cursorTopologySchema.optional(),
   shapes: z.array(cursorShapeInfoSchema).default([]),
-  timebase: cursorTelemetryTimebaseSchema.default({}),
+  timebase: cursorTelemetryTimebaseSchema.default(() => cursorTelemetryTimebaseSchema.parse({})),
   sampleRateHz: z.number().positive().default(60),
   clickWindowMs: z.number().positive().default(350),
   health: cursorTelemetryHealthSchema.default("healthy"),

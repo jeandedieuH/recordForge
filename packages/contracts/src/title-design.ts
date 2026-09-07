@@ -49,7 +49,13 @@ export const titleDesignSchema = z.object({
       prefix: z.string().max(20).default(""),
       suffix: z.string().max(20).default("%"),
     })
-    .default({}),
+    .default(() => ({
+      from: 0,
+      to: 98,
+      decimals: 0,
+      prefix: "",
+      suffix: "%",
+    })),
 })
 
 export type TitleDesign = z.infer<typeof titleDesignSchema>

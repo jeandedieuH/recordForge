@@ -15,7 +15,7 @@
     "format": "prettier --write ."
   },
   "dependencies": {
-    "zod": "^3.25.11"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@recordforge/config": "workspace:*",
