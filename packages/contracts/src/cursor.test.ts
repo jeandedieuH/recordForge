@@ -7,6 +7,7 @@ describe("cursor contracts", () => {
     expect(defaultCursorSettings.preset).toBe("recorded-system")
     expect(defaultCursorSettings.hideNativeCursor).toBe(true)
     expect(defaultCursorSettings.shapeMode).toBe("optimized")
+    expect(defaultCursorSettings.clickPressAnimation).toBe(true)
   })
 
   it("accepts telemetry emitted by the Rust tracker", () => {

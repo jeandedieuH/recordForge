@@ -149,17 +149,14 @@ impl WebcamPreviewWindow {
             from_status
                 .or_else(|| {
                     let quick_guard = state.quick_config.lock().ok();
-                    let from_quick = quick_guard
-                        .as_ref()
-                        .and_then(|g| g.as_ref())
-                        .and_then(|c| {
-                            c.webcam_device_id.clone().map(|id| {
-                                let preview_url = recorder_status
-                                    .as_ref()
-                                    .and_then(|s| s.webcam_preview_url.clone());
-                                (id.clone(), id, preview_url)
-                            })
-                        });
+                    let from_quick = quick_guard.as_ref().and_then(|g| g.as_ref()).and_then(|c| {
+                        c.webcam_device_id.clone().map(|id| {
+                            let preview_url = recorder_status
+                                .as_ref()
+                                .and_then(|s| s.webcam_preview_url.clone());
+                            (id.clone(), id, preview_url)
+                        })
+                    });
                     from_quick
                 })
                 .unwrap_or_default()

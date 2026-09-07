@@ -254,4 +254,64 @@ describe("cursor engine", () => {
     expect(fitted.x).toBeGreaterThanOrEqual(0)
     expect(fitted.y).toBeGreaterThanOrEqual(0)
   })
+
+  it("calculates micro-press and spring clickScale", () => {
+    const engine = createCursorEngine(telemetry)
+    // t=90 before click (click is at t=100)
+    expect(engine.evaluate(90, defaultCursorSettings).clickScale).toBeCloseTo(1.0, 3)
+    // t=100 at click down
+    expect(engine.evaluate(100, defaultCursorSettings).clickScale).toBeCloseTo(1.0, 3)
+    // t=150 (50ms after click): peak ~0.86 compression
+    expect(engine.evaluate(150, defaultCursorSettings).clickScale).toBeCloseTo(0.86, 2)
+    // t=245 (145ms after click): spring rebound overshoot > 1.0
+    const rebound = engine.evaluate(245, defaultCursorSettings).clickScale
+    expect(rebound).toBeGreaterThan(1.01)
+    expect(rebound).toBeLessThan(1.03)
+    // t=320 (220ms after click): settled
+    expect(engine.evaluate(320, defaultCursorSettings).clickScale).toBeCloseTo(1.0, 2)
+    // When disabled
+    const disabled = engine.evaluate(150, { ...defaultCursorSettings, clickPressAnimation: false })
+    expect(disabled.clickScale).toBe(1.0)
+  })
+
+  it("stabilizes dwell and applies micro-tap dip in cinematic mode", () => {
+    const movingEvents = []
+    for (let t = 0; t <= 2000; t += 16) {
+      const isClick = t === 1008
+      movingEvents.push(
+        v2Event(t, (t / 2000) * 1000, (t / 2000) * 500, isClick ? "left-down" : "none", isClick),
+      )
+    }
+    const movingTelemetry = normalizeCursorTelemetry({
+      recordingId: "moving-cinematic",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      sampleRateHz: 60,
+      events: movingEvents,
+    })
+    const engine = createCursorEngine(movingTelemetry)
+    const cinematic = {
+      ...defaultCursorSettings,
+      smoothMovement: true,
+      smoothFactor: 0.15,
+      clickPressAnimation: true,
+    }
+
+    // At click instant t = 1008
+    const frameClick = engine.evaluate(1008, cinematic)
+    expect(frameClick.sourceX).toBeCloseTo(504, 0)
+    expect(frameClick.sourceY).toBeCloseTo(252, 0)
+
+    // At t = 1048 (40ms after click), stays anchored near target with tap offset (~1.8px, ~2.4px)
+    const framePress = engine.evaluate(1048, cinematic)
+    expect(framePress.clickScale).toBeLessThan(0.88)
+    expect(framePress.sourceX).toBeLessThan(508)
+    expect(framePress.sourceY).toBeLessThan(256)
+    expect(framePress.sourceX).toBeGreaterThan(504)
+    expect(framePress.sourceY).toBeGreaterThan(252)
+
+    // When disabled, no tap offset is added
+    const frameNoPress = engine.evaluate(1048, { ...cinematic, clickPressAnimation: false })
+    expect(frameNoPress.clickScale).toBe(1.0)
+  })
 })

@@ -569,6 +569,17 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
         <Label className="font-semibold text-[11px]">Click Feedback</Label>
 
+        <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
+          <div className="space-y-0.5">
+            <span className="text-[10px] font-medium">Click press</span>
+            <p className="text-[9px] text-muted-foreground">Micro-press and spring on click</p>
+          </div>
+          <Switch
+            checked={settings.clickPressAnimation ?? true}
+            onCheckedChange={(value) => onChange({ clickPressAnimation: value })}
+          />
+        </div>
+
         {settings.clickFeedback !== "none" ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2">

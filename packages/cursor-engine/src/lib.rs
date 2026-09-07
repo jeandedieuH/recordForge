@@ -394,6 +394,7 @@ pub struct CursorSettings {
     pub click_duration_ms: f64,
     pub left_click_enabled: bool,
     pub right_click_enabled: bool,
+    pub click_press_animation: bool,
     pub spotlight_mode: bool,
     pub spotlight_radius: f64,
     pub spotlight_dim_opacity: f64,
@@ -428,6 +429,7 @@ impl Default for CursorSettings {
             click_duration_ms: 350.0,
             left_click_enabled: true,
             right_click_enabled: true,
+            click_press_animation: true,
             spotlight_mode: false,
             spotlight_radius: 120.0,
             spotlight_dim_opacity: 0.5,
@@ -525,6 +527,12 @@ pub struct CursorFrame {
     pub is_idle: bool,
     pub active_clicks: Vec<CursorClickEffect>,
     pub velocity_px_per_sec: f64,
+    #[serde(default = "default_click_scale")]
+    pub click_scale: f64,
+}
+
+fn default_click_scale() -> f64 {
+    1.0
 }
 
 /// Version tag for the compact cubic Bézier motion-plan format.
@@ -832,13 +840,14 @@ impl CursorEngine {
                 is_idle: false,
                 active_clicks: Vec::new(),
                 velocity_px_per_sec: 0.0,
+                click_scale: 1.0,
             };
         }
 
         let index = self.find_event_index(time_ms);
         let event = &self.prepared[index];
 
-        let (source_x, source_y) = self.evaluate_spline_position(index, time_ms, settings);
+        let (mut source_x, mut source_y) = self.evaluate_spline_position(index, time_ms, settings);
 
         let idle_duration = (time_ms - event.last_motion_ms as f64).max(0.0);
         let is_idle = settings.auto_hide_idle
@@ -859,6 +868,11 @@ impl CursorEngine {
         };
 
         let visible = settings.enabled && event.visible && opacity > 0.0;
+        let click_scale = self.calculate_click_scale(time_ms, settings);
+
+        if settings.click_press_animation {
+            self.apply_click_movement(time_ms, settings, click_scale, &mut source_x, &mut source_y);
+        }
 
         CursorFrame {
             source_time_ms: time_ms,
@@ -870,6 +884,7 @@ impl CursorEngine {
             is_idle,
             active_clicks: self.active_clicks(time_ms, settings),
             velocity_px_per_sec: event.speed_px_per_sec,
+            click_scale,
         }
     }
 
@@ -1154,6 +1169,128 @@ impl CursorEngine {
         }
         result.reverse();
         result
+    }
+
+    fn calculate_click_scale(&self, time_ms: f64, settings: &CursorSettings) -> f64 {
+        if !settings.click_press_animation {
+            return 1.0;
+        }
+
+        const PRESS_DURATION_MS: f64 = 220.0;
+        const DOWN_DURATION_MS: f64 = 50.0;
+        const REBOUND_DURATION_MS: f64 = 170.0;
+        const MAX_DEPRESSION: f64 = 0.14;
+
+        let mut low = 0usize;
+        let mut high = self.clicks.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if self.clicks[middle - 1].t_ms as f64 <= time_ms {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        let mut active_scale: Option<f64> = None;
+        for click in self.clicks[..low].iter().rev() {
+            let elapsed = time_ms - click.t_ms as f64;
+            if elapsed > PRESS_DURATION_MS {
+                break;
+            }
+            if elapsed < 0.0 {
+                continue;
+            }
+
+            let button_allowed = match click.button {
+                CursorButton::Left => settings.left_click_enabled,
+                CursorButton::Right => settings.right_click_enabled,
+                CursorButton::Middle => true,
+            };
+            if !button_allowed {
+                continue;
+            }
+
+            let scale = if elapsed <= DOWN_DURATION_MS {
+                let r = elapsed / DOWN_DURATION_MS;
+                1.0 - MAX_DEPRESSION * (r * std::f64::consts::FRAC_PI_2).sin()
+            } else {
+                let u = (elapsed - DOWN_DURATION_MS) / REBOUND_DURATION_MS;
+                1.0 - MAX_DEPRESSION * (1.0 - u).powi(2) * (u * std::f64::consts::PI * 1.5).cos()
+            };
+
+            active_scale = Some(match active_scale {
+                Some(current) => current.min(scale),
+                None => scale,
+            });
+        }
+
+        active_scale.unwrap_or(1.0)
+    }
+
+    fn apply_click_movement(
+        &self,
+        time_ms: f64,
+        settings: &CursorSettings,
+        click_scale: f64,
+        source_x: &mut f64,
+        source_y: &mut f64,
+    ) {
+        const DWELL_HOLD_MS: f64 = 50.0;
+        const DWELL_TOTAL_MS: f64 = 160.0;
+        const DWELL_RELEASE_MS: f64 = DWELL_TOTAL_MS - DWELL_HOLD_MS;
+
+        let mut low = 0usize;
+        let mut high = self.clicks.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if self.clicks[middle - 1].t_ms as f64 <= time_ms {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        // Search for the most recent click within the dwell window
+        for click in self.clicks[..low].iter().rev() {
+            let elapsed = time_ms - click.t_ms as f64;
+            if elapsed > DWELL_TOTAL_MS {
+                break;
+            }
+            if elapsed < 0.0 {
+                continue;
+            }
+
+            let button_allowed = match click.button {
+                CursorButton::Left => settings.left_click_enabled,
+                CursorButton::Right => settings.right_click_enabled,
+                CursorButton::Middle => true,
+            };
+            if !button_allowed {
+                continue;
+            }
+
+            // Click dwell stabilization in smoothed movement modes
+            if settings.smooth_movement {
+                if elapsed <= DWELL_HOLD_MS {
+                    *source_x = click.x;
+                    *source_y = click.y;
+                } else {
+                    let u = ((elapsed - DWELL_HOLD_MS) / DWELL_RELEASE_MS).clamp(0.0, 1.0);
+                    let blend = u * u * (3.0 - 2.0 * u);
+                    *source_x = click.x + (*source_x - click.x) * blend;
+                    *source_y = click.y + (*source_y - click.y) * blend;
+                }
+            }
+
+            break; // Anchored to most recent active click
+        }
+
+        // Directional kinetic micro-tap dip: down-and-right mechanical press
+        let depression = 1.0 - click_scale;
+        let tap_scale = settings.scale.clamp(0.5, 3.0);
+        *source_x += depression * 14.0 * tap_scale;
+        *source_y += depression * 18.0 * tap_scale;
     }
 }
 
@@ -1597,5 +1734,130 @@ mod tests {
             ..plan
         };
         assert!(evaluate_cubic_motion_plan(&invalid_kind, 600.0).is_none());
+    }
+
+    #[test]
+    fn click_scale_micro_press_and_spring() {
+        let telemetry = make_telemetry(vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 100.0,
+                y: 100.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 100.0,
+                y: 100.0,
+                visible: true,
+                clicked: true,
+                button: Some("left".into()),
+                button_event: Some("left-down".into()),
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 600,
+                x: 100.0,
+                y: 100.0,
+                visible: true,
+                ..Default::default()
+            },
+        ]);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        // Before click
+        let frame_before = engine.evaluate(90.0, &settings);
+        assert!((frame_before.click_scale - 1.0).abs() < 0.000_1);
+
+        // Exactly at click down
+        let frame_at = engine.evaluate(100.0, &settings);
+        assert!((frame_at.click_scale - 1.0).abs() < 0.000_1);
+
+        // Peak compression at 50ms (t = 150ms): ~0.86x
+        let frame_peak = engine.evaluate(150.0, &settings);
+        assert!((frame_peak.click_scale - 0.86).abs() < 0.001);
+
+        // Spring rebound overshoot around t = 245ms: > 1.0 (subtle bounce)
+        let frame_rebound = engine.evaluate(245.0, &settings);
+        assert!(frame_rebound.click_scale > 1.01 && frame_rebound.click_scale < 1.03);
+
+        // Settled at t = 320ms (220ms after click): 1.0
+        let frame_settled = engine.evaluate(320.0, &settings);
+        assert!((frame_settled.click_scale - 1.0).abs() < 0.001);
+
+        // Long after click
+        let frame_later = engine.evaluate(500.0, &settings);
+        assert!((frame_later.click_scale - 1.0).abs() < 0.000_1);
+
+        // When disabled, click_scale stays 1.0
+        let disabled_settings = CursorSettings {
+            click_press_animation: false,
+            ..Default::default()
+        };
+        let frame_disabled = engine.evaluate(150.0, &disabled_settings);
+        assert!((frame_disabled.click_scale - 1.0).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn cinematic_click_dwell_and_tap_movement() {
+        let mut events = Vec::new();
+        // Moving cursor from (0,0) to (1000, 500) over 2000ms, clicking at t=1000ms at (500, 250)
+        for t in (0..=2000).step_by(16) {
+            let round_t = t as u64;
+            let x = (t as f64 / 2000.0) * 1000.0;
+            let y = (t as f64 / 2000.0) * 500.0;
+            let (button_event, clicked) = if round_t == 1008 {
+                (Some("left-down".into()), true)
+            } else {
+                (None, false)
+            };
+            events.push(CursorEvent {
+                t_ms: round_t,
+                x,
+                y,
+                visible: true,
+                clicked,
+                button: if clicked { Some("left".into()) } else { None },
+                button_event,
+                ..Default::default()
+            });
+        }
+
+        let telemetry = make_telemetry(events);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let cinematic = CursorSettings {
+            smooth_movement: true,
+            smooth_factor: 0.15,
+            click_press_animation: true,
+            ..Default::default()
+        };
+
+        // At t = 1008 (exact click), position is right at the click target (504, 252)
+        let frame_click = engine.evaluate(1008.0, &cinematic);
+        assert!((frame_click.source_x - 504.0).abs() < 1.0);
+        assert!((frame_click.source_y - 252.0).abs() < 1.0);
+        assert!((frame_click.click_scale - 1.0).abs() < 0.001);
+
+        // During down-press at dt = 40ms (t = 1048), cursor stays anchored to click target + tap dip
+        let frame_press = engine.evaluate(1048.0, &cinematic);
+        assert!(frame_press.click_scale < 0.88);
+        // source_x and source_y should be anchored near (504, 252) + tap offset (~1.8px, ~2.4px),
+        // NOT teleporting 30px ahead to >530px
+        assert!(frame_press.source_x < 508.0);
+        assert!(frame_press.source_y < 256.0);
+        assert!(frame_press.source_x > 504.0); // positive tap offset
+        assert!(frame_press.source_y > 252.0);
+
+        // When click_press_animation is disabled, no tap offset is added
+        let cinematic_no_press = CursorSettings {
+            smooth_movement: true,
+            smooth_factor: 0.15,
+            click_press_animation: false,
+            ..Default::default()
+        };
+        let frame_no_press = engine.evaluate(1048.0, &cinematic_no_press);
+        assert!((frame_no_press.click_scale - 1.0).abs() < 0.0001);
     }
 }

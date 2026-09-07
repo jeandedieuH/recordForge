@@ -136,7 +136,8 @@ export function CustomCursorOverlay({
 
   const posX = zoomed.x
   const posY = zoomed.y
-  const cursorScale = (cursorSettings.scale ?? 1) * (fitted.scale ?? 1) * zoomed.scale
+  const cursorScale =
+    (cursorSettings.scale ?? 1) * (fitted.scale ?? 1) * zoomed.scale * (frame.clickScale ?? 1)
   const isCursorVisible = cursorSettings.enabled && frame.visible && frame.opacity > 0
 
   return (

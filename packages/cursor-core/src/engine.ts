@@ -36,6 +36,7 @@ export interface CursorFrame {
   isIdle: boolean
   activeClicks: CursorClickEffect[]
   velocityPxPerSec: number
+  clickScale: number
 }
 
 export interface CursorEngineOptions {
@@ -210,6 +211,7 @@ export function createCursorEngine(
         isIdle: false,
         activeClicks: [],
         velocityPxPerSec: 0,
+        clickScale: 1,
       }),
       evaluateMotionPlan: (timeMs, motionPlan) =>
         evaluateCubicMotionPlanFallback(motionPlan, timeMs),
@@ -563,11 +565,108 @@ export function createCursorEngine(
     return result.reverse()
   }
 
+  function calculateClickScale(timeMs: number, settings: CursorSettings): number {
+    if (!settings.clickPressAnimation) return 1.0
+
+    const PRESS_DURATION_MS = 220.0
+    const DOWN_DURATION_MS = 50.0
+    const REBOUND_DURATION_MS = 170.0
+    const MAX_DEPRESSION = 0.14
+
+    let low = 0
+    let high = clicks.length
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2)
+      if (clicks[middle].tMs <= timeMs) low = middle + 1
+      else high = middle
+    }
+
+    let activeScale: number | null = null
+    for (let i = low - 1; i >= 0; i--) {
+      const click = clicks[i]
+      const elapsed = timeMs - click.tMs
+      if (elapsed > PRESS_DURATION_MS) break
+      if (elapsed < 0) continue
+
+      if (click.button === "left" && !settings.leftClickEnabled) continue
+      if (click.button === "right" && !settings.rightClickEnabled) continue
+
+      let scale: number
+      if (elapsed <= DOWN_DURATION_MS) {
+        const r = elapsed / DOWN_DURATION_MS
+        scale = 1.0 - MAX_DEPRESSION * Math.sin(r * (Math.PI / 2))
+      } else {
+        const u = (elapsed - DOWN_DURATION_MS) / REBOUND_DURATION_MS
+        scale = 1.0 - MAX_DEPRESSION * Math.pow(1.0 - u, 2) * Math.cos(u * Math.PI * 1.5)
+      }
+
+      activeScale = activeScale !== null ? Math.min(activeScale, scale) : scale
+    }
+
+    return activeScale ?? 1.0
+  }
+
+  function applyClickMovement(
+    timeMs: number,
+    settings: CursorSettings,
+    clickScale: number,
+    point: { x: number; y: number },
+  ): { x: number; y: number } {
+    const DWELL_HOLD_MS = 50.0
+    const DWELL_TOTAL_MS = 160.0
+    const DWELL_RELEASE_MS = DWELL_TOTAL_MS - DWELL_HOLD_MS
+
+    let low = 0
+    let high = clicks.length
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2)
+      if (clicks[middle].tMs <= timeMs) low = middle + 1
+      else high = middle
+    }
+
+    let x = point.x
+    let y = point.y
+
+    // Search for the most recent click within the dwell window
+    for (let i = low - 1; i >= 0; i--) {
+      const click = clicks[i]
+      const elapsed = timeMs - click.tMs
+      if (elapsed > DWELL_TOTAL_MS) break
+      if (elapsed < 0) continue
+
+      if (click.button === "left" && !settings.leftClickEnabled) continue
+      if (click.button === "right" && !settings.rightClickEnabled) continue
+
+      // Click dwell stabilization in smoothed movement modes
+      if (settings.smoothMovement) {
+        if (elapsed <= DWELL_HOLD_MS) {
+          x = click.x
+          y = click.y
+        } else {
+          const u = clamp((elapsed - DWELL_HOLD_MS) / DWELL_RELEASE_MS, 0, 1)
+          const blend = u * u * (3 - 2 * u)
+          x = click.x + (x - click.x) * blend
+          y = click.y + (y - click.y) * blend
+        }
+      }
+
+      break // Anchored to most recent active click
+    }
+
+    // Directional kinetic micro-tap dip: down-and-right mechanical press
+    const depression = 1.0 - clickScale
+    const tapScale = clamp(settings.scale ?? 1.0, 0.5, 3.0)
+    x += depression * 14.0 * tapScale
+    y += depression * 18.0 * tapScale
+
+    return { x, y }
+  }
+
   function evaluate(timeMs: number, settings: CursorSettings): CursorFrame {
     const index = findEventIndex(timeMs)
     const event = prepared[index]
 
-    const point = evaluateSplinePosition(index, timeMs, settings)
+    const rawPoint = evaluateSplinePosition(index, timeMs, settings)
 
     const velocityPxPerSec = event.speedPxPerSec
 
@@ -584,6 +683,11 @@ export function createCursorEngine(
     }
 
     const visible = settings.enabled && event.visible && opacity > 0
+    const clickScale = calculateClickScale(timeMs, settings)
+
+    const point = settings.clickPressAnimation
+      ? applyClickMovement(timeMs, settings, clickScale, rawPoint)
+      : rawPoint
 
     return {
       sourceTimeMs: timeMs,
@@ -595,6 +699,7 @@ export function createCursorEngine(
       isIdle,
       activeClicks: activeClicks(timeMs, settings),
       velocityPxPerSec,
+      clickScale,
     }
   }
 

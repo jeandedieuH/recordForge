@@ -2,7 +2,7 @@
   "name": "cursor-engine",
   "type": "module",
   "collaborators": [
-    "recordForge"
+    "Prestige Tech"
   ],
   "description": "Canonical cursor evaluation engine for preview and export",
   "version": "1.4.5",

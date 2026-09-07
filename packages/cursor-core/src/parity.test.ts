@@ -116,6 +116,7 @@ function framesAreEqual(
   expect(wasm.sourceY).toBeCloseTo(ts.sourceY, 1)
   expect(wasm.visible).toBe(ts.visible)
   expect(wasm.opacity).toBeCloseTo(ts.opacity, 2)
+  expect(wasm.clickScale).toBeCloseTo(ts.clickScale, 3)
   expect(wasm.activeClicks.length).toBe(ts.activeClicks.length)
   for (let i = 0; i < wasm.activeClicks.length; i++) {
     expect(wasm.activeClicks[i].sourceX).toBeCloseTo(ts.activeClicks[i].sourceX, 1)
@@ -150,6 +151,20 @@ describe("cursor engine cross-language parity", () => {
       framesAreEqual(
         wasmEngine.evaluate(timeMs, defaultCursorSettings),
         tsEngine.evaluate(timeMs, defaultCursorSettings),
+      )
+    }
+
+    // Verify parity specifically under cinematic smoothing settings
+    const cinematicSettings: CursorSettings = {
+      ...defaultCursorSettings,
+      smoothMovement: true,
+      smoothFactor: 0.15,
+      clickPressAnimation: true,
+    }
+    for (const timeMs of [0, 50, 250, 800, 1500, 5000]) {
+      framesAreEqual(
+        wasmEngine.evaluate(timeMs, cinematicSettings),
+        tsEngine.evaluate(timeMs, cinematicSettings),
       )
     }
   })

@@ -75,6 +75,7 @@ export const cursorSettingsSchema = z.object({
   clickDurationMs: z.number().min(100).max(2000).default(350),
   leftClickEnabled: z.boolean().default(true),
   rightClickEnabled: z.boolean().default(true),
+  clickPressAnimation: z.boolean().default(true),
   smoothMovement: z.boolean().default(true),
   smoothFactor: z.number().min(0.05).max(1.0).default(0.25),
   autoHideIdle: z.boolean().default(false),

@@ -424,7 +424,7 @@ impl CursorRenderer {
             y,
             cursor_frame.opacity,
             &shape_id,
-            effective_cursor_scale,
+            effective_cursor_scale * cursor_frame.click_scale,
             &clip,
         );
     }
