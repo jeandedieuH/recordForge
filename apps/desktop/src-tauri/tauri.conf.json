@@ -50,9 +50,9 @@
         "default-src": "'self'",
         "script-src": "'self' 'wasm-unsafe-eval'",
         "style-src": "'self' 'unsafe-inline'",
-        "img-src": "'self' data: blob: http://asset.localhost https://asset.localhost asset:",
-        "media-src": "'self' data: blob: http://asset.localhost https://asset.localhost asset:",
-        "connect-src": "'self' ipc: http://ipc.localhost https://ipc.localhost http://asset.localhost https://asset.localhost asset:"
+        "img-src": "'self' data: blob: http://127.0.0.1:* http://localhost:* http://asset.localhost https://asset.localhost asset:",
+        "media-src": "'self' data: blob: http://127.0.0.1:* http://localhost:* http://asset.localhost https://asset.localhost asset:",
+        "connect-src": "'self' ipc: http://127.0.0.1:* http://localhost:* http://ipc.localhost https://ipc.localhost http://asset.localhost https://asset.localhost asset:"
       }
     },
     "withGlobalTauri": false

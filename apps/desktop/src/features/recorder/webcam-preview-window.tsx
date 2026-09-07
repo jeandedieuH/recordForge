@@ -14,7 +14,11 @@ import {
 } from "lucide-react"
 import { Button } from "@recordforge/ui"
 import { isTauri } from "../../lib/settings"
-import { useRecorderPolling, useRecorderStore } from "../../hooks/use-recorder"
+import {
+  useRecorderPolling,
+  useRecorderStatusEvents,
+  useRecorderStore,
+} from "../../hooks/use-recorder"
 
 interface InjectedWebcamParams {
   deviceId?: string
@@ -99,10 +103,12 @@ function getStoredWebcamPreference(): { webcamId?: string; webcamName?: string }
 // disconnection detection, and frame delivery monitoring to detect freezing.
 export function WebcamPreviewWindow() {
   useRecorderPolling()
+  useRecorderStatusEvents()
 
   const { status, preferences } = useRecorderStore()
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const retryCountRef = useRef(0)
 
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([])
   const [userSelectedDeviceId, setUserSelectedDeviceId] = useState<string>("")
@@ -127,6 +133,8 @@ export function WebcamPreviewWindow() {
       if (customEvent.detail) {
         setInjectedParams(customEvent.detail)
         setUserSelectedDeviceId("") // Reset manual switch so new recording's device takes effect
+        retryCountRef.current = 0
+        setStreamState("connecting")
         setRetryNonce((n) => n + 1)
       }
     }
@@ -203,6 +211,9 @@ export function WebcamPreviewWindow() {
   // Determine requested camera identifier
   const storedPrefs = getStoredWebcamPreference()
   const activePreviewUrl = injectedParams?.previewUrl || status?.webcamPreviewUrl || ""
+  const imageSrc = activePreviewUrl
+    ? `${activePreviewUrl}${activePreviewUrl.includes("?") ? "&" : "?"}_t=${retryNonce}`
+    : ""
 
   const targetCameraIdentifier =
     userSelectedDeviceId ||
@@ -216,11 +227,38 @@ export function WebcamPreviewWindow() {
     preferences.webcamId ||
     ""
 
+  // Fallback timer: ensure streamState transitions to "active" once frames are flowing,
+  // in case the browser doesn't dispatch standard onLoad for multipart streams.
+  useEffect(() => {
+    if (!activePreviewUrl) return
+    const timer = setTimeout(() => {
+      setStreamState((prev) => (prev === "connecting" ? "active" : prev))
+    }, 1500)
+    return () => clearTimeout(timer)
+  }, [activePreviewUrl, retryNonce])
+
   // Acquire camera stream with permission handshake, retry logic, and NO silent fallback
   useEffect(() => {
     if (activePreviewUrl) {
-      setStreamState("active")
-      setIsLagging(false)
+      const label =
+        injectedParams?.deviceName ||
+        status?.webcamDeviceName ||
+        injectedParams?.deviceId ||
+        status?.webcamDeviceId ||
+        "Recording Camera"
+      setActiveCameraLabel(label)
+      return
+    }
+
+    // Safety guard: if recording is active or starting with webcam enabled,
+    // do NOT call getUserMedia. Windows DirectShow lock prevents dual opening.
+    if (
+      status?.webcamActive ||
+      status?.state === "recording" ||
+      status?.state === "countdown" ||
+      status?.state === "paused"
+    ) {
+      setStreamState("connecting")
       const label =
         injectedParams?.deviceName ||
         status?.webcamDeviceName ||
@@ -234,6 +272,16 @@ export function WebcamPreviewWindow() {
     let cancelled = false
 
     async function initializeCamera() {
+      if (
+        activePreviewUrl ||
+        status?.webcamActive ||
+        status?.state === "recording" ||
+        status?.state === "countdown" ||
+        status?.state === "paused"
+      ) {
+        return
+      }
+
       if (!navigator.mediaDevices?.getUserMedia) {
         setStreamState("disconnected")
         return
@@ -378,6 +426,8 @@ export function WebcamPreviewWindow() {
     injectedParams?.deviceName,
     status?.webcamDeviceId,
     status?.webcamDeviceName,
+    status?.webcamActive,
+    status?.state,
   ])
 
   // Frame delivery monitor to detect frozen or severely lagging camera feeds
@@ -436,17 +486,27 @@ export function WebcamPreviewWindow() {
         <div className="relative h-full w-full overflow-hidden bg-black/40">
           {activePreviewUrl ? (
             <img
-              src={activePreviewUrl}
+              key={imageSrc}
+              src={imageSrc}
               alt="Live webcam feed"
               className={`h-full w-full object-cover transition-transform duration-200 ${
                 isMirrored ? "-scale-x-100" : ""
               } ${streamState === "active" ? "opacity-100" : "opacity-0"}`}
               onLoad={() => {
+                retryCountRef.current = 0
                 setStreamState("active")
                 setIsLagging(false)
               }}
               onError={() => {
-                setStreamState("disconnected")
+                // If connection fails (e.g. FFmpeg is still initializing), retry automatically up to 4 times with backoff
+                if (retryCountRef.current < 4) {
+                  retryCountRef.current += 1
+                  setTimeout(() => {
+                    setRetryNonce((n) => n + 1)
+                  }, 400)
+                } else {
+                  setStreamState("disconnected")
+                }
               }}
             />
           ) : (
@@ -508,7 +568,11 @@ export function WebcamPreviewWindow() {
                   variant="secondary"
                   size="sm"
                   className="h-6 text-[11px] px-2.5 cursor-pointer"
-                  onClick={() => setRetryNonce((n) => n + 1)}
+                  onClick={() => {
+                    retryCountRef.current = 0
+                    setStreamState("connecting")
+                    setRetryNonce((n) => n + 1)
+                  }}
                 >
                   <RefreshCw className="mr-1 size-3" />
                   Retry

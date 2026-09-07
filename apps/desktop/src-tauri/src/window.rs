@@ -132,21 +132,35 @@ impl WebcamPreviewWindow {
     pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
         let (device_id, device_name, preview_url) = {
             let state = app.state::<crate::state::AppState>();
-            let quick_guard = state.quick_config.lock().ok();
-            let from_quick = quick_guard
-                .as_ref()
-                .and_then(|g| g.as_ref())
-                .and_then(|c| c.webcam_device_id.clone().map(|id| (id.clone(), id, None)));
-            drop(quick_guard);
+            let recorder_status = state.recorder.status().ok();
 
-            from_quick
+            // 1. First priority: active recorder session
+            let from_status = recorder_status.as_ref().and_then(|s| {
+                if s.webcam_device_id.is_some() || s.webcam_preview_url.is_some() {
+                    let id = s.webcam_device_id.clone().unwrap_or_default();
+                    let name = s.webcam_device_name.clone().unwrap_or_else(|| id.clone());
+                    Some((id, name, s.webcam_preview_url.clone()))
+                } else {
+                    None
+                }
+            });
+
+            // 2. Second priority: quick_config
+            from_status
                 .or_else(|| {
-                    state.recorder.status().ok().and_then(|s| {
-                        s.webcam_device_id.map(|id| {
-                            let name = s.webcam_device_name.unwrap_or_else(|| id.clone());
-                            (id, name, s.webcam_preview_url)
-                        })
-                    })
+                    let quick_guard = state.quick_config.lock().ok();
+                    let from_quick = quick_guard
+                        .as_ref()
+                        .and_then(|g| g.as_ref())
+                        .and_then(|c| {
+                            c.webcam_device_id.clone().map(|id| {
+                                let preview_url = recorder_status
+                                    .as_ref()
+                                    .and_then(|s| s.webcam_preview_url.clone());
+                                (id.clone(), id, preview_url)
+                            })
+                        });
+                    from_quick
                 })
                 .unwrap_or_default()
         };
