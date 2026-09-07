@@ -54,37 +54,70 @@ export const cursorButtonEventV2Schema = z.enum([
 
 export type CursorButtonEventV2 = z.infer<typeof cursorButtonEventV2Schema>
 
+export const cursorSettingsFields = {
+  enabled: z.boolean(),
+  preset: cursorIconPresetSchema,
+  scale: z.number().min(0.2).max(5.0),
+  fillColor: z.string(),
+  fillOpacity: z.number().min(0).max(1),
+  strokeColor: z.string(),
+  strokeWidth: z.number().min(0).max(10),
+  strokeOpacity: z.number().min(0).max(1),
+  shadowEnabled: z.boolean(),
+  shadowColor: z.string(),
+  shadowBlur: z.number().min(0).max(30),
+  shadowOffsetX: z.number().min(-20).max(20),
+  shadowOffsetY: z.number().min(-20).max(20),
+  shadowOpacity: z.number().min(0).max(1),
+  clickFeedback: clickFeedbackSchema,
+  clickColor: z.string(),
+  clickSize: z.number().min(10).max(100),
+  clickDurationMs: z.number().min(100).max(2000),
+  leftClickEnabled: z.boolean(),
+  rightClickEnabled: z.boolean(),
+  clickPressAnimation: z.boolean(),
+  smoothMovement: z.boolean(),
+  smoothFactor: z.number().min(0.05).max(1.0),
+  autoHideIdle: z.boolean(),
+  idleTimeoutMs: z.number().min(500).max(10000),
+  spotlightMode: z.boolean(),
+  spotlightRadius: z.number().min(40).max(300),
+  spotlightDimOpacity: z.number().min(0).max(0.9),
+  hideNativeCursor: z.boolean(),
+  shapeMode: cursorShapeModeSchema,
+}
+
 export const cursorSettingsSchema = z.object({
-  enabled: z.boolean().default(true),
-  preset: cursorIconPresetSchema.default("recorded-system"),
-  scale: z.number().min(0.2).max(5.0).default(1.0),
-  fillColor: z.string().default("#3b82f6"),
-  fillOpacity: z.number().min(0).max(1).default(1.0),
-  strokeColor: z.string().default("#ffffff"),
-  strokeWidth: z.number().min(0).max(10).default(2.0),
-  strokeOpacity: z.number().min(0).max(1).default(1.0),
-  shadowEnabled: z.boolean().default(true),
-  shadowColor: z.string().default("#000000"),
-  shadowBlur: z.number().min(0).max(30).default(8.0),
-  shadowOffsetX: z.number().min(-20).max(20).default(2.0),
-  shadowOffsetY: z.number().min(-20).max(20).default(4.0),
-  shadowOpacity: z.number().min(0).max(1).default(0.4),
-  clickFeedback: clickFeedbackSchema.default("ripple"),
-  clickColor: z.string().default("#60a5fa"),
-  clickSize: z.number().min(10).max(100).default(36.0),
-  clickDurationMs: z.number().min(100).max(2000).default(350),
-  leftClickEnabled: z.boolean().default(true),
-  rightClickEnabled: z.boolean().default(true),
-  clickPressAnimation: z.boolean().default(true),
-  smoothMovement: z.boolean().default(true),
-  smoothFactor: z.number().min(0.05).max(1.0).default(0.25),
-  autoHideIdle: z.boolean().default(false),
-  idleTimeoutMs: z.number().min(500).max(10000).default(2000),
-  spotlightMode: z.boolean().default(false),
-  spotlightRadius: z.number().min(40).max(300).default(120),
-  spotlightDimOpacity: z.number().min(0).max(0.9).default(0.5),
-  hideNativeCursor: z.boolean().default(true),
-  shapeMode: cursorShapeModeSchema.default("optimized"),
+  enabled: cursorSettingsFields.enabled.default(true),
+  preset: cursorSettingsFields.preset.default("recorded-system"),
+  scale: cursorSettingsFields.scale.default(1.0),
+  fillColor: cursorSettingsFields.fillColor.default("#3b82f6"),
+  fillOpacity: cursorSettingsFields.fillOpacity.default(1.0),
+  strokeColor: cursorSettingsFields.strokeColor.default("#ffffff"),
+  strokeWidth: cursorSettingsFields.strokeWidth.default(2.0),
+  strokeOpacity: cursorSettingsFields.strokeOpacity.default(1.0),
+  shadowEnabled: cursorSettingsFields.shadowEnabled.default(true),
+  shadowColor: cursorSettingsFields.shadowColor.default("#000000"),
+  shadowBlur: cursorSettingsFields.shadowBlur.default(8.0),
+  shadowOffsetX: cursorSettingsFields.shadowOffsetX.default(2.0),
+  shadowOffsetY: cursorSettingsFields.shadowOffsetY.default(4.0),
+  shadowOpacity: cursorSettingsFields.shadowOpacity.default(0.4),
+  clickFeedback: cursorSettingsFields.clickFeedback.default("ripple"),
+  clickColor: cursorSettingsFields.clickColor.default("#60a5fa"),
+  clickSize: cursorSettingsFields.clickSize.default(36.0),
+  clickDurationMs: cursorSettingsFields.clickDurationMs.default(350),
+  leftClickEnabled: cursorSettingsFields.leftClickEnabled.default(true),
+  rightClickEnabled: cursorSettingsFields.rightClickEnabled.default(true),
+  clickPressAnimation: cursorSettingsFields.clickPressAnimation.default(true),
+  smoothMovement: cursorSettingsFields.smoothMovement.default(true),
+  smoothFactor: cursorSettingsFields.smoothFactor.default(0.25),
+  autoHideIdle: cursorSettingsFields.autoHideIdle.default(false),
+  idleTimeoutMs: cursorSettingsFields.idleTimeoutMs.default(2000),
+  spotlightMode: cursorSettingsFields.spotlightMode.default(false),
+  spotlightRadius: cursorSettingsFields.spotlightRadius.default(120),
+  spotlightDimOpacity: cursorSettingsFields.spotlightDimOpacity.default(0.5),
+  hideNativeCursor: cursorSettingsFields.hideNativeCursor.default(true),
+  shapeMode: cursorSettingsFields.shapeMode.default("optimized"),
 })
 
 export type CursorSettings = z.infer<typeof cursorSettingsSchema>
@@ -255,11 +288,14 @@ export type CursorTelemetryFile = z.infer<typeof cursorTelemetryFileSchema>
 
 // Partial settings are persisted on a cursor range. The renderer merges them
 // with the full-duration default, so adding a new setting remains migration-safe.
-export const cursorEffectSettingsSchema = cursorSettingsSchema.partial().extend({
-  presetId: cursorIconPresetSchema.optional(),
-  smoothing: cursorSmoothingSchema.optional(),
-  opacity: z.number().min(0).max(1).optional(),
-})
+export const cursorEffectSettingsSchema = z
+  .object(cursorSettingsFields)
+  .partial()
+  .extend({
+    presetId: cursorIconPresetSchema.optional(),
+    smoothing: cursorSmoothingSchema.optional(),
+    opacity: z.number().min(0).max(1).optional(),
+  })
 
 export type CursorEffectSettings = z.infer<typeof cursorEffectSettingsSchema>
 
