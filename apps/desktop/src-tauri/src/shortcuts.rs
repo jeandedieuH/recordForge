@@ -120,6 +120,7 @@ fn toggle_recording(app: &tauri::AppHandle) -> Result<()> {
             crate::window::FloatingWindow::hide(app);
             crate::window::BoundaryWindow::hide(app);
             crate::window::CountdownWindow::hide(app);
+            crate::window::WebcamPreviewWindow::hide(app);
             if let Err(error) = crate::window::MainWindow::restore(app) {
                 tracing::warn!(error = ?error, "shortcut action could not restore main window");
             }

@@ -19,7 +19,12 @@ import {
   X,
 } from "lucide-react"
 import { Button } from "@recordforge/ui"
-import { hideFloatingControls, showMainWindow } from "../../lib/recorder"
+import {
+  hideFloatingControls,
+  hideWebcamPreview,
+  openWebcamPreview,
+  showMainWindow,
+} from "../../lib/recorder"
 import { isTauri } from "../../lib/settings"
 import { MODIFIER_NAME } from "../../lib/platform"
 import { useRecorderStore, useRecorderPolling } from "../../hooks/use-recorder"
@@ -50,16 +55,32 @@ interface InputChipProps {
   icon: React.ReactNode
   label: string
   active: boolean
+  onClick?: () => void
+  title?: string
 }
 
 // Compact active-input indicator (mic / system audio / camera) so the user can
 // verify at a glance what is being captured without opening the main window.
-function InputChip({ icon, label, active }: InputChipProps) {
+function InputChip({ icon, label, active, onClick, title }: InputChipProps) {
   if (!active) return null
+  const tooltip = title ?? `Capturing ${label}`
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex size-5 cursor-pointer items-center justify-center rounded-md bg-overlay text-muted-foreground transition-colors hover:bg-overlay-hover hover:text-foreground"
+        title={tooltip}
+        aria-label={tooltip}
+      >
+        {icon}
+      </button>
+    )
+  }
   return (
     <span
       className="flex size-5 items-center justify-center rounded-md bg-overlay text-muted-foreground"
-      title={`Capturing ${label}`}
+      title={tooltip}
     >
       {icon}
     </span>
@@ -92,6 +113,17 @@ export function FloatingControls() {
   const [discardConfirming, setDiscardConfirming] = useState(false)
   // Secondary actions toggle inline inside the toolbar pill to avoid external popup clipping.
   const [moreActionsOpen, setMoreActionsOpen] = useState(false)
+  const [cameraPreviewOpen, setCameraPreviewOpen] = useState(true)
+
+  async function handleToggleCameraPreview() {
+    if (cameraPreviewOpen) {
+      await hideWebcamPreview()
+      setCameraPreviewOpen(false)
+    } else {
+      await openWebcamPreview()
+      setCameraPreviewOpen(true)
+    }
+  }
 
   useEffect(() => {
     void refreshStatus()
@@ -285,6 +317,12 @@ export function FloatingControls() {
                     active={!!status?.webcamActive}
                     label="camera"
                     icon={<Video className="size-3" aria-hidden />}
+                    onClick={() => void handleToggleCameraPreview()}
+                    title={
+                      cameraPreviewOpen
+                        ? "Camera preview is open (click to hide)"
+                        : "Click to show camera preview"
+                    }
                   />
                 </span>
               </div>
@@ -322,6 +360,18 @@ export function FloatingControls() {
             >
               <AppWindow className="size-4" />
             </Button>
+
+            {status?.webcamActive ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                title={cameraPreviewOpen ? "Hide camera preview" : "Show camera preview"}
+                aria-label={cameraPreviewOpen ? "Hide camera preview" : "Show camera preview"}
+                onClick={() => void handleToggleCameraPreview()}
+              >
+                <Video className="size-4" />
+              </Button>
+            ) : null}
 
             {isActive ? (
               <Button

@@ -127,6 +127,8 @@ pub fn run() {
             commands::recording::export_recording,
             commands::recording::open_floating_controls,
             commands::recording::hide_floating_controls,
+            commands::recording::open_webcam_preview,
+            commands::recording::hide_webcam_preview,
             commands::recording::open_boundary_overlay,
             commands::recording::hide_boundary_overlay,
             commands::recording::open_region_picker,

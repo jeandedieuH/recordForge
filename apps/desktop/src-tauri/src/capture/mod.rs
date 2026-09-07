@@ -15,6 +15,7 @@ pub mod media;
 pub mod metrics;
 pub mod outputs;
 pub mod permissions;
+pub mod preview_server;
 pub mod recovery;
 pub mod screencapturekit;
 pub mod session;

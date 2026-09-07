@@ -40,6 +40,7 @@ struct ActiveSession {
     screen_capture: Option<FfmpegCapture>,
     audio_captures: Vec<ActiveAudioCapture>,
     webcam_capture: Option<FfmpegCapture>,
+    webcam_preview_server: Option<super::preview_server::WebcamPreviewServer>,
     webcam_segments: Vec<media::WebcamSegmentInput>,
     webcam_segments_started: usize,
     webcam_capture_failed: bool,
@@ -63,6 +64,7 @@ struct SegmentCaptures {
     screen: FfmpegCapture,
     audio: Vec<ActiveAudioCapture>,
     webcam: Option<FfmpegCapture>,
+    webcam_preview_server: Option<super::preview_server::WebcamPreviewServer>,
     webcam_failed: bool,
     cursor_tracker: super::cursor_v2::CursorTrackerV2,
 }
@@ -364,6 +366,7 @@ impl Recorder {
             screen_capture: None,
             audio_captures: Vec::new(),
             webcam_capture: None,
+            webcam_preview_server: None,
             webcam_segments: Vec::new(),
             webcam_segments_started: 0,
             webcam_capture_failed: false,
@@ -435,6 +438,7 @@ impl Recorder {
             session.webcam_segments_started += 1;
         }
         session.webcam_capture = captures.webcam;
+        session.webcam_preview_server = captures.webcam_preview_server;
         session.webcam_capture_failed |= captures.webcam_failed;
         session.cursor_tracker = Some(captures.cursor_tracker);
         let bounds = session.config.source.bounds;
@@ -644,10 +648,14 @@ impl Recorder {
 
         let mut webcam = None;
         let mut webcam_failed = false;
+        let mut webcam_preview_server = None;
         if config.capture_webcam {
             if let Some(device) = config.webcam_device_id.as_ref() {
                 const MAX_WEBCAM_ATTEMPTS: usize = 15;
                 const WEBCAM_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+                let preview_server = super::preview_server::WebcamPreviewServer::start().ok();
+                let broadcaster = preview_server.as_ref().map(|s| s.broadcaster());
 
                 for attempt in 1..=MAX_WEBCAM_ATTEMPTS {
                     let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
@@ -658,9 +666,11 @@ impl Recorder {
                         &encoder,
                         &webcam_output.to_string_lossy(),
                         None,
+                        broadcaster.clone(),
                     ) {
                         Ok(capture) => {
                             webcam = Some(capture);
+                            webcam_preview_server = preview_server;
                             break;
                         }
                         Err(error) => {
@@ -698,6 +708,7 @@ impl Recorder {
             screen,
             audio,
             webcam,
+            webcam_preview_server,
             webcam_failed,
             cursor_tracker,
         })
@@ -848,8 +859,14 @@ impl Recorder {
         screen_started_at: std::time::Instant,
     ) {
         let Some(mut webcam) = webcam.or_else(|| session.webcam_capture.take()) else {
+            if let Some(mut server) = session.webcam_preview_server.take() {
+                server.stop();
+            }
             return;
         };
+        if let Some(mut server) = session.webcam_preview_server.take() {
+            server.stop();
+        }
         let path = webcam.output_path().to_path_buf();
         let index = session.segment_index;
         let stats = match webcam_quit {
@@ -1128,6 +1145,7 @@ impl Recorder {
             session.webcam_segments_started += 1;
         }
         session.webcam_capture = captures.webcam;
+        session.webcam_preview_server = captures.webcam_preview_server;
         session.webcam_capture_failed |= captures.webcam_failed;
         let bounds = session.config.source.bounds;
         session.cursor_segment_start_ms = session.total_recorded_ms.saturating_add(1);
@@ -1233,6 +1251,9 @@ impl Recorder {
                     microphone_active: false,
                     system_audio_active: false,
                     webcam_active: false,
+                    webcam_device_id: None,
+                    webcam_device_name: None,
+                    webcam_preview_url: None,
                     error: None,
                 },
             };
@@ -1710,6 +1731,9 @@ impl Recorder {
             microphone_active: false,
             system_audio_active: false,
             webcam_active: false,
+            webcam_device_id: None,
+            webcam_device_name: None,
+            webcam_preview_url: None,
             error: None,
         })
     }
@@ -1746,6 +1770,12 @@ impl Recorder {
             microphone_active: session.config.capture_microphone,
             system_audio_active: session.config.capture_system_audio,
             webcam_active: session.config.capture_webcam,
+            webcam_device_id: session.config.webcam_device_id.clone(),
+            webcam_device_name: session.config.webcam_device_id.clone(),
+            webcam_preview_url: session
+                .webcam_preview_server
+                .as_ref()
+                .map(|s| s.preview_url()),
             error: None,
         })
     }
@@ -1772,6 +1802,12 @@ pub struct RecordingStatus {
     pub system_audio_active: bool,
     #[serde(default)]
     pub webcam_active: bool,
+    #[serde(default)]
+    pub webcam_device_id: Option<String>,
+    #[serde(default)]
+    pub webcam_device_name: Option<String>,
+    #[serde(default)]
+    pub webcam_preview_url: Option<String>,
     pub error: Option<String>,
 }
 

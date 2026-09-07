@@ -161,3 +161,12 @@ export async function hideBoundaryOverlay(): Promise<void> {
 export async function hideFloatingControls(): Promise<void> {
   return invokeValidated<void>("hide_floating_controls")
 }
+
+export async function openWebcamPreview(): Promise<void> {
+  return invokeValidated<void>("open_webcam_preview")
+}
+
+export async function hideWebcamPreview(): Promise<void> {
+  return invokeValidated<void>("hide_webcam_preview")
+}
+

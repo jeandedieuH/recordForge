@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "webcam-preview",
+  "description": "Minimal permissions for recordForge floating webcam preview window",
+  "windows": ["webcam-preview"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-is-visible",
+    "core:window:allow-start-dragging"
+  ]
+}

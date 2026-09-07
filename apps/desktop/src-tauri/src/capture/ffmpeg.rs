@@ -66,7 +66,7 @@ impl FfmpegCapture {
             output,
             ddagrab_available,
         );
-        run(command, output, fragment_index, manifest)
+        run(command, output, fragment_index, manifest, None)
     }
 
     /// Check if the FFmpeg child process is still actively running.
@@ -79,7 +79,7 @@ impl FfmpegCapture {
     }
 
     /// Build and start a sidecar FFmpeg capture for a webcam device.
-    #[instrument(skip(device, profile, manifest))]
+    #[instrument(skip(device, profile, manifest, broadcaster))]
     pub fn start_webcam(
         ffmpeg_path: &str,
         device: &str,
@@ -87,9 +87,17 @@ impl FfmpegCapture {
         encoder: &str,
         output: &str,
         manifest: Option<Arc<Mutex<RecordingManifest>>>,
+        broadcaster: Option<super::preview_server::FrameBroadcaster>,
     ) -> crate::errors::Result<Self> {
-        let command = build_webcam_command(ffmpeg_path, device, profile, encoder, output);
-        run(command, output, 0, manifest)
+        let command = build_webcam_command(
+            ffmpeg_path,
+            device,
+            profile,
+            encoder,
+            output,
+            broadcaster.is_some(),
+        );
+        run(command, output, 0, manifest, broadcaster)
     }
 
     /// Elapsed milliseconds since this capture was started.
@@ -319,11 +327,16 @@ fn build_webcam_command(
     profile: &RecordingProfile,
     encoder: &str,
     output: &str,
+    enable_preview: bool,
 ) -> Command {
     let mut command = crate::process::create_command(ffmpeg_path);
     command
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(if enable_preview {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::piped())
         .arg("-y");
 
@@ -390,10 +403,15 @@ fn build_webcam_command(
         _ => (1280, 720),
     };
 
-    let filter = format!(
-        "[0:v]scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2[vout]",
-        max_cam_w, max_cam_h
-    );
+    let filter = if enable_preview {
+        format!(
+            "[0:v]scale={max_cam_w}:{max_cam_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,split=2[vout][vprev];[vprev]fps=15,scale=320:-2[vprev_out]"
+        )
+    } else {
+        format!(
+            "[0:v]scale={max_cam_w}:{max_cam_h}:force_original_aspect_ratio=decrease:force_divisible_by=2[vout]"
+        )
+    };
     command
         .args(["-filter_complex", &filter])
         .args(["-map", "[vout]"]);
@@ -408,6 +426,20 @@ fn build_webcam_command(
         "2000000",
         output,
     ]);
+
+    if enable_preview {
+        command.args([
+            "-map",
+            "[vprev_out]",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "-f",
+            "image2pipe",
+            "-",
+        ]);
+    }
 
     info!(?command, "built webcam ffmpeg command");
     command
@@ -672,6 +704,7 @@ fn run(
     output: &str,
     fragment_index: u32,
     manifest: Option<Arc<Mutex<RecordingManifest>>>,
+    broadcaster: Option<super::preview_server::FrameBroadcaster>,
 ) -> crate::errors::Result<FfmpegCapture> {
     info!(?command, "starting ffmpeg capture");
 
@@ -704,6 +737,29 @@ fn run(
             );
         }
     };
+
+    // If a preview broadcaster was provided, consume MJPEG frames from child.stdout
+    if let Some(broadcaster) = broadcaster {
+        if let Some(mut stdout) = child.stdout.take() {
+            let _ = thread::Builder::new()
+                .name("ffmpeg-mjpeg-reader".into())
+                .spawn(move || {
+                    use std::io::Read;
+                    let mut chunk = [0u8; 8192];
+                    let mut buffer = Vec::with_capacity(65536);
+                    while let Ok(bytes_read) = stdout.read(&mut chunk) {
+                        if bytes_read == 0 {
+                            break;
+                        }
+                        buffer.extend_from_slice(&chunk[..bytes_read]);
+                        let frames = super::preview_server::extract_jpeg_frames(&mut buffer);
+                        for frame in frames {
+                            broadcaster.broadcast(&frame);
+                        }
+                    }
+                });
+        }
+    }
 
     // Spawn a reader thread to tail the FFmpeg log and extract live stats.
     // It also surfaces FFmpeg's stderr so capture failures (missing filters,
@@ -1045,8 +1101,14 @@ mod tests {
     #[cfg(windows)]
     fn webcam_capture_uses_wall_clock_device_timestamps() {
         let profile = webcam_profile();
-        let command =
-            build_webcam_command("ffmpeg", "USB Camera", &profile, "libx264", "webcam.mp4");
+        let command = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            false,
+        );
         let debug = format!("{command:?}");
 
         assert!(debug.contains("-use_video_device_timestamps"));
@@ -1067,10 +1129,34 @@ mod tests {
             audio_codec: "aac".into(),
             audio_bitrate_kbps: 128,
         };
-        let command =
-            build_webcam_command("ffmpeg", "USB Camera", &profile, "libx264", "webcam.mp4");
+        let command = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            false,
+        );
         let debug = format!("{command:?}");
 
         assert!(debug.contains("854:480"));
+    }
+
+    #[test]
+    fn webcam_capture_enables_preview_stream() {
+        let profile = webcam_profile();
+        let command = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            true,
+        );
+        let debug = format!("{command:?}");
+
+        assert!(debug.contains("split=2"));
+        assert!(debug.contains("image2pipe"));
+        assert!(debug.contains("mjpeg"));
     }
 }

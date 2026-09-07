@@ -7,6 +7,11 @@ const FLOATING_WINDOW_WIDTH: f64 = 620.0;
 const FLOATING_WINDOW_HEIGHT: f64 = 88.0;
 const FLOATING_WINDOW_BOTTOM_MARGIN: f64 = 28.0;
 
+const WEBCAM_PREVIEW_WINDOW_WIDTH: f64 = 220.0;
+const WEBCAM_PREVIEW_WINDOW_HEIGHT: f64 = 220.0;
+const WEBCAM_PREVIEW_WINDOW_TOP_MARGIN: f64 = 28.0;
+const WEBCAM_PREVIEW_WINDOW_RIGHT_MARGIN: f64 = 28.0;
+
 /// Main application window lifecycle helpers used by the recorder.
 pub struct MainWindow;
 
@@ -115,6 +120,134 @@ impl FloatingWindow {
         if let Some(window) = app.get_webview_window("floating") {
             tracing::info!("hiding floating controls window");
             let _ = window.hide();
+        }
+    }
+}
+
+/// Floating webcam preview window management module.
+pub struct WebcamPreviewWindow;
+
+impl WebcamPreviewWindow {
+    /// Open or focus the floating webcam preview window.
+    pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
+        let (device_id, device_name, preview_url) = {
+            let state = app.state::<crate::state::AppState>();
+            let quick_guard = state.quick_config.lock().ok();
+            let from_quick = quick_guard
+                .as_ref()
+                .and_then(|g| g.as_ref())
+                .and_then(|c| c.webcam_device_id.clone().map(|id| (id.clone(), id, None)));
+            drop(quick_guard);
+
+            from_quick
+                .or_else(|| {
+                    state.recorder.status().ok().and_then(|s| {
+                        s.webcam_device_id.map(|id| {
+                            let name = s.webcam_device_name.unwrap_or_else(|| id.clone());
+                            (id, name, s.webcam_preview_url)
+                        })
+                    })
+                })
+                .unwrap_or_default()
+        };
+
+        if let Some(window) = app.get_webview_window("webcam-preview") {
+            tracing::info!(
+                device_id,
+                device_name,
+                ?preview_url,
+                "webcam preview window already exists, updating device and showing"
+            );
+            let _ = window.eval(format!(
+                "window.__RECORD_FORGE_WEBCAM_PARAMS = {{ deviceId: {:?}, deviceName: {:?}, previewUrl: {:?} }}; window.dispatchEvent(new CustomEvent('recordforge-webcam-device-changed', {{ detail: {{ deviceId: {:?}, deviceName: {:?}, previewUrl: {:?} }} }}));",
+                device_id, device_name, preview_url, device_id, device_name, preview_url
+            ));
+            if let Err(error) = window.set_content_protected(true) {
+                tracing::warn!(error = ?error, "protect webcam preview window from capture failed");
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+            return Ok(());
+        }
+
+        tracing::info!(
+            device_id,
+            device_name,
+            ?preview_url,
+            "creating new webcam preview window"
+        );
+
+        let script = format!(
+            "window.__RECORD_FORGE_WINDOW_KIND = 'webcam-preview'; window.__RECORD_FORGE_WEBCAM_PARAMS = {{ deviceId: {:?}, deviceName: {:?}, previewUrl: {:?} }};",
+            device_id, device_name, preview_url
+        );
+
+        let mut builder = tauri::WebviewWindowBuilder::new(
+            app,
+            "webcam-preview",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .initialization_script(&script)
+        .title("RecordForge Camera Preview")
+        .inner_size(WEBCAM_PREVIEW_WINDOW_WIDTH, WEBCAM_PREVIEW_WINDOW_HEIGHT)
+        .decorations(false)
+        .always_on_top(true)
+        .transparent(true)
+        .content_protected(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false);
+
+        // Position at top-right of the primary monitor by default so it stays
+        // out of the way of the bottom floating controls.
+        if let Ok(Some(monitor)) = app.primary_monitor() {
+            let size = monitor.size();
+            let position = monitor.position();
+            let scale = monitor.scale_factor();
+            let screen_w = size.width as f64 / scale;
+            let monitor_x = position.x as f64 / scale;
+            let monitor_y = position.y as f64 / scale;
+            let x = monitor_x + screen_w
+                - WEBCAM_PREVIEW_WINDOW_WIDTH
+                - WEBCAM_PREVIEW_WINDOW_RIGHT_MARGIN;
+            let y = monitor_y + WEBCAM_PREVIEW_WINDOW_TOP_MARGIN;
+            tracing::info!(
+                screen_w,
+                x,
+                y,
+                scale,
+                "webcam preview window position calculated"
+            );
+            builder = builder.position(x, y);
+        } else {
+            tracing::warn!("no primary monitor detected for webcam preview positioning");
+        }
+
+        match builder.build() {
+            Ok(_window) => {
+                tracing::info!("webcam preview window created successfully");
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(error = ?error, "failed to create webcam preview window");
+                Err(InternalError::Unknown(format!(
+                    "failed to create webcam preview window: {error:?}"
+                ))
+                .into())
+            }
+        }
+    }
+
+    /// Hide or destroy the floating webcam preview window.
+    pub fn hide(app: &tauri::AppHandle) {
+        Self::close(app);
+    }
+
+    /// Close and destroy the floating webcam preview window.
+    pub fn close(app: &tauri::AppHandle) {
+        if let Some(window) = app.get_webview_window("webcam-preview") {
+            tracing::info!("closing webcam preview window");
+            let _ = window.close();
         }
     }
 }

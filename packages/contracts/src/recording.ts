@@ -145,6 +145,9 @@ export const recordingStatusSchema = z.object({
   microphoneActive: z.boolean().default(false),
   systemAudioActive: z.boolean().default(false),
   webcamActive: z.boolean().default(false),
+  webcamDeviceId: z.string().nullish(),
+  webcamDeviceName: z.string().nullish(),
+  webcamPreviewUrl: z.string().nullish(),
   error: z.string().nullish(),
 })
 

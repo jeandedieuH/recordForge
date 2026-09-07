@@ -295,6 +295,7 @@ fn cleanup_recording_windows(app: &tauri::AppHandle) {
     FloatingWindow::hide(app);
     BoundaryWindow::hide(app);
     CountdownWindow::hide(app);
+    crate::window::WebcamPreviewWindow::hide(app);
 }
 
 fn start_prepared_session(
@@ -318,9 +319,23 @@ fn open_recording_windows(
 ) -> Result<()> {
     FloatingWindow::open_or_focus(app)?;
     if let Err(error) = BoundaryWindow::open_or_focus(app, bounds) {
-        FloatingWindow::hide(app);
-        BoundaryWindow::hide(app);
+        cleanup_recording_windows(app);
         return Err(error);
+    }
+
+    let state = app.state::<AppState>();
+    let capture_webcam = state
+        .quick_config
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|c| c.capture_webcam))
+        .or_else(|| state.recorder.status().ok().map(|s| s.webcam_active))
+        .unwrap_or(false);
+
+    if capture_webcam {
+        if let Err(error) = crate::window::WebcamPreviewWindow::open_or_focus(app) {
+            tracing::warn!(error = ?error, "failed to open webcam preview window; recording continues");
+        }
     }
     Ok(())
 }
@@ -419,6 +434,7 @@ pub async fn stop_recording(
         FloatingWindow::hide(&app);
         BoundaryWindow::hide(&app);
         CountdownWindow::hide(&app);
+        crate::window::WebcamPreviewWindow::hide(&app);
         if let Err(error) = MainWindow::restore(&app) {
             tracing::error!(error = ?error, "failed to restore main window after cancel");
         }
@@ -426,9 +442,10 @@ pub async fn stop_recording(
         return cancel_result.map(|_| RecordingStats::default());
     }
 
-    // Hide boundary and countdown windows immediately as capture is concluding
+    // Hide boundary, countdown, and webcam preview windows immediately as capture is concluding
     BoundaryWindow::hide(&app);
     CountdownWindow::hide(&app);
+    crate::window::WebcamPreviewWindow::hide(&app);
 
     let app_handle = app.clone();
     let recorder = state.recorder.clone();
@@ -512,6 +529,7 @@ pub(crate) fn insert_marker_broadcast(
 pub async fn discard_recording(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
     BoundaryWindow::hide(&app);
     CountdownWindow::hide(&app);
+    crate::window::WebcamPreviewWindow::close(&app);
 
     let recorder = state.recorder.clone();
     let result = tauri::async_runtime::spawn_blocking(move || recorder.discard())
@@ -961,6 +979,21 @@ pub fn show_main_window(app: tauri::AppHandle) -> Result<()> {
 #[instrument]
 pub fn hide_floating_controls(app: tauri::AppHandle) -> Result<()> {
     crate::window::FloatingWindow::hide(&app);
+    Ok(())
+}
+
+/// Open the floating webcam preview window.
+#[tauri::command]
+#[instrument]
+pub async fn open_webcam_preview(app: tauri::AppHandle) -> Result<()> {
+    crate::window::WebcamPreviewWindow::open_or_focus(&app)
+}
+
+/// Hide the floating webcam preview window.
+#[tauri::command]
+#[instrument]
+pub fn hide_webcam_preview(app: tauri::AppHandle) -> Result<()> {
+    crate::window::WebcamPreviewWindow::hide(&app);
     Ok(())
 }
 

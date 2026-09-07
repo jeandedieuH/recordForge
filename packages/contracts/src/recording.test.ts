@@ -648,5 +648,24 @@ describe("recording contracts", () => {
         }),
       ).toBe("balanced")
     })
+
+    it("validates recording status payload with webcam metadata", () => {
+      const status = {
+        sessionId: "session-123",
+        state: "recording" as const,
+        startedAt: "2026-09-07T00:00:00.000Z",
+        durationMs: 12000,
+        recordedMs: 12000,
+        sourceKind: "display",
+        sourceName: "Display 1",
+        webcamActive: true,
+        webcamDeviceId: "Integrated Webcam",
+        webcamDeviceName: "Integrated Webcam",
+      }
+      const parsed = recordingStatusSchema.parse(status)
+      expect(parsed.webcamActive).toBe(true)
+      expect(parsed.webcamDeviceId).toBe("Integrated Webcam")
+      expect(parsed.webcamDeviceName).toBe("Integrated Webcam")
+    })
   })
 })
