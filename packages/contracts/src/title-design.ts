@@ -19,12 +19,24 @@ export const titleTemplateSchema = z.enum([
 
 export type TitleTemplate = z.infer<typeof titleTemplateSchema>
 
+// Per-element absolute sizes (in clip units). A set field replaces the template's
+// `fontSize * ratio` default for that element, so each line sizes independently.
+const titleFontSizeSchema = z.number().min(4).max(600)
+
 export const titleDesignSchema = z.object({
   version: z.literal(1),
   template: titleTemplateSchema,
   appearance: z.enum(["dark", "light", "transparent"]).default("dark"),
   motion: z.enum(["designed", "subtle", "none"]).default("designed"),
   tempo: z.number().min(0.5).max(2).default(1),
+  fontSizes: z
+    .object({
+      primary: titleFontSizeSchema.optional(),
+      secondary: titleFontSizeSchema.optional(),
+      tag: titleFontSizeSchema.optional(),
+      metric: titleFontSizeSchema.optional(),
+    })
+    .default({}),
   emphasisText: z.string().max(500).default(""),
   noteTone: z.enum(["note", "tip", "warning"]).default("tip"),
   letterSpacing: z.number().min(-0.05).max(0.2).default(0),

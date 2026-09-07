@@ -2,11 +2,19 @@ import type { ReactNode } from "react"
 import type {
   TextAlignment,
   TextBackdropStyle,
+  TextClip,
   TextFontFamily,
   TextFontWeight,
+  TitleDesign,
 } from "@recordforge/contracts"
-import { applyTitleAppearance } from "@recordforge/editor-core"
-import { ColorPicker, Label, Switch, ToggleGroup, ToggleGroupItem } from "@recordforge/ui"
+import {
+  applyTitleAppearance,
+  getTitleContentLabels,
+  hasTitleFontSizeOverrides,
+  resolveTitleFontSizes,
+  type TitleFontSizeKey,
+} from "@recordforge/editor-core"
+import { Button, ColorPicker, Label, Switch, ToggleGroup, ToggleGroupItem } from "@recordforge/ui"
 import { AlignCenter, AlignLeft, AlignRight } from "lucide-react"
 import { InspectorSection, NumberField } from "../fields"
 import { TitleSelect, TitleSlider, type TitleSectionProps } from "./title-inspector-fields"
@@ -93,14 +101,16 @@ export function TitleDesignSection({
           ]}
           onChange={(fontWeight) => onChange({ fontWeight })}
         />
-        <NumberField
-          label="Type size"
-          value={clip.fontSize}
-          min={8}
-          max={200}
-          unit="px"
-          onChange={(fontSize) => onChange({ fontSize })}
-        />
+        {!design && (
+          <NumberField
+            label="Type size"
+            value={clip.fontSize}
+            min={8}
+            max={200}
+            unit="px"
+            onChange={(fontSize) => onChange({ fontSize })}
+          />
+        )}
         <div className="flex flex-col gap-1">
           <span className="text-xs text-muted-foreground">Text alignment</span>
           <ToggleGroup
@@ -121,6 +131,7 @@ export function TitleDesignSection({
           </ToggleGroup>
         </div>
       </div>
+      {design && <TitleElementSizes clip={clip} design={design} onChange={onChange} />}
       {!design && (
         <TitleSelect<TextBackdropStyle>
           label="Legacy surface"
@@ -138,6 +149,66 @@ export function TitleDesignSection({
         />
       )}
     </InspectorSection>
+  )
+}
+
+// Designed titles size each text element independently: unset fields follow the
+// template's `fontSize * ratio` proportion, edited fields store absolute overrides
+// on `titleDesign.fontSizes` which the overlay engine resolves per role.
+function TitleElementSizes({
+  clip,
+  design,
+  onChange,
+}: {
+  clip: TextClip
+  design: TitleDesign
+  onChange: TitleSectionProps["onChange"]
+}) {
+  const labels = getTitleContentLabels(design.template)
+  const sizes = resolveTitleFontSizes(design, clip.fontSize)
+  const fields: readonly (readonly [TitleFontSizeKey, string])[] = [
+    ["primary", labels.primary],
+    ["secondary", labels.secondary],
+    ["tag", labels.tag],
+    ...(design.template === "metric" ? ([["metric", "Metric value"]] as const) : []),
+  ]
+  function setSize(key: TitleFontSizeKey, value: number) {
+    onChange({
+      titleDesign: { ...design, fontSizes: { ...design.fontSizes, [key]: value } },
+    })
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium">Text sizes</span>
+        {hasTitleFontSizeOverrides(design) && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            onClick={() => onChange({ titleDesign: { ...design, fontSizes: {} } })}
+          >
+            Reset to preset
+          </Button>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {fields.map(([key, label]) => (
+          <NumberField
+            key={key}
+            label={`${label} size`}
+            value={Math.round(sizes[key])}
+            min={4}
+            max={400}
+            unit="px"
+            onChange={(value) => setSize(key, value)}
+          />
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Each element keeps its own size and still shrinks to fit its slot.
+      </p>
+    </div>
   )
 }
 

@@ -22,9 +22,59 @@ impl BoxRect {
         }
     }
 }
+/// Absolute element sizes resolved from `TitleDesign::font_sizes` overrides, or
+/// `font_size * ratio` when unset. Also used as the per-template ratio table —
+/// mirrored by `TITLE_FONT_SIZE_RATIOS` in `title-preset-helpers.ts` so the
+/// inspector can display effective defaults before an override is set.
+#[derive(Clone, Copy)]
+struct RoleSizes {
+    primary: f64,
+    secondary: f64,
+    tag: f64,
+    metric: f64,
+}
+
+fn size_ratios(template: TitleTemplate) -> RoleSizes {
+    // `metric` only applies to the Metric template; other rows keep a harmless 1.0.
+    let (primary, secondary, tag, metric) = match template {
+        TitleTemplate::CleanText => (1.0, 0.34, 0.27, 1.0),
+        TitleTemplate::Emphasis => (1.05, 0.32, 0.24, 1.0),
+        TitleTemplate::EditorialOpener => (1.15, 0.30, 0.23, 1.0),
+        TitleTemplate::KineticHook => (1.25, 0.30, 0.24, 1.0),
+        TitleTemplate::ChapterMarker => (1.0, 0.33, 1.8, 1.0),
+        TitleTemplate::SpeakerId => (1.0, 0.36, 0.24, 1.0),
+        TitleTemplate::SourceCredit => (0.70, 0.28, 0.23, 1.0),
+        TitleTemplate::StepGuide => (0.90, 0.33, 0.70, 1.0),
+        TitleTemplate::Shortcut => (0.57, 0.33, 0.24, 1.0),
+        TitleTemplate::CommandLine => (0.62, 0.25, 0.22, 1.0),
+        TitleTemplate::Note => (0.85, 0.31, 0.25, 1.0),
+        TitleTemplate::PullQuote => (1.0, 0.27, 0.23, 1.0),
+        TitleTemplate::Metric => (0.34, 0.24, 0.23, 1.7),
+        TitleTemplate::CallToAction => (1.0, 0.33, 0.24, 1.0),
+    };
+    RoleSizes {
+        primary,
+        secondary,
+        tag,
+        metric,
+    }
+}
+
+fn resolve_sizes(design: &TitleDesign, base: f64) -> RoleSizes {
+    let r = size_ratios(design.template);
+    let o = &design.font_sizes;
+    RoleSizes {
+        primary: o.primary.unwrap_or(base * r.primary),
+        secondary: o.secondary.unwrap_or(base * r.secondary),
+        tag: o.tag.unwrap_or(base * r.tag),
+        metric: o.metric.unwrap_or(base * r.metric),
+    }
+}
+
 struct Builder<'a> {
     layout: TitleLayout,
     details: &'a TextDetails,
+    sizes: RoleSizes,
     foreground: String,
     secondary: String,
     surface: String,
@@ -75,6 +125,7 @@ pub(super) fn compile(
             design: design.clone(),
         },
         details: d,
+        sizes: resolve_sizes(design, d.font_size),
         foreground: fg.into(),
         secondary: secondary.into(),
         surface: surface.into(),
@@ -92,7 +143,7 @@ pub(super) fn compile(
     let rule = (unit * 0.012).max(1.0);
     let tag = d.tag_text.as_deref().filter(|t| !t.trim().is_empty());
     let subtitle = d.secondary_text.as_deref().unwrap_or("");
-    let size = d.font_size;
+    let sizes = b.sizes;
     let family = d.font_family.as_str();
     let accent = b.accent.clone();
     let fg = b.foreground.clone();
@@ -112,7 +163,7 @@ pub(super) fn compile(
                         h: inner.h * 0.15,
                         ..inner
                     },
-                    size * 0.27,
+                    sizes.tag,
                     "sans",
                     Role::Tag,
                     &accent,
@@ -126,7 +177,7 @@ pub(super) fn compile(
                     h: inner.h * 0.52,
                     ..inner
                 },
-                size,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -139,7 +190,7 @@ pub(super) fn compile(
                     h: inner.h * 0.20,
                     ..inner
                 },
-                size * 0.34,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -153,7 +204,7 @@ pub(super) fn compile(
                     h: inner.h * 0.13,
                     ..inner
                 },
-                size * 0.24,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &secondary,
@@ -166,7 +217,7 @@ pub(super) fn compile(
                     h: inner.h * 0.56,
                     ..inner
                 },
-                size * 1.05,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -179,7 +230,7 @@ pub(super) fn compile(
                     h: inner.h * 0.16,
                     ..inner
                 },
-                size * 0.32,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -202,7 +253,7 @@ pub(super) fn compile(
                     h: inner.h * 0.12,
                     ..inner
                 },
-                size * 0.23,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &accent,
@@ -215,7 +266,7 @@ pub(super) fn compile(
                     h: inner.h * 0.52,
                     ..inner
                 },
-                size * 1.15,
+                sizes.primary,
                 if family == "sans" { "serif" } else { family },
                 Role::Primary,
                 &fg,
@@ -241,7 +292,7 @@ pub(super) fn compile(
                     w: inner.w * 0.82,
                     h: inner.h * 0.18,
                 },
-                size * 0.30,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -268,7 +319,7 @@ pub(super) fn compile(
                     h: inner.h * 0.13,
                     ..inner
                 },
-                size * 0.24,
+                sizes.tag,
                 "mono",
                 Role::Tag,
                 &accent,
@@ -282,7 +333,7 @@ pub(super) fn compile(
                     w: inner.w * 0.93,
                     ..inner
                 },
-                size * 1.25,
+                sizes.primary,
                 if family == "sans" { "heading" } else { family },
                 Role::Primary,
                 &fg,
@@ -308,7 +359,7 @@ pub(super) fn compile(
                     w: inner.w * 0.72,
                     h: inner.h * 0.17,
                 },
-                size * 0.30,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -324,7 +375,7 @@ pub(super) fn compile(
                     h: inner.h * 0.62,
                     ..inner
                 },
-                size * 1.8,
+                sizes.tag,
                 "heading",
                 Role::Tag,
                 &accent,
@@ -350,7 +401,7 @@ pub(super) fn compile(
                     w: inner.w * 0.64,
                     h: inner.h * 0.49,
                 },
-                size,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -364,7 +415,7 @@ pub(super) fn compile(
                     w: inner.w * 0.64,
                     h: inner.h * 0.19,
                 },
-                size * 0.33,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -404,7 +455,7 @@ pub(super) fn compile(
                     w: inner.w - inner.h * 0.16,
                     h: inner.h * 0.15,
                 },
-                size * 0.24,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &secondary,
@@ -417,7 +468,7 @@ pub(super) fn compile(
                     h: inner.h * 0.35,
                     ..inner
                 },
-                size,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -430,7 +481,7 @@ pub(super) fn compile(
                     h: inner.h * 0.20,
                     ..inner
                 },
-                size * 0.36,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &accent,
@@ -444,7 +495,7 @@ pub(super) fn compile(
                     h: inner.h * 0.16,
                     ..inner
                 },
-                size * 0.23,
+                sizes.tag,
                 "mono",
                 Role::Tag,
                 &accent,
@@ -468,7 +519,7 @@ pub(super) fn compile(
                     h: inner.h * 0.32,
                     ..inner
                 },
-                size * 0.70,
+                sizes.primary,
                 "serif",
                 Role::Primary,
                 &fg,
@@ -481,7 +532,7 @@ pub(super) fn compile(
                     h: inner.h * 0.17,
                     ..inner
                 },
-                size * 0.28,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -510,7 +561,7 @@ pub(super) fn compile(
                     w: badge * 0.68,
                     h: badge * 0.75,
                 },
-                size * 0.70,
+                sizes.tag,
                 "mono",
                 Role::Tag,
                 &accent,
@@ -537,7 +588,7 @@ pub(super) fn compile(
                     w: w - px - x,
                     h: inner.h * 0.48,
                 },
-                size * 0.90,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -551,7 +602,7 @@ pub(super) fn compile(
                     w: w - px - x,
                     h: inner.h * 0.24,
                 },
-                size * 0.33,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -565,7 +616,7 @@ pub(super) fn compile(
                     h: inner.h * 0.14,
                     ..inner
                 },
-                size * 0.24,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &accent,
@@ -586,7 +637,7 @@ pub(super) fn compile(
                     h: inner.h * 0.18,
                     ..inner
                 },
-                size * 0.33,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -616,7 +667,7 @@ pub(super) fn compile(
                     w: (inner.w - rule * 14.0).max(1.0),
                     h: inner.h * 0.13,
                 },
-                size * 0.22,
+                sizes.tag,
                 "mono",
                 Role::Tag,
                 &secondary,
@@ -641,7 +692,8 @@ pub(super) fn compile(
                     h: inner.h * 0.41,
                     ..inner
                 },
-                size * 0.60,
+                // The ">" prompt tracks the command size.
+                sizes.primary,
                 "mono",
                 Role::Decoration,
                 &accent,
@@ -655,7 +707,7 @@ pub(super) fn compile(
                     w: inner.w * 0.92,
                     h: inner.h * 0.41,
                 },
-                size * 0.62,
+                sizes.primary,
                 "mono",
                 Role::Primary,
                 &fg,
@@ -668,7 +720,7 @@ pub(super) fn compile(
                     h: inner.h * 0.13,
                     ..inner
                 },
-                size * 0.25,
+                sizes.secondary,
                 "mono",
                 Role::Secondary,
                 &secondary,
@@ -728,7 +780,7 @@ pub(super) fn compile(
                     w: icon.w * 0.40,
                     h: icon.h * 0.7,
                 },
-                size * 0.25,
+                sizes.tag,
                 "mono",
                 Role::Tag,
                 &accent,
@@ -742,7 +794,7 @@ pub(super) fn compile(
                     w: inner.w - icon.w * 1.4,
                     h: inner.h * 0.16,
                 },
-                size * 0.25,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &accent,
@@ -772,7 +824,7 @@ pub(super) fn compile(
                     w: inner.w * 0.945,
                     h: inner.h * 0.40,
                 },
-                size * 0.85,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -786,7 +838,7 @@ pub(super) fn compile(
                     w: inner.w * 0.945,
                     h: inner.h * 0.18,
                 },
-                size * 0.31,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -802,7 +854,7 @@ pub(super) fn compile(
                     w: inner.w * 0.12,
                     h: inner.h * 0.45,
                 },
-                size * 1.9,
+                sizes.primary * 1.9,
                 "serif",
                 Role::Decoration,
                 &accent,
@@ -816,7 +868,7 @@ pub(super) fn compile(
                     w: inner.w * 0.85,
                     h: inner.h * 0.61,
                 },
-                size,
+                sizes.primary,
                 if family == "sans" { "serif" } else { family },
                 Role::Primary,
                 &fg,
@@ -842,7 +894,7 @@ pub(super) fn compile(
                     w: inner.w * 0.71,
                     h: inner.h * 0.12,
                 },
-                size * 0.23,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &accent,
@@ -856,7 +908,7 @@ pub(super) fn compile(
                     w: inner.w * 0.71,
                     h: inner.h * 0.12,
                 },
-                size * 0.27,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -870,7 +922,7 @@ pub(super) fn compile(
                     h: inner.h * 0.12,
                     ..inner
                 },
-                size * 0.23,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &accent,
@@ -899,7 +951,7 @@ pub(super) fn compile(
                     h: inner.h * 0.12,
                     ..inner
                 },
-                size * 0.34,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -912,7 +964,7 @@ pub(super) fn compile(
                     h: inner.h * 0.08,
                     ..inner
                 },
-                size * 0.24,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -927,7 +979,7 @@ pub(super) fn compile(
                     h: inner.h * 0.14,
                     ..inner
                 },
-                size * 0.24,
+                sizes.tag,
                 "sans",
                 Role::Tag,
                 &accent,
@@ -941,7 +993,7 @@ pub(super) fn compile(
                     h: inner.h * 0.43,
                     ..inner
                 },
-                size,
+                sizes.primary,
                 family,
                 Role::Primary,
                 &fg,
@@ -989,7 +1041,7 @@ pub(super) fn compile(
                     h: inner.h * 0.17,
                     ..inner
                 },
-                size * 0.33,
+                sizes.secondary,
                 "sans",
                 Role::Secondary,
                 &secondary,
@@ -1238,7 +1290,7 @@ impl Builder<'_> {
             return;
         }
         let face = glyphs::face("mono", &self.details.font_weight);
-        let size = self.details.font_size * 0.57;
+        let size = self.sizes.primary;
         let gap = size * 0.8;
         let widths: Vec<f64> = keys
             .iter()
@@ -1323,7 +1375,9 @@ impl Builder<'_> {
         let prefix_w = glyphs::measure(&face, &prefix, 1.0, 0.0);
         let suffix_w = glyphs::measure(&face, &suffix, 1.0, 0.0);
         let units = cells as f64 * advance + prefix_w + suffix_w;
-        let size = (self.details.font_size * 1.7)
+        let size = self
+            .sizes
+            .metric
             .min(rect.h / 1.2)
             .min(rect.w / units.max(1.0));
         let x = rect.x

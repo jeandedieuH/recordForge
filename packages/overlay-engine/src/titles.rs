@@ -71,6 +71,16 @@ impl Default for TitleMetric {
         }
     }
 }
+/// Optional per-element size overrides (clip units). A set field replaces the
+/// template's `font_size * ratio` default so each line sizes independently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TitleFontSizes {
+    pub primary: Option<f64>,
+    pub secondary: Option<f64>,
+    pub tag: Option<f64>,
+    pub metric: Option<f64>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TitleDesign {
@@ -79,6 +89,7 @@ pub struct TitleDesign {
     pub appearance: TitleAppearance,
     pub motion: TitleMotion,
     pub tempo: f64,
+    pub font_sizes: TitleFontSizes,
     pub emphasis_text: String,
     pub note_tone: NoteTone,
     pub letter_spacing: f64,
@@ -93,6 +104,7 @@ impl Default for TitleDesign {
             appearance: TitleAppearance::default(),
             motion: TitleMotion::default(),
             tempo: 1.0,
+            font_sizes: TitleFontSizes::default(),
             emphasis_text: String::new(),
             note_tone: NoteTone::default(),
             letter_spacing: 0.0,
@@ -110,8 +122,17 @@ impl TitleDesign {
             (self.metric.from, -1e9, 1e9),
             (self.metric.to, -1e9, 1e9),
         ];
+        let sizes_valid = [
+            self.font_sizes.primary,
+            self.font_sizes.secondary,
+            self.font_sizes.tag,
+            self.font_sizes.metric,
+        ]
+        .into_iter()
+        .all(|v| v.is_none_or(|s| s.is_finite() && (4.0..=600.0).contains(&s)));
         if self.version != 1
             || self.metric.decimals > 3
+            || !sizes_valid
             || ranges
                 .iter()
                 .any(|(v, low, high)| !v.is_finite() || v < low || v > high)

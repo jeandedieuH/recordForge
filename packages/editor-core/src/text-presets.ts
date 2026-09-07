@@ -172,6 +172,22 @@ export function createTextClipFromPreset(
   return createTextClipFromDefinition(getTextPresetById(presetId), options)
 }
 
+// Element size overrides are absolute clip units, so they scale with the clip's
+// authored font size when a preset is placed on a differently sized canvas.
+function scaleTitleFontSizes(
+  sizes: TitleDesign["fontSizes"],
+  factor: number,
+): TitleDesign["fontSizes"] {
+  const clamp = (value?: number) =>
+    value === undefined ? undefined : Math.min(600, Math.max(4, value * factor))
+  return {
+    primary: clamp(sizes.primary),
+    secondary: clamp(sizes.secondary),
+    tag: clamp(sizes.tag),
+    metric: clamp(sizes.metric),
+  }
+}
+
 export function createTextClipFromDefinition(
   preset: TextPresetDefinition,
   options?: {
@@ -282,7 +298,14 @@ export function createTextClipFromDefinition(
     animationOut: preset.animationOut,
     overlayAnimation: animation,
     autoScaleText: preset.autoScaleText ?? true,
-    ...(titleDesign ? { titleDesign } : {}),
+    ...(titleDesign
+      ? {
+          titleDesign: {
+            ...titleDesign,
+            fontSizes: scaleTitleFontSizes(titleDesign.fontSizes, scale),
+          },
+        }
+      : {}),
     enabled: true,
     locked: false,
   }

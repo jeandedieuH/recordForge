@@ -12,7 +12,10 @@ import {
   getTextPresetRecordById,
   getTitleContentLabels,
   getTitlePresetGroup,
+  hasTitleFontSizeOverrides,
+  resolveTitleFontSizes,
   textPresetFromClip,
+  titleDesignSchema,
   textPresetToDefinition,
   textPresetValuesSchema,
   type PresetStorageData,
@@ -208,6 +211,52 @@ describe("creator title presets", () => {
     const reset = applyTextPresetToClip(createTextClipFromPreset("text-clean"), definition)
     expect(reset.titleDesign).toEqual(expectedDesign)
     expect(reset.autoScaleText).toBe(false)
+  })
+
+  it("resolves per-element font sizes from overrides or the template ratio", () => {
+    const clip = createTextClipFromPreset("text-chapter")
+    const design = clip.titleDesign!
+    const resolved = resolveTitleFontSizes(design, clip.fontSize)
+    expect(resolved.primary).toBeCloseTo(clip.fontSize)
+    expect(resolved.tag).toBeCloseTo(clip.fontSize * 1.8)
+    expect(hasTitleFontSizeOverrides(design)).toBe(false)
+    const overridden = {
+      ...design,
+      fontSizes: { ...design.fontSizes, secondary: 18, tag: 120 },
+    }
+    const custom = resolveTitleFontSizes(overridden, clip.fontSize)
+    expect(custom.secondary).toBe(18)
+    expect(custom.tag).toBe(120)
+    expect(custom.primary).toBe(resolved.primary)
+    expect(hasTitleFontSizeOverrides(overridden)).toBe(true)
+    expect(titleDesignSchema.parse({ version: 1, template: "note" }).fontSizes).toEqual({})
+    for (const bad of [3, 601, Number.NaN]) {
+      expect(
+        titleDesignSchema.safeParse({
+          version: 1,
+          template: "note",
+          fontSizes: { primary: bad },
+        }).success,
+      ).toBe(false)
+    }
+  })
+
+  it("scales font size overrides with the canvas like the base font size", () => {
+    const preset = getTextPresetById("text-clean")
+    const definition = {
+      ...preset,
+      titleDesign: {
+        ...preset.titleDesign!,
+        fontSizes: { primary: 100, secondary: 40, tag: 20 },
+      },
+    }
+    const clip = createTextClipFromDefinition(definition, {
+      canvasWidth: 960,
+      canvasHeight: 540,
+    })
+    expect(clip.fontSize).toBeCloseTo(preset.fontSize * 0.5)
+    expect(clip.titleDesign?.fontSizes?.primary).toBeCloseTo(50)
+    expect(clip.titleDesign?.fontSizes?.secondary).toBeCloseTo(20)
   })
 
   it("shares semantic content labels and groups with the title browser", () => {

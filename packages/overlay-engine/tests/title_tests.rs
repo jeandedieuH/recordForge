@@ -115,6 +115,33 @@ fn unicode_long_lines_and_explicit_newlines_are_supported() {
         }
     }
 }
+#[test]
+fn per_element_font_size_overrides_apply_independently() {
+    let default = title(&engine(&plan("clean-text", "none", 4000)), 2100);
+    // An empty overrides object behaves exactly like no overrides.
+    let mut p = plan("clean-text", "none", 4000);
+    p["items"][0]["titleDesign"]["fontSizes"] = json!({});
+    assert_eq!(title(&engine(&p), 2100), default);
+    // Each element sizes on its own instead of following the shared base.
+    for (key, value) in [("primary", 30.0), ("secondary", 42.0), ("tag", 46.0)] {
+        let mut p = plan("clean-text", "none", 4000);
+        p["items"][0]["titleDesign"]["fontSizes"] = json!({ key: value });
+        let scene = title(&engine(&p), 2100);
+        assert_ne!(scene, default, "{key} override should change the scene");
+        assert!(!scene["elements"].as_array().unwrap().is_empty());
+    }
+    // The metric count-up number has its own override on the metric template.
+    let metric_default = title(&engine(&plan("metric", "none", 4000)), 2100);
+    let mut p = plan("metric", "none", 4000);
+    p["items"][0]["titleDesign"]["fontSizes"] = json!({ "metric": 40.0 });
+    assert_ne!(title(&engine(&p), 2100), metric_default);
+    // Out-of-range overrides invalidate the design and fall back to legacy rendering.
+    for bad in [3.0, 601.0] {
+        let mut p = plan("clean-text", "none", 4000);
+        p["items"][0]["titleDesign"]["fontSizes"] = json!({ "primary": bad });
+        assert!(title(&engine(&p), 2100).is_null(), "{bad}");
+    }
+}
 #[cfg(feature = "native-render")]
 #[test]
 fn every_title_rasterizes_without_system_text_layout() {

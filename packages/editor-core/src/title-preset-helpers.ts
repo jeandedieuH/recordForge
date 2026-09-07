@@ -61,6 +61,54 @@ export function getTitleContentLabels(template?: TitleTemplate): TitleContentLab
   }
 }
 
+export interface TitleFontSizeRatios {
+  primary: number
+  secondary: number
+  tag: number
+  metric: number
+}
+
+// Mirrors `size_ratios` in packages/overlay-engine/src/title_layout.rs: each element's
+// default size is `fontSize * ratio`. An explicit `TitleDesign.fontSizes` override
+// replaces that default so elements can be sized independently.
+const titleFontSizeRatios: Record<TitleTemplate, TitleFontSizeRatios> = {
+  "clean-text": { primary: 1, secondary: 0.34, tag: 0.27, metric: 1 },
+  emphasis: { primary: 1.05, secondary: 0.32, tag: 0.24, metric: 1 },
+  "editorial-opener": { primary: 1.15, secondary: 0.3, tag: 0.23, metric: 1 },
+  "kinetic-hook": { primary: 1.25, secondary: 0.3, tag: 0.24, metric: 1 },
+  "chapter-marker": { primary: 1, secondary: 0.33, tag: 1.8, metric: 1 },
+  "speaker-id": { primary: 1, secondary: 0.36, tag: 0.24, metric: 1 },
+  "source-credit": { primary: 0.7, secondary: 0.28, tag: 0.23, metric: 1 },
+  "step-guide": { primary: 0.9, secondary: 0.33, tag: 0.7, metric: 1 },
+  shortcut: { primary: 0.57, secondary: 0.33, tag: 0.24, metric: 1 },
+  "command-line": { primary: 0.62, secondary: 0.25, tag: 0.22, metric: 1 },
+  note: { primary: 0.85, secondary: 0.31, tag: 0.25, metric: 1 },
+  "pull-quote": { primary: 1, secondary: 0.27, tag: 0.23, metric: 1 },
+  metric: { primary: 0.34, secondary: 0.24, tag: 0.23, metric: 1.7 },
+  "call-to-action": { primary: 1, secondary: 0.33, tag: 0.24, metric: 1 },
+}
+
+export type TitleFontSizeKey = keyof TitleFontSizeRatios
+
+/** Effective per-element sizes in clip units: the explicit override, else `fontSize * ratio`. */
+export function resolveTitleFontSizes(
+  design: TitleDesign,
+  baseFontSize: number,
+): Record<TitleFontSizeKey, number> {
+  const ratios = titleFontSizeRatios[design.template]
+  const overrides = design.fontSizes
+  return {
+    primary: overrides.primary ?? baseFontSize * ratios.primary,
+    secondary: overrides.secondary ?? baseFontSize * ratios.secondary,
+    tag: overrides.tag ?? baseFontSize * ratios.tag,
+    metric: overrides.metric ?? baseFontSize * ratios.metric,
+  }
+}
+
+export function hasTitleFontSizeOverrides(design: TitleDesign): boolean {
+  return Object.values(design.fontSizes).some((value) => value !== undefined)
+}
+
 // These are authored overlay colors, not shell UI tokens; export must work without CSS.
 export const TITLE_APPEARANCE_COLORS = {
   dark: {
