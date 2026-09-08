@@ -39,6 +39,17 @@ pub struct ConnectionTestResult {
     pub latency_ms: Option<u64>,
 }
 
+/// Everything needed to sign and dispatch one S3 request. The canonical path
+/// and query are already percent-encoded per SigV4 rules, and `url` is built
+/// from those same encoded components so the signature always matches what the
+/// server receives.
+struct SignTarget {
+    host: String,
+    canonical_path: String,
+    canonical_query: String,
+    url: String,
+}
+
 pub struct S3Client {
     config: S3Config,
     access_key: String,
@@ -55,13 +66,15 @@ impl S3Client {
 
         Self {
             config,
-            access_key,
-            secret_key,
+            // Trim pasted credentials — a stray leading/trailing space in the
+            // secret key silently corrupts every signature.
+            access_key: access_key.trim().to_string(),
+            secret_key: secret_key.trim().to_string(),
             http,
         }
     }
 
-    fn host_and_path(&self, key: &str, query_params: &str) -> (String, String, String) {
+    fn sign_target(&self, key: &str, query_params: &str) -> SignTarget {
         let endpoint = self.config.endpoint.trim_end_matches('/');
         let url_parsed = reqwest::Url::parse(endpoint)
             .unwrap_or_else(|_| reqwest::Url::parse(&format!("https://{}", endpoint)).unwrap());
@@ -74,33 +87,48 @@ impl S3Client {
             .unwrap_or_default();
 
         let clean_key = key.trim_start_matches('/');
+        // SigV4 requires the canonical URI and query to be percent-encoded.
+        // Without this, keys containing spaces or other reserved characters are
+        // signed raw while reqwest sends them encoded, causing
+        // SignatureDoesNotMatch on the server side.
+        let encoded_key = SigV4Signer::uri_encode(clean_key, false);
+        let canonical_query = SigV4Signer::canonical_query(query_params);
 
-        if self.config.force_path_style || base_host == "localhost" || base_host == "127.0.0.1" {
-            let host = format!("{}{}", base_host, port_suffix);
-            let canonical_path = if clean_key.is_empty() {
-                format!("/{}", self.config.bucket)
+        let (host, canonical_path) =
+            if self.config.force_path_style || base_host == "localhost" || base_host == "127.0.0.1"
+            {
+                let path = if encoded_key.is_empty() {
+                    format!("/{}", self.config.bucket)
+                } else {
+                    format!("/{}/{}", self.config.bucket, encoded_key)
+                };
+                (format!("{}{}", base_host, port_suffix), path)
             } else {
-                format!("/{}/{}", self.config.bucket, clean_key)
+                let path = if encoded_key.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", encoded_key)
+                };
+                (
+                    format!("{}.{}{}", self.config.bucket, base_host, port_suffix),
+                    path,
+                )
             };
-            let request_url = if query_params.is_empty() {
-                format!("{}://{}{}", scheme, host, canonical_path)
-            } else {
-                format!("{}://{}{}?{}", scheme, host, canonical_path, query_params)
-            };
-            (host, canonical_path, request_url)
+
+        let url = if canonical_query.is_empty() {
+            format!("{}://{}{}", scheme, host, canonical_path)
         } else {
-            let host = format!("{}.{}{}", self.config.bucket, base_host, port_suffix);
-            let canonical_path = if clean_key.is_empty() {
-                "/".to_string()
-            } else {
-                format!("/{}", clean_key)
-            };
-            let request_url = if query_params.is_empty() {
-                format!("{}://{}{}", scheme, host, canonical_path)
-            } else {
-                format!("{}://{}{}?{}", scheme, host, canonical_path, query_params)
-            };
-            (host, canonical_path, request_url)
+            format!(
+                "{}://{}{}?{}",
+                scheme, host, canonical_path, canonical_query
+            )
+        };
+
+        SignTarget {
+            host,
+            canonical_path,
+            canonical_query,
+            url,
         }
     }
 
@@ -109,15 +137,20 @@ impl S3Client {
         let start = Instant::now();
         let signer = SigV4Signer::new(&self.access_key, &self.secret_key, &self.config.region);
 
-        let (host, canonical_path, request_url) = self.host_and_path("", "max-keys=1");
+        let target = self.sign_target("", "max-keys=1");
         let payload_hash = SigV4Signer::sha256_hex(b"");
-        let (auth_header, amz_date, _) =
-            signer.sign("GET", &canonical_path, "max-keys=1", &host, &payload_hash);
+        let (auth_header, amz_date, _) = signer.sign(
+            "GET",
+            &target.canonical_path,
+            &target.canonical_query,
+            &target.host,
+            &payload_hash,
+        );
 
         let res = self
             .http
-            .get(&request_url)
-            .header("host", &host)
+            .get(&target.url)
+            .header("host", &target.host)
             .header("x-amz-date", &amz_date)
             .header("x-amz-content-sha256", &payload_hash)
             .header("authorization", &auth_header)
@@ -200,15 +233,20 @@ impl S3Client {
                 return Err(InternalError::Storage("upload cancelled by user".into()).into());
             }
 
-            let (host, canonical_path, request_url) = self.host_and_path(&remote_key, "");
+            let target = self.sign_target(&remote_key, "");
             let payload_hash = SigV4Signer::sha256_hex(&buffer);
-            let (auth_header, amz_date, _) =
-                signer.sign("PUT", &canonical_path, "", &host, &payload_hash);
+            let (auth_header, amz_date, _) = signer.sign(
+                "PUT",
+                &target.canonical_path,
+                &target.canonical_query,
+                &target.host,
+                &payload_hash,
+            );
 
             let resp = self
                 .http
-                .put(&request_url)
-                .header("host", &host)
+                .put(&target.url)
+                .header("host", &target.host)
                 .header("x-amz-date", &amz_date)
                 .header("x-amz-content-sha256", &payload_hash)
                 .header("authorization", &auth_header)
@@ -230,23 +268,27 @@ impl S3Client {
             }
 
             progress_cb(file_len, file_len);
-            let (_, _, dest_url) = self.host_and_path(&remote_key, "");
-            return Ok(dest_url);
+            return Ok(self.sign_target(&remote_key, "").url);
         }
 
         // Multipart Upload
         info!(file_len, remote_key = %remote_key, "starting S3 multipart upload");
 
         // 1. Initiate Multipart Upload
-        let (host, canonical_path, init_url) = self.host_and_path(&remote_key, "uploads=");
+        let init_target = self.sign_target(&remote_key, "uploads=");
         let payload_hash = SigV4Signer::sha256_hex(b"");
-        let (auth_header, amz_date, _) =
-            signer.sign("POST", &canonical_path, "uploads=", &host, &payload_hash);
+        let (auth_header, amz_date, _) = signer.sign(
+            "POST",
+            &init_target.canonical_path,
+            &init_target.canonical_query,
+            &init_target.host,
+            &payload_hash,
+        );
 
         let init_resp = self
             .http
-            .post(&init_url)
-            .header("host", &host)
+            .post(&init_target.url)
+            .header("host", &init_target.host)
             .header("x-amz-date", &amz_date)
             .header("x-amz-content-sha256", &payload_hash)
             .header("authorization", &auth_header)
@@ -285,14 +327,19 @@ impl S3Client {
             if cancel_flag.load(Ordering::Relaxed) {
                 // Abort multipart upload
                 let query = format!("uploadId={}", upload_id);
-                let (host, canonical_path, abort_url) = self.host_and_path(&remote_key, &query);
+                let abort_target = self.sign_target(&remote_key, &query);
                 let payload_hash = SigV4Signer::sha256_hex(b"");
-                let (auth_header, amz_date, _) =
-                    signer.sign("DELETE", &canonical_path, &query, &host, &payload_hash);
+                let (auth_header, amz_date, _) = signer.sign(
+                    "DELETE",
+                    &abort_target.canonical_path,
+                    &abort_target.canonical_query,
+                    &abort_target.host,
+                    &payload_hash,
+                );
                 let _ = self
                     .http
-                    .delete(&abort_url)
-                    .header("host", &host)
+                    .delete(&abort_target.url)
+                    .header("host", &abort_target.host)
                     .header("x-amz-date", &amz_date)
                     .header("x-amz-content-sha256", &payload_hash)
                     .header("authorization", &auth_header)
@@ -315,15 +362,20 @@ impl S3Client {
 
             let slice = &part_buffer[..bytes_read];
             let part_query = format!("partNumber={}&uploadId={}", part_number, upload_id);
-            let (host, canonical_path, part_url) = self.host_and_path(&remote_key, &part_query);
+            let part_target = self.sign_target(&remote_key, &part_query);
             let payload_hash = SigV4Signer::sha256_hex(slice);
-            let (auth_header, amz_date, _) =
-                signer.sign("PUT", &canonical_path, &part_query, &host, &payload_hash);
+            let (auth_header, amz_date, _) = signer.sign(
+                "PUT",
+                &part_target.canonical_path,
+                &part_target.canonical_query,
+                &part_target.host,
+                &payload_hash,
+            );
 
             let part_resp = self
                 .http
-                .put(&part_url)
-                .header("host", &host)
+                .put(&part_target.url)
+                .header("host", &part_target.host)
                 .header("x-amz-date", &amz_date)
                 .header("x-amz-content-sha256", &payload_hash)
                 .header("authorization", &auth_header)
@@ -369,15 +421,20 @@ impl S3Client {
         complete_xml.push_str("</CompleteMultipartUpload>");
 
         let query = format!("uploadId={}", upload_id);
-        let (host, canonical_path, complete_url) = self.host_and_path(&remote_key, &query);
+        let complete_target = self.sign_target(&remote_key, &query);
         let payload_hash = SigV4Signer::sha256_hex(complete_xml.as_bytes());
-        let (auth_header, amz_date, _) =
-            signer.sign("POST", &canonical_path, &query, &host, &payload_hash);
+        let (auth_header, amz_date, _) = signer.sign(
+            "POST",
+            &complete_target.canonical_path,
+            &complete_target.canonical_query,
+            &complete_target.host,
+            &payload_hash,
+        );
 
         let complete_resp = self
             .http
-            .post(&complete_url)
-            .header("host", &host)
+            .post(&complete_target.url)
+            .header("host", &complete_target.host)
             .header("x-amz-date", &amz_date)
             .header("x-amz-content-sha256", &payload_hash)
             .header("authorization", &auth_header)
@@ -398,7 +455,7 @@ impl S3Client {
             .into());
         }
 
-        let (_, _, dest_url) = self.host_and_path(&remote_key, "");
+        let dest_url = self.sign_target(&remote_key, "").url;
         info!(url = %dest_url, "S3 multipart upload completed successfully");
         Ok(dest_url)
     }
@@ -410,4 +467,71 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)? + start;
     Some(xml[start..end].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_with(force_path_style: bool) -> S3Client {
+        S3Client::new(
+            S3Config {
+                endpoint: "https://acct.r2.cloudflarestorage.com".to_string(),
+                region: "auto".to_string(),
+                bucket: "videos".to_string(),
+                prefix: String::new(),
+                part_size_bytes: 8 * 1024 * 1024,
+                force_path_style,
+            },
+            "ak".to_string(),
+            "sk".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_sign_target_encodes_key_with_space() {
+        // Regression: a space in the object key was signed raw while reqwest
+        // sent it percent-encoded, producing SignatureDoesNotMatch on R2.
+        let client = client_with(false);
+        let target = client.sign_target("Recording 8577bd55.mp4", "uploads=");
+
+        assert_eq!(target.host, "videos.acct.r2.cloudflarestorage.com");
+        assert_eq!(target.canonical_path, "/Recording%208577bd55.mp4");
+        assert_eq!(target.canonical_query, "uploads=");
+        assert_eq!(
+            target.url,
+            "https://videos.acct.r2.cloudflarestorage.com/Recording%208577bd55.mp4?uploads="
+        );
+        // The signed canonical path must be exactly what goes on the wire.
+        let wire_path = reqwest::Url::parse(&target.url)
+            .expect("request URL must be parseable")
+            .path()
+            .to_string();
+        assert_eq!(wire_path, target.canonical_path);
+    }
+
+    #[test]
+    fn test_sign_target_path_style() {
+        let client = client_with(true);
+        let target = client.sign_target("a b/c.mp4", "");
+
+        assert_eq!(target.host, "acct.r2.cloudflarestorage.com");
+        assert_eq!(target.canonical_path, "/videos/a%20b/c.mp4");
+        assert_eq!(
+            target.url,
+            "https://acct.r2.cloudflarestorage.com/videos/a%20b/c.mp4"
+        );
+    }
+
+    #[test]
+    fn test_sign_target_encodes_upload_id_query() {
+        let client = client_with(false);
+        let target = client.sign_target("k.mp4", "partNumber=3&uploadId=Ab+C/d=");
+
+        assert_eq!(
+            target.canonical_query,
+            "partNumber=3&uploadId=Ab%2BC%2Fd%3D"
+        );
+        assert!(target.url.contains("uploadId=Ab%2BC%2Fd%3D"));
+    }
 }

@@ -1084,27 +1084,39 @@ fn build_title_scene_svg(
         if el.path.is_empty() {
             continue;
         }
-        let clip_attr = if let Some(c) = &el.clip {
+        if let Some(c) = &el.clip {
             let _ = write!(
                 defs,
                 r#"<clipPath id="ts-clip-{i}"><rect x="{}" y="{}" width="{}" height="{}" /></clipPath>"#,
                 c.x, c.y, c.width, c.height
             );
-            format!(r#" clip-path="url(#ts-clip-{i})""#)
+            // Clip in the scene (parent) coordinate space, then translate/scale the
+            // path into that space. This matches the canvas renderer, where the clip
+            // is set in the item's local CTM before the per-element transform.
+            let _ = write!(
+                content,
+                r#"<g clip-path="url(#ts-clip-{i})"><g transform="translate({}, {}) scale({}, {})" opacity="{}"><path d="{}" fill="{}" /></g></g>"#,
+                el.translate_x,
+                el.translate_y,
+                el.scale_x,
+                el.scale_y,
+                el.opacity.clamp(0.0, 1.0),
+                escape_xml(&el.path),
+                escape_xml(&el.fill),
+            );
         } else {
-            String::new()
-        };
-        let _ = write!(
-            content,
-            r#"<g transform="translate({}, {}) scale({}, {})"{clip_attr} opacity="{}"><path d="{}" fill="{}" /></g>"#,
-            el.translate_x,
-            el.translate_y,
-            el.scale_x,
-            el.scale_y,
-            el.opacity.clamp(0.0, 1.0),
-            escape_xml(&el.path),
-            escape_xml(&el.fill),
-        );
+            let _ = write!(
+                content,
+                r#"<g transform="translate({}, {}) scale({}, {})" opacity="{}"><path d="{}" fill="{}" /></g>"#,
+                el.translate_x,
+                el.translate_y,
+                el.scale_x,
+                el.scale_y,
+                el.opacity.clamp(0.0, 1.0),
+                escape_xml(&el.path),
+                escape_xml(&el.fill),
+            );
+        }
     }
     let anchor_x = t.width * t.anchor_x;
     let anchor_y = t.height * t.anchor_y;

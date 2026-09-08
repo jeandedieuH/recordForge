@@ -144,6 +144,20 @@ fn per_element_font_size_overrides_apply_independently() {
 }
 #[cfg(feature = "native-render")]
 #[test]
+fn designed_title_text_is_visible_without_backdrop_in_export() {
+    let mut p = plan("clean-text", "none", 4000);
+    p["items"][0]["titleDesign"]["appearance"] = json!("transparent");
+    p["items"][0]["backdropStyle"] = json!("none");
+    let engine = engine(&p);
+    let mut pixmap = tiny_skia::Pixmap::new(640, 360).unwrap();
+    engine.render_to_pixmap(2100, &mut pixmap).unwrap();
+    assert!(
+        pixmap.data().chunks_exact(4).any(|p| p[3] > 0),
+        "transparent clean-text should render visible text glyphs in export"
+    );
+}
+#[cfg(feature = "native-render")]
+#[test]
 fn every_title_rasterizes_without_system_text_layout() {
     for template in TEMPLATES {
         let engine = engine(&plan(template, "designed", 4000));

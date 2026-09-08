@@ -34,6 +34,46 @@ impl<'a> SigV4Signer<'a> {
         hex::encode(hasher.finalize())
     }
 
+    /// URI-encode a string per AWS SigV4 rules: every byte except the
+    /// unreserved characters [A-Za-z0-9-._~] is percent-encoded with uppercase
+    /// hex. When `encode_slash` is false, `/` is preserved as a path delimiter
+    /// (used for canonical URIs); query names/values must pass `true`.
+    pub fn uri_encode(input: &str, encode_slash: bool) -> String {
+        let mut out = String::with_capacity(input.len());
+        for &b in input.as_bytes() {
+            let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+            if unreserved || (b == b'/' && !encode_slash) {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+        out
+    }
+
+    /// Build a SigV4 canonical query string from a raw `a=1&b=2` style string:
+    /// each name/value is URI-encoded, pairs are sorted by encoded name then
+    /// value, and joined as `name=value` (a bare `uploads` becomes `uploads=`).
+    pub fn canonical_query(query: &str) -> String {
+        if query.is_empty() {
+            return String::new();
+        }
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            pairs.push((Self::uri_encode(name, true), Self::uri_encode(value, true)));
+        }
+        pairs.sort();
+        pairs
+            .iter()
+            .map(|(n, v)| format!("{n}={v}"))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
     /// Sign an HTTP request and return (AuthorizationHeader, AmzDate, ContentSha256).
     pub fn sign(
         &self,
@@ -139,5 +179,41 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         assert_eq!(date.len(), 16);
+    }
+
+    #[test]
+    fn test_uri_encode() {
+        // Unreserved characters pass through untouched.
+        assert_eq!(
+            SigV4Signer::uri_encode("abcXYZ019-._~", true),
+            "abcXYZ019-._~"
+        );
+        // Spaces and reserved characters are percent-encoded uppercase.
+        assert_eq!(
+            SigV4Signer::uri_encode("Recording 8577bd55.mp4", true),
+            "Recording%208577bd55.mp4"
+        );
+        // Slash is preserved for paths but encoded for query values.
+        assert_eq!(
+            SigV4Signer::uri_encode("prefix/Recording 1.mp4", false),
+            "prefix/Recording%201.mp4"
+        );
+        assert_eq!(SigV4Signer::uri_encode("a/b", true), "a%2Fb");
+        // Non-ASCII bytes are encoded per byte.
+        assert_eq!(SigV4Signer::uri_encode("café", true), "caf%C3%A9");
+    }
+
+    #[test]
+    fn test_canonical_query() {
+        assert_eq!(SigV4Signer::canonical_query(""), "");
+        // Bare subresource gets an explicit empty value.
+        assert_eq!(SigV4Signer::canonical_query("uploads"), "uploads=");
+        assert_eq!(SigV4Signer::canonical_query("uploads="), "uploads=");
+        // Pairs are sorted by encoded name and reserved characters are encoded.
+        assert_eq!(
+            SigV4Signer::canonical_query("uploadId=a+b/c=&partNumber=2"),
+            "partNumber=2&uploadId=a%2Bb%2Fc%3D"
+        );
+        assert_eq!(SigV4Signer::canonical_query("max-keys=1"), "max-keys=1");
     }
 }
