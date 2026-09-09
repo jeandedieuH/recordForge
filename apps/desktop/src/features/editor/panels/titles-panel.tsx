@@ -40,18 +40,35 @@ export function TitlesPanel() {
 
   function handleAddPreset(preset: TextPresetRecord) {
     try {
+      const titlesTrack = timeline?.tracks.find((track) => track.kind === "titles" && !track.locked)
+      const existingClips = titlesTrack?.clips ?? []
+      const startMs = Math.max(0, Math.round(view.playheadMs))
+      const durationMs = 4000
+
       const clip = createTextClipFromDefinition(textPresetToDefinition(preset), {
-        startMs: Math.max(0, Math.round(view.playheadMs)),
-        durationMs: 4000,
+        startMs,
+        durationMs,
         canvasWidth,
         canvasHeight,
       })
-      const titlesTrack = timeline?.tracks.find((track) => track.kind === "titles" && !track.locked)
+
+      // If existing titles overlap this timestamp, offset y on canvas so titles don't visually occlude each other
+      const overlappingClips = existingClips.filter(
+        (c) => startMs < c.startMs + c.durationMs && startMs + durationMs > c.startMs,
+      )
+      if (overlappingClips.length > 0) {
+        const offset = (overlappingClips.length % 5) * 80
+        clip.y = Math.min(canvasHeight - clip.height - 40, clip.y + offset)
+      }
+
       const ok = execute(createAddTextClipCommand(clip, titlesTrack?.id))
       if (!ok) throw new Error("Title command rejected")
       setSelection({ kind: "clip", clipIds: [clip.id], primaryClipId: clip.id })
       remember(preset.id)
-      toast({ title: "Title added", description: `${preset.name} was added at the playhead.` })
+      toast({
+        title: "Title added",
+        description: `${preset.name} was added at the playhead.`,
+      })
     } catch {
       toast({
         title: "Title could not be added",

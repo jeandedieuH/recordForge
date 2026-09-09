@@ -177,15 +177,17 @@ export function sourceToTimelineForTrack(
 ): SourceToTimelineResult | null {
   const candidates = findTrackClips(state, trackKind, options?.trackId).filter((clip) => {
     if (clip.assetId !== assetId) return false
-    if (options?.preferClipId && clip.id !== options.preferClipId) return false
     return sourceMs >= clip.sourceInMs && sourceMs <= clip.sourceOutMs
   })
-  const first = candidates[0]
-  if (!first) return null
-  const timelineMs = sourceToClipTime(first, sourceMs)
+  if (candidates.length === 0) return null
+  const preferred = options?.preferClipId
+    ? candidates.find((clip) => clip.id === options.preferClipId)
+    : null
+  const chosen = preferred ?? candidates[0]!
+  const timelineMs = sourceToClipTime(chosen, sourceMs)
   if (timelineMs === null) return null
   return {
-    clipId: first.id,
+    clipId: chosen.id,
     timelineMs,
     unambiguous: candidates.length === 1,
   }
@@ -205,18 +207,20 @@ export function sourceToTimeline(
   options?: { preferClipId?: string },
 ): SourceToTimelineResult | null {
   const candidates = findClipsForAsset(state, assetId).filter((clip) => {
-    if (options?.preferClipId && clip.id !== options.preferClipId) return false
     return sourceMs >= clip.sourceInMs && sourceMs <= clip.sourceOutMs
   })
 
   if (candidates.length === 0) return null
 
-  const first = candidates[0]
-  const timelineMs = sourceToClipTime(first, sourceMs)
+  const preferred = options?.preferClipId
+    ? candidates.find((clip) => clip.id === options.preferClipId)
+    : null
+  const chosen = preferred ?? candidates[0]!
+  const timelineMs = sourceToClipTime(chosen, sourceMs)
   if (timelineMs === null) return null
 
   return {
-    clipId: first.id,
+    clipId: chosen.id,
     timelineMs,
     unambiguous: candidates.length === 1,
   }

@@ -37,7 +37,7 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import { snapClipStart, snapTrimEdge, type SnapTarget } from "@recordforge/editor-core"
+import { snapClipStart, snapTime, snapTrimEdge, type SnapTarget } from "@recordforge/editor-core"
 import type { ThumbnailManifest, WaveformResources } from "../media/derivative-resources"
 import { ThumbnailStrip } from "./timeline-derivatives"
 import { TimelineCanvasWaveform } from "./timeline-canvas-waveform"
@@ -93,6 +93,7 @@ export interface TimelineClipItemProps {
   onDuplicateClip: (clip: TimelineClip) => void
   onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
   onDeleteClip: (clip: TimelineClip, ripple?: boolean) => void
+  onSeek?: (timeMs: number) => void
   onCursorRangeAction?: (action: CursorRangeAction) => void
   onUpdateAudio?: (
     clip: AudioClip,
@@ -103,6 +104,8 @@ export interface TimelineClipItemProps {
       volumeKeyframes?: AudioVolumeKeyframe[]
     },
   ) => void
+  sublaneIndex?: number
+  sublaneCount?: number
 }
 
 function getClipIcon(clip: TimelineClip, track: TimelineTrack): LucideIcon {
@@ -252,8 +255,11 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   onDuplicateClip,
   onSplitClip,
   onDeleteClip,
+  onSeek,
   onCursorRangeAction,
   onUpdateAudio,
+  sublaneIndex = 0,
+  sublaneCount = 1,
 }: TimelineClipItemProps) {
   const gestureRef = useRef<ClipGesture | null>(null)
   const suppressClickRef = useRef(false)
@@ -264,7 +270,13 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     clip.kind === "audio" ? waveformResources.byStream.get(clip.streamIndex ?? -1) : undefined
   const waveformData = waveformResource?.status === "content" ? waveformResource.data : null
   const clipTargets = snapTargets.filter((target) => !target.id.startsWith(`${clip.id}:`))
-  const clipHeight = collapsed ? 24 : Math.max(34, Math.min(height - 14, 44))
+  const availableHeight = collapsed ? 24 : Math.max(34, height - 12)
+  const baseClipHeight = collapsed ? 24 : Math.max(34, Math.min(height - 14, 52))
+  const clipHeight =
+    sublaneCount > 1
+      ? Math.max(20, Math.floor((availableHeight - (sublaneCount - 1) * 3) / sublaneCount))
+      : baseClipHeight
+  const topOffset = sublaneCount > 1 ? sublaneIndex * (clipHeight + 3) : 0
   const cursorRange = clip.kind === "cursor-effect" ? clip : null
   const isLocked = track.locked || (cursorRange ? cursorRange.locked : false)
 
@@ -304,7 +316,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     if (!gesture || gesture.pointerId !== event.pointerId) return
     const currentMs = getTimelineTime(event.clientX)
     const deltaMs = currentMs - gesture.initialTimelineMs
-    if (Math.abs(event.clientX - gesture.initialClientX) < 3 && !gesture.moved) return
+    if (Math.abs(event.clientX - gesture.initialClientX) < 8 && !gesture.moved) return
     gesture.moved = true
     suppressClickRef.current = true
     event.preventDefault()
@@ -408,7 +420,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             tool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing",
             theme.cardClass,
             selected
-              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-[0_0_12px_rgba(9,77,178,0.45)] z-20"
+              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-e2 z-20"
               : "z-10",
             track.muted && "opacity-40",
             isLocked && "cursor-not-allowed opacity-60",
@@ -417,9 +429,27 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             left: `${clip.startMs * pixelsPerMs}px`,
             width: `${Math.max(clip.durationMs * pixelsPerMs, 32)}px`,
             height: `${clipHeight}px`,
+            top: `${topOffset}px`,
           }}
           onPointerDown={(event) => {
             if (tool === "split") {
+              if (event.button !== 0 || isLocked) return
+              event.stopPropagation()
+              event.preventDefault()
+              const rawMs = getTimelineTime(event.clientX)
+              const snap = snapTime(rawMs, clipTargets, {
+                enabled: snapEnabled && !event.altKey,
+                thresholdMs: snapThresholdMs,
+              })
+              const clipEndMs = clip.startMs + clip.durationMs
+              let splitTimeMs = Math.round(rawMs)
+              if (snap.snapped && snap.timeMs > clip.startMs + 1 && snap.timeMs < clipEndMs - 1) {
+                splitTimeMs = snap.timeMs
+              }
+              if (splitTimeMs > clip.startMs + 1 && splitTimeMs < clipEndMs - 1) {
+                onSeek?.(splitTimeMs)
+                onSplitClip(clip, splitTimeMs)
+              }
               return
             }
             if (
@@ -442,6 +472,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           }}
           onClick={(event) => {
             if (tool === "split") {
+              event.stopPropagation()
               return
             }
             if (
@@ -455,6 +486,9 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             if (suppressClickRef.current) {
               suppressClickRef.current = false
               return
+            }
+            if (onSeek && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+              onSeek(Math.round(getTimelineTime(event.clientX)))
             }
             onSelectClip(clip, track, event)
           }}

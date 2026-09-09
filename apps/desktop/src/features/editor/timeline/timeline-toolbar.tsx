@@ -1,5 +1,7 @@
 import { useState } from "react"
 import {
+  ChevronsLeft,
+  ChevronsRight,
   Compass,
   Flag,
   Keyboard,
@@ -38,8 +40,9 @@ import {
   cn,
 } from "@recordforge/ui"
 import { formatTime } from "@recordforge/editor-core"
-import type { MaskClip, ZoomPreset } from "@recordforge/contracts"
+import type { MaskClip, TimelineMarker, ZoomPreset } from "@recordforge/contracts"
 import { formatTimelineTime } from "./timeline-ruler"
+import { parseTimecode } from "./timeline-navigation"
 import { TimelineShortcutsDialog } from "./timeline-shortcuts-dialog"
 
 export type TimelineTool = "select" | "split" | "range"
@@ -59,10 +62,13 @@ export interface TimelineToolbarProps {
   canRippleDelete?: boolean
   selectedRange?: { startMs: number; endMs: number } | null
   showMinimap?: boolean
+  markers?: TimelineMarker[]
   onToggleMinimap?: () => void
   onTogglePlay: () => void
   onSeek: (timeMs: number) => void
   onStepFrame: (direction: -1 | 1) => void
+  onJumpPreviousCut?: () => void
+  onJumpNextCut?: () => void
   onSetPlaybackRate: (rate: number) => void
   onSetZoom: (zoom: number) => void
   onZoomToFit: () => void
@@ -88,10 +94,13 @@ export function TimelineToolbar({
   canRippleDelete = false,
   selectedRange = null,
   showMinimap = true,
+  markers = [],
   onToggleMinimap,
   onTogglePlay,
   onSeek,
   onStepFrame,
+  onJumpPreviousCut,
+  onJumpNextCut,
   onSetPlaybackRate,
   onSetZoom,
   onZoomToFit,
@@ -105,6 +114,7 @@ export function TimelineToolbar({
   const [jumpTimePopoverOpen, setJumpTimePopoverOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [jumpInputText, setJumpInputText] = useState("")
+  const [jumpError, setJumpError] = useState(false)
 
   function adjustZoom(delta: number) {
     onSetZoom(Math.max(0, Math.min(100, Math.round(zoom + delta))))
@@ -112,30 +122,20 @@ export function TimelineToolbar({
 
   function handleJumpSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!jumpInputText.trim()) return
-
-    // Parse input: support mm:ss or seconds (e.g. 12.5)
-    let parsedMs: number | null = null
-    if (jumpInputText.includes(":")) {
-      const parts = jumpInputText.split(":")
-      const minutes = parseFloat(parts[0] || "0")
-      const seconds = parseFloat(parts[1] || "0")
-      parsedMs = Math.round((minutes * 60 + seconds) * 1000)
-    } else {
-      const seconds = parseFloat(jumpInputText)
-      if (!isNaN(seconds)) parsedMs = Math.round(seconds * 1000)
-    }
-
-    if (parsedMs !== null && !isNaN(parsedMs)) {
-      onSeek(Math.max(0, Math.min(durationMs, parsedMs)))
+    const parsedMs = parseTimecode(jumpInputText, durationMs, playheadMs)
+    if (parsedMs !== null) {
+      onSeek(parsedMs)
       setJumpTimePopoverOpen(false)
       setJumpInputText("")
+      setJumpError(false)
+    } else {
+      setJumpError(true)
     }
   }
 
   return (
     <div
-      className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-dim/90 px-3 py-1.5 backdrop-blur-md"
+      className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-dim/95 px-3 py-1.5 backdrop-blur-md select-none transition-colors duration-fast"
       role="toolbar"
       aria-label="Timeline editing and transport controls"
     >
@@ -435,8 +435,9 @@ export function TimelineToolbar({
         ) : null}
       </div>
 
-      {/* Cluster 2: Transport & Precision Timecode */}
-      <div className="flex items-center gap-2">
+      {/* Cluster 2: Transport & Precision Navigation */}
+      <div className="flex items-center gap-1 sm:gap-1.5">
+        {/* Jump to Start */}
         <IconButton
           label="Go to start"
           shortcut="Home"
@@ -447,6 +448,20 @@ export function TimelineToolbar({
           <SkipBack className="size-3.5" />
         </IconButton>
 
+        {/* Jump to Previous Cut / Marker */}
+        {onJumpPreviousCut ? (
+          <IconButton
+            label="Jump to previous cut / marker"
+            shortcut="↑"
+            tooltipSide="top"
+            className="size-7 text-muted-foreground hover:text-foreground"
+            onClick={onJumpPreviousCut}
+          >
+            <ChevronsLeft className="size-3.5" />
+          </IconButton>
+        ) : null}
+
+        {/* Step Backward 1 Frame */}
         <IconButton
           label="Step backward 1 frame"
           shortcut="←"
@@ -476,6 +491,7 @@ export function TimelineToolbar({
           )}
         </Button>
 
+        {/* Step Forward 1 Frame */}
         <IconButton
           label="Step forward 1 frame"
           shortcut="→"
@@ -486,6 +502,20 @@ export function TimelineToolbar({
           <StepForward className="size-3.5" />
         </IconButton>
 
+        {/* Jump to Next Cut / Marker */}
+        {onJumpNextCut ? (
+          <IconButton
+            label="Jump to next cut / marker"
+            shortcut="↓"
+            tooltipSide="top"
+            className="size-7 text-muted-foreground hover:text-foreground"
+            onClick={onJumpNextCut}
+          >
+            <ChevronsRight className="size-3.5" />
+          </IconButton>
+        ) : null}
+
+        {/* Jump to End */}
         <IconButton
           label="Go to end"
           shortcut="End"
@@ -497,12 +527,21 @@ export function TimelineToolbar({
         </IconButton>
 
         {/* Interactive Clickable Timecode Badge & Jump-To Popover */}
-        <Popover open={jumpTimePopoverOpen} onOpenChange={setJumpTimePopoverOpen}>
+        <Popover
+          open={jumpTimePopoverOpen}
+          onOpenChange={(open) => {
+            setJumpTimePopoverOpen(open)
+            if (open) {
+              setJumpError(false)
+            }
+          }}
+        >
           <PopoverTrigger asChild>
             <button
               type="button"
               className="flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/90 px-2 py-0.5 font-mono text-xs shadow-xs transition-all duration-fast hover:border-primary/60 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer"
-              title="Click to jump to specific timestamp"
+              title="Click to jump to specific timestamp or marker"
+              aria-label={`Current playhead ${formatTimelineTime(playheadMs)} of total ${formatTimelineTime(durationMs)}. Click to jump to timecode.`}
             >
               <span className="font-semibold tabular-nums text-foreground">
                 {formatTimelineTime(playheadMs)}
@@ -513,55 +552,118 @@ export function TimelineToolbar({
               </span>
             </button>
           </PopoverTrigger>
-          <PopoverContent className="w-64 p-3 bg-surface border-border shadow-e2" align="center">
+          <PopoverContent className="w-72 p-3 bg-surface border-border shadow-e2" align="center">
             <form onSubmit={handleJumpSubmit} className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-foreground">Jump to Timestamp</span>
-                <span className="font-mono text-[10px] text-muted-foreground">MM:SS.ms</span>
+                <span className="font-mono text-[10px] text-muted-foreground">
+                  MM:SS, sec, or ±offset
+                </span>
               </div>
               <div className="flex items-center gap-1.5">
                 <input
                   type="text"
-                  placeholder="e.g. 01:23 or 45"
+                  placeholder="e.g. 01:23, +5, or -10"
                   value={jumpInputText}
-                  onChange={(e) => setJumpInputText(e.target.value)}
-                  className="flex-1 h-7 rounded border border-border bg-surface-dim px-2 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  aria-label="Target timecode, seconds, or relative offset"
+                  onChange={(e) => {
+                    setJumpInputText(e.target.value)
+                    if (jumpError) setJumpError(false)
+                  }}
+                  className={cn(
+                    "flex-1 h-7 rounded border bg-surface-dim px-2 font-mono text-xs text-foreground focus:outline-none focus:ring-1",
+                    jumpError
+                      ? "border-destructive focus:ring-destructive"
+                      : "border-border focus:ring-primary",
+                  )}
                   autoFocus
                 />
                 <Button type="submit" size="sm" className="h-7 px-2.5 text-xs">
                   Go
                 </Button>
               </div>
+              {jumpError ? (
+                <p className="text-[10px] text-destructive font-medium">
+                  Invalid format. Use MM:SS (e.g. 01:23), seconds (45), or relative offset (+5,
+                  -10).
+                </p>
+              ) : null}
               <div className="flex items-center justify-between pt-1 border-t border-border/40 text-[10px]">
                 <button
                   type="button"
-                  onClick={() => onSeek(0)}
+                  onClick={() => {
+                    onSeek(0)
+                    setJumpTimePopoverOpen(false)
+                  }}
                   className="text-primary hover:underline"
                 >
                   Start
                 </button>
                 <button
                   type="button"
-                  onClick={() => onSeek(Math.max(0, playheadMs - 5000))}
+                  onClick={() => {
+                    onSeek(Math.max(0, playheadMs - 5000))
+                    setJumpTimePopoverOpen(false)
+                  }}
                   className="text-primary hover:underline"
                 >
                   -5s
                 </button>
                 <button
                   type="button"
-                  onClick={() => onSeek(Math.min(durationMs, playheadMs + 5000))}
+                  onClick={() => {
+                    onSeek(Math.min(durationMs, playheadMs + 5000))
+                    setJumpTimePopoverOpen(false)
+                  }}
                   className="text-primary hover:underline"
                 >
                   +5s
                 </button>
                 <button
                   type="button"
-                  onClick={() => onSeek(durationMs)}
+                  onClick={() => {
+                    onSeek(durationMs)
+                    setJumpTimePopoverOpen(false)
+                  }}
                   className="text-primary hover:underline"
                 >
                   End
                 </button>
               </div>
+
+              {/* Marker Quick Jump Section */}
+              {markers.length > 0 ? (
+                <div className="pt-2 border-t border-border/40 space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px] text-subtle-foreground uppercase tracking-wider font-semibold">
+                    <span>Jump to Marker</span>
+                    <span>{markers.length}</span>
+                  </div>
+                  <div className="max-h-28 overflow-y-auto space-y-1 pr-0.5">
+                    {markers.map((marker) => (
+                      <button
+                        key={marker.id}
+                        type="button"
+                        onClick={() => {
+                          onSeek(marker.timeMs)
+                          setJumpTimePopoverOpen(false)
+                        }}
+                        className="flex w-full items-center justify-between rounded px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-overlay hover:text-foreground transition-colors cursor-pointer text-left"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <span
+                            className="size-2 shrink-0 rounded-full"
+                            style={{ backgroundColor: marker.color }}
+                          />
+                          <span className="truncate">{marker.label}</span>
+                        </span>
+                        <span className="font-mono text-[10px] text-subtle-foreground shrink-0">
+                          {formatTimelineTime(marker.timeMs)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </form>
           </PopoverContent>
         </Popover>

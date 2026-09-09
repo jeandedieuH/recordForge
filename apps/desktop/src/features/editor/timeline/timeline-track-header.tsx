@@ -205,10 +205,10 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
         >
           {/* Visual Drop Insertion Indicators */}
           {dropIndicator === "above" ? (
-            <div className="absolute inset-x-0 -top-0.5 h-1 bg-primary rounded-full shadow-[0_0_8px_rgba(9,77,178,0.9)] z-30 pointer-events-none" />
+            <div className="absolute inset-x-0 -top-0.5 h-1 bg-primary rounded-full shadow-xs z-30 pointer-events-none" />
           ) : null}
           {dropIndicator === "below" ? (
-            <div className="absolute inset-x-0 -bottom-0.5 h-1 bg-primary rounded-full shadow-[0_0_8px_rgba(9,77,178,0.9)] z-30 pointer-events-none" />
+            <div className="absolute inset-x-0 -bottom-0.5 h-1 bg-primary rounded-full shadow-xs z-30 pointer-events-none" />
           ) : null}
 
           {/* Left: Reorder Grip, Track Icon & Details */}

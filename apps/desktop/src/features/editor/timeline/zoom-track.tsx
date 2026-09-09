@@ -151,7 +151,7 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
     >
       {snapGuide ? (
         <div
-          className="pointer-events-none absolute inset-y-0 z-20 w-px bg-primary shadow-[0_0_8px_rgba(9,77,178,0.8)]"
+          className="pointer-events-none absolute inset-y-0 z-20 w-px bg-primary shadow-xs"
           style={{ left: `${snapGuide.timeMs * pixelsPerMs}px` }}
           aria-hidden
         />
@@ -379,7 +379,7 @@ function ZoomSegmentItem({
             "group/zoom absolute flex items-center overflow-hidden rounded-lg border border-primary/70 bg-linear-to-b from-primary/30 to-primary/15 px-2 text-left text-[11px] transition-all duration-fast select-none hover:from-primary/40 hover:to-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             tool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing",
             selected
-              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-[0_0_12px_rgba(9,77,178,0.45)] z-20"
+              ? "ring-2 ring-primary ring-offset-1 ring-offset-surface-dim shadow-e2 z-20"
               : "z-10",
             !segment.enabled && "border-muted-foreground/50 bg-muted/20 opacity-60",
             (track.locked || segment.locked) && "cursor-not-allowed opacity-60",

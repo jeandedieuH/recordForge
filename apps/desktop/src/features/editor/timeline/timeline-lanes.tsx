@@ -12,7 +12,12 @@ import type {
   TimelineViewState,
   ZoomPreset,
 } from "@recordforge/contracts"
-import { buildSnapTargets, snapTime, type SnapTarget } from "@recordforge/editor-core"
+import {
+  buildSnapTargets,
+  snapTime,
+  trackAllowsOverlap,
+  type SnapTarget,
+} from "@recordforge/editor-core"
 import { BookmarkPlus, Scissors, Sparkles, Trash2, X, ZoomIn } from "lucide-react"
 import {
   ContextMenu,
@@ -154,6 +159,84 @@ function getTrackHeight(track: TimelineTrack, view: TimelineViewState): number {
   return view.trackHeights[track.id] ?? TRACK_ROW_HEIGHT
 }
 
+/**
+ * Greedily assigns overlapping clips to sub-lanes per connected cluster
+ * so simultaneous overlay items (e.g. multiple titles/annotations) do not visually occlude
+ * one another, while non-overlapping clips remain at full height.
+ */
+export function computeClipSublanes(
+  clips: TimelineClip[],
+): Map<string, { index: number; count: number }> {
+  const result = new Map<string, { index: number; count: number }>()
+  if (clips.length <= 1) {
+    for (const clip of clips) {
+      result.set(clip.id, { index: 0, count: 1 })
+    }
+    return result
+  }
+
+  const sorted = [...clips].sort((a, b) => a.startMs - b.startMs)
+  const clusters: TimelineClip[][] = []
+  let currentCluster: TimelineClip[] = []
+  let currentClusterEnd = -1
+
+  for (const clip of sorted) {
+    const clipEnd = clip.startMs + clip.durationMs
+    if (currentCluster.length === 0) {
+      currentCluster.push(clip)
+      currentClusterEnd = clipEnd
+    } else if (clip.startMs < currentClusterEnd) {
+      currentCluster.push(clip)
+      currentClusterEnd = Math.max(currentClusterEnd, clipEnd)
+    } else {
+      clusters.push(currentCluster)
+      currentCluster = [clip]
+      currentClusterEnd = clipEnd
+    }
+  }
+  if (currentCluster.length > 0) {
+    clusters.push(currentCluster)
+  }
+
+  for (const cluster of clusters) {
+    if (cluster.length <= 1) {
+      for (const clip of cluster) {
+        result.set(clip.id, { index: 0, count: 1 })
+      }
+      continue
+    }
+
+    const laneEndTimes: number[] = []
+    const clusterAssignments = new Map<string, number>()
+    for (const clip of cluster) {
+      let placedLane = -1
+      for (let i = 0; i < laneEndTimes.length; i++) {
+        if (clip.startMs >= laneEndTimes[i]) {
+          placedLane = i
+          laneEndTimes[i] = clip.startMs + clip.durationMs
+          break
+        }
+      }
+      if (placedLane === -1) {
+        placedLane = laneEndTimes.length
+        laneEndTimes.push(clip.startMs + clip.durationMs)
+      }
+      clusterAssignments.set(clip.id, placedLane)
+    }
+
+    const clusterMaxLanes = Math.min(3, Math.max(1, laneEndTimes.length))
+    for (const clip of cluster) {
+      const lane = clusterAssignments.get(clip.id) ?? 0
+      result.set(clip.id, {
+        index: Math.min(lane, clusterMaxLanes - 1),
+        count: clusterMaxLanes,
+      })
+    }
+  }
+
+  return result
+}
+
 export function TimelineLanes({
   timeline,
   view,
@@ -289,9 +372,10 @@ export function TimelineLanes({
     }
   }, [pixelsPerMs, view.scrollMs])
 
-  // Auto-scroll timeline during playback when playhead moves past visible boundary
+  const prevPlayheadMsRef = useRef(view.playheadMs)
+
+  // Auto-scroll timeline during playback OR when seeking / jumping to an offscreen position
   useEffect(() => {
-    if (!view.isPlaying) return
     const element = scrollRef.current
     if (!element || viewportWidth <= 0) return
 
@@ -299,18 +383,43 @@ export function TimelineLanes({
     const currentScrollLeft = element.scrollLeft
     const rightEdge = currentScrollLeft + viewportWidth
 
-    // If playhead moves past the right viewport boundary, page forward cleanly
-    if (playheadPx >= rightEdge - 30) {
-      const nextScroll = Math.max(0, playheadPx - 60)
-      element.scrollLeft = nextScroll
-      setScrollLeft(nextScroll)
-      onSetScroll(nextScroll / pixelsPerMs)
-    } else if (playheadPx < currentScrollLeft) {
-      // If playhead has looped or jumped before current view, reset view to playhead
-      const nextScroll = Math.max(0, playheadPx - 60)
-      element.scrollLeft = nextScroll
-      setScrollLeft(nextScroll)
-      onSetScroll(nextScroll / pixelsPerMs)
+    if (view.isPlaying) {
+      // If playhead moves past the right viewport boundary, page forward cleanly
+      if (playheadPx >= rightEdge - 30) {
+        const nextScroll = Math.max(0, playheadPx - 60)
+        element.scrollLeft = nextScroll
+        setScrollLeft(nextScroll)
+        onSetScroll(nextScroll / pixelsPerMs)
+      } else if (playheadPx < currentScrollLeft) {
+        // If playhead has looped or jumped before current view, reset view to playhead
+        const nextScroll = Math.max(0, playheadPx - 60)
+        element.scrollLeft = nextScroll
+        setScrollLeft(nextScroll)
+        onSetScroll(nextScroll / pixelsPerMs)
+      }
+      prevPlayheadMsRef.current = view.playheadMs
+    } else {
+      // While paused: if playhead changed and moved outside the visible viewport (or within edge padding),
+      // scroll to keep playhead comfortably visible
+      const prevPlayhead = prevPlayheadMsRef.current
+      if (prevPlayhead !== view.playheadMs) {
+        prevPlayheadMsRef.current = view.playheadMs
+        const edgePadding = 24
+        if (playheadPx < currentScrollLeft + edgePadding || playheadPx > rightEdge - edgePadding) {
+          const prevPlayheadPx = prevPlayhead * pixelsPerMs
+          const isLargeJump = Math.abs(playheadPx - prevPlayheadPx) > viewportWidth * 0.4
+          // Center the playhead for large jumps (cuts, markers, timecodes); otherwise keep in view with padding
+          const nextScroll = isLargeJump
+            ? Math.max(0, Math.round(playheadPx - viewportWidth / 2))
+            : playheadPx > rightEdge - edgePadding
+              ? Math.max(0, Math.round(playheadPx - viewportWidth + 80))
+              : Math.max(0, Math.round(playheadPx - 80))
+
+          element.scrollLeft = nextScroll
+          setScrollLeft(nextScroll)
+          onSetScroll(nextScroll / pixelsPerMs)
+        }
+      }
     }
   }, [view.isPlaying, view.playheadMs, pixelsPerMs, viewportWidth, onSetScroll])
 
@@ -408,7 +517,7 @@ export function TimelineLanes({
       target instanceof Element &&
       Boolean(
         target.closest(
-          "[data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill], [role='menu'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-radix-collection-item]",
+          "[data-timeline-ruler], [data-timeline-playhead], [data-minimap-lens], [role='slider'], [data-timeline-clip], [data-timeline-marker], [data-timeline-zoom], [data-timeline-zoom-pill], [role='menu'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-radix-collection-item]",
         ),
       )
     )
@@ -430,7 +539,33 @@ export function TimelineLanes({
         enabled: view.snapEnabled && !e.altKey,
         thresholdMs: view.snapThresholdMs,
       })
-      const splitTimeMs = snap.snapped ? snap.timeMs : Math.round(rawMs)
+      let splitTimeMs = snap.snapped ? snap.timeMs : Math.round(rawMs)
+      if (snap.snapped) {
+        // If snap aligned with an edge/point where no clip can be split,
+        // fall back to rawMs so the user can split where they clicked
+        const canSplitAtSnap =
+          timeline.tracks.some(
+            (t) =>
+              !t.locked &&
+              t.clips.some(
+                (c) =>
+                  !("locked" in c && Boolean(c.locked)) &&
+                  snap.timeMs > c.startMs + 1 &&
+                  snap.timeMs < c.startMs + c.durationMs - 1,
+              ),
+          ) ||
+          Boolean(
+            timeline.zoomSegments?.some(
+              (z) =>
+                !z.locked &&
+                snap.timeMs > z.startMs + 1 &&
+                snap.timeMs < z.startMs + z.durationMs - 1,
+            ),
+          )
+        if (!canSplitAtSnap) {
+          splitTimeMs = Math.round(rawMs)
+        }
+      }
       onSeek(splitTimeMs)
       onSplitAllAtTime?.(splitTimeMs)
       return
@@ -459,8 +594,19 @@ export function TimelineLanes({
       timestamp: now,
     }
 
-    // Immediately seek playhead to clicked timestamp on empty space
-    onSeek(startMs)
+    // Immediately seek playhead to clicked timestamp on empty space (with magnetic snap when enabled)
+    let targetSeekMs = startMs
+    if (view.snapEnabled && !e.altKey) {
+      const snap = snapTime(startMs, snapTargets, {
+        enabled: true,
+        thresholdMs: view.snapThresholdMs,
+      })
+      if (snap.snapped) {
+        targetSeekMs = snap.timeMs
+        setSnapGuide(snap.target)
+      }
+    }
+    onSeek(targetSeekMs)
     onDeselectAll?.()
 
     // Set up marquee in case user drags
@@ -534,6 +680,7 @@ export function TimelineLanes({
 
     marqueePointerRef.current = null
     setMarquee(null)
+    setSnapGuide(null)
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId)
     }
@@ -863,7 +1010,7 @@ export function TimelineLanes({
                         {formatTimelineTime(razorHoverMs)}
                       </span>
                     </div>
-                    <div className="h-full w-px bg-destructive shadow-[0_0_6px_rgba(239,68,68,0.8)]" />
+                    <div className="h-full w-px bg-destructive shadow-xs" />
                   </div>
                 ) : null}
 
@@ -872,11 +1019,16 @@ export function TimelineLanes({
                   playheadMs={view.playheadMs}
                   pixelsPerMs={pixelsPerMs}
                   timelineHeight={contentHeight}
+                  durationMs={view.durationMs}
                   isPlaying={view.isPlaying}
                   getTimelineTime={timelineTimeFromClientX}
                   onSeek={onSeek}
                   onPause={onPause}
-                  onDeselectAll={onDeselectAll}
+                  snapTargets={snapTargets}
+                  snapEnabled={view.snapEnabled}
+                  snapThresholdMs={view.snapThresholdMs}
+                  onSnapGuide={setSnapGuide}
+                  isSplitTool={tool === "split"}
                 />
 
                 {/* Virtualized Track Rows */}
@@ -977,39 +1129,52 @@ export function TimelineLanes({
                             })
                         : null}
 
-                      {visibleClips.map((clip) => (
-                        <TimelineClipItem
-                          key={clip.id}
-                          clip={clip}
-                          track={track}
-                          height={virtualTrack.size}
-                          pixelsPerMs={pixelsPerMs}
-                          selected={selectedClipIds.has(clip.id)}
-                          tool={tool}
-                          playheadMs={view.playheadMs}
-                          frameMs={Math.max(1, Math.round(1000 / Math.max(1, timeline.canvas.fps)))}
-                          collapsed={view.collapsedTrackIds.includes(track.id)}
-                          thumbnailManifest={trackThumbnailData}
-                          spriteUrl={trackSpriteUrl}
-                          visibleStartMs={visibleStartMs}
-                          visibleEndMs={visibleEndMs}
-                          waveformResources={waveformResources}
-                          snapTargets={snapTargets}
-                          snapEnabled={view.snapEnabled}
-                          snapThresholdMs={view.snapThresholdMs}
-                          onSelectClip={onSelectClip}
-                          onMoveClip={onMoveClip}
-                          onTrimClip={onTrimClip}
-                          getTimelineTime={timelineTimeFromClientX}
-                          onSnapGuide={onSnapGuideCallback}
-                          onSpriteError={onSpriteError}
-                          onDuplicateClip={onDuplicateClip}
-                          onSplitClip={onSplitClip}
-                          onDeleteClip={onDeleteClip}
-                          onCursorRangeAction={onCursorRangeAction}
-                          onUpdateAudio={onUpdateClipAudio}
-                        />
-                      ))}
+                      {(() => {
+                        const allowsOverlap = trackAllowsOverlap(track)
+                        const sublaneMap = allowsOverlap ? computeClipSublanes(visibleClips) : null
+                        return visibleClips.map((clip) => {
+                          const sublane = sublaneMap?.get(clip.id)
+                          return (
+                            <TimelineClipItem
+                              key={clip.id}
+                              clip={clip}
+                              track={track}
+                              height={virtualTrack.size}
+                              sublaneIndex={sublane?.index}
+                              sublaneCount={sublane?.count}
+                              pixelsPerMs={pixelsPerMs}
+                              selected={selectedClipIds.has(clip.id)}
+                              tool={tool}
+                              playheadMs={view.playheadMs}
+                              frameMs={Math.max(
+                                1,
+                                Math.round(1000 / Math.max(1, timeline.canvas.fps)),
+                              )}
+                              collapsed={view.collapsedTrackIds.includes(track.id)}
+                              thumbnailManifest={trackThumbnailData}
+                              spriteUrl={trackSpriteUrl}
+                              visibleStartMs={visibleStartMs}
+                              visibleEndMs={visibleEndMs}
+                              waveformResources={waveformResources}
+                              snapTargets={snapTargets}
+                              snapEnabled={view.snapEnabled}
+                              snapThresholdMs={view.snapThresholdMs}
+                              onSelectClip={onSelectClip}
+                              onMoveClip={onMoveClip}
+                              onTrimClip={onTrimClip}
+                              getTimelineTime={timelineTimeFromClientX}
+                              onSnapGuide={onSnapGuideCallback}
+                              onSpriteError={onSpriteError}
+                              onDuplicateClip={onDuplicateClip}
+                              onSplitClip={onSplitClip}
+                              onDeleteClip={onDeleteClip}
+                              onSeek={onSeek}
+                              onCursorRangeAction={onCursorRangeAction}
+                              onUpdateAudio={onUpdateClipAudio}
+                            />
+                          )
+                        })
+                      })()}
                     </div>
                   )
                 })}

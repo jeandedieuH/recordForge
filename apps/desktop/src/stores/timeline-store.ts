@@ -211,7 +211,17 @@ function reconcileSelection(
   if (!selection) return null
   if (selection.kind === "clip") {
     const found = findClip(timeline, selection.primaryClipId)
-    if (!found) return null
+    if (!found) {
+      const validIds = selection.clipIds.filter((id) => findClip(timeline, id))
+      if (validIds.length > 0) {
+        return {
+          ...selection,
+          primaryClipId: validIds[0],
+          clipIds: validIds,
+        }
+      }
+      return null
+    }
     const validIds = selection.clipIds.filter((id) => findClip(timeline, id))
     if (validIds.length === 0) return { ...selection, clipIds: [selection.primaryClipId] }
     return { ...selection, clipIds: validIds }

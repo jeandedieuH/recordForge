@@ -20,6 +20,7 @@ interface AudioTrackPreviewProps {
   frameMs: number
   assetPaths?: Record<string, string>
   workDir?: string | null
+  isVideoSeeking?: boolean
 }
 
 function fadeMultiplier(clip: AudioClip, playheadMs: number): number {
@@ -72,6 +73,7 @@ export function AudioTrackPreview({
   frameMs,
   assetPaths = {},
   workDir,
+  isVideoSeeking = false,
 }: AudioTrackPreviewProps) {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
   const previewTracks = useMemo(
@@ -83,7 +85,8 @@ export function AudioTrackPreview({
     for (const previewTrack of previewTracks) {
       const element = audioRefs.current[previewTrack.id]
       if (!element) continue
-      const canPlay = !previewTrack.muted && previewTrack.volume > 0
+      const isTrackActive = !previewTrack.muted && previewTrack.volume > 0
+      const canPlay = isTrackActive && !isVideoSeeking
       const decision = computePreviewMediaSync({
         kind: "audio",
         clip: previewTrack.clip,
@@ -97,7 +100,7 @@ export function AudioTrackPreview({
         1,
         previewTrack.volume * fadeMultiplier(previewTrack.clip, playheadMs),
       )
-      element.muted = !canPlay
+      element.muted = previewTrack.muted
       element.preservesPitch = decision.preservesPitch
       if (Math.abs(element.playbackRate - decision.playbackRate) > 0.001) {
         element.playbackRate = decision.playbackRate
@@ -111,7 +114,7 @@ export function AudioTrackPreview({
         element.pause()
       }
     }
-  }, [frameMs, isPlaying, playbackRate, playheadMs, previewTracks])
+  }, [frameMs, isPlaying, isVideoSeeking, playbackRate, playheadMs, previewTracks])
 
   return (
     <div className="hidden" aria-hidden>

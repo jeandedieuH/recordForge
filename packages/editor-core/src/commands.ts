@@ -1039,23 +1039,51 @@ function applySplitClip(
     return { ok: false, error: editorError("invalid_split", "Split time is outside the clip") }
   }
 
-  const mappedSplitSource = timelineToSource(clip, command.splitTimeMs)
-  if (mappedSplitSource === null) {
-    return {
-      ok: false,
-      error: editorError("invalid_split", "Split point is outside the source range"),
+  const isSynthetic =
+    clip.sourceOutMs <= clip.sourceInMs ||
+    clip.kind === "annotation" ||
+    clip.kind === "text" ||
+    clip.kind === "mask" ||
+    clip.kind === "image"
+
+  let leftDuration: number
+  let rightDuration: number
+  let leftSourceIn = clip.sourceInMs
+  let leftSourceOut: number
+  let rightSourceIn: number
+  let rightSourceOut = clip.sourceOutMs
+
+  if (isSynthetic) {
+    const offsetMs = command.splitTimeMs - clip.startMs
+    leftDuration = offsetMs
+    rightDuration = clip.durationMs - offsetMs
+    leftSourceIn = 0
+    leftSourceOut = offsetMs
+    rightSourceIn = 0
+    rightSourceOut = rightDuration
+  } else {
+    const mappedSplitSource = timelineToSource(clip, command.splitTimeMs)
+    if (mappedSplitSource === null) {
+      return {
+        ok: false,
+        error: editorError("invalid_split", "Split point is outside the source range"),
+      }
     }
-  }
-  const splitSource = Math.round(mappedSplitSource)
-  if (splitSource <= clip.sourceInMs || splitSource >= clip.sourceOutMs) {
-    return {
-      ok: false,
-      error: editorError("invalid_split", "Split point is outside the source range"),
+    const splitSource = Math.round(mappedSplitSource)
+    if (splitSource <= clip.sourceInMs || splitSource >= clip.sourceOutMs) {
+      return {
+        ok: false,
+        error: editorError("invalid_split", "Split point is outside the source range"),
+      }
     }
+    leftDuration = command.splitTimeMs - clip.startMs
+    rightDuration = clip.durationMs - leftDuration
+    leftSourceIn = clip.sourceInMs
+    leftSourceOut = splitSource
+    rightSourceIn = splitSource
+    rightSourceOut = clip.sourceOutMs
   }
 
-  const leftDuration = Math.round((splitSource - clip.sourceInMs) / clip.speed)
-  const rightDuration = Math.round((clip.sourceOutMs - splitSource) / clip.speed)
   const leftClipId = command.leftClipId ?? `${clip.id}:split:${command.splitTimeMs}:left`
   const rightClipId = command.rightClipId ?? `${clip.id}:split:${command.splitTimeMs}:right`
 
@@ -1063,7 +1091,8 @@ function applySplitClip(
     ...clip,
     id: leftClipId,
     durationMs: leftDuration,
-    sourceOutMs: splitSource,
+    sourceInMs: leftSourceIn,
+    sourceOutMs: leftSourceOut,
   }
 
   const right: TimelineClip = {
@@ -1071,7 +1100,8 @@ function applySplitClip(
     id: rightClipId,
     startMs: command.splitTimeMs,
     durationMs: rightDuration,
-    sourceInMs: splitSource,
+    sourceInMs: rightSourceIn,
+    sourceOutMs: rightSourceOut,
   }
 
   const newClips = track.clips.filter((c) => c.id !== command.clipId).concat(left, right)
@@ -1086,7 +1116,7 @@ function applySplitAllClips(
   state: TimelineState,
   command: SplitAllClipsCommand,
 ): CommandResult<TimelineState> {
-  const splitTimeMs = command.splitTimeMs
+  const splitTimeMs = Math.round(command.splitTimeMs)
   const targetTrackIds = command.trackIds ? new Set(command.trackIds) : null
 
   let nextState = state
@@ -1128,13 +1158,42 @@ function applySplitAllClips(
         continue
       }
 
-      const mappedSplitSource = timelineToSource(clip, splitTimeMs)
-      if (mappedSplitSource === null) continue
-      const splitSource = Math.round(mappedSplitSource)
-      if (splitSource <= clip.sourceInMs || splitSource >= clip.sourceOutMs) continue
+      const isSynthetic =
+        clip.sourceOutMs <= clip.sourceInMs ||
+        clip.kind === "annotation" ||
+        clip.kind === "text" ||
+        clip.kind === "mask" ||
+        clip.kind === "image"
 
-      const leftDuration = Math.round((splitSource - clip.sourceInMs) / clip.speed)
-      const rightDuration = Math.round((clip.sourceOutMs - splitSource) / clip.speed)
+      let leftDuration: number
+      let rightDuration: number
+      let leftSourceIn = clip.sourceInMs
+      let leftSourceOut: number
+      let rightSourceIn: number
+      let rightSourceOut = clip.sourceOutMs
+
+      if (isSynthetic) {
+        const offsetMs = splitTimeMs - clip.startMs
+        leftDuration = offsetMs
+        rightDuration = clip.durationMs - offsetMs
+        leftSourceIn = 0
+        leftSourceOut = offsetMs
+        rightSourceIn = 0
+        rightSourceOut = rightDuration
+      } else {
+        const mappedSplitSource = timelineToSource(clip, splitTimeMs)
+        if (mappedSplitSource === null) continue
+        const splitSource = Math.round(mappedSplitSource)
+        if (splitSource <= clip.sourceInMs || splitSource >= clip.sourceOutMs) continue
+
+        leftDuration = splitTimeMs - clip.startMs
+        rightDuration = clip.durationMs - leftDuration
+        leftSourceIn = clip.sourceInMs
+        leftSourceOut = splitSource
+        rightSourceIn = splitSource
+        rightSourceOut = clip.sourceOutMs
+      }
+
       const leftClipId = `${clip.id}:split:${splitTimeMs}:left`
       const rightClipId = `${clip.id}:split:${splitTimeMs}:right`
 
@@ -1142,7 +1201,8 @@ function applySplitAllClips(
         ...clip,
         id: leftClipId,
         durationMs: leftDuration,
-        sourceOutMs: splitSource,
+        sourceInMs: leftSourceIn,
+        sourceOutMs: leftSourceOut,
       }
 
       const right: TimelineClip = {
@@ -1150,7 +1210,8 @@ function applySplitAllClips(
         id: rightClipId,
         startMs: splitTimeMs,
         durationMs: rightDuration,
-        sourceInMs: splitSource,
+        sourceInMs: rightSourceIn,
+        sourceOutMs: rightSourceOut,
       }
 
       updatedClips = updatedClips.filter((c) => c.id !== clip.id).concat(left, right)
@@ -2879,14 +2940,18 @@ export function createTrimClipCommand(
   }
 }
 
-export function createSplitClipCommand(clipId: string, splitTimeMs: number): CommandRecord {
+export function createSplitClipCommand(
+  clipId: string,
+  splitTimeMs: number,
+  options: { leftClipId?: string; rightClipId?: string } = {},
+): CommandRecord {
   return {
     kind: "split-clip",
     name: "Split clip",
     clipId,
-    splitTimeMs,
-    leftClipId: crypto.randomUUID(),
-    rightClipId: crypto.randomUUID(),
+    splitTimeMs: Math.round(splitTimeMs),
+    leftClipId: options.leftClipId ?? crypto.randomUUID(),
+    rightClipId: options.rightClipId ?? crypto.randomUUID(),
   }
 }
 
@@ -2897,7 +2962,7 @@ export function createSplitAllClipsCommand(
   return {
     kind: "split-all-clips",
     name: "Split all clips",
-    splitTimeMs,
+    splitTimeMs: Math.round(splitTimeMs),
     ...(trackIds ? { trackIds } : {}),
   }
 }
@@ -3037,14 +3102,18 @@ export function createAddCursorRangeCommand(
   }
 }
 
-export function createSplitCursorRangeCommand(rangeId: string, splitTimeMs: number): CommandRecord {
+export function createSplitCursorRangeCommand(
+  rangeId: string,
+  splitTimeMs: number,
+  options: { leftRangeId?: string; rightRangeId?: string } = {},
+): CommandRecord {
   return {
     kind: "split-cursor-range",
     name: "Split cursor range",
     rangeId,
-    splitTimeMs,
-    leftRangeId: crypto.randomUUID(),
-    rightRangeId: crypto.randomUUID(),
+    splitTimeMs: Math.round(splitTimeMs),
+    leftRangeId: options.leftRangeId ?? crypto.randomUUID(),
+    rightRangeId: options.rightRangeId ?? crypto.randomUUID(),
   }
 }
 
@@ -3170,7 +3239,7 @@ export function createSplitZoomSegmentCommand(
     kind: "split-zoom-segment",
     name: "Split zoom segment",
     segmentId,
-    splitTimeMs,
+    splitTimeMs: Math.round(splitTimeMs),
     leftSegmentId: crypto.randomUUID(),
     rightSegmentId: crypto.randomUUID(),
   }

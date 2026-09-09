@@ -121,6 +121,14 @@ describe("PlaybackClock", () => {
     expect(mapped?.timelineMs).toBe(15_000)
   })
 
+  it("falls back to matching clip when preferClipId does not span source time", () => {
+    const clock = createPlaybackClock(makeState(), { fps: 30 })
+    // source 12_000 is only in clip-b (10_000 - 15_000). Even if caller preferred clip-a, it shouldn't return null.
+    const mapped = clock.mapSourceToTimeline(12_000, { preferClipId: "clip-a" })
+    expect(mapped?.clipId).toBe("clip-b")
+    expect(mapped?.timelineMs).toBe(17_000)
+  })
+
   it("finds the next clip boundary after a position", () => {
     const clock = createPlaybackClock(makeState(), { fps: 30 })
     expect(clock.nextBoundary(2_000)).toMatchObject({
@@ -299,5 +307,20 @@ describe("PlaybackClock", () => {
     expect(paused.shouldPause).toBe(true)
     expect(outside.shouldPlay).toBe(false)
     expect(outside.shouldPause).toBe(true)
+  })
+
+  it("maps source time with boundary tolerance near clip edges without returning null", () => {
+    const clock = createPlaybackClock(makeState(), { fps: 30 })
+    // sourceMs slightly before clip start (-5ms vs sourceInMs 0)
+    const startMapped = clock.mapSourceToTimeline(-5)
+    expect(startMapped).not.toBeNull()
+    expect(startMapped?.clipId).toBe("clip-a")
+    expect(startMapped?.timelineMs).toBe(0)
+
+    // sourceMs slightly after clip-a sourceOut (10_005ms vs sourceOutMs 10_000)
+    const endMapped = clock.mapSourceToTimeline(10_005, { preferClipId: "clip-a" })
+    expect(endMapped).not.toBeNull()
+    expect(endMapped?.clipId).toBe("clip-a")
+    expect(endMapped?.timelineMs).toBe(10_000)
   })
 })

@@ -26,6 +26,8 @@ export const TimelineMinimap = memo(function TimelineMinimap({
 }: TimelineMinimapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [isDraggingLens, setIsDraggingLens] = useState(false)
+  const [hoverTimeMs, setHoverTimeMs] = useState<number | null>(null)
+  const [hoverLeftPercent, setHoverLeftPercent] = useState<number | null>(null)
   const dragStartRef = useRef<{ clientX: number; initialScrollMs: number } | null>(null)
 
   const effectiveDuration = Math.max(1, durationMs)
@@ -50,6 +52,10 @@ export const TimelineMinimap = memo(function TimelineMinimap({
       else if (track.kind === "audio") colorClass = "bg-track-mic/70"
       else if (track.kind === "captions") colorClass = "bg-track-captions/70"
       else if (track.kind === "effects") colorClass = "bg-warning/70"
+      else if (track.kind === "annotations") colorClass = "bg-track-annotation/70"
+      else if (track.kind === "titles") colorClass = "bg-track-title/70"
+      else if (track.kind === "graphics") colorClass = "bg-track-graphic/70"
+      else if (track.kind === "overlay") colorClass = "bg-secondary/70"
 
       return track.clips.map((clip) => {
         const left = (clip.startMs / effectiveDuration) * 100
@@ -74,12 +80,12 @@ export const TimelineMinimap = memo(function TimelineMinimap({
   }, [timeline.zoomSegments, effectiveDuration])
 
   const getTimeFromClientX = useCallback(
-    (clientX: number): number => {
+    (clientX: number): { timeMs: number; percent: number } => {
       const container = containerRef.current
-      if (!container) return 0
+      if (!container) return { timeMs: 0, percent: 0 }
       const rect = container.getBoundingClientRect()
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
-      return ratio * effectiveDuration
+      return { timeMs: ratio * effectiveDuration, percent: ratio * 100 }
     },
     [effectiveDuration],
   )
@@ -88,10 +94,22 @@ export const TimelineMinimap = memo(function TimelineMinimap({
   function handleContainerClick(e: React.MouseEvent<HTMLDivElement>) {
     const target = e.target as HTMLElement
     if (target.closest("[data-minimap-lens]")) return
-    const targetTimeMs = getTimeFromClientX(e.clientX)
-    const nextScroll = Math.max(0, targetTimeMs - visibleSpanMs / 2)
+    const { timeMs } = getTimeFromClientX(e.clientX)
+    const nextScroll = Math.max(0, timeMs - visibleSpanMs / 2)
     onSetScrollMs(nextScroll)
-    onSeek(targetTimeMs)
+    onSeek(timeMs)
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (isDraggingLens) return
+    const { timeMs, percent } = getTimeFromClientX(e.clientX)
+    setHoverTimeMs(timeMs)
+    setHoverLeftPercent(percent)
+  }
+
+  function handlePointerLeave() {
+    setHoverTimeMs(null)
+    setHoverLeftPercent(null)
   }
 
   // Dragging the lens pans the timeline horizontally
@@ -101,6 +119,8 @@ export const TimelineMinimap = memo(function TimelineMinimap({
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
     setIsDraggingLens(true)
+    setHoverTimeMs(null)
+    setHoverLeftPercent(null)
     dragStartRef.current = {
       clientX: e.clientX,
       initialScrollMs: visibleStartMs,
@@ -130,6 +150,27 @@ export const TimelineMinimap = memo(function TimelineMinimap({
     }
   }
 
+  function handleLensKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    const stepMs = e.shiftKey ? visibleSpanMs : Math.max(500, visibleSpanMs * 0.25)
+    if (e.key === "ArrowLeft" || e.key === "PageUp") {
+      e.preventDefault()
+      e.stopPropagation()
+      onSetScrollMs(Math.max(0, visibleStartMs - stepMs))
+    } else if (e.key === "ArrowRight" || e.key === "PageDown") {
+      e.preventDefault()
+      e.stopPropagation()
+      onSetScrollMs(Math.min(effectiveDuration - visibleSpanMs, visibleStartMs + stepMs))
+    } else if (e.key === "Home") {
+      e.preventDefault()
+      e.stopPropagation()
+      onSetScrollMs(0)
+    } else if (e.key === "End") {
+      e.preventDefault()
+      e.stopPropagation()
+      onSetScrollMs(Math.max(0, effectiveDuration - visibleSpanMs))
+    }
+  }
+
   return (
     <div
       ref={containerRef}
@@ -140,6 +181,8 @@ export const TimelineMinimap = memo(function TimelineMinimap({
         className,
       )}
       onClick={handleContainerClick}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
     >
       {/* Inner Track Lanes Micro-Canvas */}
       <div className="relative h-3.5 w-full rounded bg-surface/80 overflow-hidden border border-border/40">
@@ -177,9 +220,21 @@ export const TimelineMinimap = memo(function TimelineMinimap({
           )
         })}
 
+        {/* Hover Needle & Floating Timecode Badge */}
+        {hoverLeftPercent !== null && hoverTimeMs !== null && !isDraggingLens ? (
+          <div
+            className="pointer-events-none absolute inset-y-0 z-15 w-px -translate-x-1/2 bg-foreground/50 border-l border-dashed border-foreground/70"
+            style={{ left: `${hoverLeftPercent}%` }}
+          >
+            <div className="absolute -top-5 left-1/2 -translate-x-1/2 rounded bg-surface border border-border/80 px-1 py-0.2 font-mono text-[8px] font-semibold text-foreground shadow-e1 whitespace-nowrap">
+              {formatTimelineTime(hoverTimeMs)}
+            </div>
+          </div>
+        ) : null}
+
         {/* Micro Playhead Needle */}
         <div
-          className="absolute inset-y-0 z-20 w-0.5 -translate-x-1/2 bg-white shadow-[0_0_4px_rgba(255,255,255,0.9)] pointer-events-none"
+          className="absolute inset-y-0 z-20 w-0.5 -translate-x-1/2 bg-foreground shadow-xs pointer-events-none"
           style={{ left: `${playheadPercent}%` }}
         />
 
@@ -187,12 +242,17 @@ export const TimelineMinimap = memo(function TimelineMinimap({
         <div
           data-minimap-lens
           role="slider"
-          aria-label="Draggable timeline viewport lens"
+          aria-label="Timeline viewport position"
+          aria-valuenow={Math.round(visibleStartMs)}
+          aria-valuemin={0}
+          aria-valuemax={Math.round(effectiveDuration)}
+          aria-valuetext={`${formatTimelineTime(visibleStartMs)} to ${formatTimelineTime(visibleEndMs)}`}
           tabIndex={0}
+          onKeyDown={handleLensKeyDown}
           className={cn(
-            "absolute inset-y-0 z-15 rounded border-2 border-primary bg-primary/25 backdrop-blur-xs transition-shadow cursor-grab active:cursor-grabbing",
+            "absolute inset-y-0 z-18 rounded border-2 border-primary bg-primary/25 backdrop-blur-xs transition-shadow cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
             isDraggingLens
-              ? "border-primary shadow-[0_0_10px_rgba(9,77,178,0.5)] ring-1 ring-primary"
+              ? "border-primary shadow-e2 ring-1 ring-primary"
               : "hover:border-primary/90",
           )}
           style={{ left: `${lensLeftPercent}%`, width: `${lensWidthPercent}%` }}

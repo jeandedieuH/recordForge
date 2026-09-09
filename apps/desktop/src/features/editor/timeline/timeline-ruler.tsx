@@ -9,7 +9,7 @@ import {
   cn,
 } from "@recordforge/ui"
 
-interface TimelineRulerProps {
+export interface TimelineRulerProps {
   timelineWidth: number
   pixelsPerMs: number
   visibleStartMs: number
@@ -21,8 +21,6 @@ interface TimelineRulerProps {
   zoomSegments?: ManualZoomSegment[]
   selectedZoomId: string | null
   isPlaying?: boolean
-  hoverTimeMs?: number | null
-  onHoverTimeChange?: (timeMs: number | null) => void
   getTimelineTime: (clientX: number) => number
   onSeek: (ms: number) => void
   onPause?: () => void
@@ -52,6 +50,12 @@ export function getVisibleTickInterval(pixelsPerMs: number): number {
   )
 }
 
+/**
+ * Production-ready timeline ruler.
+ * Note: Playhead scrubbing from the ruler is intentionally removed to avoid accidental
+ * jumps and distracting hover needles. Playhead scrubbing is performed directly via
+ * the Playhead handle, keyboard navigation, minimap, or transport controls.
+ */
 export const TimelineRuler = memo(function TimelineRuler({
   timelineWidth,
   pixelsPerMs,
@@ -59,13 +63,11 @@ export const TimelineRuler = memo(function TimelineRuler({
   visibleEndMs,
   durationMs,
   tickInterval,
-  markers,
+  markers = [],
   selectedMarkerId,
   zoomSegments = [],
   selectedZoomId,
   isPlaying,
-  hoverTimeMs: externalHoverTimeMs,
-  onHoverTimeChange,
   getTimelineTime,
   onSeek,
   onPause,
@@ -73,15 +75,9 @@ export const TimelineRuler = memo(function TimelineRuler({
   onDeleteMarker,
   onAddMarkerAtTime,
   onSelectZoom,
-  onDeselectAll,
 }: TimelineRulerProps) {
   const rulerRef = useRef<HTMLDivElement>(null)
-  const [isScrubbing, setIsScrubbing] = useState(false)
-  const [internalHoverTimeMs, setInternalHoverTimeMs] = useState<number | null>(null)
-  const [rulerContextMenuTimeMs, setRulerContextMenuTimeMs] = useState<number | null>(null)
-
-  const activeHoverTimeMs =
-    externalHoverTimeMs !== undefined ? externalHoverTimeMs : internalHoverTimeMs
+  const [contextMenuTimeMs, setContextMenuTimeMs] = useState<number | null>(null)
 
   // Sub-tick subdivisions: 5 minor divisions per major tick
   const minorInterval = tickInterval / 5
@@ -105,7 +101,7 @@ export const TimelineRuler = memo(function TimelineRuler({
       }
 
       // Add minor sub-ticks if spacing permits
-      if (minorInterval * pixelsPerMs >= 10) {
+      if (minorInterval * pixelsPerMs >= 12) {
         for (let j = 1; j < 5; j++) {
           const minorTime = majorTime + j * minorInterval
           if (minorTime < durationMs && minorTime >= visibleStartMs && minorTime <= visibleEndMs) {
@@ -121,49 +117,45 @@ export const TimelineRuler = memo(function TimelineRuler({
     return ticks
   }, [durationMs, minorInterval, pixelsPerMs, tickInterval, visibleEndMs, visibleStartMs])
 
-  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+  function handleRulerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0) return
     const target = e.target as HTMLElement | null
     if (
       target?.closest(
-        "[data-timeline-marker], [data-timeline-zoom-pill], [role='menu'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-radix-menu-content], [data-radix-popper-content-wrapper]",
+        "[data-timeline-marker], [data-timeline-zoom-pill], button, [role='menuitem']",
       )
-    )
+    ) {
       return
+    }
+    e.stopPropagation()
 
-    e.currentTarget.setPointerCapture(e.pointerId)
-    setIsScrubbing(true)
     if (isPlaying && onPause) {
       onPause()
     }
-    const timeMs = getTimelineTime(e.clientX)
+
+    const timeMs = Math.max(0, Math.min(durationMs, Math.round(getTimelineTime(e.clientX))))
     onSeek(timeMs)
-    onDeselectAll?.()
-  }
 
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    const timeMs = getTimelineTime(e.clientX)
-    if (isScrubbing) {
-      onSeek(timeMs)
-    }
-    setInternalHoverTimeMs(timeMs)
-    onHoverTimeChange?.(timeMs)
-  }
-
-  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (isScrubbing) {
-      setIsScrubbing(false)
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId)
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (isPlaying && onPause) {
+        onPause()
       }
+      const currentTimeMs = Math.max(
+        0,
+        Math.min(durationMs, Math.round(getTimelineTime(moveEvent.clientX))),
+      )
+      onSeek(currentTimeMs)
     }
-  }
 
-  function handlePointerLeave() {
-    if (!isScrubbing) {
-      setInternalHoverTimeMs(null)
-      onHoverTimeChange?.(null)
+    const handlePointerUp = () => {
+      window.removeEventListener("pointermove", handlePointerMove)
+      window.removeEventListener("pointerup", handlePointerUp)
+      window.removeEventListener("pointercancel", handlePointerUp)
     }
+
+    window.addEventListener("pointermove", handlePointerMove)
+    window.addEventListener("pointerup", handlePointerUp)
+    window.addEventListener("pointercancel", handlePointerUp)
   }
 
   function handleDoubleClick(e: React.MouseEvent<HTMLDivElement>) {
@@ -176,49 +168,34 @@ export const TimelineRuler = memo(function TimelineRuler({
   return (
     <div
       ref={rulerRef}
-      className="sticky top-0 z-30 select-none border-b border-border/80 bg-surface-dim/95 backdrop-blur-md cursor-pointer"
+      data-timeline-ruler
+      className="sticky top-0 z-30 select-none border-b border-border/80 bg-surface-dim/95 backdrop-blur-md cursor-pointer transition-colors duration-fast"
       style={{ width: `${timelineWidth}px` }}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      onPointerLeave={handlePointerLeave}
+      onPointerDown={handleRulerPointerDown}
       onDoubleClick={handleDoubleClick}
-      role="presentation"
+      role="region"
+      aria-label="Timeline timecode ruler and markers"
     >
-      {/* Top Section: Ruler with subpixel tick marks and ContextMenu */}
+      {/* Top Section: High-Precision Time Ticks & Context Menu */}
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
-            className="relative h-7 border-b border-border/40"
+            className="relative h-7 border-b border-border/40 overflow-hidden"
             onContextMenu={(e) => {
               const target = e.target as HTMLElement | null
               if (target?.closest("[data-timeline-marker], [data-timeline-zoom-pill]")) return
               const timeMs = getTimelineTime(e.clientX)
-              setRulerContextMenuTimeMs(Math.round(timeMs))
+              setContextMenuTimeMs(Math.round(timeMs))
             }}
           >
-            {/* Playhead Hover Ghost Needle on Ruler */}
-            {activeHoverTimeMs !== null && !isScrubbing ? (
-              <div
-                className="pointer-events-none absolute top-0 bottom-0 z-10 w-px -translate-x-1/2 bg-primary/40 border-l border-dashed border-primary/60"
-                style={{ left: `${activeHoverTimeMs * pixelsPerMs}px` }}
-              >
-                {/* Floating Hover Timecode Tooltip */}
-                <div className="absolute -top-6 left-1/2 -translate-x-1/2 rounded bg-surface border border-border/80 px-1.5 py-0.2 font-mono text-[9px] font-semibold text-foreground shadow-e1 whitespace-nowrap">
-                  {formatTimelineTime(activeHoverTimeMs)}
-                </div>
-              </div>
-            ) : null}
-
             {visibleTicks.map(({ timeMs, left, isMajor }) =>
               isMajor ? (
                 <div
                   key={`major-${timeMs}`}
-                  className="absolute bottom-0 flex flex-col items-center -translate-x-1/2"
+                  className="pointer-events-none absolute bottom-0 flex flex-col items-center -translate-x-1/2"
                   style={{ left: `${left}px` }}
                 >
-                  <span className="font-mono text-[9px] font-medium tabular-nums text-subtle-foreground">
+                  <span className="font-mono text-[9px] font-medium tabular-nums text-subtle-foreground/90 tracking-tight select-none">
                     {formatTimelineTime(timeMs)}
                   </span>
                   <div className="h-2 w-px bg-border-strong" />
@@ -226,29 +203,28 @@ export const TimelineRuler = memo(function TimelineRuler({
               ) : (
                 <div
                   key={`minor-${timeMs}`}
-                  className="absolute bottom-0 h-1 w-px -translate-x-1/2 bg-border"
+                  className="pointer-events-none absolute bottom-0 h-1 w-px -translate-x-1/2 bg-border/60"
                   style={{ left: `${left}px` }}
                 />
               ),
             )}
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent>
+        <ContextMenuContent className="bg-surface border-border shadow-e2">
           <ContextMenuItem
             onSelect={() => {
-              if (rulerContextMenuTimeMs !== null) {
-                onAddMarkerAtTime(rulerContextMenuTimeMs)
+              if (contextMenuTimeMs !== null) {
+                onAddMarkerAtTime(contextMenuTimeMs)
               }
             }}
           >
-            <BookmarkPlus className="size-3.5 mr-2" /> Add marker here (
-            {formatTimelineTime(rulerContextMenuTimeMs ?? 0)})
+            <BookmarkPlus className="size-3.5 mr-2 text-primary" /> Add marker here (
+            {formatTimelineTime(contextMenuTimeMs ?? 0)})
           </ContextMenuItem>
           <ContextMenuItem
             onSelect={() => {
-              if (rulerContextMenuTimeMs !== null) {
-                onSeek(rulerContextMenuTimeMs)
-                onDeselectAll?.()
+              if (contextMenuTimeMs !== null) {
+                onSeek(contextMenuTimeMs)
               }
             }}
           >
@@ -258,7 +234,7 @@ export const TimelineRuler = memo(function TimelineRuler({
       </ContextMenu>
 
       {/* Bottom Section: Markers and Zoom Segment Overview Lane */}
-      <div className="relative h-6 overflow-hidden bg-surface-container-low/50">
+      <div className="relative h-6 overflow-hidden bg-surface-container-low/40">
         {/* Render Markers */}
         {markers
           .filter(
@@ -279,7 +255,7 @@ export const TimelineRuler = memo(function TimelineRuler({
                   type="button"
                   data-timeline-marker
                   className={cn(
-                    "group absolute top-0.5 flex h-5 max-w-36 -translate-x-1/2 items-center gap-1.5 rounded-full border px-2 text-[10px] font-medium transition-all duration-fast focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary shadow-xs",
+                    "group absolute top-0.5 flex h-5 max-w-36 -translate-x-1/2 items-center gap-1.5 rounded-full border px-2 text-[10px] font-medium transition-all duration-fast focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary shadow-xs cursor-pointer",
                     selectedMarkerId === marker.id
                       ? "border-primary bg-primary/25 text-foreground shadow-xs ring-1 ring-primary"
                       : "border-border/80 bg-surface/95 text-muted-foreground hover:border-primary/60 hover:bg-surface hover:text-foreground",
@@ -304,8 +280,9 @@ export const TimelineRuler = memo(function TimelineRuler({
                   <span className="truncate">{marker.label}</span>
                 </button>
               </ContextMenuTrigger>
-              <ContextMenuContent>
+              <ContextMenuContent className="bg-surface border-border shadow-e2">
                 <ContextMenuItem onSelect={() => onSeek(marker.timeMs)}>
+                  <Crosshair className="size-3.5 mr-2" />
                   Go to marker ({formatTimelineTime(marker.timeMs)})
                 </ContextMenuItem>
                 <ContextMenuItem
@@ -332,7 +309,7 @@ export const TimelineRuler = memo(function TimelineRuler({
               data-timeline-zoom-pill
               aria-label={`Zoom segment ${segment.scale}x`}
               className={cn(
-                "absolute bottom-0.5 h-1.5 rounded-full transition-all duration-fast shadow-xs",
+                "absolute bottom-0.5 h-1.5 rounded-full transition-all duration-fast shadow-xs cursor-pointer",
                 selectedZoomId === segment.id
                   ? "bg-primary shadow-xs ring-1 ring-primary"
                   : "bg-primary/60 hover:bg-primary",

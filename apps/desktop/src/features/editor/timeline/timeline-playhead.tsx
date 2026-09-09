@@ -1,29 +1,41 @@
 import { memo, useState } from "react"
 import { formatTimelineTime } from "./timeline-ruler"
+import { snapTime, type SnapTarget } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
 
-interface TimelinePlayheadProps {
+export interface TimelinePlayheadProps {
   playheadMs: number
   pixelsPerMs: number
   timelineHeight: number
+  durationMs?: number
   isPlaying?: boolean
   getTimelineTime: (clientX: number) => number
   onSeek: (ms: number) => void
   onPause?: () => void
-  onDeselectAll?: () => void
+  snapTargets?: SnapTarget[]
+  snapEnabled?: boolean
+  snapThresholdMs?: number
+  onSnapGuide?: (target: SnapTarget | null) => void
+  isSplitTool?: boolean
 }
 
 export const TimelinePlayhead = memo(function TimelinePlayhead({
   playheadMs,
   pixelsPerMs,
   timelineHeight,
+  durationMs,
   isPlaying,
   getTimelineTime,
   onSeek,
   onPause,
-  onDeselectAll,
+  snapTargets,
+  snapEnabled = true,
+  snapThresholdMs = 120,
+  onSnapGuide,
+  isSplitTool = false,
 }: TimelinePlayheadProps) {
   const [isDragging, setIsDragging] = useState(false)
+  const [snappedLabel, setSnappedLabel] = useState<string | null>(null)
   const left = Math.round(playheadMs * pixelsPerMs)
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
@@ -32,28 +44,95 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
     setIsDragging(true)
+
     if (isPlaying && onPause) {
       onPause()
     }
-    const timeMs = getTimelineTime(e.clientX)
-    onSeek(timeMs)
-    onDeselectAll?.()
+
+    const rawMs = getTimelineTime(e.clientX)
+    if (snapTargets && snapEnabled && !e.altKey) {
+      const snap = snapTime(rawMs, snapTargets, {
+        enabled: true,
+        thresholdMs: snapThresholdMs,
+      })
+      if (snap.snapped) {
+        onSnapGuide?.(snap.target)
+        setSnappedLabel(snap.target?.label ?? null)
+        onSeek(snap.timeMs)
+        return
+      }
+    }
+
+    onSnapGuide?.(null)
+    setSnappedLabel(null)
+    onSeek(rawMs)
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     if (!isDragging) return
     e.stopPropagation()
     e.preventDefault()
-    const timeMs = getTimelineTime(e.clientX)
-    onSeek(timeMs)
+
+    const rawMs = getTimelineTime(e.clientX)
+    if (snapTargets && snapEnabled && !e.altKey) {
+      const snap = snapTime(rawMs, snapTargets, {
+        enabled: true,
+        thresholdMs: snapThresholdMs,
+      })
+      if (snap.snapped) {
+        onSnapGuide?.(snap.target)
+        setSnappedLabel(snap.target?.label ?? null)
+        onSeek(snap.timeMs)
+        return
+      }
+    }
+
+    onSnapGuide?.(null)
+    setSnappedLabel(null)
+    onSeek(rawMs)
   }
 
   function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
     if (isDragging) {
       setIsDragging(false)
+      setSnappedLabel(null)
+      onSnapGuide?.(null)
       if (e.currentTarget.hasPointerCapture(e.pointerId)) {
         e.currentTarget.releasePointerCapture(e.pointerId)
       }
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    const frameMs = 1000 / 30
+    if (e.key === "ArrowLeft") {
+      e.preventDefault()
+      e.stopPropagation()
+      const delta = e.shiftKey ? 1000 : frameMs
+      onSeek(Math.max(0, Math.round(playheadMs - delta)))
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault()
+      e.stopPropagation()
+      const delta = e.shiftKey ? 1000 : frameMs
+      const maxMs = durationMs ?? Number.MAX_SAFE_INTEGER
+      onSeek(Math.min(maxMs, Math.round(playheadMs + delta)))
+    } else if (e.key === "PageUp") {
+      e.preventDefault()
+      e.stopPropagation()
+      onSeek(Math.max(0, Math.round(playheadMs - 1000)))
+    } else if (e.key === "PageDown") {
+      e.preventDefault()
+      e.stopPropagation()
+      const maxMs = durationMs ?? Number.MAX_SAFE_INTEGER
+      onSeek(Math.min(maxMs, Math.round(playheadMs + 1000)))
+    } else if (e.key === "Home") {
+      e.preventDefault()
+      e.stopPropagation()
+      onSeek(0)
+    } else if (e.key === "End" && durationMs !== undefined) {
+      e.preventDefault()
+      e.stopPropagation()
+      onSeek(durationMs)
     }
   }
 
@@ -64,32 +143,55 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
         transform: `translate3d(${left}px, 0, 0)`,
         willChange: "transform",
       }}
-      aria-hidden
     >
       {/* Draggable Playhead Needle Head & Handle */}
       <div
-        className="pointer-events-auto absolute top-0 -left-3.5 z-50 flex cursor-grab active:cursor-grabbing flex-col items-center select-none"
+        data-timeline-playhead
+        className={cn(
+          "absolute top-0 -left-3.5 z-50 flex flex-col items-center select-none group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 focus-visible:ring-offset-surface-dim rounded-t-md",
+          isSplitTool
+            ? "pointer-events-none"
+            : "pointer-events-auto cursor-grab active:cursor-grabbing",
+        )}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        title="Drag playhead to scrub (Left/Right to step frame)"
+        onKeyDown={handleKeyDown}
+        title="Drag playhead to scrub timeline (Hold Alt to bypass snapping; Left/Right to step frame)"
+        role="slider"
+        tabIndex={0}
+        aria-label="Timeline playhead"
+        aria-valuenow={Math.round(playheadMs)}
+        aria-valuemin={0}
+        aria-valuemax={Math.max(0, Math.round(durationMs ?? 0))}
+        aria-valuetext={formatTimelineTime(playheadMs)}
       >
         {/* Floating Live Timecode Bubble when Dragging / Scrubbing */}
         {isDragging ? (
-          <div className="absolute -top-7 left-1/2 -translate-x-1/2 flex items-center rounded-full border border-primary/90 bg-surface/95 px-2.5 py-0.5 font-mono text-[10px] font-bold text-foreground shadow-e3 backdrop-blur-md whitespace-nowrap animate-in fade-in zoom-in-95">
-            <span className="text-primary mr-1">●</span>
+          <div className="absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1.5 rounded-full border border-primary/90 bg-surface/95 px-2.5 py-0.5 font-mono text-[10px] font-bold text-foreground shadow-e3 backdrop-blur-md whitespace-nowrap animate-in fade-in zoom-in-95 duration-fast">
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                snappedLabel ? "bg-warning animate-pulse" : "bg-primary",
+              )}
+            />
             <span>{formatTimelineTime(playheadMs)}</span>
+            {snappedLabel ? (
+              <span className="text-[9px] font-normal text-muted-foreground max-w-28 truncate">
+                · {snappedLabel}
+              </span>
+            ) : null}
           </div>
         ) : null}
 
-        {/* Sculpted Anodized Teardrop Handle */}
+        {/* Sculpted Precision Playhead Cap */}
         <div
           className={cn(
             "flex h-5 w-7 items-center justify-center rounded-t-md bg-gradient-to-b from-primary via-primary to-primary-hover text-white shadow-e2 transition-all duration-fast",
             isDragging
-              ? "scale-110 shadow-[0_0_14px_rgba(9,77,178,0.6)] ring-1 ring-white/50"
-              : "hover:scale-105 hover:shadow-[0_0_10px_rgba(9,77,178,0.4)]",
+              ? "scale-110 shadow-e3 ring-2 ring-primary ring-offset-1 ring-offset-surface-dim"
+              : "group-hover:scale-105 group-hover:shadow-e2",
           )}
           style={{
             clipPath: "polygon(0% 0%, 100% 0%, 100% 68%, 50% 100%, 0% 68%)",
@@ -104,8 +206,9 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
 
       {/* Laser-Illuminated High-Precision Guide Needle */}
       <div
-        className="absolute top-4 bottom-0 w-px -translate-x-1/2 bg-primary shadow-[0_0_8px_rgba(9,77,178,0.9),0_0_2px_rgba(56,189,248,0.8)]"
+        className="absolute top-4 bottom-0 w-px -translate-x-1/2 bg-primary shadow-xs"
         style={{ height: `${Math.max(timelineHeight, 200)}px` }}
+        aria-hidden
       />
     </div>
   )

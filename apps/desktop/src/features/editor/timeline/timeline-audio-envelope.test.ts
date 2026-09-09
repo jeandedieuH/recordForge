@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { AudioClip, AudioVolumeKeyframe } from "@recordforge/contracts"
-import { evaluateVolumeEnvelope } from "@recordforge/editor-core"
+import { computePreviewMediaSync, evaluateVolumeEnvelope } from "@recordforge/editor-core"
 
 function createAudioClip(partial?: Partial<AudioClip>): AudioClip {
   return {
@@ -76,5 +76,78 @@ describe("evaluateVolumeEnvelope", () => {
     expect(evaluateVolumeEnvelope(clip, 6000)).toBeCloseTo(1.6, 2)
     // After second keyframe
     expect(evaluateVolumeEnvelope(clip, 8000)).toBeCloseTo(1.6, 2)
+  })
+})
+
+describe("AudioTrackPreview playback sync and cut transition lockstep", () => {
+  it("holds audio preview when isVideoSeeking is true across a cut", () => {
+    const clip = createAudioClip({
+      startMs: 3000,
+      durationMs: 5000,
+      sourceInMs: 0,
+      sourceOutMs: 5000,
+    })
+
+    // When playing normally at start of clip B (playheadMs = 3000)
+    const normal = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 3000,
+      currentTimeMs: 0,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 33,
+    })
+    expect(normal.shouldPlay).toBe(true)
+
+    // When video is in a transition seek across a cut (isVideoSeeking is true):
+    const isVideoSeeking = true
+    const canPlay = !isVideoSeeking
+    const seeking = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 3000,
+      currentTimeMs: 0,
+      playbackRate: 1,
+      isPlaying: true && canPlay,
+      frameMs: 33,
+    })
+    expect(seeking.shouldPlay).toBe(false)
+    expect(seeking.shouldPause).toBe(true)
+  })
+
+  it("prevents audio drift repetition when audio resumes synchronously with video after cut", () => {
+    const clip = createAudioClip({
+      startMs: 3000,
+      durationMs: 5000,
+      sourceInMs: 0,
+      sourceOutMs: 5000,
+    })
+
+    // In sync (0ms drift): shouldSeek is false, clean playback continues without repeat
+    const inSync = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 3000,
+      currentTimeMs: 0,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 33,
+    })
+    expect(inSync.shouldSeek).toBe(false)
+    expect(inSync.shouldPlay).toBe(true)
+
+    // Broken behavior: audio drifted ahead by 2500ms while video was seek-thrashing
+    const drifted = computePreviewMediaSync({
+      kind: "audio",
+      clip,
+      playheadMs: 3000,
+      currentTimeMs: 2500,
+      playbackRate: 1,
+      isPlaying: true,
+      frameMs: 33,
+    })
+    expect(drifted.shouldSeek).toBe(true)
+    expect(drifted.targetSourceMs).toBe(0)
   })
 })

@@ -22,7 +22,7 @@ export const TimelineMarquee = memo(function TimelineMarquee({
 
   return (
     <div
-      className="pointer-events-none absolute z-20 rounded-md border border-primary/80 bg-primary/15 shadow-[0_0_12px_rgba(9,77,178,0.25)]"
+      className="pointer-events-none absolute z-20 rounded-md border border-primary/80 bg-primary/15 shadow-e2"
       style={{
         left: `${left}px`,
         width: `${width}px`,

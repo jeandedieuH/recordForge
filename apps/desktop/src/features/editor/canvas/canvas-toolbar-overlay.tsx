@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import type { CanvasAspectRatio } from "@recordforge/contracts"
 import { createUpdateCanvasCommand } from "@recordforge/editor-core"
 import { Button, cn } from "@recordforge/ui"
@@ -29,7 +29,28 @@ export function CanvasToolbarOverlay({ className }: CanvasToolbarOverlayProps) {
   const draftTimeline = useTimelineStore((state) => state.draftTimeline)
   const timeline = draftTimeline ?? engine?.history.present ?? null
   const execute = useTimelineStore((state) => state.execute)
-  const [isCollapsed, setIsCollapsed] = useState(false)
+  const selection = useTimelineStore((state) => state.view.selection)
+  const [userCollapsed, setUserCollapsed] = useState<boolean | null>(null)
+
+  const isOverlaySelected = useMemo(() => {
+    if (!selection || selection.kind !== "clip" || !timeline) return false
+    const ids =
+      selection.clipIds.length > 0
+        ? selection.clipIds
+        : selection.primaryClipId
+          ? [selection.primaryClipId]
+          : []
+    return timeline.tracks.some(
+      (t) =>
+        (t.kind === "titles" ||
+          t.kind === "annotations" ||
+          t.kind === "graphics" ||
+          t.kind === "overlay") &&
+        t.clips.some((c) => ids.includes(c.id)),
+    )
+  }, [selection, timeline])
+
+  const effectiveCollapsed = userCollapsed ?? isOverlaySelected
 
   if (!timeline) return null
 
@@ -71,17 +92,17 @@ export function CanvasToolbarOverlay({ className }: CanvasToolbarOverlayProps) {
   return (
     <div
       className={cn(
-        "pointer-events-auto absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1.5 rounded-full border border-border/70 bg-background/80 px-2 py-1 shadow-e3 backdrop-blur-md transition-all",
+        "pointer-events-auto absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 rounded-full border border-border/70 bg-background/80 px-2 py-1 shadow-e3 backdrop-blur-md transition-all",
         className,
       )}
       role="toolbar"
       aria-label="Direct canvas layout framing controls"
     >
-      {isCollapsed ? (
+      {effectiveCollapsed ? (
         <button
           type="button"
-          onClick={() => setIsCollapsed(false)}
-          className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+          onClick={() => setUserCollapsed(false)}
+          className="flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
           title="Expand canvas framing toolbar"
         >
           {getRatioIcon(currentRatio)}
@@ -152,7 +173,7 @@ export function CanvasToolbarOverlay({ className }: CanvasToolbarOverlayProps) {
             variant="ghost"
             size="sm"
             className="size-5 p-0 text-muted-foreground hover:text-foreground"
-            onClick={() => setIsCollapsed(true)}
+            onClick={() => setUserCollapsed(true)}
             title="Collapse toolbar"
             aria-label="Collapse toolbar"
           >

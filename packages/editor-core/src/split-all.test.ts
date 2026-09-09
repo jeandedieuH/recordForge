@@ -10,6 +10,7 @@ import {
 import {
   createEngine,
   createSplitAllClipsCommand,
+  createSplitClipCommand,
   executeCommand,
   undoCommand,
   redoCommand,
@@ -193,8 +194,12 @@ describe("split-all-clips command", () => {
     expect(overlayTrack.clips.length).toBe(2)
     expect(overlayTrack.clips[0].startMs).toBe(5_000)
     expect(overlayTrack.clips[0].durationMs).toBe(7_000) // 12000 - 5000
+    expect(overlayTrack.clips[0].sourceInMs).toBe(0)
+    expect(overlayTrack.clips[0].sourceOutMs).toBe(7_000)
     expect(overlayTrack.clips[1].startMs).toBe(12_000)
     expect(overlayTrack.clips[1].durationMs).toBe(8_000) // 20000 - 12000
+    expect(overlayTrack.clips[1].sourceInMs).toBe(0)
+    expect(overlayTrack.clips[1].sourceOutMs).toBe(8_000)
 
     // Zoom segment should also be split
     expect(present.zoomSegments?.length).toBe(2)
@@ -260,6 +265,141 @@ describe("split-all-clips command", () => {
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.error.code).toBe("no_clips_to_split")
+    }
+  })
+
+  it("splits synthetic overlay clips with sourceOutMs <= sourceInMs successfully", () => {
+    const state = makeMultiTrackState()
+    // Add a text clip with sourceInMs: 0, sourceOutMs: 0
+    state.tracks.push({
+      id: "track-titles",
+      kind: "titles",
+      name: "Titles",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "clip-title-1",
+          kind: "text",
+          assetId: "synthetic:text:1",
+          startMs: 2_000,
+          durationMs: 6_000,
+          sourceInMs: 0,
+          sourceOutMs: 0,
+          speed: 1,
+          primaryText: "Hello world",
+          x: 80,
+          y: 80,
+          width: 300,
+          height: 100,
+        } as any,
+      ],
+    })
+
+    const engine = createEngine(state)
+    const splitResult = executeCommand(engine, createSplitClipCommand("clip-title-1", 4_000))
+    expect(splitResult.ok).toBe(true)
+    if (!splitResult.ok) return
+
+    const titlesTrack = splitResult.value.history.present.tracks.find(
+      (t) => t.id === "track-titles",
+    )!
+    expect(titlesTrack.clips.length).toBe(2)
+    const [left, right] = titlesTrack.clips
+    expect(left.startMs).toBe(2_000)
+    expect(left.durationMs).toBe(2_000)
+    expect(right.startMs).toBe(4_000)
+    expect(right.durationMs).toBe(4_000)
+  })
+
+  it("splits synthetic overlay clips in split-all without error", () => {
+    const state = makeMultiTrackState()
+    state.tracks.push({
+      id: "track-titles",
+      kind: "titles",
+      name: "Titles",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips: [
+        {
+          id: "clip-title-2",
+          kind: "text",
+          assetId: "synthetic:text:2",
+          startMs: 2_000,
+          durationMs: 10_000,
+          sourceInMs: 0,
+          sourceOutMs: 0,
+          speed: 1,
+          primaryText: "Title 2",
+          x: 80,
+          y: 80,
+          width: 300,
+          height: 100,
+        } as any,
+      ],
+    })
+
+    const engine = createEngine(state)
+    const splitResult = executeCommand(engine, createSplitAllClipsCommand(5_000))
+    expect(splitResult.ok).toBe(true)
+    if (!splitResult.ok) return
+    const titlesTrack = splitResult.value.history.present.tracks.find(
+      (t) => t.id === "track-titles",
+    )!
+    expect(titlesTrack.clips.length).toBe(2)
+  })
+
+  it("splits clips with non-1.0 speed factor maintaining exact adjacent boundaries", () => {
+    const state = makeMultiTrackState()
+    const screenTrack = state.tracks.find((t) => t.id === "track-screen")!
+    screenTrack.clips[0] = {
+      ...screenTrack.clips[0],
+      startMs: 1_000,
+      durationMs: 8_000,
+      sourceInMs: 0,
+      sourceOutMs: 10_000,
+      speed: 1.25,
+    } as ScreenClip
+
+    const engine = createEngine(state)
+    const splitTimeMs = 3_501
+    const result = executeCommand(
+      engine,
+      createSplitClipCommand(screenTrack.clips[0].id, splitTimeMs),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const updatedTrack = result.value.history.present.tracks.find((t) => t.id === "track-screen")!
+    expect(updatedTrack.clips.length).toBe(2)
+    const [left, right] = updatedTrack.clips
+    expect(left.startMs).toBe(1_000)
+    expect(left.durationMs).toBe(2_501)
+    expect(left.startMs + left.durationMs).toBe(right.startMs)
+    expect(right.startMs).toBe(3_501)
+    expect(right.durationMs).toBe(8_000 - 2_501)
+    expect(left.durationMs + right.durationMs).toBe(8_000)
+  })
+
+  it("splits all clips with odd timestamps ensuring zero overlap failure", () => {
+    const state = makeMultiTrackState()
+    const engine = createEngine(state)
+    const splitTimeMs = 7_333
+    const result = executeCommand(engine, createSplitAllClipsCommand(splitTimeMs))
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    for (const track of result.value.history.present.tracks) {
+      if (track.kind === "screen" || track.kind === "audio") {
+        expect(track.clips.length).toBe(2)
+        const [left, right] = track.clips
+        expect(left.startMs + left.durationMs).toBe(right.startMs)
+        expect(right.startMs).toBe(splitTimeMs)
+      }
     }
   })
 })

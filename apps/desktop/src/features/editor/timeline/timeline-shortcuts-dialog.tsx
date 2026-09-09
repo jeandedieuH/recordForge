@@ -27,11 +27,14 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Playback & Navigation",
     items: [
       { description: "Play / Pause preview", keys: ["Space"] },
-      { description: "Rewind (0.5×) / Stop / Fast-Forward (1×)", keys: ["J", "K", "L"] },
+      { description: "Jump to previous edit / marker", keys: ["↑"] },
+      { description: "Jump to next edit / marker", keys: ["↓"] },
       { description: "Step backward 1 frame", keys: ["←"] },
       { description: "Step forward 1 frame", keys: ["→"] },
       { description: "Jump 1 second backward / forward", keys: ["Shift", "← / →"] },
       { description: "Jump to timeline start / end", keys: ["Home", "End"] },
+      { description: "Shuttle speed (Reverse / Pause / Forward)", keys: ["J", "K", "L"] },
+      { description: "Scrub playhead (magnetic snapping)", keys: ["Drag Playhead"] },
     ],
   },
   {

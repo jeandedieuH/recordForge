@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { getAnnotationShapePreset } from "@recordforge/editor-core"
 import { renderOverlayDisplayList } from "@recordforge/overlay-core"
 import {
@@ -15,12 +15,13 @@ function setupCanvas() {
     closePath: vi.fn(),
     ellipse: vi.fn(),
   }
-  vi.stubGlobal(
-    "Path2D",
-    vi.fn(function () {
-      return path
-    }),
-  )
+  const originalPath2D = (globalThis as unknown as { Path2D?: unknown }).Path2D
+  ;(globalThis as unknown as { Path2D: unknown }).Path2D = vi.fn(function () {
+    return path
+  })
+  const cleanup = () => {
+    ;(globalThis as unknown as { Path2D?: unknown }).Path2D = originalPath2D
+  }
   const context = {
     clearRect: vi.fn(),
     save: vi.fn(),
@@ -44,16 +45,14 @@ function setupCanvas() {
     height: 1080,
     getContext: () => context,
   } as unknown as HTMLCanvasElement
-  return { canvas, context, path }
+  return { canvas, context, path, cleanup }
 }
 
 describe("annotation drawing preview renderer", () => {
-  afterEach(() => vi.unstubAllGlobals())
-
   it.each(["line", "arrow", "circle", "rectangle", "rounded-rect"] as const)(
     "renders a %s draft using its actual shape and stroke settings",
     (type) => {
-      const { canvas, context, path } = setupCanvas()
+      const { canvas, context, path, cleanup } = setupCanvas()
       const preset = getAnnotationShapePreset(type)
       const bounds = { width: 1920, height: 1080 }
       const clip = createAnnotationDrawingClip(
@@ -88,6 +87,7 @@ describe("annotation drawing preview renderer", () => {
         expect(path.quadraticCurveTo).toHaveBeenCalledWith(300, 100, 300, 100 + radius)
         expect(path.ellipse).not.toHaveBeenCalled()
       }
+      cleanup()
     },
   )
 })

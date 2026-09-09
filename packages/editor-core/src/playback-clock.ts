@@ -188,20 +188,26 @@ export function createPlaybackClock(
     const track = screenTrack(state)
     if (!track) return null
 
+    const toleranceMs = frameMs * 0.5
     const candidates = track.clips
       .filter((clip) => {
         if (clip.assetId !== assetId) return false
-        if (mapOptions.preferClipId && clip.id !== mapOptions.preferClipId) return false
-        return sourceMs >= clip.sourceInMs && sourceMs <= clip.sourceOutMs
+        return (
+          sourceMs >= clip.sourceInMs - toleranceMs && sourceMs <= clip.sourceOutMs + toleranceMs
+        )
       })
       .sort((a, b) => a.startMs - b.startMs)
 
     if (candidates.length === 0) return null
-    const first = candidates[0]!
-    const timelineMs = sourceToClipTime(first, sourceMs)
+    const preferred = mapOptions.preferClipId
+      ? candidates.find((clip) => clip.id === mapOptions.preferClipId)
+      : null
+    const chosen = preferred ?? candidates[0]!
+    const clampedSourceMs = Math.max(chosen.sourceInMs, Math.min(chosen.sourceOutMs, sourceMs))
+    const timelineMs = sourceToClipTime(chosen, clampedSourceMs)
     if (timelineMs === null) return null
     return {
-      clipId: first.id,
+      clipId: chosen.id,
       timelineMs,
       unambiguous: candidates.length === 1,
     }

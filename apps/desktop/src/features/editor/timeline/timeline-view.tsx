@@ -86,6 +86,7 @@ import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-f
 import { TimelineLanes, type CursorRangeAction, type ZoomSegmentAction } from "./timeline-lanes"
 import { TimelineToolbar, type TimelineTool } from "./timeline-toolbar"
 import { formatTimelineTime } from "./timeline-ruler"
+import { findNextCut, findPreviousCut, getTimelineEditPoints } from "./timeline-navigation"
 import { useOverlayInteraction } from "../canvas/use-overlay-interaction"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
@@ -530,6 +531,13 @@ export function TimelineView({
   )
   const isPreviewMuted =
     audioTrackOutputs.length > 0 || (timeline ? isTimelineAudioMuted(timeline) : false)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (video) {
+      video.muted = isPreviewMuted
+    }
+  }, [isPreviewMuted, mediaUrl])
   const retryThumbnail = useCallback(() => {
     setThumbnailSpriteError(false)
     thumbnailResource.retry()
@@ -712,7 +720,7 @@ export function TimelineView({
     [pause, seek],
   )
 
-  usePlaybackClock({
+  const { isSeeking: isVideoSeeking, videoProps: playbackVideoProps } = usePlaybackClock({
     videoRef,
     timeline,
     previewQuality: view.previewQuality,
@@ -746,6 +754,21 @@ export function TimelineView({
     setScroll(0)
   }, [setZoom, setScroll])
 
+  const editPoints = useMemo(
+    () => (timeline ? getTimelineEditPoints(timeline, view.durationMs) : [0, view.durationMs]),
+    [timeline, view.durationMs],
+  )
+
+  const jumpToPreviousCut = useCallback(() => {
+    const targetMs = findPreviousCut(editPoints, view.playheadMs)
+    seek(targetMs)
+  }, [editPoints, seek, view.playheadMs])
+
+  const jumpToNextCut = useCallback(() => {
+    const targetMs = findNextCut(editPoints, view.playheadMs)
+    seek(targetMs)
+  }, [editPoints, seek, view.playheadMs])
+
   const handleSplitAllAtTime = useCallback(
     (timeMs: number) => {
       const command = createSplitAllClipsCommand(timeMs)
@@ -766,25 +789,187 @@ export function TimelineView({
   )
 
   const splitSelected = useCallback(() => {
-    if (!selectedClip || selectedClip.track.locked) {
-      // If no clip is explicitly selected, split all clips at playhead
-      handleSplitAllAtTime(view.playheadMs)
-      return
+    const selection = view.selection
+    const playheadMs = Math.round(view.playheadMs)
+
+    // 1. If a zoom segment is selected:
+    if (selection?.kind === "zoom" && timeline) {
+      const segment = getManualZoomSegments(timeline).find((s) => s.id === selection.segmentId)
+      if (segment) {
+        if (segment.locked) {
+          toast({
+            title: "Cannot split zoom segment",
+            description: "Selected zoom segment is locked.",
+            variant: "error",
+          })
+          return
+        }
+        if (
+          playheadMs <= segment.startMs + 1 ||
+          playheadMs >= segment.startMs + segment.durationMs - 1
+        ) {
+          toast({
+            title: "Cannot split here",
+            description: `Playhead at ${formatTimelineTime(playheadMs)} is outside the active range of the selected zoom segment (${formatTimelineTime(segment.startMs)} – ${formatTimelineTime(segment.startMs + segment.durationMs)}).`,
+          })
+          return
+        }
+        const ok = execute(createSplitZoomSegmentCommand(segment.id, playheadMs))
+        if (ok) {
+          toast({
+            title: "Zoom segment split",
+            description: `Split zoom segment at ${formatTimelineTime(playheadMs)}`,
+          })
+        }
+        return
+      }
     }
-    const isIntersecting =
-      view.playheadMs > selectedClip.clip.startMs &&
-      view.playheadMs < selectedClip.clip.startMs + selectedClip.clip.durationMs
-    if (!isIntersecting) {
-      // If playhead does not intersect the selected clip, split all clips at playhead
-      handleSplitAllAtTime(view.playheadMs)
-      return
+
+    // 2. If one or more clips are selected:
+    if (selection?.kind === "clip" && timeline) {
+      const clipIds =
+        selection.clipIds && selection.clipIds.length > 0
+          ? selection.clipIds
+          : selection.primaryClipId
+            ? [selection.primaryClipId]
+            : []
+
+      const foundClips: Array<{ clip: TimelineClip; track: TimelineTrack }> = []
+      for (const track of timeline.tracks) {
+        for (const clip of track.clips) {
+          if (clipIds.includes(clip.id)) {
+            foundClips.push({ clip, track })
+          }
+        }
+      }
+
+      if (foundClips.length > 0) {
+        const unlockedClips = foundClips.filter(
+          ({ clip, track }) =>
+            !track.locked && !("locked" in clip && Boolean((clip as { locked?: boolean }).locked)),
+        )
+        if (unlockedClips.length === 0) {
+          toast({
+            title: "Cannot split clip",
+            description: "Selected clip or track is locked.",
+            variant: "error",
+          })
+          return
+        }
+
+        const intersectingClips = unlockedClips.filter(({ clip }) => {
+          const clipEndMs = clip.startMs + clip.durationMs
+          return playheadMs > clip.startMs + 1 && playheadMs < clipEndMs - 1
+        })
+
+        if (intersectingClips.length === 0) {
+          // Check if any unlocked clip across tracks intersects the playhead as a fallback
+          const clipsUnderPlayhead: Array<{ clip: TimelineClip; track: TimelineTrack }> = []
+          for (const track of timeline.tracks) {
+            if (track.locked) continue
+            for (const clip of track.clips) {
+              if ("locked" in clip && Boolean((clip as { locked?: boolean }).locked)) continue
+              const clipEndMs = clip.startMs + clip.durationMs
+              if (playheadMs > clip.startMs + 1 && playheadMs < clipEndMs - 1) {
+                clipsUnderPlayhead.push({ clip, track })
+              }
+            }
+          }
+
+          if (clipsUnderPlayhead.length > 0) {
+            let anySplit = false
+            const newRightClipIds: string[] = []
+            for (const { clip } of clipsUnderPlayhead) {
+              const rightClipId = `${clip.id}:split:${playheadMs}:right`
+              if (clip.kind === "cursor-effect") {
+                const ok = execute(
+                  createSplitCursorRangeCommand(clip.id, playheadMs, { rightRangeId: rightClipId }),
+                )
+                if (ok) {
+                  anySplit = true
+                  newRightClipIds.push(rightClipId)
+                }
+              } else {
+                const ok = execute(createSplitClipCommand(clip.id, playheadMs, { rightClipId }))
+                if (ok) {
+                  anySplit = true
+                  newRightClipIds.push(rightClipId)
+                }
+              }
+            }
+            if (anySplit) {
+              if (newRightClipIds.length > 0) {
+                setSelection({
+                  kind: "clip",
+                  primaryClipId: newRightClipIds[0],
+                  clipIds: newRightClipIds,
+                })
+              }
+              toast({
+                title: "Clip split",
+                description: `Split ${clipsUnderPlayhead.length} clip${clipsUnderPlayhead.length > 1 ? "s" : ""} at ${formatTimelineTime(playheadMs)}`,
+              })
+              return
+            }
+          }
+
+          const first = unlockedClips[0].clip
+          const clipEndMs = first.startMs + first.durationMs
+          if (playheadMs < first.startMs || playheadMs > clipEndMs) {
+            toast({
+              title: "Cannot split selected clip",
+              description: `Playhead is at ${formatTimelineTime(playheadMs)}, outside selected clip (${formatTimelineTime(first.startMs)} – ${formatTimelineTime(clipEndMs)}). Move the playhead over the clip to split.`,
+            })
+          } else {
+            toast({
+              title: "Cannot split at clip boundary",
+              description:
+                "Playhead is at the edge of the clip. Move the playhead inside the clip to split.",
+            })
+          }
+          return
+        }
+
+        let anySplit = false
+        const newRightClipIds: string[] = []
+        for (const { clip } of intersectingClips) {
+          const rightClipId = `${clip.id}:split:${playheadMs}:right`
+          if (clip.kind === "cursor-effect") {
+            const ok = execute(
+              createSplitCursorRangeCommand(clip.id, playheadMs, { rightRangeId: rightClipId }),
+            )
+            if (ok) {
+              anySplit = true
+              newRightClipIds.push(rightClipId)
+            }
+          } else {
+            const ok = execute(createSplitClipCommand(clip.id, playheadMs, { rightClipId }))
+            if (ok) {
+              anySplit = true
+              newRightClipIds.push(rightClipId)
+            }
+          }
+        }
+        if (anySplit) {
+          if (newRightClipIds.length > 0) {
+            setSelection({
+              kind: "clip",
+              primaryClipId: newRightClipIds[0],
+              clipIds: newRightClipIds,
+            })
+          }
+          toast({
+            title: "Clip split",
+            description: `Split ${intersectingClips.length} selected clip${intersectingClips.length > 1 ? "s" : ""} at ${formatTimelineTime(playheadMs)}`,
+          })
+        }
+        return
+      }
     }
-    if (selectedClip.clip.kind === "cursor-effect") {
-      execute(createSplitCursorRangeCommand(selectedClip.clip.id, view.playheadMs))
-      return
-    }
-    execute(createSplitClipCommand(selectedClip.clip.id, view.playheadMs))
-  }, [selectedClip, view.playheadMs, execute, handleSplitAllAtTime])
+
+    // 3. Fallback: ONLY when no clip or zoom segment is selected, split all clips at playhead
+    handleSplitAllAtTime(playheadMs)
+  }, [view.selection, timeline, view.playheadMs, execute, toast, handleSplitAllAtTime])
 
   const deleteSelected = useCallback(
     (ripple: boolean) => {
@@ -960,12 +1145,46 @@ export function TimelineView({
   }
 
   function splitClip(clip: TimelineClip, splitTimeMs?: number) {
-    const timeMs = splitTimeMs ?? view.playheadMs
+    const timeMs = Math.round(splitTimeMs ?? view.playheadMs)
+    if (splitTimeMs !== undefined) {
+      seek(timeMs)
+    }
+    const rightClipId = `${clip.id}:split:${timeMs}:right`
     if (clip.kind === "cursor-effect") {
-      execute(createSplitCursorRangeCommand(clip.id, timeMs))
+      const ok = execute(
+        createSplitCursorRangeCommand(clip.id, timeMs, { rightRangeId: rightClipId }),
+      )
+      if (ok) {
+        setSelection({
+          kind: "clip",
+          primaryClipId: rightClipId,
+          clipIds: [rightClipId],
+        })
+        toast({
+          title: "Clip split",
+          description: `Split cursor range at ${formatTimelineTime(timeMs)}`,
+        })
+      }
       return
     }
-    execute(createSplitClipCommand(clip.id, timeMs))
+    const ok = execute(createSplitClipCommand(clip.id, timeMs, { rightClipId }))
+    if (ok) {
+      setSelection({
+        kind: "clip",
+        primaryClipId: rightClipId,
+        clipIds: [rightClipId],
+      })
+      toast({
+        title: "Clip split",
+        description: `Split clip at ${formatTimelineTime(timeMs)}`,
+      })
+    } else {
+      toast({
+        title: "Cannot split clip",
+        description: "Split position must be inside the clip source boundaries.",
+        variant: "error",
+      })
+    }
   }
 
   function splitAllAtPlayhead() {
@@ -1393,15 +1612,43 @@ export function TimelineView({
         handleAddZoom()
       } else if (key === "j") {
         event.preventDefault()
-        setPlaybackRate(0.5)
-        play()
+        if (view.isPlaying) {
+          const nextRate =
+            view.playbackRate > 2
+              ? 2
+              : view.playbackRate > 1.5
+                ? 1.5
+                : view.playbackRate > 1
+                  ? 1
+                  : view.playbackRate > 0.5
+                    ? 0.5
+                    : 0.25
+          setPlaybackRate(nextRate)
+        } else {
+          setPlaybackRate(0.5)
+          play()
+        }
       } else if (key === "k") {
         event.preventDefault()
         pause()
       } else if (key === "l") {
         event.preventDefault()
-        setPlaybackRate(1)
-        play()
+        if (view.isPlaying) {
+          const nextRate =
+            view.playbackRate >= 2
+              ? 4
+              : view.playbackRate >= 1.5
+                ? 2
+                : view.playbackRate >= 1
+                  ? 1.5
+                  : view.playbackRate >= 0.5
+                    ? 1
+                    : 0.5
+          setPlaybackRate(nextRate)
+        } else {
+          setPlaybackRate(1)
+          play()
+        }
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault()
         deleteSelected(event.shiftKey)
@@ -1449,25 +1696,32 @@ export function TimelineView({
         } else {
           seek(view.playheadMs + direction * (event.shiftKey ? 1_000 : frameMs))
         }
-      } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && selectedOverlayClip) {
+      } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         event.preventDefault()
-        if (overlayInteraction.isRotateMode) {
+        if (selectedOverlayClip && overlayInteraction.isRotateMode) {
           overlayInteraction.rotateSelected(
             selectedOverlayClip.id,
             (event.key === "ArrowUp" ? -1 : 1) * (event.shiftKey ? 15 : 1),
           )
-        } else if (hasModifier) {
+        } else if (selectedOverlayClip && hasModifier) {
           overlayInteraction.resizeSelected(
             selectedOverlayClip.id,
             0,
             event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
           )
-        } else {
+        } else if (selectedOverlayClip) {
           overlayInteraction.nudgeSelected(
             selectedOverlayClip.id,
             0,
             event.key === "ArrowDown" ? (event.shiftKey ? 10 : 1) : event.shiftKey ? -10 : -1,
           )
+        } else {
+          // Standard timeline navigation: Jump to previous/next edit cut point or marker
+          if (event.key === "ArrowUp") {
+            jumpToPreviousCut()
+          } else {
+            jumpToNextCut()
+          }
         }
       } else if (event.key === "Home") {
         event.preventDefault()
@@ -1483,6 +1737,8 @@ export function TimelineView({
       duplicateSelected,
       frameMs,
       handleAddZoom,
+      jumpToNextCut,
+      jumpToPreviousCut,
       nudgeSelected,
       overlayInteraction,
       pause,
@@ -1500,6 +1756,8 @@ export function TimelineView({
       trimSelected,
       undo,
       view.durationMs,
+      view.isPlaying,
+      view.playbackRate,
       view.playheadMs,
       view.selection,
       view.zoom,
@@ -1668,6 +1926,7 @@ export function TimelineView({
                     key={mediaUrl}
                     ref={videoRef}
                     src={mediaUrl}
+                    {...playbackVideoProps}
                     className="size-full object-contain cursor-pointer"
                     style={
                       zoomTransformStyle
@@ -1690,9 +1949,15 @@ export function TimelineView({
                       setMediaError(true)
                     }}
                     onLoadedMetadata={() => {
+                      if (videoRef.current) {
+                        videoRef.current.muted = isPreviewMuted
+                      }
                       updateVideoBounds()
                     }}
                     onLoadedData={() => {
+                      if (videoRef.current) {
+                        videoRef.current.muted = isPreviewMuted
+                      }
                       setMediaError(false)
                       updateVideoBounds()
                     }}
@@ -1704,6 +1969,7 @@ export function TimelineView({
                     key={mediaUrl}
                     ref={videoRef}
                     src={mediaUrl}
+                    {...playbackVideoProps}
                     className="size-full object-contain cursor-pointer"
                     style={
                       zoomTransformStyle
@@ -1726,9 +1992,15 @@ export function TimelineView({
                       setMediaError(true)
                     }}
                     onLoadedMetadata={() => {
+                      if (videoRef.current) {
+                        videoRef.current.muted = isPreviewMuted
+                      }
                       updateVideoBounds()
                     }}
                     onLoadedData={() => {
+                      if (videoRef.current) {
+                        videoRef.current.muted = isPreviewMuted
+                      }
                       setMediaError(false)
                       updateVideoBounds()
                     }}
@@ -1900,6 +2172,7 @@ export function TimelineView({
               frameMs={frameMs}
               assetPaths={assetPaths}
               workDir={recording?.workDir}
+              isVideoSeeking={isVideoSeeking}
             />
 
             {/* Media status badge */}
@@ -1952,10 +2225,13 @@ export function TimelineView({
               : null
           }
           showMinimap={showMinimap}
+          markers={timeline.markers}
           onToggleMinimap={() => setShowMinimap((prev) => !prev)}
           onTogglePlay={togglePlay}
           onSeek={seek}
           onStepFrame={stepFrame}
+          onJumpPreviousCut={jumpToPreviousCut}
+          onJumpNextCut={jumpToNextCut}
           onSetPlaybackRate={setPlaybackRate}
           onSetZoom={setZoom}
           onZoomToFit={zoomToFit}
