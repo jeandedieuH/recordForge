@@ -1,4 +1,4 @@
-import { memo } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import type { TimelineTrack } from "@recordforge/contracts"
 import {
   ArrowDown,
@@ -15,6 +15,7 @@ import {
   Monitor,
   MousePointer2,
   Music,
+  Pencil,
   Rows3,
   Shapes,
   ShieldAlert,
@@ -52,6 +53,7 @@ interface TimelineTrackHeaderProps {
   onToggleTrackLocked: (track: TimelineTrack) => void
   onToggleTrackCollapsed: (track: TimelineTrack) => void
   onCycleTrackHeight: (track: TimelineTrack) => void
+  onRenameTrack?: (track: TimelineTrack, name: string) => void
 }
 
 function getTrackIcon(track: TimelineTrack): LucideIcon {
@@ -179,9 +181,37 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
   onToggleTrackLocked,
   onToggleTrackCollapsed,
   onCycleTrackHeight,
+  onRenameTrack,
 }: TimelineTrackHeaderProps) {
   const TrackIcon = getTrackIcon(track)
   const accent = getTrackAccentColor(track)
+
+  const [isEditing, setIsEditing] = useState(false)
+  const [draftName, setDraftName] = useState(track.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isEditing) inputRef.current?.select()
+  }, [isEditing])
+
+  function startRename() {
+    if (track.locked || !onRenameTrack) return
+    setDraftName(track.name)
+    setIsEditing(true)
+  }
+
+  function commitRename() {
+    setIsEditing(false)
+    const nextName = draftName.trim()
+    if (nextName && nextName !== track.name) {
+      onRenameTrack?.(track, nextName)
+    }
+  }
+
+  function cancelRename() {
+    setIsEditing(false)
+    setDraftName(track.name)
+  }
 
   return (
     <ContextMenu>
@@ -201,7 +231,7 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
           )}
           style={{ transform: `translateY(${top}px)`, height }}
           onDoubleClick={() => onCycleTrackHeight(track)}
-          title="Double-click header to cycle track height; drag grip to reorder"
+          title="Double-click name to rename; double-click header to cycle height; drag grip to reorder"
         >
           {/* Visual Drop Insertion Indicators */}
           {dropIndicator === "above" ? (
@@ -212,11 +242,11 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
           ) : null}
 
           {/* Left: Reorder Grip, Track Icon & Details */}
-          <div className="flex min-w-0 items-center gap-1.5">
-            {/* Tactile Drag Grip */}
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            {/* Tactile Drag Grip (revealed on hover so the name keeps the space) */}
             {onStartReorder ? (
               <div
-                className="cursor-grab active:cursor-grabbing text-muted-foreground/50 hover:text-foreground transition-colors p-0.5 shrink-0"
+                className="cursor-grab active:cursor-grabbing text-muted-foreground/50 hover:text-foreground transition-all p-0.5 shrink-0 opacity-0 group-hover/header:opacity-100"
                 onPointerDown={(e) => {
                   if (e.button === 0) {
                     e.stopPropagation()
@@ -238,10 +268,38 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
             >
               <TrackIcon className={cn("size-3.5", accent.text)} aria-hidden />
             </div>
-            <div className="flex min-w-0 flex-col">
-              <span className="truncate text-xs font-semibold text-foreground tracking-tight leading-snug">
-                {track.name}
-              </span>
+            <div className="flex min-w-0 flex-1 flex-col">
+              {isEditing ? (
+                <input
+                  ref={inputRef}
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename()
+                    if (e.key === "Escape") cancelRename()
+                  }}
+                  onBlur={commitRename}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  aria-label={`Rename ${track.name} track`}
+                  className="w-full min-w-0 select-text rounded-sm border border-primary/50 bg-surface px-1 py-px text-xs font-semibold text-foreground tracking-tight leading-snug outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                />
+              ) : (
+                <span
+                  className="truncate text-xs font-semibold text-foreground tracking-tight leading-snug"
+                  title={
+                    onRenameTrack && !track.locked
+                      ? `${track.name} — double-click to rename`
+                      : track.name
+                  }
+                  onDoubleClick={(e) => {
+                    e.stopPropagation()
+                    startRename()
+                  }}
+                >
+                  {track.name}
+                </span>
+              )}
               {!collapsed ? (
                 <div className="flex items-center gap-1.5 font-mono text-[9px] text-subtle-foreground leading-none">
                   <span>
@@ -257,13 +315,26 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
                       <span className="size-1 rounded-full bg-primary animate-pulse" /> SOLO
                     </span>
                   ) : null}
+                  {track.locked ? (
+                    <span className="flex items-center gap-0.5 text-warning font-semibold">
+                      <span className="size-1 rounded-full bg-warning" /> LOCKED
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
             </div>
           </div>
 
-          {/* Right: Quick Channel Controls */}
-          <div className="flex shrink-0 items-center gap-0.5">
+          {/* Right: Quick Channel Controls — floating toolbar revealed on hover/focus
+              so it no longer steals horizontal space from the track name. */}
+          <div
+            className={cn(
+              "absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-md border border-border/60 bg-surface/95 p-0.5 shadow-e1 backdrop-blur-sm transition-opacity duration-fast",
+              isEditing
+                ? "hidden"
+                : "pointer-events-none opacity-0 group-hover/header:pointer-events-auto group-hover/header:opacity-100 group-focus-within/header:pointer-events-auto group-focus-within/header:opacity-100",
+            )}
+          >
             {/* Mute Button with LED Active State */}
             <IconButton
               label={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
@@ -365,6 +436,11 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
           </ContextMenuItem>
         ) : null}
         <ContextMenuSeparator />
+        {onRenameTrack && !track.locked ? (
+          <ContextMenuItem onSelect={startRename}>
+            <Pencil className="size-3.5 mr-2" /> Rename track
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuItem onSelect={() => onToggleTrackMuted(track)}>
           {track.muted ? "Unmute track" : "Mute track"}
         </ContextMenuItem>

@@ -2290,6 +2290,7 @@ export function TimelineView({
           }
           onToggleTrackCollapsed={(track) => toggleTrackCollapsed(track.id)}
           onCycleTrackHeight={cycleTrackHeight}
+          onRenameTrack={(track, name) => execute(createUpdateTrackCommand(track.id, { name }))}
           onMoveTrack={(trackId, newIndex) => {
             execute(createMoveTrackCommand(trackId, newIndex))
           }}

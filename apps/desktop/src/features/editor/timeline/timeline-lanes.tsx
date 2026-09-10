@@ -125,6 +125,7 @@ export interface TimelineLanesProps {
   onToggleTrackLocked: (track: TimelineTrack) => void
   onToggleTrackCollapsed: (track: TimelineTrack) => void
   onCycleTrackHeight: (track: TimelineTrack) => void
+  onRenameTrack?: (track: TimelineTrack, name: string) => void
   onMoveTrack?: (trackId: string, newIndex: number) => void
   onUpdateClipAudio?: (
     clip: AudioClip,
@@ -270,6 +271,7 @@ export function TimelineLanes({
   onToggleTrackLocked,
   onToggleTrackCollapsed,
   onCycleTrackHeight,
+  onRenameTrack,
   onMoveTrack,
   onUpdateClipAudio,
   onSpriteError,
@@ -893,6 +895,7 @@ export function TimelineLanes({
                     onToggleTrackLocked={onToggleTrackLocked}
                     onToggleTrackCollapsed={onToggleTrackCollapsed}
                     onCycleTrackHeight={onCycleTrackHeight}
+                    onRenameTrack={onRenameTrack}
                   />
                 )
               })}
