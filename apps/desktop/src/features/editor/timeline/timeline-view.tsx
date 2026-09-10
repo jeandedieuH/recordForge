@@ -969,7 +969,15 @@ export function TimelineView({
 
     // 3. Fallback: ONLY when no clip or zoom segment is selected, split all clips at playhead
     handleSplitAllAtTime(playheadMs)
-  }, [view.selection, timeline, view.playheadMs, execute, toast, handleSplitAllAtTime, setSelection])
+  }, [
+    view.selection,
+    timeline,
+    view.playheadMs,
+    execute,
+    toast,
+    handleSplitAllAtTime,
+    setSelection,
+  ])
 
   const deleteSelected = useCallback(
     (ripple: boolean) => {
