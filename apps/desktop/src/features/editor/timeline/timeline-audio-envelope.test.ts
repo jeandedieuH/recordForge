@@ -109,7 +109,7 @@ describe("AudioTrackPreview playback sync and cut transition lockstep", () => {
       playheadMs: 3000,
       currentTimeMs: 0,
       playbackRate: 1,
-      isPlaying: true && canPlay,
+      isPlaying: canPlay,
       frameMs: 33,
     })
     expect(seeking.shouldPlay).toBe(false)

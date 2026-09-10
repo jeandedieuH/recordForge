@@ -149,19 +149,21 @@ describe("usePlaybackClock - Playback Synchronization & Audio Unmute Verificatio
     const playheadMs = 100
     const playheadJumpMs = Math.abs(playheadMs - drivenPlayheadMs)
 
+    // Mirrors the production shouldSeekVideo condition; params keep lint from
+    // treating literal test fixtures as constant expressions.
+    const shouldSeekVideo = (clipChanged: boolean, jumpMs: number) =>
+      !isPlaying || clipChanged || jumpMs > frameMs * 2
+
     // Normal continuous playback: shouldSeekVideo MUST be false even if drift is 66ms (2 frames)
-    const shouldSeekVideo = !isPlaying || isClipChanged || playheadJumpMs > frameMs * 2
-    expect(shouldSeekVideo).toBe(false)
+    expect(shouldSeekVideo(isClipChanged, playheadJumpMs)).toBe(false)
 
     // But if user seeks (e.g. jumps playhead by 1000ms), shouldSeekVideo is true
     const userJumpPlayheadMs = 1100
     const userJumpMs = Math.abs(userJumpPlayheadMs - drivenPlayheadMs)
-    const shouldSeekOnUserJump = !isPlaying || isClipChanged || userJumpMs > frameMs * 2
-    expect(shouldSeekOnUserJump).toBe(true)
+    expect(shouldSeekVideo(isClipChanged, userJumpMs)).toBe(true)
 
     // And if clip changes across a cut, shouldSeekVideo is true
-    const shouldSeekOnCut = !isPlaying || true || playheadJumpMs > frameMs * 2
-    expect(shouldSeekOnCut).toBe(true)
+    expect(shouldSeekVideo(true, playheadJumpMs)).toBe(true)
   })
 
   it("ensures audio is unmuted and plays when video is playing and not seeking", () => {
@@ -181,7 +183,7 @@ describe("usePlaybackClock - Playback Synchronization & Audio Unmute Verificatio
       playheadMs: 1000,
       currentTimeMs: 1000,
       playbackRate: 1,
-      isPlaying: true && canPlay,
+      isPlaying: canPlay,
       frameMs: 33,
     })
 
@@ -212,7 +214,7 @@ describe("usePlaybackClock - Playback Synchronization & Audio Unmute Verificatio
       playheadMs: 1000,
       currentTimeMs: 1000,
       playbackRate: 1,
-      isPlaying: true && canPlay,
+      isPlaying: canPlay,
       frameMs: 33,
     })
 
