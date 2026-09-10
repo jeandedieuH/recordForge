@@ -1048,10 +1048,10 @@ function applySplitClip(
 
   let leftDuration: number
   let rightDuration: number
-  let leftSourceIn = clip.sourceInMs
+  let leftSourceIn: number
   let leftSourceOut: number
   let rightSourceIn: number
-  let rightSourceOut = clip.sourceOutMs
+  let rightSourceOut: number
 
   if (isSynthetic) {
     const offsetMs = command.splitTimeMs - clip.startMs
@@ -1167,10 +1167,10 @@ function applySplitAllClips(
 
       let leftDuration: number
       let rightDuration: number
-      let leftSourceIn = clip.sourceInMs
+      let leftSourceIn: number
       let leftSourceOut: number
       let rightSourceIn: number
-      let rightSourceOut = clip.sourceOutMs
+      let rightSourceOut: number
 
       if (isSynthetic) {
         const offsetMs = splitTimeMs - clip.startMs
