@@ -5,7 +5,7 @@ describe("Update contracts", () => {
   it("parses signed update metadata with nullable release notes", () => {
     const metadata = updateMetadataSchema.parse({
       version: "1.0.1",
-      currentVersion: "1.4.9",
+      currentVersion: "1.5.0",
       body: null,
       pubDate: "2026-08-25T12:00:00Z",
     })
