@@ -267,10 +267,7 @@ export function calloutAttachPoint(
 }
 
 /** Stroke the connector centerline on a Canvas2D context. */
-export function strokeConnectorPath(
-  context: CanvasRenderingContext2D,
-  path: ConnectorPath,
-): void {
+export function strokeConnectorPath(context: CanvasRenderingContext2D, path: ConnectorPath): void {
   context.beginPath()
   context.moveTo(path.start.x, path.start.y)
   if (path.control) {

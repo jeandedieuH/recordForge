@@ -53,15 +53,11 @@ describe("connectorPathFor", () => {
 
 describe("connectorLength", () => {
   it("measures straight distance for lines", () => {
-    expect(
-      connectorLength(connectorPathFor("straight", { x: 0, y: 0 }, { x: 3, y: 4 })),
-    ).toBe(5)
+    expect(connectorLength(connectorPathFor("straight", { x: 0, y: 0 }, { x: 3, y: 4 }))).toBe(5)
   })
 
   it("sums both segments for elbows", () => {
-    expect(connectorLength(connectorPathFor("elbow", { x: 0, y: 0 }, { x: 30, y: 40 }))).toBe(
-      70,
-    )
+    expect(connectorLength(connectorPathFor("elbow", { x: 0, y: 0 }, { x: 30, y: 40 }))).toBe(70)
   })
 
   it("approximates the arc length for curves (longer than the chord)", () => {

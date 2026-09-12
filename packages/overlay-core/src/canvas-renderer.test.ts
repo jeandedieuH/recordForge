@@ -30,8 +30,10 @@ function canvasWithContext(clearRect: () => void): HTMLCanvasElement {
 function recordingCanvas(): { canvas: HTMLCanvasElement; calls: string[] } {
   const calls: string[] = []
   const n = (value: number) => Math.round(value * 100) / 100
-  const record = (name: string) => (...args: number[]) =>
-    calls.push(`${name}(${args.map(n).join(",")})`)
+  const record =
+    (name: string) =>
+    (...args: number[]) =>
+      calls.push(`${name}(${args.map(n).join(",")})`)
   const context = {
     clearRect: () => {},
     save: () => calls.push("save"),

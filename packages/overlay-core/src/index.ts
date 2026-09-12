@@ -14,10 +14,5 @@ export {
   strokeConnectorPath,
   trimConnectorPath,
 } from "./connectors"
-export type {
-  CalloutBox,
-  ConnectorAxis,
-  ConnectorPath,
-  ConnectorPoint,
-} from "./connectors"
+export type { CalloutBox, ConnectorAxis, ConnectorPath, ConnectorPoint } from "./connectors"
 export type { OverlayDisplayList, OverlayRenderPlan } from "@recordforge/contracts"
