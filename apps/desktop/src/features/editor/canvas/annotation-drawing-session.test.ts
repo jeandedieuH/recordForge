@@ -41,6 +41,7 @@ function setup() {
       strokeColor: "red",
       strokeWidth: 8,
       strokeStyle: "dashed" as const,
+      arrowStyle: "straight" as const,
     },
     startMs: 1000,
     bounds: { width: 1920, height: 1080 },

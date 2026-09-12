@@ -42,6 +42,8 @@ export interface OverlayPointerState {
   mode: "drag-threshold" | "active"
   moved: boolean
   captureTarget: Element
+  /** Line connectors translate their end point when the body moves; callouts pin their target. */
+  translatesEndOnMove: boolean
 }
 
 export interface OverlayInteraction {
@@ -90,6 +92,16 @@ function isArrowClip(clip: OverlayClip): clip is Extract<OverlayClip, { kind: "a
   return (
     clip.kind === "annotation" &&
     (clip.annotationType === "arrow" || clip.annotationType === "line")
+  )
+}
+
+// Callouts with a leader target reuse the "arrow-end" handle to aim the pointer.
+function hasPointableTarget(clip: OverlayClip): clip is Extract<OverlayClip, { kind: "annotation" }> {
+  return (
+    clip.kind === "annotation" &&
+    clip.annotationType === "callout" &&
+    clip.endX !== undefined &&
+    clip.endY !== undefined
   )
 }
 
@@ -273,7 +285,7 @@ export function useOverlayInteraction({
             snapDisabled,
           },
         )
-        if (gesture.startArrow) {
+        if (gesture.startArrow && gesture.translatesEndOnMove) {
           const appliedX = transform.x - gesture.startTransform.x
           const appliedY = transform.y - gesture.startTransform.y
           endX = gesture.startArrow.end.x + appliedX
@@ -363,12 +375,14 @@ export function useOverlayInteraction({
       if (gestureRef.current || transactionRef.current) clearTransaction()
 
       const startCanvas = getCanvasPoint(event.clientX, event.clientY)
-      const startArrow = isArrowClip(clip)
-        ? {
-            start: { x: clip.x, y: clip.y },
-            end: { x: clip.endX ?? clip.x + clip.width, y: clip.endY ?? clip.y + clip.height },
-          }
-        : undefined
+      const isLineConnector = isArrowClip(clip)
+      const startArrow =
+        isLineConnector || hasPointableTarget(clip)
+          ? {
+              start: { x: clip.x, y: clip.y },
+              end: { x: clip.endX ?? clip.x + clip.width, y: clip.endY ?? clip.y + clip.height },
+            }
+          : undefined
       const transform = overlayTransformFromClip(clip)
       const draft: OverlayGestureDraft = {
         kind: gestureKind(handle),
@@ -392,6 +406,7 @@ export function useOverlayInteraction({
         mode: "drag-threshold",
         moved: false,
         captureTarget: target,
+        translatesEndOnMove: isLineConnector,
       }
     },
     [beginTransaction, clearFrame, clearTransaction, getCanvasPoint],
@@ -473,16 +488,18 @@ export function useOverlayInteraction({
         kind: "text-edit",
         clipId,
         transform,
+        // Keep the clip's endpoints unless the update explicitly changes or
+        // clears them (endX: undefined removes a callout pointer target).
         endX:
           clip.kind === "annotation"
             ? "endX" in update
-              ? (update.endX ?? clip.endX)
+              ? update.endX
               : clip.endX
             : undefined,
         endY:
           clip.kind === "annotation"
             ? "endY" in update
-              ? (update.endY ?? clip.endY)
+              ? update.endY
               : clip.endY
             : undefined,
         update,

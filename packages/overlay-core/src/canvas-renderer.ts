@@ -3,6 +3,16 @@ import type {
   OverlayDisplayList,
   OverlayTransform,
 } from "@recordforge/contracts"
+import {
+  calloutAttachPoint,
+  connectorEndToward,
+  connectorHeadTrim,
+  connectorLength,
+  connectorPathFor,
+  connectorStartToward,
+  strokeConnectorPath,
+  trimConnectorPath,
+} from "./connectors"
 
 export interface OverlayCanvasRenderOptions {
   assetUrls?: Readonly<Record<string, string>>
@@ -50,6 +60,10 @@ function renderAnnotation(
   context.lineWidth = item.strokeWidth
   context.strokeStyle = item.strokeColor
   context.fillStyle = item.fillColor
+  // Round joins/caps match the native exporter's stroke settings so elbow and
+  // curved connectors look identical in preview and export.
+  context.lineJoin = "round"
+  context.lineCap = "round"
   context.setLineDash(strokeDash(item.strokeStyle, item.strokeWidth))
   applyShadow(context, item.shadowEnabled, item.shadowColor, item.shadowBlur)
 
@@ -60,35 +74,34 @@ function renderAnnotation(
   }
 
   if (item.annotationType === "arrow" || item.annotationType === "line") {
-    const startX = transform.x
-    const startY = transform.y
-    const endX = item.endX ?? transform.x + transform.width
-    const endY = item.endY ?? transform.y + transform.height
-    const dx = endX - startX
-    const dy = endY - startY
-    const len = Math.hypot(dx, dy)
+    const start = { x: transform.x, y: transform.y }
+    const end = {
+      x: item.endX ?? transform.x + transform.width,
+      y: item.endY ?? transform.y + transform.height,
+    }
+    const path = connectorPathFor(item.arrowStyle, start, end)
+    const len = connectorLength(path)
 
     if (len > 0.001) {
       const headSize = Math.max(10, item.strokeWidth * 3.5)
-      const startOffset =
-        item.arrowStartHead !== "none"
-          ? Math.min(len * 0.45, item.arrowStartHead === "circle" ? headSize / 2 : headSize * 0.7)
-          : 0
-      const endOffset =
-        item.arrowEndHead !== "none"
-          ? Math.min(len * 0.45, item.arrowEndHead === "circle" ? headSize / 2 : headSize * 0.7)
-          : 0
+      const trimmed = trimConnectorPath(
+        path,
+        connectorHeadTrim(item.arrowStartHead, headSize),
+        connectorHeadTrim(item.arrowEndHead, headSize),
+      )
+      strokeConnectorPath(context, trimmed)
 
-      const ux = dx / len
-      const uy = dy / len
-
-      context.beginPath()
-      context.moveTo(startX + ux * startOffset, startY + uy * startOffset)
-      context.lineTo(endX - ux * endOffset, endY - uy * endOffset)
-      context.stroke()
-
-      drawArrowHead(context, item.arrowStartHead, startX, startY, endX, endY)
-      drawArrowHead(context, item.arrowEndHead, endX, endY, startX, startY)
+      const startToward = connectorStartToward(path)
+      const endToward = connectorEndToward(path)
+      drawArrowHead(
+        context,
+        item.arrowStartHead,
+        path.start.x,
+        path.start.y,
+        startToward.x,
+        startToward.y,
+      )
+      drawArrowHead(context, item.arrowEndHead, path.end.x, path.end.y, endToward.x, endToward.y)
     }
     context.restore()
     return
@@ -123,6 +136,8 @@ function renderAnnotation(
   context.fill(path)
   context.stroke(path)
 
+  if (item.annotationType === "callout") renderCalloutPointer(context, item, transform)
+
   if ((item.annotationType === "callout" || item.annotationType === "badge") && item.text) {
     context.setLineDash([])
     context.fillStyle = item.textColor
@@ -146,6 +161,42 @@ function renderAnnotation(
     })
   }
   context.restore()
+}
+
+/**
+ * Callout pointer: when the clip has an explicit target (endX/endY) a connector
+ * leader runs from the bubble border to the target with the configured end head.
+ * Without a target the classic speech tail is drawn (matches export output).
+ */
+function renderCalloutPointer(
+  context: CanvasRenderingContext2D,
+  item: Extract<OverlayDisplayItem, { kind: "annotation" }>,
+  transform: OverlayTransform,
+): void {
+  if (item.endX === undefined || item.endY === undefined) {
+    const tail = new Path2D()
+    tail.moveTo(transform.x + 24, transform.y + transform.height - 1)
+    tail.lineTo(transform.x + 44, transform.y + transform.height - 1)
+    tail.lineTo(transform.x + 16, transform.y + transform.height + 18)
+    tail.closePath()
+    context.setLineDash([])
+    context.fillStyle = withOpacity(item.fillColor, Math.max(item.fillOpacity, 0.85))
+    context.fill(tail)
+    return
+  }
+
+  const target = { x: item.endX, y: item.endY }
+  const attach = calloutAttachPoint(
+    { x: transform.x, y: transform.y, width: transform.width, height: transform.height },
+    target,
+  )
+  const path = connectorPathFor(item.arrowStyle, attach.point, target, attach.axis)
+  const headSize = Math.max(10, item.strokeWidth * 3.5)
+  const trimmed = trimConnectorPath(path, 0, connectorHeadTrim(item.arrowEndHead, headSize))
+  strokeConnectorPath(context, trimmed)
+
+  const toward = connectorEndToward(path)
+  drawArrowHead(context, item.arrowEndHead, target.x, target.y, toward.x, toward.y)
 }
 
 function renderSpotlight(

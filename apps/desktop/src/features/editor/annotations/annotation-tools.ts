@@ -1,7 +1,12 @@
-import type { AnnotationClip, AnnotationStrokeStyle } from "@recordforge/contracts"
+import type {
+  AnnotationArrowStyle,
+  AnnotationClip,
+  AnnotationStrokeStyle,
+} from "@recordforge/contracts"
 import {
   ANNOTATION_PALETTES,
   applyPresetToAnnotationClip,
+  calloutDefaultTarget,
   createAnnotationClipFromPreset,
   getAnnotationShapePreset,
   type AnnotationShapePreset,
@@ -12,6 +17,7 @@ export interface AnnotationDrawSettings {
   strokeColor: string
   strokeWidth: number
   strokeStyle: AnnotationStrokeStyle
+  arrowStyle: AnnotationArrowStyle
 }
 
 export const DEFAULT_ANNOTATION_DRAW_SETTINGS: AnnotationDrawSettings = {
@@ -19,6 +25,7 @@ export const DEFAULT_ANNOTATION_DRAW_SETTINGS: AnnotationDrawSettings = {
   strokeColor: ANNOTATION_PALETTES[0].color,
   strokeWidth: 4,
   strokeStyle: "solid",
+  arrowStyle: "straight",
 }
 
 export function annotationSettingsFromPreset(
@@ -29,6 +36,7 @@ export function annotationSettingsFromPreset(
     strokeColor: preset.defaultStrokeColor,
     strokeWidth: preset.defaultStrokeWidth,
     strokeStyle: preset.defaultStrokeStyle,
+    arrowStyle: preset.defaultArrowStyle ?? "straight",
   }
 }
 
@@ -57,6 +65,7 @@ export function createAnnotationFromTool({
       y: (canvasHeight - height) / 2,
       strokeColor: settings.strokeColor,
       strokeWidth: settings.strokeWidth,
+      arrowStyle: settings.arrowStyle,
     }),
     strokeStyle: settings.strokeStyle,
   }
@@ -71,6 +80,7 @@ export function applyAnnotationToolToClip({
 }): AnnotationClip {
   const updated = applyPresetToAnnotationClip(clip, settings.preset)
   const isLine = updated.annotationType === "arrow" || updated.annotationType === "line"
+  const isCallout = updated.annotationType === "callout"
   const wasLine = clip.annotationType === "arrow" || clip.annotationType === "line"
 
   const endX = clip.endX ?? clip.x + clip.width
@@ -82,23 +92,33 @@ export function applyAnnotationToolToClip({
       ? "scale-down"
       : preset.animationOut
 
+  const nextX = becomesBox ? Math.min(clip.x, endX) : clip.x
+  const nextY = becomesBox ? Math.min(clip.y, endY) : clip.y
+  const nextWidth = becomesBox ? Math.max(10, Math.abs(endX - clip.x)) : clip.width
+  const nextHeight = becomesBox ? Math.max(10, Math.abs(endY - clip.y)) : clip.height
+  // Callouts keep an authored leader target, or gain a default one below the box.
+  const calloutTarget = isCallout
+    ? calloutDefaultTarget(nextX, nextY, nextWidth, nextHeight)
+    : undefined
+
   // Restyling must not undo the user's placement, timing, or authored text.
   return {
     ...updated,
-    x: becomesBox ? Math.min(clip.x, endX) : clip.x,
-    y: becomesBox ? Math.min(clip.y, endY) : clip.y,
-    width: becomesBox ? Math.max(10, Math.abs(endX - clip.x)) : clip.width,
-    height: becomesBox ? Math.max(10, Math.abs(endY - clip.y)) : clip.height,
+    x: nextX,
+    y: nextY,
+    width: nextWidth,
+    height: nextHeight,
     rotation: clip.rotation,
     anchorX: clip.anchorX,
     anchorY: clip.anchorY,
     zIndex: clip.zIndex,
-    endX: isLine ? (wasLine ? endX : clip.x + clip.width) : undefined,
-    endY: isLine ? (wasLine ? endY : clip.y + clip.height) : undefined,
+    endX: isLine ? (wasLine ? endX : clip.x + clip.width) : isCallout ? (clip.endX ?? calloutTarget?.x) : undefined,
+    endY: isLine ? (wasLine ? endY : clip.y + clip.height) : isCallout ? (clip.endY ?? calloutTarget?.y) : undefined,
     text: clip.text ?? updated.text,
     strokeColor: settings.strokeColor,
     strokeWidth: settings.strokeWidth,
     strokeStyle: settings.strokeStyle,
+    arrowStyle: settings.arrowStyle,
     overlayAnimation: {
       ...clip.overlayAnimation,
       ...(preset.animationIn !== undefined ? { inType: preset.animationIn } : {}),

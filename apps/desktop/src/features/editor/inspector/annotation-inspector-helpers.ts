@@ -4,7 +4,11 @@ import {
   type AnnotationType,
   type OverlayAnimation,
 } from "@recordforge/contracts"
-import { getAnnotationShapePreset, type AnnotationShapePreset } from "@recordforge/editor-core"
+import {
+  calloutDefaultTarget,
+  getAnnotationShapePreset,
+  type AnnotationShapePreset,
+} from "@recordforge/editor-core"
 import {
   annotationSettingsFromPreset,
   applyAnnotationToolToClip,
@@ -28,18 +32,20 @@ export function changeAnnotationType(
   const wasLine = isAnnotationLine(clip.annotationType)
   const isLine = isAnnotationLine(annotationType)
   const update: Partial<AnnotationClip> = { annotationType, presetId: "" }
+  // Only real endpoint sources (connectors, callout leaders) may carry endX/endY;
+  // a box clip's stale values must not leak into a new connector.
+  const sourceHasEndpoints =
+    wasLine ||
+    (clip.annotationType === "callout" && clip.endX !== undefined && clip.endY !== undefined)
 
   // Endpoints are absolute canvas coordinates, not offsets from the shape's origin.
   if (isLine) {
-    update.endX = wasLine ? (clip.endX ?? clip.x + clip.width) : clip.x + clip.width
-    update.endY = wasLine ? (clip.endY ?? clip.y + clip.height) : clip.y + clip.height
+    update.endX = sourceHasEndpoints ? (clip.endX ?? clip.x + clip.width) : clip.x + clip.width
+    update.endY = sourceHasEndpoints ? (clip.endY ?? clip.y + clip.height) : clip.y + clip.height
     update.arrowStartHead = "none"
     update.arrowEndHead = annotationType === "arrow" ? "arrow" : "none"
   } else {
-    update.endX = undefined
-    update.endY = undefined
     update.arrowStartHead = "none"
-    update.arrowEndHead = "none"
     // A backwards connector becomes a box around its visible segment, not a displaced box.
     if (wasLine) {
       const endX = clip.endX ?? clip.x + clip.width
@@ -48,6 +54,25 @@ export function changeAnnotationType(
       update.y = Math.min(clip.y, endY)
       update.width = Math.max(10, Math.abs(endX - clip.x))
       update.height = Math.max(10, Math.abs(endY - clip.y))
+    }
+    if (annotationType === "callout") {
+      // Callouts carry a leader target; a converted connector's tip becomes it.
+      const target =
+        clip.endX !== undefined && clip.endY !== undefined
+          ? { x: clip.endX, y: clip.endY }
+          : calloutDefaultTarget(
+              update.x ?? clip.x,
+              update.y ?? clip.y,
+              update.width ?? clip.width,
+              update.height ?? clip.height,
+            )
+      update.endX = target.x
+      update.endY = target.y
+      update.arrowEndHead = "arrow"
+    } else {
+      update.endX = undefined
+      update.endY = undefined
+      update.arrowEndHead = "none"
     }
   }
   if (annotationType === "rounded-rect" || annotationType === "callout") {

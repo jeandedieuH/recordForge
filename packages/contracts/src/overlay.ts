@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { titleDesignSchema, titleSceneSchema } from "./title-design"
 import {
+  annotationArrowStyleSchema,
   annotationHeadSchema,
   annotationStrokeStyleSchema,
   annotationTypeSchema,
@@ -59,6 +60,7 @@ export const overlayAnnotationItemSchema = overlayRenderItemBaseSchema.extend({
   cornerRadius: z.number().min(0),
   arrowEndHead: annotationHeadSchema,
   arrowStartHead: annotationHeadSchema,
+  arrowStyle: annotationArrowStyleSchema.default("straight"),
   shadowEnabled: z.boolean(),
   shadowColor: z.string(),
   shadowBlur: z.number().min(0),
@@ -173,6 +175,7 @@ export const overlayDisplayAnnotationSchema = overlayDisplayItemBaseSchema.exten
   cornerRadius: z.number().min(0),
   arrowEndHead: annotationHeadSchema,
   arrowStartHead: annotationHeadSchema,
+  arrowStyle: annotationArrowStyleSchema.default("straight"),
   shadowEnabled: z.boolean(),
   shadowColor: z.string(),
   shadowBlur: z.number().min(0),

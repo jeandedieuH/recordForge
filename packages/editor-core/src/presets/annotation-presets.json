@@ -83,6 +83,51 @@
         "defaultCornerRadius": 0,
         "defaultArrowStartHead": "none",
         "defaultArrowEndHead": "arrow",
+        "defaultArrowStyle": "straight",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "elbow-arrow",
+      "name": "Elbow Arrow",
+      "description": "Right-angle connector arrow that routes around content",
+      "category": "pointer",
+      "tags": ["arrow", "elbow", "connector", "pointer"],
+      "definition": {
+        "presetId": "elbow-arrow",
+        "type": "arrow",
+        "defaultWidth": 240,
+        "defaultHeight": 120,
+        "defaultStrokeWidth": 5,
+        "defaultStrokeColor": "#f43f5e",
+        "defaultFillColor": "#f43f5e",
+        "defaultFillOpacity": 0,
+        "defaultCornerRadius": 0,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "arrow",
+        "defaultArrowStyle": "elbow",
+        "defaultStrokeStyle": "solid"
+      }
+    },
+    {
+      "id": "curved-arrow",
+      "name": "Curved Arrow",
+      "description": "Smooth swooping arrow that curves toward the target",
+      "category": "pointer",
+      "tags": ["arrow", "curved", "swoosh", "pointer"],
+      "definition": {
+        "presetId": "curved-arrow",
+        "type": "arrow",
+        "defaultWidth": 240,
+        "defaultHeight": 120,
+        "defaultStrokeWidth": 5,
+        "defaultStrokeColor": "#f43f5e",
+        "defaultFillColor": "#f43f5e",
+        "defaultFillOpacity": 0,
+        "defaultCornerRadius": 0,
+        "defaultArrowStartHead": "none",
+        "defaultArrowEndHead": "arrow",
+        "defaultArrowStyle": "curved",
         "defaultStrokeStyle": "solid"
       }
     },
@@ -104,6 +149,7 @@
         "defaultCornerRadius": 0,
         "defaultArrowStartHead": "none",
         "defaultArrowEndHead": "none",
+        "defaultArrowStyle": "straight",
         "defaultStrokeStyle": "solid"
       }
     },
@@ -124,7 +170,8 @@
         "defaultFillOpacity": 0.85,
         "defaultCornerRadius": 12,
         "defaultArrowStartHead": "none",
-        "defaultArrowEndHead": "none",
+        "defaultArrowEndHead": "arrow",
+        "defaultArrowStyle": "straight",
         "defaultStrokeStyle": "solid"
       }
     },

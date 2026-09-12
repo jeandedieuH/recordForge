@@ -60,6 +60,26 @@ export function AnnotationLayoutTab({ clip, onChange }: AnnotationInspectorProps
             </div>
           </InspectorSection>
         )}
+        {clip.annotationType === "callout" &&
+          clip.endX !== undefined &&
+          clip.endY !== undefined && (
+            <InspectorSection title="Pointer target">
+              <div className="grid grid-cols-2 gap-3">
+                <AnnotationNumberField
+                  label="Target X"
+                  value={Math.round(clip.endX)}
+                  unit="px"
+                  onChange={(endX) => onChange({ endX })}
+                />
+                <AnnotationNumberField
+                  label="Target Y"
+                  value={Math.round(clip.endY)}
+                  unit="px"
+                  onChange={(endY) => onChange({ endY })}
+                />
+              </div>
+            </InspectorSection>
+          )}
       </fieldset>
       {clip.locked && (
         <p className="text-xs leading-relaxed text-muted-foreground">

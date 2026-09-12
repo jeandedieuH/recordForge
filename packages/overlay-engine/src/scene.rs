@@ -106,6 +106,8 @@ pub struct AnnotationDetails {
     pub corner_radius: f64,
     pub arrow_end_head: String,
     pub arrow_start_head: String,
+    #[serde(default = "default_arrow_style")]
+    pub arrow_style: String,
     pub shadow_enabled: bool,
     pub shadow_color: String,
     pub shadow_blur: f64,
@@ -162,6 +164,10 @@ where
 
 fn default_true() -> bool {
     true
+}
+
+fn default_arrow_style() -> String {
+    "straight".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +296,7 @@ pub struct DisplayAnnotation {
     pub corner_radius: f64,
     pub arrow_end_head: String,
     pub arrow_start_head: String,
+    pub arrow_style: String,
     pub shadow_enabled: bool,
     pub shadow_color: String,
     pub shadow_blur: f64,

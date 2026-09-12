@@ -5,6 +5,10 @@ use tiny_skia::{
     Point, Stroke, StrokeDash, Transform,
 };
 
+use crate::connectors::{
+    callout_attach_point, connector_length, connector_path_for, head_trim, trim_connector,
+    ConnectorPath,
+};
 use crate::fonts::resolve_font_family;
 use crate::images::{ImageCache, ImageFit};
 use crate::scene::{DisplayAnnotation, DisplayImage, DisplayItem, DisplayText};
@@ -191,6 +195,90 @@ fn stroke_for_style(style: &str, width: f32) -> Stroke {
         line_cap: LineCap::Round,
         line_join: LineJoin::Round,
         dash,
+    }
+}
+
+/// Append a connector centerline to a path builder (line, elbow bend, or curve).
+fn push_connector_path(pb: &mut PathBuilder, path: &ConnectorPath) {
+    match *path {
+        ConnectorPath::Line { start, end } => {
+            pb.move_to(start.0, start.1);
+            pb.line_to(end.0, end.1);
+        }
+        ConnectorPath::Elbow { start, corner, end } => {
+            pb.move_to(start.0, start.1);
+            pb.line_to(corner.0, corner.1);
+            pb.line_to(end.0, end.1);
+        }
+        ConnectorPath::Quad {
+            start,
+            control,
+            end,
+        } => {
+            pb.move_to(start.0, start.1);
+            pb.quad_to(control.0, control.1, end.0, end.1);
+        }
+    }
+}
+
+/// Stroke a connector and fill its configured heads.
+fn stroke_connector(
+    pixmap: &mut Pixmap,
+    item: &DisplayAnnotation,
+    path: &ConnectorPath,
+    stroke_width: f32,
+    opacity: f64,
+    ts: Transform,
+    heads: (&str, &str),
+) {
+    let (start_head, end_head) = heads;
+    let head_size = (stroke_width * 3.5).max(10.0);
+    let trimmed = trim_connector(
+        path,
+        head_trim(start_head, head_size),
+        head_trim(end_head, head_size),
+    );
+
+    let mut pb = PathBuilder::new();
+    push_connector_path(&mut pb, &trimmed);
+    if let Some(line_path) = pb.finish() {
+        let stroke_color = parse_color(&item.stroke_color, opacity);
+        let mut stroke_paint = Paint::default();
+        stroke_paint.set_color(stroke_color);
+        stroke_paint.anti_alias = true;
+        let stroke = stroke_for_style(&item.stroke_style, stroke_width);
+        pixmap.stroke_path(&line_path, &stroke_paint, &stroke, ts, None);
+    }
+
+    let start = path.start();
+    let end = path.end();
+    let start_toward = path.start_toward();
+    let end_toward = path.end_toward();
+    let mut head_pb = PathBuilder::new();
+    draw_arrow_head(
+        &mut head_pb,
+        start_head,
+        start.0,
+        start.1,
+        start_toward.0,
+        start_toward.1,
+        stroke_width,
+    );
+    draw_arrow_head(
+        &mut head_pb,
+        end_head,
+        end.0,
+        end.1,
+        end_toward.0,
+        end_toward.1,
+        stroke_width,
+    );
+    if let Some(head_path) = head_pb.finish() {
+        let stroke_color = parse_color(&item.stroke_color, opacity);
+        let mut fill_paint = Paint::default();
+        fill_paint.set_color(stroke_color);
+        fill_paint.anti_alias = true;
+        pixmap.fill_path(&head_path, &fill_paint, FillRule::Winding, ts, None);
     }
 }
 
@@ -441,78 +529,23 @@ fn render_annotation(pixmap: &mut Pixmap, item: &DisplayAnnotation) -> Result<()
     }
 
     if item.annotation_type == "arrow" || item.annotation_type == "line" {
-        let end_x = item.end_x.unwrap_or(t.x + t.width) as f32;
-        let end_y = item.end_y.unwrap_or(t.y + t.height) as f32;
-        let start_x = t.x as f32;
-        let start_y = t.y as f32;
-        let dx = end_x - start_x;
-        let dy = end_y - start_y;
-        let len = (dx * dx + dy * dy).sqrt();
+        let start = (t.x as f32, t.y as f32);
+        let end = (
+            item.end_x.unwrap_or(t.x + t.width) as f32,
+            item.end_y.unwrap_or(t.y + t.height) as f32,
+        );
+        let path = connector_path_for(&item.arrow_style, start, end, None);
 
-        if len > 0.001 {
-            let head_size = (stroke_width * 3.5).max(10.0);
-            let start_offset = if item.arrow_start_head != "none" {
-                (len * 0.45).min(if item.arrow_start_head == "circle" {
-                    head_size / 2.0
-                } else {
-                    head_size * 0.7
-                })
-            } else {
-                0.0
-            };
-            let end_offset = if item.arrow_end_head != "none" {
-                (len * 0.45).min(if item.arrow_end_head == "circle" {
-                    head_size / 2.0
-                } else {
-                    head_size * 0.7
-                })
-            } else {
-                0.0
-            };
-
-            let ux = dx / len;
-            let uy = dy / len;
-
-            let mut pb = PathBuilder::new();
-            pb.move_to(start_x + ux * start_offset, start_y + uy * start_offset);
-            pb.line_to(end_x - ux * end_offset, end_y - uy * end_offset);
-            if let Some(line_path) = pb.finish() {
-                let stroke_color = parse_color(&item.stroke_color, opacity);
-                let mut stroke_paint = Paint::default();
-                stroke_paint.set_color(stroke_color);
-                stroke_paint.anti_alias = true;
-                let stroke = stroke_for_style(&item.stroke_style, stroke_width);
-                pixmap.stroke_path(&line_path, &stroke_paint, &stroke, ts, None);
-            }
-
-            if item.annotation_type == "arrow" {
-                let mut head_pb = PathBuilder::new();
-                draw_arrow_head(
-                    &mut head_pb,
-                    &item.arrow_start_head,
-                    start_x,
-                    start_y,
-                    end_x,
-                    end_y,
-                    stroke_width,
-                );
-                draw_arrow_head(
-                    &mut head_pb,
-                    &item.arrow_end_head,
-                    end_x,
-                    end_y,
-                    start_x,
-                    start_y,
-                    stroke_width,
-                );
-                if let Some(head_path) = head_pb.finish() {
-                    let stroke_color = parse_color(&item.stroke_color, opacity);
-                    let mut fill_paint = Paint::default();
-                    fill_paint.set_color(stroke_color);
-                    fill_paint.anti_alias = true;
-                    pixmap.fill_path(&head_path, &fill_paint, FillRule::Winding, ts, None);
-                }
-            }
+        if connector_length(&path) > 0.001 {
+            stroke_connector(
+                pixmap,
+                item,
+                &path,
+                stroke_width,
+                opacity,
+                ts,
+                (&item.arrow_start_head, &item.arrow_end_head),
+            );
         }
         return Ok(());
     }
@@ -565,20 +598,39 @@ fn render_annotation(pixmap: &mut Pixmap, item: &DisplayAnnotation) -> Result<()
             pixmap.stroke_path(&path, &stroke_paint, &stroke, ts, None);
         }
 
-        // Callout tail
+        // Callout pointer: a routed leader to an explicit target, or the
+        // classic speech tail when the clip carries no target.
         if item.annotation_type == "callout" {
-            let mut tail_pb = PathBuilder::new();
-            tail_pb.move_to(x + 24.0, y + h - 1.0);
-            tail_pb.line_to(x + 44.0, y + h - 1.0);
-            tail_pb.line_to(x + 16.0, y + h + 18.0);
-            tail_pb.close();
-            if let Some(tail_path) = tail_pb.finish() {
-                let fill_color =
-                    parse_color(&item.fill_color, opacity * item.fill_opacity.max(0.85));
-                let mut tail_paint = Paint::default();
-                tail_paint.set_color(fill_color);
-                tail_paint.anti_alias = true;
-                pixmap.fill_path(&tail_path, &tail_paint, FillRule::Winding, ts, None);
+            if let (Some(end_x), Some(end_y)) = (item.end_x, item.end_y) {
+                let target = (end_x as f32, end_y as f32);
+                let (attach, exits_horizontally) = callout_attach_point(x, y, w, h, target);
+                let leader =
+                    connector_path_for(&item.arrow_style, attach, target, Some(exits_horizontally));
+                if connector_length(&leader) > 0.001 {
+                    stroke_connector(
+                        pixmap,
+                        item,
+                        &leader,
+                        stroke_width,
+                        opacity,
+                        ts,
+                        ("none", &item.arrow_end_head),
+                    );
+                }
+            } else {
+                let mut tail_pb = PathBuilder::new();
+                tail_pb.move_to(x + 24.0, y + h - 1.0);
+                tail_pb.line_to(x + 44.0, y + h - 1.0);
+                tail_pb.line_to(x + 16.0, y + h + 18.0);
+                tail_pb.close();
+                if let Some(tail_path) = tail_pb.finish() {
+                    let fill_color =
+                        parse_color(&item.fill_color, opacity * item.fill_opacity.max(0.85));
+                    let mut tail_paint = Paint::default();
+                    tail_paint.set_color(fill_color);
+                    tail_paint.anti_alias = true;
+                    pixmap.fill_path(&tail_path, &tail_paint, FillRule::Winding, ts, None);
+                }
             }
         }
     }

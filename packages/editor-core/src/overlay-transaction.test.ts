@@ -193,6 +193,121 @@ describe("overlay interaction transaction", () => {
       endY: 500,
     })
   })
+
+  it("drags a callout pointer target without moving the callout box", () => {
+    const engine = createEngine(makeTimeline())
+    const clip = createAnnotationClip("callout", {
+      startMs: 0,
+      durationMs: 4_000,
+      canvasWidth: 1_920,
+      canvasHeight: 1_080,
+    })
+    clip.endX = clip.x + clip.width / 2
+    clip.endY = clip.y + clip.height + 80
+    const added = applyCommand(engine.history.present, createAddAnnotationClipCommand(clip))
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+
+    const result = buildOverlayCommand(
+      {
+        kind: "arrow-end",
+        clipId: clip.id,
+        transform: overlayTransformFromClip(clip),
+        endX: 1_500,
+        endY: 900,
+      },
+      added.value,
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const updated = applyCommand(added.value, result.value.command)
+    expect(updated.ok).toBe(true)
+    if (!updated.ok) return
+    expect(updated.value.tracks[1]?.clips[0]).toMatchObject({
+      x: clip.x,
+      y: clip.y,
+      width: clip.width,
+      height: clip.height,
+      endX: 1_500,
+      endY: 900,
+    })
+  })
+
+  it("preserves a callout pointer target when only the box moves", () => {
+    const engine = createEngine(makeTimeline())
+    const clip = createAnnotationClip("callout", {
+      startMs: 0,
+      durationMs: 4_000,
+      canvasWidth: 1_920,
+      canvasHeight: 1_080,
+    })
+    clip.endX = 1_200
+    clip.endY = 700
+    const added = applyCommand(engine.history.present, createAddAnnotationClipCommand(clip))
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+
+    // Body-move drafts omit endX/endY so the absolute target stays pinned.
+    const result = buildOverlayCommand(
+      {
+        kind: "move",
+        clipId: clip.id,
+        transform: {
+          ...overlayTransformFromClip(clip),
+          x: clip.x + 40,
+          y: clip.y + 30,
+        },
+      },
+      added.value,
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const updated = applyCommand(added.value, result.value.command)
+    expect(updated.ok).toBe(true)
+    if (!updated.ok) return
+    expect(updated.value.tracks[1]?.clips[0]).toMatchObject({
+      x: clip.x + 40,
+      y: clip.y + 30,
+      endX: 1_200,
+      endY: 700,
+    })
+  })
+
+  it("clears a callout pointer target when an update sets it to undefined", () => {
+    const engine = createEngine(makeTimeline())
+    const clip = createAnnotationClip("callout", {
+      startMs: 0,
+      durationMs: 4_000,
+      canvasWidth: 1_920,
+      canvasHeight: 1_080,
+    })
+    clip.endX = 1_200
+    clip.endY = 700
+    const added = applyCommand(engine.history.present, createAddAnnotationClipCommand(clip))
+    expect(added.ok).toBe(true)
+    if (!added.ok) return
+
+    const result = buildOverlayCommand(
+      {
+        kind: "text-edit",
+        clipId: clip.id,
+        transform: overlayTransformFromClip(clip),
+        update: { endX: undefined, endY: undefined },
+      },
+      added.value,
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const updated = applyCommand(added.value, result.value.command)
+    expect(updated.ok).toBe(true)
+    if (!updated.ok) return
+    const stored = updated.value.tracks[1]?.clips[0]
+    expect(stored && "endX" in stored ? stored.endX : undefined).toBeUndefined()
+    expect(stored && "endY" in stored ? stored.endY : undefined).toBeUndefined()
+  })
 })
 
 describe("overlay transform constraints", () => {

@@ -24,7 +24,7 @@ describe("annotation drawing geometry", () => {
       expect(geometry!.height).toBeGreaterThan(0)
       const preset = ANNOTATION_SHAPES.find((shape) => shape.type === type)!
       const clip = createAnnotationDrawingClip(
-        { preset, strokeColor: "red", strokeWidth: 4, strokeStyle: "solid" },
+        { preset, strokeColor: "red", strokeWidth: 4, strokeStyle: "solid", arrowStyle: "straight" },
         0,
         bounds,
       )
@@ -130,7 +130,13 @@ describe("annotation drawing geometry", () => {
 
 describe("annotation drawing preset and preview", () => {
   it.each(ANNOTATION_SHAPES)("preserves the full $name preset with stroke overrides", (preset) => {
-    const settings = { preset, strokeColor: "red", strokeWidth: 7, strokeStyle: "dotted" as const }
+    const settings = {
+      preset,
+      strokeColor: "red",
+      strokeWidth: 7,
+      strokeStyle: "dotted" as const,
+      arrowStyle: "straight" as const,
+    }
     const clip = createAnnotationDrawingClip(settings, 1234.6, bounds)
     const expected = createAnnotationClipFromPreset(preset, {
       id: clip.id,
@@ -138,6 +144,7 @@ describe("annotation drawing preset and preview", () => {
       durationMs: 3500,
       strokeColor: "red",
       strokeWidth: 7,
+      arrowStyle: "straight",
       canvasWidth: bounds.width,
       canvasHeight: bounds.height,
     })

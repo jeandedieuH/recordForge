@@ -236,7 +236,43 @@ function SelectionControls({
       ) : (
         <RotationHandle clip={clip} interaction={interaction} />
       )}
+      {clip.kind === "annotation" &&
+      clip.annotationType === "callout" &&
+      clip.endX !== undefined &&
+      clip.endY !== undefined ? (
+        <CalloutTargetHandle clip={clip} interaction={interaction} />
+      ) : null}
     </>
+  )
+}
+
+function CalloutTargetHandle({
+  clip,
+  interaction,
+}: {
+  clip: Extract<OverlayClip, { kind: "annotation" }>
+  interaction: OverlayInteraction
+}) {
+  const width = Math.max(1, clip.width)
+  const height = Math.max(1, clip.height)
+  // The leader tip usually sits outside the box; overflow is intentional.
+  const endX = clip.endX ?? clip.x + width / 2
+  const endY = clip.endY ?? clip.y + height
+
+  return (
+    <Handle
+      label="Move callout pointer target"
+      className="cursor-grab rounded-full bg-warning"
+      style={{
+        left: `${((endX - clip.x) / width) * 100}%`,
+        top: `${((endY - clip.y) / height) * 100}%`,
+      }}
+      onPointerDown={(event) => beginHandleGesture(event, clip, "arrow-end", interaction)}
+      onPointerMove={interaction.moveGesture}
+      onPointerUp={interaction.finishGesture}
+      onPointerCancel={interaction.finishGesture}
+      onLostPointerCapture={interaction.handleLostPointerCapture}
+    />
   )
 }
 

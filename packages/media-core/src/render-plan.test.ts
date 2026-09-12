@@ -661,6 +661,7 @@ describe("render-plan", () => {
             cornerRadius: 16,
             arrowStartHead: "none",
             arrowEndHead: "arrow",
+            arrowStyle: "straight",
             textColor: "#ffffff",
             fontSize: 16,
             animationIn: "fade",

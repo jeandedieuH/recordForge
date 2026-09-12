@@ -137,6 +137,7 @@ function createAnnotationDisplayItem(preset: AnnotationPreset): OverlayDisplayAn
     cornerRadius: clip.cornerRadius,
     arrowEndHead: clip.arrowEndHead,
     arrowStartHead: clip.arrowStartHead,
+    arrowStyle: clip.arrowStyle,
     shadowEnabled: clip.shadowEnabled,
     shadowColor: clip.shadowColor,
     shadowBlur: clip.shadowBlur,

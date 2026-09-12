@@ -35,6 +35,8 @@ pub struct RenderPlanAnnotation {
     pub arrow_end_head: String,
     #[serde(default = "default_none")]
     pub arrow_start_head: String,
+    #[serde(default = "default_arrow_style")]
+    pub arrow_style: String,
     #[serde(default)]
     pub shadow_enabled: bool,
     #[serde(default = "default_shadow_color")]
@@ -227,6 +229,9 @@ fn default_corner_radius() -> f64 {
 fn default_arrow_head() -> String {
     "arrow".into()
 }
+fn default_arrow_style() -> String {
+    "straight".into()
+}
 fn default_none() -> String {
     "none".into()
 }
@@ -417,8 +422,11 @@ pub fn build_annotation_svg(
         filter_attr = format!(r##" filter="url(#ann-shadow-{})""##, ann.id);
     }
 
-    // Arrow markers
-    if ann.annotation_type == "arrow" || ann.annotation_type == "line" {
+    // Arrow markers (also used by callout leader pointers when a target exists)
+    if ann.annotation_type == "arrow"
+        || ann.annotation_type == "line"
+        || (ann.annotation_type == "callout" && ann.end_x.is_some() && ann.end_y.is_some())
+    {
         defs.push_str(&format!(
             r##"<marker id="arrowhead-{id}" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
                 <path d="M0,0 L0,6 L9,3 z" fill="{color}" />
@@ -525,17 +533,29 @@ pub fn build_annotation_svg(
                 dash = dash_attr,
                 filter_attr = filter_attr,
             );
-            let tail = format!(
-                r##"<polygon points="{x1},{y1} {x2},{y2} {x3},{y3}" fill="{fill}" fill-opacity="{fill_op}"/>"##,
-                x1 = x + 24.0,
-                y1 = y + h - 1.0,
-                x2 = x + 44.0,
-                y2 = y + h - 1.0,
-                x3 = x + 16.0,
-                y3 = y + h + 18.0,
-                fill = ann.fill_color,
-                fill_op = ann.fill_opacity.max(0.85),
-            );
+            let pointer = match (ann.end_x, ann.end_y) {
+                (Some(ex), Some(ey)) => format!(
+                    r##"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{stroke}" stroke-width="{sw}" stroke-linecap="round" marker-end="url(#arrowhead-{id})"/>"##,
+                    x1 = x + w / 2.0,
+                    y1 = y + h,
+                    x2 = ex,
+                    y2 = ey,
+                    stroke = ann.stroke_color,
+                    sw = ann.stroke_width,
+                    id = ann.id,
+                ),
+                _ => format!(
+                    r##"<polygon points="{x1},{y1} {x2},{y2} {x3},{y3}" fill="{fill}" fill-opacity="{fill_op}"/>"##,
+                    x1 = x + 24.0,
+                    y1 = y + h - 1.0,
+                    x2 = x + 44.0,
+                    y2 = y + h - 1.0,
+                    x3 = x + 16.0,
+                    y3 = y + h + 18.0,
+                    fill = ann.fill_color,
+                    fill_op = ann.fill_opacity.max(0.85),
+                ),
+            };
             let text_elem = if let Some(text) = &ann.text {
                 let fs = ann.font_size.clamp(10.0, 72.0);
                 let padding = fs * 1.5;
@@ -569,7 +589,7 @@ pub fn build_annotation_svg(
             } else {
                 String::new()
             };
-            format!("{bubble}{tail}{text_elem}")
+            format!("{bubble}{pointer}{text_elem}")
         }
         "spotlight" => {
             // Darkened mask covering entire canvas with clear rectangular aperture
@@ -1097,6 +1117,7 @@ pub fn build_overlay_render_plan_from_legacy(
                 corner_radius: ann.corner_radius,
                 arrow_end_head: ann.arrow_end_head.clone(),
                 arrow_start_head: ann.arrow_start_head.clone(),
+                arrow_style: ann.arrow_style.clone(),
                 shadow_enabled: ann.shadow_enabled,
                 shadow_color: ann.shadow_color.clone(),
                 shadow_blur: ann.shadow_blur,
@@ -1227,6 +1248,7 @@ mod tests {
             corner_radius: 12.0,
             arrow_end_head: "none".into(),
             arrow_start_head: "none".into(),
+            arrow_style: "straight".into(),
             shadow_enabled: true,
             shadow_color: "#000000".into(),
             shadow_blur: 8.0,
@@ -1279,6 +1301,7 @@ mod tests {
                 corner_radius: 8.0,
                 arrow_end_head: "arrow".into(),
                 arrow_start_head: "none".into(),
+                arrow_style: "straight".into(),
                 shadow_enabled: false,
                 shadow_color: "#000000".into(),
                 shadow_blur: 4.0,
@@ -1392,6 +1415,7 @@ mod tests {
             corner_radius: 12.0,
             arrow_end_head: "none".into(),
             arrow_start_head: "none".into(),
+            arrow_style: "straight".into(),
             shadow_enabled: false,
             shadow_color: "#000000".into(),
             shadow_blur: 0.0,

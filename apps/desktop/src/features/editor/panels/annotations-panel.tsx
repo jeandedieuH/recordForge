@@ -18,6 +18,7 @@ import {
   ToggleGroup,
   ToggleGroupItem,
 } from "@recordforge/ui"
+import type { AnnotationArrowStyle } from "@recordforge/contracts"
 import { Check, FolderOpen, MousePointer2, Pencil, Plus, Shapes } from "lucide-react"
 import { PresetBrowser, type BrowserPreset } from "./preset-browser"
 import { PresetThumbnail } from "../presets/preset-thumbnail"
@@ -52,7 +53,9 @@ export function AnnotationsPanel({
     .flatMap((track) => track.clips)
     .find((clip) => clip.id === selectedId)
   const selectedAnnotation = selected?.kind === "annotation" ? selected : null
-  const { preset, strokeColor, strokeWidth, strokeStyle } = drawSettings
+  const { preset, strokeColor, strokeWidth, strokeStyle, arrowStyle } = drawSettings
+  const usesConnector =
+    preset.type === "arrow" || preset.type === "line" || preset.type === "callout"
 
   const previewPreset = useMemo<AnnotationPresetRecord>(
     () => ({
@@ -66,9 +69,10 @@ export function AnnotationsPanel({
         defaultStrokeColor: strokeColor,
         defaultStrokeWidth: strokeWidth,
         defaultStrokeStyle: strokeStyle,
+        defaultArrowStyle: arrowStyle,
       },
     }),
-    [preset, strokeColor, strokeWidth, strokeStyle],
+    [preset, strokeColor, strokeWidth, strokeStyle, arrowStyle],
   )
 
   function updateSettings(update: Partial<AnnotationDrawSettings>) {
@@ -212,6 +216,30 @@ export function AnnotationsPanel({
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
+          {usesConnector && (
+            <ToggleGroup
+              type="single"
+              value={arrowStyle}
+              aria-label="Connector style"
+              onValueChange={(style) => {
+                if (style === "straight" || style === "elbow" || style === "curved")
+                  updateSettings({ arrowStyle: style })
+              }}
+              className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-surface-dim p-1"
+            >
+              {(
+                [
+                  { value: "straight", label: "Straight" },
+                  { value: "elbow", label: "Elbow" },
+                  { value: "curved", label: "Curved" },
+                ] satisfies { value: AnnotationArrowStyle; label: string }[]
+              ).map((style) => (
+                <ToggleGroupItem key={style.value} value={style.value} className="px-1 text-xs">
+                  {style.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          )}
         </section>
       </div>
 

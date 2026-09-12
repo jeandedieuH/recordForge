@@ -62,6 +62,7 @@ fn display_item_at_time(item: &OverlayItem, time_ms: u64) -> Option<DisplayItem>
                 corner_radius: details.corner_radius,
                 arrow_end_head: details.arrow_end_head.clone(),
                 arrow_start_head: details.arrow_start_head.clone(),
+                arrow_style: details.arrow_style.clone(),
                 shadow_enabled: details.shadow_enabled,
                 shadow_color: details.shadow_color.clone(),
                 shadow_blur: details.shadow_blur,

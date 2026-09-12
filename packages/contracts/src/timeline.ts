@@ -354,6 +354,10 @@ export type AnnotationStrokeStyle = z.infer<typeof annotationStrokeStyleSchema>
 export const annotationHeadSchema = z.enum(["none", "arrow", "circle", "diamond"])
 export type AnnotationHead = z.infer<typeof annotationHeadSchema>
 
+// Connector routing for arrow/line strokes and callout leader lines.
+export const annotationArrowStyleSchema = z.enum(["straight", "elbow", "curved"])
+export type AnnotationArrowStyle = z.infer<typeof annotationArrowStyleSchema>
+
 export const annotationAnimationSchema = z.enum([
   "none",
   "fade",
@@ -387,6 +391,7 @@ export const annotationClipSchema = timelineClipBaseSchema.extend({
   cornerRadius: z.number().min(0).max(100).default(8),
   arrowEndHead: annotationHeadSchema.default("arrow"),
   arrowStartHead: annotationHeadSchema.default("none"),
+  arrowStyle: annotationArrowStyleSchema.default("straight"),
   shadowEnabled: z.boolean().default(false),
   shadowColor: z.string().default("rgba(0, 0, 0, 0.5)"),
   shadowBlur: z.number().min(0).max(100).default(8),
@@ -938,6 +943,7 @@ export const renderPlanAnnotationSchema = z.object({
   cornerRadius: z.number().min(0),
   arrowEndHead: annotationHeadSchema,
   arrowStartHead: annotationHeadSchema,
+  arrowStyle: annotationArrowStyleSchema.default("straight"),
   shadowEnabled: z.boolean(),
   shadowColor: z.string(),
   shadowBlur: z.number().min(0),

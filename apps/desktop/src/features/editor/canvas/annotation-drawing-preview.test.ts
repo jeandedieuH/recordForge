@@ -56,7 +56,7 @@ describe("annotation drawing preview renderer", () => {
       const preset = getAnnotationShapePreset(type)
       const bounds = { width: 1920, height: 1080 }
       const clip = createAnnotationDrawingClip(
-        { preset, strokeColor: "red", strokeWidth: 6, strokeStyle: "dashed" },
+        { preset, strokeColor: "red", strokeWidth: 6, strokeStyle: "dashed", arrowStyle: "straight" },
         0,
         bounds,
       )

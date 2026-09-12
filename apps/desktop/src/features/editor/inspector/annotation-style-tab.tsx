@@ -1,4 +1,10 @@
-import type { AnnotationHead, AnnotationStrokeStyle, AnnotationType } from "@recordforge/contracts"
+import type {
+  AnnotationArrowStyle,
+  AnnotationHead,
+  AnnotationStrokeStyle,
+  AnnotationType,
+} from "@recordforge/contracts"
+import { calloutDefaultTarget } from "@recordforge/editor-core"
 import { ColorPicker, Switch, Textarea, ToggleGroup, ToggleGroupItem } from "@recordforge/ui"
 import { InspectorSection } from "./fields"
 import {
@@ -14,6 +20,8 @@ import {
 
 export function AnnotationStyleTab({ clip, onChange }: AnnotationInspectorProps) {
   const isLine = isAnnotationLine(clip.annotationType)
+  const isCallout = clip.annotationType === "callout"
+  const hasPointerTarget = isCallout && clip.endX !== undefined && clip.endY !== undefined
   const hasText = clip.annotationType === "callout" || clip.annotationType === "badge"
   return (
     <div className="flex flex-col gap-4">
@@ -122,9 +130,15 @@ export function AnnotationStyleTab({ clip, onChange }: AnnotationInspectorProps)
         )}
       </InspectorSection>
 
-      {/* Arrow Heads */}
+      {/* Connector routing & arrow heads for arrows/lines */}
       {isLine && (
         <InspectorSection title="Line ends">
+          <AnnotationSelect<AnnotationArrowStyle>
+            label="Connector"
+            value={clip.arrowStyle}
+            options={ARROW_STYLE_OPTIONS}
+            onChange={(arrowStyle) => onChange({ arrowStyle })}
+          />
           <div className="grid grid-cols-2 gap-3">
             <AnnotationSelect<AnnotationHead>
               label="Start head"
@@ -139,6 +153,51 @@ export function AnnotationStyleTab({ clip, onChange }: AnnotationInspectorProps)
               onChange={(arrowEndHead) => onChange({ arrowEndHead })}
             />
           </div>
+        </InspectorSection>
+      )}
+
+      {/* Callout leader: an optional arrow pointing at a target */}
+      {isCallout && (
+        <InspectorSection title="Pointer">
+          <label className="flex items-center justify-between gap-2 text-xs text-foreground">
+            Arrow pointer
+            <Switch
+              checked={hasPointerTarget}
+              onCheckedChange={(enabled) => {
+                if (!enabled) {
+                  onChange({ endX: undefined, endY: undefined })
+                  return
+                }
+                const target = calloutDefaultTarget(clip.x, clip.y, clip.width, clip.height)
+                onChange({
+                  endX: clip.endX ?? target.x,
+                  endY: clip.endY ?? target.y,
+                  arrowEndHead: clip.arrowEndHead === "none" ? "arrow" : clip.arrowEndHead,
+                })
+              }}
+            />
+          </label>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {hasPointerTarget
+              ? "Drag the tip handle on the canvas to point at content."
+              : "A classic speech tail is drawn below the bubble instead."}
+          </p>
+          {hasPointerTarget && (
+            <div className="grid grid-cols-2 gap-3">
+              <AnnotationSelect<AnnotationArrowStyle>
+                label="Pointer style"
+                value={clip.arrowStyle}
+                options={ARROW_STYLE_OPTIONS}
+                onChange={(arrowStyle) => onChange({ arrowStyle })}
+              />
+              <AnnotationSelect<AnnotationHead>
+                label="Tip"
+                value={clip.arrowEndHead}
+                options={HEAD_OPTIONS}
+                onChange={(arrowEndHead) => onChange({ arrowEndHead })}
+              />
+            </div>
+          )}
         </InspectorSection>
       )}
 
@@ -199,6 +258,12 @@ const SHAPE_OPTIONS: { value: AnnotationType; label: string }[] = [
   { value: "callout", label: "Callout" },
   { value: "spotlight", label: "Spotlight" },
   { value: "badge", label: "Badge" },
+]
+
+const ARROW_STYLE_OPTIONS: { value: AnnotationArrowStyle; label: string }[] = [
+  { value: "straight", label: "Straight" },
+  { value: "elbow", label: "Elbow" },
+  { value: "curved", label: "Curved" },
 ]
 
 // The shared contract/renderer supports diamond heads; "square" was never a valid head value.

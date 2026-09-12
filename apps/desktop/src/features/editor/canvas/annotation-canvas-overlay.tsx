@@ -2,7 +2,14 @@ import { useRef, useState } from "react"
 import type { AnnotationClip, AnnotationType } from "@recordforge/contracts"
 import { createAnnotationClip } from "@recordforge/editor-core"
 import type { OverlayHandle } from "@recordforge/editor-core"
-import { wrapTextToLines } from "@recordforge/overlay-core"
+import {
+  calloutAttachPoint,
+  connectorHeadTrim,
+  connectorPathD,
+  connectorPathFor,
+  trimConnectorPath,
+  wrapTextToLines,
+} from "@recordforge/overlay-core"
 import type { OverlayInteraction } from "./use-overlay-interaction"
 import { cn } from "@recordforge/ui"
 
@@ -296,43 +303,92 @@ export function AnnotationCanvasOverlay({
                 />
               )}
 
-              {clip.annotationType === "arrow" && (
-                <g color={clip.strokeColor}>
-                  <line
-                    x1={clip.x}
-                    y1={clip.y}
-                    x2={clip.endX ?? clip.x + clip.width}
-                    y2={clip.endY ?? clip.y + clip.height}
-                    stroke={clip.strokeColor}
-                    strokeWidth={clip.strokeWidth}
-                    strokeDasharray={clip.strokeStyle === "dashed" ? "8 8" : undefined}
-                    markerEnd="url(#arrowhead)"
-                    filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
-                  />
-                </g>
-              )}
-
-              {clip.annotationType === "line" && (
-                <line
-                  x1={clip.x}
-                  y1={clip.y}
-                  x2={clip.endX ?? clip.x + clip.width}
-                  y2={clip.endY ?? clip.y + clip.height}
-                  stroke={clip.strokeColor}
-                  strokeWidth={clip.strokeWidth}
-                  strokeDasharray={
-                    clip.strokeStyle === "dashed"
-                      ? "8 8"
-                      : clip.strokeStyle === "dotted"
-                        ? "4 6"
-                        : undefined
-                  }
-                  filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
-                />
-              )}
+              {(clip.annotationType === "arrow" || clip.annotationType === "line") &&
+                (() => {
+                  const path = connectorPathFor(
+                    clip.arrowStyle,
+                    { x: clip.x, y: clip.y },
+                    {
+                      x: clip.endX ?? clip.x + clip.width,
+                      y: clip.endY ?? clip.y + clip.height,
+                    },
+                  )
+                  const headSize = Math.max(10, clip.strokeWidth * 3.5)
+                  const endTrim =
+                    clip.annotationType === "arrow" ? connectorHeadTrim("arrow", headSize) : 0
+                  const shaft = trimConnectorPath(path, 0, endTrim)
+                  return (
+                    <g color={clip.strokeColor}>
+                      <path
+                        d={connectorPathD(shaft)}
+                        fill="none"
+                        stroke={clip.strokeColor}
+                        strokeWidth={clip.strokeWidth}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeDasharray={
+                          clip.strokeStyle === "dashed"
+                            ? "8 8"
+                            : clip.strokeStyle === "dotted"
+                              ? "4 6"
+                              : undefined
+                        }
+                        markerEnd={
+                          clip.annotationType === "arrow" ? "url(#arrowhead)" : undefined
+                        }
+                        filter={
+                          clip.shadowEnabled ? "url(#annotation-shadow)" : undefined
+                        }
+                      />
+                    </g>
+                  )
+                })()}
 
               {clip.annotationType === "callout" && (
                 <g filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}>
+                  {clip.endX !== undefined && clip.endY !== undefined
+                    ? (() => {
+                        const target = { x: clip.endX, y: clip.endY }
+                        const attach = calloutAttachPoint(
+                          {
+                            x: clip.x,
+                            y: clip.y,
+                            width: clip.width,
+                            height: clip.height,
+                          },
+                          target,
+                        )
+                        const leader = connectorPathFor(
+                          clip.arrowStyle,
+                          attach.point,
+                          target,
+                          attach.axis,
+                        )
+                        const headSize = Math.max(10, clip.strokeWidth * 3.5)
+                        const shaft = trimConnectorPath(
+                          leader,
+                          0,
+                          connectorHeadTrim(clip.arrowEndHead, headSize),
+                        )
+                        return (
+                          <g color={clip.strokeColor}>
+                            <path
+                              d={connectorPathD(shaft)}
+                              fill="none"
+                              stroke={clip.strokeColor}
+                              strokeWidth={clip.strokeWidth}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              markerEnd={
+                                clip.arrowEndHead === "arrow"
+                                  ? "url(#arrowhead)"
+                                  : undefined
+                              }
+                            />
+                          </g>
+                        )
+                      })()
+                    : null}
                   <rect
                     x={clip.x}
                     y={clip.y}

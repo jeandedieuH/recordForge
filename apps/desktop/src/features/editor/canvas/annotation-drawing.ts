@@ -102,6 +102,7 @@ export function createAnnotationDrawingClip(
     durationMs: 3_500,
     strokeColor: settings.strokeColor,
     strokeWidth: settings.strokeWidth,
+    arrowStyle: settings.arrowStyle,
     canvasWidth: bounds.width,
     canvasHeight: bounds.height,
   })

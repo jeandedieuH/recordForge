@@ -95,6 +95,10 @@ fn parity_test_renders_fixture_project_overlays() {
                                             .as_str()
                                             .unwrap_or("none")
                                             .to_string(),
+                                        arrow_style: clip["arrowStyle"]
+                                            .as_str()
+                                            .unwrap_or("straight")
+                                            .to_string(),
                                         shadow_enabled: clip["shadowEnabled"]
                                             .as_bool()
                                             .unwrap_or(false),

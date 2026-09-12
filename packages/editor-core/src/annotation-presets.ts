@@ -1,11 +1,13 @@
 import { z } from "zod"
 import {
+  annotationArrowStyleSchema,
   annotationHeadSchema,
   annotationStrokeStyleSchema,
   annotationTypeSchema,
   annotationAnimationSchema,
   overlayAnimationSchema,
   type AnnotationAnimation,
+  type AnnotationArrowStyle,
   type OverlayAnimationOutType,
   type AnnotationClip,
   type AnnotationHead,
@@ -51,6 +53,7 @@ export interface AnnotationShapePreset {
   defaultCornerRadius: number
   defaultArrowStartHead: AnnotationHead
   defaultArrowEndHead: AnnotationHead
+  defaultArrowStyle?: AnnotationArrowStyle
   defaultStrokeStyle: AnnotationStrokeStyle
   text?: string
   textColor?: string
@@ -83,6 +86,7 @@ export const annotationPresetValuesSchema = z.object({
   defaultCornerRadius: z.number().min(0).max(100),
   defaultArrowStartHead: annotationHeadSchema,
   defaultArrowEndHead: annotationHeadSchema,
+  defaultArrowStyle: annotationArrowStyleSchema.optional(),
   defaultStrokeStyle: annotationStrokeStyleSchema,
   text: z.string().optional(),
   textColor: z.string().optional(),
@@ -137,6 +141,24 @@ function toOverlayAnimationOut(animation: AnnotationAnimation): OverlayAnimation
   return animation
 }
 
+/** True for annotation types whose shape is defined by endX/endY endpoints or a pointer target. */
+export function annotationHasEndpoints(type: AnnotationType): boolean {
+  return type === "arrow" || type === "line" || type === "callout"
+}
+
+/**
+ * Default leader target for a callout box: below the box, biased toward the
+ * left so the pointer reads like the classic speech tail direction.
+ */
+export function calloutDefaultTarget(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  return { x: x + width * 0.25, y: y + height + Math.max(48, height * 0.35) }
+}
+
 export function createAnnotationClip(
   type: AnnotationType,
   options?: {
@@ -149,6 +171,7 @@ export function createAnnotationClip(
     height?: number
     endX?: number
     endY?: number
+    arrowStyle?: AnnotationArrowStyle
     strokeColor?: string
     strokeWidth?: number
     text?: string
@@ -171,6 +194,7 @@ export function createAnnotationClipFromPreset(
     height?: number
     endX?: number
     endY?: number
+    arrowStyle?: AnnotationArrowStyle
     strokeColor?: string
     strokeWidth?: number
     text?: string
@@ -189,6 +213,9 @@ export function createAnnotationClipFromPreset(
   const y = options?.y ?? Math.max(40, Math.round((canvasHeight - height) / 2))
   const animationIn = preset.animationIn ?? "fade"
   const animationOut = preset.animationOut ?? "fade"
+  const isLine = preset.type === "arrow" || preset.type === "line"
+  const calloutTarget =
+    preset.type === "callout" ? calloutDefaultTarget(x, y, width, height) : undefined
 
   return {
     id,
@@ -210,10 +237,8 @@ export function createAnnotationClipFromPreset(
     anchorY: preset.anchorY ?? 0.5,
     zIndex: preset.zIndex ?? 0,
     opacity: preset.opacity ?? 1,
-    endX:
-      options?.endX ?? (preset.type === "arrow" || preset.type === "line" ? x + width : undefined),
-    endY:
-      options?.endY ?? (preset.type === "arrow" || preset.type === "line" ? y + height : undefined),
+    endX: options?.endX ?? (isLine ? x + width : calloutTarget?.x),
+    endY: options?.endY ?? (isLine ? y + height : calloutTarget?.y),
     strokeColor: options?.strokeColor ?? preset.defaultStrokeColor,
     strokeWidth: options?.strokeWidth ?? preset.defaultStrokeWidth,
     strokeStyle: preset.defaultStrokeStyle,
@@ -222,6 +247,7 @@ export function createAnnotationClipFromPreset(
     cornerRadius: preset.defaultCornerRadius,
     arrowStartHead: preset.defaultArrowStartHead,
     arrowEndHead: preset.defaultArrowEndHead,
+    arrowStyle: options?.arrowStyle ?? preset.defaultArrowStyle ?? "straight",
     shadowEnabled: preset.shadowEnabled ?? true,
     shadowColor: preset.shadowColor ?? "rgba(0, 0, 0, 0.5)",
     shadowBlur: preset.shadowBlur ?? 10,
@@ -251,6 +277,10 @@ export function applyPresetToAnnotationClip(
   const nextWidth = shape.defaultWidth
   const nextHeight = shape.defaultHeight
   const isLine = shape.type === "arrow" || shape.type === "line"
+  const isCallout = shape.type === "callout"
+  const calloutTarget = isCallout
+    ? calloutDefaultTarget(clip.x, clip.y, nextWidth, nextHeight)
+    : undefined
   const animationIn = shape.animationIn ?? clip.animationIn
   const animationOut = shape.animationOut ?? clip.animationOut
 
@@ -260,8 +290,8 @@ export function applyPresetToAnnotationClip(
     presetId: shape.presetId ?? "",
     width: nextWidth,
     height: nextHeight,
-    endX: isLine ? clip.x + nextWidth : undefined,
-    endY: isLine ? clip.y + nextHeight : undefined,
+    endX: isLine ? clip.x + nextWidth : isCallout ? (clip.endX ?? calloutTarget?.x) : undefined,
+    endY: isLine ? clip.y + nextHeight : isCallout ? (clip.endY ?? calloutTarget?.y) : undefined,
     strokeWidth: shape.defaultStrokeWidth,
     strokeColor: shape.defaultStrokeColor,
     strokeStyle: shape.defaultStrokeStyle,
@@ -270,6 +300,7 @@ export function applyPresetToAnnotationClip(
     cornerRadius: shape.defaultCornerRadius,
     arrowStartHead: shape.defaultArrowStartHead,
     arrowEndHead: shape.defaultArrowEndHead,
+    arrowStyle: shape.defaultArrowStyle ?? "straight",
     ...(shape.text !== undefined ? { text: shape.text } : {}),
     ...(shape.textColor !== undefined ? { textColor: shape.textColor } : {}),
     ...(shape.fontSize !== undefined ? { fontSize: shape.fontSize } : {}),
@@ -312,6 +343,7 @@ export function annotationPresetFromClip(
       defaultCornerRadius: clip.cornerRadius,
       defaultArrowStartHead: clip.arrowStartHead,
       defaultArrowEndHead: clip.arrowEndHead,
+      defaultArrowStyle: clip.arrowStyle,
       defaultStrokeStyle: clip.strokeStyle,
       text: clip.text,
       textColor: clip.textColor,

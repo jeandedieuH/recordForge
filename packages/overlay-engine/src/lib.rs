@@ -7,6 +7,8 @@
 use thiserror::Error;
 
 pub mod animation;
+#[cfg(any(feature = "native-render", test))]
+mod connectors;
 mod evaluator;
 #[cfg(feature = "native-render")]
 mod export_adapter;
@@ -185,6 +187,7 @@ mod tests {
                         corner_radius: 8.0,
                         arrow_end_head: "none".to_string(),
                         arrow_start_head: "none".to_string(),
+                        arrow_style: "straight".to_string(),
                         shadow_enabled: false,
                         shadow_color: "#000000".to_string(),
                         shadow_blur: 0.0,
@@ -336,6 +339,7 @@ mod tests {
                     corner_radius: 12.0,
                     arrow_end_head: "arrow".to_string(),
                     arrow_start_head: "circle".to_string(),
+                    arrow_style: "straight".to_string(),
                     shadow_enabled: true,
                     shadow_color: "rgba(0,0,0,0.5)".to_string(),
                     shadow_blur: 8.0,
@@ -510,6 +514,7 @@ mod tests {
                 corner_radius: 12.0,
                 arrow_end_head: "none".to_string(),
                 arrow_start_head: "none".to_string(),
+                arrow_style: "straight".to_string(),
                 shadow_enabled: false,
                 shadow_color: "#000000".to_string(),
                 shadow_blur: 0.0,

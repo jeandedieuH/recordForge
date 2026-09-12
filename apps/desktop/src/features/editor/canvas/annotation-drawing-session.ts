@@ -1,4 +1,5 @@
 import type { AnnotationClip } from "@recordforge/contracts"
+import { calloutDefaultTarget } from "@recordforge/editor-core"
 import type { AnnotationDrawSettings } from "../annotations/annotation-tools"
 import {
   createAnnotationDrawingClip,
@@ -59,7 +60,16 @@ export function createAnnotationDrawingSession(options: DrawingSessionOptions) {
       draft.bounds,
       draft.shiftKey,
     )
-    return geometry ? { ...draft.clip, ...geometry } : null
+    if (!geometry) return null
+    const preview = { ...draft.clip, ...geometry }
+    if (preview.annotationType === "callout") {
+      // The draft's stored target belongs to the preset box; anchor a fresh
+      // leader target below the box the user actually drew.
+      const target = calloutDefaultTarget(preview.x, preview.y, preview.width, preview.height)
+      preview.endX = target.x
+      preview.endY = target.y
+    }
+    return preview
   }
 
   function reset(invalidate: boolean) {
