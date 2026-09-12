@@ -96,7 +96,9 @@ function isArrowClip(clip: OverlayClip): clip is Extract<OverlayClip, { kind: "a
 }
 
 // Callouts with a leader target reuse the "arrow-end" handle to aim the pointer.
-function hasPointableTarget(clip: OverlayClip): clip is Extract<OverlayClip, { kind: "annotation" }> {
+function hasPointableTarget(
+  clip: OverlayClip,
+): clip is Extract<OverlayClip, { kind: "annotation" }> {
   return (
     clip.kind === "annotation" &&
     clip.annotationType === "callout" &&
@@ -490,18 +492,8 @@ export function useOverlayInteraction({
         transform,
         // Keep the clip's endpoints unless the update explicitly changes or
         // clears them (endX: undefined removes a callout pointer target).
-        endX:
-          clip.kind === "annotation"
-            ? "endX" in update
-              ? update.endX
-              : clip.endX
-            : undefined,
-        endY:
-          clip.kind === "annotation"
-            ? "endY" in update
-              ? update.endY
-              : clip.endY
-            : undefined,
+        endX: clip.kind === "annotation" ? ("endX" in update ? update.endX : clip.endX) : undefined,
+        endY: clip.kind === "annotation" ? ("endY" in update ? update.endY : clip.endY) : undefined,
         update,
       }
     },

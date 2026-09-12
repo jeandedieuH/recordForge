@@ -333,12 +333,8 @@ export function AnnotationCanvasOverlay({
                               ? "4 6"
                               : undefined
                         }
-                        markerEnd={
-                          clip.annotationType === "arrow" ? "url(#arrowhead)" : undefined
-                        }
-                        filter={
-                          clip.shadowEnabled ? "url(#annotation-shadow)" : undefined
-                        }
+                        markerEnd={clip.annotationType === "arrow" ? "url(#arrowhead)" : undefined}
+                        filter={clip.shadowEnabled ? "url(#annotation-shadow)" : undefined}
                       />
                     </g>
                   )
@@ -380,9 +376,7 @@ export function AnnotationCanvasOverlay({
                               strokeLinecap="round"
                               strokeLinejoin="round"
                               markerEnd={
-                                clip.arrowEndHead === "arrow"
-                                  ? "url(#arrowhead)"
-                                  : undefined
+                                clip.arrowEndHead === "arrow" ? "url(#arrowhead)" : undefined
                               }
                             />
                           </g>

@@ -112,8 +112,20 @@ export function applyAnnotationToolToClip({
     anchorX: clip.anchorX,
     anchorY: clip.anchorY,
     zIndex: clip.zIndex,
-    endX: isLine ? (wasLine ? endX : clip.x + clip.width) : isCallout ? (clip.endX ?? calloutTarget?.x) : undefined,
-    endY: isLine ? (wasLine ? endY : clip.y + clip.height) : isCallout ? (clip.endY ?? calloutTarget?.y) : undefined,
+    endX: isLine
+      ? wasLine
+        ? endX
+        : clip.x + clip.width
+      : isCallout
+        ? (clip.endX ?? calloutTarget?.x)
+        : undefined,
+    endY: isLine
+      ? wasLine
+        ? endY
+        : clip.y + clip.height
+      : isCallout
+        ? (clip.endY ?? calloutTarget?.y)
+        : undefined,
     text: clip.text ?? updated.text,
     strokeColor: settings.strokeColor,
     strokeWidth: settings.strokeWidth,

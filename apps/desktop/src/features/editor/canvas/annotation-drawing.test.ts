@@ -24,7 +24,13 @@ describe("annotation drawing geometry", () => {
       expect(geometry!.height).toBeGreaterThan(0)
       const preset = ANNOTATION_SHAPES.find((shape) => shape.type === type)!
       const clip = createAnnotationDrawingClip(
-        { preset, strokeColor: "red", strokeWidth: 4, strokeStyle: "solid", arrowStyle: "straight" },
+        {
+          preset,
+          strokeColor: "red",
+          strokeWidth: 4,
+          strokeStyle: "solid",
+          arrowStyle: "straight",
+        },
         0,
         bounds,
       )
