@@ -155,7 +155,9 @@ export function FloatingControls() {
   const progressPercent = Math.max(8, Math.min(100, finalizationProgress?.percent ?? 15))
 
   async function handleMarker() {
-    await addMarker("Marker")
+    // Empty label: the Rust side auto-numbers it ("Marker N") so button,
+    // global-shortcut, and tray markers all share one naming scheme.
+    await addMarker("")
   }
 
   async function handleDiscard() {

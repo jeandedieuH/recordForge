@@ -288,6 +288,18 @@ export function ExportView({
     return formatYouTubeChapters(markers, durationMs, projectName || "Intro")
   }, [markers, durationMs, projectName])
 
+  // YouTube only renders chapter markers when there are 3+ entries and every
+  // chapter spans at least 10 seconds (the synthesized 0:00 intro counts).
+  const chaptersMeetYouTubeRules = useMemo(() => {
+    const times = markers.map((marker) => marker.timeMs).sort((a, b) => a - b)
+    if (times.length === 0) return true
+    const chapterStarts = times[0] === 0 ? times : [0, ...times]
+    if (chapterStarts.length < 3) return false
+    return chapterStarts.every(
+      (time, index) => index === 0 || time - chapterStarts[index - 1]! >= 10_000,
+    )
+  }, [markers])
+
   async function handleCopyYouTubeChapters() {
     if (!youtubeChapterText) return
     try {
@@ -785,11 +797,19 @@ export function ExportView({
                     <p className="text-[11px] text-muted-foreground">
                       Paste these timestamps into your video description to enable video chapters.
                     </p>
+                    {!chaptersMeetYouTubeRules ? (
+                      <p className="flex items-center gap-1.5 text-[11px] font-medium text-warning">
+                        <Bookmark className="size-3 shrink-0" aria-hidden />
+                        YouTube requires 3+ chapters spaced at least 10 seconds apart — these may
+                        not render as chapters.
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="rounded-lg border border-dashed border-border bg-surface-dim p-3.5 text-xs text-subtle-foreground">
-                    No markers found on timeline. Add markers (using the Marker tool or
-                    &quot;M&quot; shortcut) to generate chapter marks and YouTube timestamps.
+                    No markers on the timeline yet. Add one with the flag button, the &quot;M&quot;
+                    shortcut, or by double-clicking the time ruler — markers become export chapters
+                    and YouTube timestamps.
                   </div>
                 )}
               </div>

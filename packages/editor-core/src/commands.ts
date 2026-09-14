@@ -829,11 +829,29 @@ export function applyCommand(
   }
 }
 
+// Markers double as export chapters; clamping them to the media extent keeps a
+// stray marker from inflating the total duration and exporting a dead tail.
+function mediaEndMs(state: TimelineState): number {
+  let end = 0
+  for (const track of state.tracks) {
+    for (const clip of track.clips) {
+      end = Math.max(end, clip.startMs + clip.durationMs)
+    }
+  }
+  return end
+}
+
+function clampMarkerTime(state: TimelineState, timeMs: number): number {
+  const rounded = Math.max(0, Math.round(timeMs))
+  const end = mediaEndMs(state)
+  return end > 0 ? Math.min(rounded, end) : rounded
+}
+
 function applyAddMarker(
   state: TimelineState,
   command: AddMarkerCommand,
 ): CommandResult<TimelineState> {
-  const roundedTime = Math.max(0, Math.round(command.timeMs))
+  const roundedTime = clampMarkerTime(state, command.timeMs)
   const marker = {
     id: command.markerId ?? `marker:${roundedTime}:${command.label}`,
     timeMs: roundedTime,
@@ -862,7 +880,7 @@ function applyUpdateMarker(
   }
   const nextMarker = {
     ...marker,
-    ...(command.timeMs === undefined ? {} : { timeMs: Math.max(0, Math.round(command.timeMs)) }),
+    ...(command.timeMs === undefined ? {} : { timeMs: clampMarkerTime(state, command.timeMs) }),
     ...(command.label === undefined ? {} : { label: command.label }),
     ...(command.color === undefined ? {} : { color: command.color }),
   }
@@ -2936,14 +2954,22 @@ export function createUpdateMarkerCommand(
 ): CommandRecord {
   const roundedTimeMs =
     update.timeMs !== undefined ? Math.max(0, Math.round(update.timeMs)) : undefined
+  // Time drags and color-picker sweeps emit high-frequency updates that must
+  // undo as a single step; field-scoped keys keep them from merging together.
+  const coalesceKey =
+    update.timeMs !== undefined
+      ? `marker:${markerId}:time`
+      : update.color !== undefined
+        ? `marker:${markerId}:color`
+        : undefined
   return {
     kind: "update-marker",
     name: "Update marker",
     markerId,
     ...update,
     ...(roundedTimeMs !== undefined ? { timeMs: roundedTimeMs } : {}),
-    coalesce: update.timeMs !== undefined,
-    coalesceKey: update.timeMs !== undefined ? `marker:${markerId}` : undefined,
+    coalesce: coalesceKey !== undefined,
+    coalesceKey,
   }
 }
 

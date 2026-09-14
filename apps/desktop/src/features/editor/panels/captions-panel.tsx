@@ -192,12 +192,7 @@ export function CaptionsPanel() {
           </ToggleGroup>
         </div>
 
-        <Button
-          variant="secondary"
-          size="sm"
-          className="w-full"
-          onClick={addCaptionAtPlayhead}
-        >
+        <Button variant="secondary" size="sm" className="w-full" onClick={addCaptionAtPlayhead}>
           <Plus className="size-4" aria-hidden />
           Add caption at playhead
         </Button>

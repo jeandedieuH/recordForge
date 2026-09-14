@@ -347,11 +347,7 @@ fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
         }
         "marker" => {
             let state = app.state::<AppState>();
-            let _ = crate::commands::recording::insert_marker_broadcast(
-                app,
-                &state,
-                "tray marker".into(),
-            );
+            let _ = crate::commands::recording::insert_marker_broadcast(app, &state, String::new());
         }
         "discard" => {
             // Destructive: never executed from the tray directly. Restore the

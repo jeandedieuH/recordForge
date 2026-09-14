@@ -44,6 +44,7 @@ import {
   createTrimClipCommand,
   createUpdateClipAudioCommand,
   createUpdateCursorRangeCommand,
+  createUpdateMarkerCommand,
   createUpdateTrackCommand,
   createUpdateZoomSegmentCommand,
   findClip,
@@ -1413,11 +1414,24 @@ export function TimelineView({
   const addMarkerAtTime = useCallback(
     (timeMs: number) => {
       const roundedTimeMs = Math.max(0, Math.round(timeMs))
-      execute(
-        createAddMarkerCommand(roundedTimeMs, `Marker ${(timeline?.markers.length ?? 0) + 1}`),
-      )
+      execute(createAddMarkerCommand(roundedTimeMs, nextMarkerLabel(timeline?.markers ?? [])))
     },
     [execute, timeline],
+  )
+
+  // Marker drags preview locally on the ruler and land here as one commit.
+  const moveMarker = useCallback(
+    (marker: TimelineMarker, timeMs: number) => {
+      execute(createUpdateMarkerCommand(marker.id, { timeMs }))
+    },
+    [execute],
+  )
+
+  const renameMarker = useCallback(
+    (marker: TimelineMarker, label: string) => {
+      execute(createUpdateMarkerCommand(marker.id, { label }))
+    },
+    [execute],
   )
 
   function cycleTrackHeight(track: TimelineTrack) {
@@ -1699,6 +1713,17 @@ export function TimelineView({
                 : "end",
             direction * frameMs,
           )
+        } else if (hasModifier && selectedMarker) {
+          // Same nudge affordance clips get: Ctrl/Cmd+Arrow moves the marker by
+          // one frame (or one second with Shift).
+          execute(
+            createUpdateMarkerCommand(selectedMarker.id, {
+              timeMs: Math.max(
+                0,
+                selectedMarker.timeMs + direction * (event.shiftKey ? 1_000 : frameMs),
+              ),
+            }),
+          )
         } else if (hasModifier && selectedClip) {
           nudgeSelected(direction * (event.shiftKey ? 1_000 : frameMs))
         } else {
@@ -1743,6 +1768,7 @@ export function TimelineView({
       addMarker,
       deleteSelected,
       duplicateSelected,
+      execute,
       frameMs,
       handleAddZoom,
       jumpToNextCut,
@@ -1755,6 +1781,7 @@ export function TimelineView({
       save,
       seek,
       selectedClip,
+      selectedMarker,
       selectedOverlayClip,
       setPlaybackRate,
       setSelection,
@@ -2273,6 +2300,8 @@ export function TimelineView({
           onSelectMarker={selectMarker}
           onDeleteMarker={deleteMarker}
           onAddMarkerAtTime={addMarkerAtTime}
+          onMoveMarker={moveMarker}
+          onRenameMarker={renameMarker}
           onSelectZoom={(segmentId) => setSelection({ kind: "zoom", segmentId })}
           onAddZoomAtTime={handleAddZoom}
           onMoveZoomSegment={interaction.moveZoomSegment}
@@ -2320,4 +2349,17 @@ export function TimelineView({
       ) : null}
     </div>
   )
+}
+
+// Auto-numbered labels stay gap-free: deleting "Marker 2" of three reuses "Marker 2"
+// for the next insert instead of producing a second "Marker 4".
+function nextMarkerLabel(markers: TimelineMarker[]): string {
+  const usedNumbers = new Set<number>()
+  for (const marker of markers) {
+    const match = /^Marker (\d+)$/.exec(marker.label.trim())
+    if (match) usedNumbers.add(Number(match[1]))
+  }
+  let next = 1
+  while (usedNumbers.has(next)) next += 1
+  return `Marker ${next}`
 }

@@ -1688,20 +1688,27 @@ impl Recorder {
             .unwrap_or(0);
         let timestamp_ms = session.total_recorded_ms + current_elapsed;
 
-        let marker = RecordingMarker {
-            id: uuid::Uuid::new_v4().to_string(),
-            label,
-            timestamp_ms,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        {
+        let marker = {
             let mut m = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
+            // All built-in entry points (toolbar button, global shortcut, tray)
+            // pass an empty label so markers get a consistent auto-numbered name.
+            let resolved_label = if label.trim().is_empty() {
+                format!("Marker {}", m.markers.len() + 1)
+            } else {
+                label
+            };
+            let marker = RecordingMarker {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: resolved_label,
+                timestamp_ms,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
             m.add_marker(marker.clone());
             m.write()?;
-        }
+            marker
+        };
 
         Ok(marker)
     }

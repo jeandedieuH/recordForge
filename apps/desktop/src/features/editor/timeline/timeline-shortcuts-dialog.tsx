@@ -44,6 +44,8 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { description: "Razor / Split tool", keys: ["C"] },
       { description: "Range selection tool", keys: ["R"] },
       { description: "Add chapter / note marker", keys: ["M"] },
+      { description: "Move or rename a marker", keys: ["Drag", "Double-click"] },
+      { description: "Nudge selected marker", keys: ["Ctrl", "← / →"] },
       { description: "Add smart zoom segment", keys: ["Z"] },
     ],
   },

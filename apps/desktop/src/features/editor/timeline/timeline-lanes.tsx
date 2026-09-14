@@ -102,6 +102,8 @@ export interface TimelineLanesProps {
   onSelectMarker: (marker: TimelineMarker) => void
   onDeleteMarker?: (markerId: string) => void
   onAddMarkerAtTime?: (timeMs: number) => void
+  onMoveMarker?: (marker: TimelineMarker, timeMs: number) => void
+  onRenameMarker?: (marker: TimelineMarker, label: string) => void
   onSelectZoom: (segmentId: string) => void
   onAddZoomAtTime?: (
     timeMs: number,
@@ -263,6 +265,8 @@ export function TimelineLanes({
   onSelectMarker,
   onDeleteMarker,
   onAddMarkerAtTime,
+  onMoveMarker,
+  onRenameMarker,
   onSelectZoom,
   onAddZoomAtTime,
   onDeleteSelection,
@@ -977,6 +981,12 @@ export function TimelineLanes({
                   onSelectMarker={onSelectMarker}
                   onDeleteMarker={onDeleteMarker ?? (() => {})}
                   onAddMarkerAtTime={onAddMarkerAtTime ?? (() => {})}
+                  onMoveMarker={onMoveMarker}
+                  onRenameMarker={onRenameMarker}
+                  snapTargets={snapTargets}
+                  snapEnabled={view.snapEnabled}
+                  snapThresholdMs={view.snapThresholdMs}
+                  onSnapGuide={onSnapGuideCallback}
                   onSelectZoom={onSelectZoom}
                   onDeselectAll={onDeselectAll}
                 />

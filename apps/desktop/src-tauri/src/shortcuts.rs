@@ -151,6 +151,5 @@ fn toggle_pause_resume(app: &tauri::AppHandle) -> Result<()> {
 
 fn insert_marker(app: &tauri::AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
-    crate::commands::recording::insert_marker_broadcast(app, &state, "shortcut marker".into())
-        .map(|_| ())
+    crate::commands::recording::insert_marker_broadcast(app, &state, String::new()).map(|_| ())
 }
