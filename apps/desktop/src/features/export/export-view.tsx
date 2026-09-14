@@ -207,6 +207,20 @@ function isPresetSupported(
   return true
 }
 
+// Resolve a draft range (in ms) into a persistable ExportRange: rounded to
+// whole ms, clamped to the recording bounds, and defined only when it forms a
+// positive duration. The UI edits in seconds but the contract stays in ms.
+export function resolveExportRange(
+  startMs: number,
+  endMs: number,
+  durationMs: number,
+): ExportRange | undefined {
+  const start = Math.max(0, Math.round(startMs))
+  const end = Math.min(Math.max(0, Math.round(durationMs)), Math.round(endMs))
+  if (end <= start) return undefined
+  return { startMs: start, endMs: end }
+}
+
 function normalizePreset(
   preset: ExportPreset | undefined,
   container: "mp4" | "gif" | "webp" = "mp4",
@@ -298,19 +312,28 @@ export function ExportView({
     exportSettings?.range?.startMs,
   ])
 
-  const selectedRange = useMemo<ExportRange | undefined>(() => {
-    if (rangeEnd <= rangeStart) return undefined
-    return { startMs: Math.max(0, rangeStart), endMs: Math.min(durationMs, rangeEnd) }
-  }, [durationMs, rangeEnd, rangeStart])
+  const selectedRange = useMemo<ExportRange | undefined>(
+    () => resolveExportRange(rangeStart, rangeEnd, durationMs),
+    [durationMs, rangeEnd, rangeStart],
+  )
   const isRunning = exportJob?.status === "running" || exportJob?.status === "pending"
   const canStart = isPresetSupported(selectedPreset, canvas, selectedRange)
   const exportPercent = Math.min(100, Math.max(0, Math.round((exportJob?.progress ?? 0) * 100)))
 
   function selectPreset(preset: ExportPreset) {
-    if (!isPresetSupported(preset, canvas, selectedRange)) return
+    // "Selected range" stays clickable even while the draft range is invalid —
+    // disabling the card would deadlock it, since the inputs hide once another
+    // preset is selected. Selecting it normalizes the draft instead.
+    if (preset !== "selected-range" && !isPresetSupported(preset, canvas, selectedRange)) return
     setSelectedPreset(preset)
     onPresetChange?.(preset)
-    if (preset === "selected-range") onRangeChange?.(selectedRange)
+    if (preset === "selected-range") {
+      const candidate = selectedRange ?? exportSettings?.range
+      const startMs = Math.max(0, candidate?.startMs ?? 0)
+      const endMs = Math.min(durationMs, candidate?.endMs ?? durationMs)
+      if (endMs > startMs) updateRange(startMs, endMs)
+      else updateRange(0, durationMs)
+    }
   }
 
   function handleFormatChange(nextContainer: "mp4" | "gif" | "webp") {
@@ -327,10 +350,15 @@ export function ExportView({
   }
 
   function updateRange(startMs: number, endMs: number) {
-    setRangeStart(startMs)
-    setRangeEnd(endMs)
-    const nextRange = endMs > startMs ? { startMs: Math.max(0, startMs), endMs } : undefined
-    onRangeChange?.(nextRange)
+    const start = Math.round(startMs)
+    const end = Math.round(endMs)
+    setRangeStart(start)
+    setRangeEnd(end)
+    // Only persist positive ranges. Emitting undefined for an in-progress edit
+    // (e.g. start moved past end) would echo back through exportSettings and
+    // reset both inputs while the user is still typing.
+    const nextRange = resolveExportRange(start, end, durationMs)
+    if (nextRange) onRangeChange?.(nextRange)
   }
 
   async function handleStartExport() {
@@ -462,7 +490,9 @@ export function ExportView({
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {presets.map((preset) => {
-                const supported = isPresetSupported(preset.id, canvas, selectedRange)
+                const supported =
+                  preset.id === "selected-range" ||
+                  isPresetSupported(preset.id, canvas, selectedRange)
                 const selected = selectedPreset === preset.id
                 return (
                   <button
@@ -501,23 +531,44 @@ export function ExportView({
           </div>
 
           {selectedPreset === "selected-range" ? (
-            <div className="mb-4 grid grid-cols-1 gap-4 rounded-xl border border-border bg-surface p-5 sm:grid-cols-2">
-              <NumberInputField
-                label="Range start"
-                unit="ms"
-                min={0}
-                max={Math.max(0, durationMs - 1)}
-                value={rangeStart}
-                onChange={(val) => updateRange(val, rangeEnd)}
-              />
-              <NumberInputField
-                label="Range end"
-                unit="ms"
-                min={1}
-                max={durationMs}
-                value={rangeEnd}
-                onChange={(val) => updateRange(rangeStart, val)}
-              />
+            <div className="mb-4 rounded-xl border border-border bg-surface p-5">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <NumberInputField
+                  label="Range start"
+                  unit="s"
+                  min={0}
+                  max={durationMs / 1000}
+                  step={0.1}
+                  precision={3}
+                  value={rangeStart / 1000}
+                  disabled={isRunning}
+                  error={selectedRange === undefined}
+                  onChange={(val) => updateRange(val * 1000, rangeEnd)}
+                />
+                <NumberInputField
+                  label="Range end"
+                  unit="s"
+                  min={0}
+                  max={durationMs / 1000}
+                  step={0.1}
+                  precision={3}
+                  value={rangeEnd / 1000}
+                  disabled={isRunning}
+                  error={selectedRange === undefined}
+                  onChange={(val) => updateRange(rangeStart, val * 1000)}
+                />
+              </div>
+              {selectedRange ? (
+                <p className="mt-3 text-[11px] text-subtle-foreground">
+                  Exports {formatDuration(selectedRange.endMs - selectedRange.startMs)} ·{" "}
+                  {formatDuration(selectedRange.startMs)}–{formatDuration(selectedRange.endMs)} of{" "}
+                  {formatDuration(durationMs)} total
+                </p>
+              ) : (
+                <p className="mt-3 text-[11px] text-warning">
+                  Range end must be later than range start.
+                </p>
+              )}
             </div>
           ) : null}
 
