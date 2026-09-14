@@ -373,11 +373,7 @@ export function ExportProgressCard({
                           : "border border-border bg-overlay text-subtle-foreground"
                     }`}
                   >
-                    {isStageDone ? (
-                      <Check className="size-2.5 stroke-3" aria-hidden />
-                    ) : (
-                      index + 1
-                    )}
+                    {isStageDone ? <Check className="size-2.5 stroke-3" aria-hidden /> : index + 1}
                   </div>
                   <div className="min-w-0 truncate">
                     <span className="truncate">{stageItem.label}</span>
