@@ -134,6 +134,7 @@ pub fn run() {
             commands::recording::open_region_picker,
             commands::recording::cancel_region_picker,
             commands::recording::show_main_window,
+            commands::captions::read_caption_source,
             commands::media::prepare_media,
             commands::media::cancel_media_job,
             commands::media::get_media_job,

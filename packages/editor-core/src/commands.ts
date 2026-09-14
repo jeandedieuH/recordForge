@@ -77,6 +77,7 @@ import type {
   UpdateAnnotationClipCommand,
   UpdateCanvasCommand,
   UpdateCaptionClipCommand,
+  UpdateCaptionTrackCommand,
   UpdateClipAudioCommand,
   UpdateClipTransformCommand,
   UpdateCursorRangeCommand,
@@ -481,6 +482,24 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       return { ok: true, value: undefined }
     }
     case "add-caption-clip": {
+      const track = command.trackId
+        ? findTrack(state, command.trackId)
+        : state.tracks.find((candidate) => candidate.kind === "captions")
+      if (command.trackId && !track) {
+        return { ok: false, error: editorError("track_not_found", "Track not found") }
+      }
+      if (track?.locked) {
+        return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+      }
+      if (track && track.kind !== "captions") {
+        return {
+          ok: false,
+          error: editorError("invalid_track", "Captions can only be added to a captions track"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "update-caption-track": {
       const track = findTrack(state, command.trackId)
       if (!track) return { ok: false, error: editorError("track_not_found", "Track not found") }
       if (track.locked) {
@@ -489,7 +508,7 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       if (track.kind !== "captions") {
         return {
           ok: false,
-          error: editorError("invalid_track", "Captions can only be added to a captions track"),
+          error: editorError("invalid_track", "Only captions tracks support caption styling"),
         }
       }
       return { ok: true, value: undefined }
@@ -753,6 +772,8 @@ export function applyCommand(
       return applyAddCaptionClip(state, command)
     case "update-caption-clip":
       return applyUpdateCaptionClip(state, command)
+    case "update-caption-track":
+      return applyUpdateCaptionTrack(state, command)
     case "import-caption-cues":
       return applyImportCaptionCues(state, command)
     case "add-mask-clip":
@@ -1958,21 +1979,38 @@ function applyAddCaptionClip(
   state: TimelineState,
   command: AddCaptionClipCommand,
 ): CommandResult<TimelineState> {
-  const track = findTrack(state, command.trackId)
-  if (!track) {
+  // Without an explicit trackId, captions land on the shared captions track,
+  // which is created on demand — same behavior as caption imports.
+  const existingTrack = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((track) => track.kind === "captions")
+  if (command.trackId && !existingTrack) {
     return { ok: false, error: editorError("track_not_found", "Track not found") }
   }
-  if (track.locked) {
-    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
-  }
-  if (track.kind !== "captions") {
+  if (existingTrack && existingTrack.kind !== "captions") {
     return {
       ok: false,
       error: editorError("invalid_track", "Captions can only be added to a captions track"),
     }
   }
+  if (existingTrack?.locked) {
+    return {
+      ok: false,
+      error: editorError("track_locked", `Track "${existingTrack.name}" is locked`),
+    }
+  }
+  const track: TimelineTrack = existingTrack ?? {
+    id: "track:captions",
+    kind: "captions",
+    name: "Captions",
+    muted: false,
+    locked: false,
+    solo: false,
+    volume: 1,
+    clips: [],
+  }
   const newClip: TimelineClip = {
-    id: command.clipId ?? `caption:${command.trackId}:${command.startMs}:${command.text}`,
+    id: command.clipId ?? `caption:${track.id}:${command.startMs}:${command.text}`,
     kind: "caption",
     assetId: track.id,
     startMs: command.startMs,
@@ -1985,13 +2023,46 @@ function applyAddCaptionClip(
     placement: command.placement ?? "bottom",
     safeAreaMargin: command.safeAreaMargin ?? 48,
   }
-  const newTrack: TimelineTrack = { ...track, clips: [...track.clips, newClip] }
-  const trackResult = sortAndValidateTrack(
-    updateTrackInState(state, command.trackId, newTrack),
-    command.trackId,
-  )
+  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, newClip] }
+  if (!existingTrack) {
+    return { ok: true, value: { ...state, tracks: [...state.tracks, nextTrack], updatedAt: now() } }
+  }
+  const trackResult = sortAndValidateTrack(updateTrackInState(state, track.id, nextTrack), track.id)
   if (!trackResult.ok) return trackResult
-  return { ok: true, value: updateTrackInState(state, command.trackId, trackResult.value) }
+  return { ok: true, value: updateTrackInState(state, track.id, trackResult.value) }
+}
+
+function applyUpdateCaptionTrack(
+  state: TimelineState,
+  command: UpdateCaptionTrackCommand,
+): CommandResult<TimelineState> {
+  const track = findTrack(state, command.trackId)
+  if (!track) return { ok: false, error: editorError("track_not_found", "Track not found") }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  if (track.kind !== "captions") {
+    return {
+      ok: false,
+      error: editorError("invalid_track", "Only captions tracks support caption styling"),
+    }
+  }
+  const nextTrack: TimelineTrack = {
+    ...track,
+    clips: track.clips.map((clip) =>
+      clip.kind === "caption"
+        ? {
+            ...clip,
+            ...(command.style === undefined ? {} : { style: command.style }),
+            ...(command.placement === undefined ? {} : { placement: command.placement }),
+            ...(command.safeAreaMargin === undefined
+              ? {}
+              : { safeAreaMargin: command.safeAreaMargin }),
+          }
+        : clip,
+    ),
+  }
+  return { ok: true, value: updateTrackInState(state, track.id, nextTrack) }
 }
 
 function applyUpdateCaptionClip(
@@ -3328,11 +3399,11 @@ export function createUpdateClipTransformCommand(
 }
 
 export function createAddCaptionClipCommand(
-  trackId: string,
   text: string,
   startMs: number,
   durationMs: number,
   options: {
+    trackId?: string
     clipId?: string
     style?: CaptionClip["style"]
     placement?: CaptionClip["placement"]
@@ -3342,7 +3413,7 @@ export function createAddCaptionClipCommand(
   return {
     kind: "add-caption-clip",
     name: "Add caption",
-    trackId,
+    trackId: options.trackId,
     clipId: options.clipId ?? crypto.randomUUID(),
     text,
     startMs,
@@ -3364,6 +3435,18 @@ export function createUpdateCaptionClipCommand(
     ...update,
     coalesce: update.text !== undefined,
     coalesceKey: update.text !== undefined ? `caption:${clipId}` : undefined,
+  }
+}
+
+export function createUpdateCaptionTrackCommand(
+  trackId: string,
+  update: Partial<Pick<CaptionClip, "style" | "placement" | "safeAreaMargin">>,
+): CommandRecord {
+  return {
+    kind: "update-caption-track",
+    name: "Restyle captions",
+    trackId,
+    ...update,
   }
 }
 

@@ -230,7 +230,11 @@ function toOverlays(
     })
 }
 
-function toCaptions(state: TimelineState, range: ExportRange | undefined): RenderPlanCaption[] {
+function toCaptions(
+  state: TimelineState,
+  range: ExportRange | undefined,
+  durationMs: number,
+): RenderPlanCaption[] {
   return state.tracks
     .filter((track) => track.kind === "captions" && !track.muted)
     .flatMap((track) =>
@@ -241,12 +245,16 @@ function toCaptions(state: TimelineState, range: ExportRange | undefined): Rende
         .flatMap((clip) => {
           const window = windowTimeRange(clip.startMs, clip.startMs + clip.durationMs, range)
           if (!window) return []
+          // Imported cue files frequently outlive the recording — clamp instead
+          // of failing the whole export.
+          const endMs = Math.min(window.endMs, durationMs)
+          if (window.startMs >= endMs) return []
           return [
             {
               id: clip.id,
               text: clip.text,
               startMs: window.startMs,
-              endMs: window.endMs,
+              endMs,
               style: clip.style,
               placement: clip.placement ?? "bottom",
               safeAreaMargin: clip.safeAreaMargin ?? 48,
@@ -1101,7 +1109,7 @@ export function buildRenderPlan(
     cursorEngine: input.cursorEngine,
   })
   const cursorEffects = toCursorEffects(state, effectiveRange, input.assets)
-  const captions = toCaptions(state, effectiveRange)
+  const captions = toCaptions(state, effectiveRange, durationMs)
   const masks = toMasks(state, effectiveRange)
   const annotations = toAnnotations(state, effectiveRange)
   const texts = toTexts(state, effectiveRange)

@@ -247,7 +247,8 @@ export type UpdateClipTransformCommand = z.infer<typeof updateClipTransformComma
 
 export const addCaptionClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-caption-clip"),
-  trackId: z.string(),
+  // When omitted, the existing captions track is used or one is created.
+  trackId: z.string().optional(),
   clipId: z.string().optional(),
   text: z.string().min(1),
   startMs: z.number().int().min(0),
@@ -269,6 +270,18 @@ export const updateCaptionClipCommandSchema = commandMetaSchema.extend({
 })
 
 export type UpdateCaptionClipCommand = z.infer<typeof updateCaptionClipCommandSchema>
+
+// Applies shared styling to every caption clip on a captions track so users can
+// restyle an imported cue set as a single undoable command.
+export const updateCaptionTrackCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("update-caption-track"),
+  trackId: z.string(),
+  style: captionStylePresetSchema.optional(),
+  placement: captionPlacementSchema.optional(),
+  safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
+})
+
+export type UpdateCaptionTrackCommand = z.infer<typeof updateCaptionTrackCommandSchema>
 
 export const importCaptionCuesCommandSchema = commandMetaSchema.extend({
   kind: z.literal("import-caption-cues"),
@@ -570,6 +583,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateClipTransformCommandSchema,
   addCaptionClipCommandSchema,
   updateCaptionClipCommandSchema,
+  updateCaptionTrackCommandSchema,
   importCaptionCuesCommandSchema,
   addMaskClipCommandSchema,
   updateMaskClipCommandSchema,

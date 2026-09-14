@@ -31,6 +31,15 @@ impl Drop for TempMaskFile {
     }
 }
 
+/// Removes a whole temp directory (caption script + embedded font) on drop.
+struct TempExportDir(PathBuf);
+
+impl Drop for TempExportDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A single trimmed segment in the final export.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -883,6 +892,7 @@ fn render_timeline_composition(
     );
 
     let mut temp_mask_guards = Vec::new();
+    let mut temp_dir_guards: Vec<TempExportDir> = Vec::new();
     let bg_image_path = prepare_canvas_background_plate(
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
@@ -1562,30 +1572,29 @@ fn render_timeline_composition(
         current_label = "with_items".to_string();
     }
 
-    for (caption_index, caption) in plan.captions.iter().enumerate() {
-        captions::validate_caption(caption)?;
-        if plan.caption_mode != "burn-in" {
-            continue;
-        }
-        let safe_id = caption
-            .id
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() {
-                    character
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        let next_label = format!("caption_{caption_index}_{safe_id}");
-        filters.push(captions::drawtext_filter(
-            caption,
-            &current_label,
-            &next_label,
+    // Burned-in captions go through a single libass pass: one `subtitles`
+    // filter over a generated .ass script instead of a drawtext chain per cue.
+    if plan.caption_mode == "burn-in" && !plan.captions.is_empty() {
+        let caption_dir = std::env::temp_dir().join(format!(
+            "rf-captions-{}-{}",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        let script_path = captions::write_burn_in_assets(
+            &caption_dir,
+            &plan.captions,
+            canvas.width,
             canvas.height,
-        )?);
-        current_label = next_label;
+        )?;
+        // The script and embedded font share the directory, so one guard
+        // removes everything once the encode finishes.
+        temp_dir_guards.push(TempExportDir(caption_dir));
+        filters.push(captions::subtitles_filter(
+            &current_label,
+            "with_captions",
+            &script_path,
+        ));
+        current_label = "with_captions".to_string();
     }
 
     let final_pix_fmt = match encoder {

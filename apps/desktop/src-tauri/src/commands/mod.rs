@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod captions;
 pub mod exports;
 pub mod media;
 pub mod projects;

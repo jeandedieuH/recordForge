@@ -91,7 +91,7 @@ export function CaptionClipInspector({
             </div>
           </div>
           <NumberField
-            label="Safe area margin (ms)"
+            label="Safe area margin (px)"
             value={clip.safeAreaMargin ?? 0}
             min={0}
             onChange={(value) =>
