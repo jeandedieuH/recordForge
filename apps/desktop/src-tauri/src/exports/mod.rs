@@ -808,10 +808,12 @@ fn video_screen_rect(
 }
 
 /// Compose screen, manual zoom, camera overlays, canvas framing, cursor
-/// telemetry, and semantic audio tracks in one FFmpeg graph. The cursor layer
-/// is generated frame by frame in Rust and streamed over stdin as a rawvideo
-/// input, so the whole export is a single encode. Keeping the graph here makes
-/// the export path authoritative for every control exposed by the editor.
+/// telemetry, overlay items, and semantic audio tracks in one FFmpeg graph.
+/// The generated layers are rendered frame by frame in Rust and streamed over
+/// stdin as a rawvideo input — packed side by side when cursor and overlay
+/// items coexist so the graph can composite each at its own stack position —
+/// keeping the whole export a single encode. Keeping the graph here makes the
+/// export path authoritative for every control exposed by the editor.
 #[allow(clippy::too_many_arguments)]
 fn render_timeline_composition(
     ffmpeg_path: &str,
@@ -1277,9 +1279,12 @@ fn render_timeline_composition(
 
     let mut current_label = composed_label;
 
-    // The overlay layer (cursor telemetry, vector annotations, styled text presets, graphics)
-    // rides directly on the screen/canvas base so that camera video overlays,
-    // privacy masks, and captions render cleanly on top.
+    // The generated overlay stream packs two canvas-sized RGBA planes side by
+    // side into one rawvideo input: the cursor plane on the left and the
+    // annotation/text/image plane on the right. Compositing them at different
+    // points of the graph matches the editor preview stacking order — cursor
+    // below camera bubbles and privacy masks, overlay items above both, and
+    // burned-in captions on top.
     let cursor_renderers = build_cursor_renderers(
         plan,
         project_id,
@@ -1287,30 +1292,47 @@ fn render_timeline_composition(
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
     )?;
-    let has_overlay_plan = plan.overlay_render_plan.is_some();
-    let has_annotations = !plan.annotations.is_empty();
-    let has_texts = !plan.texts.is_empty();
-    let has_images = !plan.images.is_empty();
+    let has_overlay_items = plan.overlay_render_plan.is_some()
+        || !plan.annotations.is_empty()
+        || !plan.texts.is_empty()
+        || !plan.images.is_empty();
     let mut cursor_plan = None;
-    if !cursor_renderers.is_empty()
-        || has_overlay_plan
-        || has_annotations
-        || has_texts
-        || has_images
-    {
-        let cursor_input_index = input_assets.len();
-        let cursor_label = "with_overlay";
-        filters.push(format!(
-            "[{current_label}][{cursor_input_index}:v]overlay=shortest=1:format=yuv420[{cursor_label}]"
-        ));
-        current_label = cursor_label.to_string();
-        cursor_plan = Some(prepare_cursor_frame_plan(
+    // Label of the overlay-items plate (already bracketed), composited after
+    // the camera and privacy-mask passes so titles render above them.
+    let mut items_plate_label: Option<String> = None;
+    if !cursor_renderers.is_empty() || has_overlay_items {
+        let plate_input_index = input_assets.len();
+        let plate_source = format!("[{plate_input_index}:v]");
+        let prepared = prepare_cursor_frame_plan(
             canvas,
             plan.duration_ms,
             cursor_renderers,
             plan,
             asset_paths,
-        )?);
+        )?;
+        if prepared.dual_plane {
+            filters.push(format!(
+                "{plate_source}split=2[plate_cursor_src][plate_items_src];\
+                 [plate_cursor_src]crop={}:{}:0:0[cursor_plate];\
+                 [plate_items_src]crop={}:{}:{}:0[items_plate]",
+                canvas.width, canvas.height, canvas.width, canvas.height, canvas.width
+            ));
+            filters.push(format!(
+                "[{current_label}][cursor_plate]overlay=shortest=1:format=yuv420[with_cursor]"
+            ));
+            current_label = "with_cursor".to_string();
+            items_plate_label = Some("[items_plate]".to_string());
+        } else if !prepared.renderers.is_empty() {
+            // Cursor-only stream: composite directly below the camera layer.
+            filters.push(format!(
+                "[{current_label}]{plate_source}overlay=shortest=1:format=yuv420[with_cursor]"
+            ));
+            current_label = "with_cursor".to_string();
+        } else if prepared.overlay_engine.is_some() {
+            // Items-only stream: held until after the camera/mask passes.
+            items_plate_label = Some(plate_source);
+        }
+        cursor_plan = Some(prepared);
     }
 
     for (index, overlay) in plan.overlays.iter().enumerate() {
@@ -1530,6 +1552,16 @@ fn render_timeline_composition(
         current_label = next_label;
     }
 
+    // Overlay items (titles, annotations, images) composite above the camera
+    // bubbles and privacy masks but below burned-in captions, matching the
+    // editor preview stacking (z-35 above masks at z-30, below captions z-40).
+    if let Some(items_plate) = items_plate_label {
+        filters.push(format!(
+            "[{current_label}]{items_plate}overlay=shortest=1:format=auto[with_items]"
+        ));
+        current_label = "with_items".to_string();
+    }
+
     for (caption_index, caption) in plan.captions.iter().enumerate() {
         captions::validate_caption(caption)?;
         if plan.caption_mode != "burn-in" {
@@ -1703,12 +1735,15 @@ fn render_timeline_composition(
             .arg("-i")
             .arg(asset_path);
     }
-    if cursor_plan.is_some() {
-        // The generated cursor layer is a transparent RGBA stream fed frame by
-        // frame through stdin; frame timestamps come from the declared rate.
+    if let Some(frame_plan) = &cursor_plan {
+        // The generated overlay stream is a transparent RGBA rawvideo feed over
+        // stdin; frame timestamps come from the declared rate. When cursor and
+        // overlay items coexist the stream packs both planes side by side, so
+        // the declared width doubles.
+        let plate_width = canvas.width * if frame_plan.dual_plane { 2 } else { 1 };
         command
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-            .args(["-s", &format!("{}x{}", canvas.width, canvas.height)])
+            .args(["-s", &format!("{}x{}", plate_width, canvas.height)])
             .args(["-r", &canvas.fps.to_string()])
             .args(["-thread_queue_size", "128"])
             .arg("-i")
@@ -1895,13 +1930,17 @@ fn build_cursor_renderers(
     Ok(renderers)
 }
 
-/// Preallocated state for streaming the combined overlay layer (cursor, annotations, text, images) into FFmpeg's stdin.
+/// Preallocated state for streaming generated overlay frames into FFmpeg's
+/// stdin. When `dual_plane` is set each frame packs two canvas-sized planes
+/// side by side — cursor on the left, overlay items on the right — so the
+/// filter graph can composite them at different stack positions.
 #[allow(dead_code)]
 struct CursorFramePlan {
     fps: u32,
     width: u32,
     height: u32,
     frame_count: u64,
+    dual_plane: bool,
     pixmap: resvg::tiny_skia::Pixmap,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<overlay_engine::OverlayEngine>,
@@ -1962,11 +2001,13 @@ fn prepare_cursor_frame_plan(
         None
     };
 
+    let dual_plane = !renderers.is_empty() && overlay_engine.is_some();
     Ok(CursorFramePlan {
         fps: canvas.fps,
         width: canvas.width,
         height: canvas.height,
         frame_count,
+        dual_plane,
         pixmap,
         renderers,
         overlay_engine,
@@ -2009,24 +2050,67 @@ fn register_overlay_image_asset(
     Ok(())
 }
 
+/// Pack two `plane_w`×`plane_h` RGBA planes into one side-by-side
+/// `2*plane_w`×`plane_h` frame. A missing plane contributes transparent
+/// pixels so the corresponding filter-graph composite becomes a no-op.
+fn pack_overlay_planes(
+    dst: &mut [u8],
+    plane_w: usize,
+    plane_h: usize,
+    left: Option<&[u8]>,
+    right: Option<&[u8]>,
+) {
+    let plane_row_bytes = plane_w * 4;
+    let frame_row_bytes = plane_row_bytes * 2;
+    debug_assert_eq!(dst.len(), frame_row_bytes * plane_h);
+    for row in 0..plane_h {
+        let src_rows = row * plane_row_bytes..(row + 1) * plane_row_bytes;
+        let dst_row = &mut dst[row * frame_row_bytes..(row + 1) * frame_row_bytes];
+        match left {
+            Some(plane) => dst_row[..plane_row_bytes].copy_from_slice(&plane[src_rows.clone()]),
+            None => dst_row[..plane_row_bytes].fill(0),
+        }
+        match right {
+            Some(plane) => dst_row[plane_row_bytes..].copy_from_slice(&plane[src_rows]),
+            None => dst_row[plane_row_bytes..].fill(0),
+        }
+    }
+}
+
 /// Stream every composited overlay frame into FFmpeg's stdin.
 ///
-/// The overlay graph uses shortest=1, so FFmpeg stops reading stdin as soon as
-/// the composed video ends. Feeding ceil(duration*fps) frames can exceed that
-/// by one frame; a closed pipe here means the consumer finished, and the
-/// exit-status check in the runner decides whether the render actually failed.
+/// In dual-plane mode each frame is `2*width`×`height`: the left half carries
+/// the cursor plane composited below camera overlays, the right half carries
+/// the annotation/text/image plane composited above them. The overlay graph
+/// uses shortest=1, so FFmpeg stops reading stdin as soon as the composed
+/// video ends. Feeding ceil(duration*fps) frames can exceed that by one frame;
+/// a closed pipe here means the consumer finished, and the exit-status check
+/// in the runner decides whether the render actually failed.
 fn feed_cursor_frames(
     stdin: &mut std::process::ChildStdin,
     cursor: &mut CursorFramePlan,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     let mut writer = std::io::BufWriter::with_capacity(256 * 1024, stdin);
-    let frame_byte_len = (cursor.width as usize) * (cursor.height as usize) * 4;
+    let plane_w = cursor.width as usize;
+    let plane_h = cursor.height as usize;
+    let plane_byte_len = plane_w * plane_h * 4;
+    let frame_byte_len = if cursor.dual_plane {
+        plane_byte_len * 2
+    } else {
+        plane_byte_len
+    };
     let zero_frame = vec![0u8; frame_byte_len];
+    let mut packed_frame = if cursor.dual_plane {
+        vec![0u8; frame_byte_len]
+    } else {
+        Vec::new()
+    };
 
-    // Cache the rendered overlay layer (annotations, titles, images) when evaluated items are unchanged
+    // Cache the rendered items plane (annotations, titles, images) while the
+    // evaluated display list is unchanged; the cursor plane is per-frame
+    // telemetry and always re-rendered when an effect is active.
     let mut last_display_items: Option<Vec<overlay_engine::DisplayItem>> = None;
-    let mut cached_overlay_pixmap: Option<resvg::tiny_skia::Pixmap> = None;
     let mut cached_unpremultiplied_frame: Option<Vec<u8>> = None;
 
     for frame_index in 0..cursor.frame_count {
@@ -2039,113 +2123,64 @@ fn feed_cursor_frames(
         let output_time_ms = cursor::frame_time_ms(frame_index, cursor.fps);
         let overlay_time_ms = output_time_ms.floor().max(0.0) as u64;
 
-        let active_cursor_renderer = cursor.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
-            output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
-        });
-
         if let Some(engine) = &cursor.overlay_engine {
             let display_list = engine.evaluate(overlay_time_ms);
-            let has_items = !display_list.items.is_empty();
-
-            if !has_items && active_cursor_renderer.is_none() {
-                // Completely empty frame — stream pre-zeroed frame directly with zero CPU work
+            if display_list.items.is_empty() {
                 last_display_items = Some(Vec::new());
-                cached_overlay_pixmap = None;
                 cached_unpremultiplied_frame = None;
-                if let Err(error) = writer.write_all(&zero_frame) {
-                    if is_pipe_closed(&error) {
-                        return Ok(());
-                    }
-                    return Err(
-                        InternalError::Media(format!("write overlay frame: {error}")).into(),
-                    );
-                }
-                continue;
-            }
-
-            // If overlay items have changed, re-render the overlay layer into cached_overlay_pixmap
-            let items_changed = last_display_items.as_ref() != Some(&display_list.items);
-            if items_changed {
-                if has_items {
-                    let mut layer = resvg::tiny_skia::Pixmap::new(cursor.width, cursor.height)
-                        .ok_or_else(|| {
-                            InternalError::Media("allocate overlay pixmap failed".into())
-                        })?;
-                    engine
-                        .render_to_pixmap(overlay_time_ms, &mut layer)
-                        .map_err(|error| {
-                            InternalError::Media(format!("render overlay frame: {error}"))
-                        })?;
-                    let mut unprem = layer.data().to_vec();
-                    cursor::unpremultiply_rgba(&mut unprem);
-                    cached_unpremultiplied_frame = Some(unprem);
-                    cached_overlay_pixmap = Some(layer);
-                } else {
-                    cached_overlay_pixmap = None;
-                    cached_unpremultiplied_frame = None;
-                }
+            } else if last_display_items.as_ref() != Some(&display_list.items) {
+                let mut layer = resvg::tiny_skia::Pixmap::new(cursor.width, cursor.height)
+                    .ok_or_else(|| InternalError::Media("allocate overlay pixmap failed".into()))?;
+                engine
+                    .render_to_pixmap(overlay_time_ms, &mut layer)
+                    .map_err(|error| {
+                        InternalError::Media(format!("render overlay frame: {error}"))
+                    })?;
+                let mut unprem = layer.data().to_vec();
+                cursor::unpremultiply_rgba(&mut unprem);
+                cached_unpremultiplied_frame = Some(unprem);
                 last_display_items = Some(display_list.items);
             }
+        }
+        let items_plane = cached_unpremultiplied_frame.as_deref();
 
-            if let Some((_, _, renderer)) = active_cursor_renderer {
-                // Cursor telemetry is active on this frame: composite cursor on top of overlay layer
-                if let Some(cached_layer) = &cached_overlay_pixmap {
-                    cursor
-                        .pixmap
-                        .data_mut()
-                        .copy_from_slice(cached_layer.data());
-                } else {
-                    cursor.pixmap.data_mut().copy_from_slice(&zero_frame);
+        let cursor_plane: Option<&[u8]> =
+            match cursor.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
+                output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
+            }) {
+                Some((_, _, renderer)) => {
+                    cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
+                    renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
+                    cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
+                    Some(cursor.pixmap.data())
                 }
-                renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
-                cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
+                None => None,
+            };
 
-                if let Err(error) = writer.write_all(cursor.pixmap.data()) {
-                    if is_pipe_closed(&error) {
-                        return Ok(());
-                    }
-                    return Err(
-                        InternalError::Media(format!("write overlay frame: {error}")).into(),
-                    );
-                }
-            } else if let Some(unprem_frame) = &cached_unpremultiplied_frame {
-                // Static overlay items, no cursor: stream the cached unpremultiplied layer directly!
-                if let Err(error) = writer.write_all(unprem_frame) {
-                    if is_pipe_closed(&error) {
-                        return Ok(());
-                    }
-                    return Err(
-                        InternalError::Media(format!("write overlay frame: {error}")).into(),
-                    );
-                }
+        let frame: &[u8] = if cursor.dual_plane {
+            if cursor_plane.is_none() && items_plane.is_none() {
+                zero_frame.as_slice()
             } else {
-                if let Err(error) = writer.write_all(&zero_frame) {
-                    if is_pipe_closed(&error) {
-                        return Ok(());
-                    }
-                    return Err(
-                        InternalError::Media(format!("write overlay frame: {error}")).into(),
-                    );
-                }
-            }
-        } else if let Some((_, _, renderer)) = active_cursor_renderer {
-            cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
-            renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
-            cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
-
-            if let Err(error) = writer.write_all(cursor.pixmap.data()) {
-                if is_pipe_closed(&error) {
-                    return Ok(());
-                }
-                return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
+                pack_overlay_planes(
+                    &mut packed_frame,
+                    plane_w,
+                    plane_h,
+                    cursor_plane,
+                    items_plane,
+                );
+                packed_frame.as_slice()
             }
         } else {
-            if let Err(error) = writer.write_all(&zero_frame) {
-                if is_pipe_closed(&error) {
-                    return Ok(());
-                }
-                return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
+            cursor_plane
+                .or(items_plane)
+                .unwrap_or(zero_frame.as_slice())
+        };
+
+        if let Err(error) = writer.write_all(frame) {
+            if is_pipe_closed(&error) {
+                return Ok(());
             }
+            return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
         }
     }
     let _ = writer.flush();
@@ -5654,6 +5689,30 @@ mod tests {
     }
 
     #[test]
+    fn pack_overlay_planes_places_left_and_right_halves() {
+        // 2x2 planes packed into a 4x2 frame: left=cursor, right=items.
+        let left = vec![1u8; 2 * 2 * 4];
+        let right = vec![2u8; 2 * 2 * 4];
+        let mut dst = vec![0u8; 4 * 2 * 4];
+        pack_overlay_planes(&mut dst, 2, 2, Some(&left), Some(&right));
+        assert_eq!(
+            dst,
+            vec![
+                1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, // row 0
+                1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, // row 1
+            ]
+        );
+    }
+
+    #[test]
+    fn pack_overlay_planes_fills_missing_side_with_transparency() {
+        let right = vec![7u8; 2 * 1 * 4];
+        let mut dst = vec![9u8; 4 * 1 * 4];
+        pack_overlay_planes(&mut dst, 2, 1, None, Some(&right));
+        assert_eq!(dst, vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
+    }
+
+    #[test]
     fn prepare_cursor_frame_plan_initializes_overlay_engine_with_unified_plan() {
         let mut plan = valid_plan();
         plan.overlay_render_plan = Some(serde_json::json!({
@@ -8137,6 +8196,258 @@ mod tests {
         assert!(
             std::fs::metadata(&out_contain).unwrap().len() > 0,
             "output video with contain background image is not empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Overlay items must composite ABOVE the camera layer in export, matching
+    /// the editor preview stacking order (camera z-30, items z-35). Regresses
+    /// the bug where the shared overlay plate sat under camera bubbles.
+    #[test]
+    fn test_render_timeline_composition_stacks_items_above_camera() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-layering-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let camera_path = temp_dir.join("camera.mp4");
+        let out_path = temp_dir.join("test_out_layering.mp4");
+
+        for (path, color) in [(&screen_path, "blue"), (&camera_path, "red")] {
+            let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=c={color}:s=320x240:r=10"),
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-an",
+                ])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "failed to generate test video");
+        }
+
+        // Minimal V1 cursor telemetry so the overlay stream takes the packed
+        // dual-plane path (cursor plane + items plane in one feed).
+        std::fs::write(
+            temp_dir.join("cursor_telemetry.json"),
+            r#"{
+                "schemaVersion": 1,
+                "recordingId": "rec-layering",
+                "sourceWidth": 320,
+                "sourceHeight": 240,
+                "sampleRateHz": 60,
+                "events": [
+                    {"tMs": 0, "x": 24.0, "y": 24.0, "clicked": false, "button": "none", "visible": true},
+                    {"tMs": 500, "x": 40.0, "y": 40.0, "clicked": false, "button": "none", "visible": true},
+                    {"tMs": 900, "x": 60.0, "y": 60.0, "clicked": false, "button": "none", "visible": true}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path.clone());
+        asset_paths.insert("asset-camera".to_string(), camera_path.clone());
+        asset_paths.insert("asset-cursor".to_string(), screen_path.clone());
+
+        let plan = RenderPlan {
+            project_id: "test-layering".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            // Camera bubble covering the whole canvas: anything stacked under
+            // it is invisible, anything above it wins the frame.
+            overlays: vec![RenderPlanOverlay {
+                asset_id: "asset-camera".into(),
+                stream_index: None,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                speed: 1.0,
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 240.0,
+                crop: None,
+                opacity: 1.0,
+                visible: true,
+                shape: "rectangle".into(),
+                border_width: Some(0.0),
+                border_color: Some("#ffffff".into()),
+                border_opacity: Some(1.0),
+                shadow_enabled: Some(false),
+                shadow_color: Some("#000000".into()),
+                shadow_blur: Some(0.0),
+                shadow_offset_x: Some(0.0),
+                shadow_offset_y: Some(0.0),
+                preset: None,
+            }],
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: vec![RenderPlanCursorEffect {
+                id: "cursor-fx".into(),
+                asset_id: "asset-cursor".into(),
+                start_ms: 0,
+                end_ms: 1000,
+                enabled: true,
+                preset_id: "recorded-system".into(),
+                scale: 1.0,
+                smoothing: "off".into(),
+                settings: serde_json::json!({}),
+            }],
+            // Opaque green annotation sitting inside the camera bubble.
+            overlay_render_plan: Some(serde_json::json!({
+                "version": 1,
+                "canvas": { "width": 320, "height": 240 },
+                "items": [
+                    {
+                        "kind": "annotation",
+                        "id": "ann-block",
+                        "startMs": 0,
+                        "endMs": 1000,
+                        "transform": {
+                            "x": 120.0,
+                            "y": 80.0,
+                            "width": 80.0,
+                            "height": 60.0,
+                            "rotation": 0.0,
+                            "anchorX": 0.5,
+                            "anchorY": 0.5,
+                            "zIndex": 10,
+                            "opacity": 1.0
+                        },
+                        "animation": {
+                            "inType": "none",
+                            "outType": "none",
+                            "inDurationMs": 0,
+                            "outDurationMs": 0,
+                            "easing": "linear"
+                        },
+                        "enabled": true,
+                        "annotationType": "rect",
+                        "strokeColor": "#00ff00",
+                        "strokeWidth": 0.0,
+                        "strokeStyle": "solid",
+                        "fillColor": "#00ff00",
+                        "fillOpacity": 1.0,
+                        "cornerRadius": 0.0,
+                        "arrowEndHead": "none",
+                        "arrowStartHead": "none",
+                        "shadowEnabled": false,
+                        "shadowColor": "#000000",
+                        "shadowBlur": 0.0,
+                        "textColor": "#ffffff",
+                        "fontSize": 16.0
+                    }
+                ],
+                "assets": [],
+                "fonts": []
+            })),
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: Some(Vec::new()),
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-layering",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "layered composition failed: {:?}", res.err());
+        assert!(out_path.is_file(), "exported composition should exist");
+
+        // Decode the middle frame and compare dominant channels: the
+        // annotation region must be green (items above the red camera feed)
+        // while a camera-only corner stays red (camera above the blue screen).
+        let frame_path = temp_dir.join("frame.png");
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-i",
+                out_path.to_str().unwrap(),
+                "-vf",
+                "select=eq(n\\,5)",
+                "-vframes",
+                "1",
+            ])
+            .arg(&frame_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to extract frame");
+        let frame = image::open(&frame_path).expect("open frame").to_rgba8();
+        let annotation_px = frame.get_pixel(160, 110);
+        assert!(
+            annotation_px[1] > annotation_px[0] + 40 && annotation_px[1] > annotation_px[2] + 40,
+            "overlay item should render above the camera layer, got {annotation_px:?}"
+        );
+        let camera_px = frame.get_pixel(300, 220);
+        assert!(
+            camera_px[0] > camera_px[1] + 40 && camera_px[0] > camera_px[2] + 40,
+            "camera feed should still cover the screen layer, got {camera_px:?}"
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
