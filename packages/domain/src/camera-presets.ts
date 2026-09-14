@@ -1,11 +1,40 @@
-import type { Bounds, CameraPlacementPreset, ClipTransform } from "@recordforge/contracts"
+import type {
+  Bounds,
+  CameraPlacementPreset,
+  CanvasAspectRatio,
+  ClipTransform,
+} from "@recordforge/contracts"
 
 // Inset from the canvas edge for floating picture-in-picture presets.
 const PIP_PADDING = 24
 
 export interface CameraPresetInput {
-  canvas: { width: number; height: number; padding?: number }
+  canvas: {
+    width: number
+    height: number
+    padding?: number
+    aspectRatio?: CanvasAspectRatio
+  }
   source: { width: number; height: number }
+}
+
+// Default circular-PiP geometry per non-16:9 canvas ratio, authored against
+// the nominal 1080-base canvas each ratio produces and scaled linearly for
+// larger canvases (e.g. 2160-base from 4K sources). These place a prominent
+// circular webcam overlapping the lower edge of the centered screen video.
+interface CirclePipRatioSpec {
+  canvasWidth: number
+  canvasHeight: number
+  diameter: number
+  x: number | "center"
+  y: number
+}
+
+const CIRCLE_PIP_RATIO_LAYOUTS: Partial<Record<CanvasAspectRatio, CirclePipRatioSpec>> = {
+  "9:16": { canvasWidth: 1080, canvasHeight: 1920, diameter: 840, x: "center", y: 950 },
+  "1:1": { canvasWidth: 1080, canvasHeight: 1080, diameter: 460, x: "center", y: 595 },
+  "5:4": { canvasWidth: 1350, canvasHeight: 1080, diameter: 350, x: 975, y: 715 },
+  "4:5": { canvasWidth: 1080, canvasHeight: 1350, diameter: 600, x: "center", y: 700 },
 }
 
 // Modern default styling shared by the floating PiP presets. Camera-only is
@@ -147,6 +176,28 @@ export function buildCameraPresetTransform(
     }
 
     case "circle-pip": {
+      // On non-16:9 canvases the circle uses the per-ratio default placement;
+      // on 16:9 (or when the ratio is unknown) it stays a compact bottom-right
+      // overlay.
+      const spec = canvas.aspectRatio ? CIRCLE_PIP_RATIO_LAYOUTS[canvas.aspectRatio] : undefined
+      if (spec) {
+        const scale = canvas.height / spec.canvasHeight
+        const diameter = Math.max(1, Math.round(spec.diameter * scale))
+        const x =
+          spec.x === "center"
+            ? Math.round((canvas.width - diameter) / 2)
+            : Math.round(spec.x * scale)
+        const y = Math.round(spec.y * scale)
+        return {
+          ...defaultStyle(preset),
+          x,
+          y,
+          width: diameter,
+          height: diameter,
+          shape: "circle",
+          crop: centerSquareCrop(source.width, source.height),
+        }
+      }
       const diameter = Math.round(canvas.height * 0.28)
       return {
         ...defaultStyle(preset),

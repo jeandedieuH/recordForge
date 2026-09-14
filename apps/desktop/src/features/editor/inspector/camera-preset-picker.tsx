@@ -28,7 +28,8 @@ const PRESETS: PresetMeta[] = [
   {
     id: "circle-pip",
     label: "Circular PiP",
-    description: "A perfectly round webcam overlay in the bottom-right corner.",
+    description:
+      "A perfectly round webcam overlay — bottom-right on 16:9, placed along the lower edge on other ratios.",
   },
   {
     id: "side-by-side",

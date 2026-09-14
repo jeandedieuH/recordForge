@@ -8,9 +8,11 @@ import type {
   AnnotationClip,
   AppError,
   AudioClip,
+  CameraPlacementPreset,
   CaptionClip,
   CaptionCue,
   CameraClip,
+  CanvasAspectRatio,
   ClipTransform,
   CursorEffectClip,
   ImageClip,
@@ -26,6 +28,7 @@ import type {
   TrackUpdate,
 } from "@recordforge/domain"
 import {
+  buildCameraPresetTransform,
   defaultSmartZoomSettings,
   findClip,
   findTrack,
@@ -2483,6 +2486,24 @@ function applyAddExternalAudioClip(
   return { ok: true, value: { ...state, tracks, updatedAt: now() } }
 }
 
+// Smart per-ratio layout defaults, applied when an update-canvas command
+// switches the aspect ratio. Non-16:9 ratios get compact 24px framing and push
+// the screen video upward to make room for the circular PiP placed by the
+// per-ratio spec in `buildCameraPresetTransform`; 16:9 keeps the caller's
+// canvas fields and moves the camera to the side-by-side layout.
+const SMART_LAYOUT_INSET = 24
+const SMART_LAYOUT_VIDEO_POSITION_Y: Record<CanvasAspectRatio, number> = {
+  "16:9": 0.5,
+  "9:16": 0.15,
+  "1:1": 0.05,
+  "5:4": 0.05,
+  "4:5": 0.1,
+}
+// Standard 720p webcam assumption when neither the caller nor the existing
+// transform can tell us the real camera source size. The inspector recomputes
+// preset geometry once real dimensions resolve, matching `selectPreset`.
+const FALLBACK_CAMERA_SOURCE = { width: 1280, height: 720 }
+
 function applyUpdateCanvas(
   state: TimelineState,
   command: UpdateCanvasCommand,
@@ -2499,6 +2520,24 @@ function applyUpdateCanvas(
     nextCanvas.width = size.width
     nextCanvas.height = size.height
   }
+
+  // A ratio switch applies the target ratio's default configuration. Fields
+  // the caller explicitly sent still win over the defaults.
+  const targetAspectRatio = command.canvas.aspectRatio
+  const ratioChanged =
+    targetAspectRatio !== undefined && targetAspectRatio !== state.canvas.aspectRatio
+  if (ratioChanged) {
+    if (targetAspectRatio !== "16:9") {
+      if (command.canvas.padding === undefined) nextCanvas.padding = SMART_LAYOUT_INSET
+      if (command.canvas.borderRadius === undefined) {
+        nextCanvas.borderRadius = SMART_LAYOUT_INSET
+      }
+    }
+    if (command.canvas.videoPositionY === undefined) {
+      nextCanvas.videoPositionY = SMART_LAYOUT_VIDEO_POSITION_Y[targetAspectRatio]
+    }
+  }
+
   if (nextCanvas.videoPositionY !== undefined) {
     nextCanvas.videoPositionY = Math.min(1, Math.max(0, nextCanvas.videoPositionY))
   }
@@ -2508,10 +2547,77 @@ function applyUpdateCanvas(
       error: editorError("invalid_canvas", "Canvas padding leaves no content area"),
     }
   }
+
+  const tracks = ratioChanged
+    ? relayoutCameraClips(state.tracks, targetAspectRatio, nextCanvas, command.cameraSources)
+    : state.tracks
+
   return {
     ok: true,
-    value: { ...state, canvas: nextCanvas, updatedAt: now() },
+    value: { ...state, canvas: nextCanvas, tracks, updatedAt: now() },
   }
+}
+
+// Rebuild every camera clip's transform from the target ratio's default preset
+// so a ratio switch never leaves stale canvas-pixel geometry behind.
+function relayoutCameraClips(
+  tracks: TimelineTrack[],
+  aspectRatio: CanvasAspectRatio,
+  canvas: TimelineCanvas,
+  cameraSources?: Record<string, { width: number; height: number }>,
+): TimelineTrack[] {
+  if (!tracks.some((track) => track.kind === "camera")) return tracks
+  const preset: CameraPlacementPreset = aspectRatio === "16:9" ? "side-by-side" : "circle-pip"
+  return tracks.map((track) => {
+    if (track.kind !== "camera") return track
+    return {
+      ...track,
+      clips: track.clips.map((clip) =>
+        clip.kind === "camera"
+          ? {
+              ...clip,
+              transform: relayoutCameraTransform(clip, preset, canvas, cameraSources?.[clip.id]),
+            }
+          : clip,
+      ),
+    }
+  })
+}
+
+function relayoutCameraTransform(
+  clip: CameraClip,
+  preset: CameraPlacementPreset,
+  canvas: TimelineCanvas,
+  source?: { width: number; height: number },
+): ClipTransform {
+  let transform: ClipTransform
+  const existingCrop = clip.transform.crop
+  if (source) {
+    transform = buildCameraPresetTransform(preset, { canvas, source })
+  } else if (existingCrop && existingCrop.width > 0 && existingCrop.height > 0) {
+    // Without real source dims, treat the existing source-space crop as the
+    // bounds so the rebuilt transform keeps showing the framed region; the
+    // computed sub-crop is then offset back into source coordinates.
+    transform = buildCameraPresetTransform(preset, {
+      canvas,
+      source: { width: existingCrop.width, height: existingCrop.height },
+    })
+    if (transform.crop) {
+      transform.crop = {
+        ...transform.crop,
+        x: transform.crop.x + existingCrop.x,
+        y: transform.crop.y + existingCrop.y,
+      }
+    }
+  } else {
+    transform = buildCameraPresetTransform(preset, {
+      canvas,
+      source: FALLBACK_CAMERA_SOURCE,
+    })
+  }
+  // Visibility is a content decision, not layout: a deliberately hidden camera
+  // stays hidden rather than reappearing on every ratio switch.
+  return { ...transform, visible: clip.transform.visible ?? transform.visible }
 }
 
 function applyUpdateSmartZoomSettings(
@@ -3673,11 +3779,15 @@ export function createAddExternalAudioClipCommand(
   }
 }
 
-export function createUpdateCanvasCommand(canvas: Partial<TimelineCanvas>): CommandRecord {
+export function createUpdateCanvasCommand(
+  canvas: Partial<TimelineCanvas>,
+  options?: { cameraSources?: Record<string, { width: number; height: number }> },
+): CommandRecord {
   return {
     kind: "update-canvas",
     name: "Update canvas",
     canvas,
+    cameraSources: options?.cameraSources,
   }
 }
 

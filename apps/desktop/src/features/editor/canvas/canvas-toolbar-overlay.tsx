@@ -12,6 +12,7 @@ import {
   Tv,
 } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { collectCameraSources } from "../camera/camera-sources"
 import { ASPECT_RATIO_OPTIONS } from "../panels/layout/aspect-ratio-selector"
 
 const PADDING_PRESETS = [0, 24, 48, 64]
@@ -30,6 +31,10 @@ export function CanvasToolbarOverlay({ className }: CanvasToolbarOverlayProps) {
   const timeline = draftTimeline ?? engine?.history.present ?? null
   const execute = useTimelineStore((state) => state.execute)
   const selection = useTimelineStore((state) => state.view.selection)
+  const project = useTimelineStore((state) => state.project)
+  const metadata = useTimelineStore((state) => state.metadata)
+  const activeJob = useTimelineStore((state) => state.activeJob)
+  const recording = useTimelineStore((state) => state.recording)
   const [userCollapsed, setUserCollapsed] = useState<boolean | null>(null)
 
   const isOverlaySelected = useMemo(() => {
@@ -60,12 +65,24 @@ export function CanvasToolbarOverlay({ className }: CanvasToolbarOverlayProps) {
   const handleSelectRatio = (ratio: CanvasAspectRatio) => {
     const option = ASPECT_RATIO_OPTIONS.find((opt) => opt.value === ratio)
     if (!option) return
+    // The engine applies the ratio's default layout; real camera source sizes
+    // keep the rebuilt preset crops pixel-correct.
     execute(
-      createUpdateCanvasCommand({
-        aspectRatio: option.value,
-        width: option.width,
-        height: option.height,
-      }),
+      createUpdateCanvasCommand(
+        {
+          aspectRatio: option.value,
+          width: option.width,
+          height: option.height,
+        },
+        {
+          cameraSources: collectCameraSources(timeline, {
+            project,
+            metadata,
+            activeJob,
+            recording,
+          }),
+        },
+      ),
     )
   }
 

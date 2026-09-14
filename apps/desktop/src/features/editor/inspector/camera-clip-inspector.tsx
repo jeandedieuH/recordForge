@@ -14,6 +14,7 @@ import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 import { CameraPresetPicker } from "./camera-preset-picker"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useRecorderStore } from "../../../stores/recorder-store"
+import { resolveCameraSourceSize } from "../camera/camera-sources"
 
 interface CameraClipInspectorProps {
   clip: CameraClip
@@ -37,38 +38,18 @@ export function CameraClipInspector({
   const project = useTimelineStore((state) => state.project)
 
   // Crop math must use the camera source dimensions, not the screen/canvas.
-  // 1. The prepared derivative is the most reliable source once it exists.
-  // 2. The durable project asset may carry the original stream size.
-  // 3. For multiplexed recordings, the same stream is described in metadata.
-  // 4. Standalone webcam files have a separate path but the prepare job gives us
-  //    the size; if it is still running we cannot know the exact size, so we
-  //    use a sensible 720p fallback rather than the screen dimensions.
-  const cameraAsset = useMemo(
-    () => project?.assets.find((asset) => asset.id === clip.assetId),
-    [project?.assets, clip.assetId],
+  // The shared resolver checks the prepared derivative, the project asset, and
+  // the probed stream metadata, falling back to a 720p webcam placeholder when
+  // a camera exists but has not been probed yet. The {1,1} sentinel marks "size
+  // unknown" for callers that need a value before the prepare job finishes.
+  const sourceSize = useMemo(
+    () =>
+      resolveCameraSourceSize(clip, { project, metadata, activeJob, recording }) ?? {
+        width: 1,
+        height: 1,
+      },
+    [clip, project, metadata, activeJob, recording],
   )
-  const cameraOutput = activeJob?.outputs?.videoTracks.find(
-    (output) => output.streamIndex === clip.streamIndex,
-  )
-  const metadataStream = metadata?.streams.find(
-    (stream) => stream.index === clip.streamIndex && stream.kind === "video",
-  )
-  const fallbackWebcamSize =
-    recording?.webcamPath || (clip.streamIndex ?? 0) > 0 ? { width: 1280, height: 720 } : null
-  const sourceSize = {
-    width:
-      cameraOutput?.width ??
-      cameraAsset?.width ??
-      metadataStream?.width ??
-      fallbackWebcamSize?.width ??
-      1,
-    height:
-      cameraOutput?.height ??
-      cameraAsset?.height ??
-      metadataStream?.height ??
-      fallbackWebcamSize?.height ??
-      1,
-  }
 
   // If a clip was previously auto-framed using an approximate source size (e.g.
   // the canvas fallback), recompute the crop when the real camera size is known.

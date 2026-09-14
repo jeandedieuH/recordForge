@@ -27,6 +27,7 @@ import {
   Image as ImageIcon,
 } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { collectCameraSources } from "../camera/camera-sources"
 import { AspectRatioSelector } from "./layout/aspect-ratio-selector"
 import { SolidBackgroundPicker } from "./layout/solid-background-picker"
 import { GradientBackgroundPicker } from "./layout/gradient-background-picker"
@@ -46,6 +47,10 @@ export function LayoutPanel() {
   const execute = useTimelineStore((state) => state.execute)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const isLoading = useTimelineStore((state) => state.isLoading)
+  const project = useTimelineStore((state) => state.project)
+  const metadata = useTimelineStore((state) => state.metadata)
+  const activeJob = useTimelineStore((state) => state.activeJob)
+  const recording = useTimelineStore((state) => state.recording)
 
   const currentBackground = timeline?.canvas.background ?? DEFAULT_CANVAS_BACKGROUND
   const detectedKind = getBackgroundKind(currentBackground)
@@ -107,17 +112,25 @@ export function LayoutPanel() {
 
   const canvas = timeline.canvas
 
+  // Aspect-ratio switches apply a per-ratio smart layout (padding/radius +
+  // camera placement) inside the command engine. Real camera source sizes are
+  // attached so the rebuilt preset crops stay pixel-correct.
+  const cameraSourceCtx = { project, metadata, activeJob, recording }
+
   const handleAspectRatioChange = (option: {
     value: CanvasAspectRatio
     width: number
     height: number
   }) => {
     execute(
-      createUpdateCanvasCommand({
-        aspectRatio: option.value,
-        width: option.width,
-        height: option.height,
-      }),
+      createUpdateCanvasCommand(
+        {
+          aspectRatio: option.value,
+          width: option.width,
+          height: option.height,
+        },
+        { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
+      ),
     )
   }
 
@@ -307,18 +320,21 @@ export function LayoutPanel() {
           className="w-full text-xs text-subtle-foreground hover:text-foreground"
           onClick={() =>
             execute(
-              createUpdateCanvasCommand({
-                width: 1920,
-                height: 1080,
-                padding: 0,
-                borderRadius: 0,
-                aspectRatio: "16:9",
-                videoPositionY: 0.5,
-                background: "#070b14",
-                backgroundBlur: 0,
-                backgroundDim: 0,
-                shadow: false,
-              }),
+              createUpdateCanvasCommand(
+                {
+                  width: 1920,
+                  height: 1080,
+                  padding: 0,
+                  borderRadius: 0,
+                  aspectRatio: "16:9",
+                  videoPositionY: 0.5,
+                  background: "#070b14",
+                  backgroundBlur: 0,
+                  backgroundDim: 0,
+                  shadow: false,
+                },
+                { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
+              ),
             )
           }
         >

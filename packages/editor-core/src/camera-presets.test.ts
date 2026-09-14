@@ -57,6 +57,81 @@ describe("buildCameraPresetTransform", () => {
     expect(transform.preset).toBe("circle-pip")
   })
 
+  it.each([
+    {
+      aspectRatio: "9:16" as const,
+      canvasWidth: 1080,
+      canvasHeight: 1920,
+      diameter: 840,
+      x: 120,
+      y: 950,
+    },
+    {
+      aspectRatio: "1:1" as const,
+      canvasWidth: 1080,
+      canvasHeight: 1080,
+      diameter: 460,
+      x: 340,
+      y: 665,
+    },
+    {
+      aspectRatio: "5:4" as const,
+      canvasWidth: 1350,
+      canvasHeight: 1080,
+      diameter: 350,
+      x: 975,
+      y: 715,
+    },
+    {
+      aspectRatio: "4:5" as const,
+      canvasWidth: 1080,
+      canvasHeight: 1350,
+      diameter: 600,
+      x: 265,
+      y: 750,
+    },
+  ])(
+    "places the circular PiP at the default $aspectRatio placement",
+    ({ aspectRatio, canvasWidth, canvasHeight, diameter, x, y }) => {
+      const transform = buildCameraPresetTransform("circle-pip", {
+        canvas: { width: canvasWidth, height: canvasHeight, aspectRatio },
+        source,
+      })
+
+      expect(transform.width).toBe(diameter)
+      expect(transform.height).toBe(diameter)
+      expect(transform.x).toBe(x)
+      expect(transform.y).toBe(y)
+      expect(transform.shape).toBe("circle")
+      expect(transform.crop).toEqual({ x: 280, y: 0, width: 720, height: 720 })
+      expect(transform.preset).toBe("circle-pip")
+    },
+  )
+
+  it("scales the per-ratio circle placement for 2160-base canvases", () => {
+    const transform = buildCameraPresetTransform("circle-pip", {
+      canvas: { width: 2160, height: 3840, aspectRatio: "9:16" },
+      source,
+    })
+
+    expect(transform.width).toBe(1680)
+    expect(transform.height).toBe(1680)
+    expect(transform.x).toBe(240)
+    expect(transform.y).toBe(1900)
+  })
+
+  it("keeps the compact bottom-right circle on an explicit 16:9 canvas", () => {
+    const transform = buildCameraPresetTransform("circle-pip", {
+      canvas: { width: 1920, height: 1080, aspectRatio: "16:9" },
+      source,
+    })
+
+    const diameter = Math.round(1080 * 0.28)
+    expect(transform.width).toBe(diameter)
+    expect(transform.x).toBe(1920 - diameter - 24)
+    expect(transform.y).toBe(1080 - diameter - 24)
+  })
+
   it("creates a robust side-by-side layout with 76% screen, 5:7 camera ratio, and vertical centering", () => {
     const transform = buildCameraPresetTransform("side-by-side", { canvas, source })
 

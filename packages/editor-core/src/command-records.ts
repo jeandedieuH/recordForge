@@ -327,6 +327,12 @@ export type UpdateMaskClipCommand = z.infer<typeof updateMaskClipCommandSchema>
 export const updateCanvasCommandSchema = commandMetaSchema.extend({
   kind: z.literal("update-canvas"),
   canvas: timelineCanvasSchema.partial(),
+  // Camera source dimensions keyed by camera clip id. When an aspect-ratio
+  // change triggers the smart re-layout, the engine rebuilds each camera
+  // clip's preset transform and needs real source pixels to compute the crop.
+  cameraSources: z
+    .record(z.string(), z.object({ width: z.number().positive(), height: z.number().positive() }))
+    .optional(),
 })
 
 export type UpdateCanvasCommand = z.infer<typeof updateCanvasCommandSchema>
