@@ -71,8 +71,8 @@ describe("buildCameraPresetTransform", () => {
       canvasWidth: 1080,
       canvasHeight: 1080,
       diameter: 460,
-      x: 340,
-      y: 665,
+      x: 310,
+      y: 595,
     },
     {
       aspectRatio: "5:4" as const,
@@ -87,8 +87,8 @@ describe("buildCameraPresetTransform", () => {
       canvasWidth: 1080,
       canvasHeight: 1350,
       diameter: 600,
-      x: 265,
-      y: 750,
+      x: 240,
+      y: 700,
     },
   ])(
     "places the circular PiP at the default $aspectRatio placement",

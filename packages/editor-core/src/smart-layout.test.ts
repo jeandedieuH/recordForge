@@ -136,9 +136,9 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
   })
 
   it.each([
-    { ratio: "1:1" as const, w: 1080, h: 1080, dim: 460, x: 340, y: 665, posY: 0.05 },
+    { ratio: "1:1" as const, w: 1080, h: 1080, dim: 460, x: 310, y: 595, posY: 0.05 },
     { ratio: "5:4" as const, w: 1350, h: 1080, dim: 350, x: 975, y: 715, posY: 0.05 },
-    { ratio: "4:5" as const, w: 1080, h: 1350, dim: 600, x: 265, y: 750, posY: 0.1 },
+    { ratio: "4:5" as const, w: 1080, h: 1350, dim: 600, x: 240, y: 700, posY: 0.1 },
   ])("applies the $ratio default camera placement", ({ ratio, w, h, dim, x, y, posY }) => {
     const result = executeCommand(
       createEngine(makeState()),
@@ -225,8 +225,8 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
 
     const transform = cameraClipOf(result.value.history.present).transform
     expect(transform.preset).toBe("circle-pip")
-    expect(transform.x).toBe(340)
-    expect(transform.y).toBe(665)
+    expect(transform.x).toBe(310)
+    expect(transform.y).toBe(595)
   })
 
   it("lets explicit canvas fields win over the ratio defaults", () => {
