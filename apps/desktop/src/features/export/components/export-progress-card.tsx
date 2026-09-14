@@ -266,17 +266,17 @@ export function ExportProgressCard({
             <div
               className={`h-full rounded-full transition-[width] duration-300 ease-forge relative ${
                 isCompleted
-                  ? "bg-gradient-to-r from-emerald-500 to-success shadow-[0_0_12px_rgba(16,185,129,0.3)]"
+                  ? "bg-linear-to-r from-emerald-500 to-success shadow-[0_0_12px_rgba(16,185,129,0.3)]"
                   : isFailed
                     ? "bg-recording"
-                    : "bg-gradient-to-r from-primary via-blue-500 to-accent shadow-[0_0_12px_rgba(217,119,6,0.3)]"
+                    : "bg-linear-to-r from-primary via-blue-500 to-accent shadow-[0_0_12px_rgba(217,119,6,0.3)]"
               }`}
               style={{ width: `${percent}%` }}
             >
               {/* Shimmer sweep animation overlay during active render */}
               {isRunning ? (
                 <div
-                  className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-pulse"
+                  className="absolute inset-0 bg-linear-to-r from-transparent via-white/20 to-transparent animate-pulse"
                   aria-hidden
                 />
               ) : null}
@@ -374,7 +374,7 @@ export function ExportProgressCard({
                     }`}
                   >
                     {isStageDone ? (
-                      <Check className="size-2.5 stroke-[3]" aria-hidden />
+                      <Check className="size-2.5 stroke-3" aria-hidden />
                     ) : (
                       index + 1
                     )}

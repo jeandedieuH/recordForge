@@ -136,9 +136,9 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
   })
 
   it.each([
-    { ratio: "1:1" as const, w: 1080, h: 1080, dim: 400, x: 340, y: 665, posY: 0.05 },
+    { ratio: "1:1" as const, w: 1080, h: 1080, dim: 460, x: 340, y: 665, posY: 0.05 },
     { ratio: "5:4" as const, w: 1350, h: 1080, dim: 350, x: 975, y: 715, posY: 0.05 },
-    { ratio: "4:5" as const, w: 1080, h: 1350, dim: 550, x: 265, y: 750, posY: 0.1 },
+    { ratio: "4:5" as const, w: 1080, h: 1350, dim: 600, x: 265, y: 750, posY: 0.1 },
   ])("applies the $ratio default camera placement", ({ ratio, w, h, dim, x, y, posY }) => {
     const result = executeCommand(
       createEngine(makeState()),

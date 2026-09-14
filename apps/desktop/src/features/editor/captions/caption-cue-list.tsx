@@ -147,7 +147,7 @@ export function CaptionCueList({
                         </span>
                       ) : null}
                     </span>
-                    <span className="mt-1 block text-xs leading-snug whitespace-pre-line text-foreground [overflow-wrap:anywhere]">
+                    <span className="mt-1 block text-xs leading-snug whitespace-pre-line text-foreground wrap-anywhere">
                       {cue.text}
                     </span>
                   </button>

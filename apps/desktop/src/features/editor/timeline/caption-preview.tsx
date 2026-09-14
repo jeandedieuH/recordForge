@@ -60,7 +60,7 @@ export function CaptionPreview({ clips, playheadMs, canvasHeight }: CaptionPrevi
             }}
           >
             <span
-              className={`whitespace-pre-line [overflow-wrap:anywhere] ${captionTextClass(clip.style)}`}
+              className={`whitespace-pre-line wrap-anywhere ${captionTextClass(clip.style)}`}
             >
               {clip.text}
             </span>
