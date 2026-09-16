@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Categories of OS permissions required by recordForge subsystems.
+/// Categories of OS permissions required by RecordForge subsystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionKind {

@@ -66,7 +66,7 @@ Reference screenshots must be captured at the supported sizes so later UI change
 
 ### Windows capture helpers
 
-A PowerShell helper is provided at `tooling/scripts/capture-editor-screenshots.ps1`. It resizes the active recordForge window and captures the client area using `ffmpeg -f gdigrab` once the app is running. The script is manual; it must be started while the editor is open.
+A PowerShell helper is provided at `tooling/scripts/capture-editor-screenshots.ps1`. It resizes the active RecordForge window and captures the client area using `ffmpeg -f gdigrab` once the app is running. The script is manual; it must be started while the editor is open.
 
 ```powershell
 # Requires ffmpeg in PATH and the app window to be active/focused.

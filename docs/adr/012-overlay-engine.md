@@ -7,7 +7,7 @@
 
 ## Context
 
-recordForge supports a rich set of visual overlays:
+RecordForge supports a rich set of visual overlays:
 - **Vector annotations**: Rectangles, rounded-rectangles, circles, arrows, lines, callouts, spotlights, and badges.
 - **Titles and typography**: Categorized title styles and lower-thirds with custom typography, backdrops, and animations.
 - **External media**: Imported raster/vector graphics and images.

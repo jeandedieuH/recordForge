@@ -1,6 +1,6 @@
 use crate::errors::{InternalError, Result};
 
-/// Validation and sanitization helpers for recordForge IPC inputs.
+/// Validation and sanitization helpers for RecordForge IPC inputs.
 pub struct Validation;
 
 impl Validation {

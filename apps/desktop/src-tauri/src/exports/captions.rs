@@ -146,7 +146,7 @@ fn build_ass_script(
     let mut script = String::with_capacity(2_048 + captions.len() * 160);
     let _ = writeln!(
         script,
-        "[Script Info]\nTitle: recordForge captions\nScriptType: v4.00+\nPlayResX: {canvas_width}\nPlayResY: {canvas_height}\nScaledBorderAndShadow: yes\nWrapStyle: 0\nYCbCr Matrix: TV.709\n"
+        "[Script Info]\nTitle: RecordForge captions\nScriptType: v4.00+\nPlayResX: {canvas_width}\nPlayResY: {canvas_height}\nScaledBorderAndShadow: yes\nWrapStyle: 0\nYCbCr Matrix: TV.709\n"
     );
     let _ = writeln!(
         script,

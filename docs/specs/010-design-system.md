@@ -1,6 +1,6 @@
 # Spec 010: Forge UI Design System
 
-> Token and component rules for recordForge. Source of truth: `packages/ui/src/styles/theme.css` (tokens) and `packages/ui/src/components/**` (kit). Decisions: ADR-008 (system), ADR-009 (chrome).
+> Token and component rules for RecordForge. Source of truth: `packages/ui/src/styles/theme.css` (tokens) and `packages/ui/src/components/**` (kit). Decisions: ADR-008 (system), ADR-009 (chrome).
 
 ## 1. Color Tokens
 

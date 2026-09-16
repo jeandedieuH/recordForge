@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "webcam-preview",
-  "description": "Minimal permissions for recordForge floating webcam preview window",
+  "description": "Minimal permissions for RecordForge floating webcam preview window",
   "windows": ["webcam-preview"],
   "permissions": [
     "core:default",

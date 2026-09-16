@@ -1,6 +1,6 @@
-# Contributing to recordForge
+# Contributing to RecordForge
 
-Thank you for your interest in contributing to **recordForge**! As a free and open-source project, recordForge thrives on contributions from creators, developers, and designers around the world.
+Thank you for your interest in contributing to **RecordForge**! As a free and open-source project, RecordForge thrives on contributions from creators, developers, and designers around the world.
 
 Please take a few moments to review this guide before submitting issues or pull requests.
 
@@ -8,7 +8,7 @@ Please take a few moments to review this guide before submitting issues or pull 
 
 ## 🧭 Core Architecture & Ground Rules
 
-recordForge is a local-first, low-overhead desktop application for Windows, macOS, and Linux. To maintain performance, stability, and security, we enforce strict architectural boundaries:
+RecordForge is a local-first, low-overhead desktop application for Windows, macOS, and Linux. To maintain performance, stability, and security, we enforce strict architectural boundaries:
 
 1. **Rust owns:** Native screen capture, audio capture pipelines (WASAPI, CoreAudio, ALSA), SQLite persistence, OS credential storage (Keychain, Secret Service, Credential Manager), and FFmpeg media render jobs.
 2. **React owns:** User interface, client-side visual states, and declarative user feedback.

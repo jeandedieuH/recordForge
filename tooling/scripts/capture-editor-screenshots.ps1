@@ -1,16 +1,16 @@
 #Requires -Version 7.2
 <#
 .SYNOPSIS
-    Captures reference screenshots of the recordForge editor at the supported window sizes.
+    Captures reference screenshots of the RecordForge editor at the supported window sizes.
 
 .DESCRIPTION
-    This script resizes the active recordForge window to each supported size and captures
+    This script resizes the active RecordForge window to each supported size and captures
     the client area using FFmpeg gdigrab. It is intended for manual Phase 0/3/9 baseline
     capture on the Windows 11 baseline machine. The output is written to
     docs/design/editor-screenshots/.
 
 .PREREQUISITES
-    - recordForge is running (`bun run tauri:dev` or a release build).
+    - RecordForge is running (`bun run tauri:dev` or a release build).
     - FFmpeg is in PATH or $env:FFMPEG_PATH is set.
     - The main window title matches $env:RECORDFORGE_WINDOW_TITLE (default "recordForge").
     - The editor fixture is already open.

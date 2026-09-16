@@ -1,4 +1,4 @@
-# recordForge Desktop — Agent Guide
+# RecordForge Desktop — Agent Guide
 
 ## Scope
 

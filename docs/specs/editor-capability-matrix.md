@@ -1,4 +1,4 @@
-# recordForge Editor Capability Matrix
+# RecordForge Editor Capability Matrix
 
 > **Status:** Phase 0 baseline — updated to current branch
 > **Scope:** Editor specification traceability against the current repository

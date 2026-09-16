@@ -11,7 +11,7 @@
 
 ## Reporting a Vulnerability
 
-We take the security and privacy of our users very seriously. If you discover a security vulnerability in **recordForge**, please report it responsibly rather than opening a public GitHub issue.
+We take the security and privacy of our users very seriously. If you discover a security vulnerability in **RecordForge**, please report it responsibly rather than opening a public GitHub issue.
 
 ### How to Report
 
@@ -19,7 +19,7 @@ We take the security and privacy of our users very seriously. If you discover a 
 2. **Include Details:**
    - Detailed description of the vulnerability.
    - Steps to reproduce or proof-of-concept exploit.
-   - Operating system and recordForge version tested.
+   - Operating system and RecordForge version tested.
    - Any potential mitigations you have identified.
 
 ### What to Expect
@@ -32,7 +32,7 @@ We take the security and privacy of our users very seriously. If you discover a 
 
 ## Security Architecture Principles
 
-recordForge follows a strict zero-trust desktop security model:
+RecordForge follows a strict zero-trust desktop security model:
 
 1. **OS Credential Vault Exclusivity:** S3 access keys, Google OAuth tokens, and sensitive secrets are never stored in SQLite, flat files, or logs. They are strictly committed to the native **OS Credential Vault** (Windows Credential Manager, macOS Keychain, Linux Secret Service).
 2. **Narrow Capabilities:** Tauri v2 security scopes are restricted to minimal required filesystem paths. Arbitrary command execution is disabled.

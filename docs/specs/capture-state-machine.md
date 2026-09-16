@@ -1,7 +1,7 @@
 # Capture State Machine Specification
 
 > **Status:** Implemented baseline — Windows capture lifecycle
-> **Scope:** Defines the formal recorder state machine for recordForge V1  
+> **Scope:** Defines the formal recorder state machine for RecordForge V1  
 > **Owner:** Rust `capture` module
 
 ---

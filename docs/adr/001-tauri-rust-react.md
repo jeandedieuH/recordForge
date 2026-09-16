@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-recordForge needs a desktop application that can perform native screen/audio capture, access the filesystem, run FFmpeg, and present a modern, responsive UI.
+RecordForge needs a desktop application that can perform native screen/audio capture, access the filesystem, run FFmpeg, and present a modern, responsive UI.
 
 ## Decision
 

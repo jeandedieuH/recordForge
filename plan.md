@@ -1,4 +1,4 @@
-# recordForge End-to-End Improvement Roadmap
+# RecordForge End-to-End Improvement Roadmap
 
 Create a repository-root, implementation-ready roadmap that takes the current React/Tauri prototype to a performant, reliable, secure, local-first Windows V1-plus release without changing product code.
 
@@ -17,7 +17,7 @@ The approved scope is **V1 Plus**, the approved capture direction is **benchmark
 - Benchmark the current FFmpeg `ddagrab` path against Windows Graphics Capture/DXGI + WASAPI/Media Foundation candidates. Select the lowest-overhead reliable engine per source/hardware class and keep a tested fallback.
 - Use FFmpeg/FFprobe as bundled, pinned Rust-supervised sidecars for media preparation and final rendering even if capture becomes partly native.
 - Keep both S3 multipart and Google Drive resumable uploads optional at runtime but release-blocking for the project-plan V1 definition.
-- Do not introduce a recordForge-hosted backend, mandatory telemetry, user accounts, or hosted media.
+- Do not introduce a RecordForge-hosted backend, mandatory telemetry, user accounts, or hosted media.
 
 ## Evidence-Based Current-State Assessment
 

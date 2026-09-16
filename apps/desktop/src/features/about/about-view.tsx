@@ -547,7 +547,7 @@ export function AboutView({
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-4 text-xs text-subtle-foreground border-t border-border">
         <div className="flex items-center gap-2">
           <span>
-            © {new Date().getFullYear()} Prestige Tech &amp; recordForge Contributors • Free &amp;
+            © {new Date().getFullYear()} Prestige Tech &amp; RecordForge Contributors • Free &amp;
             Open Source (GNU GPLv3)
           </span>
         </div>

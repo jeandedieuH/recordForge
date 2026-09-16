@@ -39,7 +39,7 @@ impl TrayMenuState {
     }
 }
 
-/// Create the system tray icon and menu for recordForge.
+/// Create the system tray icon and menu for RecordForge.
 pub fn create_tray(app: &tauri::App) -> Result<()> {
     let menu = build_menu(
         app.handle(),

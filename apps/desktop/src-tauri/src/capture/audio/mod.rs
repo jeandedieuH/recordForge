@@ -1,4 +1,4 @@
-//! Audio capture subsystem for recordForge.
+//! Audio capture subsystem for RecordForge.
 //!
 //! Provides platform-native audio capture engines:
 //! - Windows: Native WASAPI capture (microphone & loopback)

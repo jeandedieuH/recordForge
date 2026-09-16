@@ -1,12 +1,12 @@
 name: 💡 Feature Request / Proposal
-description: Suggest an idea or architectural improvement for recordForge
+description: Suggest an idea or architectural improvement for RecordForge
 title: "[Feature]: "
 labels: ["enhancement", "proposal"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for suggesting an improvement to recordForge!
+        Thank you for suggesting an improvement to RecordForge!
   - type: textarea
     id: problem
     attributes:

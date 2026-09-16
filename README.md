@@ -150,7 +150,7 @@ We welcome contributions from developers, designers, and creators of all skill l
 
 For security vulnerability disclosures, please review our [Security Policy](SECURITY.md).
 
-recordForge strictly complies with local-first security boundaries:
+RecordForge strictly complies with local-first security boundaries:
 
 - Cloud credentials and API keys are stored exclusively in the **OS Credential Vault** (Windows Credential Manager, macOS Keychain, Linux Secret Service), never in plaintext or SQLite.
 - Desktop capabilities are locked down via narrow Tauri security permissions.
@@ -160,8 +160,8 @@ recordForge strictly complies with local-first security boundaries:
 
 ## 📜 License
 
-recordForge is licensed under the **GNU General Public License v3.0 (GPL-3.0-or-later)**. See the [LICENSE](LICENSE) file for details.
+RecordForge is licensed under the **GNU General Public License v3.0 (GPL-3.0-or-later)**. See the [LICENSE](LICENSE) file for details.
 
 ```
-Copyright (C) 2024-present Prestige Tech & recordForge Contributors
+Copyright (C) 2024-present Prestige Tech & RecordForge Contributors
 ```

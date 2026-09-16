@@ -6,7 +6,7 @@ Accepted (updated)
 
 ## Context
 
-recordForge requires FFmpeg and FFprobe for proxy generation, thumbnails, waveforms, audio mixing, and final export.
+RecordForge requires FFmpeg and FFprobe for proxy generation, thumbnails, waveforms, audio mixing, and final export.
 
 ## Decision
 

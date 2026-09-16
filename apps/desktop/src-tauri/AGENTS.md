@@ -1,4 +1,4 @@
-# recordForge Rust Core — Agent Guide
+# RecordForge Rust Core — Agent Guide
 
 ## Scope
 

@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>recordForge requires screen recording permission to capture your display, windows, and audio.</string>
+	<string>RecordForge requires screen recording permission to capture your display, windows, and audio.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>recordForge uses your microphone to record voice commentary.</string>
+	<string>RecordForge uses your microphone to record voice commentary.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>recordForge uses your camera to record webcam overlays.</string>
+	<string>RecordForge uses your camera to record webcam overlays.</string>
 </dict>
 </plist>

@@ -696,7 +696,7 @@ describe("render-plan", () => {
             kind: "text",
             presetId: "cyberpunk-neon",
             category: "title",
-            primaryText: "Welcome to recordForge",
+            primaryText: "Welcome to RecordForge",
             secondaryText: "Next-gen Screen Recording",
             tagText: "PRO",
             startMs: 2_000,

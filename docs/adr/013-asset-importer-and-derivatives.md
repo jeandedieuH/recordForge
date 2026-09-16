@@ -7,7 +7,7 @@
 
 ## Context
 
-recordForge users import external audio tracks (background music, voiceover) and graphics/logos to enrich their desktop screen recordings. In earlier versions:
+RecordForge users import external audio tracks (background music, voiceover) and graphics/logos to enrich their desktop screen recordings. In earlier versions:
 - Assets were referenced using browser `URL.createObjectURL()` with hardcoded fallback metadata (`durationMs: 30000`, `width: 400`, `height: 300`).
 - Assets were not persisted into the project file and broke upon reopening the application.
 - Unsanitized SVG files posed security risks (arbitrary JavaScript execution via `<script>` or event handlers embedded in SVGs).

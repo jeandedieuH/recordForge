@@ -8,7 +8,7 @@
 
 ## 1. Threat Model
 
-recordForge is a desktop app that receives untrusted input from:
+RecordForge is a desktop app that receives untrusted input from:
 1. **React UI via Tauri IPC** — user-influenced parameters (source IDs, device IDs, recording IDs, file paths, render plans)
 2. **External media files** — FFmpeg/FFprobe output, media containers
 3. **External credentials** — S3 keys, OAuth tokens (user-provided)

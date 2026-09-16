@@ -370,7 +370,7 @@
       "category": "lower-third",
       "tags": ["lower third", "gradient", "ribbon", "modern", "pink"],
       "definition": {
-        "defaultPrimaryText": "recordForge Desktop",
+        "defaultPrimaryText": "RecordForge Desktop",
         "defaultSecondaryText": "Local-first screen recording & proxy editor",
         "defaultTagText": "OVERVIEW",
         "width": 430,
@@ -764,7 +764,7 @@
       "category": "minimal",
       "tags": ["minimal", "ribbon", "footer", "clean"],
       "definition": {
-        "defaultPrimaryText": "recordForge — High Performance Studio",
+        "defaultPrimaryText": "RecordForge — High Performance Studio",
         "width": 450,
         "height": 76,
         "alignment": "center",

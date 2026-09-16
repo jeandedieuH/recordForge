@@ -22,7 +22,7 @@ pub fn canonicalize_path(path: &Path) -> std::io::Result<PathBuf> {
     Ok(normalize_path(&canonical))
 }
 
-/// Path authorization and security policy enforcer for recordForge.
+/// Path authorization and security policy enforcer for RecordForge.
 ///
 /// Ensures all filesystem accesses are contained within allowed directories,
 /// resolves symlinks and relative path traversals, validates UUID formats, and

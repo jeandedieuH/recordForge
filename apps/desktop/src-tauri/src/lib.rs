@@ -41,7 +41,7 @@ pub fn run() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    info!("recordForge desktop starting");
+    info!("RecordForge desktop starting");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

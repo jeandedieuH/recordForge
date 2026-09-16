@@ -6,7 +6,7 @@ Superseded by [ADR 014: Cross-Platform macOS and Linux Expansion](014-cross-plat
 
 ## Context
 
-recordForge must prove reliable capture on low-end hardware before expanding. Windows 11 is the primary development and target platform for the founding user.
+RecordForge must prove reliable capture on low-end hardware before expanding. Windows 11 is the primary development and target platform for the founding user.
 
 ## Decision
 

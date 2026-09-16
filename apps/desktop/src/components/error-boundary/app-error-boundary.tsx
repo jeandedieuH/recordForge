@@ -14,7 +14,7 @@ interface AppErrorBoundaryState {
 }
 
 /**
- * Root-level Error Boundary for recordForge desktop application.
+ * Root-level Error Boundary for RecordForge desktop application.
  * Prevents full-screen crashes by presenting a premium error recovery UI
  * with retry, reload, diagnostic inspection, and clipboard export.
  */
@@ -35,7 +35,7 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
 
   override componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     this.setState({ errorInfo })
-    console.error("Uncaught application error in recordForge:", error, errorInfo)
+    console.error("Uncaught application error in RecordForge:", error, errorInfo)
   }
 
   private handleReset = (): void => {
@@ -54,7 +54,7 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
   private handleCopyError = async (): Promise<void> => {
     const { error, errorInfo } = this.state
     const report = [
-      `recordForge Error Report`,
+      `RecordForge Error Report`,
       `Time: ${new Date().toISOString()}`,
       `Error: ${error?.name}: ${error?.message}`,
       `Stack:\n${error?.stack ?? "No stack trace available"}`,

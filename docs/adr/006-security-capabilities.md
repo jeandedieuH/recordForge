@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Tauri v2 uses a capability-based security model. recordForge must minimize the attack surface and keep React from accessing dangerous APIs.
+Tauri v2 uses a capability-based security model. RecordForge must minimize the attack surface and keep React from accessing dangerous APIs.
 
 ## Decision
 

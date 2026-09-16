@@ -230,10 +230,10 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
                 <HardDrive className="h-5 w-5" />
               </div>
               <div className="max-w-xs space-y-1">
-                <div className="font-semibold text-xs text-foreground">Authorize recordForge</div>
+                <div className="font-semibold text-xs text-foreground">Authorize RecordForge</div>
                 <p className="text-[11px] text-muted-foreground">
                   Uses strict <code className="bg-muted px-1 py-0.5 rounded">drive.file</code>{" "}
-                  scope. recordForge only accesses files created by the application.
+                  scope. RecordForge only accesses files created by the application.
                 </p>
               </div>
 
@@ -265,7 +265,7 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
           <Input
             value={folderName}
             onChange={(e) => setFolderName(e.target.value)}
-            placeholder="recordForge"
+            placeholder="RecordForge"
           />
         </div>
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Cursor fixture generator for recordForge Phase 0.
+ * Cursor fixture generator for RecordForge Phase 0.
  *
  * Usage:
  *   bun run tooling/fixtures/cursor-fixtures/generate.ts

@@ -395,7 +395,7 @@ fn build_webcam_command(
     }
 
     // Decouple webcam resolution from screen profile to keep CPU usage low on low-end machines.
-    // In recordForge, camera overlays are rendered as picture-in-picture bubbles (or side-by-side)
+    // In RecordForge, camera overlays are rendered as picture-in-picture bubbles (or side-by-side)
     // on the canvas. 720p or 480p provides crisp visual density while using 50-70% less encoder CPU than 1080p.
     let (max_cam_w, max_cam_h) = match profile.id.as_str() {
         "low-impact" => (854, 480),

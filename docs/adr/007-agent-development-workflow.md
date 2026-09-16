@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-recordForge is developed with assistance from coding agents. Agents need clear boundaries to avoid unsafe changes.
+RecordForge is developed with assistance from coding agents. Agents need clear boundaries to avoid unsafe changes.
 
 ## Decision
 

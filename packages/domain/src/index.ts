@@ -1,4 +1,4 @@
-// Domain models and type guards for recordForge.
+// Domain models and type guards for RecordForge.
 // Re-exports contracts and adds domain-specific helpers.
 
 export * from "@recordforge/contracts"

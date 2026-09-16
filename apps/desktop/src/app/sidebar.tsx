@@ -107,7 +107,7 @@ export function Sidebar({
           <div className="flex flex-col">
             <img
               src="/logo.png"
-              alt="recordForge icon"
+              alt="RecordForge icon"
               className="w-40 shrink-0 object-contain select-none"
             />
           </div>
@@ -116,7 +116,7 @@ export function Sidebar({
             <TooltipTrigger asChild>
               <img
                 src="/icon.svg"
-                alt="recordForge"
+                alt="RecordForge"
                 className="size-8 shrink-0 object-contain select-none"
               />
             </TooltipTrigger>

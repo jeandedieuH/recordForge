@@ -1,8 +1,8 @@
-# recordForge — Agent Operating Guide
+# RecordForge — Agent Operating Guide
 
 ## Project Summary
 
-recordForge is a **local-first, low-end-friendly cross-platform desktop screen recorder** with a lightweight editor, supporting Windows, macOS, and Linux. The product is intentionally recorder-first: capture, A/V sync, recovery, editing, and exports come before cloud-sharing features.
+RecordForge is a **local-first, low-end-friendly cross-platform desktop screen recorder** with a lightweight editor, supporting Windows, macOS, and Linux. The product is intentionally recorder-first: capture, A/V sync, recovery, editing, and exports come before cloud-sharing features.
 
 ## Approved Stack
 
@@ -54,7 +54,7 @@ recordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 
 ## V1 Non-Goals
 
-- recordForge-hosted share links
+- RecordForge-hosted share links
 - Public web video pages
 - User accounts and workspaces
 - Cloud collaboration

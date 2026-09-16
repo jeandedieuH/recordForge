@@ -3,7 +3,7 @@
 @import "@recordforge/ui/theme.css";
 @import "tw-animate-css";
 
-/* recordForge desktop base styles — Forge UI tokens come from @recordforge/ui. */
+/* RecordForge desktop base styles — Forge UI tokens come from @recordforge/ui. */
 
 html {
   font-size: 14px; /* compact desktop density: rem base 14 */
@@ -55,7 +55,7 @@ html[data-webcam-preview="true"] #root {
   overflow: hidden !important;
 }
 
-/* Custom dark scrollbar styling matching recordForge theme */
+/* Custom dark scrollbar styling matching RecordForge theme */
 :root {
   color-scheme: dark;
 }

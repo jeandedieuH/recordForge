@@ -162,8 +162,8 @@ export function formatHexDisplay(hex: string): string {
 // Default video-production and studio background presets
 export const DEFAULT_COLOR_PRESETS = [
   "#000000", // Pitch Black (Clean Canvas)
-  "#090e1a", // Charcoal Navy (recordForge Dim)
-  "#0c1220", // Deep Navy (recordForge Surface)
+  "#090e1a", // Charcoal Navy (RecordForge Dim)
+  "#0c1220", // Deep Navy (RecordForge Surface)
   "#182438", // Midnight Container
   "#334155", // Slate Blue
   "#ffffff", // Clean White

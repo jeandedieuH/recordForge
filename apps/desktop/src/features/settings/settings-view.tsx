@@ -529,7 +529,7 @@ export function SettingsView({
                   </span>
                 </div>
                 <p className="text-xs text-subtle-foreground mt-0.5">
-                  Free and open-source screen recorder developed by Prestige Tech &amp; recordForge
+                  Free and open-source screen recorder developed by Prestige Tech &amp; RecordForge
                   contributors.
                 </p>
               </div>

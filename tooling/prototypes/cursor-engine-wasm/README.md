@@ -36,4 +36,4 @@ Requires:
 
 ## Status
 
-This crate is intentionally not wired into the recordForge workspace. Phase 6 will either fold the evaluator into `apps/desktop/src-tauri` or create a shared `packages/cursor-engine` crate.
+This crate is intentionally not wired into the RecordForge workspace. Phase 6 will either fold the evaluator into `apps/desktop/src-tauri` or create a shared `packages/cursor-engine` crate.

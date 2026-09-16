@@ -1,4 +1,4 @@
-// Shared Zod schemas and API contracts for recordForge.
+// Shared Zod schemas and API contracts for RecordForge.
 // Keep this package dependency-free except for zod and TypeScript.
 
 export * from "./recording"

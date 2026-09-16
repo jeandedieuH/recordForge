@@ -347,9 +347,9 @@ pub async fn start_google_drive_oauth(
             }
 
             let response_body = if code.is_some() && recv_state.as_deref() == Some(&state_clone) {
-                "<!DOCTYPE html><html><head><title>recordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; Google Drive Connected!</h2><p>You can close this tab and return to recordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>"
+                "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; Google Drive Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>"
             } else {
-                "<!DOCTYPE html><html><head><title>recordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Invalid state or missing authorization code.</p></body></html>"
+                "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Invalid state or missing authorization code.</p></body></html>"
             };
 
             let http_response = format!(

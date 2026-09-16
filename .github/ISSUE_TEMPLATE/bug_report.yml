@@ -1,17 +1,17 @@
 name: 🐛 Bug Report
-description: Create a report to help us improve recordForge
+description: Create a report to help us improve RecordForge
 title: "[Bug]: "
 labels: ["bug", "triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report an issue with recordForge!
+        Thanks for taking the time to report an issue with RecordForge!
   - type: input
     id: version
     attributes:
-      label: recordForge Version
-      description: What version of recordForge are you using? (Check Settings > About)
+      label: RecordForge Version
+      description: What version of RecordForge are you using? (Check Settings > About)
       placeholder: "e.g. 1.1.0"
     validations:
       required: true
@@ -49,7 +49,7 @@ body:
       label: Steps to Reproduce
       description: Step by step instructions to reproduce the problem.
       placeholder: |
-        1. Open recordForge
+        1. Open RecordForge
         2. Click 'Record Screen'
         3. Select 'WASAPI Loopback' audio
         4. See error...

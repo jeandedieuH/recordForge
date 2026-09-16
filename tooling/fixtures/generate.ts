@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Synthetic Media Fixture Generator for recordForge.
+ * Synthetic Media Fixture Generator for RecordForge.
  *
  * Usage:
  *   bun run tooling/fixtures/generate.ts

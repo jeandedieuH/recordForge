@@ -1,5 +1,5 @@
 /**
- * Cross-platform detection and UI helper utilities for recordForge.
+ * Cross-platform detection and UI helper utilities for RecordForge.
  */
 
 export const isMac =

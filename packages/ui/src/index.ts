@@ -1,4 +1,4 @@
-// Forge UI — shadcn-model component kit for recordForge (spec-010).
+// Forge UI — shadcn-model component kit for RecordForge (spec-010).
 // Named exports only; small files; subfolders per concern.
 
 export { cn } from "./lib/cn"

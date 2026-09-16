@@ -23,6 +23,9 @@ jobs:
             args: "--config src-tauri/tauri.release.generated.conf.json --bundles msi,nsis"
           - platform: macos-latest
             args: "--config src-tauri/tauri.release.generated.conf.json --bundles dmg,app"
+          # Last GitHub-hosted Intel runner (x86_64); retires Aug 2027 — emits darwin-x86_64 updater artifacts
+          - platform: macos-15-intel
+            args: "--config src-tauri/tauri.release.generated.conf.json --bundles dmg,app"
           - platform: ubuntu-latest
             args: "--config src-tauri/tauri.release.generated.conf.json --bundles deb,appimage"
 

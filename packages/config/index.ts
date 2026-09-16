@@ -1,4 +1,4 @@
-// Shared configuration package for recordForge.
+// Shared configuration package for RecordForge.
 // This file is intentionally minimal; configuration lives in JSON/JS files next to this package.
 
 export const APP_NAME = "RecordForge"

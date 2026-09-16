@@ -89,13 +89,13 @@ pub struct SckStreamConfig {
     pub fps: u32,
     pub pixel_format: SckPixelFormat,
     /// Whether the system cursor should be drawn directly into the video stream.
-    /// In recordForge this is `false` so the custom overlay cursor engine renders it.
+    /// In RecordForge this is `false` so the custom overlay cursor engine renders it.
     pub shows_cursor: bool,
     /// Whether system audio should be captured via ScreenCaptureKit.
     pub captures_audio: bool,
     pub sample_rate: u32,
     pub channel_count: u16,
-    /// Exclude recordForge's own process audio to avoid feedback loops.
+    /// Exclude RecordForge's own process audio to avoid feedback loops.
     pub excludes_current_process_audio: bool,
 }
 
@@ -207,7 +207,7 @@ fn get_macos_shareable_content() -> Result<SckShareableContent> {
     Ok(content)
 }
 
-/// Map discovered ScreenCaptureKit displays and windows to recordForge `CaptureSource`s.
+/// Map discovered ScreenCaptureKit displays and windows to RecordForge `CaptureSource`s.
 pub fn sck_content_to_capture_sources(content: &SckShareableContent) -> Vec<CaptureSource> {
     let mut sources = Vec::new();
 

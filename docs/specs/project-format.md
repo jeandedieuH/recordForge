@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-A recordForge **project** is an editable timeline referencing immutable recording assets. Projects are non-destructive — all edits are metadata references into source media. The project file is the single source of truth for the editor state.
+A RecordForge **project** is an editable timeline referencing immutable recording assets. Projects are non-destructive — all edits are metadata references into source media. The project file is the single source of truth for the editor state.
 
 ---
 
@@ -290,7 +290,7 @@ CREATE INDEX idx_projects_recording ON projects(recording_id);
 
 ## 8. Time Semantics
 
-A recordForge project uses three coordinate systems for time:
+A RecordForge project uses three coordinate systems for time:
 
 | Coordinate | Description | Source of truth |
 | ---------- | ----------- | --------------- |

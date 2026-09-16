@@ -8,11 +8,11 @@
 
 ## Context
 
-recordForge initially launched as Windows-first to validate the core local-first screen recording and lightweight proxy editor architecture. With the core recording pipeline, timeline editing engine, SQLite persistence, and export pipeline stabilized and tested, expanding to macOS and Linux is necessary to serve creators across all major desktop environments.
+RecordForge initially launched as Windows-first to validate the core local-first screen recording and lightweight proxy editor architecture. With the core recording pipeline, timeline editing engine, SQLite persistence, and export pipeline stabilized and tested, expanding to macOS and Linux is necessary to serve creators across all major desktop environments.
 
 ## Decision
 
-Expand recordForge to support **Windows 10/11**, **macOS 12+ (Apple Silicon & Intel)**, and **Linux (x86_64)** while maintaining low idle memory usage and zero-trust local-first privacy:
+Expand RecordForge to support **Windows 10/11**, **macOS 12+ (Apple Silicon & Intel)**, and **Linux (x86_64)** while maintaining low idle memory usage and zero-trust local-first privacy:
 
 ### 1. Multi-Platform Capture Subsystems
 - **Screen & Window Capture**:

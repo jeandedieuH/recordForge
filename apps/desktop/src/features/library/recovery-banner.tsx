@@ -53,7 +53,7 @@ export function RecoveryBanner({ sessions, onRecovered }: RecoveryBannerProps) {
         <span>Unfinished Recording Session Detected</span>
       </div>
       <p className="mt-1 text-xs text-amber-800/80 dark:text-amber-300/80">
-        recordForge detected {items.length} recording session{items.length > 1 ? "s" : ""}{" "}
+        RecordForge detected {items.length} recording session{items.length > 1 ? "s" : ""}{" "}
         interrupted by a force-quit or power loss.
       </p>
 
