@@ -1,4 +1,4 @@
-# recordForge — Master Project Plan
+# RecordForge — Master Project Plan
 
 > **Status:** Active foundation plan  
 > **Primary objective:** Build a fast, reliable, local-first screen recorder and lightweight editor that performs well on low-end computers.  
@@ -7,7 +7,7 @@
 > **Optional storage:** Local filesystem, S3-compatible storage, Google Drive  
 
 
-recordForge is intentionally being built **recorder-first**: reliable capture, A/V sync, recovery, responsive editing, and trustworthy exports come before cloud-sharing features. The product remains fully useful offline; cloud destinations are optional copies of completed local exports.
+RecordForge is intentionally being built **recorder-first**: reliable capture, A/V sync, recovery, responsive editing, and trustworthy exports come before cloud-sharing features. The product remains fully useful offline; cloud destinations are optional copies of completed local exports.
 
 ***
 
@@ -15,7 +15,7 @@ recordForge is intentionally being built **recorder-first**: reliable capture, A
 
 ### 1.1 Vision
 
-recordForge is a desktop screen-recording application for developers, educators, product teams, support teams, and creators who need to:
+RecordForge is a desktop screen-recording application for developers, educators, product teams, support teams, and creators who need to:
 
 1. Record a display, application window, or selected region.
 2. Capture microphone, system audio, and optional webcam.
@@ -29,17 +29,17 @@ recordForge is a desktop screen-recording application for developers, educators,
 
 ### 1.3 Inspiration
 
-| Product direction | What recordForge adopts |
+| Product direction | What RecordForge adopts |
 |---|---|
 | Loom-style workflow | Fast capture, global shortcuts, screen/camera/microphone recording, concise recording controls |
 | Cap-style workflow | Local-first recording, creator-friendly visual polish, storage ownership |
-| recordForge differentiation | Low-end performance, crash recovery, local-first architecture, user-owned storage destinations, agent-friendly engineering process |
+| RecordForge differentiation | Low-end performance, crash recovery, local-first architecture, user-owned storage destinations, agent-friendly engineering process |
 
 ### 1.4 V1 non-goals
 
 The following are deliberately out of scope until the desktop recorder is stable:
 
-- recordForge-hosted share links
+- RecordForge-hosted share links
 - Public web video pages
 - User accounts and workspaces
 - Comments and reactions
@@ -60,7 +60,7 @@ The following are deliberately out of scope until the desktop recorder is stable
 - Recording, editing, exporting, recovery, and project management must work offline.
 - Local media is the source of truth.
 - Uploads are optional copies of completed exports.
-- The app must never require a recordForge backend to function.
+- The app must never require a RecordForge backend to function.
 
 ### 2.2 Native-first media
 
@@ -467,7 +467,7 @@ Use FFmpeg for:
 - Final MP4/WebM/GIF export
 - Hardware-encoder execution where available
 
-FFmpeg supports hardware-accelerated workflows, but available acceleration methods depend on OS, GPU, drivers, build configuration, codec, and filters; recordForge must detect and test capabilities rather than assume they exist. [ffmpeg](https://ffmpeg.org/ffmpeg.html)
+FFmpeg supports hardware-accelerated workflows, but available acceleration methods depend on OS, GPU, drivers, build configuration, codec, and filters; RecordForge must detect and test capabilities rather than assume they exist. [ffmpeg](https://ffmpeg.org/ffmpeg.html)
 
 ### 6.5 Hardware encoder policy
 
@@ -681,7 +681,7 @@ Storage is optional and must never block local use.
 1. Local folder export
 2. S3-compatible object storage
 3. Google Drive
-4. Future: recordForge-hosted publishing and share links
+4. Future: RecordForge-hosted publishing and share links
 
 #### Storage rules
 
@@ -814,14 +814,14 @@ type UploadJob = {
 6. Recording begins.
 7. A small floating toolbar shows timer, audio level, marker, pause, and stop.
 8. User stops the recording.
-9. recordForge finalizes segments and opens the recording in the library.
+9. RecordForge finalizes segments and opens the recording in the library.
 10. Proxy/thumbnails/waveform generation starts in the background.
 11. User can export immediately or open the editor.
 
 ### 7.2 Editing flow
 
 1. User opens a project.
-2. recordForge loads local proxy media, thumbnails, and waveform peaks.
+2. RecordForge loads local proxy media, thumbnails, and waveform peaks.
 3. User trims unwanted sections, splits clips, adjusts audio, and repositions webcam.
 4. User applies basic visual effects.
 5. User selects an export preset.
@@ -832,7 +832,7 @@ type UploadJob = {
 
 1. User completes a local export.
 2. User selects **Upload to destination**.
-3. recordForge validates the storage profile.
+3. RecordForge validates the storage profile.
 4. A resumable background upload starts.
 5. The app persists upload state locally.
 6. User can pause, cancel, retry, or resume after restart.
@@ -1291,7 +1291,7 @@ docs/
 
 #### Exit criteria
 
-- recordForge produces professional-looking tutorial/demo exports.
+- RecordForge produces professional-looking tutorial/demo exports.
 - The common workflow requires minimal configuration.
 - Users can understand and resolve common device, storage, or disk issues.
 
@@ -1326,7 +1326,7 @@ docs/
 
 ## 14. Definition of Done for V1
 
-recordForge V1 is complete when a user can:
+RecordForge V1 is complete when a user can:
 
 1. Install the Windows desktop application.
 2. Record a display, application window, or selected region.
@@ -1352,7 +1352,7 @@ After V1 reliability and real-user validation, evaluate these initiatives separa
 
 ### Hosted sharing
 
-- recordForge account system
+- RecordForge account system
 - Web dashboard
 - Public/unlisted/password-protected links
 - Browser viewer
