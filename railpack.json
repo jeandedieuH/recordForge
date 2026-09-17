@@ -11,6 +11,6 @@
     }
   },
   "deploy": {
-    "startCommand": "node apps/web/dist/server/server.js"
+    "startCommand": "bun run --cwd apps/web start"
   }
 }
