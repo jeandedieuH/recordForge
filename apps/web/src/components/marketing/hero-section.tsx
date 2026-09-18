@@ -114,6 +114,7 @@ export function HeroSection({ version }: HeroSectionProps) {
                 label="Full app walkthrough"
                 aspectClass="aspect-[16/10] md:aspect-[21/10]"
                 className="rounded-none border-0 bg-transparent p-0"
+                src="/media/recordforge-demo.gif"
               />
             </div>
           </div>
