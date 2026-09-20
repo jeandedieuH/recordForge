@@ -583,9 +583,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         // quality change (or a completed light prepare that could not carry
         // the proxy) can issue a fresh request.
         const finished =
-          job.status === "completed" ||
-          job.status === "failed" ||
-          job.status === "cancelled"
+          job.status === "completed" || job.status === "failed" || job.status === "cancelled"
         if (finished) {
           updates.previewProxyRequested = false
         }

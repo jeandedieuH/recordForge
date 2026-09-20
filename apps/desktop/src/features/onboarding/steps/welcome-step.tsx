@@ -88,7 +88,9 @@ export function WelcomeStep() {
             <div className="flex size-8 items-center justify-center rounded-lg bg-secondary/10 text-secondary">
               <Wand2 className="size-4" />
             </div>
-            <span className="text-sm font-semibold text-foreground">Responsive Timeline Editor</span>
+            <span className="text-sm font-semibold text-foreground">
+              Responsive Timeline Editor
+            </span>
           </div>
           <p className="text-xs text-subtle-foreground leading-relaxed">
             Trim, split, zoom, and annotate immediately after recording without heavy re-encoding
