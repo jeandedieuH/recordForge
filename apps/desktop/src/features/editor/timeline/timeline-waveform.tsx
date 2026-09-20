@@ -100,15 +100,7 @@ export const TimelineWaveform = memo(function TimelineWaveform({
     // Center axis hairline in the track accent.
     ctx.fillStyle = rgba(accent, 0.35)
     ctx.fillRect(0, centerY - 0.5, cssW, 1)
-  }, [
-    clip,
-    clipWindow,
-    colorVar,
-    data,
-    height,
-    normalization,
-    pixelsPerMs,
-  ])
+  }, [clip, clipWindow, colorVar, data, height, normalization, pixelsPerMs])
 
   if (!clipWindow) return null
 
