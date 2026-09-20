@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { X } from "lucide-react"
 import { Button, Kbd, Sheet, SheetContent, SheetTitle } from "@recordforge/ui"
 import {
@@ -72,6 +72,7 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const metadata = useTimelineStore((state) => state.metadata)
   const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
   const view = useTimelineStore((state) => state.view)
+  const project = useTimelineStore((state) => state.project)
 
   const thumbnailResource = useThumbnailManifest(
     activeJob?.outputs?.thumbnailManifestPath ?? null,
@@ -81,8 +82,19 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
     activeJob?.outputs?.videoTracks ?? [],
     recording?.workDir,
   )
+  // Imported audio assets keep their peak JSON under `derivatives.waveform`;
+  // wiring it here lets asset clips render waveforms like recording streams.
+  const assetWaveforms = useMemo(
+    () =>
+      (project?.assets ?? []).flatMap((asset) => {
+        const path = asset.kind === "audio" ? asset.derivatives?.waveform : undefined
+        return path ? [{ assetId: asset.id, path }] : []
+      }),
+    [project?.assets],
+  )
   const waveformResources = useWaveformResources(
     activeJob?.outputs?.audioTracks ?? [],
+    assetWaveforms,
     recording?.workDir,
   )
 

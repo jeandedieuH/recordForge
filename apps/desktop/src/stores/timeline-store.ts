@@ -260,12 +260,11 @@ function createDeferred<T>(): Deferred<T> {
 
 function isReusablePrepareJob(job: MediaJob): boolean {
   if (job.kind !== "prepare" || job.status !== "completed") return false
-  // v5 prepares no longer require a proxy: the preview plays the original by
-  // default and builds the proxy on demand via the preview-quality selector.
-  if (job.outputs.prepareVersion < 5) return false
-  return job.outputs.audioTracks.every((track) =>
-    Boolean(track.audioPath && track.waveformPath && track.waveformImagePath),
-  )
+  // v6 prepares emit zoom-aware derivatives: min/max waveform peaks and
+  // adaptive thumbnail spacing. Older payloads still render, but a light
+  // re-prepare upgrades them in the background.
+  if (job.outputs.prepareVersion < 6) return false
+  return job.outputs.audioTracks.every((track) => Boolean(track.audioPath && track.waveformPath))
 }
 
 function selectPreparationJob(jobs: MediaJob[]): MediaJob | null {
@@ -383,10 +382,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         activeJob.outputs.prepareVersion >= 4 &&
         (!recording.webcamPath || activeJob.outputs.videoTracks.length > 0),
       )
+      // v6 derivatives add min/max waveform peaks and adaptive thumbnail
+      // density; older recordings quietly re-prepare once in the background.
+      const hasCurrentDerivatives = Boolean(activeJob && activeJob.outputs.prepareVersion >= 6)
       if (
         !activeJob ||
         (activeJob.status === "completed" &&
-          (!hasUsableAudioDerivatives || !hasUsableVideoDerivatives))
+          (!hasUsableAudioDerivatives || !hasUsableVideoDerivatives || !hasCurrentDerivatives))
       ) {
         // Older prepare jobs only generated one combined waveform and did not
         // expose independent audio assets to the editor.

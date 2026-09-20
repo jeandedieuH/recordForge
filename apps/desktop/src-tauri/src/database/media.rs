@@ -97,7 +97,10 @@ pub struct MediaAudioTrackOutput {
     pub title: String,
     pub audio_path: String,
     pub waveform_path: String,
-    pub waveform_image_path: String,
+    // Pre-v6 prepares rendered a waveform PNG the timeline never drew; kept
+    // optional so older persisted job payloads still deserialize.
+    #[serde(default)]
+    pub waveform_image_path: Option<String>,
 }
 
 /// One independently playable secondary video stream for camera preview.
@@ -310,7 +313,7 @@ pub fn find_reusable_prepare_job(
                 !require_proxy || prepare_job_requests_proxy(job)
             }
             MediaJobStatus::Completed => {
-                job.outputs.prepare_version >= 5
+                job.outputs.prepare_version >= 6
                     && (!require_proxy
                         || job
                             .outputs
@@ -320,7 +323,6 @@ pub fn find_reusable_prepare_job(
                     && job.outputs.audio_tracks.iter().all(|track| {
                         Path::new(&track.audio_path).is_file()
                             && Path::new(&track.waveform_path).is_file()
-                            && Path::new(&track.waveform_image_path).is_file()
                     })
                     && job
                         .outputs
@@ -770,7 +772,7 @@ mod tests {
         let completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
             .expect("insert current completed prepare job");
         let outputs = MediaJobOutputs {
-            prepare_version: 5,
+            prepare_version: 6,
             ..Default::default()
         };
         complete_job(&conn, &completed.id, &outputs).expect("complete current prepare job");
@@ -788,7 +790,7 @@ mod tests {
         let completed_with_proxy = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
             .expect("insert completed proxy prepare job");
         let outputs_with_proxy = MediaJobOutputs {
-            prepare_version: 5,
+            prepare_version: 6,
             proxy_path: Some(proxy_path.to_string_lossy().to_string()),
             ..Default::default()
         };

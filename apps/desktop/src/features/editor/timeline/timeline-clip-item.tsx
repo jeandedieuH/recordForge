@@ -39,8 +39,8 @@ import {
 } from "@recordforge/ui"
 import { snapClipStart, snapTime, snapTrimEdge, type SnapTarget } from "@recordforge/editor-core"
 import type { ThumbnailManifest, WaveformResources } from "../media/derivative-resources"
-import { ThumbnailStrip } from "./timeline-derivatives"
-import { TimelineCanvasWaveform } from "./timeline-canvas-waveform"
+import { ThumbnailFilmstrip } from "./thumbnail-filmstrip"
+import { TimelineWaveform } from "./timeline-waveform"
 import { TimelineAudioEnvelope } from "./timeline-audio-envelope"
 import { formatTimelineTime } from "./timeline-ruler"
 import type { CursorRangeAction } from "./timeline-lanes"
@@ -266,9 +266,19 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const [gestureDelta, setGestureDelta] = useState<{ text: string; mode: string } | null>(null)
   const [contextMenuTimeMs, setContextMenuTimeMs] = useState<number | null>(null)
 
+  // Recording streams resolve by stream index; imported audio assets carry no
+  // stream index and resolve by asset id instead.
   const waveformResource =
-    clip.kind === "audio" ? waveformResources.byStream.get(clip.streamIndex ?? -1) : undefined
+    clip.kind === "audio"
+      ? clip.streamIndex !== undefined
+        ? (waveformResources.byStream.get(clip.streamIndex) ??
+          waveformResources.byAsset.get(clip.assetId))
+        : waveformResources.byAsset.get(clip.assetId)
+      : undefined
   const waveformData = waveformResource?.status === "content" ? waveformResource.data : null
+  const waveformColorVar = track.name.toLowerCase().includes("system")
+    ? "--color-track-system"
+    : "--color-track-mic"
   const clipTargets = snapTargets.filter((target) => !target.id.startsWith(`${clip.id}:`))
   const availableHeight = collapsed ? 24 : Math.max(34, height - 12)
   const baseClipHeight = collapsed ? 24 : Math.max(34, Math.min(height - 14, 52))
@@ -529,6 +539,33 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             }
           }}
         >
+          {/* Filmstrip Thumbnails */}
+          {thumbnailManifest && spriteUrl ? (
+            <ThumbnailFilmstrip
+              clip={clip}
+              manifest={thumbnailManifest}
+              spriteUrl={spriteUrl}
+              pixelsPerMs={pixelsPerMs}
+              visibleStartMs={visibleStartMs}
+              visibleEndMs={visibleEndMs}
+              height={clipHeight}
+              onSpriteError={onSpriteError}
+            />
+          ) : null}
+
+          {/* Waveform Silhouette */}
+          {waveformData ? (
+            <TimelineWaveform
+              clip={clip}
+              data={waveformData}
+              pixelsPerMs={pixelsPerMs}
+              visibleStartMs={visibleStartMs}
+              visibleEndMs={visibleEndMs}
+              height={clipHeight}
+              colorVar={waveformColorVar}
+            />
+          ) : null}
+
           {/* Top Accent Strip */}
           <div className={cn("absolute inset-x-0 top-0 h-0.5 opacity-80", theme.handleGlow)} />
 
@@ -548,30 +585,6 @@ export const TimelineClipItem = memo(function TimelineClipItem({
                 </div>
               </div>
             </div>
-          ) : null}
-
-          {/* Filmstrip Thumbnails */}
-          {thumbnailManifest && spriteUrl ? (
-            <ThumbnailStrip
-              clip={clip}
-              manifest={thumbnailManifest}
-              spriteUrl={spriteUrl}
-              pixelsPerMs={pixelsPerMs}
-              visibleStartMs={visibleStartMs}
-              visibleEndMs={visibleEndMs}
-              onSpriteError={onSpriteError}
-            />
-          ) : null}
-
-          {/* High-Performance Canvas Waveforms */}
-          {waveformData ? (
-            <TimelineCanvasWaveform
-              clip={clip}
-              data={waveformData}
-              pixelsPerMs={pixelsPerMs}
-              visibleStartMs={visibleStartMs}
-              visibleEndMs={visibleEndMs}
-            />
           ) : null}
 
           {/* Interactive Audio Volume Envelope Curve Overlay */}

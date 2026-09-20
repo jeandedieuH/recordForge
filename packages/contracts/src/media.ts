@@ -143,7 +143,9 @@ export const mediaAudioTrackOutputSchema = z.object({
   title: z.string(),
   audioPath: z.string(),
   waveformPath: z.string(),
-  waveformImagePath: z.string(),
+  // Legacy field: pre-v6 prepares rendered a waveform PNG that the timeline
+  // never drew. Kept optional so older job payloads still parse.
+  waveformImagePath: z.string().nullish(),
 })
 
 export type MediaAudioTrackOutput = z.infer<typeof mediaAudioTrackOutputSchema>
@@ -205,7 +207,8 @@ export const prepareMediaOptionsSchema = z.object({
   // Proxy resolution used when includeProxy requests the lightweight
   // performance preview. Defaults to a 540p variant for smooth scrubbing.
   proxyHeight: z.number().int().min(180).max(1080).default(540),
-  // Seconds between extracted thumbnails.
+  // Maximum seconds between extracted thumbnails. Short recordings are
+  // sampled more densely so zoomed-in editing still shows distinct frames.
   thumbnailIntervalSec: z.number().int().min(1).max(60).default(5),
   // Whether to also transcode the low-res preview proxy. Off by default so
   // prepare stays fast; the editor requests it on demand when the user picks
@@ -240,11 +243,14 @@ export const thumbnailManifestSchema = z.object({
 
 export type ThumbnailManifest = z.infer<typeof thumbnailManifestSchema>
 
-// Compact waveform peak data.
+// Compact waveform peak data. `peaks` holds the positive envelope per window
+// and `mins` (v6+) the negative envelope; when `mins` is absent the renderer
+// mirrors `peaks` symmetrically.
 export const waveformDataSchema = z.object({
   sampleRate: z.number().int().min(1),
   samplesPerPeak: z.number().int().min(1),
   peaks: z.array(z.number()),
+  mins: z.array(z.number()).optional(),
   durationMs: z.number().int().min(0),
   imagePath: z.string().nullish(),
 })

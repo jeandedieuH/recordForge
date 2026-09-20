@@ -1,30 +1,48 @@
-use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
-use std::io::Read;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 use crate::database::media::MediaMetadata;
 use crate::errors::{InternalError, Result};
 
+/// Decoded mono sample rate used for peak extraction. One sample per
+/// millisecond keeps the s16le conversion cheap and the math trivial.
 const SAMPLE_RATE: u32 = 1000;
-const SAMPLES_PER_PEAK: u32 = 100; // 0.1 second peaks
+/// Minimum analysis window (ms of audio per peak pair).
+const MIN_WINDOW_MS: u32 = 20;
+/// Upper bound on stored peak pairs so very long recordings do not produce
+/// unbounded waveform JSON payloads.
+const MAX_PEAK_COUNT: u64 = 48_000;
 
-/// Compact waveform peak data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Waveform peak data stored as JSON for fast timeline rendering.
+///
+/// `peaks` holds the positive envelope and `mins` the negative envelope of
+/// each window so the timeline can draw an asymmetric min/max silhouette at
+/// any zoom level.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaveformData {
     pub sample_rate: u32,
     pub samples_per_peak: u32,
     pub peaks: Vec<f32>,
+    #[serde(default)]
+    pub mins: Vec<f32>,
     pub duration_ms: u64,
     pub image_path: Option<String>,
 }
 
-/// Generate a waveform PNG and JSON peak file for the first audio stream.
+/// Pick the analysis window (in ms, equal to samples per peak at 1 kHz) so a
+/// recording produces at most ~MAX_PEAK_COUNT windows while short clips get
+/// fine 20 ms detail for zoomed-in rendering.
+pub fn waveform_window_ms(duration_ms: u64) -> u32 {
+    let duration = duration_ms.max(1);
+    let adaptive = duration.div_ceil(MAX_PEAK_COUNT) as u32;
+    adaptive.max(MIN_WINDOW_MS)
+}
+
+/// Generate a waveform JSON for a whole recording (first audio stream).
 #[instrument(skip(ffmpeg_path, input, output_dir, metadata, cancel))]
 pub fn generate_waveform(
     ffmpeg_path: &str,
@@ -32,122 +50,72 @@ pub fn generate_waveform(
     output_dir: &Path,
     metadata: &MediaMetadata,
     cancel: Arc<AtomicBool>,
-) -> Result<(PathBuf, PathBuf)> {
-    generate_waveform_internal(ffmpeg_path, input, output_dir, metadata, None, cancel)
+) -> Result<PathBuf> {
+    let samples_per_peak = waveform_window_ms(metadata.duration_ms);
+    let (peaks, mins) = extract_peaks(ffmpeg_path, input, None, samples_per_peak, cancel)?;
+    let json_path = output_dir.join("waveform.json");
+    write_waveform_json(
+        &json_path,
+        peaks,
+        mins,
+        metadata.duration_ms,
+        samples_per_peak,
+    )?;
+    Ok(json_path)
 }
 
-/// Generate a waveform for one specific FFmpeg stream.
+/// Generate a waveform JSON for a specific audio stream index.
 #[instrument(skip(ffmpeg_path, input, output_dir, metadata, cancel))]
 pub fn generate_waveform_for_stream(
     ffmpeg_path: &str,
     input: &Path,
     output_dir: &Path,
-    metadata: &MediaMetadata,
     stream_index: i32,
+    metadata: &MediaMetadata,
     cancel: Arc<AtomicBool>,
-) -> Result<(PathBuf, PathBuf)> {
-    generate_waveform_internal(
+) -> Result<PathBuf> {
+    let samples_per_peak = waveform_window_ms(metadata.duration_ms);
+    let (peaks, mins) = extract_peaks(
         ffmpeg_path,
         input,
-        output_dir,
-        metadata,
         Some(stream_index),
+        samples_per_peak,
         cancel,
-    )
+    )?;
+    let json_path = output_dir.join(format!("waveform-{stream_index}.json"));
+    write_waveform_json(
+        &json_path,
+        peaks,
+        mins,
+        metadata.duration_ms,
+        samples_per_peak,
+    )?;
+    Ok(json_path)
 }
 
-fn generate_waveform_internal(
-    ffmpeg_path: &str,
-    input: &Path,
-    output_dir: &Path,
-    metadata: &MediaMetadata,
-    stream_index: Option<i32>,
-    cancel: Arc<AtomicBool>,
-) -> Result<(PathBuf, PathBuf)> {
-    std::fs::create_dir_all(output_dir)
-        .map_err(|e| InternalError::Storage(format!("create waveform dir: {e}")))?;
-
-    if !metadata.has_audio {
-        return Err(InternalError::Media("recording has no audio stream".into()).into());
-    }
-
-    let png_path = output_dir.join("waveform.png");
-    let json_path = output_dir.join("waveform.json");
-
-    generate_waveform_png(ffmpeg_path, input, &png_path, stream_index, cancel.clone())?;
-
-    let peaks = extract_peaks(ffmpeg_path, input, stream_index, cancel)?;
+fn write_waveform_json(
+    json_path: &Path,
+    peaks: Vec<f32>,
+    mins: Vec<f32>,
+    duration_ms: u64,
+    samples_per_peak: u32,
+) -> Result<()> {
     let data = WaveformData {
         sample_rate: SAMPLE_RATE,
-        samples_per_peak: SAMPLES_PER_PEAK,
+        samples_per_peak,
         peaks,
-        duration_ms: metadata.duration_ms,
-        image_path: Some(png_path.to_string_lossy().to_string()),
+        mins,
+        duration_ms,
+        image_path: None,
     };
-
-    let json = serde_json::to_string_pretty(&data)
-        .map_err(|e| InternalError::Storage(format!("serialize waveform: {e}")))?;
-    std::fs::write(&json_path, json)
+    let json = serde_json::to_string(&data)
+        .map_err(|e| InternalError::Storage(format!("serialize waveform data: {e}")))?;
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| InternalError::Storage(format!("create waveform dir: {e}")))?;
+    }
+    fs::write(json_path, json)
         .map_err(|e| InternalError::Storage(format!("write waveform json: {e}")))?;
-
-    Ok((json_path, png_path))
-}
-
-fn build_waveform_png_args(
-    input: &Path,
-    output: &Path,
-    stream_index: Option<i32>,
-) -> Vec<OsString> {
-    let input_label =
-        stream_index.map_or_else(|| "0:a:0".to_string(), |index| format!("0:{index}"));
-    let filter = format!(
-        "[{input_label}]aformat=channel_layouts=mono,showwavespic=s=1600x120:colors=#3b82f6[waveform]"
-    );
-
-    vec![
-        OsString::from("-y"),
-        OsString::from("-i"),
-        input.as_os_str().to_owned(),
-        OsString::from("-filter_complex"),
-        OsString::from(filter),
-        OsString::from("-map"),
-        OsString::from("[waveform]"),
-        OsString::from("-an"),
-        OsString::from("-frames:v"),
-        OsString::from("1"),
-        OsString::from("-c:v"),
-        OsString::from("png"),
-        OsString::from("-f"),
-        OsString::from("image2"),
-        output.as_os_str().to_owned(),
-    ]
-}
-
-fn generate_waveform_png(
-    ffmpeg_path: &str,
-    input: &Path,
-    output: &Path,
-    stream_index: Option<i32>,
-    cancel: Arc<AtomicBool>,
-) -> Result<()> {
-    let mut command = crate::process::create_command(ffmpeg_path);
-    command.args(build_waveform_png_args(input, output, stream_index));
-
-    info!("generating waveform png");
-
-    let result = command
-        .output()
-        .map_err(|e| InternalError::Media(format!("waveform png run: {e}")))?;
-    if cancel.load(Ordering::Relaxed) {
-        let _ = std::fs::remove_file(output);
-        return Err(InternalError::Media("waveform cancelled".into()).into());
-    }
-    if !result.status.success() {
-        let _ = std::fs::remove_file(output);
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(InternalError::Media(format!("waveform png failed: {stderr}")).into());
-    }
-
     Ok(())
 }
 
@@ -155,90 +123,73 @@ fn extract_peaks(
     ffmpeg_path: &str,
     input: &Path,
     stream_index: Option<i32>,
+    samples_per_peak: u32,
     cancel: Arc<AtomicBool>,
-) -> Result<Vec<f32>> {
-    let mut command = crate::process::create_command(ffmpeg_path);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    let mut cmd = crate::process::create_command(ffmpeg_path);
+    cmd.arg("-hide_banner")
+        .arg("-nostats")
+        .arg("-loglevel")
+        .arg("error")
         .arg("-i")
         .arg(input);
-    if let Some(stream_index) = stream_index {
-        command.args(["-map", &format!("0:{stream_index}")]);
+    if let Some(index) = stream_index {
+        cmd.args(["-map", &format!("0:{index}")]);
+    } else {
+        cmd.args(["-map", "a:0?"]);
     }
-    command.args([
+    cmd.args([
+        "-vn",
         "-ac",
         "1",
         "-ar",
         &SAMPLE_RATE.to_string(),
-        "-sample_fmt",
-        "s16",
         "-f",
         "s16le",
-        "pipe:1",
+        "-",
     ]);
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| InternalError::Media(format!("peak extract run: {e}")))?;
+    let output = cmd
+        .output()
+        .map_err(|e| InternalError::Media(format!("waveform run: {e}")))?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(InternalError::Media("waveform cancelled".into()).into());
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(InternalError::Media(format!("waveform ffmpeg failed: {stderr}")).into());
+    }
 
-    let mut stdout = child
+    // Raw s16le → little-endian i16 samples.
+    let samples: Vec<i16> = output
         .stdout
-        .take()
-        .ok_or_else(|| InternalError::Media("peak stdout unavailable".into()))?;
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&chunk| i16::from_le_bytes(chunk))
+        .collect();
 
-    let mut peaks: Vec<f32> = Vec::new();
-    let mut window_max: f32 = 0.0;
-    let mut window_count: u32 = 0;
-    let mut buf = [0u8; 8192];
-
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(InternalError::Media("waveform cancelled".into()).into());
-        }
-
-        match stdout.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let samples = n / 2;
-                for i in 0..samples {
-                    let bytes = [buf[i * 2], buf[i * 2 + 1]];
-                    let raw = i16::from_le_bytes(bytes);
-                    let sample = raw as f32 / i16::MAX as f32;
-                    let abs = sample.abs();
-                    if abs > window_max {
-                        window_max = abs;
-                    }
-                    window_count += 1;
-                    if window_count >= SAMPLES_PER_PEAK {
-                        peaks.push(window_max);
-                        window_max = 0.0;
-                        window_count = 0;
-                    }
-                }
+    let window = samples_per_peak.max(1) as usize;
+    let mut peaks = Vec::with_capacity(samples.len() / window + 1);
+    let mut mins = Vec::with_capacity(peaks.capacity());
+    // chunks() keeps a trailing partial window so the waveform reaches the
+    // true end of the clip instead of clipping the last fraction.
+    for chunk in samples.chunks(window) {
+        let mut max_pos = 0i16;
+        let mut min_neg = 0i16;
+        for &s in chunk {
+            if s > max_pos {
+                max_pos = s;
             }
-            Err(e) => {
-                let _ = child.kill();
-                return Err(InternalError::Media(format!("read peak samples: {e}")).into());
+            if s < min_neg {
+                min_neg = s;
             }
         }
+        peaks.push(max_pos as f32 / 32768.0);
+        mins.push(min_neg as f32 / 32768.0);
     }
 
-    if window_count > 0 {
-        peaks.push(window_max);
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| InternalError::Media(format!("peak wait: {e}")))?;
-    if !status.success() {
-        return Err(InternalError::Media("peak extraction failed".into()).into());
-    }
-
-    Ok(peaks)
+    Ok((peaks, mins))
 }
 
 #[cfg(test)]
@@ -246,33 +197,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn waveform_png_command_maps_only_the_filter_video_output() {
-        let args =
-            build_waveform_png_args(Path::new("input.mp4"), Path::new("waveform.png"), Some(1));
-        let args = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            args,
-            vec![
-                "-y",
-                "-i",
-                "input.mp4",
-                "-filter_complex",
-                "[0:1]aformat=channel_layouts=mono,showwavespic=s=1600x120:colors=#3b82f6[waveform]",
-                "-map",
-                "[waveform]",
-                "-an",
-                "-frames:v",
-                "1",
-                "-c:v",
-                "png",
-                "-f",
-                "image2",
-                "waveform.png",
-            ]
-        );
+    fn waveform_window_never_exceeds_the_peak_budget() {
+        // Two-hour recording: the window widens so peak count stays bounded.
+        let window = waveform_window_ms(7_200_000);
+        assert!(7_200_000_u64.div_ceil(u64::from(window)) <= MAX_PEAK_COUNT);
+        // Ten-minute recording keeps the fine 20 ms floor.
+        assert_eq!(waveform_window_ms(600_000), MIN_WINDOW_MS);
+        // Zero-duration input still returns a usable window.
+        assert_eq!(waveform_window_ms(0), MIN_WINDOW_MS);
     }
 }

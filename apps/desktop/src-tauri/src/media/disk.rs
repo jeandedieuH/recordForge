@@ -8,8 +8,8 @@ use crate::errors::{InternalError, Result};
 ///
 /// Proxy (only when `include_proxy`): assume ~1.5 Mbps for 540p H.264 video
 /// + 96 Kbps AAC.
-/// Thumbnails: one 160 px wide JPEG per interval.
-/// Waveform: a small PNG plus a JSON peak array.
+/// Thumbnails: one 192 px wide JPEG per adaptively spaced frame.
+/// Waveform: a JSON min/max peak array per audio stream.
 #[instrument(skip(metadata))]
 pub fn estimate_derivative_size(
     metadata: &MediaMetadata,
@@ -29,22 +29,27 @@ pub fn estimate_derivative_size(
     };
 
     let thumb_count = if thumbnail_interval_sec > 0 {
-        (duration_sec / thumbnail_interval_sec as f64).ceil() as u64
+        let interval_ms = crate::media::thumbnails::effective_thumbnail_interval_ms(
+            metadata.duration_ms,
+            thumbnail_interval_sec,
+        );
+        metadata.duration_ms.div_ceil(interval_ms)
     } else {
         0
     };
-    // ~8 KB per 160px wide JPEG on average.
-    let thumbnails_bytes = thumb_count * 8 * 1024;
+    // ~14 KB per 192 px wide JPEG frame inside the sprite on average.
+    let thumbnails_bytes = thumb_count * 14 * 1024;
 
     let audio_track_count = metadata
         .streams
         .iter()
         .filter(|stream| stream.kind == "audio")
         .count() as f64;
-    // Each audio stream gets a compact M4A derivative plus its own waveform.
+    // Each audio stream gets a compact WAV derivative plus its own waveform.
     let audio_bytes = audio_track_count * (192.0 * duration_sec / 8.0 * 1024.0);
-    let waveform_bytes =
-        audio_track_count * (200.0 * 1024.0 + (duration_sec as u64) as f64 * 400.0);
+    // Min/max peak JSON ≈ two ~7-char floats per window, capped near
+    // MAX_PEAK_COUNT windows — ~1 KB per second of audio is a safe bound.
+    let waveform_bytes = audio_track_count * (duration_sec * 1024.0 + 64.0 * 1024.0);
 
     (proxy_bytes + thumbnails_bytes as f64 + audio_bytes + waveform_bytes) as u64
 }

@@ -89,15 +89,36 @@ export function useThumbnailManifest(path: string | null, workDir?: string | nul
 
 export interface WaveformResources {
   byStream: Map<number, DerivativeResource<WaveformData>>
+  // Imported audio assets carry no stream index; their peak JSON is produced
+  // by asset derivative jobs and looked up by asset id instead.
+  byAsset: Map<string, DerivativeResource<WaveformData>>
   status: DerivativeResource<null>["status"]
   retry: () => void
 }
 
+export interface AssetWaveformRequest {
+  assetId: string
+  path: string
+}
+
+async function loadWaveformResource(
+  path: string,
+  workDir?: string | null,
+): Promise<DerivativeResource<WaveformData>> {
+  try {
+    const data = await fetchDerivative(path, waveformDataSchema, workDir)
+    return { status: "content", data }
+  } catch {
+    return { status: "error", message: derivativeError() }
+  }
+}
+
 export function useWaveformResources(
   outputs: MediaAudioTrackOutput[],
+  assetWaveforms: AssetWaveformRequest[],
   workDir?: string | null,
 ): WaveformResources {
-  const requests = useMemo(
+  const streamRequests = useMemo(
     () =>
       outputs.map((output) => ({
         streamIndex: output.streamIndex,
@@ -105,15 +126,26 @@ export function useWaveformResources(
       })),
     [outputs],
   )
+  const assetRequests = useMemo(
+    () => assetWaveforms.filter((request) => Boolean(request.path)),
+    [assetWaveforms],
+  )
   const requestsKey = useMemo(
-    () => requests.map((request) => `${request.streamIndex}:${request.path}`).join("|"),
-    [requests],
+    () =>
+      [
+        streamRequests.map((request) => `s${request.streamIndex}:${request.path}`),
+        assetRequests.map((request) => `a${request.assetId}:${request.path}`),
+      ].join("|"),
+    [streamRequests, assetRequests],
   )
   const lastRequestsKeyRef = useRef("")
   const lastRetryTokenRef = useRef(0)
 
   const [retryToken, setRetryToken] = useState(0)
   const [byStream, setByStream] = useState<Map<number, DerivativeResource<WaveformData>>>(
+    () => new Map(),
+  )
+  const [byAsset, setByAsset] = useState<Map<string, DerivativeResource<WaveformData>>>(
     () => new Map(),
   )
   const retry = useCallback(() => setRetryToken((value) => value + 1), [])
@@ -128,45 +160,55 @@ export function useWaveformResources(
     lastRetryTokenRef.current = retryToken
 
     let isMounted = true
-    if (requests.length === 0) {
+    if (streamRequests.length === 0 && assetRequests.length === 0) {
       setByStream(new Map())
+      setByAsset(new Map())
       return () => {
         isMounted = false
       }
     }
 
     setByStream(
-      new Map(requests.map((request) => [request.streamIndex, { status: "loading" as const }])),
+      new Map(
+        streamRequests.map((request) => [request.streamIndex, { status: "loading" as const }]),
+      ),
+    )
+    setByAsset(
+      new Map(assetRequests.map((request) => [request.assetId, { status: "loading" as const }])),
     )
 
     void Promise.all(
-      requests.map(async (request): Promise<[number, DerivativeResource<WaveformData>]> => {
-        try {
-          const data = await fetchDerivative(request.path, waveformDataSchema, workDir)
-          return [request.streamIndex, { status: "content", data }]
-        } catch {
-          return [request.streamIndex, { status: "error", message: derivativeError() }]
-        }
-      }),
+      streamRequests.map(async (request): Promise<[number, DerivativeResource<WaveformData>]> => [
+        request.streamIndex,
+        await loadWaveformResource(request.path, workDir),
+      ]),
     ).then((entries) => {
       if (isMounted) setByStream(new Map(entries))
+    })
+    void Promise.all(
+      assetRequests.map(async (request): Promise<[string, DerivativeResource<WaveformData>]> => [
+        request.assetId,
+        await loadWaveformResource(request.path, workDir),
+      ]),
+    ).then((entries) => {
+      if (isMounted) setByAsset(new Map(entries))
     })
 
     return () => {
       isMounted = false
     }
-  }, [requests, requestsKey, workDir, retryToken])
+  }, [streamRequests, assetRequests, requestsKey, workDir, retryToken])
 
   const status = useMemo<WaveformResources["status"]>(() => {
-    if (requests.length === 0) return "missing"
-    const states = [...byStream.values()]
+    if (streamRequests.length === 0 && assetRequests.length === 0) return "missing"
+    const states = [...byStream.values(), ...byAsset.values()]
     if (states.length === 0 || states.some((state) => state.status === "loading")) return "loading"
     if (states.some((state) => state.status === "content")) return "content"
     if (states.some((state) => state.status === "error")) return "error"
     return "missing"
-  }, [byStream, requests.length])
+  }, [byStream, byAsset, streamRequests.length, assetRequests.length])
 
-  return { byStream, status, retry }
+  return { byStream, byAsset, status, retry }
 }
 
 export interface VideoTrackThumbnailResources {

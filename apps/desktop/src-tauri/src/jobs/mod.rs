@@ -26,7 +26,7 @@ use crate::media::video::extract_video_track;
 use crate::media::waveform::generate_waveform_for_stream;
 use crate::path_policy::PathPolicy;
 
-const PREPARE_OUTPUT_VERSION: u32 = 5;
+const PREPARE_OUTPUT_VERSION: u32 = 6;
 
 fn standalone_video_stream_index(metadata: &media_db::MediaMetadata) -> i32 {
     metadata
@@ -813,6 +813,28 @@ impl Worker {
             ..Default::default()
         };
 
+        // Derivative file formats evolve with PREPARE_OUTPUT_VERSION. Files
+        // left by an older prepare are stale even when present on disk, so
+        // thumbnails and waveforms regenerate once when the prior completed
+        // prepare ran under an older version. Proxy/audio extraction formats
+        // are unchanged and keep the cheaper existence check.
+        let prior_prepare_version = self
+            .with_db(|conn| {
+                Ok(media_db::list_jobs(conn, &self.options.recording_id)?
+                    .into_iter()
+                    .filter(|job| {
+                        job.kind == MediaJobKind::Prepare
+                            && job.status == media_db::MediaJobStatus::Completed
+                            && job.id != self.job_id
+                    })
+                    .map(|job| job.outputs.prepare_version)
+                    .max()
+                    .unwrap_or(0))
+            })
+            .unwrap_or(0);
+        let regenerate_derivatives =
+            self.options.force || prior_prepare_version < PREPARE_OUTPUT_VERSION;
+
         let metadata_path = derivative_dir(&work_dir, "metadata").join("metadata.json");
         let mut metadata: Option<media_db::MediaMetadata> = None;
 
@@ -1052,7 +1074,7 @@ impl Worker {
         let thumbnail_sprite_path = thumbnail_dir.join("sprite.jpg");
         let thumbnail_manifest_path = thumbnail_dir.join("thumbnails.json");
         if !cancel.load(Ordering::Relaxed) {
-            if self.options.force
+            if regenerate_derivatives
                 || !thumbnail_sprite_path.is_file()
                 || !thumbnail_manifest_path.is_file()
             {
@@ -1127,23 +1149,21 @@ impl Worker {
 
                 let track_waveform_dir = waveform_dir.join(format!("stream_{:03}", stream.index));
                 let waveform_json = track_waveform_dir.join("waveform.json");
-                let waveform_png = track_waveform_dir.join("waveform.png");
-                if self.options.force || !waveform_json.is_file() || !waveform_png.is_file() {
-                    let (json, png) = match generate_waveform_for_stream(
+                if regenerate_derivatives || !waveform_json.is_file() {
+                    let json = match generate_waveform_for_stream(
                         &self.ffmpeg_path.to_string_lossy(),
                         &input_path,
                         &track_waveform_dir,
-                        &metadata,
                         stream.index,
+                        &metadata,
                         cancel.clone(),
                     ) {
-                        Ok(paths) => paths,
+                        Ok(path) => path,
                         Err(error) => {
                             return self.fail(&format!("waveform stream {}: {error}", stream.index))
                         }
                     };
                     self.record_derivative(&json.to_string_lossy(), "waveform")?;
-                    self.record_derivative(&png.to_string_lossy(), "waveform")?;
                 }
 
                 self.record_derivative(&audio_path.to_string_lossy(), "audio")?;
@@ -1152,11 +1172,10 @@ impl Worker {
                     title,
                     audio_path: audio_path.to_string_lossy().to_string(),
                     waveform_path: waveform_json.to_string_lossy().to_string(),
-                    waveform_image_path: waveform_png.to_string_lossy().to_string(),
+                    waveform_image_path: None,
                 };
                 if outputs.audio_tracks.is_empty() {
                     outputs.waveform_path = Some(output.waveform_path.clone());
-                    outputs.waveform_image_path = Some(output.waveform_image_path.clone());
                 }
                 outputs.audio_tracks.push(output);
             }
@@ -1381,9 +1400,8 @@ impl AssetWorker {
 
                 let waveform_dir = asset_dir.join("waveform");
                 let waveform_json = waveform_dir.join("waveform.json");
-                let waveform_png = waveform_dir.join("waveform.png");
-                if self.options.force || !waveform_json.is_file() || !waveform_png.is_file() {
-                    let (json, png) = crate::media::waveform::generate_waveform(
+                if self.options.force || !waveform_json.is_file() {
+                    let json = crate::media::waveform::generate_waveform(
                         &self.ffmpeg_path.to_string_lossy(),
                         &source,
                         &waveform_dir,
@@ -1391,10 +1409,8 @@ impl AssetWorker {
                         cancel.clone(),
                     )?;
                     output_paths.push(("waveform".to_string(), json));
-                    output_paths.push(("waveformImage".to_string(), png));
                 } else {
                     output_paths.push(("waveform".to_string(), waveform_json));
-                    output_paths.push(("waveformImage".to_string(), waveform_png));
                 }
                 self.set_progress(0.8, "waveform")?;
             }

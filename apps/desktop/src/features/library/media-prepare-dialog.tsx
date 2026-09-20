@@ -52,7 +52,7 @@ export function MediaPrepareDialog({
         <form onSubmit={handleSubmit} className="space-y-4">
           <NumberInputField
             id="thumbnail-interval"
-            label="Thumbnail interval"
+            label="Max thumbnail spacing"
             unit="s"
             min={1}
             value={thumbnailIntervalSec}

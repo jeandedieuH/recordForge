@@ -17,7 +17,7 @@ pub fn recipe_for_kind(kind: &str) -> Option<DerivativeRecipe> {
     match kind {
         "audio" => Some(DerivativeRecipe {
             kind: "audio",
-            outputs: &["audioPreview", "waveform", "waveformImage"],
+            outputs: &["audioPreview", "waveform"],
         }),
         "image" => Some(DerivativeRecipe {
             kind: "image",
@@ -119,7 +119,7 @@ mod tests {
     fn exposes_recipes_for_supported_asset_kinds() {
         assert_eq!(
             recipe_for_kind("audio").unwrap().outputs,
-            ["audioPreview", "waveform", "waveformImage"]
+            ["audioPreview", "waveform"]
         );
         assert_eq!(recipe_for_kind("image").unwrap().outputs, ["thumbnail"]);
         assert_eq!(

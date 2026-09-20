@@ -951,17 +951,6 @@ export function TimelineLanes({
                   setEmptyLanesContextMenuTimeMs(Math.round(timeMs))
                 }}
               >
-                {/* Preload sprite image */}
-                {spriteUrl ? (
-                  <img
-                    src={spriteUrl}
-                    alt=""
-                    aria-hidden
-                    className="pointer-events-none absolute size-px opacity-0"
-                    onError={onSpriteError}
-                  />
-                ) : null}
-
                 {/* Sticky Time Ruler & Markers Lane */}
                 <TimelineRuler
                   timelineWidth={timelineWidth}
@@ -1088,13 +1077,29 @@ export function TimelineLanes({
                   if (isScreenTrack) {
                     trackThumbnailData = thumbnailData
                     trackSpriteUrl = spriteUrl
-                  } else if (isCameraTrack && videoThumbnailResources) {
-                    const cameraStreamThumb = Array.from(
-                      videoThumbnailResources.byStream.values(),
-                    ).find((r) => r.status === "content")
-                    if (cameraStreamThumb && cameraStreamThumb.status === "content") {
-                      trackThumbnailData = cameraStreamThumb.data
-                      trackSpriteUrl = toAssetUrl(cameraStreamThumb.data.spritePath, workDir)
+                  }
+
+                  // Camera clips resolve their sprite by stream index so each
+                  // webcam stream shows its own frames; fall back to the first
+                  // loaded manifest when the clip carries no index.
+                  const cameraThumbnailFor = (clip: (typeof track.clips)[number]) => {
+                    if (!isCameraTrack || !videoThumbnailResources) return null
+                    const resources = [...videoThumbnailResources.byStream.entries()]
+                    const streamIndex = clip.kind === "camera" ? clip.streamIndex : undefined
+                    const byIndex =
+                      streamIndex !== undefined
+                        ? videoThumbnailResources.byStream.get(streamIndex)
+                        : undefined
+                    const resolved =
+                      byIndex?.status === "content"
+                        ? byIndex
+                        : resources
+                            .map(([, resource]) => resource)
+                            .find((resource) => resource.status === "content")
+                    if (!resolved || resolved.status !== "content") return null
+                    return {
+                      manifest: resolved.data,
+                      spriteUrl: toAssetUrl(resolved.data.spritePath, workDir),
                     }
                   }
 
@@ -1147,6 +1152,7 @@ export function TimelineLanes({
                         const sublaneMap = allowsOverlap ? computeClipSublanes(visibleClips) : null
                         return visibleClips.map((clip) => {
                           const sublane = sublaneMap?.get(clip.id)
+                          const clipThumbnails = isCameraTrack ? cameraThumbnailFor(clip) : null
                           return (
                             <TimelineClipItem
                               key={clip.id}
@@ -1164,8 +1170,10 @@ export function TimelineLanes({
                                 Math.round(1000 / Math.max(1, timeline.canvas.fps)),
                               )}
                               collapsed={view.collapsedTrackIds.includes(track.id)}
-                              thumbnailManifest={trackThumbnailData}
-                              spriteUrl={trackSpriteUrl}
+                              thumbnailManifest={
+                                clipThumbnails ? clipThumbnails.manifest : trackThumbnailData
+                              }
+                              spriteUrl={clipThumbnails ? clipThumbnails.spriteUrl : trackSpriteUrl}
                               visibleStartMs={visibleStartMs}
                               visibleEndMs={visibleEndMs}
                               waveformResources={waveformResources}
