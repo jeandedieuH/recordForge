@@ -2244,7 +2244,7 @@ export function TimelineView({
                 {mediaUrl && !mediaError
                   ? isUsingProxy
                     ? "PROXY PREVIEW"
-                    : "ORIGINAL FALLBACK"
+                    : "ORIGINAL"
                   : "PREVIEW UNAVAILABLE"}
               </span>
             </div>
