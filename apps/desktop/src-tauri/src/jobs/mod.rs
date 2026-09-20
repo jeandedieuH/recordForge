@@ -26,7 +26,7 @@ use crate::media::video::extract_video_track;
 use crate::media::waveform::generate_waveform_for_stream;
 use crate::path_policy::PathPolicy;
 
-const PREPARE_OUTPUT_VERSION: u32 = 6;
+const PREPARE_OUTPUT_VERSION: u32 = 7;
 
 fn standalone_video_stream_index(metadata: &media_db::MediaMetadata) -> i32 {
     metadata

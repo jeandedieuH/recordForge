@@ -260,10 +260,10 @@ function createDeferred<T>(): Deferred<T> {
 
 function isReusablePrepareJob(job: MediaJob): boolean {
   if (job.kind !== "prepare" || job.status !== "completed") return false
-  // v6 prepares emit zoom-aware derivatives: min/max waveform peaks and
+  // v7 prepares emit zoom-aware derivatives: min/max waveform peaks and
   // adaptive thumbnail spacing. Older payloads still render, but a light
   // re-prepare upgrades them in the background.
-  if (job.outputs.prepareVersion < 6) return false
+  if (job.outputs.prepareVersion < 7) return false
   return job.outputs.audioTracks.every((track) => Boolean(track.audioPath && track.waveformPath))
 }
 
@@ -382,9 +382,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         activeJob.outputs.prepareVersion >= 4 &&
         (!recording.webcamPath || activeJob.outputs.videoTracks.length > 0),
       )
-      // v6 derivatives add min/max waveform peaks and adaptive thumbnail
+      // v7 derivatives add min/max waveform peaks and adaptive thumbnail
       // density; older recordings quietly re-prepare once in the background.
-      const hasCurrentDerivatives = Boolean(activeJob && activeJob.outputs.prepareVersion >= 6)
+      const hasCurrentDerivatives = Boolean(activeJob && activeJob.outputs.prepareVersion >= 7)
       if (
         !activeJob ||
         (activeJob.status === "completed" &&

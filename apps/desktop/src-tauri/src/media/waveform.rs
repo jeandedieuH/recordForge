@@ -82,7 +82,10 @@ pub fn generate_waveform_for_stream(
         samples_per_peak,
         cancel,
     )?;
-    let json_path = output_dir.join(format!("waveform-{stream_index}.json"));
+    // The output dir is already stream-scoped (waveform/stream_XXX/), so the
+    // file name stays plain "waveform.json" — that is the path persisted in
+    // MediaAudioTrackOutput.waveform_path.
+    let json_path = output_dir.join("waveform.json");
     write_waveform_json(
         &json_path,
         peaks,
