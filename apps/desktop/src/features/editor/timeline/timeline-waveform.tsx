@@ -41,7 +41,12 @@ export const TimelineWaveform = memo(function TimelineWaveform({
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   const normalization = useMemo(() => waveformNormalization(data), [data])
-  const clipWindow = visibleClipWindow(clip, visibleStartMs, visibleEndMs)
+  // Memoized so the draw effect can depend on the window object itself;
+  // visibleClipWindow returns a fresh { startMs, endMs } each render.
+  const clipWindow = useMemo(
+    () => visibleClipWindow(clip, visibleStartMs, visibleEndMs),
+    [clip, visibleStartMs, visibleEndMs],
+  )
 
   // Draw before paint: resizing the canvas clears it, so a post-paint effect
   // would flash blank during zoom gestures.
@@ -97,13 +102,12 @@ export const TimelineWaveform = memo(function TimelineWaveform({
     ctx.fillRect(0, centerY - 0.5, cssW, 1)
   }, [
     clip,
+    clipWindow,
     colorVar,
     data,
     height,
     normalization,
     pixelsPerMs,
-    clipWindow?.startMs,
-    clipWindow?.endMs,
   ])
 
   if (!clipWindow) return null

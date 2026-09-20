@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef } from "react"
+import { memo, useEffect, useLayoutEffect, useMemo, useRef } from "react"
 import type { TimelineClip } from "@recordforge/contracts"
 import type { ThumbnailManifest } from "../media/derivative-resources"
 import { useSpriteImage } from "../media/sprite-cache"
@@ -46,7 +46,12 @@ export const ThumbnailFilmstrip = memo(function ThumbnailFilmstrip({
     if (failed) onSpriteErrorRef.current?.()
   }, [failed])
 
-  const clipWindow = visibleClipWindow(clip, visibleStartMs, visibleEndMs)
+  // Memoized so the draw effect can depend on the window object itself;
+  // visibleClipWindow returns a fresh { startMs, endMs } each render.
+  const clipWindow = useMemo(
+    () => visibleClipWindow(clip, visibleStartMs, visibleEndMs),
+    [clip, visibleStartMs, visibleEndMs],
+  )
 
   // Draw before paint: resizing the canvas clears it, so a post-paint effect
   // would flash blank during zoom gestures.
@@ -107,7 +112,7 @@ export const ThumbnailFilmstrip = memo(function ThumbnailFilmstrip({
       }
       prevIndex = index
     }
-  }, [clip, height, image, manifest, pixelsPerMs, clipWindow?.startMs, clipWindow?.endMs])
+  }, [clip, clipWindow, height, image, manifest, pixelsPerMs])
 
   if (!clipWindow) return null
 
