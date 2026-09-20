@@ -352,6 +352,7 @@ export function TimelineView({
   const [videoBounds, setVideoBounds] = useState<VideoBounds | null>(null)
   const [tool, setTool] = useState<TimelineTool>("select")
   const [useOriginalMedia, setUseOriginalMedia] = useState(false)
+  const [rescueWithProxy, setRescueWithProxy] = useState(false)
   const [mediaError, setMediaError] = useState(false)
   const [thumbnailSpriteError, setThumbnailSpriteError] = useState(false)
   const [showMinimap, setShowMinimap] = useState(true)
@@ -396,6 +397,7 @@ export function TimelineView({
 
   useEffect(() => {
     setUseOriginalMedia(false)
+    setRescueWithProxy(false)
     setMediaError(false)
     setThumbnailSpriteError(false)
   }, [recordingId])
@@ -406,7 +408,11 @@ export function TimelineView({
 
   const proxyPath = activeJob?.outputs?.proxyPath ?? null
   const originalPath = recording?.outputPath ?? null
-  const isUsingProxy = Boolean(proxyPath && !useOriginalMedia)
+  // The preview decodes the original in Quality mode; reduced modes prefer
+  // the on-demand proxy. rescueWithProxy swaps to the proxy when the original
+  // cannot be decoded (unsupported codec in the webview).
+  const wantsProxy = view.previewQuality !== "quality" || rescueWithProxy
+  const isUsingProxy = Boolean(wantsProxy && proxyPath && !useOriginalMedia)
   const isPreparing = isPreparingJob(activeJob)
   const isPreparationFailed = isFailedPreparationJob(activeJob)
   const mediaPath = isUsingProxy ? proxyPath : originalPath
@@ -1860,7 +1866,11 @@ export function TimelineView({
               role="status"
             >
               <div className="flex items-center justify-between gap-3">
-                <span>Preparing the preview proxy in the background</span>
+                <span>
+                  {activeJob?.stage === "proxy"
+                    ? "Generating the performance preview in the background"
+                    : "Preparing preview media in the background"}
+                </span>
                 <span className="shrink-0 font-mono text-subtle-foreground">
                   {Math.round((activeJob?.progress ?? 0) * 100)}%
                 </span>
@@ -1981,6 +1991,12 @@ export function TimelineView({
                         setMediaError(false)
                         return
                       }
+                      if (!isUsingProxy && proxyPath && !rescueWithProxy) {
+                        // Original failed to decode — fall back to the proxy.
+                        setRescueWithProxy(true)
+                        setMediaError(false)
+                        return
+                      }
                       setMediaError(true)
                     }}
                     onLoadedMetadata={() => {
@@ -2021,6 +2037,12 @@ export function TimelineView({
                       setVideoBounds(null)
                       if (isUsingProxy && originalPath) {
                         setUseOriginalMedia(true)
+                        setMediaError(false)
+                        return
+                      }
+                      if (!isUsingProxy && proxyPath && !rescueWithProxy) {
+                        // Original failed to decode — fall back to the proxy.
+                        setRescueWithProxy(true)
                         setMediaError(false)
                         return
                       }

@@ -15,7 +15,7 @@ const STEPS = [
     step: "02",
     title: "Edit",
     description:
-      "Open the proxy timeline, trim the dead air, split the good take. Every action is instant and undoable.",
+      "Open the timeline, trim the dead air, split the good take. Every action is instant and undoable.",
   },
   {
     icon: Rocket,

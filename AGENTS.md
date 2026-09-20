@@ -48,7 +48,7 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 - Microphone, system audio, and optional webcam
 - Global shortcuts, tray, floating controls
 - Local library and recovery
-- Proxy-based timeline editor with trim, split, move, delete, undo/redo
+- Timeline editor with trim, split, move, delete, undo/redo; the preview plays the original by default and builds a lightweight proxy on demand via the preview-quality selector
 - Local MP4 export with hardware-accelerated encoders (NVENC, VideoToolbox, QuickSync, VAAPI, AMF)
 - Optional S3-compatible and Google Drive uploads
 

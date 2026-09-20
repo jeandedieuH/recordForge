@@ -83,6 +83,7 @@ export const useJobsStore = create<JobsStore>((set, get) => ({
       recordingId,
       proxyHeight: 540,
       thumbnailIntervalSec: options.thumbnailIntervalSec,
+      includeProxy: false,
       force: options.force,
     })
     get().upsertJob(job)

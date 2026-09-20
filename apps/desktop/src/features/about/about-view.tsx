@@ -162,8 +162,9 @@ export function AboutView({
                 </Badge>
               </div>
               <p className="text-xs sm:text-sm text-subtle-foreground max-w-2xl leading-relaxed">
-                High-performance, local-first screen recorder and proxy timeline editor engineered
-                for precision capture, zero audio-video drift, and modern content workflows.
+                High-performance, local-first screen recorder and responsive timeline editor
+                engineered for precision capture, zero audio-video drift, and modern content
+                workflows.
               </p>
             </div>
           </div>

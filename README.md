@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A high-performance, local-first desktop screen recorder and lightweight proxy timeline editor for Windows, macOS, and Linux.**
+**A high-performance, local-first desktop screen recorder and lightweight timeline editor for Windows, macOS, and Linux.**
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8.svg?logo=tauri&logoColor=white)](https://tauri.app)
@@ -25,7 +25,7 @@ RecordForge is built from the ground up to be **recorder-first, privacy-focused,
 - ⚡ **Native Performance (Sub-50MB Idle RAM):** Built on Tauri v2 and native Rust. No bloated Chromium background engines chewing up your CPU and battery.
 - 🎯 **Subpixel Cursor Telemetry (60Hz / 120Hz):** Records raw cursor vectors alongside video. Preview and export with smooth spring-damping motion, click ripples, and automatic focal framing.
 - 🎙️ **Zero-Drift Audio Sync:** Native low-latency audio capture isolates and synchronizes microphone and system audio streams with microsecond precision.
-- ✂️ **Non-Destructive Proxy Editor:** Multi-track timeline supporting instant trims, cuts, splits, reordering, and unlimited undo/redo without waiting for slow intermediate re-renders.
+- ✂️ **Non-Destructive Editor:** Multi-track timeline supporting instant trims, cuts, splits, reordering, and unlimited undo/redo without waiting for slow intermediate re-renders.
 - 🛡️ **SQLite WAL Crash Recovery:** Real-time state persistence safeguards against power loss, crashes, or unexpected reboots. Relaunch to restore your session seamlessly.
 - 🚀 **Hardware Acceleration:** Out-of-the-box hardware encoding with NVIDIA NVENC, Apple VideoToolbox, Intel QuickSync, Linux VAAPI, and AMD AMF via pinned FFmpeg 9.0 sidecars.
 

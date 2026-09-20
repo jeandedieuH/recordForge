@@ -202,10 +202,15 @@ export type MediaJob = z.infer<typeof mediaJobSchema>
 // Options for starting a prepare job.
 export const prepareMediaOptionsSchema = z.object({
   recordingId: z.string(),
-  // Proxy resolution. Defaults to a 540p variant for smooth editing.
+  // Proxy resolution used when includeProxy requests the lightweight
+  // performance preview. Defaults to a 540p variant for smooth scrubbing.
   proxyHeight: z.number().int().min(180).max(1080).default(540),
   // Seconds between extracted thumbnails.
   thumbnailIntervalSec: z.number().int().min(1).max(60).default(5),
+  // Whether to also transcode the low-res preview proxy. Off by default so
+  // prepare stays fast; the editor requests it on demand when the user picks
+  // a reduced preview-quality mode.
+  includeProxy: z.boolean().default(false),
   // Whether to recreate files that already exist.
   force: z.boolean().default(false),
 })

@@ -14,6 +14,7 @@ pub struct StartMediaJobOptions {
     pub recording_id: String,
     pub proxy_height: Option<i32>,
     pub thumbnail_interval_sec: Option<u64>,
+    pub include_proxy: Option<bool>,
     pub force: Option<bool>,
 }
 
@@ -34,6 +35,7 @@ pub fn prepare_media(
         recording_id: options.recording_id,
         proxy_height: options.proxy_height.unwrap_or(540),
         thumbnail_interval_sec: options.thumbnail_interval_sec.unwrap_or(5),
+        include_proxy: options.include_proxy.unwrap_or(false),
         force: options.force.unwrap_or(false),
     })?;
 
@@ -105,6 +107,7 @@ pub fn estimate_prepare_disk_space(
     recording_id: String,
     proxy_height: Option<i32>,
     thumbnail_interval_sec: Option<u64>,
+    include_proxy: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<DiskSpaceEstimate> {
     let db = state
@@ -131,7 +134,12 @@ pub fn estimate_prepare_disk_space(
 
     let proxy_height = proxy_height.unwrap_or(540);
     let thumbnail_interval_sec = thumbnail_interval_sec.unwrap_or(5);
-    let required = estimate_derivative_size(&metadata, proxy_height, thumbnail_interval_sec);
+    let required = estimate_derivative_size(
+        &metadata,
+        proxy_height,
+        thumbnail_interval_sec,
+        include_proxy.unwrap_or(false),
+    );
     let available = available_space(std::path::Path::new(output_path))?;
 
     Ok(DiskSpaceEstimate {

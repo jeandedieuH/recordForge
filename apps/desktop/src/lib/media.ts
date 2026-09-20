@@ -20,7 +20,21 @@ export function prepareRecordingMedia(recordingId: string, force = false): Promi
     recordingId,
     proxyHeight: 540,
     thumbnailIntervalSec: 5,
+    includeProxy: false,
     force,
+  })
+}
+
+// Ask Rust to build the lightweight performance-preview proxy on demand.
+// Prepare dedupe keeps repeated calls cheap: it reuses a queued proxy job or a
+// completed job whose proxy file is still on disk.
+export function requestPreviewProxy(recordingId: string): Promise<MediaJob> {
+  return prepareMedia({
+    recordingId,
+    proxyHeight: 540,
+    thumbnailIntervalSec: 5,
+    includeProxy: true,
+    force: false,
   })
 }
 
@@ -46,7 +60,7 @@ export async function deleteDerivatives(recordingId: string): Promise<void> {
 
 export async function estimatePrepareDiskSpace(
   recordingId: string,
-  options?: { proxyHeight?: number; thumbnailIntervalSec?: number },
+  options?: { proxyHeight?: number; thumbnailIntervalSec?: number; includeProxy?: boolean },
 ): Promise<DiskSpaceEstimate> {
   return invokeValidated(
     "estimate_prepare_disk_space",
@@ -54,6 +68,7 @@ export async function estimatePrepareDiskSpace(
       recordingId,
       proxyHeight: options?.proxyHeight,
       thumbnailIntervalSec: options?.thumbnailIntervalSec,
+      includeProxy: options?.includeProxy,
     },
     diskSpaceEstimateSchema,
   )

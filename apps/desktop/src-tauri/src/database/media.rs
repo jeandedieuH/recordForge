@@ -291,9 +291,14 @@ pub fn insert_job_with_options(
 }
 
 /// Return an existing prepare job that can satisfy a non-forced request.
+///
+/// When `require_proxy` is set, the job must be able to deliver a proxy file:
+/// a queued/running job only qualifies when its stored options include the
+/// proxy stage, and a completed job must have the file on disk.
 pub fn find_reusable_prepare_job(
     conn: &Connection,
     recording_id: &str,
+    require_proxy: bool,
 ) -> Result<Option<MediaJob>> {
     Ok(list_jobs(conn, recording_id)?.into_iter().find(|job| {
         if job.kind != MediaJobKind::Prepare {
@@ -301,14 +306,17 @@ pub fn find_reusable_prepare_job(
         }
 
         match job.status {
-            MediaJobStatus::Pending | MediaJobStatus::Running => true,
+            MediaJobStatus::Pending | MediaJobStatus::Running => {
+                !require_proxy || prepare_job_requests_proxy(job)
+            }
             MediaJobStatus::Completed => {
-                job.outputs.prepare_version >= 2
-                    && job
-                        .outputs
-                        .proxy_path
-                        .as_deref()
-                        .is_some_and(|path| Path::new(path).is_file())
+                job.outputs.prepare_version >= 5
+                    && (!require_proxy
+                        || job
+                            .outputs
+                            .proxy_path
+                            .as_deref()
+                            .is_some_and(|path| Path::new(path).is_file()))
                     && job.outputs.audio_tracks.iter().all(|track| {
                         Path::new(&track.audio_path).is_file()
                             && Path::new(&track.waveform_path).is_file()
@@ -323,6 +331,14 @@ pub fn find_reusable_prepare_job(
             MediaJobStatus::Failed | MediaJobStatus::Cancelled => false,
         }
     }))
+}
+
+/// Whether a persisted prepare job was started with the proxy stage enabled.
+fn prepare_job_requests_proxy(job: &MediaJob) -> bool {
+    job.options
+        .get("includeProxy")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Mark a pending job as running.
@@ -702,16 +718,36 @@ mod tests {
         let pending = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
             .expect("insert pending prepare job");
         assert_eq!(
-            find_reusable_prepare_job(&conn, "recording-1")
+            find_reusable_prepare_job(&conn, "recording-1", false)
                 .expect("find pending job")
                 .map(|job| job.id),
             Some(pending.id.clone())
         );
+        // A light prepare in flight cannot satisfy a proxy request.
+        assert!(find_reusable_prepare_job(&conn, "recording-1", true)
+            .expect("light pending job cannot serve proxy request")
+            .is_none());
 
         fail_job(&conn, &pending.id, "test failure").expect("fail prepare job");
-        assert!(find_reusable_prepare_job(&conn, "recording-1")
+        assert!(find_reusable_prepare_job(&conn, "recording-1", false)
             .expect("find failed job")
             .is_none());
+
+        // A pending prepare that stored includeProxy options does qualify.
+        let pending_proxy = insert_job_with_options(
+            &conn,
+            "recording-1",
+            MediaJobKind::Prepare,
+            serde_json::json!({ "includeProxy": true }),
+        )
+        .expect("insert pending proxy prepare job");
+        assert_eq!(
+            find_reusable_prepare_job(&conn, "recording-1", true)
+                .expect("find proxy-capable pending job")
+                .map(|job| job.id),
+            Some(pending_proxy.id.clone())
+        );
+        cancel_job(&conn, &pending_proxy.id).expect("cancel proxy prepare job");
 
         let stale_completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
             .expect("insert stale completed prepare job");
@@ -725,23 +761,44 @@ mod tests {
         };
         complete_job(&conn, &stale_completed.id, &stale_outputs)
             .expect("complete stale prepare job");
-        assert!(find_reusable_prepare_job(&conn, "recording-1")
+        assert!(find_reusable_prepare_job(&conn, "recording-1", false)
             .expect("ignore stale completed job")
             .is_none());
 
+        // A current light prepare has no proxy: reusable for the default
+        // request, but not when the caller needs a proxy file.
         let completed = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
             .expect("insert current completed prepare job");
         let outputs = MediaJobOutputs {
-            prepare_version: 2,
-            proxy_path: Some(proxy_path.to_string_lossy().to_string()),
+            prepare_version: 5,
             ..Default::default()
         };
         complete_job(&conn, &completed.id, &outputs).expect("complete current prepare job");
         assert_eq!(
-            find_reusable_prepare_job(&conn, "recording-1")
+            find_reusable_prepare_job(&conn, "recording-1", false)
                 .expect("find current completed job")
                 .map(|job| job.id),
-            Some(completed.id)
+            Some(completed.id.clone())
+        );
+        assert!(find_reusable_prepare_job(&conn, "recording-1", true)
+            .expect("light completed job cannot serve proxy request")
+            .is_none());
+
+        // Once the proxy file exists on disk the same request reuses it.
+        let completed_with_proxy = insert_job(&conn, "recording-1", MediaJobKind::Prepare)
+            .expect("insert completed proxy prepare job");
+        let outputs_with_proxy = MediaJobOutputs {
+            prepare_version: 5,
+            proxy_path: Some(proxy_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        complete_job(&conn, &completed_with_proxy.id, &outputs_with_proxy)
+            .expect("complete proxy prepare job");
+        assert_eq!(
+            find_reusable_prepare_job(&conn, "recording-1", true)
+                .expect("find completed job with proxy file")
+                .map(|job| job.id),
+            Some(completed_with_proxy.id)
         );
     }
 

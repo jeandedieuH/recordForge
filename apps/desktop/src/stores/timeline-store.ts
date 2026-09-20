@@ -58,6 +58,7 @@ import {
   listMediaJobs,
   onMediaJobUpdate,
   prepareRecordingMedia,
+  requestPreviewProxy,
 } from "../lib/media"
 import { exportTimeline, retryExport as retryExportRequest, revealExport } from "../lib/timeline"
 import { notifyExportFinished } from "../lib/export-notifications"
@@ -88,6 +89,9 @@ interface TimelineStore {
   // subscriptions and races between mount and unmount.
   isListening: boolean
   unlisten: (() => void) | null
+  // True once a proxy generation request was sent for this recording so
+  // repeat performance-mode selections do not spawn duplicate transcodes.
+  previewProxyRequested: boolean
   // Pending autosave timer; cleared when a save runs or the editor closes.
   autosaveTimeout: ReturnType<typeof setTimeout> | null
   // Phase 1: revision-aware save coordinator. projectRevision is a logical
@@ -121,6 +125,8 @@ interface TimelineStore {
   setSnapEnabled: (enabled: boolean) => void
   setSnapThreshold: (thresholdMs: number) => void
   setPreviewQuality: (mode: "quality" | "performance" | "power") => void
+  // Start the lightweight preview proxy when a reduced quality mode needs it.
+  ensurePerformanceProxy: () => void
   toggleTrackCollapsed: (trackId: string) => void
   setTrackHeight: (trackId: string, height: number) => void
   setActiveExportJob: (job: MediaJob | null) => void
@@ -254,7 +260,9 @@ function createDeferred<T>(): Deferred<T> {
 
 function isReusablePrepareJob(job: MediaJob): boolean {
   if (job.kind !== "prepare" || job.status !== "completed") return false
-  if (job.outputs.prepareVersion < 4 || !job.outputs.proxyPath) return false
+  // v5 prepares no longer require a proxy: the preview plays the original by
+  // default and builds the proxy on demand via the preview-quality selector.
+  if (job.outputs.prepareVersion < 5) return false
   return job.outputs.audioTracks.every((track) =>
     Boolean(track.audioPath && track.waveformPath && track.waveformImagePath),
   )
@@ -302,6 +310,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   draftError: null,
   isListening: false,
   unlisten: null,
+  previewProxyRequested: false,
   autosaveTimeout: null,
   projectRevision: 0,
   savingRevision: null,
@@ -326,6 +335,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       assetPaths: {},
       draftTimeline: null,
       draftError: null,
+      previewProxyRequested: false,
       projectRevision: 0,
       savingRevision: null,
       pendingSaveRevision: null,
@@ -359,7 +369,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       const meta = metadata ?? fallbackMetadata(recording)
       const selectedPreparationJob = selectPreparationJob(jobs)
       let activeJob = selectedPreparationJob ? await getMediaJob(selectedPreparationJob.id) : null
-      const hasUsableProxy = Boolean(activeJob?.outputs.proxyPath)
       const hasUsableAudioDerivatives =
         !meta.hasAudio ||
         Boolean(
@@ -377,7 +386,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       if (
         !activeJob ||
         (activeJob.status === "completed" &&
-          (!hasUsableProxy || !hasUsableAudioDerivatives || !hasUsableVideoDerivatives))
+          (!hasUsableAudioDerivatives || !hasUsableVideoDerivatives))
       ) {
         // Older prepare jobs only generated one combined waveform and did not
         // expose independent audio assets to the editor.
@@ -558,19 +567,39 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
       // Track the active proxy/prepare job. We follow a prepare job when it is
       // already the tracked one (so status/progress updates flow), when there is
-      // no active job yet (so the user sees progress), or when it has produced a
-      // proxy (so the video player can load it).
+      // no active job yet, when it is queued or running (so the user sees
+      // progress), or when it has produced a proxy (so the video player can
+      // load it).
       if (job.kind === "prepare") {
         const currentJob = get().activeJob
         const isCurrent = currentJob?.id === job.id
         const hasProxy = Boolean(job.outputs?.proxyPath)
-        if (isCurrent || !currentJob || hasProxy) {
+        const isQueued = job.status === "pending" || job.status === "running"
+        if (isCurrent || !currentJob || hasProxy || isQueued) {
           updates.activeJob = job
+        }
+
+        // Terminal statuses re-arm the on-demand proxy flag so a later
+        // quality change (or a completed light prepare that could not carry
+        // the proxy) can issue a fresh request.
+        const finished =
+          job.status === "completed" ||
+          job.status === "failed" ||
+          job.status === "cancelled"
+        if (finished) {
+          updates.previewProxyRequested = false
         }
       }
 
       if (Object.keys(updates).length > 0) {
         set(updates)
+      }
+
+      // A completed prepare without a proxy can be the result of dedupe onto
+      // a light prepare while a reduced quality mode was active; re-request
+      // so the mode still receives its rendition.
+      if (job.kind === "prepare" && job.status === "completed") {
+        get().ensurePerformanceProxy()
       }
     })
 
@@ -921,6 +950,21 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const { view } = get()
     if (view.previewQuality === mode) return
     set({ view: { ...view, previewQuality: mode } })
+    get().ensurePerformanceProxy()
+  },
+
+  ensurePerformanceProxy: () => {
+    const { view, recording, activeJob, previewProxyRequested } = get()
+    if (view.previewQuality === "quality" || !recording) return
+    if (previewProxyRequested || activeJob?.outputs.proxyPath) return
+    set({ previewProxyRequested: true })
+    requestPreviewProxy(recording.id)
+      .then((job) => {
+        // Track the returned job so the banner and jobs drawer reflect its
+        // progress immediately.
+        set({ activeJob: job })
+      })
+      .catch(() => set({ previewProxyRequested: false }))
   },
 
   toggleTrackCollapsed: (trackId) => {
@@ -1333,6 +1377,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       error: null,
       isListening: false,
       unlisten: null,
+      previewProxyRequested: false,
       autosaveTimeout: null,
       projectRevision: 0,
       savingRevision: null,

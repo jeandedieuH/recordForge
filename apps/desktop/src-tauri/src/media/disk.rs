@@ -4,9 +4,10 @@ use tracing::instrument;
 use crate::database::media::MediaMetadata;
 use crate::errors::{InternalError, Result};
 
-/// Estimate the disk space required for proxy + thumbnails + waveform.
+/// Estimate the disk space required for optional proxy + thumbnails + waveform.
 ///
-/// Proxy: assume ~1.5 Mbps for 540p H.264 video + 96 Kbps AAC.
+/// Proxy (only when `include_proxy`): assume ~1.5 Mbps for 540p H.264 video
+/// + 96 Kbps AAC.
 /// Thumbnails: one 160 px wide JPEG per interval.
 /// Waveform: a small PNG plus a JSON peak array.
 #[instrument(skip(metadata))]
@@ -14,13 +15,18 @@ pub fn estimate_derivative_size(
     metadata: &MediaMetadata,
     proxy_height: i32,
     thumbnail_interval_sec: u64,
+    include_proxy: bool,
 ) -> u64 {
     let duration_sec = (metadata.duration_ms as f64 / 1000.0).max(0.0);
 
     // Bitrate guesstimate for the proxy, scaled roughly by height.
-    let height_factor = (proxy_height as f64 / 540.0).clamp(0.5, 2.0);
-    let proxy_kbps = (1500.0 + 96.0) * height_factor;
-    let proxy_bytes = (proxy_kbps * duration_sec) / 8.0 * 1024.0;
+    let proxy_bytes = if include_proxy {
+        let height_factor = (proxy_height as f64 / 540.0).clamp(0.5, 2.0);
+        let proxy_kbps = (1500.0 + 96.0) * height_factor;
+        (proxy_kbps * duration_sec) / 8.0 * 1024.0
+    } else {
+        0.0
+    };
 
     let thumb_count = if thumbnail_interval_sec > 0 {
         (duration_sec / thumbnail_interval_sec as f64).ceil() as u64

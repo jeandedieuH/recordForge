@@ -26,7 +26,7 @@ use crate::media::video::extract_video_track;
 use crate::media::waveform::generate_waveform_for_stream;
 use crate::path_policy::PathPolicy;
 
-const PREPARE_OUTPUT_VERSION: u32 = 4;
+const PREPARE_OUTPUT_VERSION: u32 = 5;
 
 fn standalone_video_stream_index(metadata: &media_db::MediaMetadata) -> i32 {
     metadata
@@ -39,12 +39,31 @@ fn standalone_video_stream_index(metadata: &media_db::MediaMetadata) -> i32 {
 }
 
 /// Options for a prepare job.
-#[derive(Debug, Clone)]
+///
+/// Persisted in `media_jobs.options` so deduplication and crash-resume can
+/// tell a light prepare (no proxy stage) from a proxy-including prepare.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrepareOptions {
     pub recording_id: String,
+    #[serde(default = "default_proxy_height")]
     pub proxy_height: i32,
+    #[serde(default = "default_thumbnail_interval_sec")]
     pub thumbnail_interval_sec: u64,
+    /// Whether to transcode the low-res performance preview proxy. Light
+    /// prepares skip it so editing can start without a lengthy transcode.
+    #[serde(default)]
+    pub include_proxy: bool,
+    #[serde(default)]
     pub force: bool,
+}
+
+fn default_proxy_height() -> i32 {
+    540
+}
+
+fn default_thumbnail_interval_sec() -> u64 {
+    5
 }
 
 /// Restartable options for derivatives attached to one imported project asset.
@@ -135,13 +154,23 @@ impl JobManager {
         // Ensure the recording exists before creating or reusing a job.
         let _recording = get_recording(&conn, &options.recording_id)?;
         if !options.force {
-            if let Some(existing) =
-                media_db::find_reusable_prepare_job(&conn, &options.recording_id)?
-            {
+            if let Some(existing) = media_db::find_reusable_prepare_job(
+                &conn,
+                &options.recording_id,
+                options.include_proxy,
+            )? {
                 return Ok(existing.id);
             }
         }
-        let job = media_db::insert_job(&conn, &options.recording_id, MediaJobKind::Prepare)?;
+        let options_json = serde_json::to_value(&options).map_err(|error| {
+            InternalError::Storage(format!("serialize prepare options: {error}"))
+        })?;
+        let job = media_db::insert_job_with_options(
+            &conn,
+            &options.recording_id,
+            MediaJobKind::Prepare,
+            options_json,
+        )?;
         drop(conn);
 
         let token = Arc::new(AtomicBool::new(false));
@@ -557,12 +586,17 @@ impl JobManager {
                 continue;
             }
 
-            let options = PrepareOptions {
-                recording_id: job.recording_id.clone(),
-                proxy_height: 540,
-                thumbnail_interval_sec: 5,
-                force: false,
-            };
+            // Older prepare rows predate persisted options; they resume as
+            // light prepares and regenerate the proxy only if it was requested.
+            let mut options = serde_json::from_value::<PrepareOptions>(job.options.clone())
+                .unwrap_or_else(|_| PrepareOptions {
+                    recording_id: job.recording_id.clone(),
+                    proxy_height: 540,
+                    thumbnail_interval_sec: 5,
+                    include_proxy: false,
+                    force: false,
+                });
+            options.recording_id = job.recording_id.clone();
 
             let token = Arc::new(AtomicBool::new(false));
             self.active_tokens
@@ -803,6 +837,7 @@ impl Worker {
             &metadata,
             self.options.proxy_height,
             self.options.thumbnail_interval_sec,
+            self.options.include_proxy,
         );
 
         match available_space(&work_dir) {
@@ -815,11 +850,14 @@ impl Worker {
             Err(e) => return self.fail(&format!("disk check: {e}")),
         }
 
-        // Stage: proxy generation.
-        self.set_progress(0.10, "proxy")?;
+        // Stage: proxy generation (only when requested). The editor previews
+        // the original by default and asks for the proxy on demand; an
+        // already-generated proxy file is still reported in the outputs so
+        // reduced quality modes can pick it up without re-transcoding.
         let proxy_path = derivative_dir(&work_dir, "proxy").join("proxy.mp4");
-        if !cancel.load(Ordering::Relaxed) {
-            if self.options.force || !proxy_path.exists() {
+        if self.options.include_proxy && (self.options.force || !proxy_path.exists()) {
+            self.set_progress(0.10, "proxy")?;
+            if !cancel.load(Ordering::Relaxed) {
                 let cancel_for_proxy = cancel.clone();
                 let progress_handle = Arc::new(Mutex::new(Instant::now()));
                 let progress_db = Arc::clone(&self.db);
@@ -866,9 +904,9 @@ impl Worker {
                     }
                     Err(e) => return self.fail(&format!("proxy: {e}")),
                 }
-            } else {
-                outputs.proxy_path = Some(proxy_path.to_string_lossy().to_string());
             }
+        } else if proxy_path.exists() {
+            outputs.proxy_path = Some(proxy_path.to_string_lossy().to_string());
         }
 
         if cancel.load(Ordering::Relaxed) {

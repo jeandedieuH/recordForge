@@ -97,7 +97,11 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
 
         <Separator orientation="vertical" className="hidden h-5 md:block" />
 
-        <div className="hidden items-center gap-2 lg:flex" aria-label="Preview quality">
+        <div
+          className="hidden items-center gap-2 lg:flex"
+          aria-label="Preview quality"
+          title="Quality plays the original file; Performance and Power Saving build a lightweight proxy preview"
+        >
           <span className="text-[11px] text-subtle-foreground">Preview</span>
           <SimpleSelect
             aria-label="Preview quality"

@@ -24,7 +24,7 @@ export const Route = createFileRoute("/_marketing/")({
       {
         property: "og:description",
         content:
-          "Native screen recording with buttery cursor motion, zero-drift audio, and a proxy timeline that never waits on renders. 100% local-first.",
+          "Native screen recording with buttery cursor motion, zero-drift audio, and a timeline editor that never waits on renders. 100% local-first.",
       },
       { property: "og:type", content: "website" },
     ],

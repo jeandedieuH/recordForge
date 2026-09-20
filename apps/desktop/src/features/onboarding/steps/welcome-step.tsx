@@ -48,8 +48,8 @@ export function WelcomeStep() {
               </Badge>
             </div>
             <p className="text-sm text-subtle-foreground max-w-xl leading-relaxed">
-              Studio-grade, local-first screen recorder and proxy timeline editor engineered for
-              zero audio-video drift, hardware-accelerated encoding, and pristine captures.
+              Studio-grade, local-first screen recorder and responsive timeline editor engineered
+              for zero audio-video drift, hardware-accelerated encoding, and pristine captures.
             </p>
           </div>
         </div>
@@ -88,7 +88,7 @@ export function WelcomeStep() {
             <div className="flex size-8 items-center justify-center rounded-lg bg-secondary/10 text-secondary">
               <Wand2 className="size-4" />
             </div>
-            <span className="text-sm font-semibold text-foreground">Proxy Timeline Editor</span>
+            <span className="text-sm font-semibold text-foreground">Responsive Timeline Editor</span>
           </div>
           <p className="text-xs text-subtle-foreground leading-relaxed">
             Trim, split, zoom, and annotate immediately after recording without heavy re-encoding

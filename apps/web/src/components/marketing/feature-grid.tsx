@@ -45,7 +45,7 @@ const FEATURES: Feature[] = [
     tone: "graphic",
     title: "A feature-rich timeline editor",
     description:
-      "Proxy-based multi-track editing: trim, split, move, delete, markers — with unlimited undo/redo. Every edit lands instantly; nothing re-renders until you export.",
+      "Multi-track editing: trim, split, move, delete, markers — with unlimited undo/redo. Every edit lands instantly; nothing re-renders until you export.",
     demoLabel: "Trim, split & undo on the timeline",
     span: "md:col-span-5",
   },

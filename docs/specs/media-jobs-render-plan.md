@@ -12,7 +12,7 @@ The durable job scheduler manages background media and project work:
 
 | Kind | Purpose | Trigger |
 |------|---------|---------|
-| `prepare` | Probe, proxy, thumbnail, waveform generation for a recording | After recording stop or recovery |
+| `prepare` | Probe, thumbnail, waveform, and audio/video track generation for a recording; optional low-res preview proxy on request | After recording stop or recovery; proxy stage runs when the editor picks a reduced preview-quality mode |
 | `asset_derivative` | Generate thumbnails, waveforms, previews, or proxies for one imported asset | Asset import or relink |
 | `export` | Render timeline to final MP4 | User initiates export |
 | `upload` | Send exported file to S3/Drive/local folder | User initiates upload |
@@ -224,7 +224,7 @@ Derivatives are versioned and can be invalidated when the recipe changes:
 
 | Derivative | Recipe Version | Inputs | Invalidation |
 |-----------|---------------|--------|-------------|
-| Proxy | 1 | Original video, proxy height | Source file changed, height changed |
+| Proxy | 1 | Original video, proxy height | Source file changed, height changed. On-demand only: prepare skips it unless `includeProxy` is set |
 | Thumbnails | 1 | Original video or imported image, interval, sprite size | Source file changed, interval changed |
 | Waveform | 1 | Original video or imported audio track | Source file changed |
 | Audio preview | 1 | Imported audio source | Source file changed |
