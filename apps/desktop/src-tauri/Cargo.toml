@@ -1,6 +1,6 @@
 [package]
 name = "recordforge-desktop"
-version = "1.5.3"
+version = "1.5.4"
 description = "Local-first screen recorder and lightweight editor"
 authors = ["prestige-tech & RecordForge contributors"]
 license = "GPL-3.0-or-later"
