@@ -232,9 +232,9 @@ export function NewRecordingModal({
   return (
     <>
       <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-        <DialogContent className="max-w-2xl border border-border-strong bg-surface text-foreground p-0 rounded-xl overflow-hidden shadow-2xl">
+        <DialogContent className="flex max-h-[90vh] max-w-2xl flex-col gap-0 overflow-hidden rounded-xl border border-border-strong bg-surface p-0 text-foreground shadow-2xl">
           {/* Header - padding-right 12 to make room for Radix native close button */}
-          <div className="flex items-center justify-between border-b border-border px-6 py-4 pr-12">
+          <div className="flex shrink-0 items-center justify-between border-b border-border px-6 py-4 pr-12">
             <div className="flex items-center gap-2.5">
               <Video className="size-5 text-recording" />
               <h2 className="font-serif text-xl font-bold tracking-tight text-foreground">
@@ -246,7 +246,7 @@ export function NewRecordingModal({
           {error ? (
             <div
               role="alert"
-              className="mx-6 mt-4 rounded-md border border-red-200 bg-red-50 p-2.5 text-xs text-red-600 dark:border-red-900 dark:bg-red-950 dark:text-red-300 flex items-center justify-between"
+              className="mx-6 mt-4 flex shrink-0 items-center justify-between rounded-md border border-red-200 bg-red-50 p-2.5 text-xs text-red-600 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
             >
               <span>{error}</span>
               <button
@@ -259,8 +259,9 @@ export function NewRecordingModal({
             </div>
           ) : null}
 
-          {/* Modal Body */}
-          <div className="grid grid-cols-1 gap-6 p-6 md:grid-cols-2">
+          {/* Modal Body — this grid is the scroll container so the header and
+              footer stay pinned when the window is shorter than the content. */}
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-6 overflow-y-auto overscroll-contain p-6 md:grid-cols-2">
             {/* Left Column: VIDEO SOURCE */}
             <div className="flex flex-col gap-4">
               <h3 className="font-label text-xs font-bold tracking-wider uppercase text-subtle-foreground">
@@ -686,52 +687,61 @@ export function NewRecordingModal({
                   </div>
                 ) : null}
               </div>
+            </div>
 
-              {/* GPU screen processing preference — independent toggle next to
-                  Smart Zoom so users can compare the compatibility path. */}
-              <div className="rounded-lg border border-border bg-surface-dim p-3.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 flex-1 items-center gap-3">
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-overlay text-muted-foreground">
-                      <Zap className="size-4" aria-hidden />
+            {/* Processing options span both columns — keeps the inputs column
+                (and the whole dialog) shorter on small windows. */}
+            <div className="flex flex-col gap-4 md:col-span-2">
+              <h3 className="font-label text-xs font-bold tracking-wider uppercase text-subtle-foreground">
+                Processing
+              </h3>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {/* GPU screen processing preference — independent toggle next to
+                    Smart Zoom so users can compare the compatibility path. */}
+                <div className="rounded-lg border border-border bg-surface-dim p-3.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-overlay text-muted-foreground">
+                        <Zap className="size-4" aria-hidden />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          GPU screen processing
+                        </div>
+                        <p className="mt-0.5 text-xs text-subtle-foreground">
+                          Use a compatible GPU path when available; fall back automatically. Turn
+                          off to compare the compatibility path.
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={preferences.gpuScreenCapture}
+                      onCheckedChange={(checked) =>
+                        void savePreferences({ gpuScreenCapture: checked })
+                      }
+                      aria-label="GPU screen processing"
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-primary/25 bg-primary/5 p-3.5">
+                  <div className="flex items-center gap-3">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
+                      <Sparkles className="size-4" aria-hidden />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-foreground">
-                        GPU screen processing
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-foreground">Smart Zoom</span>
+                        <span className="rounded-full border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
+                          {preferences.smartZoomEnabled ? "Ready" : "Off"}
+                        </span>
                       </div>
-                      <p className="mt-0.5 text-xs text-subtle-foreground">
-                        Use a compatible GPU path when available; fall back automatically. Turn off
-                        to compare the compatibility path.
+                      <p className="mt-0.5 truncate text-xs text-subtle-foreground">
+                        {preferences.smartZoomEnabled
+                          ? `${preferences.smartZoomPreset} focus ranges will be added to the editor.`
+                          : "Enable it in Settings → Recording Defaults."}
                       </p>
                     </div>
-                  </div>
-                  <Switch
-                    checked={preferences.gpuScreenCapture}
-                    onCheckedChange={(checked) =>
-                      void savePreferences({ gpuScreenCapture: checked })
-                    }
-                    aria-label="GPU screen processing"
-                  />
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-primary/25 bg-primary/5 p-3.5">
-                <div className="flex items-center gap-3">
-                  <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
-                    <Sparkles className="size-4" aria-hidden />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-foreground">Smart Zoom</span>
-                      <span className="rounded-full border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">
-                        {preferences.smartZoomEnabled ? "Ready" : "Off"}
-                      </span>
-                    </div>
-                    <p className="mt-0.5 truncate text-xs text-subtle-foreground">
-                      {preferences.smartZoomEnabled
-                        ? `${preferences.smartZoomPreset} focus ranges will be added to the editor.`
-                        : "Enable it in Settings → Recording Defaults."}
-                    </p>
                   </div>
                 </div>
               </div>
@@ -739,7 +749,7 @@ export function NewRecordingModal({
           </div>
 
           {/* Modal Footer */}
-          <div className="flex items-center justify-between border-t border-border bg-background px-6 py-4">
+          <div className="flex shrink-0 items-center justify-between border-t border-border bg-background px-6 py-4">
             <Button
               variant="secondary"
               onClick={() => {
