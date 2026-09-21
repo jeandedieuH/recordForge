@@ -160,8 +160,8 @@ export function CameraClipInspector({
           </div>
 
           <p className="text-[11px] leading-relaxed text-subtle-foreground">
-            Fine-tune this clip to compensate for camera latency the capture pipeline cannot
-            measure (virtual cameras, capture cards). Moving right (positive) delays the video.
+            Fine-tune this clip to compensate for camera latency the capture pipeline cannot measure
+            (virtual cameras, capture cards). Moving right (positive) delays the video.
           </p>
 
           <div className="flex flex-wrap items-center gap-1.5">

@@ -377,9 +377,7 @@ describe("recorder-store preferences & fallback", () => {
       webcamActive: false,
       error: null,
     }
-    const prepare = vi
-      .spyOn(recorderApi, "prepareRecording")
-      .mockResolvedValue("session-sys-id")
+    const prepare = vi.spyOn(recorderApi, "prepareRecording").mockResolvedValue("session-sys-id")
     vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
 
     useRecorderStore.setState({
