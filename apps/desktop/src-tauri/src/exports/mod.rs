@@ -1334,6 +1334,7 @@ fn render_timeline_composition(
             cursor_renderers,
             plan,
             asset_paths,
+            (screen_x, screen_y, screen_w, screen_h),
         )?;
         // Gate each plate overlay to the time windows where its content can be
         // visible; outside them the blend is skipped and the base passes
@@ -1356,8 +1357,14 @@ fn render_timeline_composition(
             items_plate_label = Some("[items_plate]".to_string());
         } else if !prepared.renderers.is_empty() {
             // Cursor-only stream: composite directly below the camera layer.
+            // The plate is the fitted screen rect, not the full canvas, when
+            // `cursor_rect` is set — overlay it at that rect's origin.
+            let (plate_x, plate_y) = prepared
+                .cursor_rect
+                .map(|(x, y, _, _)| (x, y))
+                .unwrap_or((0, 0));
             filters.push(format!(
-                "[{current_label}]{plate_source}overlay=shortest=1:format=yuv420{cursor_enable}[with_cursor]"
+                "[{current_label}]{plate_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
             ));
             current_label = "with_cursor".to_string();
         } else if prepared.overlay_engine.is_some() {
@@ -1766,7 +1773,18 @@ fn render_timeline_composition(
         // Machine-readable progress blocks on stderr; the runner parses
         // `out_time=` from them and keeps them out of failure diagnostics.
         .args(["-progress", "pipe:2"]);
+    // Hardware decode keeps compressed frames off the CPU-side demux/decode
+    // path when a hardware encoder is in use. `auto` picks any working
+    // backend (D3D11VA/DXVA2/NVDEC on Windows, VideoToolbox on macOS, VAAPI on
+    // Linux) and silently falls back to software when none applies, so it is
+    // also safe on image/metadata inputs and GPU-less machines. Software
+    // encodes keep a clean software command — including the hardware-retry
+    // path, which re-enters here with `ExportEncoder::Software`.
+    let hwaccel_inputs = encoder != encoding::ExportEncoder::Software;
     for (_, asset_path) in &input_assets {
+        if hwaccel_inputs {
+            command.args(["-hwaccel", "auto"]);
+        }
         command
             .args(["-thread_queue_size", "128"])
             .arg("-i")
@@ -1776,11 +1794,12 @@ fn render_timeline_composition(
         // The generated overlay stream is a transparent RGBA rawvideo feed over
         // stdin; frame timestamps come from the declared rate. When cursor and
         // overlay items coexist the stream packs both planes side by side, so
-        // the declared width doubles.
-        let plate_width = canvas.width * if frame_plan.dual_plane { 2 } else { 1 };
+        // the declared width doubles. A cursor-only stream is the fitted screen
+        // rect, not the full canvas.
+        let plate_width = frame_plan.width * if frame_plan.dual_plane { 2 } else { 1 };
         command
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-            .args(["-s", &format!("{}x{}", plate_width, canvas.height)])
+            .args(["-s", &format!("{}x{}", plate_width, frame_plan.height)])
             .args(["-r", &canvas.fps.to_string()])
             .args(["-thread_queue_size", "128"])
             .arg("-i")
@@ -1974,8 +1993,21 @@ fn build_cursor_renderers(
 #[allow(dead_code)]
 struct CursorFramePlan {
     fps: u32,
+    /// Dimensions of each plane written to FFmpeg's stdin. Equal to the canvas
+    /// size except for a cursor-only stream, where the plane is the fitted
+    /// screen rect — the cursor is clipped to that rect, so shipping the
+    /// smaller plane cuts rasterization, pipe, and composite work by the
+    /// padding fraction for free.
     width: u32,
     height: u32,
+    /// Canvas size the cursor renderer draws into before the cursor rect is
+    /// cropped out. Only differs from `width`/`height` for cursor-only plans.
+    canvas_width: u32,
+    canvas_height: u32,
+    /// Canvas-space rect the cursor plane is cropped to before streaming, and
+    /// where the graph composites it back (`overlay=x:y`). `None` keeps the
+    /// plane at full canvas size.
+    cursor_rect: Option<(u32, u32, u32, u32)>,
     frame_count: u64,
     dual_plane: bool,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
@@ -1988,6 +2020,7 @@ fn prepare_cursor_frame_plan(
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     plan: &RenderPlan,
     asset_paths: &HashMap<String, PathBuf>,
+    screen_rect: (f64, f64, f64, f64),
 ) -> Result<CursorFramePlan> {
     // Validate the canvas pixmap can be allocated up front; each producer
     // worker allocates its own copy when feeding starts.
@@ -2049,10 +2082,34 @@ fn prepare_cursor_frame_plan(
     };
 
     let dual_plane = !renderers.is_empty() && overlay_engine.is_some();
+    // Only a pure cursor stream can shrink to the fitted screen rect: overlay
+    // items draw in canvas coordinates, and the dual-plane stream needs both
+    // halves at the same size.
+    let cursor_rect = if overlay_engine.is_none() && !renderers.is_empty() {
+        let (sx, sy, sw, sh) = screen_rect;
+        // The renderers clip every draw to this rect (rounded ints, matching
+        // `ClipRect` construction in cursor.rs), so the crop covers all drawn
+        // pixels exactly; clamp to the canvas for degenerate rect inputs.
+        let x = sx.round().clamp(0.0, canvas.width.saturating_sub(1) as f64) as u32;
+        let y = sy
+            .round()
+            .clamp(0.0, canvas.height.saturating_sub(1) as f64) as u32;
+        let w = (sw.round().max(1.0) as u32).min(canvas.width - x);
+        let h = (sh.round().max(1.0) as u32).min(canvas.height - y);
+        Some((x, y, w, h))
+    } else {
+        None
+    };
+    let (plane_w, plane_h) = cursor_rect
+        .map(|(_, _, w, h)| (w, h))
+        .unwrap_or((canvas.width, canvas.height));
     Ok(CursorFramePlan {
         fps: canvas.fps,
-        width: canvas.width,
-        height: canvas.height,
+        width: plane_w,
+        height: plane_h,
+        canvas_width: canvas.width,
+        canvas_height: canvas.height,
+        cursor_rect,
         frame_count,
         dual_plane,
         renderers,
@@ -2123,6 +2180,27 @@ fn pack_overlay_planes(
     }
 }
 
+/// Copy the `x,y,w,h` rect out of an RGBA buffer whose rows are `stride_w`
+/// pixels wide into a tightly packed `w`×`h` plane.
+fn crop_rgba_region(
+    src: &[u8],
+    stride_w: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> Vec<u8> {
+    let row_bytes = w * 4;
+    let mut out = vec![0u8; row_bytes * h];
+    let src_stride = stride_w * 4;
+    for row in 0..h {
+        let src_start = (y + row) * src_stride + x * 4;
+        out[row * row_bytes..(row + 1) * row_bytes]
+            .copy_from_slice(&src[src_start..src_start + row_bytes]);
+    }
+    out
+}
+
 /// One produced overlay frame: rasterized bytes, a fully transparent frame
 /// (the writer holds a shared zero buffer), or a worker failure.
 enum ProducedFrame {
@@ -2144,6 +2222,10 @@ struct OverlayWorkerState {
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<overlay_engine::OverlayEngine>,
     cursor_pixmap: resvg::tiny_skia::Pixmap,
+    /// Canvas-space rect the finished cursor plane is cropped to before it is
+    /// written to FFmpeg. `None` ships the full canvas (items planes and the
+    /// halves of a dual-plane frame are always full-canvas).
+    cursor_rect: Option<(u32, u32, u32, u32)>,
     items_layer: Option<resvg::tiny_skia::Pixmap>,
     last_display_items: Option<Vec<overlay_engine::DisplayItem>>,
     cached_unpremultiplied_frame: Option<Arc<Vec<u8>>>,
@@ -2155,6 +2237,7 @@ impl OverlayWorkerState {
         overlay_engine: Option<overlay_engine::OverlayEngine>,
         width: u32,
         height: u32,
+        cursor_rect: Option<(u32, u32, u32, u32)>,
     ) -> std::result::Result<Self, String> {
         let cursor_pixmap = resvg::tiny_skia::Pixmap::new(width, height)
             .ok_or_else(|| "allocate cursor pixmap failed".to_string())?;
@@ -2162,6 +2245,7 @@ impl OverlayWorkerState {
             renderers,
             overlay_engine,
             cursor_pixmap,
+            cursor_rect,
             items_layer: None,
             last_display_items: None,
             cached_unpremultiplied_frame: None,
@@ -2206,7 +2290,10 @@ impl OverlayWorkerState {
                     .render_to_pixmap(overlay_time_ms, layer)
                     .map_err(|error| format!("render overlay frame: {error}"))?;
                 let mut unprem = layer.data().to_vec();
-                cursor::unpremultiply_rgba(&mut unprem);
+                cursor::unpremultiply_rgba_bounded(
+                    &mut unprem,
+                    self.cursor_pixmap.width() as usize,
+                );
                 self.cached_unpremultiplied_frame = Some(Arc::new(unprem));
                 self.last_display_items = Some(display_list.items);
             }
@@ -2220,8 +2307,28 @@ impl OverlayWorkerState {
                 self.cursor_pixmap
                     .fill(resvg::tiny_skia::Color::TRANSPARENT);
                 renderer.render_frame_at(output_time_ms, self.cursor_pixmap.data_mut());
-                cursor::unpremultiply_rgba(self.cursor_pixmap.data_mut());
-                Some(self.cursor_pixmap.data().to_vec())
+                match self.cursor_rect {
+                    // Crop to the fitted screen rect first — every drawn pixel
+                    // is clipped to it — then unpremultiply only the drawn
+                    // bounding box inside the smaller plane.
+                    Some((rx, ry, rw, rh)) => {
+                        let mut plane = crop_rgba_region(
+                            self.cursor_pixmap.data(),
+                            self.cursor_pixmap.width() as usize,
+                            rx as usize,
+                            ry as usize,
+                            rw as usize,
+                            rh as usize,
+                        );
+                        cursor::unpremultiply_rgba_bounded(&mut plane, rw as usize);
+                        Some(plane)
+                    }
+                    None => {
+                        let stride = self.cursor_pixmap.width() as usize;
+                        cursor::unpremultiply_rgba_bounded(self.cursor_pixmap.data_mut(), stride);
+                        Some(self.cursor_pixmap.data().to_vec())
+                    }
+                }
             }
             None => None,
         };
@@ -2317,20 +2424,26 @@ fn feed_cursor_frames(
             // closure only moves owned `Send` state; `CursorEngine` is `!Sync`.
             let renderers = cursor.renderers.clone();
             let overlay_engine = cursor.overlay_engine.clone();
-            let width = cursor.width;
-            let height = cursor.height;
+            let width = cursor.canvas_width;
+            let height = cursor.canvas_height;
+            let cursor_rect = cursor.cursor_rect;
             let fps = cursor.fps;
             let dual_plane = cursor.dual_plane;
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut state =
-                        match OverlayWorkerState::new(renderers, overlay_engine, width, height) {
-                            Ok(state) => state,
-                            Err(error) => {
-                                let _ = frame_tx.send((0, ProducedFrame::Failed(error)));
-                                return;
-                            }
-                        };
+                    let mut state = match OverlayWorkerState::new(
+                        renderers,
+                        overlay_engine,
+                        width,
+                        height,
+                        cursor_rect,
+                    ) {
+                        Ok(state) => state,
+                        Err(error) => {
+                            let _ = frame_tx.send((0, ProducedFrame::Failed(error)));
+                            return;
+                        }
+                    };
                     loop {
                         if cancel.load(std::sync::atomic::Ordering::Relaxed)
                             || abort.load(std::sync::atomic::Ordering::Relaxed)
@@ -2508,8 +2621,9 @@ fn feed_cursor_frames_sequential(
     let mut state = OverlayWorkerState::new(
         cursor.renderers.clone(),
         cursor.overlay_engine.clone(),
-        cursor.width,
-        cursor.height,
+        cursor.canvas_width,
+        cursor.canvas_height,
+        cursor.cursor_rect,
     )
     .map_err(InternalError::Media)?;
 
@@ -6359,8 +6473,15 @@ mod tests {
             ..Default::default()
         };
         let asset_paths = HashMap::new();
-        let frame_plan = prepare_cursor_frame_plan(&canvas, 5000, Vec::new(), &plan, &asset_paths)
-            .expect("prepare frame plan succeeds");
+        let frame_plan = prepare_cursor_frame_plan(
+            &canvas,
+            5000,
+            Vec::new(),
+            &plan,
+            &asset_paths,
+            (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+        )
+        .expect("prepare frame plan succeeds");
 
         assert!(frame_plan.overlay_engine.is_some());
         let engine = frame_plan.overlay_engine.unwrap();
@@ -6482,8 +6603,15 @@ mod tests {
             fps: 30,
             ..Default::default()
         };
-        let frame_plan = prepare_cursor_frame_plan(&canvas, 5000, Vec::new(), &plan, &asset_paths)
-            .expect("prepare frame plan succeeds");
+        let frame_plan = prepare_cursor_frame_plan(
+            &canvas,
+            5000,
+            Vec::new(),
+            &plan,
+            &asset_paths,
+            (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+        )
+        .expect("prepare frame plan succeeds");
 
         assert!(frame_plan.overlay_engine.is_some());
         let engine = frame_plan.overlay_engine.unwrap();
@@ -9187,8 +9315,15 @@ mod tests {
             fps: 30,
             ..Default::default()
         };
-        let frame_plan = prepare_cursor_frame_plan(&canvas, 1000, Vec::new(), &plan, &asset_paths)
-            .expect("prepare frame plan succeeds");
+        let frame_plan = prepare_cursor_frame_plan(
+            &canvas,
+            1000,
+            Vec::new(),
+            &plan,
+            &asset_paths,
+            (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+        )
+        .expect("prepare frame plan succeeds");
 
         assert!(frame_plan.overlay_engine.is_some());
         let engine = frame_plan.overlay_engine.unwrap();
