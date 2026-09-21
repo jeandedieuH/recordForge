@@ -239,6 +239,8 @@ pub fn ordered_camera_modes(
 
 /// Bytes of `-list_options` stderr retained for parsing. The listing is small;
 /// the cap only guards against a device spewing diagnostics without bound.
+/// Windows-only because only the dshow probe path consumes it.
+#[cfg(windows)]
 const LIST_OPTIONS_RETAINED_BYTES: usize = 128 * 1024;
 
 /// Probe the camera's advertised modes once before starting a segment.
