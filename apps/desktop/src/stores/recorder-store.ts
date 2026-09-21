@@ -611,6 +611,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         captureMicrophone: Boolean(micId),
         captureSystemAudio: Boolean(sysId),
         captureWebcam: Boolean(camId),
+        webcamPreviewMode: state.preferences.webcamPreviewMode,
+        gpuScreenCapture: state.preferences.gpuScreenCapture,
         microphoneDeviceId: micId || undefined,
         systemAudioDeviceId: sysId || undefined,
         webcamDeviceId: camId || undefined,

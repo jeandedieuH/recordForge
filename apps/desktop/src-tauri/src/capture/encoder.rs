@@ -174,11 +174,9 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
             "testsrc=size=320x240:rate=10:duration=0.1",
             "-c:v",
             encoder,
-            "-pix_fmt",
-            "yuv420p",
-            "-an",
-            "-y",
         ]);
+        command.args(probe_pixel_format_args(encoder));
+        command.args(["-an", "-y"]);
     }
     command.arg(&output);
 
@@ -226,16 +224,152 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
     Ok(info)
 }
 
+/// Pixel-format/probe arguments for a single encoder test encode.
+///
+/// Media Foundation is forced into hardware mode (`-hw_encoding 1`) and fed
+/// NV12. Hardware forcing, not the pixel format alone, prevents a software
+/// implementation from being reported as available hardware acceleration.
+fn probe_pixel_format_args(encoder: &str) -> Vec<&'static str> {
+    if encoder == "h264_mf" {
+        vec!["-hw_encoding", "1", "-pix_fmt", "nv12"]
+    } else {
+        vec!["-pix_fmt", "yuv420p"]
+    }
+}
+
+/// Ordered list of encoder candidates for a recording/webcam attempt.
+///
+/// Keeps supported H.264 hardware paths in priority order, without duplicates.
+/// The bundled libx264 encoder is always last; unrelated HEVC/software encoders
+/// and hardware paths requiring a different filter graph are not tried.
+pub fn recording_encoder_candidates(available: &[String], priority: &[String]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for candidate in priority {
+        if candidate != "libx264"
+            && available.contains(candidate)
+            && matches!(
+                candidate.as_str(),
+                "h264_nvenc" | "h264_qsv" | "h264_amf" | "h264_mf" | "h264_videotoolbox"
+            )
+            && !candidates.contains(candidate)
+        {
+            candidates.push(candidate.clone());
+        }
+    }
+    candidates.push("libx264".into());
+    candidates
+}
+
 /// Select the highest-priority encoder from `priority` that is present in `available`.
-/// Falls back to the first priority item or `"libx264"` if no candidate matches.
+/// Falls back to the bundled `"libx264"` — never an undetected priority entry —
+/// so proxy/media jobs always select an encoder that can actually initialize.
 pub fn select_best_encoder(available: &[String], priority: &[String]) -> String {
     for candidate in priority {
         if available.iter().any(|a| a == candidate) {
             return candidate.clone();
         }
     }
-    priority
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "libx264".to_string())
+    "libx264".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidates_follow_priority_then_available_then_x264() {
+        let available = vec![
+            "h264_mf".to_string(),
+            "h264_nvenc".to_string(),
+            "libx264".to_string(),
+        ];
+        let priority = vec![
+            "h264_qsv".to_string(), // not available — skipped
+            "h264_nvenc".to_string(),
+            "h264_mf".to_string(),
+        ];
+        assert_eq!(
+            recording_encoder_candidates(&available, &priority),
+            vec!["h264_nvenc", "h264_mf", "libx264"]
+        );
+    }
+
+    #[test]
+    fn candidates_dedupe_and_always_end_with_x264() {
+        let available = vec![
+            "h264_nvenc".to_string(),
+            "h264_nvenc".to_string(),
+            "libx264".to_string(),
+        ];
+        let priority = vec!["h264_nvenc".to_string(), "libx264".to_string()];
+        let candidates = recording_encoder_candidates(&available, &priority);
+        assert_eq!(candidates, vec!["h264_nvenc", "libx264"]);
+    }
+
+    #[test]
+    fn candidates_fall_back_to_x264_when_nothing_detected() {
+        // An empty detection result must still yield the bundled software
+        // encoder so recording can proceed.
+        assert_eq!(
+            recording_encoder_candidates(&[], &["h264_nvenc".to_string()]),
+            vec!["libx264"]
+        );
+        // Priority encoders absent from detection are never selected (e.g.
+        // NVENC when only libx264 was detected).
+        assert_eq!(
+            recording_encoder_candidates(
+                &["libx264".to_string()],
+                &["h264_nvenc".to_string(), "h264_mf".to_string()],
+            ),
+            vec!["libx264"]
+        );
+    }
+
+    #[test]
+    fn candidates_exclude_other_codecs_and_put_software_last() {
+        let available = [
+            "libx264",
+            "libx265",
+            "h264_vaapi",
+            "hevc_videotoolbox",
+            "h264_mf",
+        ]
+        .map(String::from);
+        let priority = ["libx264", "libx265", "h264_vaapi", "h264_mf", "h264_mf"].map(String::from);
+        assert_eq!(
+            recording_encoder_candidates(&available, &priority),
+            ["h264_mf", "libx264"]
+        );
+    }
+
+    #[test]
+    fn select_best_encoder_never_returns_undetected_hardware() {
+        // Requested hardware that was not detected must fall back to x264 —
+        // returning the first priority entry would pick an encoder that
+        // cannot initialize on this machine.
+        assert_eq!(
+            select_best_encoder(&["libx264".to_string()], &["h264_nvenc".to_string()]),
+            "libx264"
+        );
+        assert_eq!(
+            select_best_encoder(&["h264_nvenc".to_string()], &["h264_nvenc".to_string()]),
+            "h264_nvenc"
+        );
+    }
+
+    #[test]
+    fn mediafoundation_probe_forces_hardware_nv12() {
+        assert_eq!(
+            probe_pixel_format_args("h264_mf"),
+            vec!["-hw_encoding", "1", "-pix_fmt", "nv12"]
+        );
+        assert_eq!(
+            probe_pixel_format_args("h264_nvenc"),
+            vec!["-pix_fmt", "yuv420p"]
+        );
+        assert_eq!(
+            probe_pixel_format_args("libx264"),
+            vec!["-pix_fmt", "yuv420p"]
+        );
+    }
 }

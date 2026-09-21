@@ -112,12 +112,17 @@ pub struct WebcamSegmentInput {
 /// camera is re-encoded once, independently of the screen and audio assets, so
 /// the editor can seek, trim, mute, or replace it without touching the screen
 /// recording.
-#[instrument(skip(ffmpeg_path, segments, output_path, profile))]
+///
+/// Encoding follows the camera profile (<=30fps) and walks the detected
+/// encoder candidates in order, retrying with the next candidate when an
+/// encoder fails to initialize — the same fallback chain live capture uses.
+#[instrument(skip(ffmpeg_path, segments, output_path, profile, available_encoders))]
 pub fn concatenate_webcam_segments(
     ffmpeg_path: &str,
     segments: &[WebcamSegmentInput],
     output_path: &Path,
     profile: &RecordingProfile,
+    available_encoders: &[String],
 ) -> crate::errors::Result<()> {
     if segments.is_empty() {
         return Err(crate::errors::InternalError::Media(
@@ -148,38 +153,36 @@ pub fn concatenate_webcam_segments(
         })?;
     }
 
-    let mut command = crate::process::create_command(ffmpeg_path);
-    command
-        .arg("-y")
-        .args(["-hide_banner", "-loglevel", "error"]);
-    for segment in segments {
-        command.arg("-i").arg(&segment.path);
+    let camera = super::webcam::camera_profile(profile);
+    let candidates =
+        super::encoder::recording_encoder_candidates(available_encoders, &profile.encoder_priority);
+
+    let mut last_error: Option<crate::errors::InternalError> = None;
+    for encoder in &candidates {
+        let mut command =
+            build_webcam_concat_command(ffmpeg_path, segments, output_path, &camera, encoder);
+        let output = command.output().map_err(|error| {
+            crate::errors::InternalError::Media(format!("webcam concat run: {error}"))
+        })?;
+        if !output.status.success() {
+            // An encoder that fails to initialize must not abort the whole
+            // asset — retry the same private partial path with the next
+            // detected candidate (libx264 is always last).
+            tracing::warn!(
+                encoder,
+                "webcam concat encode failed; trying next candidate"
+            );
+            last_error = Some(crate::errors::InternalError::Media(format!(
+                "webcam concat failed with encoder {encoder}"
+            )));
+            continue;
+        }
+        last_error = None;
+        break;
     }
 
-    let filter = build_webcam_stitch_filter(segments);
-    command
-        .args(["-filter_complex", &filter])
-        .args(["-map", "[webcam]", "-an"]);
-    add_profile_video_encoder(&mut command, profile);
-    let total_duration = segments
-        .iter()
-        .map(|segment| segment.duration)
-        .fold(Duration::ZERO, |total, duration| {
-            total.saturating_add(duration)
-        });
-    command
-        .args(["-t", &format!("{:.6}", total_duration.as_secs_f64())])
-        .args(["-movflags", "+faststart"])
-        .arg(output_path);
-
-    let output = command.output().map_err(|error| {
-        crate::errors::InternalError::Media(format!("webcam concat run: {error}"))
-    })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(
-            crate::errors::InternalError::Media(format!("webcam concat failed: {stderr}")).into(),
-        );
+    if let Some(error) = last_error {
+        return Err(error.into());
     }
 
     let size = std::fs::metadata(output_path)
@@ -197,21 +200,60 @@ pub fn concatenate_webcam_segments(
     Ok(())
 }
 
-fn build_webcam_stitch_filter(segments: &[WebcamSegmentInput]) -> String {
+/// Assemble the FFmpeg command that stitches webcam segments onto the screen
+/// timeline and re-encodes with the selected encoder. Pure construction so
+/// argument layout stays testable without spawning FFmpeg.
+fn build_webcam_concat_command(
+    ffmpeg_path: &str,
+    segments: &[WebcamSegmentInput],
+    output_path: &Path,
+    camera: &RecordingProfile,
+    encoder: &str,
+) -> Command {
+    let mut command = crate::process::create_command(ffmpeg_path);
+    command
+        .arg("-y")
+        .args(["-hide_banner", "-loglevel", "error"]);
+    for segment in segments {
+        command.arg("-i").arg(&segment.path);
+    }
+
+    let filter = build_webcam_stitch_filter(segments, camera.width, camera.height);
+    command
+        .args(["-filter_complex", &filter])
+        .args(["-map", "[webcam]", "-an"]);
+    super::ffmpeg::add_video_encoder(&mut command, camera, encoder, true, camera.fps as f64);
+    let total_duration = segments
+        .iter()
+        .map(|segment| segment.duration)
+        .fold(Duration::ZERO, |total, duration| {
+            total.saturating_add(duration)
+        });
+    command
+        .args(["-t", &format!("{:.6}", total_duration.as_secs_f64())])
+        .args(["-movflags", "+faststart"])
+        .arg(output_path);
+    command
+}
+
+fn build_webcam_stitch_filter(segments: &[WebcamSegmentInput], width: i32, height: i32) -> String {
     let mut filters = Vec::with_capacity(segments.len() + 1);
     for (index, segment) in segments.iter().enumerate() {
         let duration = segment.duration.as_secs_f64();
         let offset = segment.offset_ms as f64 / 1000.0;
-        let source = if offset >= 0.0 {
-            format!(
-                "[{}:v]tpad=start_mode=add:start_duration={offset:.6}:color=black",
-                index
-            )
+        // Segments negotiated at different camera modes (e.g. after a pause
+        // fallback) cannot concat unless geometry matches: scale down without
+        // ever upscaling, then black-pad to the target canvas.
+        let normalize = format!(
+            "scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease:force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        );
+        let timing = if offset >= 0.0 {
+            format!("tpad=start_mode=add:start_duration={offset:.6}:color=black")
         } else {
-            format!("[{}:v]trim=start={:.6}", index, -offset)
+            format!("trim=start={:.6}", -offset)
         };
         filters.push(format!(
-            "{source},setpts=PTS-STARTPTS,tpad=stop_mode=add:stop_duration={duration:.6}:color=black,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
+            "[{index}:v]{normalize},{timing},setpts=PTS-STARTPTS,tpad=stop_mode=add:stop_duration={duration:.6}:color=black,trim=duration={duration:.6},setpts=PTS-STARTPTS[v{index}]"
         ));
     }
 
@@ -227,28 +269,6 @@ fn build_webcam_stitch_filter(segments: &[WebcamSegmentInput]) -> String {
         ));
     }
     filters.join(";")
-}
-
-fn add_profile_video_encoder(command: &mut Command, profile: &RecordingProfile) {
-    let encoder = profile
-        .encoder_priority
-        .first()
-        .map(String::as_str)
-        .unwrap_or("libx264");
-    command.args(["-c:v", encoder, "-pix_fmt", "yuv420p", "-r"]);
-    command.arg(profile.fps.to_string());
-    if let Some(crf) = profile.crf {
-        if encoder == "libx264" || encoder == "libx265" {
-            command.args(["-preset", "ultrafast", "-crf", &crf.to_string()]);
-        } else if encoder.starts_with("h264_") || encoder.starts_with("hevc_") {
-            command.args([
-                "-b:v",
-                &format!("{}k", profile.video_bitrate_kbps.unwrap_or(5000)),
-            ]);
-        }
-    } else if let Some(kbps) = profile.video_bitrate_kbps {
-        command.args(["-b:v", &format!("{kbps}k")]);
-    }
 }
 
 fn build_audio_timeline_filter(
@@ -573,22 +593,211 @@ mod tests {
 
     #[test]
     fn webcam_stitch_filter_preserves_each_segment_start_offset() {
-        let filter = build_webcam_stitch_filter(&[
-            WebcamSegmentInput {
-                path: PathBuf::from("webcam_000.mp4"),
-                duration: Duration::from_secs(3),
-                offset_ms: 240,
-            },
-            WebcamSegmentInput {
-                path: PathBuf::from("webcam_001.mp4"),
-                duration: Duration::from_secs(2),
-                offset_ms: -80,
-            },
-        ]);
+        let filter = build_webcam_stitch_filter(
+            &[
+                WebcamSegmentInput {
+                    path: PathBuf::from("webcam_000.mp4"),
+                    duration: Duration::from_secs(3),
+                    offset_ms: 240,
+                },
+                WebcamSegmentInput {
+                    path: PathBuf::from("webcam_001.mp4"),
+                    duration: Duration::from_secs(2),
+                    offset_ms: -80,
+                },
+            ],
+            1280,
+            720,
+        );
 
         assert!(filter.contains("tpad=start_mode=add:start_duration=0.240000"));
         assert!(filter.contains("trim=start=0.080000"));
         assert!(filter.contains("concat=n=2:v=1:a=0[webcam]"));
+    }
+
+    #[test]
+    fn webcam_stitch_filter_normalizes_segment_geometry_before_timing() {
+        let filter = build_webcam_stitch_filter(
+            &[WebcamSegmentInput {
+                path: PathBuf::from("webcam_000.mp4"),
+                duration: Duration::from_secs(2),
+                offset_ms: 0,
+            }],
+            1280,
+            720,
+        );
+
+        // Normalization must run before the trim/tpad timing chain so every
+        // concat input already shares the target canvas.
+        let scale_pos = filter
+            .find("scale=w='min(iw,1280)'")
+            .expect("scale present");
+        let pad_pos = filter
+            .find("pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black")
+            .expect("pad present");
+        let setsar_pos = filter.find("setsar=1").expect("setsar present");
+        let tpad_pos = filter.find("tpad=stop_mode=add").expect("timing tpad");
+        assert!(scale_pos < pad_pos && pad_pos < setsar_pos && setsar_pos < tpad_pos);
+        // Never upscale: the scale clamps to min(iw, target).
+        assert!(filter.contains("h='min(ih,720)'"));
+    }
+
+    /// Resolve the first working bundled FFmpeg/FFprobe pair; synthetic tests
+    /// skip cleanly when sidecars are not installed.
+    #[cfg(windows)]
+    fn bundled_ffmpeg_ffprobe() -> Option<(PathBuf, PathBuf)> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        let ffmpeg_ok = crate::process::create_command(ffmpeg.as_os_str())
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let ffprobe_ok = crate::process::create_command(ffprobe.as_os_str())
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ffmpeg_ok && ffprobe_ok {
+            Some((ffmpeg, ffprobe))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn webcam_concat_normalizes_mixed_segment_resolutions() {
+        let Some((ffmpeg, ffprobe)) = bundled_ffmpeg_ffprobe() else {
+            eprintln!("skipping: FFmpeg/FFprobe sidecars unavailable");
+            return;
+        };
+        let directory = tempfile::tempdir().expect("create media test directory");
+
+        // Two synthetic camera segments at different negotiated resolutions —
+        // the exact case a pause/resume mode fallback produces.
+        let mut segments = Vec::new();
+        for (index, size) in ["640x480", "1280x720"].into_iter().enumerate() {
+            let path = directory.path().join(format!("webcam_{index:03}.mp4"));
+            let status = crate::process::create_command(ffmpeg.as_os_str())
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=c=black:s={size}:r=15:d=1"),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
+                .arg(&path)
+                .status()
+                .expect("generate synthetic camera segment");
+            assert!(status.success(), "generate {size} segment");
+            segments.push(WebcamSegmentInput {
+                path,
+                duration: Duration::from_secs(1),
+                offset_ms: 0,
+            });
+        }
+
+        let profile = RecordingProfile {
+            id: "balanced".into(),
+            label: "Balanced".into(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            video_bitrate_kbps: None,
+            crf: Some(23),
+            encoder_priority: vec!["libx264".into()],
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        };
+        let camera = super::super::webcam::camera_profile(&profile);
+        let output_path = directory.path().join("webcam.concat.mp4");
+        let mut command = build_webcam_concat_command(
+            &ffmpeg.to_string_lossy(),
+            &segments,
+            &output_path,
+            &camera,
+            "libx264",
+        );
+        let output = command.output().expect("run webcam concat");
+        assert!(
+            output.status.success(),
+            "concat must succeed over mixed resolutions"
+        );
+
+        let metadata = crate::media::probe::probe_media(
+            &ffprobe.to_string_lossy(),
+            &output_path,
+            "concat-normalize-test",
+        )
+        .expect("probe concat output");
+        let stream = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .expect("video stream");
+        assert_eq!(stream.width, Some(camera.width));
+        assert_eq!(stream.height, Some(camera.height));
+    }
+
+    #[test]
+    fn webcam_concat_encodes_at_camera_profile_rate() {
+        // A 60fps screen profile must not push the webcam asset to 60fps —
+        // the camera profile caps at 30.
+        let profile = RecordingProfile {
+            id: "smooth-60fps".into(),
+            label: "Smooth".into(),
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            video_bitrate_kbps: Some(5000),
+            crf: Some(24),
+            encoder_priority: super::super::config::default_encoder_priority(),
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        };
+        let camera = super::super::webcam::camera_profile(&profile);
+        assert_eq!(camera.fps, 30);
+
+        let command = build_webcam_concat_command(
+            "ffmpeg",
+            &[WebcamSegmentInput {
+                path: PathBuf::from("webcam_000.mp4"),
+                duration: Duration::from_secs(3),
+                offset_ms: 0,
+            }],
+            Path::new("webcam.partial.mp4"),
+            &camera,
+            "libx264",
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("\"-c:v\" \"libx264\""));
+        assert!(debug.contains("\"-r\" \"30\""));
+        assert!(!debug.contains("\"-r\" \"60\""));
+    }
+
+    #[test]
+    fn webcam_concat_candidates_never_select_undetected_encoders() {
+        // With only libx264 detected, the finalize path must never attempt
+        // nvenc/MF — a job that cannot initialize would just burn a retry.
+        let available = vec!["libx264".to_string()];
+        let candidates = super::super::encoder::recording_encoder_candidates(
+            &available,
+            &super::super::config::default_encoder_priority(),
+        );
+        assert_eq!(candidates, vec!["libx264".to_string()]);
     }
 
     #[test]

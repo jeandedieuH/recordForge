@@ -14,11 +14,7 @@ import {
 } from "lucide-react"
 import { Button } from "@recordforge/ui"
 import { isTauri } from "../../lib/settings"
-import {
-  useRecorderPolling,
-  useRecorderStatusEvents,
-  useRecorderStore,
-} from "../../hooks/use-recorder"
+import { useRecorderPolling, useRecorderStore } from "../../hooks/use-recorder"
 
 interface InjectedWebcamParams {
   deviceId?: string
@@ -102,8 +98,9 @@ function getStoredWebcamPreference(): { webcamId?: string; webcamName?: string }
 // Provides native drag handle, active video playback, direct camera switching,
 // disconnection detection, and frame delivery monitoring to detect freezing.
 export function WebcamPreviewWindow() {
+  // App.tsx owns the single recorder-status event subscription for every
+  // window; this component only polls and reads the shared store.
   useRecorderPolling()
-  useRecorderStatusEvents()
 
   const { status, preferences } = useRecorderStore()
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -210,7 +207,15 @@ export function WebcamPreviewWindow() {
 
   // Determine requested camera identifier
   const storedPrefs = getStoredWebcamPreference()
-  const activePreviewUrl = injectedParams?.previewUrl || status?.webcamPreviewUrl || ""
+  // The backend status is authoritative once known: a null previewUrl (e.g.
+  // while paused, or when preview is disabled) must clear the feed instead of
+  // falling back to the URL injected at window creation.
+  const activePreviewUrl = status
+    ? (status.webcamPreviewUrl ?? "")
+    : (injectedParams?.previewUrl ?? "")
+  // While Tauri status is still unknown the recording state cannot be
+  // determined — never open the browser camera in that window.
+  const statusKnown = status !== null
   const imageSrc = activePreviewUrl
     ? `${activePreviewUrl}${activePreviewUrl.includes("?") ? "&" : "?"}_t=${retryNonce}`
     : ""
@@ -239,6 +244,11 @@ export function WebcamPreviewWindow() {
 
   // Acquire camera stream with permission handshake, retry logic, and NO silent fallback
   useEffect(() => {
+    // Never call getUserMedia while the Tauri status is still unknown — the
+    // recording state (and therefore the DirectShow device lock) cannot be
+    // determined yet.
+    if (isTauri() && !statusKnown) return
+
     if (activePreviewUrl) {
       const label =
         injectedParams?.deviceName ||
@@ -428,6 +438,7 @@ export function WebcamPreviewWindow() {
     status?.webcamDeviceName,
     status?.webcamActive,
     status?.state,
+    statusKnown,
   ])
 
   // Frame delivery monitor to detect frozen or severely lagging camera feeds

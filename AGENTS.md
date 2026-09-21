@@ -203,5 +203,5 @@ When finishing a task, report:
 
 ## Verification Notes
 
-- `bun run lint` currently stops before linting because the installed `typescript-eslint` release does not support the repository's TypeScript 7.0 toolchain; use typecheck, format checks, and tests until the toolchain compatibility is resolved.
+- Desktop lint passed with the installed toolchain on 2026-09-21 using `bun run --cwd apps/desktop lint`; the previously observed `typescript-eslint` / TypeScript 7.0 incompatibility did not reproduce. Run lint alongside typecheck, format checks, and tests rather than assuming it is blocked.
 - On Windows, run Rust tests with `cargo test -j 1` when parallel linking intermittently reports `LNK1104` for test executables.

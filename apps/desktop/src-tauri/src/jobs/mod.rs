@@ -113,6 +113,9 @@ pub struct JobManager {
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
     start_lock: Arc<Mutex<()>>,
+    // Shared with the recorder: jobs hold a permit for their whole run so a
+    // queued job never encodes while capture or finalization is active.
+    resource_gate: Arc<crate::state::CaptureWorkGate>,
 }
 
 impl JobManager {
@@ -123,6 +126,7 @@ impl JobManager {
         ffprobe_path: PathBuf,
         path_policy: PathPolicy,
         available_encoders: Vec<String>,
+        resource_gate: Arc<crate::state::CaptureWorkGate>,
     ) -> Self {
         Self {
             app,
@@ -134,6 +138,7 @@ impl JobManager {
             active_tokens: Arc::new(Mutex::new(HashMap::new())),
             worker_lock: Arc::new(Mutex::new(())),
             start_lock: Arc::new(Mutex::new(())),
+            resource_gate,
         }
     }
 
@@ -189,6 +194,7 @@ impl JobManager {
             available_encoders: self.available_encoders.clone(),
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
+            resource_gate: Arc::clone(&self.resource_gate),
             job_id: job.id.clone(),
             options,
         };
@@ -267,6 +273,7 @@ impl JobManager {
             available_encoders: self.available_encoders.clone(),
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
+            resource_gate: Arc::clone(&self.resource_gate),
             job_id: job.id.clone(),
             options,
         };
@@ -437,6 +444,7 @@ impl JobManager {
             available_encoders: self.available_encoders.clone(),
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
+            resource_gate: Arc::clone(&self.resource_gate),
             job_id: job.id,
             request,
         };
@@ -528,6 +536,7 @@ impl JobManager {
                     available_encoders: self.available_encoders.clone(),
                     active_tokens: Arc::clone(&self.active_tokens),
                     worker_lock: Arc::clone(&self.worker_lock),
+                    resource_gate: Arc::clone(&self.resource_gate),
                     job_id: job.id.clone(),
                     options,
                 };
@@ -612,6 +621,7 @@ impl JobManager {
                 available_encoders: self.available_encoders.clone(),
                 active_tokens: Arc::clone(&self.active_tokens),
                 worker_lock: Arc::clone(&self.worker_lock),
+                resource_gate: Arc::clone(&self.resource_gate),
                 job_id: job.id.clone(),
                 options,
             };
@@ -651,6 +661,7 @@ struct ExportWorker {
     available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
+    resource_gate: Arc<crate::state::CaptureWorkGate>,
     job_id: String,
     request: ExportRequest,
 }
@@ -664,6 +675,13 @@ impl ExportWorker {
         if cancel.load(Ordering::Relaxed) {
             return self.finish_cancelled();
         }
+        // Wait for any active capture/finalization to release the media gate
+        // before marking the job running; a cancelled wait starts nothing.
+        let _resource_permit = match self.resource_gate.wait_for_job(&cancel) {
+            Ok(Some(permit)) => permit,
+            Ok(None) => return self.finish_cancelled(),
+            Err(error) => return self.fail(&error.to_string()),
+        };
 
         let conn = self
             .db
@@ -769,6 +787,7 @@ struct Worker {
     available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
+    resource_gate: Arc<crate::state::CaptureWorkGate>,
     job_id: String,
     options: PrepareOptions,
 }
@@ -783,6 +802,13 @@ impl Worker {
         if cancel.load(Ordering::Relaxed) {
             return self.finish_cancelled();
         }
+        // Wait for any active capture/finalization to release the media gate
+        // before marking the job running; a cancelled wait starts nothing.
+        let _resource_permit = match self.resource_gate.wait_for_job(&cancel) {
+            Ok(Some(permit)) => permit,
+            Ok(None) => return self.finish_cancelled(),
+            Err(error) => return self.fail(&error.to_string()),
+        };
 
         let conn = self
             .db
@@ -1327,6 +1353,7 @@ struct AssetWorker {
     available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
+    resource_gate: Arc<crate::state::CaptureWorkGate>,
     job_id: String,
     options: AssetDerivativeOptions,
 }
@@ -1348,6 +1375,13 @@ impl AssetWorker {
         if cancel.load(Ordering::Relaxed) {
             return self.finish_cancelled();
         }
+        // Wait for any active capture/finalization to release the media gate
+        // before marking the job running; a cancelled wait starts nothing.
+        let _resource_permit = match self.resource_gate.wait_for_job(&cancel) {
+            Ok(Some(permit)) => permit,
+            Ok(None) => return self.finish_cancelled(),
+            Err(error) => return self.fail(&error.to_string()),
+        };
 
         let conn = self
             .db

@@ -29,7 +29,7 @@
 | Component | Version |
 | ----------- | --------- |
 | Windows | 10 21H2+ |
-| FFmpeg | 6.x+ (bundled) |
+| FFmpeg | 9.0.1 (bundled) |
 | .NET Desktop Runtime | Not required |
 | Visual C++ Redistributable | Bundled by Tauri |
 
@@ -109,7 +109,7 @@
 | ---------- | -------- | ------ |
 | 5 min 1080p30 simple trim | < 2× real-time (< 10 min) | > 4× real-time |
 | 5 min 1080p30 full composite | < 4× real-time (< 20 min) | > 8× real-time |
-| Export during recording | No visible impact on recording | Frame drops > 5% |
+| Export during recording | Queued until recording/finalization completes; already-running jobs require wait or cancel before capture | Concurrent media-job encoding or a queued job that never resumes |
 | Export cancellation cleanup | No orphan `.partial` files | Partial files remain |
 
 ---
@@ -144,7 +144,7 @@
 ### Tools
 
 - **CPU/Memory**: Windows Task Manager, `Get-Process` PowerShell, Rust `sysinfo` crate
-- **Frame drops**: FFmpeg stderr `frame=`, `drop=` counters
+- **Frame drops**: FFmpeg -progress encoded-output counters (not unique sensor frames); requestedCameraMode is the requested advertised mode, not independently measured sensor delivery.
 - **A/V drift**: FFprobe stream analysis + manual verification
 - **Disk I/O**: Windows Resource Monitor or `fsutil`
 - **Timing**: Rust `std::time::Instant`, browser `Performance.now()`
@@ -157,6 +157,14 @@
 4. Run each scenario 3 times; report median
 5. Record CPU/memory at 1-second intervals during capture tests
 6. Log FFmpeg stderr for frame/speed/stats extraction
+
+### Screen + camera comparison
+
+Use a packaged release build. Compare screen-only, screen + camera with preview Off, Low (5 FPS), and Standard (15 FPS), on Low Impact and Balanced; then repeat with a 60 FPS screen profile (camera remains capped at 30 FPS). Hiding the window is not equivalent to preview Off. Repeat with GPU screen processing enabled and disabled; disabling GPU processing does not force software encoding. The GPU-resident Windows path currently covers matching-aspect-ratio, even-sized captures with NVENC, AMF, or hardware Media Foundation; other cases retain CPU processing. Record the actual backend and encoder from Settings → Diagnostics.
+
+Save per-segment screen/camera diagnostics after stop: requested camera mode, encoded output FPS/frames, duplicates/drops, process speed, fallback reason, preview FPS, and startup readiness. Startup readiness includes progress-report latency; it is not sensor startup time. Missing counters are unavailable, not zero. Final snapshots persist in the session manifest; the Settings panel shows the current/latest session in this app run.
+
+Measure CPU across RecordForge, its FFmpeg workers, and associated WebView2 processes. Record private memory and working sets separately (shared pages can be double-counted), GPU engine utilization, disk throughput, preview stability, and saved video quality with external tools. The app does not currently measure those resource values, audio underruns, or A/V drift. The synthetic encoder benchmark is not evidence of screen + camera performance. Include sustained recording, pause/resume, a queued/cancelled job during recording, and an already-running job when starting capture. Assess camera/audio alignment with the clap protocol below.
 
 ### A/V sync protocol
 

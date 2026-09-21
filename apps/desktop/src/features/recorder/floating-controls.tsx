@@ -27,6 +27,7 @@ import {
 } from "../../lib/recorder"
 import { isTauri } from "../../lib/settings"
 import { MODIFIER_NAME } from "../../lib/platform"
+import { toErrorMessage } from "../../lib/errors"
 import { useRecorderStore, useRecorderPolling } from "../../hooks/use-recorder"
 
 function formatDuration(ms: number) {
@@ -116,12 +117,18 @@ export function FloatingControls() {
   const [cameraPreviewOpen, setCameraPreviewOpen] = useState(true)
 
   async function handleToggleCameraPreview() {
-    if (cameraPreviewOpen) {
-      await hideWebcamPreview()
-      setCameraPreviewOpen(false)
-    } else {
-      await openWebcamPreview()
-      setCameraPreviewOpen(true)
+    try {
+      if (cameraPreviewOpen) {
+        await hideWebcamPreview()
+        setCameraPreviewOpen(false)
+      } else {
+        await openWebcamPreview()
+        setCameraPreviewOpen(true)
+      }
+    } catch (error) {
+      // Backend rejections (e.g. preview disabled for this recording) surface
+      // through the shared store so the banner shows the real reason.
+      useRecorderStore.setState({ error: toErrorMessage(error) })
     }
   }
 
@@ -315,15 +322,22 @@ export function FloatingControls() {
                     label="system audio"
                     icon={<Volume2 className="size-3" aria-hidden />}
                   />
+                  {/* The camera chip always reports whether the camera is
+                      being recorded; it only toggles the preview window when a
+                      preview stream actually exists for this session. */}
                   <InputChip
                     active={!!status?.webcamActive}
                     label="camera"
                     icon={<Video className="size-3" aria-hidden />}
-                    onClick={() => void handleToggleCameraPreview()}
+                    onClick={
+                      status?.webcamPreviewUrl ? () => void handleToggleCameraPreview() : undefined
+                    }
                     title={
-                      cameraPreviewOpen
-                        ? "Camera preview is open (click to hide)"
-                        : "Click to show camera preview"
+                      status?.webcamPreviewUrl
+                        ? cameraPreviewOpen
+                          ? "Camera preview is open (click to hide)"
+                          : "Click to show camera preview"
+                        : "Capturing camera (preview disabled)"
                     }
                   />
                 </span>
@@ -363,7 +377,7 @@ export function FloatingControls() {
               <AppWindow className="size-4" />
             </Button>
 
-            {status?.webcamActive ? (
+            {status?.webcamActive && status?.webcamPreviewUrl ? (
               <Button
                 size="icon"
                 variant="ghost"
@@ -483,25 +497,30 @@ export function FloatingControls() {
           </div>
         )}
 
-        {/* Error notification banner if any */}
-        {error ? (
+        {/* Error notification banner: store errors and backend status errors
+            (e.g. camera failed while screen kept recording) share one surface.
+            Backend status warnings live on the status payload — only store
+            errors are dismissible here. */}
+        {error || status?.error ? (
           <div
             className="flex min-w-0 max-w-44 items-center gap-1.5 rounded-lg border border-recording/30 bg-recording/10 px-2 py-1 text-recording"
             role="alert"
-            title={error}
+            title={error || status?.error || undefined}
           >
             <CircleAlert className="size-3.5 shrink-0" aria-hidden />
-            <span className="truncate text-xs">{error}</span>
-            <Button
-              size="icon"
-              variant="ghost"
-              title="Dismiss error"
-              aria-label="Dismiss error"
-              className="size-5 p-0 text-recording hover:bg-recording/20"
-              onClick={clearError}
-            >
-              <X className="size-3" />
-            </Button>
+            <span className="truncate text-xs">{error || status?.error}</span>
+            {error ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                title="Dismiss error"
+                aria-label="Dismiss error"
+                className="size-5 p-0 text-recording hover:bg-recording/20"
+                onClick={clearError}
+              >
+                <X className="size-3" />
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </div>

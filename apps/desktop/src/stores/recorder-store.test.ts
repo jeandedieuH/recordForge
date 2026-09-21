@@ -57,6 +57,8 @@ describe("recorder-store preferences & fallback", () => {
         systemAudioId: null,
         systemAudioName: null,
         webcamEnabled: false,
+        webcamPreviewMode: "low",
+        gpuScreenCapture: true,
         webcamId: null,
         webcamName: null,
         cameraSyncOffsetMs: 0,
@@ -136,6 +138,60 @@ describe("recorder-store preferences & fallback", () => {
       expect.objectContaining({
         smartZoomEnabled: true,
         smartZoomPreset: "cinematic",
+      }),
+      3,
+    )
+  })
+
+  it("forwards webcam preview mode and GPU flag into the recording config", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-preview-off",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: false,
+      webcamActive: true,
+      error: null,
+    }
+    const prepare = vi
+      .spyOn(recorderApi, "prepareRecording")
+      .mockResolvedValue("session-preview-off")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      videoDevices: [{ id: "cam-1", name: "Integrated Webcam", kind: "webcam", isDefault: true }],
+      videoDevicesLoaded: true,
+      selectedWebcamId: "cam-1",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        webcamEnabled: true,
+        webcamId: "cam-1",
+        webcamPreviewMode: "off",
+        gpuScreenCapture: false,
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        captureWebcam: true,
+        webcamPreviewMode: "off",
+        gpuScreenCapture: false,
       }),
       3,
     )
@@ -270,6 +326,7 @@ describe("recorder-store preferences & fallback", () => {
       encoders: [],
       audioDevices: [],
       videoDevices: [],
+      devicesEnumerated: true,
     })
 
     expect(useRecorderStore.getState().sourcesLoaded).toBe(false)

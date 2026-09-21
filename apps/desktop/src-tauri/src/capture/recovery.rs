@@ -321,7 +321,23 @@ fn recover_webcam_asset(
         if partial.exists() {
             let _ = std::fs::remove_file(&partial);
         }
-        media::concatenate_webcam_segments(ffmpeg_path, &segments, &partial, &profile)?;
+        // Reuse the cached encoder detection so the re-encode follows the same
+        // hardware→software fallback chain as live capture without re-probing.
+        let available_encoders = super::encoder::detect_encoders(ffmpeg_path)
+            .map(|list| {
+                list.into_iter()
+                    .filter(|e| e.available)
+                    .map(|e| e.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|_| vec!["libx264".into()]);
+        media::concatenate_webcam_segments(
+            ffmpeg_path,
+            &segments,
+            &partial,
+            &profile,
+            &available_encoders,
+        )?;
         disk::atomic_replace(&partial, &output)?;
         return Ok(Some(output));
     };

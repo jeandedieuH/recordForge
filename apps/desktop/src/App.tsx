@@ -1,17 +1,20 @@
-import { useEffect } from "react"
+import { lazy, Suspense, useEffect } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
-import { AppShell } from "./app/app-shell"
 import { AppErrorBoundary } from "./components/error-boundary"
-import {
-  CaptureBoundaryOverlay,
-  CountdownWindow,
-  FloatingControls,
-  RegionPickerWindow,
-  WebcamPreviewWindow,
-} from "./features/recorder"
+import { CaptureBoundaryOverlay } from "./features/recorder/capture-boundary-overlay"
+import { CountdownWindow } from "./features/recorder/countdown-window"
+import { FloatingControls } from "./features/recorder/floating-controls"
+import { RegionPickerWindow } from "./features/recorder/region-picker-window"
+import { WebcamPreviewWindow } from "./features/recorder/webcam-preview-window"
 import { useRecorderPolling, useRecorderStatusEvents } from "./hooks/use-recorder"
 import { isTauri } from "./lib/settings"
 import { useRecorderStore } from "./stores/recorder-store"
+
+// The main shell is code-split so auxiliary windows (floating toolbar, region
+// picker, webcam preview) never pay for the full editor bundle on startup.
+const AppShell = lazy(() =>
+  import("./app/app-shell").then((module) => ({ default: module.AppShell })),
+)
 
 function BoundaryWindow() {
   useRecorderPolling()
@@ -100,7 +103,17 @@ function App() {
       ) : isWebcamPreview ? (
         <WebcamPreviewWindow />
       ) : (
-        <AppShell />
+        <Suspense
+          fallback={
+            <div
+              className="h-screen animate-pulse bg-background"
+              role="status"
+              aria-label="Loading application"
+            />
+          }
+        >
+          <AppShell />
+        </Suspense>
       )}
     </AppErrorBoundary>
   )

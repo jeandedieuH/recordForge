@@ -28,6 +28,11 @@ pub struct Recorder {
     available_encoders: Vec<String>,
     current: Mutex<Option<ActiveSession>>,
     finalizing: Mutex<Option<RecordingStatus>>,
+    last_manifest: Mutex<Option<Arc<Mutex<RecordingManifest>>>>,
+    /// Shared admission gate that serializes capture against media jobs. The
+    /// session holds its permit through countdown, recording, pause, and
+    /// finalization; queued jobs wait for the permit instead of competing.
+    resource_gate: Arc<crate::state::CaptureWorkGate>,
 }
 
 #[derive(Debug)]
@@ -51,6 +56,9 @@ struct ActiveSession {
     segment_index: u32,
     total_recorded_ms: u64,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
+    // Media-work admission permit. Declared last so it drops after every
+    // capture field above — workers are always stopped before the gate frees.
+    resource_permit: Option<crate::state::CaptureWorkPermit>,
 }
 
 #[derive(Debug)]
@@ -203,6 +211,17 @@ fn refresh_window_source_bounds(session: &mut ActiveSession) {
     }
 }
 
+/// Ordered backend attempts for one encoder candidate: the DDA backend first
+/// (when the FFmpeg build has the filter), then the GDI-compatible path.
+/// Pure so the attempt order stays testable without spawning capture.
+fn screen_backend_attempts(ddagrab_available: bool) -> Vec<bool> {
+    if ddagrab_available {
+        vec![true, false]
+    } else {
+        vec![false]
+    }
+}
+
 /// Compute the alignment math from the measured clocks. Pure so the clamping
 /// rules stay testable: a missing probe keeps the legacy wall-clock behavior,
 /// and an implausible gap is rejected rather than applied.
@@ -270,6 +289,8 @@ impl Recorder {
             available_encoders,
             current: Mutex::new(None),
             finalizing: Mutex::new(None),
+            last_manifest: Mutex::new(None),
+            resource_gate: Arc::new(crate::state::CaptureWorkGate::default()),
         }
     }
 
@@ -277,6 +298,12 @@ impl Recorder {
     /// proxy media jobs so they reuse the same detection instead of re-probing.
     pub fn available_encoders(&self) -> &[String] {
         &self.available_encoders
+    }
+
+    /// The shared media-work admission gate. Media jobs wait on this instead
+    /// of competing with an active capture or finalization.
+    pub fn resource_gate(&self) -> Arc<crate::state::CaptureWorkGate> {
+        Arc::clone(&self.resource_gate)
     }
 
     /// Discover or verify the FFmpeg binary path.
@@ -328,6 +355,11 @@ impl Recorder {
             *guard = None;
         }
 
+        // Admit the session before any directory or manifest work so a media
+        // job holding the gate can never race capture startup. The local
+        // permit releases through RAII if preparation fails below.
+        let resource_permit = self.resource_gate.try_acquire()?;
+
         let profile = config.resolve_profile().ok_or_else(|| {
             crate::errors::InternalError::Capture(format!("unknown profile: {}", config.profile))
         })?;
@@ -357,6 +389,9 @@ impl Recorder {
             m.write()?;
         }
 
+        if let Ok(mut latest) = self.last_manifest.lock() {
+            *latest = Some(Arc::clone(&manifest));
+        }
         *guard = Some(ActiveSession {
             session_id: session_id.clone(),
             work_dir,
@@ -375,6 +410,7 @@ impl Recorder {
             segment_index: 0,
             total_recorded_ms: 0,
             started_at: None,
+            resource_permit: Some(resource_permit),
         });
 
         Ok(session_id)
@@ -428,6 +464,9 @@ impl Recorder {
                         tracing::error!(error = ?write_error, "failed to persist failed recording state");
                     }
                 }
+                // start_segment drops any partially started workers on its
+                // error path, so no captures survive here — release the gate.
+                session.resource_permit.take();
                 return Err(error);
             }
         };
@@ -512,70 +551,103 @@ impl Recorder {
     ) -> crate::errors::Result<SegmentCaptures> {
         let ffmpeg = self.ffmpeg_path.to_string_lossy();
         let screen_output = work_dir.join(format!("seg_{:03}.mp4", index));
-        let encoder = super::encoder::select_best_encoder(
+        // Ordered fallback chain: for each detected encoder try the DDA
+        // backend first (when the build has the filter), then the GDI path.
+        // FfmpegCapture::start itself downgrades a failing GPU-resident
+        // pipeline to CPU processing before surfacing an error; libx264 is
+        // always the last candidate.
+        let encoder_candidates = super::encoder::recording_encoder_candidates(
             &self.available_encoders,
             &profile.encoder_priority,
         );
         info!(
-            %encoder,
+            candidates = ?encoder_candidates,
             profile = %profile.id,
-            "selected video encoder for recording segment"
+            "screen capture encoder candidates"
         );
-        let screen = match FfmpegCapture::start(
-            &ffmpeg,
-            config,
-            profile,
-            &encoder,
-            &screen_output.to_string_lossy(),
-            index,
-            Some(Arc::clone(&manifest)),
-            self.ddagrab_available,
-        ) {
-            Ok(capture) => capture,
-            Err(error) if self.ddagrab_available => {
-                tracing::warn!(%error, "ddagrab display capture failed; falling back to gdigrab");
+
+        // Negotiate the camera mode BEFORE starting the screen process: the
+        // dshow `-list_options` probe can take up to a few seconds and must not
+        // delay the screen capture's timeline origin. Probed once per segment;
+        // on probe failure (or non-Windows) the list is empty and the device
+        // defaults are used as the only attempt.
+        let camera = super::webcam::camera_profile(profile);
+        let probed_modes = match (config.capture_webcam, config.webcam_device_id.as_ref()) {
+            (true, Some(device)) => {
+                super::webcam::probe_camera_modes(&ffmpeg, device, camera.fps as f64)
+            }
+            _ => Vec::new(),
+        };
+        let mut mode_attempts: Vec<Option<super::webcam::CameraMode>> =
+            super::webcam::ordered_camera_modes(
+                &probed_modes,
+                camera.width.max(1) as u32,
+                camera.height.max(1) as u32,
+            )
+            .into_iter()
+            .map(Some)
+            .collect();
+        // The trailing `None` is the device-defaults compatibility attempt —
+        // recorded as `mode=None` in diagnostics, never mistaken for an
+        // advertised mode.
+        mode_attempts.push(None);
+
+        let mut last_error = None;
+        let mut screen = None;
+        let mut screen_encoder_index = 0usize;
+        let mut screen_backend_fallback = false;
+        'encoders: for (encoder_index, encoder) in encoder_candidates.iter().enumerate() {
+            for use_ddagrab in screen_backend_attempts(self.ddagrab_available) {
                 match FfmpegCapture::start(
                     &ffmpeg,
                     config,
                     profile,
-                    &encoder,
+                    encoder,
                     &screen_output.to_string_lossy(),
                     index,
                     Some(Arc::clone(&manifest)),
-                    false,
+                    use_ddagrab,
                 ) {
-                    Ok(capture) => capture,
-                    Err(gdi_err) if encoder != "libx264" => {
-                        tracing::warn!(%gdi_err, "gdigrab with hardware encoder failed; falling back to libx264 software encoder");
-                        FfmpegCapture::start(
-                            &ffmpeg,
-                            config,
-                            profile,
-                            "libx264",
-                            &screen_output.to_string_lossy(),
-                            index,
-                            Some(manifest),
-                            false,
-                        )?
+                    Ok(capture) => {
+                        screen = Some(capture);
+                        screen_encoder_index = encoder_index;
+                        screen_backend_fallback = !use_ddagrab && self.ddagrab_available;
+                        break 'encoders;
                     }
-                    Err(gdi_err) => return Err(gdi_err),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            encoder,
+                            use_ddagrab,
+                            "screen capture attempt failed; trying next candidate"
+                        );
+                        last_error = Some(error);
+                    }
                 }
             }
-            Err(error) if encoder != "libx264" => {
-                tracing::warn!(%error, "capture with hardware encoder failed; falling back to libx264 software encoder");
-                FfmpegCapture::start(
-                    &ffmpeg,
-                    config,
-                    profile,
-                    "libx264",
-                    &screen_output.to_string_lossy(),
-                    index,
-                    Some(manifest),
-                    false,
-                )?
+        }
+        let mut screen = match screen {
+            Some(screen) => screen,
+            None => {
+                return Err(last_error.unwrap_or_else(|| {
+                    crate::errors::InternalError::Capture("screen capture could not start".into())
+                        .into()
+                }));
             }
-            Err(error) => return Err(error),
         };
+        // Record why a non-primary encoder/backend won — the same generic
+        // codes the webcam chain reports, combined with any GPU-pipeline
+        // downgrade FfmpegCapture::start already recorded.
+        let mut reasons: Vec<String> = screen.diagnostics().fallback_reason.into_iter().collect();
+        if screen_encoder_index > 0 {
+            reasons.push("encoder-fallback".into());
+        }
+        if screen_backend_fallback {
+            reasons.push("backend-fallback".into());
+        }
+        if !reasons.is_empty() {
+            screen.set_fallback_reason(Some(reasons.join("+")));
+        }
 
         // Every auxiliary capture and the cursor tracker share the screen
         // process origin. Starting the tracker before webcam initialization
@@ -651,47 +723,101 @@ impl Recorder {
         let mut webcam_preview_server = None;
         if config.capture_webcam {
             if let Some(device) = config.webcam_device_id.as_ref() {
-                const MAX_WEBCAM_ATTEMPTS: usize = 15;
-                const WEBCAM_RETRY_DELAY: Duration = Duration::from_millis(100);
-
-                let preview_server = super::preview_server::WebcamPreviewServer::start().ok();
+                // The camera runs at its own <=30fps rate/resolution budget —
+                // decoupled from the (possibly 60fps) screen profile. Modes
+                // were already negotiated before the screen process started.
+                let preview_fps = config.webcam_preview_mode.fps();
+                // A preview server is only spun up when the user asked for a
+                // preview; "off" produces no MJPEG output and no listener.
+                let preview_server = if preview_fps.is_some() {
+                    super::preview_server::WebcamPreviewServer::start().ok()
+                } else {
+                    None
+                };
                 let broadcaster = preview_server.as_ref().map(|s| s.broadcaster());
+                let preview_fps = preview_server.as_ref().and(preview_fps);
+                let startup_deadline = std::time::Instant::now() + Duration::from_secs(20);
 
-                for attempt in 1..=MAX_WEBCAM_ATTEMPTS {
-                    let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
-                    match FfmpegCapture::start_webcam(
-                        &ffmpeg,
-                        device,
-                        profile,
-                        &encoder,
-                        &webcam_output.to_string_lossy(),
-                        None,
-                        broadcaster.clone(),
-                    ) {
-                        Ok(capture) => {
-                            webcam = Some(capture);
-                            webcam_preview_server = preview_server;
-                            break;
-                        }
-                        Err(error) => {
-                            if attempt == MAX_WEBCAM_ATTEMPTS {
-                                webcam_failed = true;
-                                tracing::warn!(
-                                    error = %error,
-                                    device,
-                                    "failed to start webcam sidecar; continuing without camera"
-                                );
-                            } else {
-                                tracing::debug!(
-                                    error = %error,
-                                    device,
-                                    attempt,
-                                    "webcam sidecar start failed, retrying"
-                                );
-                                std::thread::sleep(WEBCAM_RETRY_DELAY);
+                // Walk detected encoders in preference order — libx264 is
+                // always present as the last candidate.
+                let encoder_candidates = super::encoder::recording_encoder_candidates(
+                    &self.available_encoders,
+                    &profile.encoder_priority,
+                );
+                let first_encoder = encoder_candidates.first().cloned();
+                let webcam_output = work_dir.join(format!("webcam_{:03}.mp4", index));
+
+                'modes: for (mode_index, mode) in mode_attempts.into_iter().enumerate() {
+                    for encoder in &encoder_candidates {
+                        // One extra same-combination attempt is allowed only
+                        // for a device that reported busy/in-use — the only
+                        // transient startup failure worth retrying. Failed
+                        // attempts are killed/reaped inside start_webcam, so
+                        // the same output path can be reused: a failed start
+                        // never delivered a first output frame.
+                        let mut busy_retried = false;
+                        loop {
+                            let remaining = startup_deadline
+                                .saturating_duration_since(std::time::Instant::now());
+                            if remaining.is_zero() {
+                                break 'modes;
+                            }
+                            match FfmpegCapture::start_webcam(
+                                &ffmpeg,
+                                device,
+                                &camera,
+                                encoder,
+                                &webcam_output.to_string_lossy(),
+                                None,
+                                broadcaster.clone(),
+                                mode.as_ref(),
+                                preview_fps,
+                                remaining.min(Duration::from_secs(8)),
+                            ) {
+                                Ok(mut capture) => {
+                                    // Record why a non-primary combination
+                                    // won. Codes are generic — never stderr
+                                    // text or device paths.
+                                    let mut reasons = Vec::new();
+                                    if mode.is_none() {
+                                        reasons.push("device-default-mode");
+                                    } else if mode_index > 0 {
+                                        reasons.push("mode-fallback");
+                                    }
+                                    if first_encoder.as_deref() != Some(encoder.as_str()) {
+                                        reasons.push("encoder-fallback");
+                                    }
+                                    if !reasons.is_empty() {
+                                        capture.set_fallback_reason(Some(reasons.join("+")));
+                                    }
+                                    capture.attach_diagnostics(Arc::clone(&manifest), index, true);
+                                    webcam = Some(capture);
+                                    webcam_preview_server = preview_server;
+                                    break 'modes;
+                                }
+                                Err(error) => {
+                                    if !busy_retried
+                                        && super::webcam::is_device_busy_error(&error.to_string())
+                                    {
+                                        busy_retried = true;
+                                        std::thread::sleep(Duration::from_millis(100));
+                                        continue;
+                                    }
+                                    tracing::debug!(
+                                        error = %error,
+                                        encoder,
+                                        "webcam sidecar start failed; trying next candidate"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
+                }
+
+                if webcam.is_none() {
+                    webcam_failed = true;
+                    tracing::warn!("failed to start webcam sidecar; continuing without camera");
                 }
             } else {
                 // `RecordingConfig::validate` should already enforce this, but
@@ -977,6 +1103,7 @@ impl Recorder {
             &session.webcam_segments,
             &partial,
             &session.profile,
+            &self.available_encoders,
         ) {
             tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
             return None;
@@ -1041,6 +1168,9 @@ impl Recorder {
                         tracing::error!(error = ?write_error, "failed to persist failed recording state");
                     }
                 }
+                // Every native worker above has been stopped; the dead
+                // session must not keep blocking queued media work.
+                session.resource_permit.take();
                 return Err(error);
             }
         };
@@ -1233,11 +1363,11 @@ impl Recorder {
             let mut guard = self.current.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("recorder mutex poisoned".into())
             })?;
-            let session = guard.take().ok_or_else(|| {
+            let mut session = guard.take().ok_or_else(|| {
                 crate::errors::InternalError::Capture("no active recording".into())
             })?;
             let session_id = session.session_id.clone();
-            let mut finalizing_status = match self.status_from_session(&session) {
+            let mut finalizing_status = match self.status_from_session(&mut session) {
                 Ok(s) => s,
                 Err(_) => RecordingStatus {
                     session_id: session_id.clone(),
@@ -1254,6 +1384,8 @@ impl Recorder {
                     webcam_device_id: None,
                     webcam_device_name: None,
                     webcam_preview_url: None,
+                    screen_diagnostics: None,
+                    camera_diagnostics: None,
                     error: None,
                 },
             };
@@ -1713,10 +1845,44 @@ impl Recorder {
         Ok(marker)
     }
 
+    pub fn capture_diagnostics(&self) -> Option<super::metrics::SessionCaptureDiagnostics> {
+        let current = self.current.lock().ok()?;
+        let manifest = current
+            .as_ref()
+            .map(|session| Arc::clone(&session.manifest))
+            .or_else(|| self.last_manifest.lock().ok()?.clone())?;
+        let mut snapshot = {
+            let manifest = manifest.lock().ok()?;
+            super::metrics::SessionCaptureDiagnostics {
+                session_id: manifest.session_id.clone(),
+                segments: manifest.capture_diagnostics.clone(),
+            }
+        };
+        if let Some(session) = current.as_ref() {
+            if let Some(capture) = session.screen_capture.as_ref() {
+                super::metrics::upsert_capture_diagnostics(
+                    &mut snapshot.segments,
+                    session.segment_index,
+                    false,
+                    capture.diagnostics(),
+                );
+            }
+            if let Some(capture) = session.webcam_capture.as_ref() {
+                super::metrics::upsert_capture_diagnostics(
+                    &mut snapshot.segments,
+                    session.segment_index,
+                    true,
+                    capture.diagnostics(),
+                );
+            }
+        }
+        Some(snapshot)
+    }
+
     /// Runtime status for the React UI.
     pub fn status(&self) -> crate::errors::Result<RecordingStatus> {
-        if let Ok(guard) = self.current.lock() {
-            if let Some(session) = guard.as_ref() {
+        if let Ok(mut guard) = self.current.lock() {
+            if let Some(session) = guard.as_mut() {
                 return self.status_from_session(session);
             }
         }
@@ -1741,13 +1907,15 @@ impl Recorder {
             webcam_device_id: None,
             webcam_device_name: None,
             webcam_preview_url: None,
+            screen_diagnostics: None,
+            camera_diagnostics: None,
             error: None,
         })
     }
 
     fn status_from_session(
         &self,
-        session: &ActiveSession,
+        session: &mut ActiveSession,
     ) -> crate::errors::Result<RecordingStatus> {
         let m = session
             .manifest
@@ -1765,6 +1933,17 @@ impl Recorder {
             .map(|started_at| (chrono::Utc::now() - started_at).num_milliseconds().max(0) as u64)
             .unwrap_or(0);
 
+        // Liveness comes from the child process status itself, not the
+        // stderr EOF flag — a stalled process can still hold the device.
+        let camera_live = session
+            .webcam_capture
+            .as_mut()
+            .is_some_and(|capture| capture.is_running());
+        let screen_live = session
+            .screen_capture
+            .as_mut()
+            .is_some_and(|capture| capture.is_running());
+
         Ok(RecordingStatus {
             session_id: session.session_id.clone(),
             state: m.state,
@@ -1776,14 +1955,53 @@ impl Recorder {
             source_name: session.config.source.name.clone(),
             microphone_active: session.config.capture_microphone,
             system_audio_active: session.config.capture_system_audio,
-            webcam_active: session.config.capture_webcam,
+            // Report the live camera process, not the request: a sidecar that
+            // failed every start attempt (or died mid-recording) is not active
+            // even when the config asked for one.
+            webcam_active: camera_live,
             webcam_device_id: session.config.webcam_device_id.clone(),
             webcam_device_name: session.config.webcam_device_id.clone(),
             webcam_preview_url: session
                 .webcam_preview_server
                 .as_ref()
                 .map(|s| s.preview_url()),
-            error: None,
+            // Paused segments have no live capture; fall back to the stored
+            // snapshot for THIS segment — never a prior segment's camera,
+            // which may have belonged to a mode the resumed attempt no longer uses.
+            screen_diagnostics: session
+                .screen_capture
+                .as_ref()
+                .map(|capture| capture.diagnostics())
+                .or_else(|| {
+                    m.capture_diagnostics
+                        .iter()
+                        .find(|segment| segment.index == session.segment_index)
+                        .and_then(|segment| segment.screen.clone())
+                }),
+            camera_diagnostics: session
+                .webcam_capture
+                .as_ref()
+                .map(|capture| capture.diagnostics())
+                .or_else(|| {
+                    m.capture_diagnostics
+                        .iter()
+                        .find(|segment| segment.index == session.segment_index)
+                        .and_then(|segment| segment.camera.clone())
+                }),
+            error: if m.state == RecorderState::Recording
+                && session.config.capture_webcam
+                && !camera_live
+            {
+                // Only claim the screen survives when a live screen
+                // process is actually observable.
+                Some(if screen_live {
+                    "Camera capture is unavailable; screen recording continues.".into()
+                } else {
+                    "Camera capture is unavailable.".into()
+                })
+            } else {
+                None
+            },
         })
     }
 }
@@ -1815,6 +2033,10 @@ pub struct RecordingStatus {
     pub webcam_device_name: Option<String>,
     #[serde(default)]
     pub webcam_preview_url: Option<String>,
+    #[serde(default)]
+    pub screen_diagnostics: Option<super::metrics::CaptureDiagnostics>,
+    #[serde(default)]
+    pub camera_diagnostics: Option<super::metrics::CaptureDiagnostics>,
     pub error: Option<String>,
 }
 
@@ -1877,6 +2099,12 @@ mod tests {
     }
 
     #[test]
+    fn screen_backend_attempts_order_dda_then_gdi() {
+        assert_eq!(screen_backend_attempts(true), vec![true, false]);
+        assert_eq!(screen_backend_attempts(false), vec![false]);
+    }
+
+    #[test]
     fn webcam_start_offset_accounts_for_camera_and_screen_startup_gaps() {
         // Camera spawned 150ms after screen, but camera DirectShow init took 800ms
         // while screen took 500ms. Camera first frame is 150 + 800 - 500 = +450ms
@@ -1929,6 +2157,8 @@ mod tests {
             webcam_device_id: None,
             microphone_device_id: None,
             system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
             smart_zoom_enabled: true,
             smart_zoom_preset: "cinematic".into(),
         };
@@ -2011,6 +2241,8 @@ mod tests {
             webcam_device_id: None,
             microphone_device_id: None,
             system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
         };
@@ -2031,6 +2263,124 @@ mod tests {
             RecorderState::Idle
         );
         assert!(!temp_dir.path().join(session_id).exists());
+    }
+
+    fn test_recorder(temp_dir: &std::path::Path) -> Recorder {
+        let db = Arc::new(Mutex::new(
+            rusqlite::Connection::open_in_memory().expect("create in-memory database"),
+        ));
+        // Bogus sidecar paths keep every capture attempt local to the
+        // process — no screen, camera, or audio device is ever opened.
+        Recorder::new(
+            PathBuf::from("ffmpeg-not-installed"),
+            PathBuf::from("ffprobe-not-installed"),
+            temp_dir.to_path_buf(),
+            db,
+        )
+    }
+
+    fn test_config() -> RecordingConfig {
+        RecordingConfig {
+            source: CaptureSource {
+                kind: "display".into(),
+                id: "display-0".into(),
+                name: "Display 1".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "low-impact".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+        }
+    }
+
+    #[test]
+    fn prepare_holds_resource_permit_until_session_leaves() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+
+        let session_id = recorder.prepare(test_config()).expect("prepare session");
+        // A queued media job must not start while a session holds the gate.
+        assert!(recorder.resource_gate().try_acquire().is_err());
+
+        recorder
+            .cancel_prepared(&session_id)
+            .expect("cancel countdown session");
+        recorder
+            .resource_gate()
+            .try_acquire()
+            .expect("cancel released the permit");
+    }
+
+    #[test]
+    fn held_job_permit_rejects_new_recording() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+
+        let permit = recorder
+            .resource_gate()
+            .try_acquire()
+            .expect("job acquires free gate");
+        let error = recorder
+            .prepare(test_config())
+            .expect_err("prepare must fail while a job holds the gate");
+        assert!(error.to_string().contains("media processing is active"));
+
+        drop(permit);
+        recorder
+            .prepare(test_config())
+            .expect("prepare after release");
+        recorder.discard().expect("discard prepared session");
+    }
+
+    #[test]
+    fn failed_start_releases_resource_permit() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+
+        let session_id = recorder.prepare(test_config()).expect("prepare session");
+        // The bogus sidecar cannot spawn, so the segment fails before any
+        // real device is touched; the permit must still be released.
+        recorder
+            .start_prepared(&session_id)
+            .expect_err("bogus ffmpeg fails capture startup");
+
+        recorder
+            .resource_gate()
+            .try_acquire()
+            .expect("failed start released the permit");
+        recorder.discard().expect("discard failed session");
+    }
+
+    #[test]
+    fn waiting_job_unblocks_when_session_permit_drops() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+
+        let session_id = recorder.prepare(test_config()).expect("prepare session");
+        let gate = recorder.resource_gate();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let waiter = std::thread::spawn(move || gate.wait_for_job(&cancel));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!waiter.is_finished());
+
+        recorder
+            .cancel_prepared(&session_id)
+            .expect("cancel countdown session");
+        let acquired = waiter.join().expect("waiter thread").expect("wait_for_job");
+        assert!(acquired.is_some());
     }
 
     #[test]
@@ -2068,6 +2418,8 @@ mod tests {
             webcam_device_id: Some("Nonexistent Camera".into()),
             microphone_device_id: None,
             system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
         };
@@ -2123,6 +2475,8 @@ mod tests {
             webcam_device_id: None,
             microphone_device_id: None,
             system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
         };
@@ -2204,6 +2558,8 @@ mod tests {
             webcam_device_id: Some(device),
             microphone_device_id: None,
             system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
         };

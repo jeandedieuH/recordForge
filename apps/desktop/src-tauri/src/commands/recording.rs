@@ -74,6 +74,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         ffprobe_path.clone(),
         path_policy.clone(),
         available_encoders,
+        recorder.resource_gate(),
     );
 
     // Resume any pending or interrupted jobs from a previous run.
@@ -332,7 +333,7 @@ fn open_recording_windows(
         .or_else(|| state.recorder.status().ok().map(|s| s.webcam_active))
         .unwrap_or(false);
 
-    if capture_webcam {
+    if capture_webcam && state.recorder.status()?.webcam_preview_url.is_some() {
         if let Err(error) = crate::window::WebcamPreviewWindow::open_or_focus(app) {
             tracing::warn!(error = ?error, "failed to open webcam preview window; recording continues");
         }
@@ -561,18 +562,28 @@ pub fn detect_hardware_encoders(state: State<'_, AppState>) -> Result<Vec<Encode
 #[tauri::command]
 #[instrument]
 pub fn get_diagnostics_report(state: State<'_, AppState>) -> Result<DiagnosticsReport> {
+    // Device enumeration spawns probing processes; while a capture or media
+    // job holds the gate, skip the device lists and return capture snapshots
+    // only — the encoder probe result is already cached from startup.
+    let resource_permit = state.recorder.resource_gate().try_acquire().ok();
     let ffmpeg = state.ffmpeg_path.to_string_lossy();
     let ffmpeg_version = capture::media::ffmpeg_version(&ffmpeg)?;
     let encoders = detect_encoders(&ffmpeg)?;
-    let audio_devices = capture::enumerate_audio_devices(&ffmpeg)?;
-    let video_devices = capture::enumerate_video_devices(&ffmpeg)?;
+    let (audio_devices, video_devices) = if resource_permit.is_some() {
+        (
+            capture::enumerate_audio_devices(&ffmpeg)?,
+            capture::enumerate_video_devices(&ffmpeg)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let cpu_cores = std::thread::available_parallelism().map(|n| n.get()).ok();
     let cpu = cpu_cores.map(|c| {
         if c == 1 {
-            "1 Core".to_string()
+            "1 logical processor available".to_string()
         } else {
-            format!("{c} Cores")
+            format!("{c} logical processors available")
         }
     });
 
@@ -586,6 +597,8 @@ pub fn get_diagnostics_report(state: State<'_, AppState>) -> Result<DiagnosticsR
         encoders,
         audio_devices,
         video_devices,
+        devices_enumerated: resource_permit.is_some(),
+        capture: state.recorder.capture_diagnostics(),
     })
 }
 
@@ -602,6 +615,10 @@ pub async fn recover_session(
     state: State<'_, AppState>,
 ) -> Result<LibraryRecording> {
     let _update_operation = state.update_gate.acquire_operation()?;
+    // Recovery re-encodes media — never compete with an active capture or
+    // another media job. The permit moves into the worker so it is held for
+    // the entire recovery, not just the IPC call.
+    let resource_permit = state.recorder.resource_gate().try_acquire()?;
     // Validate the session ID as a UUID and ensure its directory stays inside
     // the sessions root before any recovery work begins.
     let work_dir = state.path_policy.validate_session_dir(&session_id)?;
@@ -610,6 +627,7 @@ pub async fn recover_session(
     let db = state.db.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _resource_permit = resource_permit;
         let mut db = db
             .lock()
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
@@ -638,8 +656,12 @@ pub async fn delete_recovery_session(session_id: String, state: State<'_, AppSta
 #[instrument]
 pub async fn run_encoder_benchmark(state: State<'_, AppState>) -> Result<BenchmarkReport> {
     let _update_operation = state.update_gate.acquire_operation()?;
+    // The synthetic benchmark spawns many FFmpeg probes; it must wait for a
+    // quiet machine rather than steal CPU from an active capture or job.
+    let resource_permit = state.recorder.resource_gate().try_acquire()?;
     let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
     tauri::async_runtime::spawn_blocking(move || {
+        let _resource_permit = resource_permit;
         let encoders = detect_encoders(&ffmpeg)?;
         let profiles = capture::config::builtin_profiles();
         run_benchmark(&ffmpeg, profiles, encoders)
@@ -651,6 +673,10 @@ pub async fn run_encoder_benchmark(state: State<'_, AppState>) -> Result<Benchma
 #[tauri::command]
 #[instrument]
 pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecording>> {
+    // Lazy poster generation spawns FFmpeg; grab the media gate if it is free
+    // so listing never competes with capture or a running job. The listing
+    // itself is never blocked — posters are just skipped while the gate is held.
+    let poster_permit = state.recorder.resource_gate().try_acquire().ok();
     let db = state
         .db
         .lock()
@@ -678,7 +704,7 @@ pub fn list_recordings(state: State<'_, AppState>) -> Result<Vec<LibraryRecordin
             }
         });
 
-        if needs_thumb {
+        if needs_thumb && poster_permit.is_some() {
             if let Some(output_str) = &rec.output_path {
                 let raw_output = Path::new(output_str);
                 let output_path = if raw_output.is_absolute() {
@@ -852,11 +878,13 @@ pub async fn trim_recording(
     state: State<'_, AppState>,
 ) -> Result<LibraryRecording> {
     let _update_operation = state.update_gate.acquire_operation()?;
+    let resource_permit = state.recorder.resource_gate().try_acquire()?;
     let db_arc = state.db.clone();
     let ffmpeg_path = state.ffmpeg_path.to_string_lossy().to_string();
     let path_policy = state.path_policy.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _resource_permit = resource_permit;
         let db = db_arc
             .lock()
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
@@ -925,6 +953,7 @@ pub struct ExportOptions {
 #[instrument]
 pub fn export_recording(options: ExportOptions, state: State<'_, AppState>) -> Result<()> {
     let _update_operation = state.update_gate.acquire_operation()?;
+    let _resource_permit = state.recorder.resource_gate().try_acquire()?;
     let db = state
         .db
         .lock()
@@ -986,6 +1015,14 @@ pub fn hide_floating_controls(app: tauri::AppHandle) -> Result<()> {
 #[tauri::command]
 #[instrument]
 pub async fn open_webcam_preview(app: tauri::AppHandle) -> Result<()> {
+    let status = app.state::<AppState>().recorder.status()?;
+    if status.webcam_preview_url.is_none() {
+        return Err(InternalError::Capture(
+            "Preview is disabled or unavailable. Enable it before starting the next recording."
+                .into(),
+        )
+        .into());
+    }
     crate::window::WebcamPreviewWindow::open_or_focus(&app)
 }
 
@@ -1034,6 +1071,11 @@ pub struct DiagnosticsReport {
     pub encoders: Vec<EncoderInfo>,
     pub audio_devices: Vec<AudioDevice>,
     pub video_devices: Vec<VideoDevice>,
+    /// False when device enumeration was skipped because capture/media work
+    /// held the resource gate — empty device arrays then mean "not measured",
+    /// not "no devices present".
+    pub devices_enumerated: bool,
+    pub capture: Option<capture::metrics::SessionCaptureDiagnostics>,
 }
 
 fn diagnostic_os() -> String {

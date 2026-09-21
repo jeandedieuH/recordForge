@@ -10,10 +10,12 @@ import {
   Layers,
   Mic,
   Monitor,
+  RefreshCw,
   Video,
   Zap,
 } from "lucide-react"
 import { Badge, Button, Skeleton, Switch } from "@recordforge/ui"
+import type { CaptureDiagnostics } from "@recordforge/contracts"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { getSetting, setSetting } from "../../lib/settings"
 
@@ -57,6 +59,68 @@ const ENCODER_INFO_MAP: Record<string, { desc: string; iconLabel: string }> = {
   },
 }
 
+// Exact, user-facing explanation for why the counters below are only FFmpeg's
+// encoded-output view — nothing about sensor frames or machine load is derived.
+const CAPTURE_COUNTER_NOTE =
+  "FFmpeg counters describe encoded output, not unique camera frames. CPU, memory, GPU load, disk throughput, audio underruns and A/V drift are not measured here; use external tools."
+
+function DiagnosticsRow({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-subtle-foreground">{label}</dt>
+      <dd className="truncate font-mono text-foreground" title={String(value)}>
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+// One capture process (screen or camera) as reported by the backend. Missing
+// counters render "Unavailable" — zeros are never invented.
+function CaptureStreamDetails({ label, capture }: { label: string; capture: CaptureDiagnostics }) {
+  const mode = capture.requestedCameraMode
+  const cameraModeLabel = mode
+    ? `${mode.width}×${mode.height} @ ${mode.fps} fps${
+        mode.pixelFormat ? ` (${mode.pixelFormat})` : mode.codec ? ` (${mode.codec})` : ""
+      }`
+    : "Device defaults (not verified)"
+  const progress = capture.progress
+
+  return (
+    <div className="rounded-xl border border-border bg-surface p-4">
+      <div className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+        {label}
+      </div>
+      <dl className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+        <DiagnosticsRow label="Backend" value={capture.backend} />
+        <DiagnosticsRow label="Encoder" value={capture.encoder} />
+        <DiagnosticsRow label="Process ID" value={capture.processId} />
+        <DiagnosticsRow label="Requested FPS" value={capture.requestedFps} />
+        {label === "Camera" ? <DiagnosticsRow label="Camera mode" value={cameraModeLabel} /> : null}
+        <DiagnosticsRow label="Fallback reason" value={capture.fallbackReason ?? "None"} />
+        <DiagnosticsRow
+          label="Startup readiness (ms)"
+          value={capture.startupReadyMs ?? "Unavailable"}
+        />
+        <DiagnosticsRow label="Preview encoding FPS" value={capture.previewFps ?? "Off"} />
+        <DiagnosticsRow
+          label="Encoded output frames"
+          value={progress.outputFrames ?? "Unavailable"}
+        />
+        <DiagnosticsRow label="Encoded output FPS" value={progress.outputFps ?? "Unavailable"} />
+        <DiagnosticsRow label="Process speed" value={progress.speed ?? "Unavailable"} />
+        <DiagnosticsRow
+          label="Duplicated frames"
+          value={progress.duplicatedFrames ?? "Unavailable"}
+        />
+        <DiagnosticsRow label="Dropped frames" value={progress.droppedFrames ?? "Unavailable"} />
+        <DiagnosticsRow label="Progress age (ms)" value={capture.progressAgeMs ?? "Unavailable"} />
+        <DiagnosticsRow label="Process exited" value={capture.exited ? "Yes" : "No"} />
+      </dl>
+    </div>
+  )
+}
+
 export function DiagnosticsPanel() {
   const {
     diagnostics,
@@ -65,6 +129,7 @@ export function DiagnosticsPanel() {
     benchmark,
     isLoading,
     error,
+    status,
     loadDiagnostics,
     runBenchmark,
     clearError,
@@ -87,6 +152,16 @@ export function DiagnosticsPanel() {
     void setSetting("lowGpuFilterOptimization", String(checked))
   }
 
+  // Live process diagnostics exist on the status payload while a capture is
+  // running; outside those states the persisted manifest snapshots are shown.
+  const captureActive =
+    status?.state === "recording" ||
+    status?.state === "paused" ||
+    status?.state === "countdown" ||
+    status?.state === "finalizing"
+  const liveCapture = status?.state === "recording" || status?.state === "paused"
+  const storedSegments = diagnostics?.capture?.segments ?? []
+
   return (
     <div className="space-y-6">
       {/* Overview Status Banner */}
@@ -105,7 +180,7 @@ export function DiagnosticsPanel() {
                   variant="accent"
                   className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-[11px]"
                 >
-                  Ready for 60FPS Capture
+                  Device capability report
                 </Badge>
               </div>
               <p className="text-xs text-subtle-foreground mt-0.5">
@@ -115,8 +190,13 @@ export function DiagnosticsPanel() {
           </div>
 
           <Button
-            disabled={isLoading}
+            disabled={isLoading || captureActive}
             onClick={runBenchmark}
+            title={
+              captureActive
+                ? "Benchmark is unavailable while a capture is active"
+                : "Runs a synthetic encoder benchmark — not a screen + camera test"
+            }
             className="shrink-0 bg-primary hover:bg-primary-hover text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 shadow-sm"
           >
             <Gauge className="size-4" />
@@ -144,7 +224,7 @@ export function DiagnosticsPanel() {
               <div className="min-w-0">
                 <p className="text-[10px] uppercase font-mono text-subtle-foreground">Processor</p>
                 <p className="text-xs font-medium text-foreground truncate">
-                  {diagnostics.platform.cpu || "CPU Detected"}
+                  {diagnostics.platform.cpu ?? "Unavailable"}
                 </p>
               </div>
             </div>
@@ -158,7 +238,7 @@ export function DiagnosticsPanel() {
                 <p className="text-xs font-medium text-foreground truncate">
                   {diagnostics.platform.memoryMb
                     ? `${(diagnostics.platform.memoryMb / 1024).toFixed(1)} GB RAM`
-                    : "16 GB RAM"}
+                    : "Unavailable"}
                 </p>
               </div>
             </div>
@@ -170,7 +250,9 @@ export function DiagnosticsPanel() {
                   Media Engine
                 </p>
                 <p className="text-xs font-medium text-foreground truncate">
-                  FFmpeg {diagnostics.platform.ffmpegVersion.split("-")[0] || "8.1"}
+                  {diagnostics.platform.ffmpegVersion
+                    ? `FFmpeg ${diagnostics.platform.ffmpegVersion.split("-")[0]}`
+                    : "Unavailable"}
                 </p>
               </div>
             </div>
@@ -199,16 +281,83 @@ export function DiagnosticsPanel() {
         </div>
       ) : null}
 
-      {/* Hardware Encoders Grid */}
+      {/* Capture Diagnostics — live process counters while recording, persisted
+          manifest snapshots otherwise. Refresh re-queries the device report and
+          capture snapshots, so it is disabled while a capture is active (no
+          polling timer here). */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+            <Activity className="size-4 text-sky-400" />
+            <span>Current / latest capture</span>
+          </h3>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={diagnosticsLoading || captureActive}
+            onClick={() => void loadDiagnostics()}
+            title="Refresh device report and capture snapshots"
+            className="h-7 gap-1.5 px-2.5 text-xs"
+          >
+            <RefreshCw className={`size-3 ${diagnosticsLoading ? "animate-spin" : ""}`} />
+            <span>Refresh</span>
+          </Button>
+        </div>
+
+        {liveCapture ? (
+          status?.screenDiagnostics || status?.cameraDiagnostics ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {status?.screenDiagnostics ? (
+                <CaptureStreamDetails label="Screen" capture={status.screenDiagnostics} />
+              ) : null}
+              {status?.cameraDiagnostics ? (
+                <CaptureStreamDetails label="Camera" capture={status.cameraDiagnostics} />
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-xs text-subtle-foreground italic">
+              Waiting for capture processes to report…
+            </p>
+          )
+        ) : storedSegments.length > 0 ? (
+          storedSegments.map((segment) => (
+            <div key={segment.index} className="space-y-2">
+              <div className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
+                Segment {segment.index}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {segment.screen ? (
+                  <CaptureStreamDetails label="Screen" capture={segment.screen} />
+                ) : null}
+                {segment.camera ? (
+                  <CaptureStreamDetails label="Camera" capture={segment.camera} />
+                ) : null}
+              </div>
+            </div>
+          ))
+        ) : (
+          <p className="text-xs text-subtle-foreground italic">
+            Record a session to collect capture diagnostics.
+          </p>
+        )}
+
+        <p className="text-xs leading-relaxed text-subtle-foreground">{CAPTURE_COUNTER_NOTE}</p>
+        <p className="text-xs leading-relaxed text-subtle-foreground">
+          Startup readiness measures process launch to the first reported output frame, including
+          progress-report latency.
+        </p>
+      </section>
+
+      {/* Detected Encoders Grid */}
       <section className="space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
             <Zap className="size-4 text-amber-400" />
-            <span>Hardware Encoders</span>
+            <span>Detected encoders</span>
           </h3>
           <span className="text-xs text-subtle-foreground">
             {diagnostics?.encoders
-              ? `${diagnostics.encoders.filter((e) => e.available).length} active acceleration engines`
+              ? `${diagnostics.encoders.filter((e) => e.available).length} available encoders`
               : "Checking encoders..."}
           </span>
         </div>
@@ -303,94 +452,105 @@ export function DiagnosticsPanel() {
         )}
       </section>
 
-      {/* Connected Devices (Audio & Camera) */}
-      <div className="grid gap-4 sm:grid-cols-2">
-        {/* Audio Devices Card */}
-        <div className="rounded-xl border border-border bg-surface p-4 flex flex-col gap-3">
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground flex items-center gap-2">
-            <Mic className="size-4 text-sky-400" />
-            <span>Audio Capture Devices</span>
-          </h4>
+      {/* Connected Devices (Audio & Camera) — when enumeration was deferred
+          the report explicitly says so; never claim "no devices" for a list
+          that was never measured. */}
+      {diagnostics?.devicesEnumerated === false ? (
+        <p className="text-xs text-subtle-foreground">
+          Device enumeration deferred while recording or media processing is active. Refresh after
+          it finishes.
+        </p>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {/* Audio Devices Card */}
+          <div className="rounded-xl border border-border bg-surface p-4 flex flex-col gap-3">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground flex items-center gap-2">
+              <Mic className="size-4 text-sky-400" />
+              <span>Audio Capture Devices</span>
+            </h4>
 
-          {diagnosticsLoading || !diagnosticsLoaded ? (
-            <div className="space-y-2">
-              {[0, 1].map((i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
-                >
-                  <div className="min-w-0 flex-1 space-y-1.5 pr-2">
-                    <Skeleton className="h-3.5 w-3/4 rounded" />
-                    <Skeleton className="h-2.5 w-1/4 rounded" />
+            {diagnosticsLoading || !diagnosticsLoaded ? (
+              <div className="space-y-2">
+                {[0, 1].map((i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
+                  >
+                    <div className="min-w-0 flex-1 space-y-1.5 pr-2">
+                      <Skeleton className="h-3.5 w-3/4 rounded" />
+                      <Skeleton className="h-2.5 w-1/4 rounded" />
+                    </div>
+                    {i === 0 ? <Skeleton className="h-4 w-12 rounded" /> : null}
                   </div>
-                  {i === 0 ? <Skeleton className="h-4 w-12 rounded" /> : null}
-                </div>
-              ))}
-            </div>
-          ) : diagnostics?.audioDevices && diagnostics.audioDevices.length > 0 ? (
-            <div className="space-y-2">
-              {diagnostics.audioDevices.map((dev) => (
-                <div
-                  key={dev.id}
-                  className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
-                >
-                  <div className="min-w-0 pr-2">
+                ))}
+              </div>
+            ) : diagnostics?.audioDevices && diagnostics.audioDevices.length > 0 ? (
+              <div className="space-y-2">
+                {diagnostics.audioDevices.map((dev) => (
+                  <div
+                    key={dev.id}
+                    className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <p className="font-medium text-foreground truncate">{dev.name}</p>
+                      <p className="text-[10px] text-subtle-foreground capitalize">{dev.kind}</p>
+                    </div>
+                    {dev.isDefault ? (
+                      <span className="shrink-0 rounded bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-sky-400 border border-sky-500/20">
+                        Default
+                      </span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-subtle-foreground italic">
+                No microphone devices detected.
+              </p>
+            )}
+          </div>
+
+          {/* Video Devices Card */}
+          <div className="rounded-xl border border-border bg-surface p-4 flex flex-col gap-3">
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground flex items-center gap-2">
+              <Video className="size-4 text-purple-400" />
+              <span>Camera & Capture Devices</span>
+            </h4>
+
+            {diagnosticsLoading || !diagnosticsLoaded ? (
+              <div className="space-y-2">
+                {[0, 1].map((i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
+                  >
+                    <Skeleton className="h-3.5 w-2/3 rounded" />
+                    {i === 0 ? <Skeleton className="h-4 w-12 rounded" /> : null}
+                  </div>
+                ))}
+              </div>
+            ) : diagnostics?.videoDevices && diagnostics.videoDevices.length > 0 ? (
+              <div className="space-y-2">
+                {diagnostics.videoDevices.map((dev) => (
+                  <div
+                    key={dev.id}
+                    className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
+                  >
                     <p className="font-medium text-foreground truncate">{dev.name}</p>
-                    <p className="text-[10px] text-subtle-foreground capitalize">{dev.kind}</p>
+                    {dev.isDefault ? (
+                      <span className="shrink-0 rounded bg-purple-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-purple-400 border border-purple-500/20">
+                        Active
+                      </span>
+                    ) : null}
                   </div>
-                  {dev.isDefault ? (
-                    <span className="shrink-0 rounded bg-sky-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-sky-400 border border-sky-500/20">
-                      Default
-                    </span>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-subtle-foreground italic">No microphone devices detected.</p>
-          )}
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-subtle-foreground italic">No webcam devices detected.</p>
+            )}
+          </div>
         </div>
-
-        {/* Video Devices Card */}
-        <div className="rounded-xl border border-border bg-surface p-4 flex flex-col gap-3">
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-subtle-foreground flex items-center gap-2">
-            <Video className="size-4 text-purple-400" />
-            <span>Camera & Capture Devices</span>
-          </h4>
-
-          {diagnosticsLoading || !diagnosticsLoaded ? (
-            <div className="space-y-2">
-              {[0, 1].map((i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
-                >
-                  <Skeleton className="h-3.5 w-2/3 rounded" />
-                  {i === 0 ? <Skeleton className="h-4 w-12 rounded" /> : null}
-                </div>
-              ))}
-            </div>
-          ) : diagnostics?.videoDevices && diagnostics.videoDevices.length > 0 ? (
-            <div className="space-y-2">
-              {diagnostics.videoDevices.map((dev) => (
-                <div
-                  key={dev.id}
-                  className="flex items-center justify-between rounded-lg bg-surface-dim p-2.5 text-xs border border-border/60"
-                >
-                  <p className="font-medium text-foreground truncate">{dev.name}</p>
-                  {dev.isDefault ? (
-                    <span className="shrink-0 rounded bg-purple-500/10 px-2 py-0.5 text-[10px] font-mono font-medium text-purple-400 border border-purple-500/20">
-                      Active
-                    </span>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-subtle-foreground italic">No webcam devices detected.</p>
-          )}
-        </div>
-      </div>
+      )}
 
       {/* Preview Rendering & GPU Acceleration Card */}
       <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
@@ -427,7 +587,7 @@ export function DiagnosticsPanel() {
               <Gauge className="size-4 text-primary" />
               <span>Benchmark Results & Recommendation</span>
             </h4>
-            <span className="text-xs text-emerald-400 font-medium">Optimal setup confirmed</span>
+            <span className="text-xs text-emerald-400 font-medium">Synthetic encoder test</span>
           </div>
 
           <div className="rounded-xl bg-primary/10 border border-primary/20 p-3.5 text-xs text-foreground">

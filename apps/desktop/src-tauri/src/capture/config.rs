@@ -18,6 +18,31 @@ pub struct RecordingProfile {
     pub audio_bitrate_kbps: i32,
 }
 
+/// Preview quality preference for the in-app webcam feed.
+///
+/// The preview is decoded from a second FFmpeg output (MJPEG over stdout), so
+/// each level trades encoder CPU against preview smoothness. `Off` removes the
+/// split/preview output entirely so the camera process does no extra work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebcamPreviewMode {
+    Off,
+    #[default]
+    Low,
+    Standard,
+}
+
+impl WebcamPreviewMode {
+    /// Frame rate of the preview MJPEG stream, or `None` when preview is off.
+    pub fn fps(self) -> Option<i32> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some(5),
+            Self::Standard => Some(15),
+        }
+    }
+}
+
 /// Runtime recording configuration received from the React UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,9 +56,17 @@ pub struct RecordingConfig {
     pub microphone_device_id: Option<String>,
     pub system_audio_device_id: Option<String>,
     #[serde(default)]
+    pub webcam_preview_mode: WebcamPreviewMode,
+    #[serde(default = "default_gpu_screen_capture")]
+    pub gpu_screen_capture: bool,
+    #[serde(default)]
     pub smart_zoom_enabled: bool,
     #[serde(default = "default_smart_zoom_preset")]
     pub smart_zoom_preset: String,
+}
+
+fn default_gpu_screen_capture() -> bool {
+    true
 }
 
 fn default_smart_zoom_preset() -> String {

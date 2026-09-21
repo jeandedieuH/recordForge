@@ -156,6 +156,8 @@ pub struct RecordingManifest {
     pub webcam_path: Option<String>,
     #[serde(default)]
     pub webcam_fragments: Vec<RecordingWebcamFragment>,
+    #[serde(default)]
+    pub capture_diagnostics: Vec<super::metrics::CaptureSegmentDiagnostics>,
     pub fragments: Vec<RecordingFragment>,
     #[serde(default)]
     pub markers: Vec<RecordingMarker>,
@@ -202,6 +204,7 @@ impl RecordingManifest {
             thumbnail_path: None,
             webcam_path: None,
             webcam_fragments: Vec::new(),
+            capture_diagnostics: Vec::new(),
             fragments: Vec::new(),
             markers: Vec::new(),
             smart_zoom: None,
@@ -300,5 +303,109 @@ impl RecordingManifest {
     pub fn add_marker(&mut self, marker: RecordingMarker) {
         self.markers.push(marker);
         self.touch();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::metrics::CaptureDiagnostics;
+    use crate::capture::source::Bounds;
+
+    fn sample_source() -> CaptureSource {
+        CaptureSource {
+            kind: "display".into(),
+            id: "display-0".into(),
+            name: "Display 1".into(),
+            bounds: Bounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        }
+    }
+
+    fn sample_diagnostics(encoder: &str) -> CaptureDiagnostics {
+        CaptureDiagnostics {
+            process_id: 1234,
+            encoder: encoder.into(),
+            backend: "lavfi-testsrc".into(),
+            requested_fps: 30.0,
+            startup_ready_ms: Some(180),
+            preview_fps: None,
+            requested_camera_mode: None,
+            fallback_reason: None,
+            progress: super::super::metrics::CaptureProgress {
+                output_frames: Some(120),
+                output_fps: Some(29.97),
+                speed: Some(1.0),
+                duplicated_frames: Some(0),
+                dropped_frames: None,
+                output_time_us: Some(4_000_000),
+            },
+            progress_age_ms: Some(50),
+            exited: true,
+        }
+    }
+
+    #[test]
+    fn manifest_without_capture_diagnostics_loads_empty() {
+        // Session manifests written before capture diagnostics existed must
+        // still load — the field defaults to an empty list, never an error.
+        let json = r#"{
+            "version": 1,
+            "sessionId": "session-1",
+            "state": "completed",
+            "createdAt": "2024-01-01T00:00:00Z",
+            "updatedAt": "2024-01-01T00:00:00Z",
+            "source": {"kind": "display", "id": "display-0", "name": "Display 1",
+                "bounds": {"x": 0, "y": 0, "width": 1920, "height": 1080}},
+            "profileName": "balanced",
+            "workDir": "work",
+            "fragments": []
+        }"#;
+        let manifest: RecordingManifest =
+            serde_json::from_str(json).expect("legacy manifest parses");
+        assert!(manifest.capture_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn capture_diagnostics_serialize_camel_case_and_roundtrip() {
+        let mut manifest = RecordingManifest::new("session-1", "work", sample_source(), "balanced");
+        super::super::metrics::upsert_capture_diagnostics(
+            &mut manifest.capture_diagnostics,
+            0,
+            false,
+            sample_diagnostics("libx264"),
+        );
+        super::super::metrics::upsert_capture_diagnostics(
+            &mut manifest.capture_diagnostics,
+            0,
+            true,
+            sample_diagnostics("h264_mf"),
+        );
+
+        let json = serde_json::to_string(&manifest).expect("serialize manifest");
+        assert!(json.contains("\"captureDiagnostics\""));
+        assert!(json.contains("\"startupReadyMs\""));
+        assert!(json.contains("\"previewFps\""));
+        assert!(json.contains("\"requestedCameraMode\""));
+        assert!(json.contains("\"outputFrames\""));
+        // Missing counters stay null — never a fabricated zero metric name.
+        assert!(!json.contains("sensorFps"));
+
+        let back: RecordingManifest = serde_json::from_str(&json).expect("roundtrip manifest");
+        assert_eq!(back.capture_diagnostics.len(), 1);
+        let segment = &back.capture_diagnostics[0];
+        assert_eq!(segment.index, 0);
+        assert_eq!(
+            segment.screen.as_ref().map(|d| d.encoder.as_str()),
+            Some("libx264")
+        );
+        assert_eq!(
+            segment.camera.as_ref().map(|d| d.encoder.as_str()),
+            Some("h264_mf")
+        );
     }
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 import {
   audioDeviceSchema,
   benchmarkReportSchema,
+  captureDiagnosticsSchema,
+  captureProgressSchema,
   captureSourceSchema,
   defaultRecordingPreferences,
   diagnosticsReportSchema,
@@ -21,8 +23,10 @@ import {
   recordingStatsSchema,
   recordingStatusSchema,
   recoveryScanResultSchema,
+  sessionCaptureDiagnosticsSchema,
   trimOptionsSchema,
   videoDeviceSchema,
+  webcamPreviewModeSchema,
 } from "./recording"
 import { mediaMetadataSchema } from "./media"
 
@@ -382,7 +386,18 @@ describe("recording contracts", () => {
       videoDevices: [],
     }
 
-    expect(diagnosticsReportSchema.parse(report)).toMatchObject(report)
+    // Reports predating devicesEnumerated parse with the enumerated default.
+    const parsed = diagnosticsReportSchema.parse(report)
+    expect(parsed).toMatchObject(report)
+    expect(parsed.devicesEnumerated).toBe(true)
+
+    // A deferred report explicitly says enumeration was skipped; empty
+    // device arrays then mean "not measured", not "no devices".
+    const deferred = { ...report, devicesEnumerated: false }
+    const parsedDeferred = diagnosticsReportSchema.parse(deferred)
+    expect(parsedDeferred.devicesEnumerated).toBe(false)
+    expect(parsedDeferred.audioDevices).toEqual([])
+    expect(parsedDeferred.videoDevices).toEqual([])
   })
 
   it("validates audio and video devices", () => {
@@ -666,6 +681,120 @@ describe("recording contracts", () => {
       expect(parsed.webcamActive).toBe(true)
       expect(parsed.webcamDeviceId).toBe("Integrated Webcam")
       expect(parsed.webcamDeviceName).toBe("Integrated Webcam")
+    })
+
+    it("defaults webcam preview mode and GPU flag on old preferences", () => {
+      const parsed = recordingPreferencesSchema.parse({
+        profile: "balanced",
+        microphoneEnabled: true,
+        microphoneId: "mic-custom",
+      })
+      expect(parsed.webcamPreviewMode).toBe("low")
+      expect(parsed.gpuScreenCapture).toBe(true)
+      expect(defaultRecordingPreferences.webcamPreviewMode).toBe("low")
+      expect(defaultRecordingPreferences.gpuScreenCapture).toBe(true)
+    })
+
+    it("parses old status payloads without capture diagnostics", () => {
+      const status = {
+        sessionId: "session-old",
+        state: "recording" as const,
+        startedAt: "2026-09-07T00:00:00.000Z",
+        durationMs: 12000,
+        recordedMs: 12000,
+        webcamActive: false,
+      }
+      const parsed = recordingStatusSchema.parse(status)
+      expect(parsed.screenDiagnostics).toBeUndefined()
+      expect(parsed.cameraDiagnostics).toBeUndefined()
+    })
+
+    it("rejects arbitrary webcam preview modes", () => {
+      expect(() => webcamPreviewModeSchema.parse("ultra")).toThrow()
+      expect(() => webcamPreviewModeSchema.parse(15)).toThrow()
+    })
+
+    it("parses capture diagnostics with nullable counters", () => {
+      const sample = {
+        sessionId: "session-diag",
+        segments: [
+          {
+            index: 0,
+            screen: {
+              processId: 1234,
+              encoder: "h264_mf",
+              backend: "ddagrab-cpu",
+              requestedFps: 30,
+              requestedCameraMode: null,
+              fallbackReason: null,
+              progress: {
+                outputFrames: 120,
+                outputFps: 29.97,
+                speed: 1.0,
+                duplicatedFrames: null,
+                droppedFrames: null,
+                outputTimeUs: 4_004_000,
+              },
+              progressAgeMs: 120,
+              exited: false,
+              startupReadyMs: 940,
+              previewFps: null,
+            },
+            camera: {
+              processId: 5678,
+              encoder: "libx264",
+              backend: "dshow-camera",
+              requestedFps: 25,
+              requestedCameraMode: {
+                width: 1280,
+                height: 720,
+                fps: 25,
+                pixelFormat: "nv12",
+                codec: null,
+              },
+              fallbackReason: "device-default-mode+encoder-fallback",
+              progress: {
+                outputFrames: null,
+                outputFps: null,
+                speed: null,
+                duplicatedFrames: null,
+                droppedFrames: null,
+                outputTimeUs: null,
+              },
+              progressAgeMs: null,
+              exited: false,
+              startupReadyMs: null,
+              previewFps: 5,
+            },
+          },
+        ],
+      }
+      const parsed = sessionCaptureDiagnosticsSchema.parse(sample)
+      const camera = parsed.segments[0].camera
+      expect(camera?.requestedCameraMode?.fps).toBe(25)
+      // Counters may be entirely absent — they must round-trip as null, never
+      // be coerced to zero.
+      expect(camera?.progress.outputFrames).toBeNull()
+      expect(camera?.progress.outputFps).toBeNull()
+      expect(camera?.startupReadyMs).toBeNull()
+      expect(parsed.segments[0].screen?.previewFps).toBeNull()
+    })
+
+    it("rejects negative and non-finite capture counters", () => {
+      expect(() => captureProgressSchema.parse({ outputFrames: -1 })).toThrow()
+      expect(() => captureProgressSchema.parse({ outputFps: Number.NaN })).toThrow()
+      expect(() => captureProgressSchema.parse({ speed: Number.POSITIVE_INFINITY })).toThrow()
+      expect(() => captureProgressSchema.parse({ outputTimeUs: -5 })).toThrow()
+      expect(() =>
+        captureDiagnosticsSchema.parse({
+          processId: 0,
+          encoder: "libx264",
+          backend: "gdigrab",
+          requestedFps: 30,
+          progress: {},
+          exited: false,
+        }),
+      ).toThrow()
     })
   })
 })

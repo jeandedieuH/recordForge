@@ -90,6 +90,49 @@ export const videoDeviceSchema = z.object({
 
 export type VideoDevice = z.infer<typeof videoDeviceSchema>
 
+export const webcamPreviewModeSchema = z.enum(["off", "low", "standard"])
+export const cameraModeSchema = z.object({
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  fps: z.number().positive(),
+  pixelFormat: z.string().nullish(),
+  codec: z.string().nullish(),
+})
+export const captureProgressSchema = z.object({
+  outputFrames: z.number().int().nonnegative().nullish(),
+  outputFps: z.number().nonnegative().nullish(),
+  speed: z.number().nonnegative().nullish(),
+  duplicatedFrames: z.number().int().nonnegative().nullish(),
+  droppedFrames: z.number().int().nonnegative().nullish(),
+  outputTimeUs: z.number().int().nonnegative().nullish(),
+})
+export const captureDiagnosticsSchema = z.object({
+  processId: z.number().int().positive(),
+  encoder: z.string(),
+  backend: z.string(),
+  requestedFps: z.number().positive(),
+  requestedCameraMode: cameraModeSchema.nullish(),
+  fallbackReason: z.string().nullish(),
+  progress: captureProgressSchema,
+  progressAgeMs: z.number().int().nonnegative().nullish(),
+  exited: z.boolean(),
+  // Elapsed spawn-to-first-positive-progress-block readiness; not the exact
+  // first sensor frame. previewFps is absent when preview encoding is off.
+  startupReadyMs: z.number().int().nonnegative().nullish(),
+  previewFps: z.number().int().positive().nullish(),
+})
+export const captureSegmentDiagnosticsSchema = z.object({
+  index: z.number().int().nonnegative(),
+  screen: captureDiagnosticsSchema.nullish(),
+  camera: captureDiagnosticsSchema.nullish(),
+})
+export const sessionCaptureDiagnosticsSchema = z.object({
+  sessionId: z.string(),
+  segments: z.array(captureSegmentDiagnosticsSchema),
+})
+export type CaptureDiagnostics = z.infer<typeof captureDiagnosticsSchema>
+export type SessionCaptureDiagnostics = z.infer<typeof sessionCaptureDiagnosticsSchema>
+
 export const recordingConfigSchema = z.object({
   source: captureSourceSchema,
   profile: z.enum([
@@ -105,6 +148,8 @@ export const recordingConfigSchema = z.object({
   captureMicrophone: z.boolean(),
   captureSystemAudio: z.boolean(),
   captureWebcam: z.boolean(),
+  webcamPreviewMode: webcamPreviewModeSchema.default("low"),
+  gpuScreenCapture: z.boolean().default(true),
   webcamDeviceId: z.string().nullish(),
   microphoneDeviceId: z.string().nullish(),
   systemAudioDeviceId: z.string().nullish(),
@@ -148,6 +193,8 @@ export const recordingStatusSchema = z.object({
   webcamDeviceId: z.string().nullish(),
   webcamDeviceName: z.string().nullish(),
   webcamPreviewUrl: z.string().nullish(),
+  screenDiagnostics: captureDiagnosticsSchema.nullish(),
+  cameraDiagnostics: captureDiagnosticsSchema.nullish(),
   error: z.string().nullish(),
 })
 
@@ -230,6 +277,7 @@ export const recordingManifestSchema = z.object({
   // Independent camera output path. Older manifests omit this field.
   webcamPath: z.string().optional(),
   webcamFragments: z.array(recordingWebcamFragmentSchema).default([]),
+  captureDiagnostics: z.array(captureSegmentDiagnosticsSchema).default([]),
   fragments: z.array(recordingFragmentSchema),
   markers: z.array(recordingMarkerSchema).default([]),
   // Snapshot of the smart-zoom preference used to create this recording.
@@ -416,6 +464,11 @@ export const diagnosticsReportSchema = z.object({
   encoders: z.array(encoderInfoSchema),
   audioDevices: z.array(audioDeviceSchema),
   videoDevices: z.array(videoDeviceSchema),
+  // False when enumeration was deferred while capture/media work held the
+  // resource gate — empty device arrays then mean "not measured", never
+  // "no devices present". Defaults true for older reports.
+  devicesEnumerated: z.boolean().default(true),
+  capture: sessionCaptureDiagnosticsSchema.nullish(),
 })
 
 export type DiagnosticsReport = z.infer<typeof diagnosticsReportSchema>
@@ -436,6 +489,8 @@ export const recordingPreferencesSchema = z.object({
   systemAudioId: z.string().nullable().default(null),
   systemAudioName: z.string().nullable().default(null),
   webcamEnabled: z.boolean().default(false),
+  webcamPreviewMode: webcamPreviewModeSchema.default("low"),
+  gpuScreenCapture: z.boolean().default(true),
   webcamId: z.string().nullable().default(null),
   webcamName: z.string().nullable().default(null),
   cameraSyncOffsetMs: z.number().int().min(-2000).max(5000).default(0),
@@ -458,6 +513,8 @@ export const defaultRecordingPreferences: RecordingPreferences = {
   systemAudioId: null,
   systemAudioName: null,
   webcamEnabled: false,
+  webcamPreviewMode: "low",
+  gpuScreenCapture: true,
   webcamId: null,
   webcamName: null,
   cameraSyncOffsetMs: 0,
