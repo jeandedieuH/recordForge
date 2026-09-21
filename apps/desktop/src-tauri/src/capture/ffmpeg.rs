@@ -39,6 +39,9 @@ pub struct FfmpegCapture {
     camera_mode: Option<CameraMode>,
     /// Generic reason code when a fallback mode/encoder was used.
     fallback_reason: Option<String>,
+    /// DirectShow sample/graph clock correlation, fed by the stderr reader.
+    /// Populated only for `dshow-camera` captures; other backends stay empty.
+    camera_timing: Arc<Mutex<super::camera_timing::CameraTimingState>>,
 }
 
 /// Metadata describing how a capture process was actually launched, recorded
@@ -246,6 +249,8 @@ impl FfmpegCapture {
             progress,
             progress_age_ms,
             exited,
+            camera_first_frame_offset_ms: self.camera_first_frame_offset_ms(),
+            camera_timing_rejection: self.camera_timing_rejection(),
         }
     }
 
@@ -292,6 +297,36 @@ impl FfmpegCapture {
     pub fn set_fallback_reason(&mut self, reason: Option<String>) {
         self.fallback_reason = reason;
         self.persist_diagnostics();
+    }
+
+    /// Measured camera file origin relative to this process's spawn instant,
+    /// correlated from DirectShow sample/graph timestamps observed on stderr.
+    /// `None` when the telemetry was missing, malformed, or implausible —
+    /// callers must keep the duration-derived fallback in that case.
+    pub fn camera_first_frame_offset_ms(&self) -> Option<u64> {
+        self.camera_timing
+            .lock()
+            .ok()?
+            .first_frame_offset_ms(STARTUP_FRAME_TIMEOUT)
+    }
+
+    /// Stable reason code when the measured camera origin is unavailable —
+    /// `None` when the measurement succeeded or this capture never emits
+    /// camera timing telemetry (screen captures, non-camera backends).
+    /// `unsupported-backend` marks camera backends with no timestamp
+    /// correlation path (non-Windows or the lavfi test source).
+    fn camera_timing_rejection(&self) -> Option<String> {
+        if !self.backend.ends_with("-camera") {
+            return None;
+        }
+        if self.backend != "dshow-camera" {
+            return Some("unsupported-backend".to_string());
+        }
+        self.camera_timing
+            .lock()
+            .ok()?
+            .rejection_reason(STARTUP_FRAME_TIMEOUT)
+            .map(str::to_string)
     }
 
     /// Send the graceful stop signal ("q\n") to FFmpeg immediately and record the
@@ -551,6 +586,12 @@ fn build_webcam_command(
         .arg("-y");
     add_progress_reporting(&mut command);
 
+    // Windows only: keep source timestamps (-copyts stops the demuxer from
+    // re-basing the camera clock) and raise the log level so the DirectShow
+    // packet trace reaches stderr for camera clock correlation in Rust.
+    #[cfg(windows)]
+    command.args(["-copyts", "-loglevel", "verbose"]);
+
     #[cfg(windows)]
     let backend = {
         command.args([
@@ -578,11 +619,12 @@ fn build_webcam_command(
             }
         }
         command.args([
-            // DirectShow device timestamps are not guaranteed to share the same
-            // clock as WASAPI or the screen capture. Wall-clock timestamps keep the
-            // webcam on the same timeline as the other capture sources.
+            // Keep the driver's sample timestamps so the camera file carries
+            // driver sample times; the DirectShow graph clock is correlated
+            // back to the capture timeline in Rust from the verbose packet
+            // trace (see capture::camera_timing).
             "-use_video_device_timestamps",
-            "0",
+            "1",
             "-fflags",
             "+genpts",
             "-i",
@@ -641,6 +683,11 @@ fn build_webcam_command(
     let scale = format!(
         "scale=w='min(iw,{max_cam_w})':h='min(ih,{max_cam_h})':force_original_aspect_ratio=decrease:force_divisible_by=2"
     );
+    // Windows only: normalize the file origin to zero BEFORE scale/split so
+    // both recording and preview see the same rebased timestamps. The
+    // original PTS is preserved for stats (`{ptsi}`) and for `-stats_enc_pre`.
+    #[cfg(windows)]
+    let scale = format!("setpts=PTS-STARTPTS,{scale}");
     let filter = if let Some(preview_fps) = preview_fps {
         format!(
             "[0:v]{scale},split=2[vout][vprev];[vprev]fps={preview_fps},scale=320:-2[vprev_out]"
@@ -659,6 +706,19 @@ fn build_webcam_command(
         .map(|m| (profile.fps as f64).min(m.fps))
         .unwrap_or(profile.fps as f64);
     add_video_encoder(&mut command, profile, encoder, true, output_fps);
+    // Windows only, camera output only: disable B-frame reordering so the
+    // fragmented MP4 origin is normalized consistently, and emit the original
+    // input PTS of every encoded frame on stderr for clock correlation.
+    // Screen and concat encoders are intentionally unchanged.
+    #[cfg(windows)]
+    command.args([
+        "-bf",
+        "0",
+        "-stats_enc_pre",
+        "pipe:2",
+        "-stats_enc_pre_fmt",
+        super::camera_timing::CAMERA_FRAME_STATS_FORMAT,
+    ]);
     command.args([
         "-movflags",
         "+frag_keyframe+empty_moov+default_base_moof",
@@ -1122,9 +1182,36 @@ fn run(
     let progress_state = Arc::new(Mutex::new(CaptureProgressState::new()));
     let progress_reader = Arc::clone(&progress_state);
     let manifest_reader = manifest.clone();
+    // Only the DirectShow camera backend emits the verbose packet trace and
+    // the per-frame stats consumed by the clock correlator.
+    let observe_camera_timing = meta.backend == "dshow-camera";
+    let camera_timing: Arc<Mutex<super::camera_timing::CameraTimingState>> = Arc::new(Mutex::new(
+        super::camera_timing::CameraTimingState::default(),
+    ));
+    let camera_timing_reader = Arc::clone(&camera_timing);
     let stderr_reader = thread::Builder::new().name("capture-progress".into()).spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
+            // Record the observation instant before any lock/progress work:
+            // packet lines correlate the graph clock to the spawn instant, so
+            // early scheduling latency must stay inside the measurement.
+            let observed_at = Instant::now();
+            // Camera timing lines carry raw device names and clock values —
+            // consume them here so they never reach the stderr buffer, the
+            // manifest, or the logs.
+            if observe_camera_timing
+                && camera_timing_reader
+                    .lock()
+                    .map(|mut state| {
+                        state.observe(
+                            &line,
+                            observed_at.saturating_duration_since(timeline_anchor.instant),
+                        )
+                    })
+                    .unwrap_or(false)
+            {
+                continue;
+            }
             // Fold the line into the pending progress block. A `progress=`
             // terminator commits the whole block atomically so readers never
             // observe a half-updated snapshot.
@@ -1210,6 +1297,7 @@ fn run(
         preview_fps: meta.preview_fps,
         camera_mode: meta.camera_mode,
         fallback_reason: None,
+        camera_timing,
     };
 
     // Startup readiness: alive-and-producing-frames, not merely spawned.
@@ -1665,7 +1753,91 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn webcam_capture_uses_wall_clock_device_timestamps() {
+    fn webcam_command_preserves_source_clock() {
+        let profile = test_profile();
+        for preview in [None, Some(10), Some(15)] {
+            let (command, backend) = build_webcam_command(
+                "ffmpeg",
+                "USB Camera",
+                &profile,
+                "libx264",
+                "webcam.mp4",
+                None,
+                preview,
+            );
+            assert_eq!(backend, "dshow-camera");
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let paired = |flag: &str| -> Option<&str> {
+                args.iter()
+                    .position(|arg| arg == flag)
+                    .and_then(|index| args.get(index + 1).map(String::as_str))
+            };
+
+            // Driver sample timestamps must reach the file (-copyts stops the
+            // demuxer from re-basing them) so the camera keeps its own clock.
+            assert_eq!(paired("-use_video_device_timestamps"), Some("1"));
+            assert!(args.iter().any(|arg| arg == "-copyts"));
+
+            // PTS normalization runs BEFORE scale/split: the file origin is
+            // zeroed while `-stats_enc_pre` still reports the original PTS.
+            let filter = paired("-filter_complex").expect("filter graph");
+            let setpts_pos = filter.find("setpts=PTS-STARTPTS").unwrap();
+            let scale_pos = filter.find("scale=").unwrap();
+            assert!(setpts_pos < scale_pos);
+            if preview.is_some() {
+                let split_pos = filter.find("split").unwrap();
+                assert!(setpts_pos < split_pos);
+            }
+
+            // Camera-only B-frame disable and per-frame stats must sit in the
+            // recording output's option block — before the file output and
+            // never on the preview pipe.
+            assert_eq!(paired("-bf"), Some("0"));
+            assert_eq!(paired("-stats_enc_pre"), Some("pipe:2"));
+            assert_eq!(
+                paired("-stats_enc_pre_fmt"),
+                Some(super::super::camera_timing::CAMERA_FRAME_STATS_FORMAT)
+            );
+            let output_pos = args.iter().position(|arg| arg == "webcam.mp4").unwrap();
+            let stats_pos = args.iter().position(|arg| arg == "-stats_enc_pre").unwrap();
+            assert!(stats_pos < output_pos);
+            assert!(!args[output_pos..]
+                .iter()
+                .any(|arg| arg.starts_with("-stats_enc")));
+        }
+
+        // The camera-only flags must not leak into the screen pipeline.
+        let config = RecordingConfig {
+            source: region_source(0, 0, 800, 600),
+            profile: "balanced".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+        };
+        let (screen_command, _) =
+            build_screen_command("ffmpeg", &config, &profile, "libx264", "seg.mp4", false);
+        let screen_args: Vec<String> = screen_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!screen_args.iter().any(|arg| arg == "-bf"));
+        assert!(!screen_args.iter().any(|arg| arg.starts_with("-stats_enc")));
+        assert!(!screen_args.iter().any(|arg| arg == "-copyts"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn webcam_capture_preserves_device_sample_timestamps() {
         let profile = webcam_profile();
         let (command, backend) = build_webcam_command(
             "ffmpeg",
@@ -1676,11 +1848,203 @@ mod tests {
             None,
             None,
         );
-        let debug = format!("{command:?}");
-
-        assert!(debug.contains("-use_video_device_timestamps"));
-        assert!(debug.contains("\"0\""));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let flag = args
+            .iter()
+            .position(|arg| arg == "-use_video_device_timestamps")
+            .expect("dshow timestamp flag present");
+        assert_eq!(args[flag + 1], "1");
         assert_eq!(backend, "dshow-camera");
+    }
+
+    /// Rebuild a built webcam command with the DirectShow input block swapped
+    /// for a synthetic lavfi source. Every other production argument —
+    /// `-copyts`, the filter graph, encoder args, stats flags, outputs — is
+    /// exercised exactly as `build_webcam_command` emits it.
+    #[cfg(windows)]
+    fn splice_lavfi_input(command: &Command, source: &str, preview: bool) -> Command {
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let input_start = args
+            .windows(2)
+            .position(|pair| pair[0] == "-f" && pair[1] == "dshow")
+            .expect("dshow input block must exist");
+        let input_end = args
+            .windows(2)
+            .position(|pair| pair[0] == "-i" && pair[1].starts_with("video="))
+            .map(|index| index + 2)
+            .expect("-i video=... input must exist");
+        // `-re` paces the finite source in realtime so the capture reaches
+        // readiness (a positive progress block) before natural exit.
+        let mut spliced = crate::process::create_command(command.get_program());
+        spliced
+            .stdin(Stdio::piped())
+            .stdout(if preview {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stderr(Stdio::piped())
+            .args(&args[..input_start])
+            .args(["-re", "-f", "lavfi", "-i", source])
+            .args(&args[input_end..]);
+        spliced
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_timestamp_metadata_survives_normalization() {
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("webcam.mp4");
+
+        let (command, backend) = build_webcam_command(
+            executable.to_str().unwrap(),
+            "Synthetic Camera",
+            &webcam_profile(),
+            "libx264",
+            output.to_str().unwrap(),
+            None,
+            None,
+        );
+        assert_eq!(backend, "dshow-camera");
+        let command = splice_lavfi_input(
+            &command,
+            "color=c=white:s=64x64:r=10:d=2,setpts=PTS+1000/TB",
+            false,
+        );
+
+        let mut capture = run(
+            command,
+            output.to_str().unwrap(),
+            0,
+            None,
+            None,
+            CaptureMeta {
+                startup_timeout: Duration::from_secs(8),
+                encoder: "libx264".into(),
+                backend: "dshow-camera".into(),
+                requested_fps: 30.0,
+                camera_mode: None,
+                preview_fps: None,
+            },
+        )
+        .expect("synthetic camera capture must reach readiness");
+
+        // The input is finite: let it end on its own and be reaped rather
+        // than sending 'q' prematurely at readiness.
+        capture
+            .wait_for_stop(Instant::now())
+            .expect("finite synthetic camera stops cleanly");
+
+        // The lavfi source emits no DirectShow packet lines, so the graph
+        // clock is bound here by authored fixtures with a constant 600ms
+        // delivery delta arriving at 800ms/900ms/1000ms after spawn.
+        {
+            let mut timing = capture.camera_timing.lock().unwrap();
+            for n in 0..3i64 {
+                let sample = 10_000_000_000 + n * 1_000_000;
+                let graph = sample + 6_000_000;
+                assert!(timing.observe(
+                    &format!(
+                        "[dshow @ 000001] passing through packet of type video size     2048 timestamp {sample} orig timestamp {sample} graph timestamp {graph} diff 6000000 Synthetic Camera"
+                    ),
+                    Duration::from_millis(800 + n as u64 * 100),
+                ));
+            }
+        }
+        // first_input from the REAL stats lines (ptsi == +1000s offset) minus
+        // the bound graph origin (1e10 - 9.998e9) must equal 200ms — proving
+        // the original absolute PTS survived setpts normalization end-to-end.
+        assert_eq!(capture.camera_first_frame_offset_ms(), Some(200));
+
+        let metadata = crate::media::probe::probe_media(
+            ffprobe.to_str().unwrap(),
+            &output,
+            "camera-timing-test",
+        )
+        .expect("ffprobe reads the recorded camera file");
+        let video = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .expect("video stream present");
+        assert!(
+            video.start_ms.unwrap_or(0) <= 34,
+            "first frame must be normalized near zero (<= one 30fps frame), got {:?}ms",
+            video.start_ms
+        );
+        let duration_ms = video
+            .duration_ms
+            .or(metadata.format.duration_ms)
+            .unwrap_or(0);
+        assert!(
+            (1_500..=3_000).contains(&duration_ms),
+            "duration must reflect the ~2s of media, not the +1000s offset: {duration_ms}ms"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn webcam_preview_capture_records_without_stdout_blocking() {
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("webcam.mp4");
+
+        let (command, backend) = build_webcam_command(
+            executable.to_str().unwrap(),
+            "Synthetic Camera",
+            &webcam_profile(),
+            "libx264",
+            output.to_str().unwrap(),
+            None,
+            Some(10),
+        );
+        assert_eq!(backend, "dshow-camera");
+        let command = splice_lavfi_input(
+            &command,
+            "color=c=white:s=64x64:r=10:d=2,setpts=PTS+1000/TB",
+            true,
+        );
+
+        // A live broadcaster drains the MJPEG preview pipe so the capture is
+        // never blocked on stdout.
+        let server = crate::capture::preview_server::WebcamPreviewServer::start()
+            .expect("preview server starts");
+        let mut capture = run(
+            command,
+            output.to_str().unwrap(),
+            0,
+            None,
+            Some(server.broadcaster()),
+            CaptureMeta {
+                startup_timeout: Duration::from_secs(8),
+                encoder: "libx264".into(),
+                backend: "dshow-camera".into(),
+                requested_fps: 30.0,
+                camera_mode: None,
+                preview_fps: Some(10),
+            },
+        )
+        .expect("synthetic camera capture with preview must reach readiness");
+
+        capture
+            .wait_for_stop(Instant::now())
+            .expect("finite synthetic camera stops cleanly");
+        assert!(
+            server.broadcaster().latest_frame().is_some(),
+            "preview pipe produced at least one MJPEG frame"
+        );
+        assert!(output.exists());
     }
 
     #[test]

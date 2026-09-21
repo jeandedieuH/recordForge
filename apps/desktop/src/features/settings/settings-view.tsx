@@ -652,17 +652,20 @@ export function SettingsView({
             </div>
           </div>
 
-          {/* Camera Lip-Sync & Audio Alignment */}
+          {/* Camera Latency Calibration */}
           <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <div className="flex items-center gap-2">
                   <Video className="size-4 text-primary" />
-                  <h3 className="text-sm font-semibold text-foreground">Camera Lip-Sync Offset</h3>
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Camera Latency Calibration
+                  </h3>
                 </div>
                 <p className="text-xs text-subtle-foreground mt-0.5">
-                  Calibrate the timing offset between camera video and microphone audio for new
-                  recordings.
+                  Compensate for camera-internal latency the capture pipeline cannot measure —
+                  virtual/network cameras, HDMI capture cards. Applies to new recordings; most
+                  cameras need no adjustment.
                 </p>
               </div>
               <span className="rounded bg-primary/10 px-2.5 py-1 text-xs font-mono font-semibold text-primary">

@@ -130,8 +130,8 @@ export function CameraClipInspector({
   function handleSaveAsDefault() {
     void savePreferences({ cameraSyncOffsetMs: clip.startMs }).then(() => {
       toast({
-        title: "Lip-sync default saved",
-        description: `Set ${clip.startMs > 0 ? `+${clip.startMs}` : clip.startMs} ms as the default camera sync offset for future recordings.`,
+        title: "Camera latency default saved",
+        description: `Set ${clip.startMs > 0 ? `+${clip.startMs}` : clip.startMs} ms as the default camera latency offset for future recordings.`,
       })
     })
   }
@@ -147,12 +147,12 @@ export function CameraClipInspector({
         />
       </InspectorSection>
 
-      <InspectorSection title="Lip-Sync & Timing" defaultOpen>
+      <InspectorSection title="Camera Latency" defaultOpen>
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-subtle-foreground">
               <Video className="size-4 text-primary" aria-hidden />
-              <span>Camera Sync Offset</span>
+              <span>Latency Offset</span>
             </div>
             <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-mono font-semibold text-primary">
               {clip.startMs > 0 ? `+${clip.startMs}` : clip.startMs} ms
@@ -160,8 +160,8 @@ export function CameraClipInspector({
           </div>
 
           <p className="text-[11px] leading-relaxed text-subtle-foreground">
-            Nudge this camera clip forward or backward to achieve perfect lip-sync with audio.
-            Moving right (positive) delays the camera video.
+            Fine-tune this clip to compensate for camera latency the capture pipeline cannot
+            measure (virtual cameras, capture cards). Moving right (positive) delays the video.
           </p>
 
           <div className="flex flex-wrap items-center gap-1.5">

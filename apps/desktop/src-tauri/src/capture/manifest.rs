@@ -346,6 +346,8 @@ mod tests {
             },
             progress_age_ms: Some(50),
             exited: true,
+            camera_first_frame_offset_ms: None,
+            camera_timing_rejection: None,
         }
     }
 

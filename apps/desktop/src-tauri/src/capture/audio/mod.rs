@@ -71,7 +71,46 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
 }
 
 /// Start an audio capture track (microphone or system audio loopback) on the active host platform.
+///
+/// Endpoint churn — device re-enumeration, exclusive-mode holds, and audio
+/// service restarts — makes startup fail transiently, so a brief bounded retry
+/// runs before the caller is told the track is unavailable.
 pub fn start_audio_track(
+    kind: AudioCaptureKind,
+    device_id: Option<String>,
+    output_path: PathBuf,
+    timeline_origin: TimelineAnchor,
+) -> Result<Box<dyn AudioTrack>> {
+    const ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+    let mut last_error = None;
+    for attempt in 1..=ATTEMPTS {
+        match start_audio_track_once(
+            kind,
+            device_id.clone(),
+            output_path.clone(),
+            timeline_origin,
+        ) {
+            Ok(track) => return Ok(track),
+            Err(error) => {
+                if attempt < ATTEMPTS {
+                    std::thread::sleep(RETRY_DELAY);
+                }
+                last_error = Some(error);
+            }
+        }
+    }
+
+    match last_error {
+        Some(error) => Err(error),
+        None => {
+            Err(crate::errors::InternalError::Capture("audio track failed to start".into()).into())
+        }
+    }
+}
+
+fn start_audio_track_once(
     kind: AudioCaptureKind,
     device_id: Option<String>,
     output_path: PathBuf,

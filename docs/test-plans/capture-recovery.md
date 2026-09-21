@@ -143,3 +143,13 @@
 | Mic + system (P0.4) | Enable both → Record → Stop → Check tracks | Separate microphone and system-audio streams in the MP4 |
 | No audio | Disable all audio → Record → Stop | Valid video-only MP4 |
 | Audio device disconnect | Record with mic → Unplug mic during recording | Warning, continue video |
+
+### 5.3 Camera synchronization
+
+Windows hardware acceptance remains manual; synthetic tests do not establish sensor-level synchronization.
+
+| Scenario | Steps | Expected |
+| ---------- | ------- | ---------- |
+| Fresh recording | Record screen, camera, microphone, and system audio. Keep camera lip-sync adjustment at zero. Make visible claps near the beginning and end, then inspect editor preview and an MP4 export. | Camera motion aligns with microphone sound; screen/microphone/system-audio alignment remains unchanged. Record any residual offset rather than compensating during this test. |
+| Pause/resume | Repeat the clap check before and after a pause/resume. | Camera alignment remains consistent across segment boundaries. |
+| Timing diagnostics | Inspect each segment’s cameraFirstFrameOffsetMs, cameraTimingRejection, and finalization timing_source. | A populated origin and dshow-sample-clock indicate the new path ran; an absent origin and duration-fallback do not verify the new path, and cameraTimingRejection names the rejection cause. No raw device names or timing trace lines are persisted by the correlator. |

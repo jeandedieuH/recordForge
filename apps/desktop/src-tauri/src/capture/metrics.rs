@@ -132,6 +132,16 @@ pub struct CaptureDiagnostics {
     pub progress_age_ms: Option<u64>,
     /// True once the process's stderr reached EOF (process exited).
     pub exited: bool,
+    /// Camera file origin relative to process spawn, correlated from
+    /// DirectShow sample/graph timestamps; absent if unavailable.
+    #[serde(default)]
+    pub camera_first_frame_offset_ms: Option<u64>,
+    /// Stable reason code when the camera origin was rejected (e.g.
+    /// `sample-clock-skew`, `insufficient-samples`), `unsupported-backend`
+    /// for camera backends without timestamp correlation, or `None` when the
+    /// measurement succeeded / this capture is not a camera.
+    #[serde(default)]
+    pub camera_timing_rejection: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -290,6 +300,8 @@ mod tests {
             },
             progress_age_ms: Some(40),
             exited: false,
+            camera_first_frame_offset_ms: None,
+            camera_timing_rejection: None,
         }
     }
 

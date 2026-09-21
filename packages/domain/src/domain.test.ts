@@ -214,7 +214,7 @@ describe("domain", () => {
     })
   })
 
-  it("defaults to Northern Lights background gradient and 0 padding without camera", () => {
+  it("defaults to Northern Lights background gradient with 24px padding and radius without camera", () => {
     const recording = makeRecording()
     const metadata: MediaMetadata = {
       recordingId: recording.id,
@@ -232,13 +232,15 @@ describe("domain", () => {
     expect(timeline.canvas.background).toBe(
       "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
     )
-    expect(timeline.canvas.padding).toBe(0)
+    expect(timeline.canvas.padding).toBe(24)
+    expect(timeline.canvas.borderRadius).toBe(24)
 
     const project = createProjectFromRecording(recording, metadata)
     expect(project.canvas.background).toBe(
       "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
     )
-    expect(project.canvas.padding).toBe(0)
+    expect(project.canvas.padding).toBe(24)
+    expect(project.canvas.borderRadius).toBe(24)
   })
 
   it("applies positive cameraSyncOffsetMs to shift camera clip startMs to the right", () => {

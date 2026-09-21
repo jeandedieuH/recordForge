@@ -780,6 +780,60 @@ describe("recording contracts", () => {
       expect(parsed.segments[0].screen?.previewFps).toBeNull()
     })
 
+    it("parses diagnostics that lack a measured camera origin", () => {
+      // Payloads written before the camera clock correlation existed (and
+      // non-Windows captures) simply omit the field — it must stay optional.
+      const parsed = captureDiagnosticsSchema.parse({
+        processId: 1234,
+        encoder: "libx264",
+        backend: "dshow-camera",
+        requestedFps: 30,
+        progress: {},
+        exited: false,
+      })
+      expect(parsed.cameraFirstFrameOffsetMs).toBeUndefined()
+    })
+
+    it("round-trips a measured camera origin and rejects negatives", () => {
+      const parsed = captureDiagnosticsSchema.parse({
+        processId: 1234,
+        encoder: "libx264",
+        backend: "dshow-camera",
+        requestedFps: 30,
+        cameraFirstFrameOffsetMs: 201,
+        progress: {},
+        exited: false,
+      })
+      expect(parsed.cameraFirstFrameOffsetMs).toBe(201)
+
+      expect(() =>
+        captureDiagnosticsSchema.parse({
+          processId: 1234,
+          encoder: "libx264",
+          backend: "dshow-camera",
+          requestedFps: 30,
+          cameraFirstFrameOffsetMs: -1,
+          progress: {},
+          exited: false,
+        }),
+      ).toThrow()
+    })
+
+    it("round-trips a camera timing rejection reason", () => {
+      // When the measured origin is absent the rejection code explains why
+      // (e.g. a virtual camera's sample clock leading the graph clock).
+      const parsed = captureDiagnosticsSchema.parse({
+        processId: 1234,
+        encoder: "h264_nvenc",
+        backend: "dshow-camera",
+        requestedFps: 30,
+        cameraTimingRejection: "sample-clock-skew",
+        progress: {},
+        exited: false,
+      })
+      expect(parsed.cameraTimingRejection).toBe("sample-clock-skew")
+    })
+
     it("rejects negative and non-finite capture counters", () => {
       expect(() => captureProgressSchema.parse({ outputFrames: -1 })).toThrow()
       expect(() => captureProgressSchema.parse({ outputFps: Number.NaN })).toThrow()

@@ -120,6 +120,16 @@ export const captureDiagnosticsSchema = z.object({
   // first sensor frame. previewFps is absent when preview encoding is off.
   startupReadyMs: z.number().int().nonnegative().nullish(),
   previewFps: z.number().int().positive().nullish(),
+  // Measured camera file origin relative to the FFmpeg spawn instant,
+  // correlated from DirectShow sample/graph timestamps. Unlike startupReadyMs
+  // (a readiness signal) this estimates the camera file origin used for A/V
+  // alignment; absent when the correlation was unavailable or implausible.
+  cameraFirstFrameOffsetMs: z.number().int().nonnegative().nullish(),
+  // Stable reason code when the measured camera origin was rejected (e.g.
+  // `sample-clock-skew`, `insufficient-samples`), `unsupported-backend` for
+  // camera backends without timestamp correlation; absent when the
+  // measurement succeeded or the capture is not a camera.
+  cameraTimingRejection: z.string().nullish(),
 })
 export const captureSegmentDiagnosticsSchema = z.object({
   index: z.number().int().nonnegative(),

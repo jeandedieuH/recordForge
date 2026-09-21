@@ -300,6 +300,115 @@ describe("recorder-store preferences & fallback", () => {
     expect(useRecorderStore.getState().preferences.microphoneEnabled).toBe(true)
   })
 
+  it("keeps system audio capture enabled and falls back to the default endpoint when enumeration is empty", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-sys-default",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: true,
+      webcamActive: false,
+      error: null,
+    }
+    const prepare = vi
+      .spyOn(recorderApi, "prepareRecording")
+      .mockResolvedValue("session-sys-default")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    // The user toggled system audio on, but this run's enumeration produced no
+    // devices — a transient WASAPI miss must not disable the capture or flip
+    // the stored preference off.
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      audioDevices: [],
+      audioDevicesLoaded: true,
+      selectedSystemAudioId: "",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        systemAudioEnabled: true,
+        systemAudioId: "sys-stale",
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        captureSystemAudio: true,
+        systemAudioDeviceId: "default",
+      }),
+      3,
+    )
+    expect(useRecorderStore.getState().preferences.systemAudioEnabled).toBe(true)
+    expect(useRecorderStore.getState().preferences.systemAudioId).toBe("sys-stale")
+  })
+
+  it("sends the selected system audio endpoint when one is resolved", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-sys-id",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: true,
+      webcamActive: false,
+      error: null,
+    }
+    const prepare = vi
+      .spyOn(recorderApi, "prepareRecording")
+      .mockResolvedValue("session-sys-id")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      audioDevices: [
+        { id: "ep-render-1", name: "Speakers", kind: "system" as const, isDefault: true },
+      ],
+      audioDevicesLoaded: true,
+      selectedSystemAudioId: "ep-render-1",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        systemAudioEnabled: true,
+        systemAudioId: "ep-render-1",
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        captureSystemAudio: true,
+        systemAudioDeviceId: "ep-render-1",
+      }),
+      3,
+    )
+  })
+
   it("tracks sourcesLoaded, profilesLoaded, and diagnosticsLoading / diagnosticsLoaded flags", async () => {
     vi.spyOn(recorderApi, "listCaptureSources").mockResolvedValue([
       {

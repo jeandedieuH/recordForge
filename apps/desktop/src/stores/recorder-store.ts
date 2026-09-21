@@ -605,16 +605,22 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         camId = ""
       }
 
+      // Capture toggles follow the user's preference — a transient device
+      // enumeration miss must not silently disable a requested input.
+      const micEnabled = state.preferences.microphoneEnabled
+      const sysEnabled = state.preferences.systemAudioEnabled
       const config: RecordingConfig = {
         source,
         profile: state.selectedProfileId,
-        captureMicrophone: Boolean(micId),
-        captureSystemAudio: Boolean(sysId),
+        captureMicrophone: micEnabled,
+        captureSystemAudio: sysEnabled,
         captureWebcam: Boolean(camId),
         webcamPreviewMode: state.preferences.webcamPreviewMode,
         gpuScreenCapture: state.preferences.gpuScreenCapture,
-        microphoneDeviceId: micId || undefined,
-        systemAudioDeviceId: sysId || undefined,
+        // "default" lets the native side open the platform default endpoint
+        // when enumeration produced no matching device id this run.
+        microphoneDeviceId: micEnabled ? micId || "default" : undefined,
+        systemAudioDeviceId: sysEnabled ? sysId || "default" : undefined,
         webcamDeviceId: camId || undefined,
         smartZoomEnabled: state.preferences.smartZoomEnabled,
         smartZoomPreset: state.preferences.smartZoomPreset,
@@ -626,9 +632,9 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         sourceName: source.name,
         regionBounds: source.kind === "region" ? source.bounds : get().preferences.regionBounds,
         profile: state.selectedProfileId,
-        microphoneEnabled: Boolean(micId),
+        microphoneEnabled: micEnabled,
         microphoneId: micId || get().preferences.microphoneId,
-        systemAudioEnabled: Boolean(sysId),
+        systemAudioEnabled: sysEnabled,
         systemAudioId: sysId || get().preferences.systemAudioId,
         webcamEnabled: Boolean(camId),
         webcamId: camId || get().preferences.webcamId,

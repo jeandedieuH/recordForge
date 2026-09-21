@@ -169,6 +169,26 @@ fn compute_webcam_start_offset_ms(
         .saturating_sub(screen_head_trim_ms as i64)
 }
 
+/// Resolve the webcam segment start offset on the master screen timeline.
+///
+/// `measured_camera_start_ms` is the camera file's own first-frame origin
+/// relative to the process spawn instant, correlated from DirectShow
+/// sample/graph timestamps. When it is absent (non-Windows backends, missing
+/// or implausible telemetry) the duration-derived `fallback_camera_head_trim_ms`
+/// keeps the legacy behavior.
+fn resolve_webcam_start_offset_ms(
+    spawn_offset_ms: i64,
+    measured_camera_start_ms: Option<u64>,
+    fallback_camera_head_trim_ms: u64,
+    screen_head_trim_ms: u64,
+) -> i64 {
+    compute_webcam_start_offset_ms(
+        spawn_offset_ms,
+        measured_camera_start_ms.unwrap_or(fallback_camera_head_trim_ms),
+        screen_head_trim_ms,
+    )
+}
+
 /// The segment's rendered video timeline. FFmpeg only starts producing frames
 /// several hundred milliseconds after spawn (input and encoder init), while
 /// the audio workers and cursor tracker clock against the spawn instant. Every
@@ -861,9 +881,23 @@ impl Recorder {
                     tracing::warn!(
                         error = ?error,
                         path = %path.display(),
-                        "audio track stopped with an error"
+                        "audio track stopped with an error; keeping whatever was captured"
                     );
-                    continue;
+                    // A worker that dies mid-capture still leaves its WAV on
+                    // disk: the worker finalizes the header before reporting
+                    // an error, and a torn file is rebuilt from its length.
+                    // The alignment pass below then re-reads the file for the
+                    // real payload size. Only a truly unusable file is dropped.
+                    if let Err(repair_error) = super::audio::wav::repair_wav_header_if_needed(&path)
+                    {
+                        tracing::warn!(
+                            error = ?repair_error,
+                            path = %path.display(),
+                            "audio track could not be salvaged"
+                        );
+                        continue;
+                    }
+                    0
                 }
             };
 
@@ -1008,11 +1042,13 @@ impl Recorder {
             }
         };
 
-        // Align the webcam stream to the master screen/audio timeline:
-        // FFmpeg webcam sidecars take several hundred milliseconds (DirectShow
-        // initialization and encoder setup) to capture their first frame.
-        // We probe the real webcam duration and start timestamp, calculate its startup gap,
-        // and compute the exact offset relative to the screen's first frame.
+        // Align the webcam stream to the master screen/audio timeline. The
+        // camera file's own first-frame origin is preferred when available:
+        // on Windows the capture correlated DirectShow sample/graph
+        // timestamps back to the process spawn instant. The duration-derived
+        // head trim remains the fallback for missing telemetry and
+        // non-Windows backends — it is an estimate (it can fold delivery and
+        // encoder-flush tail delay into the offset), not an exact origin.
         let wall_span_ms = if stats.quit_span_ms > 0 {
             stats.quit_span_ms
         } else {
@@ -1027,8 +1063,10 @@ impl Recorder {
         );
 
         let spawn_offset_ms = signed_start_offset_ms(webcam.started_at(), screen_started_at);
-        let offset_ms = compute_webcam_start_offset_ms(
+        let measured_camera_start_ms = webcam.camera_first_frame_offset_ms();
+        let offset_ms = resolve_webcam_start_offset_ms(
             spawn_offset_ms,
+            measured_camera_start_ms,
             webcam_timeline.head_trim_ms(),
             timeline.head_trim_ms(),
         );
@@ -1041,6 +1079,12 @@ impl Recorder {
             probed_start_ms = probed_start_ms.unwrap_or(0),
             webcam_head_trim_ms = webcam_timeline.head_trim_ms(),
             screen_head_trim_ms = timeline.head_trim_ms(),
+            measured_camera_start_ms = ?measured_camera_start_ms,
+            timing_source = if measured_camera_start_ms.is_some() {
+                "dshow-sample-clock"
+            } else {
+                "duration-fallback"
+            },
             final_offset_ms = offset_ms,
             "aligned webcam segment to screen timeline"
         );
@@ -1943,6 +1987,16 @@ impl Recorder {
             .screen_capture
             .as_mut()
             .is_some_and(|capture| capture.is_running());
+        // Audio liveness comes from tracks that actually started — the config
+        // may request a track whose endpoint never produced a worker.
+        let microphone_live = session
+            .audio_captures
+            .iter()
+            .any(|capture| capture.kind == AudioCaptureKind::Microphone);
+        let system_audio_live = session
+            .audio_captures
+            .iter()
+            .any(|capture| capture.kind == AudioCaptureKind::SystemLoopback);
 
         Ok(RecordingStatus {
             session_id: session.session_id.clone(),
@@ -1953,8 +2007,8 @@ impl Recorder {
             recorded_ms,
             source_kind: session.config.source.kind.clone(),
             source_name: session.config.source.name.clone(),
-            microphone_active: session.config.capture_microphone,
-            system_audio_active: session.config.capture_system_audio,
+            microphone_active: microphone_live,
+            system_audio_active: system_audio_live,
             // Report the live camera process, not the request: a sidecar that
             // failed every start attempt (or died mid-recording) is not active
             // even when the config asked for one.
@@ -1988,17 +2042,35 @@ impl Recorder {
                         .find(|segment| segment.index == session.segment_index)
                         .and_then(|segment| segment.camera.clone())
                 }),
-            error: if m.state == RecorderState::Recording
-                && session.config.capture_webcam
-                && !camera_live
-            {
-                // Only claim the screen survives when a live screen
-                // process is actually observable.
-                Some(if screen_live {
-                    "Camera capture is unavailable; screen recording continues.".into()
+            error: if m.state == RecorderState::Recording {
+                // A requested capture that produced no live worker is a
+                // degradation the user must see — otherwise a track is lost
+                // silently while its toggle still reads "on".
+                let mut missing = Vec::new();
+                if session.config.capture_microphone && !microphone_live {
+                    missing.push("Microphone");
+                }
+                if session.config.capture_system_audio && !system_audio_live {
+                    missing.push("System audio");
+                }
+                if session.config.capture_webcam && !camera_live {
+                    missing.push("Camera");
+                }
+                if missing.is_empty() {
+                    None
                 } else {
-                    "Camera capture is unavailable.".into()
-                })
+                    // Only claim the screen survives when a live screen
+                    // process is actually observable.
+                    Some(format!(
+                        "{} capture is unavailable{}.",
+                        missing.join(", "),
+                        if screen_live {
+                            "; screen recording continues"
+                        } else {
+                            ""
+                        }
+                    ))
+                }
             } else {
                 None
             },
@@ -2124,6 +2196,43 @@ mod tests {
         // Fallback without probes (0ms trims): offset is purely spawn delta.
         let fallback_offset = compute_webcam_start_offset_ms(180, 0, 0);
         assert_eq!(fallback_offset, 180);
+    }
+
+    #[test]
+    fn webcam_measured_start_ignores_tail_shortfall() {
+        // Production seam: the duration-derived head trim bakes encoder
+        // flush / delivery tail delay into the camera-only offset. With a
+        // measured first-frame origin of 200ms the offset must use 200, not
+        // the 800ms fallback trim: 150 + 200 - 100 = 250 (not 850).
+        let offset = resolve_webcam_start_offset_ms(150, Some(200), 800, 100);
+        assert_eq!(offset, 250);
+    }
+
+    #[test]
+    fn webcam_measured_start_overrides_fallback_and_stays_honest() {
+        // The measured origin wins even when the fallback disagrees wildly.
+        assert_eq!(
+            resolve_webcam_start_offset_ms(150, Some(200), 1_800, 100),
+            250
+        );
+        // A measured origin of zero is honored, not filtered as "missing".
+        assert_eq!(resolve_webcam_start_offset_ms(150, Some(0), 800, 100), 50);
+        // A camera that started earlier than the screen still goes negative
+        // (needs head trimming in the stitch filter).
+        assert_eq!(
+            resolve_webcam_start_offset_ms(100, Some(200), 900, 900),
+            -600
+        );
+        // Without telemetry the resolver is exactly the legacy computation.
+        assert_eq!(
+            resolve_webcam_start_offset_ms(150, None, 800, 100),
+            compute_webcam_start_offset_ms(150, 800, 100)
+        );
+        // Each segment resolves from its own measurement — no shared state.
+        assert_eq!(
+            resolve_webcam_start_offset_ms(150, Some(800), 1_800, 100),
+            850
+        );
     }
 
     #[test]
@@ -2304,6 +2413,94 @@ mod tests {
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
         }
+    }
+
+    fn test_profile() -> RecordingProfile {
+        RecordingProfile {
+            id: "low-impact".into(),
+            label: "Low Impact".into(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            video_bitrate_kbps: None,
+            crf: Some(23),
+            encoder_priority: vec!["libx264".into()],
+            audio_codec: "aac".into(),
+            audio_bitrate_kbps: 128,
+        }
+    }
+
+    fn test_session(work_dir: &std::path::Path, config: RecordingConfig) -> ActiveSession {
+        let manifest = RecordingManifest::new(
+            "session-1",
+            work_dir.to_string_lossy(),
+            config.source.clone(),
+            "low-impact",
+        );
+        ActiveSession {
+            session_id: "session-1".into(),
+            work_dir: work_dir.to_path_buf(),
+            config,
+            profile: test_profile(),
+            manifest: Arc::new(Mutex::new(manifest)),
+            screen_capture: None,
+            audio_captures: Vec::new(),
+            webcam_capture: None,
+            webcam_preview_server: None,
+            webcam_segments: Vec::new(),
+            webcam_segments_started: 0,
+            webcam_capture_failed: false,
+            cursor_tracker: None,
+            cursor_segment_start_ms: 0,
+            segment_index: 0,
+            total_recorded_ms: 0,
+            started_at: Some(chrono::Utc::now()),
+            resource_permit: None,
+        }
+    }
+
+    #[test]
+    fn status_reports_requested_audio_that_never_started() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+        let work_dir = temp_dir.path().join("session-1");
+        std::fs::create_dir_all(&work_dir).expect("create session work dir");
+
+        let mut config = test_config();
+        config.capture_microphone = true;
+        config.capture_system_audio = true;
+        let mut session = test_session(&work_dir, config);
+
+        // Requested tracks that failed to start must read inactive and surface
+        // an error — echoing the config would hide the silent skip.
+        let status = recorder
+            .status_from_session(&mut session)
+            .expect("read status");
+        assert!(!status.microphone_active);
+        assert!(!status.system_audio_active);
+        let error = status
+            .error
+            .expect("missing captures must surface an error");
+        assert!(error.contains("Microphone"), "{error}");
+        assert!(error.contains("System audio"), "{error}");
+
+        // A live loopback worker clears the degradation for that track.
+        let track = crate::capture::fakes::FakeAudioTrack::new(
+            work_dir.join("sys_000.wav"),
+            std::time::Instant::now(),
+        )
+        .expect("create fake audio track");
+        session.audio_captures.push(ActiveAudioCapture {
+            kind: AudioCaptureKind::SystemLoopback,
+            track: Box::new(track),
+        });
+        let status = recorder
+            .status_from_session(&mut session)
+            .expect("read status");
+        assert!(status.system_audio_active);
+        let error = status.error.expect("microphone is still missing");
+        assert!(error.contains("Microphone"), "{error}");
+        assert!(!error.contains("System audio"), "{error}");
     }
 
     #[test]

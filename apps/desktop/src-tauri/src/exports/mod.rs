@@ -1143,14 +1143,17 @@ fn render_timeline_composition(
         );
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
+        // scale runs per source frame at full canvas resolution and defaults
+        // to a single swscale thread; `threads=auto` slices it across cores —
+        // measured +7% export throughput on 1080p60 with the pinned FFmpeg.
         if can_direct_pad {
             filter.push_str(&format!(
-                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
+                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
                 canvas.fps,
             ));
         } else {
             filter.push_str(&format!(
-                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={screen_w:.0}:{screen_h:.0}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
+                ",scale={screen_w:.0}:{screen_h:.0}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={screen_w:.0}:{screen_h:.0}:(ow-iw)/2:(oh-ih)/2:color={pad_color},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={segment_duration},tpad=stop_mode=add:stop_duration={segment_duration}:color={pad_color},trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]",
                 canvas.fps,
             ));
         }
@@ -1302,14 +1305,26 @@ fn render_timeline_composition(
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
     )?;
-    let has_overlay_items = plan.overlay_render_plan.is_some()
-        || !plan.annotations.is_empty()
+    let cursor_windows: Vec<(u64, u64)> = cursor_renderers
+        .iter()
+        .map(|(start_ms, end_ms, _)| (*start_ms, *end_ms))
+        .collect();
+    // An overlay render plan that parses to zero items is treated as "no
+    // items": it lets us skip the generated plate input (and its stdin feed)
+    // entirely instead of streaming transparent frames for the whole export.
+    let overlay_item_windows = collect_overlay_item_windows(plan);
+    let has_overlay_items = !plan.annotations.is_empty()
         || !plan.texts.is_empty()
-        || !plan.images.is_empty();
+        || !plan.images.is_empty()
+        || overlay_item_windows
+            .as_ref()
+            .map(|windows| !windows.is_empty())
+            .unwrap_or_else(|| plan.overlay_render_plan.is_some());
     let mut cursor_plan = None;
     // Label of the overlay-items plate (already bracketed), composited after
     // the camera and privacy-mask passes so titles render above them.
     let mut items_plate_label: Option<String> = None;
+    let mut items_enable: Option<String> = None;
     if !cursor_renderers.is_empty() || has_overlay_items {
         let plate_input_index = input_assets.len();
         let plate_source = format!("[{plate_input_index}:v]");
@@ -1320,6 +1335,13 @@ fn render_timeline_composition(
             plan,
             asset_paths,
         )?;
+        // Gate each plate overlay to the time windows where its content can be
+        // visible; outside them the blend is skipped and the base passes
+        // through untouched, which keeps the CPU cost of an idle plate near
+        // zero (the plate input itself is still consumed at CFR rate).
+        let cursor_enable = plate_enable_expr(cursor_windows, plan.duration_ms)
+            .map(|expr| format!(":enable='{expr}'"))
+            .unwrap_or_default();
         if prepared.dual_plane {
             filters.push(format!(
                 "{plate_source}split=2[plate_cursor_src][plate_items_src];\
@@ -1328,19 +1350,24 @@ fn render_timeline_composition(
                 canvas.width, canvas.height, canvas.width, canvas.height, canvas.width
             ));
             filters.push(format!(
-                "[{current_label}][cursor_plate]overlay=shortest=1:format=yuv420[with_cursor]"
+                "[{current_label}][cursor_plate]overlay=shortest=1:format=yuv420{cursor_enable}[with_cursor]"
             ));
             current_label = "with_cursor".to_string();
             items_plate_label = Some("[items_plate]".to_string());
         } else if !prepared.renderers.is_empty() {
             // Cursor-only stream: composite directly below the camera layer.
             filters.push(format!(
-                "[{current_label}]{plate_source}overlay=shortest=1:format=yuv420[with_cursor]"
+                "[{current_label}]{plate_source}overlay=shortest=1:format=yuv420{cursor_enable}[with_cursor]"
             ));
             current_label = "with_cursor".to_string();
         } else if prepared.overlay_engine.is_some() {
             // Items-only stream: held until after the camera/mask passes.
             items_plate_label = Some(plate_source);
+        }
+        if items_plate_label.is_some() {
+            items_enable = overlay_item_windows
+                .and_then(|windows| plate_enable_expr(windows, plan.duration_ms))
+                .map(|expr| format!(":enable='{expr}'"));
         }
         cursor_plan = Some(prepared);
     }
@@ -1407,11 +1434,11 @@ fn render_timeline_composition(
                 crop.width, crop.height, crop.x, crop.y
             ));
             camera_filter.push_str(&format!(
-                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ));
         } else {
             camera_filter.push_str(&format!(
-                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2,crop={overlay_w}:{overlay_h}:(iw-ow)/2:(ih-oh)/2"
+                ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={overlay_w}:{overlay_h}:(iw-ow)/2:(ih-oh)/2"
             ));
         }
         if overlay.opacity < 1.0 {
@@ -1566,8 +1593,9 @@ fn render_timeline_composition(
     // bubbles and privacy masks but below burned-in captions, matching the
     // editor preview stacking (z-35 above masks at z-30, below captions z-40).
     if let Some(items_plate) = items_plate_label {
+        let enable_suffix = items_enable.unwrap_or_default();
         filters.push(format!(
-            "[{current_label}]{items_plate}overlay=shortest=1:format=auto[with_items]"
+            "[{current_label}]{items_plate}overlay=shortest=1:format=auto{enable_suffix}[with_items]"
         ));
         current_label = "with_items".to_string();
     }
@@ -1765,7 +1793,7 @@ fn render_timeline_composition(
             _ => (20, "bayer:bayer_scale=3", Some(960)),
         };
         let scale_filter = if let Some(max_w) = max_width {
-            format!("scale='trunc(min(iw,{max_w})/2)*2':-2:flags=lanczos,")
+            format!("scale='trunc(min(iw,{max_w})/2)*2':-2:flags=lanczos:threads=auto,")
         } else {
             String::new()
         };
@@ -1780,7 +1808,7 @@ fn render_timeline_composition(
             _ => (24, Some(1280)),
         };
         let scale_filter = if let Some(max_w) = max_width {
-            format!("scale='trunc(min(iw,{max_w})/2)*2':-2:flags=lanczos,")
+            format!("scale='trunc(min(iw,{max_w})/2)*2':-2:flags=lanczos:threads=auto,")
         } else {
             String::new()
         };
@@ -1950,7 +1978,6 @@ struct CursorFramePlan {
     height: u32,
     frame_count: u64,
     dual_plane: bool,
-    pixmap: resvg::tiny_skia::Pixmap,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<overlay_engine::OverlayEngine>,
 }
@@ -1962,8 +1989,11 @@ fn prepare_cursor_frame_plan(
     plan: &RenderPlan,
     asset_paths: &HashMap<String, PathBuf>,
 ) -> Result<CursorFramePlan> {
-    let pixmap = resvg::tiny_skia::Pixmap::new(canvas.width, canvas.height)
-        .ok_or_else(|| InternalError::Media("overlay frame is too large".into()))?;
+    // Validate the canvas pixmap can be allocated up front; each producer
+    // worker allocates its own copy when feeding starts.
+    if resvg::tiny_skia::Pixmap::new(canvas.width, canvas.height).is_none() {
+        return Err(InternalError::Media("overlay frame is too large".into()).into());
+    }
     let frame_count = duration_ms
         .saturating_mul(canvas.fps as u64)
         .saturating_add(999)
@@ -1990,22 +2020,30 @@ fn prepare_cursor_frame_plan(
     };
 
     let overlay_engine = if let Some(mut parsed_plan) = overlay_plan {
-        parsed_plan.canvas = overlay_engine::OverlayCanvas {
-            width: canvas.width,
-            height: canvas.height,
-        };
-        let mut image_asset_ids = std::collections::BTreeSet::new();
-        image_asset_ids.extend(plan.images.iter().map(|image| image.asset_id.clone()));
-        image_asset_ids.extend(parsed_plan.assets.iter().map(|asset| asset.id.clone()));
-        let mut engine = overlay_engine::OverlayEngine::from_render_plan(parsed_plan)
-            .map_err(|error| InternalError::Media(format!("build overlay render plan: {error}")))?;
-        for asset_id in image_asset_ids {
-            let path = asset_paths.get(&asset_id).ok_or_else(|| {
-                InternalError::Permissions("overlay references a missing image asset".into())
-            })?;
-            register_overlay_image_asset(&mut engine, &asset_id, path)?;
+        if parsed_plan.items.is_empty() {
+            // An empty items list would only force the dual-plane stream to
+            // carry a permanently transparent half, so skip the engine too.
+            None
+        } else {
+            parsed_plan.canvas = overlay_engine::OverlayCanvas {
+                width: canvas.width,
+                height: canvas.height,
+            };
+            let mut image_asset_ids = std::collections::BTreeSet::new();
+            image_asset_ids.extend(plan.images.iter().map(|image| image.asset_id.clone()));
+            image_asset_ids.extend(parsed_plan.assets.iter().map(|asset| asset.id.clone()));
+            let mut engine =
+                overlay_engine::OverlayEngine::from_render_plan(parsed_plan).map_err(|error| {
+                    InternalError::Media(format!("build overlay render plan: {error}"))
+                })?;
+            for asset_id in image_asset_ids {
+                let path = asset_paths.get(&asset_id).ok_or_else(|| {
+                    InternalError::Permissions("overlay references a missing image asset".into())
+                })?;
+                register_overlay_image_asset(&mut engine, &asset_id, path)?;
+            }
+            Some(engine)
         }
-        Some(engine)
     } else {
         None
     };
@@ -2017,7 +2055,6 @@ fn prepare_cursor_frame_plan(
         height: canvas.height,
         frame_count,
         dual_plane,
-        pixmap,
         renderers,
         overlay_engine,
     })
@@ -2086,6 +2123,122 @@ fn pack_overlay_planes(
     }
 }
 
+/// One produced overlay frame: rasterized bytes, a fully transparent frame
+/// (the writer holds a shared zero buffer), or a worker failure.
+enum ProducedFrame {
+    Bytes(Vec<u8>),
+    Zero,
+    Failed(String),
+}
+
+/// (cursor plane, items plane) for one output frame. The items plane is `Arc`
+/// because the cached render is shared across frames while the evaluated
+/// display list is unchanged.
+type FramePlanes = (Option<Vec<u8>>, Option<Arc<Vec<u8>>>);
+
+/// Per-worker raster state. Cursor and overlay engines are cloned per worker
+/// because `CursorEngine` keeps a `RefCell` smoothing cache and tiny-skia
+/// pixmaps are single-owner; the engines are pure functions of the frame
+/// timestamp, so per-worker copies produce identical output.
+struct OverlayWorkerState {
+    renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
+    overlay_engine: Option<overlay_engine::OverlayEngine>,
+    cursor_pixmap: resvg::tiny_skia::Pixmap,
+    items_layer: Option<resvg::tiny_skia::Pixmap>,
+    last_display_items: Option<Vec<overlay_engine::DisplayItem>>,
+    cached_unpremultiplied_frame: Option<Arc<Vec<u8>>>,
+}
+
+impl OverlayWorkerState {
+    fn new(
+        renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
+        overlay_engine: Option<overlay_engine::OverlayEngine>,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<Self, String> {
+        let cursor_pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+            .ok_or_else(|| "allocate cursor pixmap failed".to_string())?;
+        Ok(Self {
+            renderers,
+            overlay_engine,
+            cursor_pixmap,
+            items_layer: None,
+            last_display_items: None,
+            cached_unpremultiplied_frame: None,
+        })
+    }
+
+    /// Render the logical frame planes for `frame_index`, reusing the cached
+    /// items plane while the evaluated display list is unchanged. The cursor
+    /// plane is per-frame telemetry and is re-rendered whenever an effect is
+    /// active at the frame's exact CFR timestamp.
+    fn render_planes(
+        &mut self,
+        frame_index: u64,
+        fps: u32,
+    ) -> std::result::Result<FramePlanes, String> {
+        let output_time_ms = cursor::frame_time_ms(frame_index, fps);
+        let overlay_time_ms = output_time_ms.floor().max(0.0) as u64;
+
+        if let Some(engine) = &self.overlay_engine {
+            let display_list = engine.evaluate(overlay_time_ms);
+            if display_list.items.is_empty() {
+                self.last_display_items = Some(Vec::new());
+                self.cached_unpremultiplied_frame = None;
+            } else if self.last_display_items.as_ref() != Some(&display_list.items) {
+                let layer = match &mut self.items_layer {
+                    Some(layer) => layer,
+                    None => {
+                        self.items_layer = Some(
+                            resvg::tiny_skia::Pixmap::new(
+                                self.cursor_pixmap.width(),
+                                self.cursor_pixmap.height(),
+                            )
+                            .ok_or_else(|| "allocate overlay pixmap failed".to_string())?,
+                        );
+                        self.items_layer
+                            .as_mut()
+                            .expect("items layer just assigned")
+                    }
+                };
+                layer.fill(resvg::tiny_skia::Color::TRANSPARENT);
+                engine
+                    .render_to_pixmap(overlay_time_ms, layer)
+                    .map_err(|error| format!("render overlay frame: {error}"))?;
+                let mut unprem = layer.data().to_vec();
+                cursor::unpremultiply_rgba(&mut unprem);
+                self.cached_unpremultiplied_frame = Some(Arc::new(unprem));
+                self.last_display_items = Some(display_list.items);
+            }
+        }
+        let items_plane = self.cached_unpremultiplied_frame.clone();
+
+        let cursor_plane = match self.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
+            output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
+        }) {
+            Some((_, _, renderer)) => {
+                self.cursor_pixmap
+                    .fill(resvg::tiny_skia::Color::TRANSPARENT);
+                renderer.render_frame_at(output_time_ms, self.cursor_pixmap.data_mut());
+                cursor::unpremultiply_rgba(self.cursor_pixmap.data_mut());
+                Some(self.cursor_pixmap.data().to_vec())
+            }
+            None => None,
+        };
+
+        Ok((cursor_plane, items_plane))
+    }
+}
+
+/// How many overlay raster workers to run beside the writer. Rendering is the
+/// dominant producer cost (tiny-skia + full-canvas unpremultiply + pack), so
+/// half the cores keeps the pipe fed without starving the FFmpeg filter graph.
+fn producer_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| (count.get() / 2).clamp(2, 8))
+        .unwrap_or(2)
+}
+
 /// Stream every composited overlay frame into FFmpeg's stdin.
 ///
 /// In dual-plane mode each frame is `2*width`×`height`: the left half carries
@@ -2095,6 +2248,11 @@ fn pack_overlay_planes(
 /// video ends. Feeding ceil(duration*fps) frames can exceed that by one frame;
 /// a closed pipe here means the consumer finished, and the exit-status check
 /// in the runner decides whether the render actually failed.
+///
+/// Frames are rasterized on a bounded worker pool — a serial producer
+/// (rasterize + unpremultiply + pack + pipe write per frame) is the export
+/// pipeline's slowest stage and leaves the hardware encoder idle. The writer
+/// reorders worker output so the rawvideo stream stays strictly CFR.
 fn feed_cursor_frames(
     stdin: &mut std::process::ChildStdin,
     cursor: &mut CursorFramePlan,
@@ -2110,79 +2268,277 @@ fn feed_cursor_frames(
         plane_byte_len
     };
     let zero_frame = vec![0u8; frame_byte_len];
+    let frame_count = cursor.frame_count;
+
+    // Each worker keeps roughly five live frames (two pixmaps, the cursor
+    // copy, the shared items plane, and the packed buffer); cap the pool so a
+    // 4K dual-plane canvas stays near ~768 MiB of producer state.
+    let workers = producer_worker_count()
+        .min(((768usize * 1024 * 1024) / (frame_byte_len.max(1) * 5)).max(2));
+    // Bounded in-flight window caps peak memory at ~256 MiB of finished frames
+    // while keeping enough work queued to hide render-time variance.
+    let window = ((256usize * 1024 * 1024) / frame_byte_len.max(1))
+        .clamp(workers + 2, 64)
+        .min(frame_count.max(1) as usize) as u64;
+    if workers <= 1 || frame_count <= 1 {
+        return feed_cursor_frames_sequential(
+            &mut writer,
+            cursor,
+            cancel,
+            frame_byte_len,
+            &zero_frame,
+        );
+    }
+
+    struct Dispatch {
+        next: u64,
+        limit: u64,
+    }
+    let dispatch = Mutex::new(Dispatch {
+        next: 0,
+        limit: window,
+    });
+    let dispatch_changed = std::sync::Condvar::new();
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let (frame_tx, frame_rx) = std::sync::mpsc::channel::<(u64, ProducedFrame)>();
+    // Finished buffers are recycled back to workers to avoid an 8-33 MiB
+    // allocation + zeroing on every frame.
+    let free_buffers = Mutex::new(Vec::<Vec<u8>>::new());
+
+    let result = std::thread::scope(|scope| -> Result<()> {
+        for _ in 0..workers {
+            let dispatch = &dispatch;
+            let dispatch_changed = &dispatch_changed;
+            let abort = &abort;
+            let cancel = &*cancel;
+            let frame_tx = frame_tx.clone();
+            let free_buffers = &free_buffers;
+            // The renderers/engine are cloned per worker here so the spawned
+            // closure only moves owned `Send` state; `CursorEngine` is `!Sync`.
+            let renderers = cursor.renderers.clone();
+            let overlay_engine = cursor.overlay_engine.clone();
+            let width = cursor.width;
+            let height = cursor.height;
+            let fps = cursor.fps;
+            let dual_plane = cursor.dual_plane;
+            scope.spawn(move || {
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut state =
+                        match OverlayWorkerState::new(renderers, overlay_engine, width, height) {
+                            Ok(state) => state,
+                            Err(error) => {
+                                let _ = frame_tx.send((0, ProducedFrame::Failed(error)));
+                                return;
+                            }
+                        };
+                    loop {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                            || abort.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            return;
+                        }
+                        let frame_index = {
+                            let mut guard = dispatch
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            loop {
+                                if abort.load(std::sync::atomic::Ordering::Relaxed)
+                                    || guard.next >= frame_count
+                                {
+                                    return;
+                                }
+                                if guard.next < guard.limit {
+                                    let index = guard.next;
+                                    guard.next += 1;
+                                    break index;
+                                }
+                                guard = dispatch_changed
+                                    .wait(guard)
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            }
+                        };
+
+                        let produced = state
+                            .render_planes(frame_index, fps)
+                            .map(|(cursor_plane, items_plane)| {
+                                if dual_plane {
+                                    if cursor_plane.is_none() && items_plane.is_none() {
+                                        return ProducedFrame::Zero;
+                                    }
+                                    let mut buffer = free_buffers
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .pop()
+                                        .unwrap_or_else(|| vec![0u8; frame_byte_len]);
+                                    buffer.resize(frame_byte_len, 0);
+                                    pack_overlay_planes(
+                                        &mut buffer,
+                                        plane_w,
+                                        plane_h,
+                                        cursor_plane.as_deref(),
+                                        items_plane.as_ref().map(|plane| plane.as_slice()),
+                                    );
+                                    ProducedFrame::Bytes(buffer)
+                                } else {
+                                    match cursor_plane.or_else(|| items_plane.map(arc_into_vec)) {
+                                        Some(plane) => ProducedFrame::Bytes(plane),
+                                        None => ProducedFrame::Zero,
+                                    }
+                                }
+                            })
+                            .unwrap_or_else(ProducedFrame::Failed);
+
+                        let is_failure = matches!(produced, ProducedFrame::Failed(_));
+                        if frame_tx.send((frame_index, produced)).is_err() {
+                            return;
+                        }
+                        if is_failure {
+                            abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                            dispatch_changed.notify_all();
+                            return;
+                        }
+                    }
+                }));
+                if run.is_err() {
+                    let _ = frame_tx.send((
+                        u64::MAX,
+                        ProducedFrame::Failed("overlay worker panicked".to_string()),
+                    ));
+                }
+            });
+        }
+        // The scope owns the receiver side; dropping our sender clone lets the
+        // channel close once every worker exits. recycle_tx stays alive for the
+        // writer loop below.
+        drop(frame_tx);
+
+        let mut expected = 0u64;
+        let mut pending = std::collections::BTreeMap::new();
+        let result: Result<()> = (|| {
+            while expected < frame_count {
+                let (frame_index, produced) = match frame_rx.recv() {
+                    Ok(message) => message,
+                    Err(_) => {
+                        // Every sender is gone before all frames arrived: only
+                        // an unreported worker exit can leave a permanent gap.
+                        if expected < frame_count
+                            && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            return Err(InternalError::Media(
+                                "overlay frame producer terminated early".into(),
+                            )
+                            .into());
+                        }
+                        break;
+                    }
+                };
+                match produced {
+                    ProducedFrame::Failed(error) => {
+                        abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                        dispatch_changed.notify_all();
+                        return Err(InternalError::Media(error).into());
+                    }
+                    produced => {
+                        pending.insert(frame_index, produced);
+                    }
+                }
+                while let Some(produced) = pending.remove(&expected) {
+                    let written = match &produced {
+                        ProducedFrame::Zero => writer.write_all(&zero_frame),
+                        ProducedFrame::Bytes(bytes) => writer.write_all(bytes),
+                        ProducedFrame::Failed(_) => unreachable!("failures return early"),
+                    };
+                    if let Err(error) = written {
+                        if is_pipe_closed(&error) {
+                            return Ok(());
+                        }
+                        return Err(
+                            InternalError::Media(format!("write overlay frame: {error}")).into(),
+                        );
+                    }
+                    if let ProducedFrame::Bytes(bytes) = produced {
+                        free_buffers
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(bytes);
+                    }
+                    expected += 1;
+                    let mut guard = dispatch
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.limit = expected + window;
+                    drop(guard);
+                    dispatch_changed.notify_all();
+                }
+            }
+            Ok(())
+        })();
+        // Wake waiting workers so the scope can join even on early exits
+        // (cancel, pipe close, or failure).
+        abort.store(true, std::sync::atomic::Ordering::Relaxed);
+        dispatch_changed.notify_all();
+        result
+    });
+    let _ = writer.flush();
+    result
+}
+
+fn arc_into_vec(plane: Arc<Vec<u8>>) -> Vec<u8> {
+    match Arc::try_unwrap(plane) {
+        Ok(bytes) => bytes,
+        Err(shared) => (*shared).clone(),
+    }
+}
+
+/// Serial producer used when the worker pool degenerates to a single thread.
+fn feed_cursor_frames_sequential(
+    writer: &mut std::io::BufWriter<&mut std::process::ChildStdin>,
+    cursor: &mut CursorFramePlan,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    frame_byte_len: usize,
+    zero_frame: &[u8],
+) -> Result<()> {
+    let plane_w = cursor.width as usize;
+    let plane_h = cursor.height as usize;
     let mut packed_frame = if cursor.dual_plane {
         vec![0u8; frame_byte_len]
     } else {
         Vec::new()
     };
-
-    // Cache the rendered items plane (annotations, titles, images) while the
-    // evaluated display list is unchanged; the cursor plane is per-frame
-    // telemetry and always re-rendered when an effect is active.
-    let mut last_display_items: Option<Vec<overlay_engine::DisplayItem>> = None;
-    let mut cached_unpremultiplied_frame: Option<Vec<u8>> = None;
+    let mut state = OverlayWorkerState::new(
+        cursor.renderers.clone(),
+        cursor.overlay_engine.clone(),
+        cursor.width,
+        cursor.height,
+    )
+    .map_err(InternalError::Media)?;
 
     for frame_index in 0..cursor.frame_count {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
-        // Rawvideo assigns each input frame the exact CFR PTS. Do not floor
-        // this value: the old integer calculation accumulated almost one frame
-        // of cursor timing error over long exports.
-        let output_time_ms = cursor::frame_time_ms(frame_index, cursor.fps);
-        let overlay_time_ms = output_time_ms.floor().max(0.0) as u64;
-
-        if let Some(engine) = &cursor.overlay_engine {
-            let display_list = engine.evaluate(overlay_time_ms);
-            if display_list.items.is_empty() {
-                last_display_items = Some(Vec::new());
-                cached_unpremultiplied_frame = None;
-            } else if last_display_items.as_ref() != Some(&display_list.items) {
-                let mut layer = resvg::tiny_skia::Pixmap::new(cursor.width, cursor.height)
-                    .ok_or_else(|| InternalError::Media("allocate overlay pixmap failed".into()))?;
-                engine
-                    .render_to_pixmap(overlay_time_ms, &mut layer)
-                    .map_err(|error| {
-                        InternalError::Media(format!("render overlay frame: {error}"))
-                    })?;
-                let mut unprem = layer.data().to_vec();
-                cursor::unpremultiply_rgba(&mut unprem);
-                cached_unpremultiplied_frame = Some(unprem);
-                last_display_items = Some(display_list.items);
-            }
-        }
-        let items_plane = cached_unpremultiplied_frame.as_deref();
-
-        let cursor_plane: Option<&[u8]> =
-            match cursor.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
-                output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
-            }) {
-                Some((_, _, renderer)) => {
-                    cursor.pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
-                    renderer.render_frame_at(output_time_ms, cursor.pixmap.data_mut());
-                    cursor::unpremultiply_rgba(cursor.pixmap.data_mut());
-                    Some(cursor.pixmap.data())
-                }
-                None => None,
-            };
+        let (cursor_plane, items_plane) = state
+            .render_planes(frame_index, cursor.fps)
+            .map_err(InternalError::Media)?;
 
         let frame: &[u8] = if cursor.dual_plane {
             if cursor_plane.is_none() && items_plane.is_none() {
-                zero_frame.as_slice()
+                zero_frame
             } else {
                 pack_overlay_planes(
                     &mut packed_frame,
                     plane_w,
                     plane_h,
-                    cursor_plane,
-                    items_plane,
+                    cursor_plane.as_deref(),
+                    items_plane.as_ref().map(|plane| plane.as_slice()),
                 );
                 packed_frame.as_slice()
             }
         } else {
             cursor_plane
-                .or(items_plane)
-                .unwrap_or(zero_frame.as_slice())
+                .as_deref()
+                .or(items_plane.as_deref().map(|plane| plane.as_slice()))
+                .unwrap_or(zero_frame)
         };
 
         if let Err(error) = writer.write_all(frame) {
@@ -5199,6 +5555,71 @@ fn seconds(milliseconds: u64) -> String {
     format!("{:.3}", milliseconds as f64 / 1000.0)
 }
 
+/// Enumerate the `[start_ms, end_ms)` windows in which the generated overlay
+/// items plane can contain visible content. Returns None when the typed render
+/// plan cannot be parsed — the caller then leaves the plate ungated so unknown
+/// content can never be clipped by a stale window.
+fn collect_overlay_item_windows(plan: &RenderPlan) -> Option<Vec<(u64, u64)>> {
+    if let Some(value) = &plan.overlay_render_plan {
+        return serde_json::from_value::<overlay_engine::OverlayRenderPlan>(value.clone())
+            .ok()
+            .map(|overlay_plan| {
+                overlay_plan
+                    .items
+                    .iter()
+                    .map(|item| item.timing())
+                    .collect()
+            });
+    }
+    Some(
+        plan.annotations
+            .iter()
+            .map(|item| (item.start_ms, item.end_ms))
+            .chain(plan.texts.iter().map(|item| (item.start_ms, item.end_ms)))
+            .chain(plan.images.iter().map(|item| (item.start_ms, item.end_ms)))
+            .collect(),
+    )
+}
+
+/// Merge `[start_ms, end_ms)` windows into a minimal `enable` expression for a
+/// generated-plate `overlay` filter so FFmpeg skips blending while the plate
+/// is fully transparent. Returns None when the union covers the whole export
+/// (gating would add an expression for no benefit). An empty union yields the
+/// constant `0`, which disables the blend for the entire stream.
+fn plate_enable_expr(windows: Vec<(u64, u64)>, duration_ms: u64) -> Option<String> {
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
+    let mut windows: Vec<(u64, u64)> = windows
+        .into_iter()
+        .filter(|(start, end)| end > start)
+        .collect();
+    windows.sort_unstable();
+    for (start, end) in windows {
+        match merged.last_mut() {
+            Some((_, prev_end)) if start <= *prev_end => *prev_end = (*prev_end).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    if merged.is_empty() {
+        return Some("0".into());
+    }
+    // A long expression per frame costs more than it saves; collapse dense
+    // timelines into a single wide window.
+    const MAX_ENABLE_WINDOWS: usize = 8;
+    if merged.len() > MAX_ENABLE_WINDOWS {
+        merged = vec![(merged[0].0, merged[merged.len() - 1].1)];
+    }
+    if merged.len() == 1 && merged[0].0 == 0 && merged[0].1 >= duration_ms {
+        return None;
+    }
+    Some(
+        merged
+            .iter()
+            .map(|(start, end)| format!("between(t,{},{})", seconds(*start), seconds(*end)))
+            .collect::<Vec<_>>()
+            .join("+"),
+    )
+}
+
 fn write_caption_sidecar(output_path: &Path, captions: &[RenderPlanCaption]) -> Result<PathBuf> {
     captions::write_sidecar(output_path, captions)
 }
@@ -5719,6 +6140,118 @@ mod tests {
         let mut dst = vec![9u8; 4 * 1 * 4];
         pack_overlay_planes(&mut dst, 2, 1, None, Some(&right));
         assert_eq!(dst, vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
+    }
+
+    #[test]
+    fn plate_enable_expr_merges_and_collapses_windows() {
+        // Overlapping windows merge into a union expression.
+        assert_eq!(
+            plate_enable_expr(vec![(1_000, 2_000), (500, 1_200), (4_000, 5_000)], 10_000),
+            Some("between(t,0.500,2.000)+between(t,4.000,5.000)".to_string())
+        );
+        // A union covering the whole export is left ungated.
+        assert_eq!(plate_enable_expr(vec![(0, 10_000)], 10_000), None);
+        // No visible content anywhere disables the blend entirely.
+        assert_eq!(plate_enable_expr(Vec::new(), 10_000), Some("0".to_string()));
+        // Dense timelines collapse into one wide window instead of a huge
+        // per-frame expression.
+        assert_eq!(
+            plate_enable_expr(
+                (0..12).map(|i| (i * 1_000, i * 1_000 + 500)).collect(),
+                60_000,
+            ),
+            Some("between(t,0.000,11.500)".to_string())
+        );
+    }
+
+    #[test]
+    fn collect_overlay_item_windows_enumerates_typed_and_legacy_items() {
+        // A typed render plan contributes its item windows.
+        let mut plan = valid_plan();
+        plan.overlay_render_plan = Some(serde_json::json!({
+            "version": 1,
+            "canvas": { "width": 1920, "height": 1080 },
+            "items": [
+                {
+                    "kind": "annotation",
+                    "id": "ann-rect",
+                    "startMs": 500,
+                    "endMs": 3000,
+                    "transform": {
+                        "x": 100.0, "y": 100.0, "width": 300.0, "height": 200.0,
+                        "rotation": 0.0, "anchorX": 0.5, "anchorY": 0.5,
+                        "zIndex": 10, "opacity": 1.0
+                    },
+                    "enabled": true,
+                    "annotationType": "rounded-rect",
+                    "strokeColor": "#38bdf8",
+                    "strokeWidth": 4.0,
+                    "strokeStyle": "solid",
+                    "fillColor": "#38bdf8",
+                    "fillOpacity": 0.2,
+                    "cornerRadius": 16.0,
+                    "arrowEndHead": "none",
+                    "arrowStartHead": "none",
+                    "shadowEnabled": false,
+                    "shadowColor": "black",
+                    "shadowBlur": 0.0,
+                    "textColor": "#ffffff",
+                    "fontSize": 16.0
+                }
+            ],
+            "assets": [],
+            "fonts": []
+        }));
+        assert_eq!(
+            collect_overlay_item_windows(&plan),
+            Some(vec![(500, 3_000)])
+        );
+        // Legacy items are enumerated when no typed plan exists.
+        let mut legacy = valid_plan();
+        legacy.texts = serde_json::from_value(serde_json::json!([
+            {
+                "id": "txt-1",
+                "startMs": 200,
+                "endMs": 800,
+                "presetId": "title-modern",
+                "category": "title",
+                "primaryText": "Test",
+                "x": 10.0,
+                "y": 20.0,
+                "width": 100.0,
+                "height": 50.0,
+                "alignment": "left",
+                "fontFamily": "sans",
+                "fontSize": 32.0,
+                "fontWeight": "700",
+                "textColor": "#ffffff",
+                "secondaryTextColor": "#94a3b8",
+                "accentColor": "#38bdf8",
+                "backdropStyle": "glass",
+                "backdropColor": "#0f172a",
+                "backdropOpacity": 0.8,
+                "backdropBlur": 16.0,
+                "backdropBorderRadius": 12.0,
+                "backdropPaddingX": 24.0,
+                "backdropPaddingY": 16.0,
+                "shadowEnabled": false,
+                "shadowColor": "black",
+                "shadowBlur": 0.0,
+                "animationIn": "fade",
+                "animationOut": "fade",
+                "enabled": true
+            }
+        ]))
+        .expect("legacy text");
+        assert_eq!(
+            collect_overlay_item_windows(&legacy),
+            Some(vec![(200, 800)])
+        );
+        // An unparseable render plan reports unknown windows so callers do not
+        // gate the plate behind a stale expression.
+        let mut invalid = valid_plan();
+        invalid.overlay_render_plan = Some(serde_json::json!({ "broken": true }));
+        assert_eq!(collect_overlay_item_windows(&invalid), None);
     }
 
     #[test]
