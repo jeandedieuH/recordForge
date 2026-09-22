@@ -123,14 +123,16 @@ pub(super) fn subtitles_filter(
     )
 }
 
-/// Escapes a filesystem path for use inside a quoted value of a
-/// `-/filter_complex` script entry. The script file and the option parser each
-/// run one unescape pass, so separators need double backslashes (`\\:`).
+/// Escapes a filesystem path for use inside a single-quoted option value of a
+/// `-/filter_complex` script entry. The option parser runs one unescape pass
+/// on the quoted value, so a `:` separator needs a single backslash (`\:`) and
+/// an embedded quote needs `\'`. A doubled backslash there de-escapes to a
+/// bare `\` before a real separator and the value splits mid-path.
 fn escape_filter_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
-        .replace('\'', "\\\\'")
-        .replace(':', "\\\\:")
+        .replace('\'', "\\'")
+        .replace(':', "\\:")
 }
 
 fn build_ass_script(
@@ -275,10 +277,10 @@ mod tests {
 
     #[test]
     fn filter_path_escapes_drive_colon() {
-        // The -/filter_complex script and the option parser each strip one
-        // escape level, so a literal colon needs a double backslash.
+        // Inside a single-quoted option value the option parser strips one
+        // escape level, so a literal colon needs a single backslash.
         let escaped = escape_filter_path(Path::new("C:\\Users\\rf\\captions.ass"));
-        assert_eq!(escaped, "C\\\\:/Users/rf/captions.ass");
+        assert_eq!(escaped, "C\\:/Users/rf/captions.ass");
     }
 
     #[test]
