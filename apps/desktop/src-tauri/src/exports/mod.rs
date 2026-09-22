@@ -1870,8 +1870,18 @@ fn render_composition_window(
     } else {
         "setpts=PTS-STARTPTS,"
     };
+    // `eof_action=repeat` overlays fed by infinite secondary loops keep
+    // emitting clones of the last frame past the main stream's end; `-t` trims
+    // them approximately, so a repeat landing exactly on a millisecond
+    // boundary can leak through as a duplicated seam frame. Cap the windowed
+    // pass at its exact frame count.
+    let frame_cap = if pass.standalone {
+        String::new()
+    } else {
+        format!("trim=end_frame={},", window.frame_count)
+    };
     filters.push(format!(
-        "[{current_label}]{reanchor}format={final_pix_fmt}[{final_label}]"
+        "[{current_label}]{reanchor}{frame_cap}format={final_pix_fmt}[{final_label}]"
     ));
     current_label = final_label.to_string();
 
