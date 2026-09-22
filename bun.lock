@@ -88,7 +88,7 @@
     },
     "packages/config": {
       "name": "@recordforge/config",
-      "version": "1.5.7,
+      "version": "1.5.7",
       "devDependencies": {
         "@eslint/js": "^10.0.1",
         "eslint": "^10.8.0",
