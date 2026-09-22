@@ -946,19 +946,22 @@ fn parse_hex_color(value: &str, fallback: &str) -> String {
     }
 }
 
-/// tiny-skia / resvg store pixels as premultiplied RGBA. The export frame uses
-/// straight-alpha RGBA, so convert once when the cursor asset is cached or in-place per frame.
-pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
+fn inv_alpha_lut() -> &'static [f32; 256] {
     static INV_ALPHA: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
-    let inv_lut = INV_ALPHA.get_or_init(|| {
+    INV_ALPHA.get_or_init(|| {
         let mut lut = [0.0f32; 256];
         for (a, val) in lut.iter_mut().enumerate().take(255).skip(1) {
             *val = 255.0 / a as f32;
         }
         lut[255] = 1.0;
         lut
-    });
+    })
+}
 
+/// tiny-skia / resvg store pixels as premultiplied RGBA. The export frame uses
+/// straight-alpha RGBA, so convert once when the cursor asset is cached or in-place per frame.
+pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
+    let inv_lut = inv_alpha_lut();
     for pixel in data.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as usize;
         if alpha > 0 && alpha < 255 {
@@ -966,6 +969,54 @@ pub(crate) fn unpremultiply_rgba(data: &mut [u8]) {
             pixel[0] = (pixel[0] as f32 * inv).min(255.0) as u8;
             pixel[1] = (pixel[1] as f32 * inv).min(255.0) as u8;
             pixel[2] = (pixel[2] as f32 * inv).min(255.0) as u8;
+        }
+    }
+}
+
+/// Same conversion as `unpremultiply_rgba`, restricted to the bounding box of
+/// pixels with non-zero alpha. Alpha-0 pixels are left untouched either way,
+/// and drawn content dominates only a small screen rect on most frames, so
+/// bounding the pass avoids unpremultiplying millions of already-transparent
+/// pixels per frame. `stride_w` is the row stride in pixels.
+pub(crate) fn unpremultiply_rgba_bounded(data: &mut [u8], stride_w: usize) {
+    let stride = stride_w.saturating_mul(4);
+    if stride == 0 || data.len() < stride {
+        return;
+    }
+    let mut rows = data.chunks_exact(stride);
+    let mut top = usize::MAX;
+    let mut bottom = 0usize;
+    let mut left = usize::MAX;
+    let mut right = 0usize;
+    for (row, row_bytes) in rows.by_ref().enumerate() {
+        let mut row_left = usize::MAX;
+        let mut row_right = 0usize;
+        for (col, pixel) in row_bytes.as_chunks::<4>().0.iter().enumerate() {
+            if pixel[3] != 0 {
+                row_left = row_left.min(col);
+                row_right = col + 1;
+            }
+        }
+        if row_left != usize::MAX {
+            top = top.min(row);
+            bottom = row + 1;
+            left = left.min(row_left);
+            right = right.max(row_right);
+        }
+    }
+    if top == usize::MAX {
+        return;
+    }
+    let inv_lut = inv_alpha_lut();
+    for row_bytes in data[top * stride..bottom * stride].chunks_exact_mut(stride) {
+        for pixel in row_bytes[left * 4..right * 4].as_chunks_mut::<4>().0 {
+            let alpha = pixel[3] as usize;
+            if alpha > 0 && alpha < 255 {
+                let inv = inv_lut[alpha];
+                pixel[0] = (pixel[0] as f32 * inv).min(255.0) as u8;
+                pixel[1] = (pixel[1] as f32 * inv).min(255.0) as u8;
+                pixel[2] = (pixel[2] as f32 * inv).min(255.0) as u8;
+            }
         }
     }
 }
