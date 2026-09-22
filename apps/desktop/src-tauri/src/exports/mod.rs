@@ -2409,8 +2409,11 @@ fn feed_cursor_frames(
     let abort = std::sync::atomic::AtomicBool::new(false);
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<(u64, ProducedFrame)>();
     // Finished buffers are recycled back to workers to avoid an 8-33 MiB
-    // allocation + zeroing on every frame.
+    // allocation + zeroing on every frame. Only the dual-plane branch below
+    // pops them — on a single-plane stream pushing every finished frame
+    // would grow the pool by one plate per frame until memory is exhausted.
     let free_buffers = Mutex::new(Vec::<Vec<u8>>::new());
+    let dual_plane = cursor.dual_plane;
 
     let result = std::thread::scope(|scope| -> Result<()> {
         for _ in 0..workers {
@@ -2428,7 +2431,6 @@ fn feed_cursor_frames(
             let height = cursor.canvas_height;
             let cursor_rect = cursor.cursor_rect;
             let fps = cursor.fps;
-            let dual_plane = cursor.dual_plane;
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = match OverlayWorkerState::new(
@@ -2570,10 +2572,12 @@ fn feed_cursor_frames(
                         );
                     }
                     if let ProducedFrame::Bytes(bytes) = produced {
-                        free_buffers
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .push(bytes);
+                        if dual_plane {
+                            free_buffers
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(bytes);
+                        }
                     }
                     expected += 1;
                     let mut guard = dispatch
