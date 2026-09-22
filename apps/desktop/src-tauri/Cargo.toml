@@ -6,6 +6,7 @@ authors = ["prestige-tech & RecordForge contributors"]
 license = "GPL-3.0-or-later"
 edition = "2021"
 rust-version = "1.97.1"
+default-run = "recordforge-desktop"
 
 [lib]
 name = "recordforge_desktop_lib"

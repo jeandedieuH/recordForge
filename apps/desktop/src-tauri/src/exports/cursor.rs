@@ -133,6 +133,25 @@ struct RasterizedCursor {
     data: Vec<u8>,
 }
 
+/// One fitted screen rect and the absolute output window it applies to —
+/// exported layouts switch between the full area and the side-by-side slot as
+/// camera overlays come and go, and the cursor mapping must follow.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenRectWindow {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub rect: (f64, f64, f64, f64),
+}
+
+/// Resolved clip rect + telemetry fit scale for one layout window.
+#[derive(Debug, Clone, Copy)]
+struct ScreenRectEntry {
+    start_ms: f64,
+    end_ms: f64,
+    clip: ClipRect,
+    fit_scale: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CursorRenderer {
     settings: CursorSettings,
@@ -146,6 +165,15 @@ pub struct CursorRenderer {
     /// clipped to this rectangle unless a zoom effect expands the view to the
     /// full canvas.
     video_screen: ClipRect,
+    /// `settings.scale` clamped once; the per-frame scale multiplies it by the
+    /// active window's fit scale so the cursor resizes with the video slot.
+    cursor_scale_factor: f64,
+    /// Telemetry→pixel fit scale for `video_screen`, kept for the
+    /// single-rect fast path and the no-window fallback.
+    base_fit_scale: f64,
+    /// Sorted, non-overlapping absolute output windows for renders whose
+    /// layout changes over time; empty keeps the single `video_screen` rect.
+    video_screen_windows: Vec<ScreenRectEntry>,
     /// The final cursor scale is the user setting combined with the fit scale
     /// so the rendered cursor stays visually proportional to the output video.
     cursor_scale: f64,
@@ -259,7 +287,7 @@ impl CursorRenderer {
         segments: &[RenderSegment],
         canvas: &RenderCanvas,
     ) -> Result<Self, String> {
-        Self::new_with_zoom(settings, telemetry, segments, &[], canvas, None)
+        Self::new_with_zoom(settings, telemetry, segments, &[], canvas, None, None)
     }
 
     pub fn new_with_zoom(
@@ -269,6 +297,7 @@ impl CursorRenderer {
         zoom_segments: &[RenderPlanZoomSegment],
         canvas: &RenderCanvas,
         screen_rect: Option<(f64, f64, f64, f64)>,
+        screen_windows: Option<Vec<ScreenRectWindow>>,
     ) -> Result<Self, String> {
         if canvas.width == 0 || canvas.height == 0 {
             return Err("cursor canvas dimensions must be positive".into());
@@ -313,9 +342,34 @@ impl CursorRenderer {
         let options = cursor_engine::CursorEngineOptions::default();
         let engine = cursor_engine::CursorEngine::new(telemetry, options)
             .map_err(|e| format!("failed to build cursor engine: {e}"))?;
-        let fit_scale = (video_screen.w as f64 / engine.telemetry().source_width.max(1.0))
-            .min(video_screen.h as f64 / engine.telemetry().source_height.max(1.0));
-        let cursor_scale = settings.scale.clamp(0.2, 5.0) * fit_scale;
+        let source_w = engine.telemetry().source_width.max(1.0);
+        let source_h = engine.telemetry().source_height.max(1.0);
+        let base_fit_scale =
+            (video_screen.w as f64 / source_w).min(video_screen.h as f64 / source_h);
+        let cursor_scale_factor = settings.scale.clamp(0.2, 5.0);
+        let cursor_scale = cursor_scale_factor * base_fit_scale;
+        let mut video_screen_windows: Vec<ScreenRectEntry> = screen_windows
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|window| window.end_ms > window.start_ms)
+            .map(|window| {
+                let (rx, ry, rw, rh) = window.rect;
+                let clip = ClipRect {
+                    x: rx.round().max(0.0) as u32,
+                    y: ry.round().max(0.0) as u32,
+                    w: rw.round().max(1.0) as u32,
+                    h: rh.round().max(1.0) as u32,
+                    border_radius: canvas.border_radius,
+                };
+                ScreenRectEntry {
+                    start_ms: window.start_ms as f64,
+                    end_ms: window.end_ms as f64,
+                    clip,
+                    fit_scale: (clip.w as f64 / source_w).min(clip.h as f64 / source_h),
+                }
+            })
+            .collect();
+        video_screen_windows.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
 
         Ok(Self {
             settings,
@@ -326,9 +380,22 @@ impl CursorRenderer {
             canvas_height: canvas.height,
             canvas_padding: canvas.padding,
             video_screen,
+            cursor_scale_factor,
+            base_fit_scale,
+            video_screen_windows,
             cursor_scale,
             cursor_cache: HashMap::new(),
         })
+    }
+
+    /// Clip rect and fit scale active at an absolute output timestamp —
+    /// falls back to the primary rect outside every declared window.
+    fn screen_entry_at(&self, output_ms: f64) -> (ClipRect, f64) {
+        self.video_screen_windows
+            .iter()
+            .find(|entry| output_ms >= entry.start_ms && output_ms < entry.end_ms)
+            .map(|entry| (entry.clip, entry.fit_scale))
+            .unwrap_or((self.video_screen, self.base_fit_scale))
     }
 
     /// Resolve the effective asset id for a cursor frame, honoring the user's
@@ -360,18 +427,24 @@ impl CursorRenderer {
 
     /// Map source coordinates from telemetry into the pixel boundaries of the
     /// fitted video screen on the canvas.
+    #[cfg(test)]
     fn fit_source_point(&self, source_x: f64, source_y: f64) -> (f64, f64) {
+        self.fit_source_point_in(source_x, source_y, self.video_screen)
+    }
+
+    /// Same mapping against an explicit screen rect — layout-varying renders
+    /// resolve the rect per frame instead of keying off `video_screen`.
+    fn fit_source_point_in(&self, source_x: f64, source_y: f64, screen: ClipRect) -> (f64, f64) {
         let source_w = self.engine.telemetry().source_width.max(1.0);
         let source_h = self.engine.telemetry().source_height.max(1.0);
         let clamped_x = source_x.clamp(0.0, source_w);
         let clamped_y = source_y.clamp(0.0, source_h);
-        let scale =
-            (self.video_screen.w as f64 / source_w).min(self.video_screen.h as f64 / source_h);
-        let offset_x = (self.video_screen.w as f64 - source_w * scale) / 2.0;
-        let offset_y = (self.video_screen.h as f64 - source_h * scale) / 2.0;
+        let scale = (screen.w as f64 / source_w).min(screen.h as f64 / source_h);
+        let offset_x = (screen.w as f64 - source_w * scale) / 2.0;
+        let offset_y = (screen.h as f64 - source_h * scale) / 2.0;
         (
-            self.video_screen.x as f64 + offset_x + clamped_x * scale,
-            self.video_screen.y as f64 + offset_y + clamped_y * scale,
+            screen.x as f64 + offset_x + clamped_x * scale,
+            screen.y as f64 + offset_y + clamped_y * scale,
         )
     }
 
@@ -397,11 +470,11 @@ impl CursorRenderer {
         }
 
         let transform = self.resolve_zoom_transform_at(output_ms);
-        let effective_cursor_scale = self.cursor_scale * transform.scale;
+        let (clip, fit_scale) = self.screen_entry_at(output_ms);
+        let effective_cursor_scale = self.cursor_scale_factor * fit_scale * transform.scale;
 
-        let (px, py) = self.fit_source_point(cursor_frame.source_x, cursor_frame.source_y);
-        let (x, y) = self.apply_zoom_at(output_ms, px, py);
-        let clip = self.clip_for_output();
+        let (px, py) = self.fit_source_point_in(cursor_frame.source_x, cursor_frame.source_y, clip);
+        let (x, y) = self.apply_zoom_in(output_ms, px, py, clip);
 
         if self.settings.spotlight_mode {
             self.render_spotlight(frame, x, y, effective_cursor_scale, &clip);
@@ -409,8 +482,9 @@ impl CursorRenderer {
 
         if self.settings.click_feedback != "none" {
             for click in &cursor_frame.active_clicks {
-                let (cx_raw, cy_raw) = self.fit_source_point(click.source_x, click.source_y);
-                let (cx, cy) = self.apply_zoom_at(output_ms, cx_raw, cy_raw);
+                let (cx_raw, cy_raw) =
+                    self.fit_source_point_in(click.source_x, click.source_y, clip);
+                let (cx, cy) = self.apply_zoom_in(output_ms, cx_raw, cy_raw, clip);
                 self.render_click_feedback(frame, cx, cy, click, effective_cursor_scale, &clip);
             }
         }
@@ -427,10 +501,6 @@ impl CursorRenderer {
             effective_cursor_scale * cursor_frame.click_scale,
             &clip,
         );
-    }
-
-    fn clip_for_output(&self) -> ClipRect {
-        self.video_screen
     }
 
     /// Resolve zoom at a fractional output PTS so the cursor and video use the
@@ -592,7 +662,14 @@ impl CursorRenderer {
         }
     }
 
+    #[cfg(test)]
     fn apply_zoom_at(&self, output_ms: f64, x: f64, y: f64) -> (f64, f64) {
+        self.apply_zoom_in(output_ms, x, y, self.video_screen)
+    }
+
+    /// Zoom mapping against an explicit screen rect so layout-varying renders
+    /// anchor the crop to the rect active at `output_ms`.
+    fn apply_zoom_in(&self, output_ms: f64, x: f64, y: f64, screen: ClipRect) -> (f64, f64) {
         let transform = self.resolve_zoom_transform_at(output_ms);
         map_screen_point_through_zoom(
             transform,
@@ -600,10 +677,10 @@ impl CursorRenderer {
             self.canvas_width as f64,
             self.canvas_height as f64,
             (
-                self.video_screen.x as f64,
-                self.video_screen.y as f64,
-                self.video_screen.w as f64,
-                self.video_screen.h as f64,
+                screen.x as f64,
+                screen.y as f64,
+                screen.w as f64,
+                screen.h as f64,
             ),
         )
     }
@@ -1717,6 +1794,7 @@ mod tests {
             &[zoom],
             &test_canvas(200, 200, 20),
             None,
+            None,
         )
         .expect("valid cursor renderer");
 
@@ -1785,6 +1863,7 @@ mod tests {
             &[zoom],
             &test_canvas(200, 200, 0),
             None,
+            None,
         )
         .expect("valid cursor renderer");
 
@@ -1839,6 +1918,7 @@ mod tests {
             &segments(),
             &[zoom],
             &test_canvas(200, 200, 0),
+            None,
             None,
         )
         .expect("valid cursor renderer");
@@ -1915,6 +1995,7 @@ mod tests {
             &[zoom1, zoom2],
             &test_canvas(200, 200, 0),
             None,
+            None,
         )
         .expect("valid cursor renderer");
 
@@ -1942,6 +2023,7 @@ mod tests {
             &fixture.zoom_segments,
             &fixture.canvas,
             Some(screen_rect),
+            None,
         )
         .expect("valid fractional preview/Rust parity renderer");
 
@@ -2024,6 +2106,7 @@ mod tests {
             &[],
             &test_canvas(1920, 1080, 40),
             Some(screen_rect),
+            None,
         )
         .expect("valid side-by-side renderer");
 
@@ -2049,6 +2132,7 @@ mod tests {
             &[],
             &test_canvas(1920, 1080, 40),
             Some(screen_rect),
+            None,
         )
         .expect("valid 16:9 side-by-side renderer");
         let (px_16_9, py_16_9) = renderer_16_9.fit_source_point(1920.0, 1080.0);

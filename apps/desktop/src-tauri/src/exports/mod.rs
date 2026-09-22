@@ -720,6 +720,91 @@ pub fn run_render_plan(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Dev-only spec harness used by `src/bin/devin_harness.rs` to drive the real
+// composition entry points with a JSON spec — the same serde types
+// `export_timeline` receives — so export behavior can be reproduced
+// end-to-end on a dev box without the Tauri UI. Not referenced by the app.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevinRenderSpec {
+    pub plan: RenderPlan,
+    pub settings: ExportSettings,
+    pub asset_paths: HashMap<String, PathBuf>,
+    pub ffmpeg_path: String,
+    pub ffprobe_path: String,
+    pub output_path: String,
+    #[serde(default)]
+    pub force_single_pass: bool,
+}
+
+/// Render a JSON `DevinRenderSpec` through the real export path.
+/// Returns 0 on success, 2 on spec parse failure, 1 on render failure.
+pub fn devin_render_spec(spec_json: &[u8]) -> i32 {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
+    let spec: DevinRenderSpec = match serde_json::from_slice(spec_json) {
+        Ok(spec) => spec,
+        Err(error) => {
+            eprintln!("devin_render_spec: spec parse failed: {error}");
+            return 2;
+        }
+    };
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let on_progress = |ratio: f64| {
+        eprintln!("[progress] {:.1}%", ratio.clamp(0.0, 1.0) * 100.0);
+    };
+    let result = if spec.force_single_pass {
+        render_composition_window(
+            &spec.ffmpeg_path,
+            Path::new(&spec.output_path),
+            &spec.plan,
+            "devin-harness",
+            &spec.asset_paths,
+            &spec.settings,
+            encoding::ExportEncoder::Software,
+            cancel,
+            None,
+            &on_progress,
+            None,
+            Some(Path::new(&spec.ffprobe_path)),
+            &CompositionWindow::full(&spec.plan),
+            &CompositionPass::standalone(),
+        )
+    } else {
+        render_timeline_composition(
+            &spec.ffmpeg_path,
+            Path::new(&spec.output_path),
+            &spec.plan,
+            "devin-harness",
+            &spec.asset_paths,
+            &spec.settings,
+            encoding::ExportEncoder::Software,
+            cancel,
+            &on_progress,
+            None,
+            Some(Path::new(&spec.ffprobe_path)),
+        )
+    };
+
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("devin_render_spec: render failed: {error}");
+            1
+        }
+    }
+}
+
 /// Returns a source size shared by every screen segment, or `None` when the
 /// segments are missing dimensions or have mixed source sizes.
 fn common_screen_source(
@@ -759,6 +844,43 @@ fn common_screen_source(
         }
     }
     common
+}
+
+/// True when a camera overlay uses the side-by-side layout — either the
+/// explicit preset or legacy coordinates that land on the generated slot.
+/// `visible` overlays only: a hidden clip never drives the layout.
+fn overlay_is_side_by_side(overlay: &RenderPlanOverlay, canvas: &cursor::RenderCanvas) -> bool {
+    if !overlay.visible {
+        return false;
+    }
+    if overlay.preset.as_deref() == Some("side-by-side") {
+        return true;
+    }
+    let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
+    let target_camera_x =
+        (canvas.padding as f64) + (usable_w * 0.76).round() + (usable_w * 0.02).round();
+    let legacy_camera_x =
+        (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
+    (overlay.x - target_camera_x).abs() <= 3.0 || (overlay.x - legacy_camera_x).abs() <= 3.0
+}
+
+/// Merge `[start_ms, end_ms)` windows, sorted by start. Unlike
+/// `plate_enable_expr` this never collapses dense windows into one wide span —
+/// layout switching must follow the exact overlay edges, not a widened union.
+fn merge_ms_windows(windows: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    let mut windows: Vec<(u64, u64)> = windows
+        .into_iter()
+        .filter(|(start, end)| end > start)
+        .collect();
+    windows.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
+    for (start, end) in windows {
+        match merged.last_mut() {
+            Some((_, prev_end)) if start <= *prev_end => *prev_end = (*prev_end).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 fn video_screen_rect(
@@ -1008,25 +1130,50 @@ fn render_composition_window(
         .as_ref()
         .ok_or_else(|| InternalError::Media("timeline has no render canvas".into()))?;
     validate_canvas(canvas)?;
-    let is_side_by_side = plan.overlays.iter().any(|overlay| {
-        if !overlay.visible {
-            return false;
-        }
-        if overlay.preset.as_deref() == Some("side-by-side") {
-            return true;
-        }
-        let usable_w = (canvas.width as f64 - (canvas.padding as f64) * 2.0).max(1.0);
-        let target_camera_x =
-            (canvas.padding as f64) + (usable_w * 0.76).round() + (usable_w * 0.02).round();
-        let legacy_camera_x =
-            (canvas.padding as f64) + (usable_w * 0.68).round() + (usable_w * 0.02).round();
-        (overlay.x - target_camera_x).abs() <= 3.0 || (overlay.x - legacy_camera_x).abs() <= 3.0
-    });
-    let (screen_x, screen_y, screen_w, screen_h) = video_screen_rect(
-        canvas,
-        common_screen_source(&plan.segments, asset_paths, ffprobe_path),
-        is_side_by_side,
+    // Side-by-side layout follows the overlay's timeline windows, matching
+    // preview: when the camera clip is absent (deleted or not yet started) the
+    // screen expands over the freed slot. Computing it once for the whole
+    // render leaves a dead static region wherever the camera was removed.
+    let sbs_windows = merge_ms_windows(
+        plan.overlays
+            .iter()
+            .filter(|overlay| overlay_is_side_by_side(overlay, canvas))
+            .map(|overlay| (overlay.output_start_ms, overlay.output_end_ms))
+            .collect(),
     );
+    let uniform_sbs =
+        sbs_windows.len() == 1 && sbs_windows[0].0 == 0 && sbs_windows[0].1 >= plan.duration_ms;
+    let layout_varies = !sbs_windows.is_empty() && !uniform_sbs;
+    let is_side_by_side = uniform_sbs;
+    // Absolute-time expression evaluating to true inside side-by-side windows;
+    // every timestamped construct in the graph (scale/overlay eval=frame,
+    // gated shadow plate) shares this one gate.
+    let sbs_expr = if layout_varies {
+        sbs_windows
+            .iter()
+            .map(|(start, end)| format!("between(t,{},{})", seconds(*start), seconds(*end)))
+            .collect::<Vec<_>>()
+            .join("+")
+    } else {
+        String::new()
+    };
+
+    let screen_source = common_screen_source(&plan.segments, asset_paths, ffprobe_path);
+    let full_screen_rect = video_screen_rect(canvas, screen_source, false);
+    // `screen_*` is the fitted stream's base geometry: the side-by-side rect
+    // when the layout is uniformly so, otherwise the full rect — for a
+    // varying layout the stream is rendered at the larger full geometry and
+    // eval-scaled down inside side-by-side windows.
+    let (screen_x, screen_y, screen_w, screen_h) = if uniform_sbs {
+        video_screen_rect(canvas, screen_source, true)
+    } else {
+        full_screen_rect
+    };
+    let sbs_screen_rect = if layout_varies {
+        Some(video_screen_rect(canvas, screen_source, true))
+    } else {
+        None
+    };
 
     let mut temp_mask_guards = Vec::new();
     let mut temp_dir_guards: Vec<TempExportDir> = Vec::new();
@@ -1036,7 +1183,17 @@ fn render_composition_window(
         asset_paths,
         resource_dir,
     );
-    if let Some(bg_path) = &bg_image_path {
+    // A baked canvas shadow tracks the video rect; when the rect moves with
+    // the layout a second plate — composited only inside side-by-side
+    // windows — keeps the shadow pinned to the smaller slot.
+    let bg_sbs_image_path = if layout_varies && canvas.shadow {
+        sbs_screen_rect.and_then(|rect| {
+            prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
+        })
+    } else {
+        None
+    };
+    for bg_path in [&bg_image_path, &bg_sbs_image_path].into_iter().flatten() {
         if bg_path.starts_with(std::env::temp_dir())
             && bg_path
                 .file_name()
@@ -1050,6 +1207,13 @@ fn render_composition_window(
     let bg_input_index = if let Some(bg_path) = &bg_image_path {
         let idx = input_assets.len();
         input_assets.push(("canvas:background".to_string(), bg_path.clone()));
+        Some(idx)
+    } else {
+        None
+    };
+    let bg_sbs_input_index = if let Some(bg_path) = &bg_sbs_image_path {
+        let idx = input_assets.len();
+        input_assets.push(("canvas:background_sbs".to_string(), bg_path.clone()));
         Some(idx)
     } else {
         None
@@ -1211,6 +1375,7 @@ fn render_composition_window(
         && canvas.border_radius == 0
         && !canvas.shadow
         && !is_side_by_side
+        && !layout_varies
         && canvas.background_dim.unwrap_or(0.0) <= 0.0;
     let can_direct_pad = can_pad_canvas && !has_zoom;
 
@@ -1364,6 +1529,7 @@ fn render_composition_window(
         && canvas.border_radius == 0
         && !canvas.shadow
         && !is_side_by_side
+        && !layout_varies
         && canvas.background_dim.unwrap_or(0.0) <= 0.0
         && screen_w >= (canvas.width as f64 - 0.5)
         && screen_h >= (canvas.height as f64 - 0.5)
@@ -1423,6 +1589,18 @@ fn render_composition_window(
             solid_filter.push_str("[bg_plate]");
             filters.push(solid_filter);
         }
+        let mut bg_label = "bg_plate";
+        if let Some(bg_sbs_idx) = bg_sbs_input_index {
+            // The plate carrying the side-by-side-positioned canvas shadow is
+            // composited only inside side-by-side windows, so the baked shadow
+            // follows the video slot as the layout changes.
+            filters.push(format!(
+                "[{bg_sbs_idx}:v]format=yuv420p,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}[bg_sbs_plate];\
+                 [bg_plate][bg_sbs_plate]overlay=x=0:y=0:eof_action=repeat:enable='{sbs_expr}':format=auto[bg_shaded]",
+                canvas.fps
+            ));
+            bg_label = "bg_shaded";
+        }
 
         // 2. Format the fitted video layer [screen_fitted]
         let mut screen_filter = if has_zoom {
@@ -1452,6 +1630,26 @@ fn render_composition_window(
             filters.push(screen_filter);
         }
 
+        // The fitted stream is rendered at the full-area geometry; inside
+        // side-by-side windows an eval=frame scale resizes it to the smaller
+        // rect and the overlay position exprs re-anchor it — the same
+        // per-frame layout switch the preview performs on the playhead.
+        let (fitted_label, overlay_args) = if let Some((sbs_x, sbs_y, sbs_w, sbs_h)) =
+            sbs_screen_rect
+        {
+            filters.push(format!(
+                "[screen_fitted]scale=w='if({sbs_expr},{sbs_w:.0},{screen_w:.0})':h='if({sbs_expr},{sbs_h:.0},{screen_h:.0})':eval=frame,setsar=1[screen_fitted_dyn]"
+            ));
+            (
+                "screen_fitted_dyn",
+                format!(
+                    "x='if({sbs_expr},{sbs_x:.0},{screen_x:.0})':y='if({sbs_expr},{sbs_y:.0},{screen_y:.0})':eval=frame"
+                ),
+            )
+        } else {
+            ("screen_fitted", format!("x={screen_x:.0}:y={screen_y:.0}"))
+        };
+
         // 3. Composite screen layer onto background plate [canvas_base]
         let overlay_format = if canvas_mask_idx.is_some() {
             "format=auto"
@@ -1459,7 +1657,7 @@ fn render_composition_window(
             "format=yuv420"
         };
         filters.push(format!(
-            "[bg_plate][screen_fitted]overlay=x={screen_x:.0}:y={screen_y:.0}:shortest=1:{overlay_format}[{base_label}]"
+            "[{bg_label}][{fitted_label}]overlay={overlay_args}:shortest=1:{overlay_format}[{base_label}]"
         ));
     }
 
@@ -1473,12 +1671,53 @@ fn render_composition_window(
     // points of the graph matches the editor preview stacking order — cursor
     // below camera bubbles and privacy masks, overlay items above both, and
     // burned-in captions on top.
+    // Layout windows the cursor maps through: the full rect outside
+    // side-by-side windows, the smaller slot inside them. The streamed plate
+    // crop is the union of all window rects, so every drawn pixel is covered.
+    let (cursor_screen_windows, cursor_plane_rect) = if let Some(sbs_rect) = sbs_screen_rect {
+        let mut windows: Vec<cursor::ScreenRectWindow> = Vec::new();
+        let mut cursor = 0u64;
+        for &(start, end) in &sbs_windows {
+            if start > cursor {
+                windows.push(cursor::ScreenRectWindow {
+                    start_ms: cursor,
+                    end_ms: start,
+                    rect: (screen_x, screen_y, screen_w, screen_h),
+                });
+            }
+            windows.push(cursor::ScreenRectWindow {
+                start_ms: start,
+                end_ms: end,
+                rect: sbs_rect,
+            });
+            cursor = end;
+        }
+        if cursor < plan.duration_ms {
+            windows.push(cursor::ScreenRectWindow {
+                start_ms: cursor,
+                end_ms: plan.duration_ms,
+                rect: (screen_x, screen_y, screen_w, screen_h),
+            });
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for window in &windows {
+            let (rx, ry, rw, rh) = window.rect;
+            x0 = x0.min(rx);
+            y0 = y0.min(ry);
+            x1 = x1.max(rx + rw);
+            y1 = y1.max(ry + rh);
+        }
+        (Some(windows), (x0, y0, x1 - x0, y1 - y0))
+    } else {
+        (None, (screen_x, screen_y, screen_w, screen_h))
+    };
     let mut cursor_renderers = build_cursor_renderers(
         plan,
         project_id,
         asset_paths,
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
+        cursor_screen_windows,
     )?;
     // Renderers whose window never intersects this pass can never produce a
     // visible frame; dropping them lets a cursor-free chunk skip the plate
@@ -1536,7 +1775,7 @@ fn render_composition_window(
             cursor_renderers,
             plan,
             asset_paths,
-            (screen_x, screen_y, screen_w, screen_h),
+            cursor_plane_rect,
         )?;
         // This pass emits only its window of plate frames; renderer
         // timestamps are absolute, so the feed offsets by `first_frame_index`.
@@ -2562,6 +2801,7 @@ fn build_cursor_renderers(
     asset_paths: &HashMap<String, PathBuf>,
     canvas: &cursor::RenderCanvas,
     screen_rect: (f64, f64, f64, f64),
+    screen_windows: Option<Vec<cursor::ScreenRectWindow>>,
 ) -> Result<Vec<(u64, u64, cursor::CursorRenderer)>> {
     let mut renderers = Vec::new();
     for effect in plan
@@ -2618,6 +2858,7 @@ fn build_cursor_renderers(
             &plan.zoom_segments,
             canvas,
             Some(screen_rect),
+            screen_windows.clone(),
         )
         .map_err(|error| InternalError::Media(format!("prepare cursor overlay: {error}")))?;
         renderers.push((effect.start_ms, effect.end_ms, renderer));
@@ -7621,6 +7862,203 @@ mod tests {
         assert_eq!(rect_sbs.2, 1458.0);
         assert_eq!(rect_sbs.3, 820.0);
         assert_eq!(rect_sbs.1, 130.0);
+    }
+
+    /// Regression: deleting a middle camera piece must not leave a static
+    /// camera slot in the export. Preview expands the screen over the freed
+    /// area for that window only; the export has to do the same — screen at
+    /// the full-area rect inside the gap, side-by-side elsewhere.
+    #[test]
+    fn test_side_by_side_camera_gap_expands_screen_in_gap() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-sbs-gap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let camera_path = temp_dir.join("camera.mp4");
+        let out_path = temp_dir.join("out_sbs_gap.mp4");
+
+        for (args, path) in [
+            (
+                vec!["testsrc2=size=1280x720:rate=24:duration=6".to_string()],
+                &screen_path,
+            ),
+            (
+                vec!["testsrc=size=640x960:rate=24:duration=6".to_string()],
+                &camera_path,
+            ),
+        ] {
+            let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+                .args(["-y", "-f", "lavfi", "-i"])
+                .args(&args)
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "generate test media");
+        }
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+        asset_paths.insert("asset-camera".to_string(), camera_path);
+
+        // Camera present [0,2s) and [4,6s) — the [2,4s) window is the user's
+        // deleted piece. Geometry mirrors the side-by-side preset for a
+        // 1280x720 canvas with 40px padding (76% screen + 2% gap).
+        let overlay = |source_in, source_out, out_start, out_end| RenderPlanOverlay {
+            asset_id: "asset-camera".into(),
+            stream_index: Some(0),
+            source_in_ms: source_in,
+            source_out_ms: source_out,
+            output_start_ms: out_start,
+            output_end_ms: out_end,
+            speed: 1.0,
+            x: 976.0,
+            y: 175.0,
+            width: 264.0,
+            height: 370.0,
+            crop: None,
+            opacity: 1.0,
+            visible: true,
+            shape: "rectangle".into(),
+            border_width: Some(0.0),
+            border_color: None,
+            border_opacity: None,
+            shadow_enabled: Some(false),
+            shadow_color: None,
+            shadow_blur: None,
+            shadow_offset_x: None,
+            shadow_offset_y: None,
+            preset: Some("side-by-side".into()),
+        };
+
+        let plan = RenderPlan {
+            project_id: "test-sbs-gap".into(),
+            duration_ms: 6000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 6000,
+                output_start_ms: 0,
+                output_end_ms: 6000,
+                source_width: Some(1280),
+                source_height: Some(720),
+            }],
+            gaps: Vec::new(),
+            overlays: vec![overlay(0, 2000, 0, 2000), overlay(4000, 6000, 4000, 6000)],
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 1280,
+                height: 720,
+                fps: 24,
+                padding: 40,
+                background: "#ff0000".into(),
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+
+        let res = render_timeline_composition(
+            &*ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-sbs-gap",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(
+            res.is_ok(),
+            "side-by-side gap render failed: {:?}",
+            res.err()
+        );
+        assert!(out_path.is_file());
+
+        let frame_at = |at_s: &str| -> Vec<u8> {
+            let output = crate::process::create_command(&*ffmpeg.to_string_lossy())
+                .args(["-y", "-ss", at_s, "-i"])
+                .arg(&out_path)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "extract frame at {}", at_s);
+            assert_eq!(output.stdout.len(), 1280 * 720 * 3);
+            output.stdout
+        };
+        let px = |frame: &[u8], x: usize, y: usize| -> (u8, u8, u8) {
+            let i = (y * 1280 + x) * 3;
+            (frame[i], frame[i + 1], frame[i + 2])
+        };
+        let is_red_bg = |(r, g, b): (u8, u8, u8)| r > 200 && g < 70 && b < 70;
+
+        let sbs_frame = frame_at("1");
+        // Inside a side-by-side window the strip between the screen's right
+        // edge (~952px) and the camera slot (~976px) stays background.
+        assert!(
+            is_red_bg(px(&sbs_frame, 962, 360)),
+            "background strip between screen and camera expected during side-by-side"
+        );
+
+        let gap_frame = frame_at("3");
+        // The deleted window: the former camera slot must now show video, not
+        // the frozen-looking empty background the buggy export produced.
+        assert!(
+            !is_red_bg(px(&gap_frame, 1100, 360)),
+            "screen video should cover the former camera slot during the gap"
+        );
+        assert!(
+            !is_red_bg(px(&gap_frame, 962, 360)),
+            "screen video should also cover the inter-slot strip during the gap"
+        );
+
+        // After the gap the side-by-side layout is restored.
+        let after_frame = frame_at("5");
+        assert!(
+            is_red_bg(px(&after_frame, 962, 360)),
+            "side-by-side layout should be restored after the gap"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
