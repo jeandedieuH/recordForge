@@ -837,6 +837,143 @@ fn render_timeline_composition(
     resource_dir: Option<&Path>,
     ffprobe_path: Option<&Path>,
 ) -> Result<()> {
+    if should_render_chunked(plan, settings) {
+        return render_timeline_chunked(
+            ffmpeg_path,
+            output_path,
+            plan,
+            project_id,
+            asset_paths,
+            settings,
+            encoder,
+            cancel,
+            on_progress,
+            resource_dir,
+            ffprobe_path,
+        );
+    }
+    render_composition_window(
+        ffmpeg_path,
+        output_path,
+        plan,
+        project_id,
+        asset_paths,
+        settings,
+        encoder,
+        cancel,
+        None,
+        on_progress,
+        resource_dir,
+        ffprobe_path,
+        &CompositionWindow::full(plan),
+        &CompositionPass::standalone(),
+    )
+}
+
+/// Output-time window one composition pass renders, in absolute timeline
+/// coordinates. A full render uses `CompositionWindow::full` — `start_s` = 0
+/// keeps every generated filter identical to an unchunked export. Chunked
+/// passes shift the composed stream by `start_s`, so `between(t,…)`, zoompan
+/// `it`, timed camera `setpts` offsets and libass cue times all evaluate in
+/// absolute timeline seconds.
+struct CompositionWindow {
+    /// Absolute index of the first frame this pass emits (0 for a full pass).
+    first_frame: u64,
+    /// Number of CFR frames this pass emits.
+    frame_count: u64,
+    /// Absolute output time of `first_frame`, seconds.
+    start_s: f64,
+    /// Absolute output time of `first_frame + frame_count`, seconds.
+    end_s: f64,
+    /// Stream length for `-t` and progress reporting, ms.
+    duration_ms: u64,
+}
+
+impl CompositionWindow {
+    fn full(plan: &RenderPlan) -> Self {
+        let fps = plan
+            .canvas
+            .as_ref()
+            .map(|canvas| canvas.fps)
+            .unwrap_or(1)
+            .max(1) as u64;
+        let frame_count = plan
+            .duration_ms
+            .saturating_mul(fps)
+            .saturating_add(999)
+            .checked_div(1000)
+            .unwrap_or(1)
+            .max(1);
+        Self {
+            first_frame: 0,
+            frame_count,
+            start_s: 0.0,
+            end_s: plan.duration_ms as f64 / 1000.0,
+            duration_ms: plan.duration_ms,
+        }
+    }
+
+    fn from_frames(first_frame: u64, frame_count: u64, fps: u64) -> Self {
+        let start_s = first_frame as f64 / fps as f64;
+        let end_s = (first_frame + frame_count) as f64 / fps as f64;
+        Self {
+            first_frame,
+            frame_count,
+            start_s,
+            end_s,
+            duration_ms: ((end_s - start_s) * 1000.0).round() as u64,
+        }
+    }
+
+    fn start_ms(&self) -> f64 {
+        self.start_s * 1000.0
+    }
+
+    fn end_ms(&self) -> f64 {
+        self.end_s * 1000.0
+    }
+}
+
+/// Per-pass switches for `render_composition_window`. `standalone` emits a
+/// finished deliverable (chapter mapping + faststart); chunk passes write
+/// intermediate slices and let the mux stage own both. `include_audio`
+/// controls the audio graph — chunk passes stay video-only because the mux
+/// splices in one continuous audio render, which also avoids per-chunk AAC
+/// priming at the seams.
+struct CompositionPass {
+    standalone: bool,
+    include_audio: bool,
+    /// Share of the machine the overlay producer may use (see CursorFramePlan).
+    plate_divisor: usize,
+}
+
+impl CompositionPass {
+    fn standalone() -> Self {
+        Self {
+            standalone: true,
+            include_audio: true,
+            plate_divisor: 1,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_composition_window(
+    ffmpeg_path: &str,
+    output_path: &Path,
+    plan: &RenderPlan,
+    project_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    settings: &ExportSettings,
+    encoder: encoding::ExportEncoder,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    on_progress: &(dyn Fn(f64) + Sync),
+    resource_dir: Option<&Path>,
+    ffprobe_path: Option<&Path>,
+    window: &CompositionWindow,
+    pass: &CompositionPass,
+) -> Result<()> {
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
     }
@@ -1089,12 +1226,31 @@ fn render_timeline_composition(
     let background = safe_filter_color(&canvas.background);
     let mut filters = Vec::new();
     let mut video_labels = Vec::new();
-    let mut cursor_ms = 0;
+    // Suffix re-anchoring a fresh stream to this window's absolute start: every
+    // timestamped construct downstream (enable windows, zoompan `it`, timed
+    // camera offsets, libass cue times) then evaluates in absolute plan
+    // seconds, which is what makes chunk boundaries seamless.
+    let abs_pts = if window.start_s > 1e-9 {
+        format!("+{:.6}/TB", window.start_s)
+    } else {
+        String::new()
+    };
+    let win_start_ms = window.start_ms();
+    let win_end_ms = window.end_ms();
+    let win_len_s = fmt_secs(window.end_s - window.start_s);
+    let mut filled_ms = win_start_ms;
     for (index, segment) in plan.segments.iter().enumerate() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
-        if segment.output_start_ms > cursor_ms {
+        let segment_start = segment.output_start_ms as f64;
+        let segment_end = segment.output_end_ms as f64;
+        let clamped_start = segment_start.clamp(win_start_ms, win_end_ms);
+        let clamped_end = segment_end.clamp(win_start_ms, win_end_ms);
+        if clamped_end <= clamped_start {
+            continue;
+        }
+        if clamped_start > filled_ms {
             let gap_label = format!("gap{index}");
             let gap_color = if bg_input_index.is_some() {
                 "black@0".to_string()
@@ -1104,7 +1260,7 @@ fn render_timeline_composition(
             filters.push(format!(
                 "color=c={gap_color}:s={target_seg_w}x{target_seg_h}:r={}:d={}[{gap_label}]",
                 canvas.fps,
-                seconds(segment.output_start_ms - cursor_ms),
+                fmt_secs((clamped_start - filled_ms) / 1000.0),
             ));
             video_labels.push(format!("[{gap_label}]"));
         }
@@ -1123,24 +1279,32 @@ fn render_timeline_composition(
             segment.stream_index,
         )?;
         let label = format!("screen{index}");
+        // A mid-segment cut re-anchors the sub-clip to the cut offset instead
+        // of zero so the fps resampler lands on the same absolute frame grid
+        // the unchunked render produces — chunk seams stay sample-identical.
+        let speed = segment.speed;
+        let cut_in_s = (clamped_start - segment_start) / 1000.0;
+        let source_in_s = segment.source_in_ms as f64 / 1000.0 + cut_in_s * speed;
+        let source_out_s = source_in_s + (clamped_end - clamped_start) / 1000.0 * speed;
+        let phase = if cut_in_s > 1e-9 {
+            format!("+{:.6}/TB", cut_in_s * speed)
+        } else {
+            String::new()
+        };
         let mut filter = format!(
-            "{input}trim=start={}:end={},setpts=PTS-STARTPTS",
-            seconds(segment.source_in_ms),
-            seconds(segment.source_out_ms),
+            "{input}trim=start={}:end={},setpts=PTS-STARTPTS{phase}",
+            fmt_secs(source_in_s),
+            fmt_secs(source_out_s),
         );
-        if (segment.speed - 1.0).abs() > f64::EPSILON {
-            filter.push_str(&format!(",setpts=PTS/{:.6}", segment.speed));
+        if (speed - 1.0).abs() > f64::EPSILON {
+            filter.push_str(&format!(",setpts=PTS/{:.6}", speed));
         }
         let pad_color = if bg_input_index.is_some() {
             "black@0".to_string()
         } else {
             background.clone()
         };
-        let segment_duration = seconds(
-            segment
-                .output_end_ms
-                .saturating_sub(segment.output_start_ms),
-        );
+        let segment_duration = fmt_secs((clamped_end - clamped_start) / 1000.0);
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
         // scale runs per source frame at full canvas resolution and defaults
@@ -1159,9 +1323,9 @@ fn render_timeline_composition(
         }
         filters.push(filter);
         video_labels.push(format!("[{label}]"));
-        cursor_ms = segment.output_end_ms;
+        filled_ms = clamped_end;
     }
-    if cursor_ms < plan.duration_ms {
+    if filled_ms < win_end_ms {
         let gap_label = "gap_trailing";
         let gap_color = if bg_input_index.is_some() {
             "black@0".to_string()
@@ -1171,7 +1335,7 @@ fn render_timeline_composition(
         filters.push(format!(
             "color=c={gap_color}:s={target_seg_w}x{target_seg_h}:r={}:d={}[{gap_label}]",
             canvas.fps,
-            seconds(plan.duration_ms - cursor_ms),
+            fmt_secs((win_end_ms - filled_ms) / 1000.0),
         ));
         video_labels.push(format!("[{gap_label}]"));
     }
@@ -1194,7 +1358,7 @@ fn render_timeline_composition(
     // shortfall and trim caps the stream at the exact planned duration.
     // Filters are pull-based, so the oversized stop_duration only materializes
     // frames up to the trim cutoff.
-    let plan_duration = seconds(plan.duration_ms);
+    let plan_duration = win_len_s.clone();
 
     let is_fullscreen_canvas = bg_input_index.is_none()
         && canvas.border_radius == 0
@@ -1207,15 +1371,23 @@ fn render_timeline_composition(
         && screen_y.abs() < 0.5;
 
     let base_label = "canvas_base";
+    // zoompan emits output timestamps on its own 0-based grid, so a shifted
+    // pass must restore absolute pts for downstream pairing (overlays, plate,
+    // masks) after it runs.
+    let post_zoom_reabs = if abs_pts.is_empty() {
+        String::new()
+    } else {
+        format!(",setpts=PTS{abs_pts}")
+    };
     if can_direct_pad {
         filters.push(format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,setsar=1[{base_label}]"
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},setsar=1[{base_label}]"
         ));
     } else if is_fullscreen_canvas && has_zoom {
         let (z_expr, x_expr, y_expr) =
             build_zoompan_expressions(plan, canvas, canvas.width as f64, canvas.height as f64);
         filters.push(format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1[{base_label}]",
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={}x{}:fps={},setsar=1{post_zoom_reabs}[{base_label}]",
             canvas.width, canvas.height, canvas.fps
         ));
     } else if can_pad_canvas && has_zoom {
@@ -1224,13 +1396,13 @@ fn render_timeline_composition(
         let canvas_h = canvas.height;
         let canvas_fps = canvas.fps;
         filters.push(format!(
-            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={canvas_fps},pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1[{base_label}]"
+            "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={canvas_fps},pad={canvas_w}:{canvas_h}:{screen_x:.0}:{screen_y:.0}:color={background},setsar=1{post_zoom_reabs}[{base_label}]"
         ));
     } else {
         // 1. Generate the background plate [bg_plate]
         if let Some(bg_idx) = bg_input_index {
             filters.push(format!(
-                "[{bg_idx}:v]format=yuv420p,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS[bg_plate]",
+                "[{bg_idx}:v]format=yuv420p,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}[bg_plate]",
                 canvas.fps
             ));
         } else {
@@ -1238,6 +1410,9 @@ fn render_timeline_composition(
                 "color=c={background}:s={}x{}:r={}:d={}",
                 canvas.width, canvas.height, canvas.fps, plan_duration
             );
+            if !abs_pts.is_empty() {
+                solid_filter.push_str(&format!(",setpts=PTS{abs_pts}"));
+            }
             let bg_dim = canvas.background_dim.unwrap_or(0.0).clamp(0.0, 1.0);
             if bg_dim > 0.0 {
                 solid_filter.push_str(&format!(
@@ -1254,12 +1429,12 @@ fn render_timeline_composition(
             let (z_expr, x_expr, y_expr) =
                 build_zoompan_expressions(plan, canvas, screen_w, screen_h);
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1",
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={screen_w:.0}x{screen_h:.0}:fps={},setsar=1{post_zoom_reabs}",
                 canvas.fps
             )
         } else {
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS,setsar=1"
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},setsar=1"
             )
         };
         if let Some(mask_idx) = canvas_mask_idx {
@@ -1298,13 +1473,19 @@ fn render_timeline_composition(
     // points of the graph matches the editor preview stacking order — cursor
     // below camera bubbles and privacy masks, overlay items above both, and
     // burned-in captions on top.
-    let cursor_renderers = build_cursor_renderers(
+    let mut cursor_renderers = build_cursor_renderers(
         plan,
         project_id,
         asset_paths,
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
     )?;
+    // Renderers whose window never intersects this pass can never produce a
+    // visible frame; dropping them lets a cursor-free chunk skip the plate
+    // input and its stdin feed entirely.
+    cursor_renderers.retain(|(start_ms, end_ms, _)| {
+        (*end_ms as f64) > win_start_ms && (*start_ms as f64) < win_end_ms
+    });
     let cursor_windows: Vec<(u64, u64)> = cursor_renderers
         .iter()
         .map(|(start_ms, end_ms, _)| (*start_ms, *end_ms))
@@ -1312,13 +1493,26 @@ fn render_timeline_composition(
     // An overlay render plan that parses to zero items is treated as "no
     // items": it lets us skip the generated plate input (and its stdin feed)
     // entirely instead of streaming transparent frames for the whole export.
+    // Chunked passes additionally require the items to overlap the window.
     let overlay_item_windows = collect_overlay_item_windows(plan);
-    let has_overlay_items = !plan.annotations.is_empty()
-        || !plan.texts.is_empty()
-        || !plan.images.is_empty()
+    let overlaps_window = |start_ms: u64, end_ms: u64| {
+        (end_ms as f64) > win_start_ms && (start_ms as f64) < win_end_ms
+    };
+    let legacy_items_in_window = plan
+        .annotations
+        .iter()
+        .map(|item| (item.start_ms, item.end_ms))
+        .chain(plan.texts.iter().map(|item| (item.start_ms, item.end_ms)))
+        .chain(plan.images.iter().map(|item| (item.start_ms, item.end_ms)))
+        .any(|(start_ms, end_ms)| overlaps_window(start_ms, end_ms));
+    let has_overlay_items = legacy_items_in_window
         || overlay_item_windows
             .as_ref()
-            .map(|windows| !windows.is_empty())
+            .map(|windows| {
+                windows
+                    .iter()
+                    .any(|(start_ms, end_ms)| overlaps_window(*start_ms, *end_ms))
+            })
             .unwrap_or_else(|| plan.overlay_render_plan.is_some());
     let mut cursor_plan = None;
     // Label of the overlay-items plate (already bracketed), composited after
@@ -1328,7 +1522,15 @@ fn render_timeline_composition(
     if !cursor_renderers.is_empty() || has_overlay_items {
         let plate_input_index = input_assets.len();
         let plate_source = format!("[{plate_input_index}:v]");
-        let prepared = prepare_cursor_frame_plan(
+        // Shift the generated stream into absolute time so it framesyncs with
+        // the shifted canvas stream (a full pass keeps the zero-shifted form).
+        let plate_source = if abs_pts.is_empty() {
+            plate_source
+        } else {
+            filters.push(format!("{plate_source}setpts=PTS{abs_pts}[plate_shifted]"));
+            "[plate_shifted]".to_string()
+        };
+        let mut prepared = prepare_cursor_frame_plan(
             canvas,
             plan.duration_ms,
             cursor_renderers,
@@ -1336,6 +1538,11 @@ fn render_timeline_composition(
             asset_paths,
             (screen_x, screen_y, screen_w, screen_h),
         )?;
+        // This pass emits only its window of plate frames; renderer
+        // timestamps are absolute, so the feed offsets by `first_frame_index`.
+        prepared.first_frame_index = window.first_frame;
+        prepared.frame_count = window.frame_count;
+        prepared.parallel_divisor = pass.plate_divisor;
         // Gate each plate overlay to the time windows where its content can be
         // visible; outside them the blend is skipped and the base passes
         // through untouched, which keeps the CPU cost of an idle plate near
@@ -1384,6 +1591,13 @@ fn render_timeline_composition(
             continue;
         }
         validate_overlay(overlay, project_id, asset_paths, canvas)?;
+        // Camera chains are timestamped absolutely, so a window-disjoint
+        // overlay would render nothing — skip its decode entirely.
+        if (overlay.output_end_ms as f64) <= win_start_ms
+            || (overlay.output_start_ms as f64) >= win_end_ms
+        {
+            continue;
+        }
         let input_index = *input_indices.get(&overlay.asset_id).ok_or_else(|| {
             InternalError::Media("camera overlay references an unknown asset".into())
         })?;
@@ -1511,6 +1725,12 @@ fn render_timeline_composition(
             continue;
         }
         validate_mask(mask, project_id, asset_paths, canvas)?;
+        // Same absolute-time rule as the camera chains: a mask outside this
+        // pass's window can never trigger, so its split/crop branch is dead
+        // work — skip building it.
+        if (mask.end_ms as f64) <= win_start_ms || (mask.start_ms as f64) >= win_end_ms {
+            continue;
+        }
         let x_raw = mask
             .rect
             .x
@@ -1609,7 +1829,13 @@ fn render_timeline_composition(
 
     // Burned-in captions go through a single libass pass: one `subtitles`
     // filter over a generated .ass script instead of a drawtext chain per cue.
-    if plan.caption_mode == "burn-in" && !plan.captions.is_empty() {
+    if plan.caption_mode == "burn-in"
+        && !plan.captions.is_empty()
+        && plan
+            .captions
+            .iter()
+            .any(|caption| overlaps_window(caption.start_ms, caption.end_ms))
+    {
         let caption_dir = std::env::temp_dir().join(format!(
             "rf-captions-{}-{}",
             project_id,
@@ -1637,134 +1863,36 @@ fn render_timeline_composition(
         _ => "yuv420p",
     };
     let final_label = "export_output";
+    // Re-anchor to zero after the absolute-time window so each emitted file
+    // is a normal 0-based stream (no-op suffix for a full pass).
+    let reanchor = if abs_pts.is_empty() {
+        ""
+    } else {
+        "setpts=PTS-STARTPTS,"
+    };
     filters.push(format!(
-        "[{current_label}]format={final_pix_fmt}[{final_label}]"
+        "[{current_label}]{reanchor}format={final_pix_fmt}[{final_label}]"
     ));
     current_label = final_label.to_string();
 
-    let audio_tracks = plan
-        .audio_tracks
-        .as_ref()
-        .map(|tracks| tracks.iter().collect::<Vec<_>>())
-        .unwrap_or_else(|| plan.audio.iter().collect::<Vec<_>>());
     let duration_ms = plan.duration_ms.max(1);
     let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
     let is_webp = settings.container == "webp" || settings.preset.starts_with("webp-");
-    let mut audio_labels = Vec::new();
-    let mut audio_segment_index = 0usize;
-    if !is_gif && !is_webp {
-        for track in audio_tracks {
-            if track.muted {
-                continue;
-            }
-            let fallback = RenderSegment {
-                asset_id: track.asset_id.clone(),
-                stream_index: track.stream_index,
-                volume: Some(track.volume),
-                speed: 1.0,
-                fade_in_ms: None,
-                fade_out_ms: None,
-                volume_keyframes: None,
-                audio_filter: None,
-                source_in_ms: 0,
-                source_out_ms: duration_ms,
-                output_start_ms: 0,
-                output_end_ms: duration_ms,
-                source_width: None,
-                source_height: None,
-            };
-            let uses_legacy_fallback = track.segments.is_empty();
-            let segments = if uses_legacy_fallback {
-                vec![fallback]
-            } else {
-                track.segments.clone()
-            };
-            for segment in segments {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Err(InternalError::Media("export cancelled".into()).into());
-                }
-                validate_segment_known(&segment, project_id, asset_paths)?;
-                let volume = segment.volume.unwrap_or(track.volume).clamp(0.0, 2.0);
-                let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
-                    InternalError::Media("audio track references an unknown asset".into())
-                })?;
-                let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
-                    InternalError::Media("audio track references an unknown asset".into())
-                })?;
-                let stream_index = if uses_legacy_fallback {
-                    segment.stream_index.or(track.stream_index)
-                } else {
-                    segment.stream_index
-                };
-                let Some(input) = resolve_audio_stream_specifier(
-                    ffprobe_path,
-                    asset_path,
-                    &segment.asset_id,
-                    input_index,
-                    stream_index,
-                )?
-                else {
-                    continue;
-                };
-                let label = format!("audio{audio_segment_index}");
-                let clip_duration_ms = segment
-                    .output_end_ms
-                    .saturating_sub(segment.output_start_ms)
-                    .max(1);
-                let mut audio_filter = format!(
-                    "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
-                    seconds(segment.source_in_ms),
-                    seconds(segment.source_out_ms),
-                );
-                if (segment.speed - 1.0).abs() > f64::EPSILON {
-                    audio_filter.push_str(&atempo_filter(segment.speed));
-                }
-                if let Some(custom_filter) = &segment.audio_filter {
-                    audio_filter.push_str(&format!(",{custom_filter}"));
-                } else {
-                    audio_filter.push_str(&format!(",volume={volume:.4}"));
-                    if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
-                        audio_filter.push_str(&format!(
-                            ",afade=t=in:st=0:d={}",
-                            seconds(fade_in_ms as u64)
-                        ));
-                    }
-                    if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
-                        let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
-                        let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
-                        audio_filter.push_str(&format!(
-                            ",afade=t=out:st={:.3}:d={:.3}",
-                            fade_start / 1000.0,
-                            fade_duration / 1000.0
-                        ));
-                    }
-                }
-                if segment.output_start_ms > 0 {
-                    audio_filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
-                }
-                audio_filter.push_str(&format!(",apad=pad_dur={}[{label}]", seconds(duration_ms)));
-                filters.push(audio_filter);
-                audio_labels.push(format!("[{label}]"));
-                audio_segment_index += 1;
-            }
-        }
-
-        if audio_labels.len() == 1 {
-            let label = "aout";
-            filters.push(format!(
-                "{}atrim=duration={}[{label}]",
-                audio_labels[0],
-                seconds(duration_ms)
-            ));
-        } else if !audio_labels.is_empty() {
-            filters.push(format!(
-                "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
-                audio_labels.join(""),
-                audio_labels.len(),
-                seconds(duration_ms),
-            ));
-        }
-    }
+    // Chunk passes render video-only: the mux stage splices in one continuous
+    // audio render so no AAC priming discontinuity ever reaches a seam.
+    let has_audio = pass.include_audio
+        && !is_gif
+        && !is_webp
+        && append_audio_graph(
+            &mut filters,
+            plan,
+            project_id,
+            &input_indices,
+            asset_paths,
+            ffprobe_path,
+            duration_ms,
+            &cancel,
+        )?;
 
     let mut command = crate::process::create_command(ffmpeg_path);
     command
@@ -1851,7 +1979,7 @@ fn render_timeline_composition(
         .arg("-/filter_complex")
         .arg(&filter_script_path)
         .args(["-map", &format!("[{current_label}]")]);
-    if is_gif || is_webp || audio_labels.is_empty() {
+    if is_gif || is_webp || !has_audio {
         command.arg("-an");
     } else {
         command.args(["-map", "[aout]"]);
@@ -1888,27 +2016,531 @@ fn render_timeline_composition(
             canvas.width,
             canvas.height,
         );
-        if !audio_labels.is_empty() {
+        if has_audio {
             command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
         }
-        if let Some(idx) = chapters_input_index {
-            command.args(["-map_chapters", &idx.to_string()]);
+        // Embedded chapters and faststart belong to the finished file only —
+        // chunk intermediates defer both to the concat mux stage.
+        if pass.standalone {
+            if let Some(idx) = chapters_input_index {
+                command.args(["-map_chapters", &idx.to_string()]);
+            }
+            command.args(["-movflags", "+faststart"]);
         }
-        command.args(["-movflags", "+faststart"]);
     }
-    command
-        .args(["-t", &seconds(plan.duration_ms)])
-        .arg(output_path);
+    command.args(["-t", &win_len_s]).arg(output_path);
 
     run_export_ffmpeg(
         &mut command,
         &cancel,
+        halt,
         output_path,
         "timeline composition",
-        Some(plan.duration_ms),
+        Some(window.duration_ms),
         cursor_plan,
         Some(on_progress),
     )
+}
+
+/// Append the audio graph — per-segment `atrim`/speed/volume chains padded to
+/// the full export duration and mixed into `[aout]` — to `filters`. Returns
+/// whether `[aout]` was emitted. Called by the standalone pass directly and,
+/// for chunked exports, by the dedicated audio render in `render_timeline_chunked`.
+#[allow(clippy::too_many_arguments)]
+fn append_audio_graph(
+    filters: &mut Vec<String>,
+    plan: &RenderPlan,
+    project_id: &str,
+    input_indices: &HashMap<String, usize>,
+    asset_paths: &HashMap<String, PathBuf>,
+    ffprobe_path: Option<&Path>,
+    duration_ms: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<bool> {
+    let audio_tracks = plan
+        .audio_tracks
+        .as_ref()
+        .map(|tracks| tracks.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| plan.audio.iter().collect::<Vec<_>>());
+    let mut audio_labels = Vec::new();
+    let mut audio_segment_index = 0usize;
+    for track in audio_tracks {
+        if track.muted {
+            continue;
+        }
+        let fallback = RenderSegment {
+            asset_id: track.asset_id.clone(),
+            stream_index: track.stream_index,
+            volume: Some(track.volume),
+            speed: 1.0,
+            fade_in_ms: None,
+            fade_out_ms: None,
+            volume_keyframes: None,
+            audio_filter: None,
+            source_in_ms: 0,
+            source_out_ms: duration_ms,
+            output_start_ms: 0,
+            output_end_ms: duration_ms,
+            source_width: None,
+            source_height: None,
+        };
+        let uses_legacy_fallback = track.segments.is_empty();
+        let segments = if uses_legacy_fallback {
+            vec![fallback]
+        } else {
+            track.segments.clone()
+        };
+        for segment in segments {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(InternalError::Media("export cancelled".into()).into());
+            }
+            validate_segment_known(&segment, project_id, asset_paths)?;
+            let volume = segment.volume.unwrap_or(track.volume).clamp(0.0, 2.0);
+            let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
+                InternalError::Media("audio track references an unknown asset".into())
+            })?;
+            let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
+                InternalError::Media("audio track references an unknown asset".into())
+            })?;
+            let stream_index = if uses_legacy_fallback {
+                segment.stream_index.or(track.stream_index)
+            } else {
+                segment.stream_index
+            };
+            let Some(input) = resolve_audio_stream_specifier(
+                ffprobe_path,
+                asset_path,
+                &segment.asset_id,
+                input_index,
+                stream_index,
+            )?
+            else {
+                continue;
+            };
+            let label = format!("audio{audio_segment_index}");
+            let clip_duration_ms = segment
+                .output_end_ms
+                .saturating_sub(segment.output_start_ms)
+                .max(1);
+            let mut audio_filter = format!(
+                "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
+                seconds(segment.source_in_ms),
+                seconds(segment.source_out_ms),
+            );
+            if (segment.speed - 1.0).abs() > f64::EPSILON {
+                audio_filter.push_str(&atempo_filter(segment.speed));
+            }
+            if let Some(custom_filter) = &segment.audio_filter {
+                audio_filter.push_str(&format!(",{custom_filter}"));
+            } else {
+                audio_filter.push_str(&format!(",volume={volume:.4}"));
+                if let Some(fade_in_ms) = segment.fade_in_ms.filter(|value| *value > 0.0) {
+                    audio_filter.push_str(&format!(
+                        ",afade=t=in:st=0:d={}",
+                        seconds(fade_in_ms as u64)
+                    ));
+                }
+                if let Some(fade_out_ms) = segment.fade_out_ms.filter(|value| *value > 0.0) {
+                    let fade_duration = fade_out_ms.min(clip_duration_ms as f64);
+                    let fade_start = (clip_duration_ms as f64 - fade_duration).max(0.0);
+                    audio_filter.push_str(&format!(
+                        ",afade=t=out:st={:.3}:d={:.3}",
+                        fade_start / 1000.0,
+                        fade_duration / 1000.0
+                    ));
+                }
+            }
+            if segment.output_start_ms > 0 {
+                audio_filter.push_str(&format!(",adelay={}:all=1", segment.output_start_ms));
+            }
+            audio_filter.push_str(&format!(",apad=pad_dur={}[{label}]", seconds(duration_ms)));
+            filters.push(audio_filter);
+            audio_labels.push(format!("[{label}]"));
+            audio_segment_index += 1;
+        }
+    }
+
+    if audio_labels.len() == 1 {
+        let label = "aout";
+        filters.push(format!(
+            "{}atrim=duration={}[{label}]",
+            audio_labels[0],
+            seconds(duration_ms)
+        ));
+    } else if !audio_labels.is_empty() {
+        filters.push(format!(
+            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
+            audio_labels.join(""),
+            audio_labels.len(),
+            seconds(duration_ms),
+        ));
+    }
+    Ok(!audio_labels.is_empty())
+}
+
+/// Sub-millisecond seconds used by windowed (chunked) filters, where cut
+/// boundaries fall between millisecond marks.
+fn fmt_secs(value: f64) -> String {
+    format!("{:.6}", value)
+}
+
+/// Escape a path for the concat demuxer list file: the demuxer treats `\`
+/// (escape char) and `'` (quoting) as special, so paths go in as forward-
+/// slashes with embedded quotes escaped.
+fn escape_concat_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('\'', "\\'")
+}
+
+/// Frame-exact `[first_frame, end_frame)` ranges covering `total_frames`.
+/// Every chunk except the last is exactly `chunk_frames` long, so the concat
+/// reproduces the single-pass frame count precisely.
+fn chunk_boundaries(total_frames: u64, chunk_frames: u64) -> Vec<(u64, u64)> {
+    let mut boundaries = Vec::new();
+    let mut start = 0;
+    while start < total_frames {
+        let end = (start + chunk_frames).min(total_frames);
+        boundaries.push((start, end));
+        start = end;
+    }
+    boundaries
+}
+
+/// Chunked rendering pays a fixed per-chunk cost — an extra FFmpeg process
+/// and a re-decoded source prefix — and only wins when slices run side by
+/// side. Short exports and low-core machines keep the single pass; GIF/WebP
+/// presets stay single-pass because they stream through special muxer-level
+/// filters that don't slice cleanly.
+fn should_render_chunked(plan: &RenderPlan, settings: &ExportSettings) -> bool {
+    if settings.container == "gif" || settings.preset.starts_with("gif-") {
+        return false;
+    }
+    if settings.container == "webp" || settings.preset.starts_with("webp-") {
+        return false;
+    }
+    let Some(canvas) = plan.canvas.as_ref() else {
+        return false;
+    };
+    if canvas.fps == 0 {
+        return false;
+    }
+    if plan.duration_ms < 20_000 {
+        return false;
+    }
+    std::thread::available_parallelism()
+        .map(|count| count.get() >= 4)
+        .unwrap_or(false)
+}
+
+/// Render the composition as parallel frame-exact chunks: each chunk runs its
+/// own FFmpeg process with a `window`-shifted filter graph, audio renders
+/// once as a single continuous track, and the slices are joined by a
+/// stream-copying concat mux. The single pass is bottlenecked on serial
+/// stages (zoompan, the overlay composites), so it leaves a hardware encoder
+/// mostly idle — N chunk pipelines multiply throughput up to the worker
+/// count without changing the emitted frames.
+#[allow(clippy::too_many_arguments)]
+fn render_timeline_chunked(
+    ffmpeg_path: &str,
+    output_path: &Path,
+    plan: &RenderPlan,
+    project_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    settings: &ExportSettings,
+    encoder: encoding::ExportEncoder,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    on_progress: &(dyn Fn(f64) + Sync),
+    resource_dir: Option<&Path>,
+    ffprobe_path: Option<&Path>,
+) -> Result<()> {
+    let canvas = plan
+        .canvas
+        .as_ref()
+        .ok_or_else(|| InternalError::Media("render plan has no canvas".into()))?;
+    let fps = canvas.fps.max(1) as u64;
+    let total_frames = plan
+        .duration_ms
+        .saturating_mul(fps)
+        .saturating_add(999)
+        .checked_div(1000)
+        .unwrap_or(1)
+        .max(1);
+    // Half the cores per pass keeps each process's encode/decode thread pools
+    // from drowning the serial filter stages; ~2 chunks per worker absorbs
+    // uneven slice costs.
+    let workers = std::thread::available_parallelism()
+        .map(|count| (count.get() / 2).clamp(2, 4))
+        .unwrap_or(2);
+    let chunk_frames = total_frames
+        .div_ceil((workers * 2) as u64)
+        .max(fps.saturating_mul(2));
+    let boundaries = chunk_boundaries(total_frames, chunk_frames);
+    if boundaries.len() <= 1 {
+        return render_composition_window(
+            ffmpeg_path,
+            output_path,
+            plan,
+            project_id,
+            asset_paths,
+            settings,
+            encoder,
+            cancel,
+            None,
+            on_progress,
+            resource_dir,
+            ffprobe_path,
+            &CompositionWindow::full(plan),
+            &CompositionPass::standalone(),
+        );
+    }
+    info!(
+        %project_id,
+        chunks = boundaries.len(),
+        workers,
+        total_frames,
+        "export: rendering timeline in parallel chunks"
+    );
+
+    // Intermediates live in their own temp dir; the guard removes everything
+    // on both the success and failure paths.
+    let chunk_dir = std::env::temp_dir().join(format!(
+        "recordforge_chunks_{}_{}",
+        project_id,
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&chunk_dir)
+        .map_err(|error| InternalError::Storage(format!("create chunk dir: {error}")))?;
+    let _chunk_guard = TempExportDir(chunk_dir.clone());
+
+    // Audio renders once as a single pass: muxing an intact AAC track avoids
+    // the per-chunk priming gaps chunked audio would introduce at each seam.
+    let audio_inputs = collect_input_assets(plan, asset_paths)?;
+    let audio_input_indices: HashMap<String, usize> = audio_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, (asset_id, _))| (asset_id.clone(), index))
+        .collect();
+    let mut audio_filters = Vec::new();
+    let has_audio = append_audio_graph(
+        &mut audio_filters,
+        plan,
+        project_id,
+        &audio_input_indices,
+        asset_paths,
+        ffprobe_path,
+        plan.duration_ms.max(1),
+        &cancel,
+    )?;
+    let audio_path = chunk_dir.join("audio.m4a");
+    let audio_filter_path = chunk_dir.join("audio-filter.txt");
+    if has_audio {
+        std::fs::write(&audio_filter_path, audio_filters.join(";\n"))
+            .map_err(|error| InternalError::Storage(format!("write audio filters: {error}")))?;
+    }
+    // Embedded chapters are injected by the mux stage so they land exactly
+    // once on the finished container.
+    let chapters_path = chunk_dir.join("chapters.ffmeta");
+    let has_chapters = (settings.chapter_mode == "embed" || settings.chapter_mode == "both")
+        && !plan.chapters.is_empty();
+    if has_chapters {
+        std::fs::write(
+            &chapters_path,
+            generate_ffmetadata(project_id, &plan.chapters),
+        )
+        .map_err(|error| InternalError::Storage(format!("write chapters metadata: {error}")))?;
+    }
+
+    // Job queue: job 0 is the audio render when present, then one job per
+    // chunk. Workers share `halt` — a failure or cancel stops every sibling
+    // pass immediately rather than finishing dead work.
+    let audio_job = has_audio;
+    let job_count = boundaries.len() + usize::from(audio_job);
+    let weights: Vec<f64> = boundaries
+        .iter()
+        .map(|(first, end)| (end - first) as f64)
+        .collect();
+    // The audio pass is a fraction of a video slice's work; give it a small
+    // weight so progress stays roughly linear.
+    let audio_weight = (total_frames as f64 * 0.05).max(1.0);
+    let total_weight: f64 =
+        weights.iter().sum::<f64>() + if audio_job { audio_weight } else { 0.0 };
+    let next_job = std::sync::atomic::AtomicUsize::new(0);
+    let halt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_parts = Mutex::new(vec![0f64; job_count]);
+    let first_error: Mutex<Option<crate::errors::AppError>> = Mutex::new(None);
+
+    let run_job = |job: usize| -> Result<()> {
+        let report = |ratio: f64| {
+            if let Ok(mut parts) = progress_parts.lock() {
+                parts[job] = ratio;
+                let mut sum = 0.0;
+                for (index, weight) in weights.iter().enumerate() {
+                    sum += parts[usize::from(audio_job) + index] * weight;
+                }
+                if audio_job {
+                    sum += parts[0] * audio_weight;
+                }
+                on_progress(sum / total_weight);
+            }
+        };
+        if audio_job && job == 0 {
+            let mut command = crate::process::create_command(ffmpeg_path);
+            command
+                .arg("-y")
+                .arg("-hide_banner")
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-threads")
+                .arg("0")
+                .arg("-progress")
+                .arg("pipe:2")
+                .arg("-thread_queue_size")
+                .arg("128");
+            for (_, path) in &audio_inputs {
+                command.arg("-i").arg(path);
+            }
+            command
+                .arg("-/filter_complex")
+                .arg(&audio_filter_path)
+                .args(["-map", "[aout]"])
+                .args(["-c:a", "aac", "-b:a", audio_bitrate(settings)])
+                .args(["-f", "mp4"])
+                .args(["-t", &seconds(plan.duration_ms)])
+                .arg(&audio_path);
+            run_export_ffmpeg(
+                &mut command,
+                &cancel,
+                Some(&halt),
+                &audio_path,
+                "audio render",
+                Some(plan.duration_ms),
+                None,
+                Some(&report),
+            )
+        } else {
+            let chunk_index = job - usize::from(audio_job);
+            let (first_frame, end_frame) = boundaries[chunk_index];
+            let chunk_path = chunk_dir.join(format!("chunk_{chunk_index:05}.mkv"));
+            let window = CompositionWindow::from_frames(first_frame, end_frame - first_frame, fps);
+            let pass = CompositionPass {
+                standalone: false,
+                include_audio: false,
+                plate_divisor: workers,
+            };
+            render_composition_window(
+                ffmpeg_path,
+                &chunk_path,
+                plan,
+                project_id,
+                asset_paths,
+                settings,
+                encoder,
+                cancel.clone(),
+                Some(&halt),
+                &report,
+                resource_dir,
+                ffprobe_path,
+                &window,
+                &pass,
+            )
+        }
+    };
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    || halt.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    return;
+                }
+                let job = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if job >= job_count {
+                    return;
+                }
+                if let Err(error) = run_job(job) {
+                    let mut guard = first_error
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if guard.is_none() {
+                        *guard = Some(error);
+                    }
+                    drop(guard);
+                    halt.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            });
+        }
+    });
+
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(InternalError::Media("export cancelled".into()).into());
+    }
+    if let Some(error) = first_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        return Err(error);
+    }
+
+    let list_path = chunk_dir.join("chunks.txt");
+    let list = boundaries
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let chunk_path = chunk_dir.join(format!("chunk_{index:05}.mkv"));
+            format!("file '{}'", escape_concat_path(&chunk_path))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&list_path, list)
+        .map_err(|error| InternalError::Storage(format!("write concat list: {error}")))?;
+
+    let mut mux = crate::process::create_command(ffmpeg_path);
+    mux.arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .args(["-f", "concat", "-safe", "0", "-i"])
+        .arg(&list_path);
+    let mut mux_input_index = 1;
+    if has_audio {
+        mux.arg("-i").arg(&audio_path);
+        mux_input_index += 1;
+    }
+    if has_chapters {
+        mux.args(["-f", "ffmetadata", "-i"]).arg(&chapters_path);
+    }
+    mux.args(["-map", "0:v"]);
+    if has_audio {
+        mux.args(["-map", "1:a"]);
+    }
+    if has_chapters {
+        mux.args(["-map_chapters", &mux_input_index.to_string()]);
+    }
+    mux.args(["-c", "copy", "-movflags", "+faststart"])
+        .args(["-t", &seconds(plan.duration_ms)])
+        .arg(output_path);
+    on_progress(0.98);
+    run_export_ffmpeg(
+        &mut mux,
+        &cancel,
+        None,
+        output_path,
+        "concat mux",
+        Some(plan.duration_ms),
+        None,
+        Some(&|_| on_progress(0.98)),
+    )?;
+
+    info!(
+        %project_id,
+        chunks = boundaries.len(),
+        "export: chunked render muxed"
+    );
+    Ok(())
 }
 
 /// Build one cursor renderer per enabled effect. Renderers are pure functions
@@ -2009,6 +2641,15 @@ struct CursorFramePlan {
     /// plane at full canvas size.
     cursor_rect: Option<(u32, u32, u32, u32)>,
     frame_count: u64,
+    /// Absolute output index of the first frame this plan emits. Nonzero only
+    /// for chunked renders, where each pass feeds the plate frames
+    /// `[first_frame_index, first_frame_index + frame_count)` — renderer
+    /// timestamps are absolute, so the offset is applied at render time.
+    first_frame_index: u64,
+    /// Share of the machine this feed may use for producer workers and memory
+    /// budgets. Chunked renders run several FFmpeg processes concurrently, so
+    /// each divides its budgets by this factor; 1 is the single-pass default.
+    parallel_divisor: usize,
     dual_plane: bool,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<overlay_engine::OverlayEngine>,
@@ -2111,6 +2752,8 @@ fn prepare_cursor_frame_plan(
         canvas_height: canvas.height,
         cursor_rect,
         frame_count,
+        first_frame_index: 0,
+        parallel_divisor: 1,
         dual_plane,
         renderers,
         overlay_engine,
@@ -2379,12 +3022,16 @@ fn feed_cursor_frames(
 
     // Each worker keeps roughly five live frames (two pixmaps, the cursor
     // copy, the shared items plane, and the packed buffer); cap the pool so a
-    // 4K dual-plane canvas stays near ~768 MiB of producer state.
-    let workers = producer_worker_count()
-        .min(((768usize * 1024 * 1024) / (frame_byte_len.max(1) * 5)).max(2));
+    // 4K dual-plane canvas stays near ~768 MiB of producer state. Chunked
+    // renders share the machine across passes, so both budgets divide by the
+    // plan's parallel factor.
+    let divisor = cursor.parallel_divisor.max(1);
+    let workers = (producer_worker_count() / divisor)
+        .max(1)
+        .min(((768usize * 1024 * 1024) / divisor / (frame_byte_len.max(1) * 5)).max(2));
     // Bounded in-flight window caps peak memory at ~256 MiB of finished frames
     // while keeping enough work queued to hide render-time variance.
-    let window = ((256usize * 1024 * 1024) / frame_byte_len.max(1))
+    let window = ((256usize * 1024 * 1024) / divisor / frame_byte_len.max(1))
         .clamp(workers + 2, 64)
         .min(frame_count.max(1) as usize) as u64;
     if workers <= 1 || frame_count <= 1 {
@@ -2431,6 +3078,7 @@ fn feed_cursor_frames(
             let height = cursor.canvas_height;
             let cursor_rect = cursor.cursor_rect;
             let fps = cursor.fps;
+            let first_frame_index = cursor.first_frame_index;
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = match OverlayWorkerState::new(
@@ -2474,7 +3122,7 @@ fn feed_cursor_frames(
                         };
 
                         let produced = state
-                            .render_planes(frame_index, fps)
+                            .render_planes(frame_index + first_frame_index, fps)
                             .map(|(cursor_plane, items_plane)| {
                                 if dual_plane {
                                     if cursor_plane.is_none() && items_plane.is_none() {
@@ -2636,7 +3284,7 @@ fn feed_cursor_frames_sequential(
             return Err(InternalError::Media("export cancelled".into()).into());
         }
         let (cursor_plane, items_plane) = state
-            .render_planes(frame_index, cursor.fps)
+            .render_planes(frame_index + cursor.first_frame_index, cursor.fps)
             .map_err(InternalError::Media)?;
 
         let frame: &[u8] = if cursor.dual_plane {
@@ -3107,9 +3755,14 @@ fn is_progress_line(line: &str) -> bool {
 /// continuous block stream that would otherwise fill the pipe and deadlock the
 /// child; progress lines are reported through `on_progress` (as a 0..1 ratio
 /// of expected duration) and non-progress lines are kept as diagnostics.
+/// `halt` is an optional cooperative stop shared across sibling renders: a
+/// chunked export sets it when any pass fails so the other FFmpeg processes
+/// die immediately instead of finishing their slices.
+#[allow(clippy::too_many_arguments)]
 fn run_export_ffmpeg(
     command: &mut Command,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
+    halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
     partial_path: &Path,
     stage: &str,
     expected_duration_ms: Option<u64>,
@@ -3170,7 +3823,9 @@ fn run_export_ffmpeg(
         drop(child.stdin.take());
 
         loop {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let stopped = cancel.load(std::sync::atomic::Ordering::Relaxed)
+                || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+            if stopped {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = std::fs::remove_file(partial_path);
@@ -5810,6 +6465,37 @@ mod tests {
             Some("[mpeg4] something broke")
         );
         assert_eq!(ffmpeg_failure_detail(b"\n \n"), None);
+    }
+
+    #[test]
+    fn chunk_boundaries_cover_all_frames_exactly() {
+        let boundaries = chunk_boundaries(1000, 300);
+        assert_eq!(
+            boundaries,
+            vec![(0, 300), (300, 600), (600, 900), (900, 1000)]
+        );
+        // Contiguous and non-overlapping: concatenating emits every frame once.
+        for pair in boundaries.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|(start, end)| end - start)
+                .sum::<u64>(),
+            1000
+        );
+        assert_eq!(chunk_boundaries(100, 500), vec![(0, 100)]);
+        assert!(chunk_boundaries(0, 100).is_empty());
+    }
+
+    #[test]
+    fn composition_window_from_frames_maps_to_absolute_seconds() {
+        let window = CompositionWindow::from_frames(180, 180, 30);
+        assert_eq!(window.first_frame, 180);
+        assert!((window.start_s - 6.0).abs() < 1e-9);
+        assert!((window.end_s - 12.0).abs() < 1e-9);
+        assert_eq!(window.duration_ms, 6000);
     }
 
     fn valid_plan() -> RenderPlan {
