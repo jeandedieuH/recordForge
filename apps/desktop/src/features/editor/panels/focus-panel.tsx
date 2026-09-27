@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import type { ManualZoomSegment, ZoomPreset } from "@recordforge/contracts"
-import { getCursorPointAtTimelineTime, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
+import { getCursorPointAtTimelineTime } from "@recordforge/cursor-core"
+import { buildSmartZoomSegment } from "@recordforge/editor-core"
 import {
   createAddZoomSegmentCommand,
   createDeleteZoomSegmentCommand,
@@ -41,6 +42,20 @@ export function FocusPanel() {
   const segments = useMemo(() => (timeline ? getManualZoomSegments(timeline) : []), [timeline])
   const selectedId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
 
+  // Mirrors the preservation rule in applyRegenerateZoomSuggestions: user-authored
+  // (manual/follow/legacy) and locked segments survive suggestion regeneration.
+  const keptSegmentCount = useMemo(
+    () =>
+      segments.filter(
+        (segment) =>
+          segment.locked ||
+          segment.source === "manual" ||
+          segment.source === "follow" ||
+          (segment.source === undefined && segment.mode !== "auto"),
+      ).length,
+    [segments],
+  )
+
   const canvas = timeline?.canvas ?? { width: 1920, height: 1080 }
   const smartZoomPreset = timeline?.smartZoomSettings?.preset ?? "product-demo"
 
@@ -64,46 +79,47 @@ export function FocusPanel() {
     const startMs = playheadMs
     const defaultEnd = Math.min(timelineDuration || startMs + 1_500, startMs + 1_500)
     if (defaultEnd <= startMs) return
-    const segmentId = crypto.randomUUID()
 
-    // 1) Evaluate cursor position at playhead to navigate to where cursor is
+    // Evaluate the cursor at the playhead so the new segment focuses there.
     const cursorPoint = getCursorPointAtTimelineTime(
       timeline,
       startMs,
       cursorTelemetry,
       cursorEngine,
     )
-    const centerPoint = cursorPoint ?? {
-      x: timeline.canvas.width / 2,
-      y: timeline.canvas.height / 2,
-    }
-
-    const targetScale =
-      preset === "subtle" ? 1.25 : preset === "cinematic" ? 1.8 : preset === "developer" ? 2.2 : 1.5
-    const target = zoomTargetForCursorPoint(centerPoint, timeline.canvas, targetScale)
-
-    const easing = preset === "cinematic" ? "cinematic" : "smooth"
-    const transitionInMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
-    const transitionOutMs = preset === "developer" ? 320 : preset === "cinematic" ? 600 : 400
+    const segment = buildSmartZoomSegment(timeline, cursorPoint, {
+      segmentId: crypto.randomUUID(),
+      startMs,
+      endMs: defaultEnd,
+      preset,
+      mode: "follow-cursor",
+    })
 
     execute(
-      createAddZoomSegmentCommand(startMs, defaultEnd, target, {
-        segmentId,
-        scale: targetScale,
-        easing,
-        transitionInMs,
-        transitionOutMs,
-        mode: "follow-cursor",
-        source: "manual",
-        preset,
-      }),
+      createAddZoomSegmentCommand(
+        segment.startMs,
+        segment.startMs + segment.durationMs,
+        segment.target,
+        {
+          segmentId: segment.id,
+          scale: segment.scale,
+          easing: segment.easing,
+          transitionInMs: segment.transitionInMs,
+          transitionOutMs: segment.transitionOutMs,
+          mode: "follow-cursor",
+          source: "manual",
+          preset,
+          followSpeed: segment.followSpeed,
+          label: segment.label,
+        },
+      ),
     )
-    setSelection({ kind: "zoom", segmentId })
+    setSelection({ kind: "zoom", segmentId: segment.id })
   }
 
   function generateSuggestions() {
     if (!timeline || !cursorTelemetry || cursorTelemetryStatus !== "available") return []
-    return generateSmartZoomSuggestions(cursorTelemetry, timeline.canvas, {
+    return generateSmartZoomSuggestions(cursorTelemetry, timeline, {
       ...(timeline.smartZoomSettings ?? {}),
       durationMs: getTotalDuration(timeline),
     })
@@ -179,8 +195,10 @@ export function FocusPanel() {
         <ReviewSuggestionsCard
           suggestions={reviewing}
           canvas={canvas}
+          keptSegmentCount={keptSegmentCount}
           onAccept={acceptSuggestions}
           onReject={rejectSuggestions}
+          onSeek={seek}
         />
       ) : null}
 

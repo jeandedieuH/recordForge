@@ -3,6 +3,7 @@ import {
   CURSOR_ASSET_MANIFEST,
   SHAPE_ID_TO_ASSET,
   cursorRangeOverrideLabels,
+  cursorSizeFactor,
   findCursorEventAtTime,
   fitCursorPoint,
   mapCursorPointThroughZoom,
@@ -19,6 +20,7 @@ import {
   defaultCursorSettings,
   type CursorEffectClip,
   type ManualZoomSegment,
+  type CursorTelemetryFile,
   type TimelineState,
 } from "@recordforge/contracts"
 
@@ -374,5 +376,57 @@ describe("cursor-core", () => {
       const resolved = resolveCursorAsset(kind, "recorded-system", { shapeMode: "optimized" })
       expect(resolved.id).toBe(expectedAssetId)
     }
+  })
+
+  it("computes the DPI cursor size factor identically to the Rust engine", () => {
+    const baseTelemetry = normalizeCursorTelemetry({
+      recordingId: "size-test",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      sampleRateHz: 60,
+      events: [v2Event(0, 0, 0, "none"), v2Event(100, 10, 10, "none")],
+    }) as CursorTelemetryFile
+
+    const dpiSettings = { ...defaultCursorSettings, sizeModel: "dpi" as const }
+
+    // legacy is always 1 regardless of topology.
+    const withTopology: CursorTelemetryFile = {
+      ...baseTelemetry,
+      topology: {
+        displayId: "d1",
+        displayBounds: { x: 0, y: 0, width: 3840, height: 2160 },
+        isPrimary: true,
+        orientation: 0,
+        scaleFactor: 2,
+        dpiX: 192,
+        dpiY: 192,
+      },
+      coordinateTransform: { a00: 0.5, a01: 0, a10: 0, a11: 0.5, b0: 0, b1: 0 },
+    }
+    expect(cursorSizeFactor(defaultCursorSettings, withTopology)).toBe(1)
+
+    // 1080p @ 1x -> 48/64 = 0.75.
+    expect(
+      cursorSizeFactor(dpiSettings, {
+        ...baseTelemetry,
+        topology: { ...withTopology.topology!, scaleFactor: 1 },
+        coordinateTransform: { a00: 1, a01: 0, a10: 0, a11: 1, b0: 0, b1: 0 },
+      }),
+    ).toBeCloseTo(0.75)
+
+    // 4K @ 2x -> 0.75 * 2 = 1.5.
+    expect(
+      cursorSizeFactor(dpiSettings, {
+        ...baseTelemetry,
+        topology: { ...withTopology.topology!, scaleFactor: 2 },
+        coordinateTransform: { a00: 1, a01: 0, a10: 0, a11: 1, b0: 0, b1: 0 },
+      }),
+    ).toBeCloseTo(1.5)
+
+    // Downscaled capture (a00 = 0.5) at scale 2 -> 0.75 * 2 * 0.5 = 0.75.
+    expect(cursorSizeFactor(dpiSettings, withTopology)).toBeCloseTo(0.75)
+
+    // Missing topology/transform falls back to scale 1.
+    expect(cursorSizeFactor(dpiSettings, baseTelemetry)).toBeCloseTo(0.75)
   })
 })

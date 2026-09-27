@@ -1,7 +1,18 @@
 import { memo } from "react"
 import { Sparkles } from "lucide-react"
 import type { RecordingSmartZoomPreset } from "@recordforge/contracts"
+import { ZOOM_PRESETS } from "@recordforge/cursor-core"
 import { SimpleSelect, Switch } from "@recordforge/ui"
+
+// Options derive from the canonical preset table so labels and scales here can
+// never drift from what generation actually applies.
+const SMART_ZOOM_PRESET_OPTIONS = Object.values(ZOOM_PRESETS).map((definition) => ({
+  value: definition.id,
+  label:
+    definition.id === "manual-only"
+      ? definition.label
+      : `${definition.label} · ${definition.scale}×`,
+}))
 
 interface SmartZoomSettingsProps {
   enabled: boolean
@@ -58,13 +69,7 @@ export const SmartZoomSettings = memo(function SmartZoomSettings({
           disabled={disabled}
           onValueChange={(val) => onPresetChange(val as RecordingSmartZoomPreset)}
           className="w-full sm:w-60"
-          options={[
-            { value: "subtle", label: "Subtle · 1.25×" },
-            { value: "product-demo", label: "Product demo · 1.5×" },
-            { value: "cinematic", label: "Cinematic · 1.8×" },
-            { value: "developer", label: "Developer · 2.2×" },
-            { value: "manual-only", label: "Manual only" },
-          ]}
+          options={SMART_ZOOM_PRESET_OPTIONS}
         />
         <p
           id="smart-zoom-preset-help"

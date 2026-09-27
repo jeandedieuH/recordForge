@@ -5,6 +5,7 @@ import type {
   ManualZoomSegment,
   SmartZoomSettings,
   TimelineCanvas,
+  TimelineState,
   ZoomEasing,
   ZoomMode,
   ZoomPreset,
@@ -12,6 +13,8 @@ import type {
   ZoomTarget,
 } from "@recordforge/contracts"
 import { defaultSmartZoomSettings } from "@recordforge/contracts"
+import { cursorSourceToTimelineOccurrences, sourcePointToZoomSpace } from "./time-mapping"
+import { ZOOM_PRESETS, type FollowSpeed } from "./zoom-presets"
 
 export interface CursorClickFeature {
   kind: "click"
@@ -69,6 +72,12 @@ export interface CursorAnalysisOptions {
   dwellTolerancePx?: number
   minMovementPx?: number
   safeEdgePadding?: number
+  /** Skip the per-event safe-edge feature pass (default true for callers that
+   *  consume it); generation never reads safeEdges so it opts out. */
+  includeSafeEdges?: boolean
+  /** Skip the per-event movement feature pass (default true); generation
+   *  builds clusters only from clicks and dwells so it opts out. */
+  includeMovements?: boolean
 }
 
 export interface SmartZoomGenerationOptions extends Partial<SmartZoomSettings> {
@@ -83,6 +92,7 @@ interface ZoomPresetProfile {
   easing: ZoomEasing
   transitionInMs: number
   transitionOutMs: number
+  followSpeed: FollowSpeed
 }
 
 interface RawInteractionEvent {
@@ -94,10 +104,17 @@ interface RawInteractionEvent {
   priority: number
 }
 
+interface ZoomClusterPoint {
+  x: number
+  y: number
+  timeMs: number
+  source: ZoomSource
+}
+
 interface ZoomCluster {
   startMs: number
   endMs: number
-  points: Array<{ x: number; y: number; timeMs: number }>
+  points: ZoomClusterPoint[]
   source: ZoomSource
   priority: number
   easing: ZoomEasing
@@ -105,47 +122,26 @@ interface ZoomCluster {
   mode: ZoomMode
 }
 
+function toZoomPresetProfile(definition: (typeof ZOOM_PRESETS)[ZoomPreset]): ZoomPresetProfile {
+  return {
+    scale: definition.scale,
+    clickDurationMs: definition.clickDurationMs,
+    dwellTailMs: definition.dwellTailMs,
+    easing: definition.easing,
+    transitionInMs: definition.transitionInMs,
+    transitionOutMs: definition.transitionOutMs,
+    followSpeed: definition.followSpeed,
+  }
+}
+
+// Generation profiles derive from ZOOM_PRESETS so the suggester and the manual
+// zoom builders can never drift apart per preset.
 const PRESET_PROFILES: Record<ZoomPreset, ZoomPresetProfile> = {
-  subtle: {
-    scale: 1.25,
-    clickDurationMs: 900,
-    dwellTailMs: 450,
-    easing: "smooth",
-    transitionInMs: 450,
-    transitionOutMs: 450,
-  },
-  "product-demo": {
-    scale: 1.5,
-    clickDurationMs: 1_200,
-    dwellTailMs: 600,
-    easing: "smooth",
-    transitionInMs: 380,
-    transitionOutMs: 380,
-  },
-  cinematic: {
-    scale: 1.8,
-    clickDurationMs: 1_800,
-    dwellTailMs: 900,
-    easing: "cinematic",
-    transitionInMs: 600,
-    transitionOutMs: 600,
-  },
-  developer: {
-    scale: 2.2,
-    clickDurationMs: 1_400,
-    dwellTailMs: 700,
-    easing: "smooth",
-    transitionInMs: 320,
-    transitionOutMs: 320,
-  },
-  "manual-only": {
-    scale: 1,
-    clickDurationMs: 0,
-    dwellTailMs: 0,
-    easing: "linear",
-    transitionInMs: 300,
-    transitionOutMs: 300,
-  },
+  subtle: toZoomPresetProfile(ZOOM_PRESETS.subtle),
+  "product-demo": toZoomPresetProfile(ZOOM_PRESETS["product-demo"]),
+  cinematic: toZoomPresetProfile(ZOOM_PRESETS.cinematic),
+  developer: toZoomPresetProfile(ZOOM_PRESETS.developer),
+  "manual-only": toZoomPresetProfile(ZOOM_PRESETS["manual-only"]),
 }
 
 function distanceBetween(left: { x: number; y: number }, right: { x: number; y: number }): number {
@@ -170,18 +166,23 @@ function finishDwell(
   const end = telemetry.events[endIndex]
   if (!start || !end || end.tMs - start.tMs < minDwellMs) return null
 
-  const samples = telemetry.events.slice(startIndex, endIndex + 1)
-  const position = samples.reduce(
-    (sum, event) => ({ x: sum.x + event.sourceX, y: sum.y + event.sourceY }),
-    { x: 0, y: 0 },
-  )
+  // Sum in place: a dwell window can span a large share of a long capture, so
+  // slice+reduce would allocate a full copy plus an accumulator per event.
+  const sampleCount = endIndex - startIndex + 1
+  let sumX = 0
+  let sumY = 0
+  for (let index = startIndex; index <= endIndex; index++) {
+    const event = telemetry.events[index]
+    sumX += event.sourceX
+    sumY += event.sourceY
+  }
   return {
     kind: "dwell",
     startMs: start.tMs,
     endMs: end.tMs,
     durationMs: end.tMs - start.tMs,
-    x: position.x / samples.length,
-    y: position.y / samples.length,
+    x: sumX / sampleCount,
+    y: sumY / sampleCount,
   }
 }
 
@@ -240,41 +241,48 @@ export function analyzeCursorTelemetry(
     if (dwell) dwells.push(dwell)
   }
 
+  const includeMovements = options.includeMovements ?? true
+  const includeSafeEdges = options.includeSafeEdges ?? true
+
   const movements: CursorMovementFeature[] = []
-  for (let index = 1; index < events.length; index++) {
-    const previous = events[index - 1]
-    const current = events[index]
-    const durationMs = current.tMs - previous.tMs
-    const distancePx = distanceBetween(sourcePoint(previous), sourcePoint(current))
-    if (durationMs <= 0 || distancePx < minMovementPx) continue
-    movements.push({
-      kind: "movement",
-      startMs: previous.tMs,
-      endMs: current.tMs,
-      durationMs,
-      distancePx,
-      speedPxPerSecond: (distancePx * 1_000) / durationMs,
-      from: sourcePoint(previous),
-      to: sourcePoint(current),
-    })
+  if (includeMovements) {
+    for (let index = 1; index < events.length; index++) {
+      const previous = events[index - 1]
+      const current = events[index]
+      const durationMs = current.tMs - previous.tMs
+      const distancePx = distanceBetween(sourcePoint(previous), sourcePoint(current))
+      if (durationMs <= 0 || distancePx < minMovementPx) continue
+      movements.push({
+        kind: "movement",
+        startMs: previous.tMs,
+        endMs: current.tMs,
+        durationMs,
+        distancePx,
+        speedPxPerSecond: (distancePx * 1_000) / durationMs,
+        from: sourcePoint(previous),
+        to: sourcePoint(current),
+      })
+    }
   }
 
   const sourceWidth = Math.max(1, telemetry.sourceWidth)
   const sourceHeight = Math.max(1, telemetry.sourceHeight)
-  const safeEdges = events.map<CursorSafeEdgeFeature>((event) => ({
-    kind: "safe-edge",
-    timeMs: event.tMs,
-    x: event.sourceX,
-    y: event.sourceY,
-    distanceToLeft: event.sourceX,
-    distanceToRight: Math.max(0, sourceWidth - event.sourceX),
-    distanceToTop: event.sourceY,
-    distanceToBottom: Math.max(0, sourceHeight - event.sourceY),
-    nearLeft: event.sourceX <= safeEdgePadding,
-    nearRight: sourceWidth - event.sourceX <= safeEdgePadding,
-    nearTop: event.sourceY <= safeEdgePadding,
-    nearBottom: sourceHeight - event.sourceY <= safeEdgePadding,
-  }))
+  const safeEdges = includeSafeEdges
+    ? events.map<CursorSafeEdgeFeature>((event) => ({
+        kind: "safe-edge",
+        timeMs: event.tMs,
+        x: event.sourceX,
+        y: event.sourceY,
+        distanceToLeft: event.sourceX,
+        distanceToRight: Math.max(0, sourceWidth - event.sourceX),
+        distanceToTop: event.sourceY,
+        distanceToBottom: Math.max(0, sourceHeight - event.sourceY),
+        nearLeft: event.sourceX <= safeEdgePadding,
+        nearRight: sourceWidth - event.sourceX <= safeEdgePadding,
+        nearTop: event.sourceY <= safeEdgePadding,
+        nearBottom: sourceHeight - event.sourceY <= safeEdgePadding,
+      }))
+    : []
 
   return { clicks, dwells, movements, safeEdges }
 }
@@ -351,83 +359,6 @@ export function zoomTargetForCursorPoint(
   return clampZoomTarget(target, canvas, _extraPadding)
 }
 
-export interface InertialFollowOptions {
-  deadzoneRadiusPercent?: number
-  deadzoneRadiusPx?: number
-  smoothingAlpha?: number
-}
-
-/**
- * Screen Studio-style soft deadzone and spring-damped camera focal tracking.
- * When the cursor stays within the comfortable center deadzone, the camera
- * does not vibrate. When the cursor travels across the screen, the camera
- * smoothly glides with gentle inertia and velocity continuity.
- */
-export function resolveInertialFollowCenter(
-  currentPoint: { x: number; y: number },
-  previousCenter: { x: number; y: number } | null | undefined,
-  viewportSize: { width: number; height: number },
-  options: InertialFollowOptions = {},
-): { x: number; y: number } {
-  if (!previousCenter) return currentPoint
-  if (!Number.isFinite(currentPoint.x) || !Number.isFinite(currentPoint.y)) return previousCenter
-
-  const viewportWidth = Number.isFinite(viewportSize.width) ? Math.max(1, viewportSize.width) : 1
-  const viewportHeight = Number.isFinite(viewportSize.height) ? Math.max(1, viewportSize.height) : 1
-  const requestedDeadzone =
-    options.deadzoneRadiusPx ??
-    Math.min(viewportWidth, viewportHeight) * (options.deadzoneRadiusPercent ?? 0.08)
-  const deadzone = Math.min(
-    Math.max(0, Number.isFinite(requestedDeadzone) ? requestedDeadzone : 0),
-    Math.min(viewportWidth, viewportHeight) / 2,
-  )
-
-  const dx = currentPoint.x - previousCenter.x
-  const dy = currentPoint.y - previousCenter.y
-  const dist = Math.hypot(dx, dy)
-  if (dist <= deadzone || dist < 0.001) return previousCenter
-
-  const excess = dist - deadzone
-  const targetX = previousCenter.x + (dx / dist) * excess
-  const targetY = previousCenter.y + (dy / dist) * excess
-  const requestedAlpha = options.smoothingAlpha ?? 0.25
-  const alpha = clampRange(Number.isFinite(requestedAlpha) ? requestedAlpha : 0.25, 0.05, 1)
-  const next = {
-    x: previousCenter.x + (targetX - previousCenter.x) * alpha,
-    y: previousCenter.y + (targetY - previousCenter.y) * alpha,
-  }
-
-  // A camera may ease toward the deadzone, but it must never leave the cursor
-  // outside the visible crop after a large telemetry jump.
-  return {
-    x: clampRange(next.x, currentPoint.x - viewportWidth / 2, currentPoint.x + viewportWidth / 2),
-    y: clampRange(next.y, currentPoint.y - viewportHeight / 2, currentPoint.y + viewportHeight / 2),
-  }
-}
-
-export function sourcePointToCanvas(
-  telemetry: CursorTelemetryFile,
-  canvas: Pick<TimelineCanvas, "width" | "height"> &
-    Partial<Pick<TimelineCanvas, "padding" | "aspectRatio" | "videoPositionY">>,
-  point: { x: number; y: number },
-): { x: number; y: number } {
-  const sourceWidth = Math.max(1, telemetry.sourceWidth)
-  const sourceHeight = Math.max(1, telemetry.sourceHeight)
-  const sourceX = clampRange(point.x, 0, sourceWidth)
-  const sourceY = clampRange(point.y, 0, sourceHeight)
-  const padding = canvas.padding ?? 0
-  const contentWidth = Math.max(1, canvas.width - padding * 2)
-  const contentHeight = Math.max(1, canvas.height - padding * 2)
-  const scale = Math.min(contentWidth / sourceWidth, contentHeight / sourceHeight)
-  const fitWidth = sourceWidth * scale
-  const fitHeight = sourceHeight * scale
-  const positionY = canvas.aspectRatio === "16:9" ? 0.5 : (canvas.videoPositionY ?? 0.5)
-  return {
-    x: padding + (contentWidth - fitWidth) / 2 + sourceX * scale,
-    y: padding + (contentHeight - fitHeight) * positionY + sourceY * scale,
-  }
-}
-
 function resolvedGenerationSettings(options: SmartZoomGenerationOptions): {
   settings: SmartZoomSettings
   profile: ZoomPresetProfile
@@ -499,7 +430,7 @@ function buildInteractionClusters(
       currentCluster = {
         startMs: eventStart,
         endMs: eventEnd,
-        points: [{ x: event.x, y: event.y, timeMs: event.timeMs }],
+        points: [{ x: event.x, y: event.y, timeMs: event.timeMs, source: event.source }],
         source: event.source,
         priority: event.priority,
         easing: profile.easing,
@@ -515,7 +446,12 @@ function buildInteractionClusters(
 
     if (timeGap <= clusterToleranceMs && potentialDuration <= maxSegmentDurationMs) {
       currentCluster.endMs = Math.max(currentCluster.endMs, eventEnd)
-      currentCluster.points.push({ x: event.x, y: event.y, timeMs: event.timeMs })
+      currentCluster.points.push({
+        x: event.x,
+        y: event.y,
+        timeMs: event.timeMs,
+        source: event.source,
+      })
       if (event.source === "click") {
         currentCluster.source = "click"
         currentCluster.priority = Math.max(currentCluster.priority, event.priority)
@@ -525,7 +461,7 @@ function buildInteractionClusters(
       currentCluster = {
         startMs: eventStart,
         endMs: eventEnd,
-        points: [{ x: event.x, y: event.y, timeMs: event.timeMs }],
+        points: [{ x: event.x, y: event.y, timeMs: event.timeMs, source: event.source }],
         source: event.source,
         priority: event.priority,
         easing: profile.easing,
@@ -592,43 +528,70 @@ function candidateId(source: string, startMs: number, index: number): string {
   return `smart-zoom:${source}:${startMs}:${index}`
 }
 
+/** Total timeline span (max clip end across tracks), in timeline ms. */
+function totalTimelineDurationMs(state: TimelineState): number {
+  let durationMs = 0
+  for (const track of state.tracks) {
+    for (const clip of track.clips) {
+      durationMs = Math.max(durationMs, clip.startMs + clip.durationMs)
+    }
+  }
+  return durationMs
+}
+
 /** Generate deterministic, editable zoom suggestions from cursor activity. */
 export function generateSmartZoomSuggestions(
   telemetry: CursorTelemetryFile,
-  canvas: TimelineCanvas,
+  state: TimelineState,
   options: SmartZoomGenerationOptions = {},
 ): ManualZoomSegment[] {
   const { settings, profile } = resolvedGenerationSettings(options)
   if (settings.preset === "manual-only") return []
   if (telemetry.events.length === 0) return []
 
-  const features = analyzeCursorTelemetry(telemetry, settings)
+  const canvas = state.canvas
+  // Generation only consumes clicks and dwells; skip the per-event movement
+  // and safe-edge passes (each allocates one object per telemetry event).
+  const features = analyzeCursorTelemetry(telemetry, {
+    ...settings,
+    includeMovements: false,
+    includeSafeEdges: false,
+  })
   const rawEvents: RawInteractionEvent[] = []
-  const durationMs = options.durationMs ?? Number.POSITIVE_INFINITY
+  const durationMs = options.durationMs ?? totalTimelineDurationMs(state)
 
+  // Interaction timestamps are recorded in source time; a segment must be
+  // placed in timeline time or it lands on the wrong content after trims,
+  // splits, and speed changes. Events outside every screen clip are dropped.
   if (settings.includeClicks) {
     for (const click of features.clicks) {
-      rawEvents.push({
-        timeMs: click.timeMs,
-        endMs: click.timeMs + settings.clickDurationMs,
-        x: click.x,
-        y: click.y,
-        source: "click",
-        priority: 2,
-      })
+      for (const occurrence of cursorSourceToTimelineOccurrences(state, click.timeMs)) {
+        rawEvents.push({
+          timeMs: occurrence.timeMs,
+          endMs: occurrence.timeMs + settings.clickDurationMs * occurrence.clipRatio,
+          x: click.x,
+          y: click.y,
+          source: "click",
+          priority: 2,
+        })
+      }
     }
   }
 
   if (settings.includeDwells) {
     for (const dwell of features.dwells) {
-      rawEvents.push({
-        timeMs: dwell.startMs,
-        endMs: dwell.endMs + settings.dwellTailMs,
-        x: dwell.x,
-        y: dwell.y,
-        source: "dwell",
-        priority: 1,
-      })
+      for (const occurrence of cursorSourceToTimelineOccurrences(state, dwell.startMs)) {
+        rawEvents.push({
+          timeMs: occurrence.timeMs,
+          endMs:
+            occurrence.timeMs +
+            (dwell.endMs + settings.dwellTailMs - dwell.startMs) * occurrence.clipRatio,
+          x: dwell.x,
+          y: dwell.y,
+          source: "dwell",
+          priority: 1,
+        })
+      }
     }
   }
 
@@ -637,26 +600,54 @@ export function generateSmartZoomSuggestions(
   const validClusters = clusters.filter((c) => c.endMs - c.startMs >= settings.minSegmentDurationMs)
 
   return validClusters.map((cluster, index) => {
-    // Weighted centroid (clicks have 3x higher weight than passive dwells)
+    // Weighted centroid in zoom space: an intentional click outweighs a
+    // passive dwell 3:1 so the camera favors what the user pointed at.
     let sumX = 0
     let sumY = 0
     let totalWeight = 0
-    for (const p of cluster.points) {
-      const weight = 1
-      sumX += p.x * weight
-      sumY += p.y * weight
+    let bboxMinX = Number.POSITIVE_INFINITY
+    let bboxMinY = Number.POSITIVE_INFINITY
+    let bboxMaxX = Number.NEGATIVE_INFINITY
+    let bboxMaxY = Number.NEGATIVE_INFINITY
+    for (const point of cluster.points) {
+      const zoomPoint = sourcePointToZoomSpace(telemetry, canvas, point)
+      const weight = point.source === "click" ? 3 : 1
+      sumX += zoomPoint.x * weight
+      sumY += zoomPoint.y * weight
       totalWeight += weight
+      bboxMinX = Math.min(bboxMinX, zoomPoint.x)
+      bboxMinY = Math.min(bboxMinY, zoomPoint.y)
+      bboxMaxX = Math.max(bboxMaxX, zoomPoint.x)
+      bboxMaxY = Math.max(bboxMaxY, zoomPoint.y)
     }
-    const avgX = totalWeight > 0 ? sumX / totalWeight : cluster.points[0].x
-    const avgY = totalWeight > 0 ? sumY / totalWeight : cluster.points[0].y
+    const firstPoint = sourcePointToZoomSpace(telemetry, canvas, cluster.points[0])
+    const center = totalWeight > 0 ? { x: sumX / totalWeight, y: sumY / totalWeight } : firstPoint
 
-    const canvasPoint = sourcePointToCanvas(telemetry, canvas, { x: avgX, y: avgY })
-    const target = zoomTargetForCursorPoint(
-      canvasPoint,
-      canvas,
-      settings.targetScale,
-      settings.safeEdgePadding,
+    // Auto-fit: the crop grows around the cluster bounding box (plus a 35%
+    // framing margin) but never exceeds the resolved preset/user scale and
+    // never zooms out past 1.25× so focus zooms always read as zooms.
+    const bboxWidth = Number.isFinite(bboxMaxX - bboxMinX) ? bboxMaxX - bboxMinX : 0
+    const bboxHeight = Number.isFinite(bboxMaxY - bboxMinY) ? bboxMaxY - bboxMinY : 0
+    const fitScale = Math.min(
+      canvas.width / Math.max(1, bboxWidth * 1.35),
+      canvas.height / Math.max(1, bboxHeight * 1.35),
     )
+    const maxScale = settings.targetScale
+    const scale = Math.min(maxScale, Math.max(Math.min(1.25, maxScale), fitScale))
+
+    const centeredTarget = zoomTargetForCursorPoint(center, canvas, scale)
+
+    // Shift (never resize) the crop until it contains the whole cluster when
+    // the bounding box fits inside it; then re-clamp to the canvas.
+    let targetX = centeredTarget.x
+    let targetY = centeredTarget.y
+    if (bboxWidth <= centeredTarget.width) {
+      targetX = clampRange(centeredTarget.x, bboxMaxX - centeredTarget.width, bboxMinX)
+    }
+    if (bboxHeight <= centeredTarget.height) {
+      targetY = clampRange(centeredTarget.y, bboxMaxY - centeredTarget.height, bboxMinY)
+    }
+    const target = clampZoomTarget({ ...centeredTarget, x: targetX, y: targetY }, canvas)
 
     const mode: ZoomMode = "follow-cursor"
 
@@ -675,7 +666,7 @@ export function generateSmartZoomSuggestions(
       startMs: cluster.startMs,
       durationMs: segDuration,
       target,
-      scale: settings.targetScale,
+      scale,
       easing: cluster.easing,
       transitionInMs: transIn,
       transitionOutMs: transOut,
@@ -686,6 +677,7 @@ export function generateSmartZoomSuggestions(
       preset: cluster.preset,
       followDeadzonePercent: 0.08,
       followSmoothingAlpha: 0.25,
+      followSpeed: profile.followSpeed,
     }
   })
 }

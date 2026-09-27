@@ -1,6 +1,6 @@
 import {
+  buildFollowCursorKeyframes,
   buildFollowCursorMotionPlan,
-  resolveFollowCursorTarget,
   resolveFollowCursorMotionPlanTargetAtTime,
 } from "@recordforge/editor-core"
 import { createCursorEngine, type CursorEngine } from "@recordforge/cursor-core"
@@ -12,7 +12,9 @@ import {
   type ZoomTarget,
 } from "@recordforge/domain"
 
-const REFERENCE_STEP_MS = 100
+// Dense reference sampled at the production follow-camera cadence (50 ms), so
+// the comparison measures exactly the path the editor/export ship.
+const REFERENCE_STEP_MS = 50
 const MOTION_PLAN_TOLERANCE_PX = 2
 const BENCHMARK_DURATIONS_MS = [60_000, 5 * 60_000, 30 * 60_000]
 
@@ -229,24 +231,11 @@ function buildDenseReference(
   state: TimelineState,
   engine: CursorEngine,
 ): DenseReferenceSample[] {
-  const endMs = segment.startMs + Math.max(1, segment.durationMs)
-  const baseTarget = segment.target
-  let previousTarget = baseTarget
-  let previousCenter = targetCenter(baseTarget)
-  const samples: DenseReferenceSample[] = []
-
-  for (let timeMs = segment.startMs; timeMs < endMs; timeMs += REFERENCE_STEP_MS) {
-    const target =
-      resolveFollowCursorTarget(segment, state, timeMs, engine, previousCenter) ?? previousTarget
-    samples.push({ timeMs, target })
-    previousTarget = target
-    previousCenter = targetCenter(target)
-  }
-
-  const endTarget =
-    resolveFollowCursorTarget(segment, state, endMs, engine, previousCenter) ?? previousTarget
-  samples.push({ timeMs: endMs, target: endTarget })
-  return samples
+  // The damped-camera sim is deterministic, so the dense reference is just the
+  // raw keyframe grid at the reference step (the same sim the plan samples).
+  return buildFollowCursorKeyframes(segment, state, engine, {
+    sampleStepMs: REFERENCE_STEP_MS,
+  })
 }
 
 function measurePath(reference: DenseReferenceSample[]): PathMetrics {

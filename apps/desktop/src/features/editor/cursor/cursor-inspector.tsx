@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react"
-import type { CursorIconPreset, CursorSettings } from "@recordforge/contracts"
-import { cursorSettingsSchema, defaultCursorSettings } from "@recordforge/contracts"
-import { MousePointer2, Save, Sliders, Trash2 } from "lucide-react"
+import type { ClickFeedback, CursorIconPreset, CursorSettings } from "@recordforge/contracts"
+import {
+  cursorSettingsSchema,
+  defaultCursorSettings,
+  recommendedCursorSettings,
+} from "@recordforge/contracts"
+import { MousePointer2, Palette, Save, Sliders, Trash2 } from "lucide-react"
 import { getSetting, isTauri, setSetting } from "../../../lib/settings"
 import {
   Button,
@@ -15,47 +19,12 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
+  ToggleGroup,
+  ToggleGroupItem,
   cn,
 } from "@recordforge/ui"
 import { RenderCursorPreset } from "./cursor-asset"
 import { DebouncedSlider } from "../inspector/fields"
-
-/** Motion presets that map to tested smoothing parameters. */
-const MOTION_PRESETS: {
-  id: string
-  label: string
-  smoothMovement: boolean
-  smoothFactor: number
-}[] = [
-  { id: "precise", label: "Precise", smoothMovement: false, smoothFactor: 0.25 },
-  { id: "natural", label: "Natural", smoothMovement: true, smoothFactor: 0.25 },
-  { id: "cinematic", label: "Cinematic", smoothMovement: true, smoothFactor: 0.15 },
-]
-
-const CLICK_PRESETS: {
-  id: string
-  label: string
-  clickFeedback: CursorSettings["clickFeedback"]
-  clickSize?: number
-  clickDurationMs?: number
-}[] = [
-  { id: "subtle", label: "Subtle", clickFeedback: "ripple", clickSize: 24, clickDurationMs: 250 },
-  {
-    id: "standard",
-    label: "Standard",
-    clickFeedback: "ripple",
-    clickSize: 36,
-    clickDurationMs: 350,
-  },
-  {
-    id: "dramatic",
-    label: "Dramatic",
-    clickFeedback: "spotlight",
-    clickSize: 64,
-    clickDurationMs: 600,
-  },
-  { id: "off", label: "Off", clickFeedback: "none" },
-]
 
 interface CursorInspectorProps {
   settings?: CursorSettings
@@ -73,6 +42,46 @@ const PRESETS: { id: CursorIconPreset; label: string; desc: string }[] = [
 ]
 
 const CURSOR_PRESETS_KEY = "cursorPresets"
+
+/** Motion presets that map to tested smoothing parameters. Higher smoothFactor
+ *  means the cursor tracks the raw input more closely (less smoothing). */
+const MOTION_PRESETS: {
+  id: string
+  label: string
+  smoothMovement: boolean
+  smoothFactor: number
+}[] = [
+  { id: "precise", label: "Precise", smoothMovement: false, smoothFactor: 1 },
+  { id: "natural", label: "Natural", smoothMovement: true, smoothFactor: 0.25 },
+  { id: "smooth", label: "Smooth", smoothMovement: true, smoothFactor: 0.18 },
+  { id: "cinematic", label: "Cinematic", smoothMovement: true, smoothFactor: 0.12 },
+]
+
+const CLICK_STYLE_OPTIONS: { value: ClickFeedback; label: string }[] = [
+  { value: "ripple", label: "Ring" },
+  { value: "pulse", label: "Pulse" },
+  { value: "spotlight", label: "Glow" },
+  { value: "none", label: "None" },
+]
+
+function motionPresetFor(settings: CursorSettings): string {
+  if (!(settings.smoothMovement ?? true)) return "precise"
+  const factor = settings.smoothFactor ?? 0.25
+  return (
+    MOTION_PRESETS.find(
+      (preset) => preset.smoothMovement && Math.abs(preset.smoothFactor - factor) < 0.001,
+    )?.id ?? ""
+  )
+}
+
+function cursorThemeIdFor(settings: CursorSettings): string {
+  const fill = (settings.fillColor ?? "").toLowerCase()
+  const stroke = (settings.strokeColor ?? "").toLowerCase()
+  const match = CURSOR_THEMES.find(
+    (theme) => theme.fillColor.toLowerCase() === fill && theme.strokeColor.toLowerCase() === stroke,
+  )
+  return match?.id ?? "custom"
+}
 
 export function CursorInspector({
   settings = defaultCursorSettings,
@@ -165,7 +174,7 @@ export function CursorInspector({
           variant="ghost"
           size="sm"
           className="h-7 text-[11px]"
-          onClick={() => (onReset ? onReset() : onChange(defaultCursorSettings))}
+          onClick={() => (onReset ? onReset() : onChange(recommendedCursorSettings))}
         >
           {resetLabel}
         </Button>
@@ -284,46 +293,128 @@ function BasicCursorSettings({
   activePreset,
   scale,
 }: BasicCursorSettingsProps) {
+  // The user may open the custom pickers while the colors still match a named
+  // theme, so "Custom" stays reachable until they pick a theme again.
+  const [customThemeOpen, setCustomThemeOpen] = useState(false)
+  const activeThemeId = cursorThemeIdFor(settings)
+  const showCustomColors = customThemeOpen || activeThemeId === "custom"
+  const motionPresetId = motionPresetFor(settings)
+  const clickStyle = settings.clickFeedback ?? "ripple"
+  const styleMeta = PRESETS.find((preset) => preset.id === activePreset) ?? PRESETS[0]
+
+  function applyTheme(theme: (typeof CURSOR_THEMES)[number]) {
+    setCustomThemeOpen(false)
+    onChange({
+      fillColor: theme.fillColor,
+      strokeColor: theme.strokeColor,
+      strokeWidth: theme.strokeWidth,
+    })
+  }
+
   return (
     <>
-      <div className="space-y-2">
-        <Label className="text-[11px] font-semibold text-muted-foreground">Style</Label>
-        <div className="grid grid-cols-2 gap-2">
-          {PRESETS.map((item) => {
-            const isSelected = activePreset === item.id
+      <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
+        <Label className="text-[11px] font-semibold text-muted-foreground">Appearance</Label>
+
+        {/* The editor supports a single recorded-system style — render it as a
+            labelled row instead of a one-cell grid. */}
+        <div className="flex items-center gap-3 rounded-lg border border-border bg-surface-dim/60 p-2">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-surface-dim shadow-inner">
+            <RenderCursorPreset
+              preset={styleMeta.id}
+              isPreview
+              className="size-7"
+              fillColor={settings.fillColor ?? "#3b82f6"}
+              fillOpacity={settings.fillOpacity ?? 1}
+              strokeColor={settings.strokeColor ?? "#ffffff"}
+              strokeWidth={settings.strokeWidth ?? 2}
+              strokeOpacity={settings.strokeOpacity ?? 1}
+            />
+          </div>
+          <div className="min-w-0">
+            <p className="font-semibold text-foreground text-[11px] leading-tight">
+              {styleMeta.label}
+            </p>
+            <p className="text-[10px] text-muted-foreground">{styleMeta.desc}</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Cursor theme">
+          {CURSOR_THEMES.map((theme) => {
+            const isSelected = activeThemeId === theme.id
             return (
               <button
-                key={item.id}
+                key={theme.id}
                 type="button"
-                onClick={() => onChange({ preset: item.id })}
+                role="radio"
+                aria-checked={isSelected}
+                onClick={() => applyTheme(theme)}
                 className={cn(
-                  "flex flex-col items-center justify-center gap-2 rounded-xl border p-2.5 text-center transition-colors hover:bg-surface-elevated",
+                  "flex flex-col items-center gap-1 rounded-lg border p-1.5 transition-colors hover:bg-overlay",
                   isSelected
                     ? "border-primary bg-primary/10 ring-1 ring-primary"
                     : "border-border bg-surface",
                 )}
               >
-                <div className="flex size-10 items-center justify-center rounded-lg bg-surface-dim shadow-inner">
+                <span className="flex size-7 items-center justify-center rounded-md bg-surface-dim">
                   <RenderCursorPreset
-                    preset={item.id}
+                    preset={styleMeta.id}
                     isPreview
-                    className="size-7"
-                    fillColor={settings.fillColor ?? "#3b82f6"}
-                    fillOpacity={settings.fillOpacity ?? 1}
-                    strokeColor={settings.strokeColor ?? "#ffffff"}
-                    strokeWidth={settings.strokeWidth ?? 2}
-                    strokeOpacity={settings.strokeOpacity ?? 1}
+                    className="size-5"
+                    fillColor={theme.fillColor}
+                    strokeColor={theme.strokeColor}
+                    strokeWidth={theme.strokeWidth}
                   />
-                </div>
-                <div className="min-w-0 w-full">
-                  <p className="truncate font-semibold text-foreground text-[11px] leading-tight">
-                    {item.label}
-                  </p>
-                </div>
+                </span>
+                <span className="text-[10px] font-medium text-foreground">{theme.label}</span>
               </button>
             )
           })}
+          <button
+            type="button"
+            role="radio"
+            aria-checked={showCustomColors}
+            onClick={() => setCustomThemeOpen(true)}
+            className={cn(
+              "flex flex-col items-center gap-1 rounded-lg border p-1.5 transition-colors hover:bg-overlay",
+              showCustomColors
+                ? "border-primary bg-primary/10 ring-1 ring-primary"
+                : "border-border bg-surface",
+            )}
+          >
+            <span className="flex size-7 items-center justify-center rounded-md bg-surface-dim text-muted-foreground">
+              <Palette className="size-4" aria-hidden />
+            </span>
+            <span className="text-[10px] font-medium text-foreground">Custom</span>
+          </button>
         </div>
+
+        {showCustomColors ? (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <span className="text-[10px] text-muted-foreground">Fill Color</span>
+              <ColorPicker
+                aria-label="Fill color"
+                size="sm"
+                value={settings.fillColor ?? "#3b82f6"}
+                onChange={(fillColor) => onChange({ fillColor })}
+                className="w-full"
+                triggerClassName="w-full justify-between"
+              />
+            </div>
+            <div className="space-y-1">
+              <span className="text-[10px] text-muted-foreground">Stroke Color</span>
+              <ColorPicker
+                aria-label="Stroke color"
+                size="sm"
+                value={settings.strokeColor ?? "#ffffff"}
+                onChange={(strokeColor) => onChange({ strokeColor })}
+                className="w-full"
+                triggerClassName="w-full justify-between"
+              />
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
@@ -339,7 +430,7 @@ function BasicCursorSettings({
                   "px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors",
                   Math.abs(scale - presetScale) < 0.05
                     ? "border-primary bg-primary/10 text-primary font-semibold"
-                    : "border-border bg-surface-dim hover:bg-surface-elevated text-muted-foreground",
+                    : "border-border bg-surface-dim hover:bg-overlay text-muted-foreground",
                 )}
               >
                 {Math.round(presetScale * 100)}%
@@ -358,102 +449,156 @@ function BasicCursorSettings({
       </div>
 
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="space-y-0.5">
-            <p className="font-medium text-[11px]">Motion style</p>
-            <p className="text-[10px] text-muted-foreground">Choose how the cursor moves</p>
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="space-y-0.5">
+              <p className="font-medium text-[11px]">Motion style</p>
+              <p className="text-[10px] text-muted-foreground">Choose how the cursor moves</p>
+            </div>
           </div>
-          <SimpleSelect
+          <ToggleGroup
+            type="single"
             aria-label="Cursor motion style"
-            size="sm"
-            value={
-              MOTION_PRESETS.find(
-                (p) =>
-                  p.smoothMovement === (settings.smoothMovement ?? true) &&
-                  p.smoothFactor === (settings.smoothFactor ?? 0.25),
-              )?.id ?? "custom"
-            }
-            onValueChange={(val) => {
-              const preset = MOTION_PRESETS.find((p) => p.id === val)
-              if (preset) {
-                onChange({
-                  smoothMovement: preset.smoothMovement,
-                  smoothFactor: preset.smoothFactor,
-                })
-              }
+            value={motionPresetId}
+            onValueChange={(value) => {
+              if (!value) return
+              const preset = MOTION_PRESETS.find((p) => p.id === value)
+              if (!preset) return
+              onChange({
+                smoothMovement: preset.smoothMovement,
+                smoothFactor: preset.smoothFactor,
+              })
             }}
-            className="w-36 text-[10px]"
-            options={[
-              ...MOTION_PRESETS.map((preset) => ({
-                value: preset.id,
-                label: preset.label,
-              })),
-              { value: "custom", label: "Custom" },
-            ]}
-          />
+            className="flex w-full rounded-md border border-border"
+          >
+            {MOTION_PRESETS.map((preset) => (
+              <ToggleGroupItem
+                key={preset.id}
+                value={preset.id}
+                className="h-7 flex-1 px-1 text-[10px]"
+              >
+                {preset.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+          {motionPresetId === "" ? (
+            <p className="text-[10px] text-muted-foreground">
+              Custom — tune the smoothing strength in Advanced.
+            </p>
+          ) : null}
         </div>
 
-        <div className="flex items-center justify-between">
-          <div className="space-y-0.5">
-            <p className="font-medium text-[11px]">Natural motion</p>
-            <p className="text-[10px] text-muted-foreground">Smooths small mouse jitters</p>
-          </div>
-          <Switch
-            checked={settings.smoothMovement ?? true}
-            onCheckedChange={(value) => onChange({ smoothMovement: value })}
-          />
-        </div>
-
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <div className="space-y-0.5">
             <p className="font-medium text-[11px]">Click style</p>
             <p className="text-[10px] text-muted-foreground">Choose how clicks are emphasized</p>
           </div>
-          <SimpleSelect
+          <ToggleGroup
+            type="single"
             aria-label="Cursor click style"
-            size="sm"
-            value={
-              CLICK_PRESETS.find(
-                (p) =>
-                  p.clickFeedback === settings.clickFeedback &&
-                  (p.clickSize === undefined || p.clickSize === settings.clickSize) &&
-                  (p.clickDurationMs === undefined ||
-                    p.clickDurationMs === settings.clickDurationMs),
-              )?.id ?? "custom"
-            }
-            onValueChange={(val) => {
-              const preset = CLICK_PRESETS.find((p) => p.id === val)
-              if (preset) {
-                onChange({
-                  clickFeedback: preset.clickFeedback,
-                  clickSize: preset.clickSize,
-                  clickDurationMs: preset.clickDurationMs,
-                })
-              }
+            value={clickStyle}
+            onValueChange={(value) => {
+              if (!value) return
+              onChange({ clickFeedback: value as ClickFeedback })
             }}
-            className="w-36 text-[10px]"
-            options={[
-              ...CLICK_PRESETS.map((preset) => ({
-                value: preset.id,
-                label: preset.label,
-              })),
-              { value: "custom", label: "Custom" },
-            ]}
+            className="flex w-full rounded-md border border-border"
+          >
+            {CLICK_STYLE_OPTIONS.map((option) => (
+              <ToggleGroupItem
+                key={option.value}
+                value={option.value}
+                className="h-7 flex-1 gap-1 px-1 text-[10px]"
+              >
+                <ClickStyleGlyph kind={option.value} />
+                {option.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <p className="font-medium text-[11px]">Press animation</p>
+            <p className="text-[10px] text-muted-foreground">Micro-press and spring on click</p>
+          </div>
+          <Switch
+            checked={settings.clickPressAnimation ?? true}
+            onCheckedChange={(value) => onChange({ clickPressAnimation: value })}
           />
         </div>
 
-        <div className="flex items-center justify-between pt-1">
-          <div className="space-y-0.5">
-            <p className="font-medium text-[11px]">Hide when idle</p>
-            <p className="text-[10px] text-muted-foreground">Fade after a quiet stretch</p>
+        <div className="space-y-2 pt-1 border-t border-border">
+          <div className="flex items-center justify-between pt-1">
+            <div className="space-y-0.5">
+              <p className="font-medium text-[11px]">Hide when idle</p>
+              <p className="text-[10px] text-muted-foreground">Fade after a quiet stretch</p>
+            </div>
+            <Switch
+              checked={settings.autoHideIdle ?? false}
+              onCheckedChange={(value) => onChange({ autoHideIdle: value })}
+            />
           </div>
-          <Switch
-            checked={settings.autoHideIdle ?? false}
-            onCheckedChange={(value) => onChange({ autoHideIdle: value })}
-          />
+          {settings.autoHideIdle ? (
+            <div className="space-y-1 pl-2 border-l-2 border-border-strong">
+              <div className="flex justify-between text-[10px]">
+                <span>Idle timeout</span>
+                <span className="font-mono">{settings.idleTimeoutMs ?? 2000}ms</span>
+              </div>
+              <DebouncedSlider
+                value={[settings.idleTimeoutMs ?? 2000]}
+                min={500}
+                max={10000}
+                step={100}
+                onValueCommit={([value]) => onChange({ idleTimeoutMs: value })}
+                aria-label="Idle timeout"
+              />
+            </div>
+          ) : null}
         </div>
       </div>
     </>
+  )
+}
+
+/** Miniature click-effect previews for the click-style segmented control. */
+function ClickStyleGlyph({ kind }: { kind: ClickFeedback }) {
+  if (kind === "none") {
+    return (
+      <svg viewBox="0 0 16 16" className="size-3.5 text-muted-foreground" aria-hidden>
+        <circle
+          cx="8"
+          cy="8"
+          r="5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeDasharray="2 2"
+        />
+      </svg>
+    )
+  }
+  if (kind === "pulse") {
+    return (
+      <svg viewBox="0 0 16 16" className="size-3.5 text-primary" aria-hidden>
+        <circle cx="8" cy="8" r="7" fill="currentColor" fillOpacity="0.25" />
+        <circle cx="8" cy="8" r="4" fill="currentColor" fillOpacity="0.75" />
+      </svg>
+    )
+  }
+  if (kind === "spotlight") {
+    return (
+      <svg viewBox="0 0 16 16" className="size-3.5 text-primary" aria-hidden>
+        <circle cx="8" cy="8" r="7" fill="currentColor" fillOpacity="0.2" />
+        <circle cx="8" cy="8" r="4.5" fill="currentColor" fillOpacity="0.45" />
+        <circle cx="8" cy="8" r="2" fill="currentColor" />
+      </svg>
+    )
+  }
+  return (
+    <svg viewBox="0 0 16 16" className="size-3.5 text-primary" aria-hidden>
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" />
+      <circle cx="8" cy="8" r="2" fill="currentColor" />
+    </svg>
   )
 }
 
@@ -463,36 +608,14 @@ interface AdvancedCursorSettingsProps {
 }
 
 function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsProps) {
+  // smoothFactor is an EMA alpha: 1 follows raw input, lower values are
+  // smoother. The slider exposes it as "strength" so higher = smoother.
+  const smoothingStrength = 1 - (settings.smoothFactor ?? 0.25)
+
   return (
     <div className="space-y-4">
       <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
-        <Label className="font-semibold text-[11px]">Fill & Outline</Label>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <span className="text-[10px] text-muted-foreground">Fill Color</span>
-            <ColorPicker
-              aria-label="Fill color"
-              size="sm"
-              value={settings.fillColor ?? "#3b82f6"}
-              onChange={(fillColor) => onChange({ fillColor })}
-              className="w-full"
-              triggerClassName="w-full justify-between"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <span className="text-[10px] text-muted-foreground">Stroke Color</span>
-            <ColorPicker
-              aria-label="Stroke color"
-              size="sm"
-              value={settings.strokeColor ?? "#ffffff"}
-              onChange={(strokeColor) => onChange({ strokeColor })}
-              className="w-full"
-              triggerClassName="w-full justify-between"
-            />
-          </div>
-        </div>
+        <Label className="font-semibold text-[11px]">Stroke &amp; Opacity</Label>
 
         <div className="space-y-1.5 pt-1">
           <div className="flex justify-between text-[11px]">
@@ -521,6 +644,29 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
             step={0.05}
             onValueCommit={([val]) => onChange({ fillOpacity: val })}
             aria-label="Cursor opacity"
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2 rounded-xl border border-border bg-surface p-3">
+        <Label className="font-semibold text-[11px]">Motion</Label>
+        <div className="space-y-1 pt-1">
+          <div className="flex justify-between text-[10px]">
+            <span>Smoothing strength</span>
+            <span className="font-mono">{Math.round(smoothingStrength * 100)}%</span>
+          </div>
+          <DebouncedSlider
+            value={[smoothingStrength]}
+            min={0}
+            max={0.95}
+            step={0.05}
+            aria-label="Cursor smoothing strength"
+            onValueCommit={([value]) =>
+              onChange({
+                smoothMovement: (value ?? 0) > 0,
+                smoothFactor: Math.min(1, Math.max(0.05, 1 - (value ?? 0))),
+              })
+            }
           />
         </div>
       </div>
@@ -568,17 +714,6 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
 
       <div className="space-y-3 rounded-xl border border-border bg-surface p-3">
         <Label className="font-semibold text-[11px]">Click Feedback</Label>
-
-        <div className="flex items-center justify-between rounded-lg border border-border px-2 py-1.5">
-          <div className="space-y-0.5">
-            <span className="text-[10px] font-medium">Click press</span>
-            <p className="text-[9px] text-muted-foreground">Micro-press and spring on click</p>
-          </div>
-          <Switch
-            checked={settings.clickPressAnimation ?? true}
-            onCheckedChange={(value) => onChange({ clickPressAnimation: value })}
-          />
-        </div>
 
         {settings.clickFeedback !== "none" ? (
           <div className="space-y-3">
@@ -692,41 +827,24 @@ function AdvancedCursorSettings({ settings, onChange }: AdvancedCursorSettingsPr
             </div>
           </div>
         ) : null}
-
-        {settings.autoHideIdle ? (
-          <div className="space-y-1 pl-2 border-l-2 border-success/40 pt-2">
-            <div className="flex justify-between text-[10px]">
-              <span>Idle timeout</span>
-              <span className="font-mono">{settings.idleTimeoutMs ?? 2000}ms</span>
-            </div>
-            <DebouncedSlider
-              value={[settings.idleTimeoutMs ?? 2000]}
-              min={500}
-              max={10000}
-              step={100}
-              onValueCommit={([value]) => onChange({ idleTimeoutMs: value })}
-              aria-label="Idle timeout"
-            />
-          </div>
-        ) : null}
-
-        <div className="space-y-1 pt-1">
-          <div className="flex justify-between text-[10px]">
-            <span>Smoothing strength</span>
-            <span className="font-mono">
-              {Math.round((1 - (settings.smoothFactor ?? 0.25)) * 100)}%
-            </span>
-          </div>
-          <DebouncedSlider
-            value={[settings.smoothFactor ?? 0.25]}
-            min={0.05}
-            max={1}
-            step={0.05}
-            aria-label="Cursor smoothing strength"
-            onValueCommit={([value]) => onChange({ smoothFactor: value })}
-          />
-        </div>
       </div>
     </div>
   )
 }
+
+/**
+ * Named fill/stroke looks for the cursor. These are actual render colors
+ * (they ship into the exported video), so explicit values are intentional —
+ * they mirror the DPI-consistent recommendedCursorSettings defaults.
+ */
+const CURSOR_THEMES: {
+  id: "light" | "dark" | "accent"
+  label: string
+  fillColor: string
+  strokeColor: string
+  strokeWidth: number
+}[] = [
+  { id: "light", label: "Light", fillColor: "#ffffff", strokeColor: "#111111", strokeWidth: 1.5 },
+  { id: "dark", label: "Dark", fillColor: "#111111", strokeColor: "#ffffff", strokeWidth: 1.5 },
+  { id: "accent", label: "Accent", fillColor: "#3b82f6", strokeColor: "#ffffff", strokeWidth: 2 },
+]

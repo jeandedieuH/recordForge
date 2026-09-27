@@ -84,6 +84,12 @@ rustup target add wasm32-unknown-unknown
 bun run build:wasm:overlay
 ```
 
+Rebuild the cursor engine WASM artifact (`packages/cursor-core/wasm/`) after changing `packages/cursor-engine`:
+
+```bash
+bun run --cwd packages/cursor-core build:wasm
+```
+
 Download FFmpeg/FFprobe sidecar binaries (required after fresh clone):
 
 ```bash
@@ -205,3 +211,4 @@ When finishing a task, report:
 
 - Desktop lint passed with the installed toolchain on 2026-09-21 using `bun run --cwd apps/desktop lint`; the previously observed `typescript-eslint` / TypeScript 7.0 incompatibility did not reproduce. Run lint alongside typecheck, format checks, and tests rather than assuming it is blocked.
 - On Windows, run Rust tests with `cargo test -j 1` when parallel linking intermittently reports `LNK1104` for test executables.
+- The checked-in cursor-engine WASM artifact (`packages/cursor-core/wasm/`) must be rebuilt with `bun run --cwd packages/cursor-core build:wasm` after any change to `packages/cursor-engine`; otherwise the preview and its parity tests run against a stale engine.

@@ -191,6 +191,12 @@ describe("cursor engine", () => {
     const mid = engine.evaluate(275, settings)
     expect(mid.activeClicks.length).toBeGreaterThan(0)
     expect(mid.activeClicks[0].progress).toBeCloseTo(0.5)
+    // expand = 1-(1-p)^3 (ease-out cubic), fade = (1-p)^2 — shared with the
+    // Rust engine and the export renderer.
+    expect(mid.activeClicks[0].expand).toBeCloseTo(0.875)
+    expect(mid.activeClicks[0].fade).toBeCloseTo(0.25)
+    expect(atClick.activeClicks[0].expand).toBeCloseTo(0)
+    expect(atClick.activeClicks[0].fade).toBeCloseTo(1)
 
     const later = engine.evaluate(500, settings)
     expect(later.activeClicks.length).toBe(0)
@@ -302,16 +308,113 @@ describe("cursor engine", () => {
     expect(frameClick.sourceX).toBeCloseTo(504, 0)
     expect(frameClick.sourceY).toBeCloseTo(252, 0)
 
-    // At t = 1048 (40ms after click), stays anchored near target with tap offset (~1.8px, ~2.4px)
+    // At t = 1048 (40ms after click), dwell anchors the cursor exactly on the
+    // click position; the press is visual-only (clickScale), never a dip.
     const framePress = engine.evaluate(1048, cinematic)
     expect(framePress.clickScale).toBeLessThan(0.88)
-    expect(framePress.sourceX).toBeLessThan(508)
-    expect(framePress.sourceY).toBeLessThan(256)
-    expect(framePress.sourceX).toBeGreaterThan(504)
-    expect(framePress.sourceY).toBeGreaterThan(252)
+    expect(framePress.sourceX).toBe(504)
+    expect(framePress.sourceY).toBe(252)
 
-    // When disabled, no tap offset is added
+    // When disabled, no press animation state is produced
     const frameNoPress = engine.evaluate(1048, { ...cinematic, clickPressAnimation: false })
     expect(frameNoPress.clickScale).toBe(1.0)
+  })
+
+  it("smooths the same path consistently at 60 Hz and 120 Hz", () => {
+    // Zero-phase smoothing is driven by a fixed 60 Hz reference interval, so
+    // the same preset must produce equivalent results at either capture rate.
+    const curve = (t: number) => {
+      const u = t / 2_000
+      const s = u * u * (3 - 2 * u)
+      return { x: 200 + 600 * s, y: 100 + 400 * s }
+    }
+    const build = (stepMs: number, rateHz: number) => {
+      const events = []
+      for (let t = 0; t <= 2_000; t += stepMs) {
+        const tMs = Math.round(t)
+        const { x, y } = curve(tMs)
+        // rawX/rawY must be integers in the schema; the engine reads the
+        // fractional sourceX/sourceY path the same way for both rates.
+        events.push({
+          ...v2Event(tMs, Math.round(x), Math.round(y), "none"),
+          sourceX: x,
+          sourceY: y,
+        })
+      }
+      return createCursorEngine(
+        normalizeCursorTelemetry({
+          recordingId: "s-curve",
+          sourceWidth: 1920,
+          sourceHeight: 1080,
+          sampleRateHz: rateHz,
+          events,
+        }),
+        // Denoise disabled so only the smoothing rate can differ.
+        { jitterThresholdPx: 0 },
+      )
+    }
+    const engine60 = build(1_000 / 60, 60)
+    const engine120 = build(1_000 / 120, 120)
+    const settings = { ...defaultCursorSettings, smoothMovement: true, smoothFactor: 0.15 }
+
+    for (const t of [400, 800, 1_000, 1_400, 1_800]) {
+      const frame60 = engine60.evaluate(t, settings)
+      const frame120 = engine120.evaluate(t, settings)
+      expect(Math.abs(frame60.sourceX - frame120.sourceX)).toBeLessThanOrEqual(0.5)
+      expect(Math.abs(frame60.sourceY - frame120.sourceY)).toBeLessThanOrEqual(0.5)
+    }
+  })
+
+  it("fades the cursor back in over 150ms when motion resumes after idle", () => {
+    const idleTelemetry = normalizeCursorTelemetry({
+      recordingId: "idle-resume",
+      sourceWidth: 1000,
+      sourceHeight: 500,
+      events: [
+        v2Event(0, 100, 100, "none"),
+        v2Event(100, 200, 100, "none"),
+        v2Event(5_000, 300, 100, "none"),
+        v2Event(5_500, 400, 100, "none"),
+      ],
+    })
+    const engine = createCursorEngine(idleTelemetry)
+    const settings = {
+      ...defaultCursorSettings,
+      autoHideIdle: true,
+      idleTimeoutMs: 1_000,
+      smoothMovement: false,
+    }
+
+    // Long idle fades the cursor fully out.
+    expect(engine.evaluate(4_900, settings).opacity).toBe(0)
+    // Motion resumes at 5000: a stateless 150ms fade-in restores opacity.
+    expect(engine.evaluate(5_000, settings).opacity).toBeCloseTo(0, 2)
+    expect(engine.evaluate(5_075, settings).opacity).toBeCloseTo(0.5, 2)
+    expect(engine.evaluate(5_150, settings).opacity).toBe(1)
+  })
+
+  it("keeps a stationary cursor exactly on the click point during the press window", () => {
+    const stationary = normalizeCursorTelemetry({
+      recordingId: "recording",
+      sourceWidth: 1000,
+      sourceHeight: 500,
+      events: [
+        v2Event(0, 350, 200, "none"),
+        v2Event(100, 350, 200, "left-down", true),
+        v2Event(300, 350, 200, "none"),
+      ],
+    })
+    const engine = createCursorEngine(stationary)
+    const settings = {
+      ...defaultCursorSettings,
+      smoothMovement: false,
+      clickPressAnimation: true,
+    }
+
+    // 40ms into the press: clickScale is engaged, but the tip must not dip.
+    const frame = engine.evaluate(140, settings)
+    expect(frame.clickScale).toBeLessThan(1.0)
+    expect(frame.sourceX).toBe(350)
+    expect(frame.sourceY).toBe(200)
   })
 })

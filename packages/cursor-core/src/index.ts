@@ -10,6 +10,7 @@ import {
   type TimelineState,
 } from "@recordforge/contracts"
 import { CURSOR_ASSET_MANIFEST, type CursorAssetId } from "./assets"
+import { sourcePointToZoomSpace } from "./time-mapping"
 
 export interface CursorEventLookup {
   event: CursorTelemetryEvent
@@ -56,6 +57,28 @@ export interface CursorZoomTransform {
     width: number
     height: number
   }
+}
+
+/**
+ * DPI-consistent cursor size multiplier, mirroring the Rust engine's
+ * `cursor_size_factor`: `(48 * dpiScale * transformScale) / 64`, clamped to
+ * [0.25, 4]. Assets are authored at 64 units, so ~0.75 is the native 1080p @1x
+ * size. `legacy` always returns 1 regardless of topology.
+ */
+export function cursorSizeFactor(
+  settings: Pick<CursorSettings, "sizeModel">,
+  telemetry: Pick<CursorTelemetryFile, "topology" | "coordinateTransform">,
+): number {
+  if (settings.sizeModel !== "dpi") return 1
+  const dpiScale =
+    telemetry.topology &&
+    Number.isFinite(telemetry.topology.scaleFactor) &&
+    telemetry.topology.scaleFactor > 0
+      ? telemetry.topology.scaleFactor
+      : 1
+  const a00 = Math.abs(telemetry.coordinateTransform?.a00 ?? 1)
+  const transformScale = Number.isFinite(a00) && a00 > 0 ? a00 : 1
+  return Math.min(4, Math.max(0.25, (48 * dpiScale * transformScale) / 64))
 }
 
 export interface CursorZoomedPoint extends CursorSourcePoint {
@@ -317,26 +340,18 @@ export function getCursorPointAtTimelineTime(
     )
     const frame = cursorEngine.evaluate(sourceTimeMs, settings)
     if (!frame.visible) return null
-    const fitted = fitCursorPoint(
-      { x: frame.sourceX, y: frame.sourceY },
-      telemetry,
-      state.canvas.width,
-      state.canvas.height,
-    )
-    if (!fitted.visible) return null
-    return { x: fitted.x, y: fitted.y }
+    return sourcePointToZoomSpace(telemetry, state.canvas, {
+      x: frame.sourceX,
+      y: frame.sourceY,
+    })
   }
 
   const lookup = findCursorEventAtTime(telemetry, sourceTimeMs)
   if (!lookup || !lookup.event.visible) return null
-  const fitted = fitCursorPoint(
-    { x: lookup.event.sourceX, y: lookup.event.sourceY },
-    telemetry,
-    state.canvas.width,
-    state.canvas.height,
-  )
-  if (!fitted.visible) return null
-  return { x: fitted.x, y: fitted.y }
+  return sourcePointToZoomSpace(telemetry, state.canvas, {
+    x: lookup.event.sourceX,
+    y: lookup.event.sourceY,
+  })
 }
 
 export function findCursorEffectAtTime(
@@ -355,6 +370,8 @@ export function findCursorEffectAtTime(
 }
 
 export * from "./smart-zoom"
+export * from "./time-mapping"
+export * from "./zoom-presets"
 export * from "./engine"
 export * from "./wasm-engine"
 export * from "./assets"
@@ -411,11 +428,21 @@ export function cursorRangeOverrideLabels(
     })
   }
 
+  // Map onto the inspector's motion-style labels: Precise = off,
+  // Natural/Smooth = smooth, Cinematic = strong.
   const effectiveSmoothMovement = range.settings?.smoothMovement ?? range.smoothing !== "off"
-  if (base && effectiveSmoothMovement !== base.smoothMovement) {
+  const effectiveLevel: "off" | "smooth" | "strong" = !effectiveSmoothMovement
+    ? "off"
+    : range.smoothing === "strong" || (range.settings?.smoothFactor ?? Infinity) <= 0.15
+      ? "strong"
+      : "smooth"
+  const baseLevel: "off" | "smooth" | "strong" =
+    base && !base.smoothMovement ? "off" : base && base.smoothFactor <= 0.15 ? "strong" : "smooth"
+  if (base && effectiveLevel !== baseLevel) {
     badges.push({
       key: "smoothing",
-      label: effectiveSmoothMovement ? "Smooth" : "Precise",
+      label:
+        effectiveLevel === "off" ? "Precise" : effectiveLevel === "strong" ? "Cinematic" : "Smooth",
       variant: "secondary",
     })
   }

@@ -124,11 +124,43 @@ interface RenderPlanZoomSegment {
   endMs: number
   target: { x: number; y: number; width: number; height: number }
   scale: number
-  easing: "linear" | "ease-in" | "ease-out" | "ease-in-out" | "smooth" | "cinematic" | "snappy"
+  easing: "linear" | "ease-in" | "ease-out" | "ease-in-out" | "smooth" | "cinematic" | "snappy" | "spring"
+  transitionInMs: number   // default 400
+  transitionOutMs: number  // default 400
   enabled: boolean
-  mode?: "auto" | "manual" | "follow-cursor"
-  source?: "click" | "dwell" | "movement" | "manual" | "follow"
-  preset?: "subtle" | "product-demo" | "cinematic" | "manual-only"
+  mode?: "auto" | "manual" | "static" | "follow-cursor" | "smooth-pan"
+  source?: "click" | "dwell" | "movement" | "manual" | "follow" | "cluster"
+  preset?: "subtle" | "product-demo" | "cinematic" | "developer" | "manual-only"
+  followDeadzonePercent?: number
+  followSmoothingAlpha?: number
+  label?: string
+  // Camera-shot bridging (§5.3): when a segment starts within
+  // ZOOM_BRIDGE_GAP_MS of the previous one, the previous shot's end pose is
+  // baked into fromTarget/fromScale so the camera pans in instead of popping
+  // to 1x. followSpeed lives on the editor schema only — export consumes the
+  // baked motion plan.
+  fromTarget?: { x: number; y: number; width: number; height: number }
+  fromScale?: number
+  // Follow-camera paths: compact cubic-Bézier motion plan (v1) is preferred;
+  // `keyframes` remains accepted for older plans.
+  keyframes?: Array<{ timeMs: number; target: ZoomTarget }>
+  motionPlan?: RenderPlanZoomMotionPlan
+}
+
+interface RenderPlanZoomMotionPlan {
+  version: 1
+  kind: "cubic-bezier"
+  // Contiguous segments; each carries start/control1/control2/end points in
+  // canvas coordinates. Evaluated by `evaluate_cubic_motion_plan` (Rust) and
+  // `evaluateCubicMotionPlan` (TypeScript) with identical results.
+  segments: Array<{
+    startMs: number
+    endMs: number
+    start: { x: number; y: number }
+    control1: { x: number; y: number }
+    control2: { x: number; y: number }
+    end: { x: number; y: number }
+  }>
 }
 
 interface RenderSegment {
@@ -189,7 +221,17 @@ The render engine builds an FFmpeg complex filter graph from the render plan:
 6. **Canvas/effects**: `pad`, zoom crop, privacy mask filters, and caption drawtext.
 7. **Cursor**: telemetry is resolved as a project asset and composited into RGBA frames in Rust.
 
-### 5.3 Current gaps
+### 5.3 Zoom and cursor camera model
+
+One camera model is shared by the preview, the FFmpeg `zoompan` graph, and the Rust cursor renderer (`exports/camera.rs`):
+
+- **Camera-shot bridging.** `resolveCameraShots` (`packages/editor-core/src/camera-shots.ts`) treats two enabled zoom segments separated by ≤ `ZOOM_BRIDGE_GAP_MS` (800 ms) as one continuous shot: the first segment holds its target through the gap (`transitionOutMs` → 0) and the next pans in from `fromTarget`/`fromScale` baked at plan build (`media-core/src/render-plan.ts`). Follow-cursor shots resolve their bridge pose through the cursor engine before baking.
+- **Log-space crop interpolation (Z6).** Crop width travels in log space — `w(p) = wA·(wB/wA)^p` — while the center glides around the screen-fixed point `f = (cB·sB − cA·sA)/(sB − sA)`; near-equal zoom levels have no usable fixed point and degrade to a linear pan. `interpolate_crop` (Rust) and `interpolateCrop` (`editor-core/src/composition.ts`) are the same math, and `build_zoompan_expressions` emits the equivalent symbolic `z`/`x`/`y` expressions FFmpeg evaluates per frame.
+- **Integer zoompan crop + cursor registration.** FFmpeg's `zoompan` quantizes its crop to integers and snaps the origin to the chroma grid. `zoompan_integer_crop` reproduces that selection (`(int)(in_w/zoom)`, clamped, `x &= ~((1<<log2_chroma)-1)`) so the cursor is composited onto the exact pixels `sws_scale` samples — the cursor maps source points into the integer crop via the same center-aligned `sws_scale` mapping.
+- **Pixel-format normalization.** `format=yuv420p` is inserted immediately before every `zoompan`, pinning the chroma-subsample origin snap to 1 px in each axis so the registration model stays exact. A `setpts` re-anchoring follows `zoompan` when the pass runs on absolute-PTS-shifted inputs, since zoompan emits its own 0-based grid.
+- **Cursor compositing.** One `cursor_engine::CursorEngine` per telemetry asset (`Arc<Mutex>`, shared across cursor ranges of the same capture) feeds `CursorRenderer`, which rasterizes into RGBA frames streamed to FFmpeg's stdin. Rasterization caches bitmaps by quarter-pixel phase so subpixel placement does not re-rasterize. Click effects and the spotlight are anti-aliased primitives driven by engine-emitted `expand`/`fade` progress; the spotlight dim is always black (the cursor `shadowColor` must not tint it).
+
+### 5.4 Current gaps
 
 | Concern | Phase 8 behavior |
 |---------|------------------|

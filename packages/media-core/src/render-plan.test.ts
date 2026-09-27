@@ -1011,6 +1011,131 @@ describe("render-plan", () => {
     expect(plan.value.zoomSegments[1].fromScale).toBe(2)
   })
 
+  it("extends a bridged zoom segment through a short gap so the camera never returns to 1x", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-1",
+        startMs: 1000,
+        durationMs: 2000,
+        target: { x: 100, y: 100, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+      {
+        id: "zoom-2",
+        startMs: 3400,
+        durationMs: 2000,
+        target: { x: 400, y: 300, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+    ]
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.zoomSegments).toHaveLength(2)
+    // The first shot holds its target until the second starts.
+    expect(plan.value.zoomSegments[0]).toMatchObject({ endMs: 3_400, transitionOutMs: 0 })
+    expect(plan.value.zoomSegments[1].startMs).toBe(3_400)
+    expect(plan.value.zoomSegments[1].fromTarget).toEqual({
+      x: 100,
+      y: 100,
+      width: 800,
+      height: 450,
+    })
+    expect(plan.value.zoomSegments[1].fromScale).toBe(2)
+  })
+
+  it("keeps bridged shot timing contiguous under an output-range offset", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-1",
+        startMs: 1000,
+        durationMs: 2000,
+        target: { x: 100, y: 100, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+      {
+        id: "zoom-2",
+        startMs: 3400,
+        durationMs: 2000,
+        target: { x: 400, y: 300, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+    ]
+
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 2_000, endMs: 6_000 },
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    // Effective shots [1000,3400) and [3400,5400) map to [0,1400) and [1400,3400).
+    expect(plan.value.zoomSegments[0].endMs).toBe(1_400)
+    expect(plan.value.zoomSegments[1].startMs).toBe(1_400)
+    expect(plan.value.zoomSegments[0].transitionOutMs).toBe(0)
+    expect(plan.value.zoomSegments[1].fromTarget).toBeDefined()
+  })
+
+  it("does not bridge zoom segments across a gap beyond the threshold", () => {
+    const state = makeTimeline()
+    state.zoomSegments = [
+      {
+        id: "zoom-1",
+        startMs: 1000,
+        durationMs: 2000,
+        target: { x: 100, y: 100, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+      {
+        id: "zoom-2",
+        startMs: 5000,
+        durationMs: 2000,
+        target: { x: 400, y: 300, width: 800, height: 450 },
+        scale: 2,
+        easing: "smooth",
+        transitionInMs: 300,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+      },
+    ]
+
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.zoomSegments[0]).toMatchObject({ endMs: 3_000, transitionOutMs: 300 })
+    expect(plan.value.zoomSegments[1].fromTarget).toBeUndefined()
+    expect(plan.value.zoomSegments[1].fromScale).toBeUndefined()
+  })
+
   it("builds a compact motion plan when telemetry is provided for follow-cursor mode", () => {
     const state = makeTimeline()
     state.zoomSegments = [

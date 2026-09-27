@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import {
   createCursorEngine,
   fitCursorPoint,
+  getCursorPointAtTimelineTime,
   mapCursorPointThroughZoom,
   normalizeCursorTelemetry,
 } from "@recordforge/cursor-core"
@@ -11,12 +12,14 @@ import {
   cursorTelemetryFileSchema,
   defaultCursorSettings,
   timelineStateSchema,
+  type ManualZoomSegment,
   type TimelineState,
 } from "@recordforge/domain"
 import {
   buildFollowCursorKeyframes,
   buildFollowCursorMotionPlan,
   resolveFollowCursorMotionPlanTargetAtTime,
+  resolveFollowCursorTarget,
   resolveFollowCursorTargetAtTime,
   resolvePreviewComposition,
   zoomTransformToCss,
@@ -377,7 +380,9 @@ describe("resolvePreviewComposition", () => {
       events: followPoints.map(([x, y], index) => event(index * 100, x, y)),
     })
     const cursorEngine = createCursorEngine(followTelemetry)
-    const reference = buildFollowCursorKeyframes(segment, state, cursorEngine)
+    const reference = buildFollowCursorKeyframes(segment, state, cursorEngine, {
+      sampleStepMs: 100,
+    })
     const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine, {
       sampleStepMs: 100,
       tolerancePx: 2,
@@ -498,6 +503,48 @@ describe("resolvePreviewComposition", () => {
     expect(composition.screen.zoomTransform?.crop.y).toBeCloseTo(previousTarget?.y ?? 0, 5)
   })
 
+  it("maps the follow-camera center and cursor layer into stretched zoom space", () => {
+    const state = makeState()
+    // 9:16 canvas with 16:9 telemetry: zoom space is the normalized screen
+    // stretched onto the canvas, so the camera must track the cursor across
+    // the full 1920px height instead of a letterboxed middle band.
+    state.canvas = { ...state.canvas, width: 1080, height: 1920, padding: 0 }
+    const baseSegment = state.zoomSegments?.[0]
+    if (!baseSegment) return
+    const segment = {
+      ...baseSegment,
+      id: "follow-zoom",
+      startMs: 0,
+      durationMs: 2_000,
+      target: { x: 270, y: 480, width: 540, height: 960 },
+      scale: 2,
+      easing: "smooth" as const,
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      mode: "follow-cursor" as const,
+      followDeadzonePercent: 0.01,
+      followSmoothingAlpha: 1,
+    }
+    state.zoomSegments = [segment]
+
+    const bottomTelemetry = normalizeCursorTelemetry({
+      ...telemetry,
+      events: [event(0, 960, 540), event(1_000, 960, 1_080)],
+    })
+    const cursorEngine = createCursorEngine(bottomTelemetry)
+
+    // The cursor jumps at exactly t=1000; the damped camera needs ~200ms to
+    // reach the pinned bottom edge afterwards (it can no longer snap).
+    const target = resolveFollowCursorTarget(segment, state, 1_200, cursorEngine)
+    expect(target).toBeDefined()
+    expect((target?.y ?? 0) + (target?.height ?? 0)).toBeCloseTo(1_920, 1)
+
+    const comp = resolvePreviewComposition(state, 1_000, { cursorTelemetry: bottomTelemetry })
+    expect(comp.cursor.zoomSpacePoint).not.toBeNull()
+    expect(comp.cursor.zoomSpacePoint?.x).toBeCloseTo(540, 5)
+    expect(comp.cursor.zoomSpacePoint?.y).toBeCloseTo(1_920, 5)
+  })
+
   it("uses a pixel-precise matrix for the video crop transform", () => {
     const transform = {
       crop: { x: 480, y: 270, width: 960, height: 540 },
@@ -540,7 +587,7 @@ describe("resolvePreviewComposition", () => {
     const comp = resolvePreviewComposition(makeState(), 2_000, { cursorTelemetry: telemetry })
     expect(comp.cursor.active).toBe(true)
     expect(comp.cursor.sourceTimeMs).toBe(2_000)
-    expect(comp.cursor.sourcePoint).not.toBeNull()
+    expect(comp.cursor.zoomSpacePoint).not.toBeNull()
     expect(comp.cursor.settings.preset).toBe("recorded-system")
   })
 
@@ -558,6 +605,186 @@ describe("resolvePreviewComposition", () => {
     const comp = resolvePreviewComposition(state, 2_000)
     expect(comp.screen.active).toBe(false)
     expect(comp.screen.isGap).toBe(true)
+  })
+})
+
+describe("follow camera v2", () => {
+  function makeFollowState(
+    events: Array<ReturnType<typeof event>>,
+    segmentOverrides: Partial<ManualZoomSegment> = {},
+  ) {
+    const state = makeState()
+    state.canvas.cursorSettings = { ...defaultCursorSettings, smoothMovement: false }
+    // Deterministic cursor positions: bypass engine-side smoothing so keyframe
+    // assertions compare against the recorded samples exactly.
+    const cursorClip = state.tracks
+      .find((track) => track.kind === "cursor")
+      ?.clips.find((clip) => clip.kind === "cursor-effect")
+    if (cursorClip && cursorClip.kind === "cursor-effect") {
+      cursorClip.smoothing = "off"
+    }
+    const baseSegment = state.zoomSegments?.[0]
+    if (!baseSegment) throw new Error("test timeline is missing a zoom segment")
+    const segment = {
+      ...baseSegment,
+      startMs: 0,
+      durationMs: 10_000,
+      scale: 2,
+      target: { x: 480, y: 270, width: 960, height: 540 },
+      transitionInMs: 0,
+      transitionOutMs: 0,
+      mode: "follow-cursor" as const,
+      ...segmentOverrides,
+    }
+    state.zoomSegments = [segment]
+    const cursorEngine = createCursorEngine(normalizeCursorTelemetry({ ...telemetry, events }))
+    return { state, segment, cursorEngine }
+  }
+
+  it("keeps the cursor inside the 8%-inset crop during a fast diagonal sweep", () => {
+    // ~1500px diagonal in 500ms — fast enough that the margin clamp, not the
+    // damping, is what keeps the cursor inside the crop.
+    const events = [
+      event(0, 300, 200),
+      event(400, 300, 200),
+      event(500, 560, 300),
+      event(600, 860, 420),
+      event(700, 1_160, 560),
+      event(800, 1_420, 700),
+      event(900, 1_700, 880),
+      event(10_000, 1_700, 880),
+    ]
+    const { state, segment, cursorEngine } = makeFollowState(events, {
+      followSpeed: "tight",
+      // Generated follow segments are authored around the cursor, so the
+      // initial resting crop already contains the sweep's start point.
+      target: { x: 0, y: 0, width: 960, height: 540 },
+    })
+    const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine)
+    expect(motionPlan).not.toBeNull()
+    if (!motionPlan) return
+
+    // The sim enforces an 8% inset at substep instants; sampled keyframes can
+    // lag that instant by up to one substep (8.3ms), so allow ~30px of slack
+    // for the cursor's travel in between.
+    const slackPx = 30
+    for (let timeMs = 0; timeMs <= 10_000; timeMs += 25) {
+      const target = resolveFollowCursorMotionPlanTargetAtTime(
+        motionPlan,
+        segment,
+        state,
+        timeMs,
+        cursorEngine,
+      )
+      const point = getCursorPointAtTimelineTime(
+        state,
+        timeMs,
+        cursorEngine.telemetry,
+        cursorEngine,
+      )
+      if (!target || !point) continue
+      const insetX = 0.08 * target.width
+      const insetY = 0.08 * target.height
+      expect(Math.abs(point.x - (target.x + target.width / 2))).toBeLessThanOrEqual(
+        target.width / 2 - insetX + slackPx,
+      )
+      expect(Math.abs(point.y - (target.y + target.height / 2))).toBeLessThanOrEqual(
+        target.height / 2 - insetY + slackPx,
+      )
+    }
+  })
+
+  it("produces zero camera motion while the cursor stays inside the deadzone", () => {
+    const events = [event(0, 990, 560), event(10_000, 990, 560)]
+    const { state, segment, cursorEngine } = makeFollowState(events)
+    const keyframes = buildFollowCursorKeyframes(segment, state, cursorEngine)
+
+    expect(keyframes.length).toBeGreaterThan(1)
+    const resting = segment.target
+    for (const keyframe of keyframes) {
+      expect(keyframe.target.x).toBeCloseTo(resting.x, 5)
+      expect(keyframe.target.y).toBeCloseTo(resting.y, 5)
+      expect(keyframe.target.width).toBeCloseTo(resting.width, 5)
+      expect(keyframe.target.height).toBeCloseTo(resting.height, 5)
+    }
+  })
+
+  it("lags a step move more under relaxed follow than under tight follow", () => {
+    // A ~10ms event ramp at t=2000 reads as a step for the 120Hz sim.
+    const events = [
+      event(0, 700, 540),
+      event(1_990, 700, 540),
+      event(2_000, 1_300, 540),
+      event(10_000, 1_300, 540),
+    ]
+    const probeMs = 2_400
+
+    const relaxed = makeFollowState(events, { followSpeed: "relaxed" })
+    const tight = makeFollowState(events, { followSpeed: "tight" })
+    const relaxedTarget = resolveFollowCursorTarget(
+      relaxed.segment,
+      relaxed.state,
+      probeMs,
+      relaxed.cursorEngine,
+    )
+    const tightTarget = resolveFollowCursorTarget(
+      tight.segment,
+      tight.state,
+      probeMs,
+      tight.cursorEngine,
+    )
+
+    expect(relaxedTarget).toBeDefined()
+    expect(tightTarget).toBeDefined()
+    const relaxedCenterX = (relaxedTarget?.x ?? 0) + (relaxedTarget?.width ?? 0) / 2
+    const tightCenterX = (tightTarget?.x ?? 0) + (tightTarget?.width ?? 0) / 2
+    expect(relaxedCenterX).toBeLessThan(tightCenterX)
+    // Tight is almost settled on the cursor after 400ms; relaxed is not.
+    expect(1_300 - tightCenterX).toBeLessThan(1_300 - relaxedCenterX)
+  })
+
+  it("is deterministic: identical inputs produce identical motion plans", () => {
+    const events = [
+      event(0, 400, 300),
+      event(800, 1_500, 800),
+      event(1_700, 600, 700),
+      event(2_600, 1_600, 300),
+      event(10_000, 1_600, 300),
+    ]
+    const first = makeFollowState(events)
+    const second = makeFollowState(events)
+    const planA = buildFollowCursorMotionPlan(first.segment, first.state, first.cursorEngine)
+    const planB = buildFollowCursorMotionPlan(second.segment, second.state, second.cursorEngine)
+    expect(planA).toEqual(planB)
+  })
+
+  it("compresses a busy 10-second segment into few motion-plan segments", () => {
+    const events = [
+      event(0, 960, 540),
+      event(1_000, 500, 300),
+      event(2_000, 1_400, 300),
+      event(3_000, 1_500, 800),
+      event(4_000, 400, 800),
+      event(5_000, 960, 540),
+      event(6_000, 1_600, 540),
+      event(7_000, 960, 900),
+      event(8_000, 300, 540),
+      event(9_000, 960, 540),
+      event(10_000, 960, 540),
+    ]
+    const { state, segment, cursorEngine } = makeFollowState(events)
+    const rawKeyframes = buildFollowCursorKeyframes(segment, state, cursorEngine)
+    const motionPlan = buildFollowCursorMotionPlan(segment, state, cursorEngine)
+
+    expect(motionPlan).toBeDefined()
+    if (!motionPlan) return
+    // 10s at the 50ms sample step produces 201 raw keyframes; the damped path
+    // must simplify to a small fraction of that.
+    expect(rawKeyframes.length).toBeGreaterThanOrEqual(200)
+    expect(motionPlan.segments.length).toBeGreaterThan(0)
+    expect(motionPlan.segments.length).toBeLessThanOrEqual(rawKeyframes.length)
+    expect(motionPlan.segments[0]?.startMs).toBe(0)
+    expect(motionPlan.segments[motionPlan.segments.length - 1]?.endMs).toBe(10_000)
   })
 })
 

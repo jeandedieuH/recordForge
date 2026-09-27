@@ -13,8 +13,8 @@
 //! V1 JSON telemetry is read transparently and can be migrated to V2 on demand.
 
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -811,6 +811,125 @@ pub fn write_v2_telemetry(
     Ok(metadata)
 }
 
+/// Incremental append-only writer for the V2 binary event stream.
+///
+/// Each checkpoint appends only the records produced since the last one,
+/// flushes/syncs, THEN updates the header `event_count` in place — the count
+/// is the commit point, so a torn trailing record after a crash is ignored by
+/// readers that honor it. This replaces the old O(total events) rewrite of
+/// `write_v2_telemetry` on every one-second checkpoint.
+struct IncrementalTelemetryWriter {
+    file: File,
+    /// Records that were fully appended AND committed via the header count.
+    committed_count: u64,
+    /// Byte offset of the next record to append.
+    offset: u64,
+    /// Chunk index entries appended per `INDEX_STRIDE`.
+    index: Vec<CursorEventIndexEntry>,
+}
+
+impl IncrementalTelemetryWriter {
+    /// Create the live event file and write the header with a zero commit
+    /// count. Writes go straight to `event_path` — crash recovery is the whole
+    /// point, so there is no temp+rename step.
+    fn create(event_path: &Path) -> Result<Self, String> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(event_path)
+            .map_err(|e| format!("open event file: {e}"))?;
+        file.write_all(V2_EVENT_MAGIC)
+            .and_then(|()| file.write_all(&V2_EVENT_FILE_VERSION.to_le_bytes()))
+            .and_then(|()| file.write_all(&0u64.to_le_bytes()))
+            .map_err(|e| format!("write event header: {e}"))?;
+        Ok(Self {
+            file,
+            committed_count: 0,
+            offset: (V2_EVENT_MAGIC.len() + 4 + 8) as u64,
+            index: Vec::new(),
+        })
+    }
+
+    /// Append every event past `committed_count`, sync data, then bump the
+    /// header count — that final in-place write is the commit point.
+    fn checkpoint(
+        &mut self,
+        events: &[CursorTelemetryEventV2],
+        metadata: &CursorTelemetryMetadata,
+    ) -> Result<u64, String> {
+        if (events.len() as u64) < self.committed_count {
+            return Err("event log shrank below the committed count".into());
+        }
+        self.file
+            .seek(SeekFrom::Start(self.offset))
+            .map_err(|e| format!("seek event file: {e}"))?;
+        for (i, event) in events
+            .iter()
+            .enumerate()
+            .skip(self.committed_count as usize)
+        {
+            if i % INDEX_STRIDE == 0 {
+                self.index.push(CursorEventIndexEntry {
+                    event_index: i as u64,
+                    t_ms: event.t_ms,
+                    file_offset: self.offset,
+                });
+            }
+            write_event_record(&mut self.file, event, &metadata.shapes)
+                .map_err(|e| format!("write event record: {e}"))?;
+            self.offset += EVENT_RECORD_SIZE as u64;
+        }
+        self.file
+            .flush()
+            .and_then(|()| self.file.sync_data())
+            .map_err(|e| format!("sync event records: {e}"))?;
+
+        // Commit: the count update is the last write, so readers either see
+        // all of this checkpoint's records or none of them.
+        let count = events.len() as u64;
+        self.file
+            .seek(SeekFrom::Start(8))
+            .map_err(|e| format!("seek event count: {e}"))?;
+        self.file
+            .write_all(&count.to_le_bytes())
+            .and_then(|()| self.file.flush())
+            .and_then(|()| self.file.sync_data())
+            .map_err(|e| format!("commit event count: {e}"))?;
+        self.committed_count = count;
+        Ok(count)
+    }
+}
+
+/// Atomically rewrite the small metadata JSON (shapes, health, index entries).
+/// Same temp+sync+rename protocol as `write_v2_telemetry`.
+fn write_v2_metadata(work_dir: &Path, metadata: &CursorTelemetryMetadata) -> Result<(), String> {
+    let meta_path = work_dir.join("cursor_telemetry.json");
+    let temp_meta_path = meta_path.with_extension("json.tmp");
+    let json =
+        serde_json::to_string_pretty(metadata).map_err(|e| format!("serialize metadata: {e}"))?;
+    std::fs::write(&temp_meta_path, json).map_err(|e| format!("write metadata temp: {e}"))?;
+    super::disk::sync_file(&temp_meta_path).map_err(|e| format!("sync metadata: {e}"))?;
+    super::disk::atomic_replace(&temp_meta_path, &meta_path)
+        .map_err(|e| format!("publish metadata: {e}"))?;
+    Ok(())
+}
+
+/// Checkpoint helper for the capture loop: append new events, commit the
+/// header count, then publish the updated metadata JSON.
+fn checkpoint_v2_telemetry(
+    writer: &mut IncrementalTelemetryWriter,
+    work_dir: &Path,
+    metadata: &CursorTelemetryMetadata,
+    events: &[CursorTelemetryEventV2],
+) -> Result<(), String> {
+    let committed = writer.checkpoint(events, metadata)?;
+    let mut metadata = metadata.clone();
+    metadata.event_count = committed;
+    metadata.index = writer.index.clone();
+    write_v2_metadata(work_dir, &metadata)
+}
+
 /// Read a V2 telemetry asset from disk.
 pub fn read_v2_telemetry(work_dir: &Path) -> Option<CursorTelemetryFileV2> {
     let meta_path = work_dir.join("cursor_telemetry.json");
@@ -1088,6 +1207,19 @@ impl CursorTrackerV2 {
                 return;
             }
 
+            // Append-only event writer: each checkpoint adds only the new
+            // records and commits the header count in place. Falls back to the
+            // full rewrite if the live file cannot be opened.
+            let mut incremental_writer = match IncrementalTelemetryWriter::create(
+                &metadata.event_path(&work_dir),
+            ) {
+                Ok(writer) => Some(writer),
+                Err(error) => {
+                    warn!(error = %error, "incremental cursor telemetry writer unavailable; falling back to full rewrites");
+                    None
+                }
+            };
+
             let mut last_checkpoint = Instant::now();
             // Schedule against a monotonic deadline instead of sleeping for a
             // fixed interval after each sample. This prevents capture work and
@@ -1155,11 +1287,20 @@ impl CursorTrackerV2 {
                 });
 
                 if last_checkpoint.elapsed() >= Duration::from_secs(1) {
-                    let telemetry = CursorTelemetryFileV2 {
-                        metadata: metadata.clone(),
-                        events: events.clone(),
+                    let result = match incremental_writer.as_mut() {
+                        Some(writer) => {
+                            checkpoint_v2_telemetry(writer, &work_dir, &metadata, &events)
+                        }
+                        None => write_v2_telemetry(
+                            &work_dir,
+                            &CursorTelemetryFileV2 {
+                                metadata: metadata.clone(),
+                                events: events.clone(),
+                            },
+                        )
+                        .map(|_| ()),
                     };
-                    if let Err(error) = write_v2_telemetry(&work_dir, &telemetry) {
+                    if let Err(error) = result {
                         error!(error = %error, "failed to checkpoint cursor telemetry");
                     }
                     last_checkpoint = Instant::now();
@@ -1174,17 +1315,25 @@ impl CursorTrackerV2 {
                 }
             }
 
-            let telemetry = CursorTelemetryFileV2 {
-                metadata: metadata.clone(),
-                events,
+            let event_count = events.len() as u64;
+            let result = match incremental_writer.as_mut() {
+                // The live file already holds every committed record; the
+                // final checkpoint appends the tail and commits the count,
+                // leaving a file byte-identical in format to a full write.
+                Some(writer) => checkpoint_v2_telemetry(writer, &work_dir, &metadata, &events),
+                None => write_v2_telemetry(
+                    &work_dir,
+                    &CursorTelemetryFileV2 {
+                        metadata: metadata.clone(),
+                        events,
+                    },
+                )
+                .map(|_| ()),
             };
-            if let Err(error) = write_v2_telemetry(&work_dir, &telemetry) {
+            if let Err(error) = result {
                 error!(error = %error, "failed to publish cursor telemetry");
             } else {
-                info!(
-                    event_count = telemetry.events.len(),
-                    "saved cursor telemetry v2"
-                );
+                info!(event_count, "saved cursor telemetry v2");
             }
         });
 
@@ -2561,5 +2710,145 @@ mod tests {
 
         clear_pipewire_cursor_metadata();
         assert_eq!(get_pipewire_cursor_metadata(), None);
+    }
+
+    fn checkpoint_event(t_ms: u64) -> CursorTelemetryEventV2 {
+        CursorTelemetryEventV2 {
+            t_ms,
+            raw_x: (t_ms % 500) as i32,
+            raw_y: (t_ms % 300) as i32,
+            source_x: (t_ms % 500) as f64,
+            source_y: (t_ms % 300) as f64,
+            buttons: CursorButtonState::default(),
+            button_event: "none".into(),
+            visible: true,
+            shape_id: "arrow".into(),
+            shape_changed: false,
+        }
+    }
+
+    fn checkpoint_metadata() -> CursorTelemetryMetadata {
+        let mut metadata = CursorTelemetryMetadata::new(
+            "rec".into(),
+            1920,
+            1080,
+            CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        metadata.shapes.push(CursorShapeInfo {
+            shape_id: "arrow".into(),
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 32,
+            height: 32,
+            kind: "arrow".into(),
+        });
+        metadata
+    }
+
+    #[test]
+    fn incremental_writer_matches_full_write_output() {
+        let incremental_dir = tempfile::tempdir().expect("tempdir");
+        let full_dir = tempfile::tempdir().expect("tempdir");
+
+        let metadata = checkpoint_metadata();
+        let events: Vec<CursorTelemetryEventV2> =
+            (0..5).map(|i| checkpoint_event(i * 16)).collect();
+
+        // Two checkpoints (3 + 2 events) then the final flush.
+        let event_path = metadata.event_path(incremental_dir.path());
+        let mut writer = IncrementalTelemetryWriter::create(&event_path).expect("create writer");
+        checkpoint_v2_telemetry(&mut writer, incremental_dir.path(), &metadata, &events[..3])
+            .expect("checkpoint 1");
+        checkpoint_v2_telemetry(&mut writer, incremental_dir.path(), &metadata, &events)
+            .expect("checkpoint 2");
+        drop(writer);
+
+        // Reference: one full write of the same events.
+        let telemetry = CursorTelemetryFileV2 {
+            metadata,
+            events: events.clone(),
+        };
+        write_v2_telemetry(full_dir.path(), &telemetry).expect("full write");
+
+        let incremental_bytes = std::fs::read(&event_path).expect("incremental file");
+        let full_bytes =
+            std::fs::read(full_dir.path().join("cursor_events.bin")).expect("full file");
+        assert_eq!(
+            incremental_bytes, full_bytes,
+            "incremental event file must be byte-identical to a full write"
+        );
+
+        let decoded = read_v2_telemetry(incremental_dir.path()).expect("decode");
+        assert_eq!(decoded.events, events);
+        assert_eq!(decoded.metadata.event_count, events.len() as u64);
+        assert!(!decoded.metadata.index.is_empty());
+    }
+
+    #[test]
+    fn reader_ignores_torn_trailing_record_past_committed_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let metadata = checkpoint_metadata();
+        let events: Vec<CursorTelemetryEventV2> =
+            (0..4).map(|i| checkpoint_event(i * 16)).collect();
+        write_v2_telemetry(
+            dir.path(),
+            &CursorTelemetryFileV2 {
+                metadata: metadata.clone(),
+                events: events.clone(),
+            },
+        )
+        .expect("write");
+
+        // Simulate a crash mid-checkpoint: the header count stays at 2 while a
+        // torn partial record follows two committed ones.
+        let event_path = metadata.event_path(dir.path());
+        let mut bytes = std::fs::read(&event_path).expect("read event file");
+        bytes[8..16].copy_from_slice(&2u64.to_le_bytes());
+        bytes.truncate(16 + 3 * EVENT_RECORD_SIZE + 7); // record 3 torn mid-write
+        std::fs::write(&event_path, &bytes).expect("tamper");
+
+        let decoded = read_v2_telemetry(dir.path()).expect("decode torn file");
+        assert_eq!(
+            decoded.events.len(),
+            2,
+            "reader must stop at the committed header count"
+        );
+        assert_eq!(decoded.events, events[..2].to_vec());
+    }
+
+    #[test]
+    fn checkpoints_append_only_new_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let metadata = checkpoint_metadata();
+        let event_path = metadata.event_path(dir.path());
+        let mut writer = IncrementalTelemetryWriter::create(&event_path).expect("create");
+
+        let header_len = (V2_EVENT_MAGIC.len() + 4 + 8) as u64;
+        let first: Vec<CursorTelemetryEventV2> =
+            (0..10).map(|i| checkpoint_event(i * 16)).collect();
+        checkpoint_v2_telemetry(&mut writer, dir.path(), &metadata, &first).expect("cp1");
+        let len_after_first = std::fs::metadata(&event_path).unwrap().len();
+        assert_eq!(
+            len_after_first,
+            header_len + 10 * EVENT_RECORD_SIZE as u64,
+            "first checkpoint must write exactly the new records"
+        );
+
+        let second: Vec<CursorTelemetryEventV2> =
+            (10..13).map(|i| checkpoint_event(i * 16)).collect();
+        let mut all = first.clone();
+        all.extend(second.iter().cloned());
+        checkpoint_v2_telemetry(&mut writer, dir.path(), &metadata, &all).expect("cp2");
+        let len_after_second = std::fs::metadata(&event_path).unwrap().len();
+        assert_eq!(
+            len_after_second - len_after_first,
+            3 * EVENT_RECORD_SIZE as u64,
+            "checkpoint growth must be proportional to new events only"
+        );
     }
 }

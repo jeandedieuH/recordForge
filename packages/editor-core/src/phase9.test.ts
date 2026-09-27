@@ -124,6 +124,65 @@ describe("Phase 9 smart zoom regeneration", () => {
     ])
   })
 
+  it("keeps manually authored follow-cursor zooms while replacing generated ones", () => {
+    const state = makeState()
+    state.zoomSegments = [
+      {
+        id: "manual-follow",
+        startMs: 0,
+        durationMs: 500,
+        target: { x: 48, y: 48, width: 960, height: 540 },
+        scale: 2,
+        easing: "smooth",
+        enabled: true,
+        locked: false,
+        // "Add manual zoom" produces follow-cursor segments sourced from the user.
+        mode: "follow-cursor",
+        source: "manual",
+        preset: "manual-only",
+      },
+      {
+        id: "stale-click",
+        startMs: 2_000,
+        durationMs: 500,
+        target: { x: 100, y: 100, width: 960, height: 540 },
+        scale: 2,
+        easing: "smooth",
+        enabled: true,
+        locked: false,
+        mode: "auto",
+        source: "click",
+        preset: "product-demo",
+      },
+    ]
+
+    const result = executeCommand(
+      createEngine(state),
+      createRegenerateZoomSuggestionsCommand([
+        {
+          id: "new-auto",
+          startMs: 6_000,
+          durationMs: 800,
+          target: { x: 400, y: 200, width: 960, height: 540 },
+          scale: 1.5,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "auto",
+          source: "click",
+          preset: "product-demo",
+        },
+      ]),
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.history.present.zoomSegments).toEqual([
+      expect.objectContaining({ id: "manual-follow", mode: "follow-cursor" }),
+      expect.objectContaining({ id: "new-auto", source: "click" }),
+    ])
+  })
+
   it("promotes an edited auto suggestion to a manual segment", () => {
     const edited = executeCommand(
       createEngine(makeState()),

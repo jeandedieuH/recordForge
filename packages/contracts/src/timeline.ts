@@ -165,6 +165,11 @@ export const manualZoomSegmentSchema = z.object({
   preset: zoomPresetSchema.optional(),
   followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
   followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  // Named follow-camera speed; mirrors cursor-core's followSpeedSchemaValues.
+  // Legacy segments may carry followSmoothingAlpha instead — the camera maps
+  // it to a smooth time. Deliberately absent from the render-plan schema:
+  // export consumes the baked motion plan only.
+  followSpeed: z.enum(["relaxed", "balanced", "tight"]).optional(),
   label: z.string().optional(),
 })
 

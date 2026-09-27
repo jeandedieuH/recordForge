@@ -51,46 +51,48 @@ function formatDuration(ms: number): string {
   return `${sec.toFixed(2)}s`
 }
 
+// Trigger chips use the semantic palette (same text/bg/border pattern as the
+// Badge variants) so each source keeps a distinct hue without raw literals.
 function getTriggerMeta(segment: ManualZoomSegment) {
   if (segment.source === "click") {
     return {
       Icon: MousePointerClick,
       label: "Click trigger",
-      style: "text-sky-400 bg-sky-500/10 border-sky-500/20",
+      style: "text-info bg-info/10 border-info/20",
     }
   }
   if (segment.mode === "follow-cursor") {
     return {
       Icon: MousePointer2,
       label: "Follow cursor",
-      style: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
+      style: "text-tertiary bg-tertiary/10 border-tertiary/20",
     }
   }
   if (segment.source === "cluster") {
     return {
       Icon: Sparkles,
       label: "Action cluster",
-      style: "text-purple-400 bg-purple-500/10 border-purple-500/20",
+      style: "text-secondary bg-secondary/10 border-secondary/20",
     }
   }
   if (segment.source === "dwell") {
     return {
       Icon: Clock,
       label: "Cursor dwell",
-      style: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+      style: "text-warning bg-warning/10 border-warning/20",
     }
   }
   if (segment.mode === "smooth-pan") {
     return {
       Icon: Move,
       label: "Smooth pan",
-      style: "text-teal-400 bg-teal-500/10 border-teal-500/20",
+      style: "text-success bg-success/10 border-success/20",
     }
   }
   return {
     Icon: Target,
     label: "Manual target",
-    style: "text-blue-400 bg-blue-500/10 border-blue-500/20",
+    style: "text-primary bg-primary/10 border-primary/20",
   }
 }
 
@@ -134,9 +136,9 @@ export const ZoomSegmentCard = memo(function ZoomSegmentCard({
         className={cn(
           "absolute inset-y-2 left-0 w-1 rounded-r-full transition-all duration-base",
           selected
-            ? "bg-primary shadow-[0_0_8px_rgba(9,77,178,0.8)]"
+            ? "bg-primary shadow-[0_0_8px_var(--color-primary)]"
             : isPlayheadInside
-              ? "bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]"
+              ? "bg-success shadow-[0_0_6px_var(--color-success)]"
               : "bg-transparent group-hover:bg-border-strong",
         )}
       />
@@ -167,10 +169,10 @@ export const ZoomSegmentCard = memo(function ZoomSegmentCard({
         <div className="flex items-center gap-1.5 shrink-0">
           {isPlayheadInside ? (
             <span
-              className="flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-400"
+              className="flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-1.5 py-0.5 text-[9px] font-semibold text-success"
               title="Playhead is currently inside this zoom segment"
             >
-              <span className="size-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="size-1.5 rounded-full bg-success animate-pulse" />
               Live
             </span>
           ) : null}

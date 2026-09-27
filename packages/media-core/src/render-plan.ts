@@ -27,9 +27,7 @@ import type {
 } from "@recordforge/domain"
 import {
   buildFollowCursorMotionPlan,
-  findPreviousZoomSegment,
-  getManualZoomSegments,
-  resolveFollowCursorTargetAtTime,
+  resolveCameraShots,
   timelineMarkersToChapters,
 } from "@recordforge/editor-core"
 import {
@@ -660,32 +658,19 @@ function toZoomSegments(
   const engine =
     options?.cursorEngine ??
     (options?.cursorTelemetry ? createCursorEngine(options.cursorTelemetry) : null)
-  return getManualZoomSegments(state)
-    .filter((segment) => segment.enabled)
-    .flatMap((segment) => {
-      const window = windowTimeRange(segment.startMs, segment.startMs + segment.durationMs, range)
+  const sourceTimelineOffsetMs = range ? Math.round(range.startMs) : 0
+  // Export windows ride on the same effective shots as the preview so gaps
+  // bridged on screen are bridged in the rendered file as well.
+  return resolveCameraShots(state, engine)
+    .flatMap((shot) => {
+      const window = windowTimeRange(shot.startMs, shot.startMs + shot.durationMs, range)
       if (!window) return []
       const duration = window.endMs - window.startMs
       const defaultTrans = Math.min(450, Math.max(60, Math.round(duration * 0.3)))
-      const prevSegment = findPreviousZoomSegment(state, segment)
-      const previousTarget =
-        prevSegment?.mode === "follow-cursor" && engine
-          ? resolveFollowCursorTargetAtTime(
-              prevSegment,
-              state,
-              prevSegment.startMs + Math.max(1, prevSegment.durationMs),
-              engine,
-            )
-          : prevSegment?.target
-      const fromTarget = previousTarget
-        ? canonicalizeZoomTarget(previousTarget, state.canvas, prevSegment?.scale ?? 1)
-        : undefined
-      const fromScale = prevSegment ? prevSegment.scale : undefined
 
       let motionPlan: RenderPlanZoomMotionPlan | undefined = undefined
-      if (engine && segment.mode === "follow-cursor") {
-        const sourceTimelineOffsetMs = range ? Math.round(range.startMs) : 0
-        motionPlan = buildFollowCursorMotionPlan(segment, state, engine, {
+      if (engine && shot.mode === "follow-cursor") {
+        motionPlan = buildFollowCursorMotionPlan(shot, state, engine, {
           windowStartMs: window.startMs + sourceTimelineOffsetMs,
           windowEndMs: window.endMs + sourceTimelineOffsetMs,
           timeOffsetMs: sourceTimelineOffsetMs,
@@ -694,23 +679,25 @@ function toZoomSegments(
 
       return [
         {
-          id: segment.id,
+          id: shot.id,
           startMs: window.startMs,
           endMs: window.endMs,
-          target: canonicalizeZoomTarget(segment.target, state.canvas, segment.scale),
-          scale: segment.scale ?? 1.5,
-          easing: segment.easing ?? "smooth",
-          transitionInMs: segment.transitionInMs ?? defaultTrans,
-          transitionOutMs: segment.transitionOutMs ?? defaultTrans,
-          enabled: segment.enabled,
-          mode: segment.mode,
-          source: segment.source,
-          preset: segment.preset,
-          followDeadzonePercent: segment.followDeadzonePercent,
-          followSmoothingAlpha: segment.followSmoothingAlpha,
-          label: segment.label,
-          fromTarget,
-          fromScale,
+          target: canonicalizeZoomTarget(shot.target, state.canvas, shot.scale),
+          scale: shot.scale ?? 1.5,
+          easing: shot.easing ?? "smooth",
+          transitionInMs: shot.transitionInMs ?? defaultTrans,
+          transitionOutMs: shot.transitionOutMs ?? defaultTrans,
+          enabled: shot.enabled,
+          mode: shot.mode,
+          source: shot.source,
+          preset: shot.preset,
+          followDeadzonePercent: shot.followDeadzonePercent,
+          followSmoothingAlpha: shot.followSmoothingAlpha,
+          label: shot.label,
+          fromTarget: shot.fromTarget
+            ? canonicalizeZoomTarget(shot.fromTarget, state.canvas, shot.fromScale ?? 1)
+            : undefined,
+          fromScale: shot.fromScale,
           motionPlan,
         },
       ]

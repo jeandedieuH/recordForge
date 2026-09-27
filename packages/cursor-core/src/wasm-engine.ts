@@ -1,4 +1,5 @@
-import type { CursorEngine, CursorFrame, CursorEngineOptions } from "./engine"
+import { evaluateCubicMotionPlan } from "./engine"
+import type { CursorClickEffect, CursorEngine, CursorEngineOptions, CursorFrame } from "./engine"
 import type {
   CursorSettings,
   CursorTelemetryFile,
@@ -17,6 +18,102 @@ const DEFAULT_MOTION_THRESHOLD_PX = 1.5
 const DEFAULT_SMOOTHING_WINDOW = 12
 const DEFAULT_IDLE_FADE_MS = 400
 const DEFAULT_ADAPTIVE_SPEED_REF = 2000
+
+// Packed frame layout shared with CursorEngine::evaluate_packed in
+// packages/cursor-engine: HEADER fields then CLICK fields per active click.
+export const PACKED_FRAME_HEADER_LEN = 10
+export const PACKED_CLICK_LEN = 8
+
+const CLICK_BUTTON_BY_INDEX = ["left", "right", "middle"] as const
+
+/** Rebuild a CursorFrame from the flat f64 buffer emitted by evaluate_packed. */
+export function decodePackedCursorFrame(
+  packed: ArrayLike<number>,
+  shapeIds: readonly string[],
+): CursorFrame {
+  const clickCount = packed[9]
+  const activeClicks = new Array<CursorClickEffect>(clickCount)
+  for (let index = 0; index < clickCount; index++) {
+    const offset = PACKED_FRAME_HEADER_LEN + index * PACKED_CLICK_LEN
+    activeClicks[index] = {
+      button: CLICK_BUTTON_BY_INDEX[packed[offset]] ?? "left",
+      startMs: packed[offset + 1],
+      sourceX: packed[offset + 2],
+      sourceY: packed[offset + 3],
+      progress: packed[offset + 4],
+      intensity: packed[offset + 5],
+      expand: packed[offset + 6],
+      fade: packed[offset + 7],
+    }
+  }
+
+  const shapeIndex = packed[8]
+  return {
+    sourceTimeMs: packed[0],
+    sourceX: packed[1],
+    sourceY: packed[2],
+    visible: packed[3] !== 0,
+    opacity: packed[4],
+    shapeId: shapeIndex >= 0 ? (shapeIds[shapeIndex] ?? "") : "",
+    isIdle: packed[5] !== 0,
+    activeClicks,
+    velocityPxPerSec: packed[6],
+    clickScale: packed[7],
+  }
+}
+
+function hiddenCursorFrame(timeMs: number): CursorFrame {
+  return {
+    sourceTimeMs: timeMs,
+    sourceX: 0,
+    sourceY: 0,
+    visible: false,
+    opacity: 0,
+    shapeId: "",
+    isIdle: false,
+    activeClicks: [],
+    velocityPxPerSec: 0,
+    clickScale: 1,
+  }
+}
+
+/**
+ * Adapt a raw wasm-bindgen engine to the shared CursorEngine contract. Frames
+ * cross the bridge as a Float64Array (no JSON); settings are pushed via
+ * set_settings only when their serialized form changes.
+ */
+export function wrapWasmCursorEngine(
+  instance: WasmCursorEngine,
+  telemetry: CursorTelemetryFile,
+): CursorEngine {
+  const shapeIds = JSON.parse(instance.shape_ids()) as string[]
+  let disposed = false
+  let lastSettingsJson: string | null = null
+
+  return {
+    evaluate: (timeMs: number, settings: CursorSettings): CursorFrame => {
+      // A disposed engine's heap pointer is freed; callers during teardown get
+      // a hidden frame instead of a wasm null-pointer trap.
+      if (disposed) return hiddenCursorFrame(timeMs)
+      const settingsJson = JSON.stringify(settings)
+      if (settingsJson !== lastSettingsJson) {
+        instance.set_settings(settingsJson)
+        lastSettingsJson = settingsJson
+      }
+      return decodePackedCursorFrame(instance.evaluate_packed(timeMs), shapeIds)
+    },
+    evaluateMotionPlan: (
+      timeMs: number,
+      motionPlan: RenderPlanZoomMotionPlan,
+    ): RenderPlanZoomMotionPoint | null => evaluateCubicMotionPlan(motionPlan, timeMs),
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      instance.free()
+    },
+    telemetry,
+  }
+}
 
 let initPromise: Promise<void> | null = null
 
@@ -67,21 +164,6 @@ export async function createWasmCursorEngine(
 
   const telemetryJson = JSON.stringify(telemetry)
   const optionsJson = JSON.stringify(toWasmOptions(telemetry, options))
-  const instance = new WasmCursorEngine(telemetryJson, optionsJson)
 
-  return {
-    evaluate: (timeMs: number, settings: CursorSettings): CursorFrame => {
-      const settingsJson = JSON.stringify(settings)
-      const result = instance.evaluate(timeMs, settingsJson)
-      return JSON.parse(result) as CursorFrame
-    },
-    evaluateMotionPlan: (
-      timeMs: number,
-      motionPlan: RenderPlanZoomMotionPlan,
-    ): RenderPlanZoomMotionPoint | null => {
-      const result = instance.evaluate_motion_plan(JSON.stringify(motionPlan), timeMs)
-      return JSON.parse(result) as RenderPlanZoomMotionPoint | null
-    },
-    telemetry,
-  }
+  return wrapWasmCursorEngine(new WasmCursorEngine(telemetryJson, optionsJson), telemetry)
 }

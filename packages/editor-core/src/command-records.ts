@@ -423,6 +423,7 @@ export const addZoomSegmentCommandSchema = commandMetaSchema.extend({
   preset: zoomPresetSchema.optional(),
   followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
   followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  followSpeed: z.enum(["relaxed", "balanced", "tight"]).optional(),
   label: z.string().optional(),
 })
 
@@ -445,6 +446,7 @@ export const updateZoomSegmentCommandSchema = commandMetaSchema.extend({
   preset: zoomPresetSchema.optional(),
   followDeadzonePercent: z.number().min(0.01).max(0.5).optional(),
   followSmoothingAlpha: z.number().min(0.05).max(1.0).optional(),
+  followSpeed: z.enum(["relaxed", "balanced", "tight"]).optional(),
   label: z.string().optional(),
 })
 

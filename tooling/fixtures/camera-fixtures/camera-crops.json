@@ -1,0 +1,953 @@
+{
+  "version": 1,
+  "canvas": {
+    "width": 1920,
+    "height": 1080,
+    "padding": 0
+  },
+  "cases": [
+    {
+      "name": "static-ease-out",
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "padding": 0
+      },
+      "segment": {
+        "startMs": 0,
+        "durationMs": 2000,
+        "target": {
+          "x": 480,
+          "y": 270,
+          "width": 960,
+          "height": 540
+        },
+        "scale": 2,
+        "easing": "ease-out",
+        "transitionInMs": 400,
+        "transitionOutMs": 400,
+        "fromTarget": null,
+        "fromScale": null
+      },
+      "frames": [
+        {
+          "timeMs": 0,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080
+          },
+          "scale": 1,
+          "progress": 0
+        },
+        {
+          "timeMs": 100,
+          "crop": {
+            "x": 251.12344994904026,
+            "y": 141.2569405963352,
+            "width": 1417.7531001019195,
+            "height": 797.4861188073296
+          },
+          "scale": 1.3542555469368927,
+          "progress": 0.4375
+        },
+        {
+          "timeMs": 200,
+          "crop": {
+            "x": 389.18058479869387,
+            "y": 218.91407894926533,
+            "width": 1141.6388304026123,
+            "height": 642.1718421014693
+          },
+          "scale": 1.681792830507429,
+          "progress": 0.75
+        },
+        {
+          "timeMs": 300,
+          "crop": {
+            "x": 458.7485844348414,
+            "y": 258.0460787445983,
+            "width": 1002.5028311303172,
+            "height": 563.9078425108034
+          },
+          "scale": 1.9152065613971474,
+          "progress": 0.9375
+        },
+        {
+          "timeMs": 400,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 500,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 600,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 700,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 800,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 900,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1000,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1100,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1200,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1300,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1400,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1500,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1600,
+          "crop": {
+            "x": 480,
+            "y": 270,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 1700,
+          "crop": {
+            "x": 309.9573374702916,
+            "y": 174.351002327039,
+            "width": 1300.0853250594168,
+            "height": 731.297995345922
+          },
+          "scale": 1.4768261459394996,
+          "progress": 0.5625
+        },
+        {
+          "timeMs": 1800,
+          "crop": {
+            "x": 152.7394413564341,
+            "y": 85.9159357629942,
+            "width": 1614.5211172871318,
+            "height": 908.1681284740116
+          },
+          "scale": 1.1892071150027212,
+          "progress": 0.25
+        },
+        {
+          "timeMs": 1900,
+          "crop": {
+            "x": 40.70085052936929,
+            "y": 22.894228422770198,
+            "width": 1838.5982989412614,
+            "height": 1034.2115431544596
+          },
+          "scale": 1.0442737824274138,
+          "progress": 0.0625
+        }
+      ]
+    },
+    {
+      "name": "snappy-zoom",
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "padding": 0
+      },
+      "segment": {
+        "startMs": 500,
+        "durationMs": 1500,
+        "target": {
+          "x": 1200,
+          "y": 540,
+          "width": 640,
+          "height": 360
+        },
+        "scale": 3,
+        "easing": "snappy",
+        "transitionInMs": 300,
+        "transitionOutMs": 300,
+        "fromTarget": null,
+        "fromScale": null
+      },
+      "frames": [
+        {
+          "timeMs": 500,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080
+          },
+          "scale": 1,
+          "progress": 0
+        },
+        {
+          "timeMs": 600,
+          "crop": {
+            "x": 969.1540426845256,
+            "y": 436.1193192080365,
+            "width": 886.2356878031728,
+            "height": 498.5075743892847
+          },
+          "scale": 2.1664665804187515,
+          "progress": 0.7037037037037036
+        },
+        {
+          "timeMs": 700,
+          "crop": {
+            "x": 1175.0829010611392,
+            "y": 528.7873054775125,
+            "width": 666.5782388681184,
+            "height": 374.9502593633166
+          },
+          "scale": 2.880382058766652,
+          "progress": 0.9629629629629629
+        },
+        {
+          "timeMs": 800,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 900,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1000,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1100,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1200,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1300,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1400,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1500,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1600,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1700,
+          "crop": {
+            "x": 1200,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1800,
+          "crop": {
+            "x": 500.1200517487491,
+            "y": 225.05402328693702,
+            "width": 1386.538611468001,
+            "height": 779.9279689507506
+          },
+          "scale": 1.3847432621924576,
+          "progress": 0.2962962962962964
+        },
+        {
+          "timeMs": 1900,
+          "crop": {
+            "x": 71.7707647400091,
+            "y": 32.29684413300413,
+            "width": 1843.444517610657,
+            "height": 1036.9375411559945
+          },
+          "scale": 1.0415284982314352,
+          "progress": 0.03703703703703709
+        }
+      ]
+    },
+    {
+      "name": "spring-overshoot",
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "padding": 0
+      },
+      "segment": {
+        "startMs": 0,
+        "durationMs": 1600,
+        "target": {
+          "x": 0,
+          "y": 0,
+          "width": 640,
+          "height": 360
+        },
+        "scale": 3,
+        "easing": "spring",
+        "transitionInMs": 500,
+        "transitionOutMs": 400,
+        "fromTarget": null,
+        "fromScale": null
+      },
+      "frames": [
+        {
+          "timeMs": 0,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080
+          },
+          "scale": 1,
+          "progress": 0
+        },
+        {
+          "timeMs": 100,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 947.4880887726001,
+            "height": 532.9620499345875
+          },
+          "scale": 2.026410698721518,
+          "progress": 0.6428711080746704
+        },
+        {
+          "timeMs": 200,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 641.7622910242103,
+            "height": 360.9912887011183
+          },
+          "scale": 2.991761944965334,
+          "progress": 0.9974970282072229
+        },
+        {
+          "timeMs": 300,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 624.8678928463974,
+            "height": 351.48818972609854
+          },
+          "scale": 3.072649470360877,
+          "progress": 1.0217801317643929
+        },
+        {
+          "timeMs": 400,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 636.8053219867027,
+            "height": 358.20299361752024
+          },
+          "scale": 3.015050178930653,
+          "progress": 1.0045550049994025
+        },
+        {
+          "timeMs": 500,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 600,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 700,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 800,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 900,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1000,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1100,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1200,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1300,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 1517.6292968419818,
+            "height": 853.6664794736148
+          },
+          "scale": 1.2651310856974802,
+          "progress": 0.21406618539938915
+        },
+        {
+          "timeMs": 1400,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080
+          },
+          "scale": 1,
+          "progress": -0.02551654414765059
+        },
+        {
+          "timeMs": 1500,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080
+          },
+          "scale": 1,
+          "progress": -0.007673436582606108
+        }
+      ]
+    },
+    {
+      "name": "bridged-pan",
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "padding": 0
+      },
+      "segment": {
+        "startMs": 1000,
+        "durationMs": 1200,
+        "target": {
+          "x": 960,
+          "y": 540,
+          "width": 640,
+          "height": 360
+        },
+        "scale": 3,
+        "easing": "cinematic",
+        "transitionInMs": 300,
+        "transitionOutMs": 300,
+        "fromTarget": {
+          "x": 0,
+          "y": 0,
+          "width": 640,
+          "height": 360
+        },
+        "fromScale": 3
+      },
+      "frames": [
+        {
+          "timeMs": 1000,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 0
+        },
+        {
+          "timeMs": 1100,
+          "crop": {
+            "x": 248.8888888888889,
+            "y": 140,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 0.25925925925925924
+        },
+        {
+          "timeMs": 1200,
+          "crop": {
+            "x": 711.1111111111111,
+            "y": 400,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 0.7407407407407407
+        },
+        {
+          "timeMs": 1300,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1400,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1500,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1600,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1700,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1800,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 1900,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 640,
+            "height": 360
+          },
+          "scale": 3,
+          "progress": 1
+        },
+        {
+          "timeMs": 2000,
+          "crop": {
+            "x": 801.8256562532545,
+            "y": 451.0269316424557,
+            "width": 850.8991249956607,
+            "height": 478.63075781005915
+          },
+          "scale": 2.2564366839721353,
+          "progress": 0.7407407407407407
+        },
+        {
+          "timeMs": 2100,
+          "crop": {
+            "x": 356.91039169337535,
+            "y": 200.76209532752358,
+            "width": 1444.1194777421663,
+            "height": 812.3172062299685
+          },
+          "scale": 1.32952988280572,
+          "progress": 0.2592592592592593
+        }
+      ]
+    },
+    {
+      "name": "equal-scale-pan",
+      "canvas": {
+        "width": 1920,
+        "height": 1080,
+        "padding": 0
+      },
+      "segment": {
+        "startMs": 0,
+        "durationMs": 1000,
+        "target": {
+          "x": 960,
+          "y": 540,
+          "width": 960,
+          "height": 540
+        },
+        "scale": 2,
+        "easing": "linear",
+        "transitionInMs": 500,
+        "transitionOutMs": 0,
+        "fromTarget": {
+          "x": 0,
+          "y": 0,
+          "width": 960,
+          "height": 540
+        },
+        "fromScale": 2
+      },
+      "frames": [
+        {
+          "timeMs": 0,
+          "crop": {
+            "x": 0,
+            "y": 0,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 0
+        },
+        {
+          "timeMs": 100,
+          "crop": {
+            "x": 192,
+            "y": 108,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 0.2
+        },
+        {
+          "timeMs": 200,
+          "crop": {
+            "x": 384,
+            "y": 216,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 0.4
+        },
+        {
+          "timeMs": 300,
+          "crop": {
+            "x": 576,
+            "y": 324,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 0.6
+        },
+        {
+          "timeMs": 400,
+          "crop": {
+            "x": 768,
+            "y": 432,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 0.8
+        },
+        {
+          "timeMs": 500,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 600,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 700,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 800,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        },
+        {
+          "timeMs": 900,
+          "crop": {
+            "x": 960,
+            "y": 540,
+            "width": 960,
+            "height": 540
+          },
+          "scale": 2,
+          "progress": 1
+        }
+      ]
+    }
+  ]
+}

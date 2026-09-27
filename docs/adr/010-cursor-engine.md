@@ -1,9 +1,9 @@
 # ADR 010: Cursor Evaluation Engine — Rust+WASM vs Compiled Motion Plan
 
-> **Status:** Proposed — Phase 0 architecture decision  
+> **Status:** Accepted — Implemented (Option A, Rust+WASM)  
 > **Date:** 2026-08-10  
 > **Scope:** How the editor preview and export share one canonical cursor evaluator  
-> **Related:** `editor-ui-cursor-imrovement-plan.md`, `packages/cursor-core/src/index.ts`, `apps/desktop/src-tauri/src/exports/cursor.rs`
+> **Related:** `editor-ui-cursor-imrovement-plan.md`, `packages/cursor-engine/`, `packages/cursor-core/src/index.ts`, `packages/cursor-core/src/wasm-engine.ts`, `apps/desktop/src-tauri/src/exports/cursor.rs`, `apps/desktop/src-tauri/src/exports/camera.rs`
 
 ## Context
 
@@ -97,6 +97,23 @@ The prototype artifact contains:
 
 The crate is intentionally throwaway. Phase 6 will either fold it into `apps/desktop/src-tauri` as a shared module or keep it as a separate `packages/cursor-engine` workspace member.
 
+## Shipped Implementation
+
+Option A shipped as the `packages/cursor-engine` crate: `src-tauri` links it natively (`cursor-engine` path dependency) and `packages/cursor-core` builds it to `packages/cursor-core/wasm/` via `wasm-pack --target web` (`bun run --cwd packages/cursor-core build:wasm`). The prototype was superseded by this crate. Differences from the Phase 0 sketch:
+
+- **Packed WASM bridge.** Per-frame results cross the bridge as a `Float64Array` from `evaluate_packed` — a 10-field header (time, source position, visibility, opacity, idle, velocity, click scale, shape index, click count) followed by 8 fields per active click (button, start, position, progress, intensity, expand, fade). No JSON is serialized per frame; `decodePackedCursorFrame` in `wasm-engine.ts` rebuilds the `CursorFrame`.
+- **Diff-push settings.** `set_settings` is invoked only when the serialized settings change, so steady-state playback pays one bridge call per frame.
+- **Dispose lifecycle.** `CursorEngine.dispose()` frees the WASM heap, is idempotent, and turns `evaluate` into a hidden-frame no-op so teardown never traps on a null pointer. The timeline store boots with the TypeScript engine, upgrades to WASM when it finishes loading, and disposes whichever engine loses the race (`timeline-store.ts`).
+- **Time-based smoothing.** Zero-phase smoothing measures each sample's `dt` against a fixed 60 Hz reference interval (`SMOOTHING_REFERENCE_INTERVAL_MS`), so `lambda = 1-(1-a)^(dt/ref)` is identical on 60 Hz and 120 Hz captures. Smoothed passes are kept in a bounded cache keyed by segment and alpha so per-frame evaluation avoids an O(n) allocation. Motion resuming after an idle gap fades back in over a fixed 150 ms instead of popping to full opacity.
+- **Camera parity via shared motion plan.** Follow-cursor zoom compiles to a compact cubic-Bézier `RenderPlanZoomMotionPlan` (version 1) evaluated by `evaluate_cubic_motion_plan` in Rust and `evaluateCubicMotionPlan` in TypeScript — the WASM wrapper delegates `evaluateMotionPlan` to the TypeScript evaluator since the plan is already a plain JSON contract. Zoom-space crop interpolation (`interpolate_crop` in `exports/camera.rs`) mirrors `interpolateCrop` in `packages/editor-core/src/composition.ts`, so preview, the zoompan expression graph, and the cursor rasterizer all sample the same crop.
+
+Parity coverage that exists today:
+
+- `packages/cursor-core/src/parity.test.ts` — a Vitest harness that loads the real WASM artifact (`initSync`) and asserts frame/motion-plan/fit parity against the TypeScript engine across the shared fixtures, plus settings diff-push and dispose behavior.
+- `apps/desktop/src-tauri/src/exports/cursor.rs` — `matches_typescript_preview_golden_frames_at_fractional_timestamps` compares the native engine against TypeScript golden frames (`tooling/golden-fixtures/preview-rust-fractional-frame.json`).
+
+**Still open:** the original criterion mentioned an HTML/React browser harness; no standalone browser page was ever built — the Vitest suite exercises the same assertion by loading the real artifact under Node. A browser-side harness remains optional follow-up.
+
 ## Risks and Mitigations
 
 | Risk | Mitigation |
@@ -109,7 +126,7 @@ The crate is intentionally throwaway. Phase 6 will either fold it into `apps/des
 
 ## Acceptance Criteria for Closing This ADR
 
-- [x] `tooling/prototypes/cursor-engine-wasm` builds for `wasm32-unknown-unknown`.
+- [x] `tooling/prototypes/cursor-engine-wasm` builds for `wasm32-unknown-unknown` (superseded by `packages/cursor-engine` + the checked-in `packages/cursor-core/wasm` artifact).
 - [x] Native build passes parity tests for `cursor-v1-100dpi-10s.json` through `cursor-v2-topology-multi-10s.json`.
-- [ ] A simple HTML page (or React test harness) can load the WASM module and render the same cursor position as the Rust export for the same input.
-- [ ] The decision is either confirmed, modified, or reverted with a new ADR before Phase 6 implementation.
+- [x] A test harness can load the WASM module and produce the same cursor state as the TypeScript/Rust evaluators for the same input — satisfied by `packages/cursor-core/src/parity.test.ts` (Vitest, `initSync` on the real artifact) plus the Rust-side golden-frame test. No standalone browser page was built; see "Still open" above.
+- [x] The decision is confirmed by this update: Option A shipped.

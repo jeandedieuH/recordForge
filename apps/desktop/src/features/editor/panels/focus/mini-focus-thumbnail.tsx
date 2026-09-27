@@ -33,7 +33,7 @@ export const MiniFocusThumbnail = memo(function MiniFocusThumbnail({
   return (
     <div
       className={cn(
-        "relative shrink-0 overflow-hidden rounded-xs border border-border-strong bg-black/60 shadow-inner",
+        "relative shrink-0 overflow-hidden rounded-xs border border-border-strong bg-surface-dim shadow-inner",
         className,
       )}
       style={{ width: `${width}px`, height: `${height}px` }}
@@ -41,14 +41,14 @@ export const MiniFocusThumbnail = memo(function MiniFocusThumbnail({
     >
       {/* Subtle rule of thirds grid */}
       <div className="pointer-events-none absolute inset-0 grid grid-cols-3 grid-rows-3 opacity-15">
-        <div className="border-b border-r border-dashed border-white/50" />
-        <div className="border-b border-r border-dashed border-white/50" />
-        <div className="border-b border-dashed border-white/50" />
-        <div className="border-b border-r border-dashed border-white/50" />
-        <div className="border-b border-r border-dashed border-white/50" />
-        <div className="border-b border-dashed border-white/50" />
-        <div className="border-r border-dashed border-white/50" />
-        <div className="border-r border-dashed border-white/50" />
+        <div className="border-b border-r border-dashed border-foreground/50" />
+        <div className="border-b border-r border-dashed border-foreground/50" />
+        <div className="border-b border-dashed border-foreground/50" />
+        <div className="border-b border-r border-dashed border-foreground/50" />
+        <div className="border-b border-r border-dashed border-foreground/50" />
+        <div className="border-b border-dashed border-foreground/50" />
+        <div className="border-r border-dashed border-foreground/50" />
+        <div className="border-r border-dashed border-foreground/50" />
         <div />
       </div>
 
@@ -63,7 +63,7 @@ export const MiniFocusThumbnail = memo(function MiniFocusThumbnail({
         }}
       >
         {/* Tiny focal center dot */}
-        <div className="absolute left-1/2 top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow-xs" />
+        <div className="absolute left-1/2 top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-foreground shadow-xs" />
       </div>
     </div>
   )

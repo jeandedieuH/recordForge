@@ -197,7 +197,17 @@ Each session will track multiple asset types:
 | `system_audio` | `sys_NNN.wav` | Separate audio from native WASAPI loopback |
 | `webcam` | `webcam_NNN.mp4` | Separate timestamped video |
 | `marker` | In manifest | Metadata only |
-| `cursor_events` | `cursor.json` | Metadata (Phase 6) |
+| `cursor_events` | `cursor_telemetry.json` + `cursor_events.bin` | Metadata (Phase 6) |
+
+### Cursor telemetry checkpoint protocol
+
+During capture, cursor telemetry checkpoints are **append-only** rather than full rewrites. The capture loop opens `cursor_events.bin` once and writes the 16-byte header (`RFCT` magic, u32 version, u64 `event_count`) with `event_count = 0`. Every ~1 s checkpoint then:
+
+1. Appends only the fixed-size event records produced since the last checkpoint (32 bytes each).
+2. `flush`es and `sync_data`s the file.
+3. Commits the batch by seeking to the header `event_count` field and writing the new total in place, then `flush` + `sync_data` again.
+
+The in-place `event_count` write is the **commit point**: a reader that honors the header count sees either every record of a checkpoint or none of them, and a torn trailing record after a crash is ignored. The small `cursor_telemetry.json` metadata (shapes, health, chunk index entries appended every `INDEX_STRIDE = 1024` events) is rewritten atomically per checkpoint using the same temp-file + rename protocol as before. The final stop checkpoint produces a file byte-identical in format to a single full `write_v2_telemetry` call; that function remains for degraded/empty-telemetry paths and other callers.
 
 ### Current implementation
 Microphone and system audio are captured by native WASAPI workers into the independent `mic_NNN.wav` and `sys_NNN.wav` assets. At segment finalization, FFmpeg applies the microphone cleanup filter and muxes the available audio assets as separate uncompressed PCM (`pcm_s16le`) streams in `seg_NNN.mp4`; the audio streams remain independently addressable with 0 ms encoder delay during preparation and editing, while AAC encoding is applied once during final render export. Webcam capture stays outside that mux: each `webcam_NNN.mp4` sidecar records its screen-relative startup offset, and finalization builds a separate, timeline-aligned `webcam.mp4` asset. This keeps camera editing independent from the screen/audio output and preserves pause/resume timing.

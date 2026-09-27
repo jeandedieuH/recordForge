@@ -52,6 +52,16 @@
 | `test_manifest_atomic_write` | Write manifest | `session.json.tmp` does not exist after write |
 | `test_manifest_rewrite_is_atomic_and_durable` | Write, mutate, and rewrite manifest | Existing manifest is replaced and the latest state can be read |
 
+### 2.1a Cursor telemetry checkpoints (append-only commit-count protocol)
+
+Cursor telemetry checkpoints append new event records to `cursor_events.bin`, sync data, then update the header `event_count` in place — the count is the commit point, so a crash mid-append never exposes a torn record. Metadata JSON (`cursor_telemetry.json`) is still rewritten atomically per checkpoint.
+
+| Test | Action | Verification |
+| ------ | -------- | ------------- |
+| `incremental_writer_matches_full_write_output` | Two checkpoints + final flush via the incremental writer | `cursor_events.bin` is byte-identical to a single `write_v2_telemetry` output; decode returns every event |
+| `reader_ignores_torn_trailing_record_past_committed_count` | Truncate the file mid-record with an older header count | Reader decodes exactly the committed count and ignores trailing bytes |
+| `checkpoints_append_only_new_records` | Checkpoint, append more events, checkpoint again | File growth equals `new_events * EVENT_RECORD_SIZE` — no O(total) rewrite |
+
 ### 2.2 Fragment lifecycle
 
 | Test | Action | Verification |

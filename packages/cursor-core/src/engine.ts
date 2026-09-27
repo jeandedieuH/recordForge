@@ -22,6 +22,10 @@ export interface CursorClickEffect {
   progress: number
   /** 0..1 visual intensity at this point in time. */
   intensity: number
+  /** Ease-out-cubic expansion factor: `1 - (1 - p)^3`. */
+  expand: number
+  /** Quadratic fade factor: `(1 - p)^2`. */
+  fade: number
 }
 
 export interface CursorFrame {
@@ -66,6 +70,8 @@ interface PreparedEvent {
   speedPxPerSec: number
   isMotion: boolean
   lastMotionMs: number
+  /** Idle gap that preceded the most recent motion event; 0 while still moving. */
+  motionGapMs: number
   isClickEdge: boolean
   clickButton: "left" | "right" | "middle"
 }
@@ -90,9 +96,15 @@ const DEFAULT_CLICK_DURATION_MS = 350
 const DEFAULT_GAP_MULTIPLIER = 8
 const MIN_GAP_THRESHOLD_MS = 120
 const ADAPTIVE_SPEED_REF_PX_PER_SEC = 2000
+// Smoothing strength is derived from wall-clock sample spacing against this
+// fixed interval rather than the telemetry's declared rate, so a preset feels
+// identical on 60 Hz and 120 Hz captures.
+const SMOOTHING_REFERENCE_INTERVAL_MS = 1_000 / 60
+const IDLE_FADE_IN_MS = 150
 
-// Kept only for non-browser callers and the short period before the WASM
-// adapter finishes loading; preview/export use the Rust implementation when available.
+// Shared by the TS engine and the WASM wrapper: motion-plan evaluation is pure
+// math over an already-parsed plan, so both engines call the TypeScript mirror
+// and skip a WASM round-trip per seek.
 function isEvaluableMotionSegment(segment: RenderPlanZoomMotionPlan["segments"][number]): boolean {
   return (
     segment.endMs > segment.startMs &&
@@ -102,7 +114,12 @@ function isEvaluableMotionSegment(segment: RenderPlanZoomMotionPlan["segments"][
   )
 }
 
-function evaluateCubicMotionPlanFallback(
+/**
+ * TypeScript mirror of the Rust `evaluate_cubic_motion_plan`. Preview uses this
+ * directly even on the WASM engine so motion-plan seeks never cross the bridge;
+ * the parity suite checks it against the Rust binding.
+ */
+export function evaluateCubicMotionPlan(
   motionPlan: RenderPlanZoomMotionPlan,
   timeMs: number,
 ): RenderPlanZoomMotionPoint | null {
@@ -189,6 +206,9 @@ export interface CursorEngine {
     timeMs: number,
     motionPlan: RenderPlanZoomMotionPlan,
   ) => RenderPlanZoomMotionPoint | null
+  /** Release held resources (the WASM heap allocation). Optional for engines
+   *  with nothing to free; must be idempotent when present. */
+  dispose?: () => void
   telemetry: CursorTelemetryFile
 }
 
@@ -213,8 +233,7 @@ export function createCursorEngine(
         velocityPxPerSec: 0,
         clickScale: 1,
       }),
-      evaluateMotionPlan: (timeMs, motionPlan) =>
-        evaluateCubicMotionPlanFallback(motionPlan, timeMs),
+      evaluateMotionPlan: (timeMs, motionPlan) => evaluateCubicMotionPlan(motionPlan, timeMs),
       telemetry,
     }
   }
@@ -319,6 +338,15 @@ export function createCursorEngine(
         ? prepared[index - 1].lastMotionMs
         : event.tMs
 
+    // The idle gap that this motion event ended; non-motion events inherit the
+    // gap of their last motion so the fade-in check stays stateless.
+    const motionGapMs =
+      index === 0
+        ? 0
+        : isMotion
+          ? event.tMs - prepared[index - 1].lastMotionMs
+          : prepared[index - 1].motionGapMs
+
     if (click) {
       clicks.push({
         index,
@@ -343,6 +371,7 @@ export function createCursorEngine(
       speedPxPerSec,
       isMotion,
       lastMotionMs,
+      motionGapMs,
       isClickEdge: click,
       clickButton,
     }
@@ -407,10 +436,12 @@ export function createCursorEngine(
         const dt = Math.max(1, ev.tMs - prepared[i - 1].tMs)
         const rawAlpha = alpha * (1 + ev.speedPxPerSec / ADAPTIVE_SPEED_REF_PX_PER_SEC)
         const sampleAlpha = rawAlpha < 0.05 ? 0.05 : rawAlpha > 1 ? 1 : rawAlpha
-        const rawRate = dt / expectedIntervalMs
+        // Time-based rate: dt measured against the fixed 60 Hz reference so
+        // lambda = 1 - (1-a)^(dt/ref) behaves identically at any capture rate.
+        const rawRate = dt / SMOOTHING_REFERENCE_INTERVAL_MS
         const rate = rawRate < 0.1 ? 0.1 : rawRate > 5 ? 5 : rawRate
         const rawLambda = rate === 1 ? sampleAlpha : 1 - Math.pow(1 - sampleAlpha, rate)
-        const lambda = rawLambda < 0.05 ? 0.05 : rawLambda > 1 ? 1 : rawLambda
+        const lambda = rawLambda < 0.01 ? 0.01 : rawLambda > 1 ? 1 : rawLambda
 
         forwardX[relI] = prevFx + (x - prevFx) * lambda
         forwardY[relI] = prevFy + (y - prevFy) * lambda
@@ -436,10 +467,11 @@ export function createCursorEngine(
         const dt = Math.max(1, prepared[absI + 1].tMs - ev.tMs)
         const rawAlpha = alpha * (1 + ev.speedPxPerSec / ADAPTIVE_SPEED_REF_PX_PER_SEC)
         const sampleAlpha = rawAlpha < 0.05 ? 0.05 : rawAlpha > 1 ? 1 : rawAlpha
-        const rawRate = dt / expectedIntervalMs
+        // Same fixed reference interval as the forward pass.
+        const rawRate = dt / SMOOTHING_REFERENCE_INTERVAL_MS
         const rate = rawRate < 0.1 ? 0.1 : rawRate > 5 ? 5 : rawRate
         const rawLambda = rate === 1 ? sampleAlpha : 1 - Math.pow(1 - sampleAlpha, rate)
-        const lambda = rawLambda < 0.05 ? 0.05 : rawLambda > 1 ? 1 : rawLambda
+        const lambda = rawLambda < 0.01 ? 0.01 : rawLambda > 1 ? 1 : rawLambda
 
         smoothedX[relI] = nextBx + (fx - nextBx) * lambda
         smoothedY[relI] = nextBy + (fy - nextBy) * lambda
@@ -552,6 +584,9 @@ export function createCursorEngine(
 
       const progress = elapsed / duration
       const intensity = 1 - progress
+      // Expansion/fade easing shared with the Rust engine and the exporter.
+      const expand = 1 - (1 - progress) ** 3
+      const fade = (1 - progress) ** 2
       result.push({
         button: click.button,
         startMs: click.tMs,
@@ -559,6 +594,8 @@ export function createCursorEngine(
         sourceY: click.y,
         progress,
         intensity,
+        expand,
+        fade,
       })
     }
 
@@ -609,7 +646,6 @@ export function createCursorEngine(
   function applyClickMovement(
     timeMs: number,
     settings: CursorSettings,
-    clickScale: number,
     point: { x: number; y: number },
   ): { x: number; y: number } {
     const DWELL_HOLD_MS = 50.0
@@ -653,12 +689,6 @@ export function createCursorEngine(
       break // Anchored to most recent active click
     }
 
-    // Directional kinetic micro-tap dip: down-and-right mechanical press
-    const depression = 1.0 - clickScale
-    const tapScale = clamp(settings.scale ?? 1.0, 0.5, 3.0)
-    x += depression * 14.0 * tapScale
-    y += depression * 18.0 * tapScale
-
     return { x, y }
   }
 
@@ -680,13 +710,22 @@ export function createCursorEngine(
       opacity = 1 - fadeProgress
     } else if (isIdle) {
       opacity = 0
+    } else if (idleTimeoutMs > 0 && event.motionGapMs > idleTimeoutMs) {
+      // Motion resumed after an idle gap: replay the faded opacity backwards
+      // over a fixed 150ms fade-in instead of popping straight back to 1.
+      const opacityBefore =
+        idleFadeDurationMs > 0
+          ? 1 - clamp((event.motionGapMs - idleTimeoutMs) / idleFadeDurationMs, 0, 1)
+          : 0
+      const fadeIn = clamp((timeMs - event.lastMotionMs) / IDLE_FADE_IN_MS, 0, 1)
+      opacity = opacityBefore + (1 - opacityBefore) * fadeIn
     }
 
     const visible = settings.enabled && event.visible && opacity > 0
     const clickScale = calculateClickScale(timeMs, settings)
 
     const point = settings.clickPressAnimation
-      ? applyClickMovement(timeMs, settings, clickScale, rawPoint)
+      ? applyClickMovement(timeMs, settings, rawPoint)
       : rawPoint
 
     return {
@@ -705,7 +744,7 @@ export function createCursorEngine(
 
   return {
     evaluate,
-    evaluateMotionPlan: (timeMs, motionPlan) => evaluateCubicMotionPlanFallback(motionPlan, timeMs),
+    evaluateMotionPlan: (timeMs, motionPlan) => evaluateCubicMotionPlan(motionPlan, timeMs),
     telemetry,
   }
 }

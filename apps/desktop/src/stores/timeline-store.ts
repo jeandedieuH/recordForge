@@ -318,6 +318,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   snapshotPending: false,
 
   load: async (recordingId) => {
+    // Release the previous session's cursor engine before dropping it; the
+    // WASM wrapper owns heap memory that GC alone does not reclaim promptly.
+    get().cursorEngine?.dispose?.()
     set({
       isLoading: true,
       error: null,
@@ -530,8 +533,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       // Try to upgrade to the canonical Rust + WASM cursor engine for the preview.
       // The TypeScript engine remains in use until the WASM module loads.
       if (initialCursorTelemetry) {
-        createWasmCursorEngine(initialCursorTelemetry)
+        const loadedTelemetry = initialCursorTelemetry
+        createWasmCursorEngine(loadedTelemetry)
           .then((wasmEngine) => {
+            // The WASM build can resolve after the user opened another
+            // project; only install it while this telemetry is still current.
+            if (get().cursorTelemetry !== loadedTelemetry) {
+              wasmEngine.dispose?.()
+              return
+            }
+            get().cursorEngine?.dispose?.()
             set({ cursorEngine: wasmEngine })
           })
           .catch((err) => {
@@ -1342,10 +1353,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   // Phase 1: reset all session-scoped state without saving. Used when the
   // session component unmounts after the session has already been closed.
   resetSession: () => {
-    const { autosaveTimeout } = get()
+    const { autosaveTimeout, cursorEngine } = get()
     if (autosaveTimeout) {
       window.clearTimeout(autosaveTimeout)
     }
+    cursorEngine?.dispose?.()
     get().stopListening()
     set({
       engine: null,

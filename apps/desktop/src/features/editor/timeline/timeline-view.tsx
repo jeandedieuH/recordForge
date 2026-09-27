@@ -60,12 +60,13 @@ import {
   findCursorEventAtTime,
   getCursorPointAtTimelineTime,
   isCursorClickEdge,
-  sourcePointToCanvas,
+  sourcePointToZoomSpace,
+  timelineToCursorSourceTime,
   zoomTargetForCursorPoint,
 } from "@recordforge/cursor-core"
 import { buildOverlayRenderPlan, isTimelineAudioMuted } from "@recordforge/media-core"
-import { AlertCircle, Monitor } from "lucide-react"
-import { Button, EmptyState, Progress, Skeleton, cn, useToast } from "@recordforge/ui"
+import { AlertCircle, Monitor, ZoomIn } from "lucide-react"
+import { Button, EmptyState, IconButton, Progress, Skeleton, cn, useToast } from "@recordforge/ui"
 import { useEditorStore } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import type {
@@ -442,12 +443,22 @@ export function TimelineView({
     const zoomSelection = view.selection
     return (timeline.zoomSegments ?? []).find((s) => s.id === zoomSelection.segmentId) ?? null
   }, [view.selection, timeline])
+  // Framing mode: while a zoom segment is selected the screen renders unzoomed
+  // so the overlay frame matches what is on screen. "Preview zoom" opts back
+  // into the real zoomed render without leaving edit mode.
+  const [zoomPreviewActive, setZoomPreviewActive] = useState(false)
+  const selectedZoomSegmentId = selectedZoomSegment?.id
+  useEffect(() => {
+    setZoomPreviewActive(false)
+  }, [selectedZoomSegmentId])
+  const isZoomFraming = Boolean(selectedZoomSegment?.enabled) && !zoomPreviewActive
+  const screenZoomTransformStyle = isZoomFraming ? undefined : zoomTransformStyle
   const cursorPointAtPlayhead = useMemo(() => {
-    if (composition?.cursor.sourcePoint) {
-      return composition.cursor.sourcePoint
+    if (composition?.cursor.zoomSpacePoint) {
+      return composition.cursor.zoomSpacePoint
     }
     return getCursorPointAtTimelineTime(timeline, view.playheadMs, cursorTelemetry, cursorEngine)
-  }, [composition?.cursor.sourcePoint, timeline, view.playheadMs, cursorTelemetry, cursorEngine])
+  }, [composition?.cursor.zoomSpacePoint, timeline, view.playheadMs, cursorTelemetry, cursorEngine])
   const cursorClickTimesMs = useMemo(() => {
     if (!timeline) return []
     const screenAssetId = timeline.tracks.find((track) => track.kind === "screen")?.clips[0]
@@ -1248,11 +1259,13 @@ export function TimelineView({
     }
   }
 
+  /** Nearest click edge to a timeline ms, in *timeline* ms (clicks are mapped
+   *  through the screen-clip speed ratio elsewhere via cursorClickTimesMs). */
   function findNearestClickTimeMs(timeMs: number): number | null {
-    if (!cursorTelemetry || cursorClickSourceTimesMs.length === 0) return null
-    let nearest = cursorClickSourceTimesMs[0]
+    if (!cursorTelemetry || cursorClickTimesMs.length === 0) return null
+    let nearest = cursorClickTimesMs[0]
     let nearestDistance = Math.abs(nearest - timeMs)
-    for (const clickMs of cursorClickSourceTimesMs) {
+    for (const clickMs of cursorClickTimesMs) {
       const distance = Math.abs(clickMs - timeMs)
       if (distance < nearestDistance) {
         nearest = clickMs
@@ -1266,9 +1279,12 @@ export function TimelineView({
     if (!cursorTelemetry || !timeline) return
     const clickTimeMs = findNearestClickTimeMs(segment.startMs + Math.floor(segment.durationMs / 2))
     if (clickTimeMs === null) return
-    const lookup = findCursorEventAtTime(cursorTelemetry, clickTimeMs)
+    // Telemetry lookup is indexed by source time — map the timeline click back.
+    const clickSourceTimeMs = timelineToCursorSourceTime(timeline, clickTimeMs)
+    if (clickSourceTimeMs === null) return
+    const lookup = findCursorEventAtTime(cursorTelemetry, clickSourceTimeMs)
     if (!lookup) return
-    const point = sourcePointToCanvas(cursorTelemetry, timeline.canvas, {
+    const point = sourcePointToZoomSpace(cursorTelemetry, timeline.canvas, {
       x: lookup.event.sourceX,
       y: lookup.event.sourceY,
     })
@@ -1896,6 +1912,27 @@ export function TimelineView({
             {/* Direct On-Canvas Framing & Aspect Ratio Toolbar */}
             <CanvasToolbarOverlay />
 
+            {/* Zoom framing: while a zoom segment is selected the screen renders
+                unzoomed for accurate frame editing; this toggles back to the real
+                zoomed preview. */}
+            {selectedZoomSegment?.enabled && videoBounds ? (
+              <IconButton
+                label={zoomPreviewActive ? "Back to framing" : "Preview zoom"}
+                tooltipSide="left"
+                variant="ghost"
+                aria-pressed={zoomPreviewActive}
+                className={cn(
+                  "absolute right-3 top-3 z-40 size-8 rounded-full border border-border/70 shadow-e2 backdrop-blur-md",
+                  zoomPreviewActive
+                    ? "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground"
+                    : "bg-background/80 text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => setZoomPreviewActive((active) => !active)}
+              >
+                <ZoomIn className="size-4" aria-hidden />
+              </IconButton>
+            ) : null}
+
             <div
               ref={canvasRef}
               className="relative flex items-center justify-center overflow-visible"
@@ -1974,9 +2011,9 @@ export function TimelineView({
                     {...playbackVideoProps}
                     className="size-full object-contain cursor-pointer"
                     style={
-                      zoomTransformStyle
+                      screenZoomTransformStyle
                         ? {
-                            transform: zoomTransformStyle,
+                            transform: screenZoomTransformStyle,
                             transformOrigin: "0 0",
                             willChange: "transform",
                           }
@@ -2023,9 +2060,9 @@ export function TimelineView({
                     {...playbackVideoProps}
                     className="size-full object-contain cursor-pointer"
                     style={
-                      zoomTransformStyle
+                      screenZoomTransformStyle
                         ? {
-                            transform: zoomTransformStyle,
+                            transform: screenZoomTransformStyle,
                             transformOrigin: "0 0",
                             willChange: "transform",
                           }
@@ -2148,7 +2185,7 @@ export function TimelineView({
                   offsetX={videoBounds.left}
                   offsetY={videoBounds.top}
                   borderRadius={screenStyle.borderRadius as number | string | undefined}
-                  zoomTransform={composition?.screen.zoomTransform}
+                  zoomTransform={isZoomFraming ? undefined : composition?.screen.zoomTransform}
                 />
               ) : null}
 
@@ -2162,6 +2199,7 @@ export function TimelineView({
                   offsetX={videoBounds.left}
                   offsetY={videoBounds.top}
                   cursorPointAtPlayhead={cursorPointAtPlayhead}
+                  dimOutsideFrame={isZoomFraming}
                   onUpdateTarget={(target, options) =>
                     interaction.updateZoomTarget(selectedZoomSegment.id, { target }, options)
                   }

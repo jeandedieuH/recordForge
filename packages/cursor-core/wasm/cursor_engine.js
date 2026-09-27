@@ -12,25 +12,6 @@ export class WasmCursorEngine {
         wasm.__wbg_wasmcursorengine_free(ptr, 0);
     }
     /**
-     * @param {number} time_ms
-     * @param {string} settings_json
-     * @returns {string}
-     */
-    evaluate(time_ms, settings_json) {
-        let deferred2_0;
-        let deferred2_1;
-        try {
-            const ptr0 = passStringToWasm0(settings_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmcursorengine_evaluate(this.__wbg_ptr, time_ms, ptr0, len0);
-            deferred2_0 = ret[0];
-            deferred2_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-        }
-    }
-    /**
      * @param {string} motion_plan_json
      * @param {number} time_ms
      * @returns {string}
@@ -54,6 +35,18 @@ export class WasmCursorEngine {
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
+    }
+    /**
+     * Per-frame evaluation without JSON. Returns the flat f64 layout
+     * documented on `CursorEngine::evaluate_packed`.
+     * @param {number} time_ms
+     * @returns {Float64Array}
+     */
+    evaluate_packed(time_ms) {
+        const ret = wasm.wasmcursorengine_evaluate_packed(this.__wbg_ptr, time_ms);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
     }
     /**
      * @param {number} source_x
@@ -92,6 +85,36 @@ export class WasmCursorEngine {
         WasmCursorEngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
+    /**
+     * Store the settings used by `evaluate_packed`. The JS wrapper only
+     * calls this when the serialized settings actually change.
+     * @param {string} settings_json
+     */
+    set_settings(settings_json) {
+        const ptr0 = passStringToWasm0(settings_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcursorengine_set_settings(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Ordered shape-id table evaluated once at construction; packed frames
+     * reference entries by index. Serialized once, not per frame.
+     * @returns {string}
+     */
+    shape_ids() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmcursorengine_shape_ids(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
 }
 if (Symbol.dispose) WasmCursorEngine.prototype[Symbol.dispose] = WasmCursorEngine.prototype.free;
 function __wbg_get_imports() {
@@ -124,6 +147,19 @@ function __wbg_get_imports() {
 const WasmCursorEngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmcursorengine_free(ptr, 1));
+
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
+let cachedFloat64ArrayMemory0 = null;
+function getFloat64ArrayMemory0() {
+    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
+        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
+    }
+    return cachedFloat64ArrayMemory0;
+}
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
@@ -214,6 +250,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedFloat64ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

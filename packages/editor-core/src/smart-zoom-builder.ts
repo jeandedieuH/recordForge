@@ -7,9 +7,11 @@ import {
   type ZoomPreset,
 } from "@recordforge/contracts"
 import {
+  ZOOM_PRESETS,
   clampZoomTarget,
   generateSmartZoomSuggestions,
   zoomTargetForCursorPoint,
+  type ZoomPresetDefinition,
 } from "@recordforge/cursor-core"
 import { getTotalDuration } from "@recordforge/domain"
 import { getManualZoomSegments } from "./composition"
@@ -23,47 +25,25 @@ export interface SmartZoomPresetConfig {
   label: string
 }
 
+function toSmartZoomPresetConfig(definition: ZoomPresetDefinition): SmartZoomPresetConfig {
+  return {
+    scale: definition.scale,
+    easing: definition.easing,
+    mode: "follow-cursor",
+    transitionInMs: definition.transitionInMs,
+    transitionOutMs: definition.transitionOutMs,
+    label: `${definition.label} ${definition.scale}×`,
+  }
+}
+
+// Derived from ZOOM_PRESETS so editor-side presets mirror the single source of
+// truth in cursor-core instead of carrying a parallel literal table.
 export const SMART_ZOOM_PRESETS: Record<ZoomPreset, SmartZoomPresetConfig> = {
-  "product-demo": {
-    scale: 1.5,
-    easing: "smooth",
-    mode: "follow-cursor",
-    transitionInMs: 400,
-    transitionOutMs: 400,
-    label: "Standard 1.5×",
-  },
-  developer: {
-    scale: 2.0,
-    easing: "smooth",
-    mode: "follow-cursor",
-    transitionInMs: 300,
-    transitionOutMs: 300,
-    label: "Detail 2.0×",
-  },
-  cinematic: {
-    scale: 1.8,
-    easing: "cinematic",
-    mode: "follow-cursor",
-    transitionInMs: 600,
-    transitionOutMs: 600,
-    label: "Cinematic 1.8×",
-  },
-  subtle: {
-    scale: 1.25,
-    easing: "smooth",
-    mode: "follow-cursor",
-    transitionInMs: 400,
-    transitionOutMs: 400,
-    label: "Subtle 1.25×",
-  },
-  "manual-only": {
-    scale: 1.5,
-    easing: "smooth",
-    mode: "follow-cursor",
-    transitionInMs: 400,
-    transitionOutMs: 400,
-    label: "Manual 1.5×",
-  },
+  subtle: toSmartZoomPresetConfig(ZOOM_PRESETS.subtle),
+  "product-demo": toSmartZoomPresetConfig(ZOOM_PRESETS["product-demo"]),
+  cinematic: toSmartZoomPresetConfig(ZOOM_PRESETS.cinematic),
+  developer: toSmartZoomPresetConfig(ZOOM_PRESETS.developer),
+  "manual-only": toSmartZoomPresetConfig(ZOOM_PRESETS["manual-only"]),
 }
 
 export interface CapturedSmartZoomOptions {
@@ -98,7 +78,7 @@ export function initializeSmartZoom(
     return { ...timeline, smartZoomSettings: settings }
   }
 
-  const zoomSegments = generateSmartZoomSuggestions(telemetry, timeline.canvas, {
+  const zoomSegments = generateSmartZoomSuggestions(telemetry, timeline, {
     ...settings,
     durationMs: getTotalDuration(timeline),
   })
@@ -209,6 +189,7 @@ export function buildSmartZoomSegment(
     mode,
     source: "manual",
     preset: presetKey,
+    followSpeed: ZOOM_PRESETS[presetKey].followSpeed,
     label,
   }
 }

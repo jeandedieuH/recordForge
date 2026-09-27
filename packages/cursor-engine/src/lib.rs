@@ -6,6 +6,11 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
+/// Fixed reference interval for the zero-phase smoothing rate. Measuring the
+/// per-sample dt against a constant 60 Hz interval (instead of the telemetry's
+/// declared sample rate) makes lambda = 1-(1-a)^(dt/ref) behave identically on
+/// 60 Hz and 120 Hz captures.
+const SMOOTHING_REFERENCE_INTERVAL_MS: f64 = 1000.0 / 60.0;
 
 /// Raw cursor telemetry event. Supports both V2 (source/raw split, button
 /// events, shape hashes) and legacy V1 (x/y, clicked, button) inputs.
@@ -233,6 +238,14 @@ pub struct CursorCoordinateTransform {
     pub b1: f64,
 }
 
+/// Display topology where the cursor was captured. Only the scale factor is
+/// needed by the engine (the DPI cursor size model multiplies by it).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorTopologyInfo {
+    pub scale_factor: f64,
+}
+
 /// Cursor shape metadata captured with V2 telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -274,6 +287,10 @@ pub struct CursorTelemetryFile {
     pub capture_bounds: Option<CursorCaptureBounds>,
     #[serde(default)]
     pub coordinate_transform: CursorCoordinateTransform,
+    /// Display topology captured with the telemetry; carries the OS DPI scale
+    /// factor used by the DPI cursor size model.
+    #[serde(default)]
+    pub topology: Option<CursorTopologyInfo>,
     #[serde(default)]
     pub shapes: Vec<CursorShapeInfo>,
     #[serde(default)]
@@ -403,6 +420,38 @@ pub struct CursorSettings {
     pub smooth_factor: f64,
     pub auto_hide_idle: bool,
     pub idle_timeout_ms: f64,
+    /// Cursor size model: `legacy` keeps the absolute `scale` factor; `dpi`
+    /// multiplies by `cursor_size_factor` so artwork tracks display DPI.
+    #[serde(default = "default_size_model")]
+    pub size_model: String,
+}
+
+fn default_size_model() -> String {
+    "legacy".into()
+}
+
+/// DPI-consistent cursor size factor shared with the TypeScript engine:
+/// `(48 * dpiScale * transformScale) / 64`, clamped to `[0.25, 4]`. Assets are
+/// authored at 64 units, so ~0.75 is the native 1080p @1x size. `legacy` is
+/// always 1 regardless of topology.
+pub fn cursor_size_factor(settings: &CursorSettings, telemetry: &CursorTelemetryFile) -> f64 {
+    if settings.size_model != "dpi" {
+        return 1.0;
+    }
+    let dpi_scale = telemetry
+        .topology
+        .map(|topology| topology.scale_factor)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let transform_scale = {
+        let a00 = telemetry.coordinate_transform.a00.abs();
+        if a00.is_finite() && a00 > 0.0 {
+            a00
+        } else {
+            1.0
+        }
+    };
+    ((48.0 * dpi_scale * transform_scale) / 64.0).clamp(0.25, 4.0)
 }
 
 impl Default for CursorSettings {
@@ -438,6 +487,7 @@ impl Default for CursorSettings {
             smooth_factor: 0.25,
             auto_hide_idle: false,
             idle_timeout_ms: 2_000.0,
+            size_model: "legacy".into(),
         }
     }
 }
@@ -513,6 +563,12 @@ pub struct CursorClickEffect {
     pub source_y: f64,
     pub progress: f64,
     pub intensity: f64,
+    /// Ease-out-cubic expansion factor: `1 - (1 - p)^3`.
+    #[serde(default)]
+    pub expand: f64,
+    /// Quadratic fade factor: `(1 - p)^2`.
+    #[serde(default)]
+    pub fade: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -655,6 +711,8 @@ struct PreparedEvent {
     shape_id: String,
     speed_px_per_sec: f64,
     last_motion_ms: u64,
+    /// Idle gap that preceded the most recent motion event; 0 while still moving.
+    motion_gap_ms: u64,
     is_click_edge: bool,
 }
 
@@ -668,7 +726,9 @@ struct ClickEntry {
 
 type SmoothingCacheKey = (usize, u64);
 type SmoothingCacheValue = (Vec<f64>, Vec<f64>);
-type SmoothingCache = RefCell<HashMap<SmoothingCacheKey, SmoothingCacheValue>>;
+// Insertion-ordered list capped at 8 entries; HashMap iteration order made the
+// eviction victim arbitrary and could churn a still-active segment.
+type SmoothingCache = RefCell<Vec<(SmoothingCacheKey, SmoothingCacheValue)>>;
 
 #[derive(Debug, Clone)]
 pub struct CursorEngine {
@@ -679,6 +739,10 @@ pub struct CursorEngine {
     segment_start_index: Vec<usize>,
     segment_end_index: Vec<usize>,
     clicks: Vec<ClickEntry>,
+    /// Distinct non-empty shape ids in first-appearance order. `evaluate_packed`
+    /// emits indices into this table so per-frame results carry no strings.
+    shape_ids: Vec<String>,
+    shape_index_by_id: HashMap<String, usize>,
     /// Cached zero-phase smoothing passes keyed by segment start and alpha.
     /// Interior mutability keeps `evaluate` deterministic and seek-safe while
     /// avoiding an O(n) allocation for every exported frame.
@@ -782,6 +846,18 @@ impl CursorEngine {
                 event.t_ms
             };
 
+            // The idle gap this motion event ended; non-motion events inherit
+            // their last motion's gap so the fade-in check stays stateless.
+            let motion_gap_ms = if index == 0 {
+                0
+            } else if is_motion {
+                event
+                    .t_ms
+                    .saturating_sub(prepared[index - 1].last_motion_ms)
+            } else {
+                prepared[index - 1].motion_gap_ms
+            };
+
             if is_click_edge {
                 clicks.push(ClickEntry {
                     t_ms: event.t_ms,
@@ -799,6 +875,7 @@ impl CursorEngine {
                 shape_id,
                 speed_px_per_sec,
                 last_motion_ms,
+                motion_gap_ms,
                 is_click_edge,
             });
             times.push(event.t_ms);
@@ -816,6 +893,16 @@ impl CursorEngine {
             }
         }
 
+        let mut shape_ids = Vec::new();
+        let mut shape_index_by_id = HashMap::new();
+        for event in &prepared {
+            if event.shape_id.is_empty() || shape_index_by_id.contains_key(&event.shape_id) {
+                continue;
+            }
+            shape_index_by_id.insert(event.shape_id.clone(), shape_ids.len());
+            shape_ids.push(event.shape_id.clone());
+        }
+
         Ok(Self {
             telemetry,
             options,
@@ -824,7 +911,9 @@ impl CursorEngine {
             segment_start_index,
             segment_end_index,
             clicks,
-            smoothing_cache: RefCell::new(HashMap::new()),
+            shape_ids,
+            shape_index_by_id,
+            smoothing_cache: RefCell::new(Vec::new()),
         })
     }
 
@@ -854,7 +943,7 @@ impl CursorEngine {
             && settings.idle_timeout_ms > 0.0
             && idle_duration > settings.idle_timeout_ms;
 
-        let opacity = if is_idle {
+        let mut opacity = if is_idle {
             if self.options.idle_fade_duration_ms > 0.0 {
                 let fade_progress = ((idle_duration - settings.idle_timeout_ms)
                     / self.options.idle_fade_duration_ms)
@@ -867,11 +956,29 @@ impl CursorEngine {
             1.0
         };
 
+        // Motion resumed after an idle gap: replay the faded opacity backwards
+        // over a fixed 150ms fade-in instead of popping straight back to 1.
+        if !is_idle
+            && settings.auto_hide_idle
+            && settings.idle_timeout_ms > 0.0
+            && event.motion_gap_ms as f64 > settings.idle_timeout_ms
+        {
+            let opacity_before = if self.options.idle_fade_duration_ms > 0.0 {
+                1.0 - ((event.motion_gap_ms as f64 - settings.idle_timeout_ms)
+                    / self.options.idle_fade_duration_ms)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let fade_in = ((time_ms - event.last_motion_ms as f64) / 150.0).clamp(0.0, 1.0);
+            opacity = opacity_before + (1.0 - opacity_before) * fade_in;
+        }
+
         let visible = settings.enabled && event.visible && opacity > 0.0;
         let click_scale = self.calculate_click_scale(time_ms, settings);
 
         if settings.click_press_animation {
-            self.apply_click_movement(time_ms, settings, click_scale, &mut source_x, &mut source_y);
+            self.apply_click_movement(time_ms, settings, &mut source_x, &mut source_y);
         }
 
         CursorFrame {
@@ -888,14 +995,64 @@ impl CursorEngine {
         }
     }
 
+    /// Distinct shape ids in first-appearance order; `evaluate_packed` encodes
+    /// the frame shape as an index into this table (-1 = empty shape id).
+    pub fn shape_ids(&self) -> &[String] {
+        &self.shape_ids
+    }
+
+    /// Evaluate a frame and return it as a flat `f64` buffer for the WASM
+    /// bridge, avoiding per-frame JSON. Layout: `PACKED_FRAME_HEADER_LEN`
+    /// leading fields then `PACKED_CLICK_LEN` fields per active click:
+    /// `[sourceTimeMs, sourceX, sourceY, visible(0/1), opacity, isIdle(0/1),
+    /// velocityPxPerSec, clickScale, shapeIndex, clickCount, ...per click:
+    /// button(0 left/1 right/2 middle), startMs, sourceX, sourceY, progress,
+    /// intensity, expand, fade]`.
+    pub fn evaluate_packed(&self, time_ms: f64, settings: &CursorSettings) -> Vec<f64> {
+        const HEADER_LEN: usize = 10;
+        const CLICK_LEN: usize = 8;
+
+        let frame = self.evaluate(time_ms, settings);
+        let mut packed = Vec::with_capacity(HEADER_LEN + frame.active_clicks.len() * CLICK_LEN);
+        packed.push(frame.source_time_ms);
+        packed.push(frame.source_x);
+        packed.push(frame.source_y);
+        packed.push(f64::from(frame.visible));
+        packed.push(frame.opacity);
+        packed.push(f64::from(frame.is_idle));
+        packed.push(frame.velocity_px_per_sec);
+        packed.push(frame.click_scale);
+        let shape_index = self
+            .shape_index_by_id
+            .get(&frame.shape_id)
+            .map(|index| *index as f64)
+            .unwrap_or(-1.0);
+        packed.push(shape_index);
+        packed.push(frame.active_clicks.len() as f64);
+        for click in &frame.active_clicks {
+            packed.push(match click.button {
+                CursorButton::Left => 0.0,
+                CursorButton::Right => 1.0,
+                CursorButton::Middle => 2.0,
+            });
+            packed.push(click.start_ms as f64);
+            packed.push(click.source_x);
+            packed.push(click.source_y);
+            packed.push(click.progress);
+            packed.push(click.intensity);
+            packed.push(click.expand);
+            packed.push(click.fade);
+        }
+        packed
+    }
+
     fn ensure_smoothed_positions(&self, seg_start: usize, seg_end: usize, alpha: f64) {
         let key = (seg_start, alpha.to_bits());
-        if self.smoothing_cache.borrow().contains_key(&key) {
+        if self.smoothing_cache.borrow().iter().any(|(k, _)| *k == key) {
             return;
         }
 
         let seg_len = seg_end - seg_start + 1;
-        let expected_interval_ms = 1000.0 / self.telemetry.sample_rate_hz.max(1.0);
         let mut forward_x = Vec::with_capacity(seg_len);
         let mut forward_y = Vec::with_capacity(seg_len);
 
@@ -915,8 +1072,10 @@ impl CursorEngine {
                 let dt = (ev.t_ms.saturating_sub(self.prepared[i - 1].t_ms) as f64).max(1.0);
                 let speed_factor = ev.speed_px_per_sec / self.options.adaptive_speed_ref_px_per_sec;
                 let sample_alpha = (alpha * (1.0 + speed_factor)).clamp(0.05, 1.0);
-                let rate = (dt / expected_interval_ms).clamp(0.1, 5.0);
-                let lambda = (1.0 - (1.0 - sample_alpha).powf(rate)).clamp(0.05, 1.0);
+                // Time-based rate against the fixed 60 Hz reference interval so
+                // the same preset smooths identically at any capture rate.
+                let rate = (dt / SMOOTHING_REFERENCE_INTERVAL_MS).clamp(0.1, 5.0);
+                let lambda = (1.0 - (1.0 - sample_alpha).powf(rate)).clamp(0.01, 1.0);
 
                 forward_x.push(prev_fx + (x - prev_fx) * lambda);
                 forward_y.push(prev_fy + (y - prev_fy) * lambda);
@@ -943,8 +1102,9 @@ impl CursorEngine {
                 let dt = (self.prepared[abs_i + 1].t_ms.saturating_sub(ev.t_ms) as f64).max(1.0);
                 let speed_factor = ev.speed_px_per_sec / self.options.adaptive_speed_ref_px_per_sec;
                 let sample_alpha = (alpha * (1.0 + speed_factor)).clamp(0.05, 1.0);
-                let rate = (dt / expected_interval_ms).clamp(0.1, 5.0);
-                let lambda = (1.0 - (1.0 - sample_alpha).powf(rate)).clamp(0.05, 1.0);
+                // Same fixed reference interval as the forward pass.
+                let rate = (dt / SMOOTHING_REFERENCE_INTERVAL_MS).clamp(0.1, 5.0);
+                let lambda = (1.0 - (1.0 - sample_alpha).powf(rate)).clamp(0.01, 1.0);
 
                 smoothed_x[rel_i] = next_bx + (fx - next_bx) * lambda;
                 smoothed_y[rel_i] = next_by + (fy - next_by) * lambda;
@@ -952,12 +1112,12 @@ impl CursorEngine {
         }
 
         let mut cache = self.smoothing_cache.borrow_mut();
+        // Evict the oldest entry first; arbitrary order here could throw away a
+        // segment the next frame still needs.
         if cache.len() >= 8 {
-            if let Some(oldest) = cache.keys().next().copied() {
-                cache.remove(&oldest);
-            }
+            cache.remove(0);
         }
-        cache.insert(key, (smoothed_x, smoothed_y));
+        cache.push((key, (smoothed_x, smoothed_y)));
     }
 
     fn evaluate_spline_position(
@@ -987,7 +1147,9 @@ impl CursorEngine {
         let cache_key = (seg_start, alpha_base.to_bits());
         let cache = self.smoothing_cache.borrow();
         let (smoothed_x, smoothed_y) = cache
-            .get(&cache_key)
+            .iter()
+            .find(|(k, _)| *k == cache_key)
+            .map(|(_, value)| value)
             .expect("smoothing cache entry is populated before evaluation");
 
         // Time-aware Catmull-Rom interpolation between index and index + 1.
@@ -1158,6 +1320,10 @@ impl CursorEngine {
 
             let progress = elapsed / settings.click_duration_ms;
             let intensity = 1.0 - progress;
+            // Expansion/fade easing shared by preview and export so both draw
+            // the same ring/disc envelope per frame.
+            let expand = 1.0 - (1.0 - progress).powi(3);
+            let fade = (1.0 - progress).powi(2);
             result.push(CursorClickEffect {
                 button: click.button,
                 start_ms: click.t_ms,
@@ -1165,6 +1331,8 @@ impl CursorEngine {
                 source_y: click.y,
                 progress,
                 intensity,
+                expand,
+                fade,
             });
         }
         result.reverse();
@@ -1232,7 +1400,6 @@ impl CursorEngine {
         &self,
         time_ms: f64,
         settings: &CursorSettings,
-        click_scale: f64,
         source_x: &mut f64,
         source_y: &mut f64,
     ) {
@@ -1285,12 +1452,6 @@ impl CursorEngine {
 
             break; // Anchored to most recent active click
         }
-
-        // Directional kinetic micro-tap dip: down-and-right mechanical press
-        let depression = 1.0 - click_scale;
-        let tap_scale = settings.scale.clamp(0.5, 3.0);
-        *source_x += depression * 14.0 * tap_scale;
-        *source_y += depression * 18.0 * tap_scale;
     }
 }
 
@@ -1323,6 +1484,9 @@ mod wasm {
     #[wasm_bindgen]
     pub struct WasmCursorEngine {
         inner: CursorEngine,
+        /// Last settings pushed by `set_settings`; `evaluate_packed` reads this
+        /// so hot per-frame calls never cross the bridge with JSON.
+        settings: CursorSettings,
     }
 
     #[wasm_bindgen]
@@ -1332,13 +1496,32 @@ mod wasm {
             let telemetry: CursorTelemetryFile = parse_json_or_err(telemetry_json)?;
             let options: CursorEngineOptions = parse_json_or_err(options_json)?;
             let inner = CursorEngine::new(telemetry, options)?;
-            Ok(Self { inner })
+            Ok(Self {
+                inner,
+                settings: CursorSettings::default(),
+            })
         }
 
+        /// Ordered shape-id table evaluated once at construction; packed frames
+        /// reference entries by index. Serialized once, not per frame.
         #[wasm_bindgen]
-        pub fn evaluate(&self, time_ms: f64, settings_json: &str) -> String {
-            let settings: CursorSettings = parse_json_or_err(settings_json).unwrap_or_default();
-            serde_json::to_string(&self.inner.evaluate(time_ms, &settings)).unwrap_or_default()
+        pub fn shape_ids(&self) -> String {
+            serde_json::to_string(self.inner.shape_ids()).unwrap_or_else(|_| "[]".into())
+        }
+
+        /// Store the settings used by `evaluate_packed`. The JS wrapper only
+        /// calls this when the serialized settings actually change.
+        #[wasm_bindgen]
+        pub fn set_settings(&mut self, settings_json: &str) -> Result<(), String> {
+            self.settings = parse_json_or_err(settings_json)?;
+            Ok(())
+        }
+
+        /// Per-frame evaluation without JSON. Returns the flat f64 layout
+        /// documented on `CursorEngine::evaluate_packed`.
+        #[wasm_bindgen]
+        pub fn evaluate_packed(&self, time_ms: f64) -> Vec<f64> {
+            self.inner.evaluate_packed(time_ms, &self.settings)
         }
 
         #[wasm_bindgen]
@@ -1386,6 +1569,7 @@ mod tests {
             sample_rate_hz: 60.0,
             capture_bounds: None,
             coordinate_transform: CursorCoordinateTransform::default(),
+            topology: None,
             shapes: Vec::new(),
             click_window_ms: 350,
             health: CursorTelemetryHealth::Healthy,
@@ -1396,6 +1580,47 @@ mod tests {
             events,
         }
         .normalize()
+    }
+
+    #[test]
+    fn cursor_size_factor_matches_typescript_model() {
+        let events = vec![CursorEvent {
+            t_ms: 0,
+            x: 0.0,
+            y: 0.0,
+            visible: true,
+            ..Default::default()
+        }];
+
+        // legacy is always 1 regardless of topology.
+        let mut telemetry = make_telemetry(events.clone());
+        telemetry.topology = Some(CursorTopologyInfo { scale_factor: 2.0 });
+        telemetry.coordinate_transform.a00 = 0.5;
+        let mut settings = CursorSettings::default();
+        assert_eq!(cursor_size_factor(&settings, &telemetry), 1.0);
+
+        // 1080p @ 1x -> 48/64 = 0.75.
+        settings.size_model = "dpi".into();
+        let mut telemetry = make_telemetry(events.clone());
+        telemetry.topology = Some(CursorTopologyInfo { scale_factor: 1.0 });
+        telemetry.coordinate_transform.a00 = 1.0;
+        assert!((cursor_size_factor(&settings, &telemetry) - 0.75).abs() < 1e-9);
+
+        // 4K @ 2x -> 0.75 * 2 * 1 = 1.5.
+        let mut telemetry = make_telemetry(events.clone());
+        telemetry.topology = Some(CursorTopologyInfo { scale_factor: 2.0 });
+        telemetry.coordinate_transform.a00 = 1.0;
+        assert!((cursor_size_factor(&settings, &telemetry) - 1.5).abs() < 1e-9);
+
+        // Downscaled capture: a00 = 0.5 at scale 2 -> 0.75 * 2 * 0.5 = 0.75.
+        let mut telemetry = make_telemetry(events.clone());
+        telemetry.topology = Some(CursorTopologyInfo { scale_factor: 2.0 });
+        telemetry.coordinate_transform.a00 = 0.5;
+        assert!((cursor_size_factor(&settings, &telemetry) - 0.75).abs() < 1e-9);
+
+        // Missing/invalid topology and transform fall back to scale 1.
+        let telemetry = make_telemetry(events);
+        assert!((cursor_size_factor(&settings, &telemetry) - 0.75).abs() < 1e-9);
     }
 
     #[test]
@@ -1496,9 +1721,11 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        let mut settings = CursorSettings::default();
-        settings.auto_hide_idle = true;
-        settings.idle_timeout_ms = 50.0;
+        let settings = CursorSettings {
+            auto_hide_idle: true,
+            idle_timeout_ms: 50.0,
+            ..Default::default()
+        };
         let options = CursorEngineOptions {
             idle_fade_duration_ms: 0.0,
             ..Default::default()
@@ -1534,10 +1761,12 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        let mut options = CursorEngineOptions::default();
-        options.gap_threshold_multiplier = 1.0;
-        options.min_gap_threshold_ms = 100.0;
-        options.smoothing_window_size = 5;
+        let options = CursorEngineOptions {
+            gap_threshold_multiplier: 1.0,
+            min_gap_threshold_ms: 100.0,
+            smoothing_window_size: 5,
+            ..Default::default()
+        };
         let engine = CursorEngine::new(telemetry, options).unwrap();
         let frame = engine.evaluate(2000.0, &CursorSettings::default());
         assert!((frame.source_x - 500.0).abs() < 1.0);
@@ -1576,6 +1805,14 @@ mod tests {
         let at_click = engine.evaluate(100.0, &CursorSettings::default());
         assert_eq!(at_click.active_clicks.len(), 1);
         assert!((at_click.active_clicks[0].progress).abs() < 0.001);
+        assert!((at_click.active_clicks[0].expand).abs() < 0.001);
+        assert!((at_click.active_clicks[0].fade - 1.0).abs() < 0.001);
+
+        // expand = 1-(1-p)^3 (ease-out cubic), fade = (1-p)^2.
+        let mid = engine.evaluate(275.0, &CursorSettings::default());
+        assert!((mid.active_clicks[0].progress - 0.5).abs() < 0.001);
+        assert!((mid.active_clicks[0].expand - 0.875).abs() < 0.001);
+        assert!((mid.active_clicks[0].fade - 0.25).abs() < 0.001);
 
         let later = engine.evaluate(500.0, &CursorSettings::default());
         assert!(later.active_clicks.is_empty());
@@ -1840,17 +2077,15 @@ mod tests {
         assert!((frame_click.source_y - 252.0).abs() < 1.0);
         assert!((frame_click.click_scale - 1.0).abs() < 0.001);
 
-        // During down-press at dt = 40ms (t = 1048), cursor stays anchored to click target + tap dip
+        // During down-press at dt = 40ms (t = 1048), dwell anchors the cursor
+        // exactly on the click position; the press is visual-only (clickScale)
+        // and must not dip the tip.
         let frame_press = engine.evaluate(1048.0, &cinematic);
         assert!(frame_press.click_scale < 0.88);
-        // source_x and source_y should be anchored near (504, 252) + tap offset (~1.8px, ~2.4px),
-        // NOT teleporting 30px ahead to >530px
-        assert!(frame_press.source_x < 508.0);
-        assert!(frame_press.source_y < 256.0);
-        assert!(frame_press.source_x > 504.0); // positive tap offset
-        assert!(frame_press.source_y > 252.0);
+        assert_eq!(frame_press.source_x, 504.0);
+        assert_eq!(frame_press.source_y, 252.0);
 
-        // When click_press_animation is disabled, no tap offset is added
+        // When click_press_animation is disabled, no press state is produced
         let cinematic_no_press = CursorSettings {
             smooth_movement: true,
             smooth_factor: 0.15,
@@ -1859,5 +2094,273 @@ mod tests {
         };
         let frame_no_press = engine.evaluate(1048.0, &cinematic_no_press);
         assert!((frame_no_press.click_scale - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn stationary_cursor_does_not_move_during_click_press() {
+        let events = vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 350.0,
+                y: 200.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 350.0,
+                y: 200.0,
+                visible: true,
+                clicked: true,
+                button: Some("left".into()),
+                button_event: Some("left-down".into()),
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 300,
+                x: 350.0,
+                y: 200.0,
+                visible: true,
+                ..Default::default()
+            },
+        ];
+        let telemetry = make_telemetry(events);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings {
+            smooth_movement: false,
+            click_press_animation: true,
+            ..Default::default()
+        };
+
+        // 40ms into the press: clickScale is engaged but the tip must stay put.
+        let frame = engine.evaluate(140.0, &settings);
+        assert!(frame.click_scale < 1.0);
+        assert_eq!(frame.source_x, 350.0);
+        assert_eq!(frame.source_y, 200.0);
+    }
+
+    #[test]
+    fn smooths_same_path_consistently_at_60hz_and_120hz() {
+        // Zero-phase smoothing is driven by a fixed 60 Hz reference interval,
+        // so the same preset must produce equivalent results at either rate.
+        let curve = |t: f64| {
+            let u = t / 2000.0;
+            let s = u * u * (3.0 - 2.0 * u);
+            (200.0 + 600.0 * s, 100.0 + 400.0 * s)
+        };
+        let build = |step: u64, rate: f64| {
+            let mut t = 0u64;
+            let mut events = Vec::new();
+            while t <= 2000 {
+                let (x, y) = curve(t as f64);
+                events.push(CursorEvent {
+                    t_ms: t,
+                    x,
+                    y,
+                    visible: true,
+                    ..Default::default()
+                });
+                t += step;
+            }
+            let mut telemetry = make_telemetry(events);
+            telemetry.sample_rate_hz = rate;
+            // Denoise disabled so only the smoothing rate can differ.
+            let options = CursorEngineOptions {
+                jitter_threshold_px: 0.0,
+                ..Default::default()
+            };
+            CursorEngine::new(telemetry, options).unwrap()
+        };
+        let engine60 = build(16, 60.0);
+        let engine120 = build(8, 120.0);
+        let settings = CursorSettings {
+            smooth_movement: true,
+            smooth_factor: 0.15,
+            ..Default::default()
+        };
+
+        for t in [400.0, 800.0, 1_000.0, 1_400.0, 1_800.0] {
+            let frame60 = engine60.evaluate(t, &settings);
+            let frame120 = engine120.evaluate(t, &settings);
+            assert!(
+                (frame60.source_x - frame120.source_x).abs() <= 0.5,
+                "x differs at {t}ms: {} vs {}",
+                frame60.source_x,
+                frame120.source_x
+            );
+            assert!(
+                (frame60.source_y - frame120.source_y).abs() <= 0.5,
+                "y differs at {t}ms: {} vs {}",
+                frame60.source_y,
+                frame120.source_y
+            );
+        }
+    }
+
+    #[test]
+    fn fades_cursor_back_in_when_motion_resumes_after_idle() {
+        let telemetry = make_telemetry(vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 100.0,
+                y: 100.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 200.0,
+                y: 100.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 5_000,
+                x: 300.0,
+                y: 100.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 5_500,
+                x: 400.0,
+                y: 100.0,
+                visible: true,
+                ..Default::default()
+            },
+        ]);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings {
+            auto_hide_idle: true,
+            idle_timeout_ms: 1_000.0,
+            smooth_movement: false,
+            ..Default::default()
+        };
+
+        // Long idle fades the cursor fully out.
+        assert_eq!(engine.evaluate(4_900.0, &settings).opacity, 0.0);
+        // Motion resumes at 5000: a stateless 150ms fade-in restores opacity.
+        assert!(engine.evaluate(5_000.0, &settings).opacity < 0.01);
+        assert!((engine.evaluate(5_075.0, &settings).opacity - 0.5).abs() < 0.01);
+        assert_eq!(engine.evaluate(5_150.0, &settings).opacity, 1.0);
+    }
+
+    #[test]
+    fn smoothing_cache_evicts_the_oldest_entry_in_insertion_order() {
+        let telemetry = make_telemetry(vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 0.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 100.0,
+                y: 0.0,
+                visible: true,
+                ..Default::default()
+            },
+        ]);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+
+        // Fill past capacity with distinct alpha keys; the first inserted must
+        // be the one evicted rather than an arbitrary HashMap victim.
+        let alphas = [0.05f64, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13];
+        for alpha in alphas {
+            engine.ensure_smoothed_positions(0, 1, alpha);
+        }
+        let cache = engine.smoothing_cache.borrow();
+        assert_eq!(cache.len(), 8);
+        assert!(cache.iter().all(|(k, _)| k.1 != alphas[0].to_bits()));
+        for alpha in &alphas[1..] {
+            assert!(cache.iter().any(|(k, _)| k.1 == alpha.to_bits()));
+        }
+    }
+
+    #[test]
+    fn evaluate_packed_layout_matches_bridge_contract() {
+        let telemetry = make_telemetry(vec![
+            CursorEvent {
+                t_ms: 0,
+                x: 0.0,
+                y: 0.0,
+                visible: true,
+                shape_id: Some("arrow".into()),
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 100,
+                x: 100.0,
+                y: 0.0,
+                visible: true,
+                clicked: true,
+                button: Some("left".into()),
+                button_event: Some("left-down".into()),
+                shape_id: Some("arrow".into()),
+                ..Default::default()
+            },
+            CursorEvent {
+                t_ms: 600,
+                x: 100.0,
+                y: 0.0,
+                visible: true,
+                shape_id: Some("ibeam".into()),
+                ..Default::default()
+            },
+        ]);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        // Shape table is ordered by first appearance across the events.
+        assert_eq!(engine.shape_ids(), ["arrow", "ibeam"]);
+
+        // Header: [sourceTimeMs, sourceX, sourceY, visible, opacity, isIdle,
+        // velocityPxPerSec, clickScale, shapeIndex, clickCount].
+        let at_click = engine.evaluate_packed(100.0, &settings);
+        assert_eq!(at_click.len(), 10 + 8);
+        assert_eq!(at_click[0], 100.0);
+        assert!((at_click[1] - 100.0).abs() < 0.001); // click anchors sourceX exactly
+        assert!(at_click[2].abs() < 0.001); // sourceY
+        assert_eq!(at_click[3], 1.0); // visible
+        assert_eq!(at_click[4], 1.0); // opacity
+        assert_eq!(at_click[5], 0.0); // isIdle
+        assert_eq!(at_click[7], 1.0); // clickScale untouched at the click instant
+        assert_eq!(at_click[8], 0.0); // shapeIndex 0 -> "arrow"
+        assert_eq!(at_click[9], 1.0); // clickCount
+
+        // Per click: [button(0 left/1 right/2 middle), startMs, sourceX,
+        // sourceY, progress, intensity, expand, fade].
+        assert_eq!(at_click[10], 0.0);
+        assert_eq!(at_click[11], 100.0);
+        assert!((at_click[12] - 100.0).abs() < 0.001);
+        assert!(at_click[13].abs() < 0.001);
+        assert!(at_click[14].abs() < 0.001); // progress 0
+        assert!((at_click[15] - 1.0).abs() < 0.001); // intensity 1
+        assert!(at_click[16].abs() < 0.001); // expand 0
+        assert!((at_click[17] - 1.0).abs() < 0.001); // fade 1
+
+        // Later frames carry the second shape id and no clicks.
+        let later = engine.evaluate_packed(600.0, &settings);
+        assert_eq!(later.len(), 10);
+        assert_eq!(later[8], 1.0); // shapeIndex 1 -> "ibeam"
+        assert_eq!(later[9], 0.0);
+
+        // Events without a shape id encode -1.
+        let shapeless = CursorEngine::new(
+            make_telemetry(vec![CursorEvent {
+                t_ms: 0,
+                x: 1.0,
+                y: 1.0,
+                visible: true,
+                ..Default::default()
+            }]),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        let packed = shapeless.evaluate_packed(0.0, &settings);
+        assert_eq!(packed[8], -1.0);
+        assert!(shapeless.shape_ids().is_empty());
     }
 }

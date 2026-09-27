@@ -85,6 +85,12 @@ export const cursorSettingsFields = {
   spotlightDimOpacity: z.number().min(0).max(0.9),
   hideNativeCursor: z.boolean(),
   shapeMode: cursorShapeModeSchema,
+  /**
+   * `legacy` keeps `scale` as an absolute multiplier; `dpi` additionally
+   * multiplies by the captured display DPI/geometry so the cursor renders at
+   * a consistent physical size (48/64 of the asset grid at 1×).
+   */
+  sizeModel: z.enum(["legacy", "dpi"]),
 }
 
 export const cursorSettingsSchema = z.object({
@@ -118,11 +124,32 @@ export const cursorSettingsSchema = z.object({
   spotlightDimOpacity: cursorSettingsFields.spotlightDimOpacity.default(0.5),
   hideNativeCursor: cursorSettingsFields.hideNativeCursor.default(true),
   shapeMode: cursorSettingsFields.shapeMode.default("optimized"),
+  // Existing projects parse as `legacy` so their cursor size never changes.
+  sizeModel: cursorSettingsFields.sizeModel.default("legacy"),
 })
 
 export type CursorSettings = z.infer<typeof cursorSettingsSchema>
 
 export const defaultCursorSettings: CursorSettings = cursorSettingsSchema.parse({})
+
+/**
+ * Settings applied to NEW projects only. `sizeModel: "dpi"` makes the cursor
+ * size independent of capture resolution and display DPI, and the defaults are
+ * tuned for that neutral, resolution-independent look.
+ */
+export const recommendedCursorSettings: CursorSettings = {
+  ...defaultCursorSettings,
+  sizeModel: "dpi",
+  fillColor: "#ffffff",
+  strokeColor: "#111111",
+  strokeWidth: 1.5,
+  shadowEnabled: true,
+  shadowColor: "#000000",
+  shadowBlur: 6,
+  shadowOffsetX: 0,
+  shadowOffsetY: 2,
+  shadowOpacity: 0.35,
+}
 
 export const cursorCoordinateTransformSchema = z.object({
   a00: z.number().finite(),
@@ -247,7 +274,12 @@ function identityTransform(): CursorCoordinateTransform {
   }
 }
 
-function addV2Defaults(value: unknown): unknown {
+/**
+ * Fill top-level V2 defaults on a raw telemetry payload. Exported so callers
+ * that validate events without Zod (the fast load path in the desktop app)
+ * still get identical metadata defaults to `cursorTelemetryFileSchema`.
+ */
+export function applyCursorTelemetryFileDefaults(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value
   const input = value as Record<string, unknown>
   const recordingId = typeof input.recordingId === "string" ? input.recordingId : "recording"
@@ -278,7 +310,7 @@ function addV2Defaults(value: unknown): unknown {
 }
 
 export const cursorTelemetryFileSchema = z.preprocess(
-  addV2Defaults,
+  applyCursorTelemetryFileDefaults,
   cursorTelemetryMetadataSchema.extend({
     events: z.array(cursorTelemetryEventSchema),
   }),

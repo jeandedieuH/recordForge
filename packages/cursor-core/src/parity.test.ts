@@ -1,9 +1,15 @@
-import { describe, expect, it, beforeAll } from "vitest"
+import { describe, expect, it, beforeAll, vi } from "vitest"
 import { readFileSync } from "node:fs"
 import { resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { initSync, WasmCursorEngine } from "../wasm/cursor_engine.js"
-import { createCursorEngine, fitCursorPoint, normalizeCursorTelemetry } from "./index"
+import { wrapWasmCursorEngine } from "./wasm-engine"
+import {
+  createCursorEngine,
+  fitCursorPoint,
+  normalizeCursorTelemetry,
+  type CursorEngine,
+} from "./index"
 import {
   defaultCursorSettings,
   type CursorSettings,
@@ -98,8 +104,11 @@ interface WasmEngine {
 
 function createWasmEngine(telemetry: CursorTelemetryFile): WasmEngine {
   const raw = new WasmCursorEngine(JSON.stringify(telemetry), JSON.stringify({}))
+  // Exercise the production bridge: packed Float64Array frames decoded through
+  // the same wrapper the preview uses.
+  const wrapped = wrapWasmCursorEngine(raw, telemetry)
   return {
-    evaluate: (timeMs, settings) => JSON.parse(raw.evaluate(timeMs, JSON.stringify(settings))),
+    evaluate: wrapped.evaluate,
     evaluateMotionPlan: (timeMs, motionPlan) =>
       JSON.parse(raw.evaluate_motion_plan(JSON.stringify(motionPlan), timeMs)),
     fit: (sourceX, sourceY, targetWidth, targetHeight, padding) =>
@@ -116,13 +125,20 @@ function framesAreEqual(
   expect(wasm.sourceY).toBeCloseTo(ts.sourceY, 1)
   expect(wasm.visible).toBe(ts.visible)
   expect(wasm.opacity).toBeCloseTo(ts.opacity, 2)
+  expect(wasm.isIdle).toBe(ts.isIdle)
+  expect(wasm.shapeId).toBe(ts.shapeId)
+  expect(wasm.velocityPxPerSec).toBeCloseTo(ts.velocityPxPerSec, 1)
   expect(wasm.clickScale).toBeCloseTo(ts.clickScale, 3)
   expect(wasm.activeClicks.length).toBe(ts.activeClicks.length)
   for (let i = 0; i < wasm.activeClicks.length; i++) {
+    expect(wasm.activeClicks[i].button).toBe(ts.activeClicks[i].button)
+    expect(wasm.activeClicks[i].startMs).toBe(ts.activeClicks[i].startMs)
     expect(wasm.activeClicks[i].sourceX).toBeCloseTo(ts.activeClicks[i].sourceX, 1)
     expect(wasm.activeClicks[i].sourceY).toBeCloseTo(ts.activeClicks[i].sourceY, 1)
     expect(wasm.activeClicks[i].progress).toBeCloseTo(ts.activeClicks[i].progress, 2)
     expect(wasm.activeClicks[i].intensity).toBeCloseTo(ts.activeClicks[i].intensity, 2)
+    expect(wasm.activeClicks[i].expand).toBeCloseTo(ts.activeClicks[i].expand, 2)
+    expect(wasm.activeClicks[i].fade).toBeCloseTo(ts.activeClicks[i].fade, 2)
   }
 }
 
@@ -235,5 +251,41 @@ describe("cursor engine cross-language parity", () => {
       expect(wasm.x).toBeCloseTo(ts.x, 1)
       expect(wasm.y).toBeCloseTo(ts.y, 1)
     }
+  })
+
+  it("pushes settings across the bridge only when they change", () => {
+    const telemetry = loadFixture("cursor-v1-100dpi-10s.json")
+    const raw = new WasmCursorEngine(JSON.stringify(telemetry), JSON.stringify({}))
+    const setSettings = vi.spyOn(raw, "set_settings")
+    const engine = wrapWasmCursorEngine(raw, telemetry)
+
+    engine.evaluate(100, defaultCursorSettings)
+    engine.evaluate(200, defaultCursorSettings)
+    expect(setSettings).toHaveBeenCalledTimes(1)
+
+    engine.evaluate(300, { ...defaultCursorSettings, smoothMovement: false })
+    expect(setSettings).toHaveBeenCalledTimes(2)
+
+    engine.dispose?.()
+  })
+
+  it("dispose frees the wasm instance, is idempotent, and turns evaluate into a no-op", () => {
+    const telemetry = loadFixture("cursor-v1-100dpi-10s.json")
+    const raw = new WasmCursorEngine(JSON.stringify(telemetry), JSON.stringify({}))
+    const engine: CursorEngine = wrapWasmCursorEngine(raw, telemetry)
+
+    expect(engine.evaluate(100, defaultCursorSettings).visible).toBe(true)
+
+    engine.dispose?.()
+    engine.dispose?.()
+
+    const frame = engine.evaluate(100, defaultCursorSettings)
+    expect(frame.visible).toBe(false)
+    expect(frame.opacity).toBe(0)
+    expect(frame.activeClicks).toEqual([])
+    // Motion-plan evaluation is pure TypeScript and keeps working.
+    expect(
+      engine.evaluateMotionPlan(0, { version: 1, kind: "cubic-bezier", segments: [] }),
+    ).toBeNull()
   })
 })

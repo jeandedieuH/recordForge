@@ -3,6 +3,7 @@ import {
   defaultCursorSettings,
   defaultProjectExportSettings,
   defaultSmartZoomSettings,
+  recommendedCursorSettings,
 } from "@recordforge/contracts"
 import { buildCameraPresetTransform } from "./camera-presets"
 import type {
@@ -343,7 +344,9 @@ export function createTimelineFromRecording(
       padding: hasCamera ? 96 : 24,
       borderRadius: hasCamera ? 0 : 24,
       shadow: false,
-      cursorSettings: defaultCursorSettings,
+      // New projects get DPI-consistent cursor defaults; existing projects
+      // keep whatever settings were persisted (legacy model by default).
+      cursorSettings: recommendedCursorSettings,
     },
     tracks,
     markers,

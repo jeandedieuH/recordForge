@@ -18,24 +18,21 @@ import type {
   RenderPlanZoomMotionSegment,
 } from "@recordforge/contracts"
 import {
+  FOLLOW_SPEED_SMOOTH_TIME_S,
+  ZOOM_PRESETS,
   canonicalizeZoomTarget,
   clampZoomTarget,
   createCursorEngine,
   cursorSettingsForEffect,
   findCursorEffectAtTime,
-  fitCursorPoint,
-  resolveInertialFollowCenter,
+  sourcePointToZoomSpace,
   timelineToCursorSourceTime,
   zoomTargetForCursorPoint,
   type CursorEngine,
   type CursorFrame,
 } from "@recordforge/cursor-core"
-import {
-  findManualZoomAtTime,
-  findPreviousZoomSegment,
-  resolveZoomTransform,
-  type ZoomTransform,
-} from "./composition"
+import { resolveZoomTransform, type ZoomTransform } from "./composition"
+import { resolveCameraShots } from "./camera-shots"
 import { findTimelineClipAt, timelineToSource } from "./time-mapping"
 
 export type { ZoomTransform }
@@ -94,8 +91,8 @@ export interface CursorLayer {
   active: boolean
   sourceTimeMs: number | null
   settings: CursorSettings
-  /** Cursor position in source canvas coordinates, before any zoom transform. */
-  sourcePoint: { x: number; y: number } | null
+  /** Cursor position in zoom space (normalized screen × canvas), before any zoom transform. */
+  zoomSpacePoint: { x: number; y: number } | null
   /** Canonical cursor frame produced by the engine, if available. */
   frame: CursorFrame | null
 }
@@ -133,9 +130,17 @@ function clampRect(rect: MaskRect, canvas: TimelineCanvas): MaskRect {
   }
 }
 
-export const FOLLOW_CAMERA_SAMPLE_STEP_MS = 100
+export const FOLLOW_CAMERA_SAMPLE_STEP_MS = 50
 export const FOLLOW_CAMERA_MOTION_TOLERANCE_PX = 2
 const MOTION_TURN_COSINE_THRESHOLD = 0.75
+/** Fixed camera integration step (120 Hz) so the simulated path is identical
+ *  regardless of the emitted keyframe cadence. */
+const FOLLOW_CAMERA_SUBSTEP_MS = 1000 / 120
+/** The camera aims where the cursor will be this far ahead, leading fast moves. */
+const FOLLOW_CAMERA_LOOKAHEAD_MS = 120
+/** Per-axis crop inset the cursor must stay inside while following. */
+const FOLLOW_CAMERA_SAFE_MARGIN_RATIO = 0.08
+const SUBSTEP_TIME_EPSILON_MS = 1e-9
 
 export interface FollowCursorKeyframe {
   timeMs: number
@@ -179,6 +184,9 @@ function followCursorPathCacheKey(segment: ManualZoomSegment, sampleStepMs: numb
     segment.target.height,
     segment.followDeadzonePercent,
     segment.followSmoothingAlpha,
+    segment.followSpeed,
+    // The preset feeds the follow-speed fallback, so it must bust the cache too.
+    segment.preset,
     sampleStepMs,
   ].join(":")
 }
@@ -191,46 +199,209 @@ function followCursorMotionPlanCacheKey(
   return `${followCursorPathCacheKey(segment, sampleStepMs)}:${tolerancePx}`
 }
 
-/** Resolve one follow-camera sample from a supplied previous camera center. */
+/** Evaluate the cursor's zoom-space point at a timeline time, or null when the
+ *  cursor is not visible there (or the time sits outside a screen clip). */
+function evaluateFollowCursorZoomPoint(
+  state: TimelineState,
+  timelineMs: number,
+  cursorEngine: CursorEngine,
+): { x: number; y: number } | null {
+  const sourceTimeMs = timelineToCursorSourceTime(state, timelineMs)
+  if (sourceTimeMs === null) return null
+  const cursorSettings = cursorSettingsForEffect(
+    state.canvas.cursorSettings,
+    findCursorEffectAtTime(state, timelineMs),
+  )
+  const frame = cursorEngine.evaluate(sourceTimeMs, cursorSettings)
+  if (!frame.visible) return null
+  return sourcePointToZoomSpace(cursorEngine.telemetry, state.canvas, {
+    x: frame.sourceX,
+    y: frame.sourceY,
+  })
+}
+
+/**
+ * Resolve the critically damped smooth time (seconds) for a follow segment:
+ * an explicit followSpeed wins; otherwise legacy segments keep their
+ * smoothing-alpha tuning; otherwise the preset's speed; default "balanced".
+ */
+function followCameraSmoothTimeS(segment: ManualZoomSegment): number {
+  if (segment.followSpeed) {
+    return FOLLOW_SPEED_SMOOTH_TIME_S[segment.followSpeed]
+  }
+  const alpha = segment.followSmoothingAlpha
+  if (alpha !== undefined && Number.isFinite(alpha) && alpha > 0) {
+    return Math.min(0.8, Math.max(0.12, 0.1 / alpha))
+  }
+  const presetSpeed = segment.preset ? ZOOM_PRESETS[segment.preset].followSpeed : undefined
+  return FOLLOW_SPEED_SMOOTH_TIME_S[presetSpeed ?? "balanced"]
+}
+
+interface FollowCameraSample {
+  /** Time the state corresponds to (a substep boundary, clamped to the segment end). */
+  timeMs: number
+  /** Camera center in zoom space after canvas clamping. */
+  center: { x: number; y: number }
+}
+
+/**
+ * Deterministic critically damped follow-camera simulation.
+ *
+ * The camera integrates at a fixed 120 Hz over the whole segment, so the path
+ * is a pure function of (segment, timeline, telemetry) — every caller asking
+ * for a time or a keyframe grid shares the same baked trajectory. Each
+ * substep:
+ *
+ * 1. Aim at the cursor's zoom-space point 120 ms ahead (held across gaps where
+ *    the cursor is invisible).
+ * 2. Deadzone: the damp target trails the cursor by the deadzone radius;
+ *    inside the deadzone the camera rests.
+ * 3. One SmoothDamp integration step per axis (omega = 2 / smoothTime).
+ * 4. Safe margin: the instantaneous cursor must stay inside the crop inset by
+ *    8% per axis; clamping the camera center also kills that axis's velocity.
+ * 5. The emitted crop is clamped to the canvas, and the clamped center is fed
+ *    back into the simulation so pinned edges never accumulate off-canvas drift.
+ */
+function* followCameraCenters(
+  segment: ManualZoomSegment,
+  state: TimelineState,
+  cursorEngine: CursorEngine,
+): Generator<FollowCameraSample, void, void> {
+  const segmentStartMs = segment.startMs
+  const segmentEndMs = segment.startMs + Math.max(1, segment.durationMs)
+  const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
+  const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
+  const cropWidth = baseTarget.width
+  const cropHeight = baseTarget.height
+  const deadzone = (segment.followDeadzonePercent ?? 0.08) * Math.min(cropWidth, cropHeight)
+  const smoothTimeS = followCameraSmoothTimeS(segment)
+  const omega = 2 / smoothTimeS
+  const dtS = FOLLOW_CAMERA_SUBSTEP_MS / 1_000
+  const dampX = omega * dtS
+  const dampE = 1 / (1 + dampX + 0.48 * dampX * dampX + 0.235 * dampX * dampX * dampX)
+  const marginX = FOLLOW_CAMERA_SAFE_MARGIN_RATIO * cropWidth
+  const marginY = FOLLOW_CAMERA_SAFE_MARGIN_RATIO * cropHeight
+  const halfCropW = cropWidth / 2
+  const halfCropH = cropHeight / 2
+
+  const center = zoomTargetCenter(baseTarget)
+  const velocity = { x: 0, y: 0 }
+  let lookAheadPoint: { x: number; y: number } | null = null
+  let currentPoint: { x: number; y: number } | null = null
+
+  yield { timeMs: segmentStartMs, center: { ...center } }
+
+  let substepIndex = 0
+  let substepTimeMs = segmentStartMs
+  while (substepTimeMs < segmentEndMs - SUBSTEP_TIME_EPSILON_MS) {
+    const ahead = evaluateFollowCursorZoomPoint(
+      state,
+      Math.min(substepTimeMs + FOLLOW_CAMERA_LOOKAHEAD_MS, segmentEndMs),
+      cursorEngine,
+    )
+    if (ahead) lookAheadPoint = ahead
+    const now = evaluateFollowCursorZoomPoint(state, substepTimeMs, cursorEngine)
+    if (now) currentPoint = now
+
+    if (lookAheadPoint) {
+      const offsetX = lookAheadPoint.x - center.x
+      const offsetY = lookAheadPoint.y - center.y
+      const distance = Math.hypot(offsetX, offsetY)
+      let targetX = center.x
+      let targetY = center.y
+      if (distance > deadzone) {
+        const pull = 1 - deadzone / distance
+        targetX = center.x + offsetX * pull
+        targetY = center.y + offsetY * pull
+      }
+
+      const changeX = center.x - targetX
+      const tempX = (velocity.x + omega * changeX) * dtS
+      velocity.x = (velocity.x - omega * tempX) * dampE
+      center.x = targetX + (changeX + tempX) * dampE
+
+      const changeY = center.y - targetY
+      const tempY = (velocity.y + omega * changeY) * dtS
+      velocity.y = (velocity.y - omega * tempY) * dampE
+      center.y = targetY + (changeY + tempY) * dampE
+    }
+
+    if (currentPoint) {
+      const clampedX = Math.min(
+        Math.max(center.x, currentPoint.x - (halfCropW - marginX)),
+        currentPoint.x + (halfCropW - marginX),
+      )
+      if (clampedX !== center.x) {
+        center.x = clampedX
+        velocity.x = 0
+      }
+      const clampedY = Math.min(
+        Math.max(center.y, currentPoint.y - (halfCropH - marginY)),
+        currentPoint.y + (halfCropH - marginY),
+      )
+      if (clampedY !== center.y) {
+        center.y = clampedY
+        velocity.y = 0
+      }
+    }
+
+    const emitted = zoomTargetForCursorPoint(
+      { x: center.x, y: center.y },
+      state.canvas,
+      desiredScale,
+    )
+    center.x = emitted.x + emitted.width / 2
+    center.y = emitted.y + emitted.height / 2
+
+    substepIndex += 1
+    substepTimeMs = Math.min(segmentEndMs, segmentStartMs + substepIndex * FOLLOW_CAMERA_SUBSTEP_MS)
+    yield { timeMs: substepTimeMs, center: { ...center } }
+  }
+}
+
+/**
+ * Resolve the follow-camera crop at a timeline time by replaying the
+ * deterministic substep simulation up to that time. `timeMs` is timeline time.
+ */
 export function resolveFollowCursorTarget(
   segment: ManualZoomSegment,
   state: TimelineState,
   timeMs: number,
   cursorEngine: CursorEngine | null | undefined,
-  previousCenter?: { x: number; y: number },
 ): ZoomTarget | undefined {
   if (segment.mode !== "follow-cursor" || !cursorEngine) return undefined
-  const sourceTimeMs = timelineToCursorSourceTime(state, timeMs)
-  if (sourceTimeMs === null) return undefined
-  const cursorSettings = cursorSettingsForEffect(
-    state.canvas.cursorSettings,
-    findCursorEffectAtTime(state, timeMs),
-  )
-  const frame = cursorEngine.evaluate(sourceTimeMs, cursorSettings)
-  if (!frame.visible) return undefined
-  const fitted = fitCursorPoint(
-    { x: frame.sourceX, y: frame.sourceY },
-    cursorEngine.telemetry,
-    state.canvas.width,
-    state.canvas.height,
-  )
-  if (!fitted.visible) return undefined
 
   const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
   const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
-  const initialCenter = zoomTargetCenter(baseTarget)
-  const followCenter = resolveInertialFollowCenter(
-    { x: fitted.x, y: fitted.y },
-    previousCenter ?? initialCenter,
-    { width: state.canvas.width / desiredScale, height: state.canvas.height / desiredScale },
-    {
-      deadzoneRadiusPercent: segment.followDeadzonePercent,
-      smoothingAlpha: segment.followSmoothingAlpha,
-    },
-  )
-  return zoomTargetForCursorPoint(followCenter, state.canvas, desiredScale)
+  const segmentStartMs = segment.startMs
+  const segmentEndMs = segment.startMs + Math.max(1, segment.durationMs)
+
+  if (timeMs < segmentStartMs) {
+    // Before the segment the camera has no simulated state, so resolve the
+    // instantaneous cursor framing (or the resting base target if hidden).
+    const point = evaluateFollowCursorZoomPoint(state, timeMs, cursorEngine)
+    return zoomTargetForCursorPoint(
+      point ?? zoomTargetCenter(baseTarget),
+      state.canvas,
+      desiredScale,
+    )
+  }
+
+  const resolveAtMs = Math.min(timeMs, segmentEndMs)
+  let center = zoomTargetCenter(baseTarget)
+  for (const sample of followCameraCenters(segment, state, cursorEngine)) {
+    center = sample.center
+    if (sample.timeMs >= resolveAtMs - SUBSTEP_TIME_EPSILON_MS) break
+  }
+  return zoomTargetForCursorPoint({ x: center.x, y: center.y }, state.canvas, desiredScale)
 }
 
+/**
+ * Emit follow-camera keyframes at `sampleStepMs` cadence from the fixed-step
+ * camera simulation. A sample at time t carries the camera state of the first
+ * substep boundary at-or-after t, so the emitted path equals the deterministic
+ * trajectory `resolveFollowCursorTarget` also resolves.
+ */
 function buildRawFollowCursorKeyframes(
   segment: ManualZoomSegment,
   state: TimelineState,
@@ -240,25 +411,37 @@ function buildRawFollowCursorKeyframes(
   const segmentStartMs = segment.startMs
   const segmentEndMs = segment.startMs + Math.max(1, segment.durationMs)
   const baseTarget = canonicalizeZoomTarget(segment.target, state.canvas, segment.scale)
-  let previousTarget = baseTarget
-  let previousCenter = zoomTargetCenter(baseTarget)
+  const desiredScale = Math.max(1.05, state.canvas.width / Math.max(1, baseTarget.width))
   const keyframes: FollowCursorKeyframe[] = []
+  let nextSampleMs = segmentStartMs
+  let lastCenter = zoomTargetCenter(baseTarget)
 
-  for (let timeMs = segmentStartMs; timeMs < segmentEndMs; timeMs += sampleStepMs) {
-    const target =
-      resolveFollowCursorTarget(segment, state, timeMs, cursorEngine, previousCenter) ??
-      previousTarget
-    keyframes.push({ timeMs, target })
-    previousTarget = target
-    previousCenter = zoomTargetCenter(target)
+  for (const sample of followCameraCenters(segment, state, cursorEngine)) {
+    lastCenter = sample.center
+    while (nextSampleMs <= sample.timeMs + SUBSTEP_TIME_EPSILON_MS) {
+      keyframes.push({
+        timeMs: nextSampleMs,
+        target: zoomTargetForCursorPoint(
+          { x: sample.center.x, y: sample.center.y },
+          state.canvas,
+          desiredScale,
+        ),
+      })
+      nextSampleMs += sampleStepMs
+      if (nextSampleMs > segmentEndMs) break
+    }
   }
 
-  keyframes.push({
-    timeMs: segmentEndMs,
-    target:
-      resolveFollowCursorTarget(segment, state, segmentEndMs, cursorEngine, previousCenter) ??
-      previousTarget,
-  })
+  if (keyframes[keyframes.length - 1]?.timeMs !== segmentEndMs) {
+    keyframes.push({
+      timeMs: segmentEndMs,
+      target: zoomTargetForCursorPoint(
+        { x: lastCenter.x, y: lastCenter.y },
+        state.canvas,
+        desiredScale,
+      ),
+    })
+  }
   return keyframes
 }
 
@@ -790,24 +973,6 @@ export function resolveFollowCursorTargetAtTime(
     : undefined
 }
 
-function resolvePreviousZoomTarget(
-  previous: ManualZoomSegment | null,
-  state: TimelineState,
-  cursorEngine: CursorEngine | null | undefined,
-): ZoomTarget | null {
-  if (!previous) return null
-  if (previous.mode !== "follow-cursor" || !cursorEngine) return previous.target
-
-  return (
-    resolveFollowCursorTargetAtTime(
-      previous,
-      state,
-      previous.startMs + Math.max(1, previous.durationMs),
-      cursorEngine,
-    ) ?? previous.target
-  )
-}
-
 /**
  * Build a single preview composition for a given timeline time.
  *
@@ -829,21 +994,20 @@ export function resolvePreviewComposition(
 
   const screenClip = findTimelineClipAt(state, "screen", timeMs)
   const screenSourceMs = screenClip ? timelineToSource(screenClip, timeMs) : null
-  const activeZoom = findManualZoomAtTime(state, timeMs)
-  const followTarget = activeZoom
-    ? resolveFollowCursorTargetAtTime(activeZoom, state, timeMs, cursorEngine)
+  const shots = resolveCameraShots(state, cursorEngine)
+  // Latest-starting shot wins on overlaps, matching the render plan's rule.
+  const activeShot = shots
+    .filter((shot) => timeMs >= shot.startMs && timeMs < shot.startMs + shot.durationMs)
+    .pop()
+  const followTarget = activeShot
+    ? resolveFollowCursorTargetAtTime(activeShot, state, timeMs, cursorEngine)
     : undefined
 
-  const previousZoom = activeZoom ? findPreviousZoomSegment(state, activeZoom) : null
-  const previousTarget = activeZoom
-    ? resolvePreviousZoomTarget(previousZoom, state, cursorEngine)
-    : null
-
-  const zoomTransform = activeZoom
-    ? resolveZoomTransform(activeZoom, timeMs, state.canvas, {
+  const zoomTransform = activeShot
+    ? resolveZoomTransform(activeShot, timeMs, state.canvas, {
         target: followTarget,
-        fromTarget: previousTarget,
-        fromScale: previousZoom?.scale,
+        fromTarget: activeShot.fromTarget,
+        fromScale: activeShot.fromScale,
       })
     : null
 
@@ -923,21 +1087,16 @@ export function resolvePreviewComposition(
   const cursorSourceTimeMs = timelineToCursorSourceTime(state, timeMs)
   const cursorSettings = cursorSettingsForEffect(state.canvas.cursorSettings, cursorEffect)
 
-  let cursorSourcePoint: { x: number; y: number } | null = null
+  let zoomSpacePoint: { x: number; y: number } | null = null
   let cursorFrame: CursorFrame | null = null
   if (cursorSourceTimeMs !== null && cursorEngine) {
     const frame = cursorEngine.evaluate(cursorSourceTimeMs, cursorSettings)
     if (frame.visible) {
-      const fitted = fitCursorPoint(
-        { x: frame.sourceX, y: frame.sourceY },
-        cursorEngine.telemetry,
-        canvas.width,
-        canvas.height,
-      )
-      if (fitted.visible) {
-        cursorSourcePoint = { x: fitted.x, y: fitted.y }
-        cursorFrame = frame
-      }
+      zoomSpacePoint = sourcePointToZoomSpace(cursorEngine.telemetry, canvas, {
+        x: frame.sourceX,
+        y: frame.sourceY,
+      })
+      cursorFrame = frame
     }
   }
 
@@ -946,10 +1105,10 @@ export function resolvePreviewComposition(
       cursorSettings.enabled &&
       screenClip !== null &&
       cursorSourceTimeMs !== null &&
-      cursorSourcePoint !== null,
+      zoomSpacePoint !== null,
     sourceTimeMs: cursorSourceTimeMs,
     settings: cursorSettings,
-    sourcePoint: cursorSourcePoint,
+    zoomSpacePoint,
     frame: cursorFrame,
   }
 

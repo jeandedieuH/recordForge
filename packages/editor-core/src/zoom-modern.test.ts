@@ -85,6 +85,45 @@ describe("Modern Zoom System", () => {
       expect(zoomEasedProgress(0, "cinematic")).toBe(0)
       expect(zoomEasedProgress(1, "cinematic")).toBe(1)
     })
+
+    it("implements a normalized damped spring with bounded overshoot", () => {
+      expect(zoomEasedProgress(0, "spring")).toBe(0)
+      expect(zoomEasedProgress(1, "spring")).toBe(1)
+
+      let max = 0
+      for (let index = 0; index <= 500; index++) {
+        max = Math.max(max, zoomEasedProgress(index / 500, "spring"))
+      }
+      // A real spring overshoots the endpoint; the normalized curve bounds it
+      // to ~2.6% instead of clamping the overshoot away.
+      expect(max).toBeGreaterThan(1.0)
+      expect(max).toBeLessThanOrEqual(1.03)
+    })
+
+    it("decelerates through the out-phase instead of re-accelerating", () => {
+      const segment: ManualZoomSegment = {
+        id: "snappy-out",
+        startMs: 1_000,
+        durationMs: 1_000,
+        target: { x: 480, y: 270, width: 960, height: 540 },
+        scale: 2,
+        easing: "snappy",
+        transitionInMs: 200,
+        transitionOutMs: 300,
+        enabled: true,
+        locked: false,
+        mode: "manual",
+      }
+      const progressAt = (timeMs: number) => resolveZoomTransform(segment, timeMs, canvas).progress
+
+      // Out-phase spans elapsed 700..1000. Snappy zoom-out must be steepest at
+      // the start and nearly flat at the end, like a real ease-out camera move.
+      const dropNearStart = progressAt(1_700) - progressAt(1_710)
+      const dropNearEnd = progressAt(1_990) - progressAt(2_000)
+      expect(dropNearStart).toBeGreaterThan(0.05)
+      expect(dropNearEnd).toBeLessThan(dropNearStart * 0.01)
+      expect(progressAt(2_000)).toBe(0)
+    })
   })
 
   describe("Continuous Multi-Segment Camera Panning (Bridging)", () => {
@@ -134,6 +173,62 @@ describe("Modern Zoom System", () => {
       // Center should start at seg 1 target (100, 100)
       expect(transformAtStartOfSeg2.crop.x).toBeCloseTo(100, 1)
       expect(transformAtStartOfSeg2.crop.y).toBeCloseTo(100, 1)
+    })
+  })
+
+  describe("Zoom-space crop interpolation", () => {
+    const interpolateSegment = (target: ManualZoomSegment["target"]): ManualZoomSegment => ({
+      id: "interp",
+      startMs: 0,
+      durationMs: 2_000,
+      target,
+      scale: 2,
+      easing: "linear",
+      transitionInMs: 1_000,
+      transitionOutMs: 0,
+      enabled: true,
+      locked: false,
+      mode: "manual",
+    })
+
+    it("interpolates crop width in log space: p=0.5 of a 1x->2x zoom is sqrt(2) scale", () => {
+      const segment = interpolateSegment({ x: 480, y: 270, width: 960, height: 540 })
+      const transform = resolveZoomTransform(segment, 500, canvas)
+      // Log-space width: w(0.5) = 1920 * 0.5^0.5 = 1920/sqrt(2) -> scale sqrt(2).
+      expect(transform.scale).toBeCloseTo(Math.SQRT2, 5)
+    })
+
+    it("keeps the screen-fixed point stationary through the transition", () => {
+      const segment = interpolateSegment({ x: 1_200, y: 600, width: 640, height: 360 })
+      // Fixed point for 1x -> 3x toward (1520, 780):
+      //   f = (cB*sB - cA*sA) / (sB - sA) = ((1520*3 - 960), (780*3 - 540)) / 2
+      const fixedX = (1_520 * 3 - 960) / 2
+      const fixedY = (780 * 3 - 540) / 2
+
+      // A point at `f` must land on the same screen position at every progress.
+      const positions = [0, 250, 500, 750, 1_000].map((timeMs) => {
+        const transform = resolveZoomTransform(segment, timeMs, canvas)
+        const { x, y, width, height } = transform.crop
+        return {
+          x: ((fixedX - x) / width) * canvas.width,
+          y: ((fixedY - y) / height) * canvas.height,
+        }
+      })
+      for (const position of positions) {
+        expect(position.x).toBeCloseTo(positions[0].x, 6)
+        expect(position.y).toBeCloseTo(positions[0].y, 6)
+      }
+    })
+
+    it("pans linearly when the zoom levels of both crops are equal", () => {
+      const segment = interpolateSegment({ x: 960, y: 540, width: 960, height: 540 })
+      const transform = resolveZoomTransform(segment, 500, canvas, {
+        fromTarget: { x: 0, y: 0, width: 960, height: 540 },
+        fromScale: 2,
+      })
+      // Equal scale on both ends: pure pan, midpoint center (960, 540).
+      expect(transform.crop.x + transform.crop.width / 2).toBeCloseTo(960, 3)
+      expect(transform.crop.y + transform.crop.height / 2).toBeCloseTo(540, 3)
     })
   })
 
@@ -207,11 +302,16 @@ describe("Modern Zoom System", () => {
         mode: "manual",
       }
 
+      // The real spring overshoots eased progress by ~3%, so the crop can
+      // narrow past the target by up to (canvas - target) * 0.03 during the
+      // transition; scale bounds derive from that minimum crop, not 8x itself.
+      const minCropWidth = canvas.width - (canvas.width - 240) * 1.03
+      const maxExpectedScale = canvas.width / minCropWidth
       for (const timeMs of [0, 100, 200, 300, 500, 900]) {
         const transform = resolveZoomTransform(segment, timeMs, canvas)
         expect(transform.crop.width).toBeGreaterThanOrEqual(1)
         expect(transform.crop.height).toBeGreaterThanOrEqual(1)
-        expect(transform.scale).toBeLessThanOrEqual(8)
+        expect(transform.scale).toBeLessThanOrEqual(maxExpectedScale)
       }
     })
   })

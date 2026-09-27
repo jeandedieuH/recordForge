@@ -5,7 +5,7 @@ import {
   clampZoomTarget,
   zoomTargetForCursorPoint,
 } from "@recordforge/cursor-core"
-import { Button, cn } from "@recordforge/ui"
+import { Badge, Button, IconButton, ToggleGroup, ToggleGroupItem, cn } from "@recordforge/ui"
 import { Crosshair, Lock, MousePointer, Move, Unlock, ZoomIn } from "lucide-react"
 
 export interface ZoomCanvasOverlayProps {
@@ -17,6 +17,11 @@ export interface ZoomCanvasOverlayProps {
   offsetX?: number
   offsetY?: number
   cursorPointAtPlayhead?: { x: number; y: number } | null
+  /**
+   * Framing mode: the screen renders unzoomed so the frame rect is accurate.
+   * The overlay dims everything outside the frame to mark the crop.
+   */
+  dimOutsideFrame?: boolean
   onUpdateTarget?: (
     target: Partial<ZoomTarget>,
     options?: { phase?: "draft" | "commit" | "cancel" },
@@ -48,6 +53,8 @@ interface DragState {
   moved: boolean
 }
 
+const SCALE_CHIPS = [1.25, 1.5, 2]
+
 export function ZoomCanvasOverlay({
   segment,
   canvasWidth,
@@ -57,6 +64,7 @@ export function ZoomCanvasOverlay({
   offsetX = 0,
   offsetY = 0,
   cursorPointAtPlayhead,
+  dimOutsideFrame = false,
   onUpdateTarget,
   onUpdateSegment,
 }: ZoomCanvasOverlayProps) {
@@ -202,6 +210,7 @@ export function ZoomCanvasOverlay({
   const frameHeight = displayTarget.height * scaleY
 
   const currentScale = (canvasWidth / Math.max(1, displayTarget.width)).toFixed(1)
+  const isFollowMode = segment.mode === "follow-cursor"
 
   function applyScalePreset(targetScale: number) {
     if (!segment) return
@@ -249,9 +258,9 @@ export function ZoomCanvasOverlay({
     }
   }
 
-  function enableFollowCursor() {
-    if (!segment || !onUpdateSegment || segment.mode === "follow-cursor") return
-    onUpdateSegment({ mode: "follow-cursor" }, { phase: "commit" })
+  function setCameraMode(mode: "follow-cursor" | "static") {
+    if (!segment || !onUpdateSegment || isFollowMode === (mode === "follow-cursor")) return
+    onUpdateSegment({ mode }, { phase: "commit" })
   }
 
   function toggleLock() {
@@ -260,7 +269,7 @@ export function ZoomCanvasOverlay({
   }
 
   const handleBaseClass =
-    "absolute size-3 rounded-full border-2 border-primary bg-background shadow-md transition-transform hover:scale-125 focus-visible:scale-125 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary z-30"
+    "absolute size-3 rounded-full border-2 border-primary bg-background shadow-md transition-transform hover:scale-125 focus-visible:scale-125 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary z-30 p-0"
 
   return (
     <div
@@ -269,12 +278,35 @@ export function ZoomCanvasOverlay({
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
     >
-      {/* Zoom Focus Frame */}
+      {/* Dim everything outside the frame while framing mode shows the
+          unzoomed source — tokens only, four rects act as a mask hole. */}
+      {dimOutsideFrame ? (
+        <>
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 bg-background/70"
+            style={{ height: frameTop }}
+          />
+          <div
+            className="pointer-events-none absolute inset-x-0 bottom-0 bg-background/70"
+            style={{ top: frameTop + frameHeight }}
+          />
+          <div
+            className="pointer-events-none absolute left-0 bg-background/70"
+            style={{ top: frameTop, width: frameLeft, height: frameHeight }}
+          />
+          <div
+            className="pointer-events-none absolute right-0 bg-background/70"
+            style={{ top: frameTop, height: frameHeight, left: frameLeft + frameWidth }}
+          />
+        </>
+      ) : null}
+
+      {/* Zoom Focus Frame — no transition-all here: it makes dragging laggy. */}
       <div
         className={cn(
-          "absolute rounded-lg border-2 border-primary shadow-[0_0_0_1px_rgba(255,255,255,0.2),0_8px_24px_rgba(0,0,0,0.6)] transition-all",
+          "absolute rounded-lg border-2 border-primary shadow-e2",
           isInteracting ? "ring-4 ring-primary/30" : "hover:border-primary",
-          segment.locked && "border-subtle/70 opacity-70",
+          segment.locked && "border-border-strong opacity-70",
         )}
         style={{
           left: `${frameLeft}px`,
@@ -283,6 +315,17 @@ export function ZoomCanvasOverlay({
           height: `${frameHeight}px`,
         }}
       >
+        {/* In follow mode the camera tracks the cursor, so the frame only
+            describes where tracking starts. */}
+        {isFollowMode ? (
+          <Badge
+            variant="outline"
+            className="pointer-events-none absolute left-2 top-2 z-40 bg-background/80 text-[9px] font-semibold"
+          >
+            Starting framing
+          </Badge>
+        ) : null}
+
         {/* Rule of Thirds Guides */}
         <div
           className={cn(
@@ -301,13 +344,13 @@ export function ZoomCanvasOverlay({
           <div />
         </div>
 
-        {/* Center Drag Anchor */}
+        {/* Center Drag Anchor — a plain button: IconButton tooltips would fire
+            while scrubbing, and drag handles only need an aria-label. */}
         {!segment.locked && (
           <button
             type="button"
-            className="group absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-full border border-primary/40 bg-background/85 p-1.5 text-primary shadow-sm backdrop-blur transition-all active:cursor-grabbing hover:scale-110 hover:border-primary hover:bg-background"
+            className="group absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center rounded-full border border-primary/40 bg-background/85 p-1.5 text-primary shadow-sm backdrop-blur transition-transform active:cursor-grabbing hover:scale-110 hover:border-primary hover:bg-background"
             onPointerDown={(e) => handlePointerDown(e, "move")}
-            title="Pan zoom focus area"
             aria-label="Pan zoom target"
           >
             <Move className="size-3.5" aria-hidden />
@@ -390,84 +433,82 @@ export function ZoomCanvasOverlay({
           </div>
 
           <div className="flex items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[10px]"
-              onClick={() => applyScalePreset(1.25)}
-              disabled={segment.locked}
-            >
-              1.25×
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[10px]"
-              onClick={() => applyScalePreset(1.5)}
-              disabled={segment.locked}
-            >
-              1.5×
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[10px]"
-              onClick={() => applyScalePreset(2.0)}
-              disabled={segment.locked}
-            >
-              2.0×
-            </Button>
-          </div>
-
-          <div className="flex items-center gap-0.5 border-l border-border pl-1.5">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[10px]"
-              onClick={centerTarget}
-              title="Center focus frame on canvas"
-              disabled={segment.locked}
-            >
-              <Crosshair className="size-3" aria-hidden />
-            </Button>
-
-            {cursorPointAtPlayhead && (
+            {SCALE_CHIPS.map((chipScale) => (
               <Button
+                key={chipScale}
                 variant="ghost"
                 size="sm"
                 className="h-6 px-1.5 text-[10px]"
+                onClick={() => applyScalePreset(chipScale)}
+                disabled={segment.locked}
+              >
+                {chipScale}×
+              </Button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-0.5 border-l border-border pl-1.5">
+            <IconButton
+              label="Center focus frame on canvas"
+              variant="ghost"
+              size="sm"
+              className="size-6"
+              onClick={centerTarget}
+              disabled={segment.locked}
+            >
+              <Crosshair className="size-3" aria-hidden />
+            </IconButton>
+
+            {cursorPointAtPlayhead ? (
+              <IconButton
+                label="Snap focus frame to cursor position"
+                variant="ghost"
+                size="sm"
+                className="size-6"
                 onClick={snapToCursor}
-                title="Snap focus frame to cursor position"
                 disabled={segment.locked}
               >
                 <MousePointer className="size-3" aria-hidden />
-              </Button>
-            )}
+              </IconButton>
+            ) : null}
 
-            <Button
-              variant={segment.mode === "follow-cursor" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-6 px-1.5 text-[10px]"
-              onClick={enableFollowCursor}
-              title="Camera mode: Follow Cursor"
-              disabled={segment.locked || segment.mode === "follow-cursor"}
+            <ToggleGroup
+              type="single"
+              aria-label="Camera mode"
+              value={isFollowMode ? "follow-cursor" : "static"}
+              disabled={segment.locked}
+              onValueChange={(value) => {
+                if (value === "follow-cursor" || value === "static") setCameraMode(value)
+              }}
+              className="flex rounded-md border border-border"
             >
-              Follow
-            </Button>
+              <ToggleGroupItem
+                value="follow-cursor"
+                className="h-6 px-1.5 text-[10px] data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
+              >
+                Follow
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="static"
+                className="h-6 px-1.5 text-[10px] data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
+              >
+                Fixed
+              </ToggleGroupItem>
+            </ToggleGroup>
 
-            <Button
+            <IconButton
+              label={segment.locked ? "Unlock zoom segment" : "Lock zoom segment"}
               variant="ghost"
               size="sm"
-              className="h-6 px-1.5 text-[10px]"
+              className="size-6"
               onClick={toggleLock}
-              title={segment.locked ? "Unlock zoom segment" : "Lock zoom segment"}
             >
               {segment.locked ? (
                 <Lock className="size-3" aria-hidden />
               ) : (
                 <Unlock className="size-3 text-subtle-foreground" aria-hidden />
               )}
-            </Button>
+            </IconButton>
           </div>
         </div>
       </div>

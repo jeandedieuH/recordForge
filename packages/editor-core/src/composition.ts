@@ -37,6 +37,85 @@ export interface ZoomTransform {
 const DEFAULT_SHADOW_COLOR = "#000000"
 const DEFAULT_SHADOW_BLUR = 24
 
+function springRaw(progress: number): number {
+  return 1 - Math.exp(-7 * progress) * (Math.cos(6 * progress) + (7 / 6) * Math.sin(6 * progress))
+}
+
+const springRawOne = springRaw(1)
+
+/**
+ * Per-axis crop center under log-space zoom interpolation. The fixed point `f`
+ * is the content position that stays put on screen while the crop zooms; the
+ * center converges on it as `f - (f - cA) * (w/wA)`. Equal zoom levels have no
+ * usable fixed point, so near-equal scales fall back to a pure pan.
+ */
+function interpolateCropCenter(
+  centerA: number,
+  centerB: number,
+  sizeA: number,
+  sizeB: number,
+  size: number,
+  canvasSize: number,
+  progress: number,
+): number {
+  const safeSizeA = Math.max(1e-6, sizeA)
+  const safeSizeB = Math.max(1e-6, sizeB)
+  const scaleA = canvasSize / safeSizeA
+  const scaleB = canvasSize / safeSizeB
+  if (Math.abs(scaleB - scaleA) < 1e-3 * scaleA) {
+    return centerA + (centerB - centerA) * progress
+  }
+  const fixed = (centerB * scaleB - centerA * scaleA) / (scaleB - scaleA)
+  return fixed - (fixed - centerA) * (size / safeSizeA)
+}
+
+/**
+ * Zoom-space crop interpolation shared by preview, export, and the zoompan
+ * expressions: the crop width travels in log space (`wA * (wB/wA)^p`) so the
+ * zoom rate stays constant, and the center glides around the screen-fixed
+ * point instead of linearly. Valid for p outside [0, 1] (spring overshoot)
+ * and for a `to` crop that is recomputed per frame (follow camera).
+ */
+export function interpolateCrop(
+  from: ZoomTarget,
+  to: ZoomTarget,
+  progress: number,
+  canvas: Pick<TimelineCanvas, "width" | "height">,
+): ZoomTarget {
+  const canvasWidth = Math.max(1, canvas.width)
+  const canvasHeight = Math.max(1, canvas.height)
+  const fromWidth = Math.max(1e-6, from.width)
+  const toWidth = Math.max(1e-6, to.width)
+  const width = Math.min(fromWidth * Math.pow(toWidth / fromWidth, progress), canvasWidth)
+  const height = (width / canvasWidth) * canvasHeight
+
+  const centerX = interpolateCropCenter(
+    from.x + from.width / 2,
+    to.x + to.width / 2,
+    from.width,
+    to.width,
+    width,
+    canvasWidth,
+    progress,
+  )
+  const centerY = interpolateCropCenter(
+    from.y + from.height / 2,
+    to.y + to.height / 2,
+    from.height,
+    to.height,
+    height,
+    canvasHeight,
+    progress,
+  )
+
+  return {
+    x: Math.min(Math.max(0, centerX - width / 2), Math.max(0, canvasWidth - width)),
+    y: Math.min(Math.max(0, centerY - height / 2), Math.max(0, canvasHeight - height)),
+    width,
+    height,
+  }
+}
+
 /** Return a stable numeric aspect ratio for a framing preset. */
 export function aspectRatioValue(aspectRatio: CanvasAspectRatio | undefined): number | null {
   if (aspectRatio === "16:9") return 16 / 9
@@ -76,11 +155,11 @@ export function zoomEasedProgress(progress: number, easing: ManualZoomSegment["e
   if (easing === "snappy") return 1 - (1 - value) ** 3
   if (easing === "cinematic") return value * value * (3 - 2 * value)
   if (easing === "spring") {
-    // Damped harmonic oscillation with a bounded output so high zoom factors
-    // cannot produce a negative crop during an overshoot.
-    const p = 0.4
-    const spring = Math.pow(2, -10 * value) * Math.sin(((value - p / 4) * (2 * Math.PI)) / p) + 1
-    return Math.min(1, Math.max(0, spring))
+    // Normalized damped spring: 1 - e^(-7p)(cos(6p) + (7/6)sin(6p)), divided by
+    // its value at p=1 so endpoints land exactly on 0 and 1 while keeping a
+    // ~2.6% overshoot. The decay term vanishes so fast that a single cos/sin
+    // pair is enough — no clamping needed.
+    return springRaw(value) / springRawOne
   }
   if (easing === "smooth") {
     // Quintic smootherstep: 6t^5 - 15t^4 + 10t^3 (0 velocity and 0 acceleration at endpoints)
@@ -109,29 +188,6 @@ export function findManualZoomAtTime(
       .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
       .slice(-1)[0] ?? null
   )
-}
-
-/**
- * Find the immediately preceding active zoom segment, if any, within a bridge threshold.
- */
-export function findPreviousZoomSegment(
-  state: TimelineState,
-  currentSegment: ManualZoomSegment,
-  maxBridgeGapMs = 500,
-): ManualZoomSegment | null {
-  const segments = getManualZoomSegments(state)
-    .filter(
-      (s) =>
-        s.enabled &&
-        s.id !== currentSegment.id &&
-        s.startMs + s.durationMs <= currentSegment.startMs,
-    )
-    .sort((a, b) => b.startMs + b.durationMs - (a.startMs + a.durationMs))
-
-  const prev = segments[0] ?? null
-  if (!prev) return null
-  const gap = currentSegment.startMs - (prev.startMs + prev.durationMs)
-  return gap <= maxBridgeGapMs ? prev : null
 }
 
 /**
@@ -198,42 +254,39 @@ export function resolveZoomTransform(
     // Phase 2: Sustain / active cursor follow hold
     progress = 1
   } else if (elapsed <= duration) {
-    // Phase 3: Smooth ease out back to full screen
-    const remaining = duration - elapsed
-    const rawProgress = Math.max(0, remaining / Math.max(1, transitionOutMs))
-    progress = zoomEasedProgress(rawProgress, segment.easing)
+    // Phase 3: Ease the crop back out with the easing's own out-phase shape.
+    // 1 - ease(elapsed/out) preserves symmetric easings exactly and gives
+    // asymmetric ones (snappy, spring) a real decelerating tail instead of a
+    // mirrored acceleration into full screen.
+    const elapsedOut = elapsed - (duration - transitionOutMs)
+    const rawProgress = Math.max(0, elapsedOut / Math.max(1, transitionOutMs))
+    progress = 1 - zoomEasedProgress(rawProgress, segment.easing)
   } else {
     progress = 0
   }
 
   const fullCenterX = canvas.width / 2
   const fullCenterY = canvas.height / 2
-  const targetCenterX = target.x + target.width / 2
-  const targetCenterY = target.y + target.height / 2
 
-  let cropWidth: number
-  let cropHeight: number
-  let currentCenterX: number
-  let currentCenterY: number
+  const crop =
+    isPannedFromPrevious && options.fromTarget
+      ? interpolateCrop(
+          canonicalizeZoomTarget(options.fromTarget, canvas, options.fromScale ?? 1),
+          target,
+          progress,
+          canvas,
+        )
+      : interpolateCrop(
+          { x: 0, y: 0, width: canvas.width, height: canvas.height },
+          target,
+          progress,
+          canvas,
+        )
 
-  if (isPannedFromPrevious && options.fromTarget) {
-    const fromTarget = canonicalizeZoomTarget(options.fromTarget, canvas, options.fromScale ?? 1)
-    const fromCenterX = fromTarget.x + fromTarget.width / 2
-    const fromCenterY = fromTarget.y + fromTarget.height / 2
-
-    cropWidth = fromTarget.width + (target.width - fromTarget.width) * progress
-    cropHeight = fromTarget.height + (target.height - fromTarget.height) * progress
-    currentCenterX = fromCenterX + (targetCenterX - fromCenterX) * progress
-    currentCenterY = fromCenterY + (targetCenterY - fromCenterY) * progress
-  } else {
-    cropWidth = canvas.width + (target.width - canvas.width) * progress
-    cropHeight = canvas.height + (target.height - canvas.height) * progress
-    currentCenterX = fullCenterX + (targetCenterX - fullCenterX) * progress
-    currentCenterY = fullCenterY + (targetCenterY - fullCenterY) * progress
-  }
-
-  const cropX = Math.min(Math.max(0, currentCenterX - cropWidth / 2), canvas.width - cropWidth)
-  const cropY = Math.min(Math.max(0, currentCenterY - cropHeight / 2), canvas.height - cropHeight)
+  const cropX = crop.x
+  const cropY = crop.y
+  const cropWidth = crop.width
+  const cropHeight = crop.height
 
   const scale = canvas.width / Math.max(1, cropWidth)
   const effectiveCenterX = cropX + cropWidth / 2

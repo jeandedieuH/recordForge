@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest"
-import { defaultCursorSettings, type TimelineCanvas } from "@recordforge/contracts"
+import {
+  defaultCursorSettings,
+  type TimelineCanvas,
+  type TimelineClip,
+  type TimelineState,
+} from "@recordforge/contracts"
 import {
   analyzeCursorTelemetry,
   generateSmartZoomSuggestions,
   getCursorPointAtTimelineTime,
   normalizeCursorTelemetry,
-  resolveInertialFollowCenter,
-  zoomTargetForCursorPoint,
 } from "./index"
 
 const canvas: TimelineCanvas = {
@@ -49,6 +52,45 @@ const v2Event = (
   shapeChanged: false,
 })
 
+function makeTimelineState(
+  clips: Array<
+    Pick<TimelineClip, "startMs" | "durationMs" | "sourceInMs" | "sourceOutMs" | "speed">
+  >,
+  canvasOverride: Partial<TimelineCanvas> = {},
+): TimelineState {
+  return {
+    version: 1,
+    id: "smart-zoom-test",
+    name: "Smart zoom test",
+    recordingId: "recording",
+    canvas: { ...canvas, ...canvasOverride },
+    tracks: [
+      {
+        id: "screen",
+        kind: "screen",
+        name: "Screen",
+        muted: false,
+        locked: false,
+        solo: false,
+        volume: 1,
+        clips: clips.map((clip, index) => ({
+          ...clip,
+          id: `clip-${index}`,
+          kind: "screen" as const,
+          assetId: "recording",
+        })),
+      },
+    ],
+    markers: [],
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  } as TimelineState
+}
+
+const fullRangeState = makeTimelineState([
+  { startMs: 0, durationMs: 20_000, sourceInMs: 0, sourceOutMs: 20_000, speed: 1 },
+])
+
 const telemetry = normalizeCursorTelemetry({
   recordingId: "recording",
   sourceWidth: 1920,
@@ -77,8 +119,21 @@ describe("smart zoom telemetry analysis", () => {
     )
   })
 
+  it("skips movement and safe-edge extraction when the include flags are off", () => {
+    const features = analyzeCursorTelemetry(telemetry, {
+      minDwellMs: 500,
+      includeMovements: false,
+      includeSafeEdges: false,
+    })
+
+    expect(features.clicks).toHaveLength(2)
+    expect(features.dwells.length).toBeGreaterThanOrEqual(2)
+    expect(features.movements).toEqual([])
+    expect(features.safeEdges).toEqual([])
+  })
+
   it("generates aspect-ratio-aware, canvas-safe editable suggestions", () => {
-    const suggestions = generateSmartZoomSuggestions(telemetry, canvas, {
+    const suggestions = generateSmartZoomSuggestions(telemetry, fullRangeState, {
       preset: "product-demo",
       minDwellMs: 500,
       includeDwells: true,
@@ -109,13 +164,15 @@ describe("smart zoom telemetry analysis", () => {
       events: [v2Event(3_000, 800, 600, "left-down", true)],
     })
 
-    const cinematic = generateSmartZoomSuggestions(singleClickTelemetry, canvas, {
+    const cinematic = generateSmartZoomSuggestions(singleClickTelemetry, fullRangeState, {
       preset: "cinematic",
     })
-    expect(cinematic[0]?.transitionInMs).toBe(600)
-    expect(cinematic[0]?.transitionOutMs).toBe(600)
+    // Segment is 2620ms, so the preset transition is capped at a quarter of it.
+    expect(cinematic[0]?.transitionInMs).toBe(655)
+    expect(cinematic[0]?.transitionOutMs).toBe(655)
+    expect(cinematic[0]?.followSpeed).toBe("relaxed")
 
-    const custom = generateSmartZoomSuggestions(singleClickTelemetry, canvas, {
+    const custom = generateSmartZoomSuggestions(singleClickTelemetry, fullRangeState, {
       preset: "cinematic",
       defaultTransitionInMs: 200,
       defaultTransitionOutMs: 250,
@@ -137,7 +194,7 @@ describe("smart zoom telemetry analysis", () => {
       ],
     })
 
-    const suggestions = generateSmartZoomSuggestions(multiClickTelemetry, canvas, {
+    const suggestions = generateSmartZoomSuggestions(multiClickTelemetry, fullRangeState, {
       preset: "product-demo",
       clusterToleranceMs: 2_000,
     })
@@ -169,7 +226,7 @@ describe("smart zoom telemetry analysis", () => {
       ],
     })
 
-    const suggestions = generateSmartZoomSuggestions(testTelemetry, canvas, {
+    const suggestions = generateSmartZoomSuggestions(testTelemetry, fullRangeState, {
       preset: "product-demo",
     })
 
@@ -185,50 +242,152 @@ describe("smart zoom telemetry analysis", () => {
   })
 
   it("returns no suggestions when the manual-only preset is selected", () => {
-    expect(generateSmartZoomSuggestions(telemetry, canvas, { preset: "manual-only" })).toEqual([])
+    expect(
+      generateSmartZoomSuggestions(telemetry, fullRangeState, { preset: "manual-only" }),
+    ).toEqual([])
   })
 
-  it("filters micro-movements within the soft deadzone and tracks large movements with resolveInertialFollowCenter", () => {
-    const prevCenter = { x: 960, y: 540 }
-    const viewportSize = { width: 960, height: 540 }
-
-    // Small jitter: distance 15px (within 10% deadzone radius of ~54px)
-    const jitterPoint = { x: 970, y: 545 }
-    const centerAfterJitter = resolveInertialFollowCenter(jitterPoint, prevCenter, viewportSize, {
-      deadzoneRadiusPercent: 0.1,
-      smoothingAlpha: 0.35,
+  it("keeps the preset scale for a tight multi-point cluster", () => {
+    const tightClusterTelemetry = normalizeCursorTelemetry({
+      recordingId: "tight-cluster",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        v2Event(3_000, 800, 600, "left-down", true),
+        v2Event(3_300, 820, 615, "left-down", true),
+      ],
     })
-    expect(centerAfterJitter).toEqual(prevCenter)
 
-    // Large movement: distance 300px (well outside deadzone)
-    const largeTravelPoint = { x: 1260, y: 740 }
-    const centerAfterTravel = resolveInertialFollowCenter(
-      largeTravelPoint,
-      prevCenter,
-      viewportSize,
-      {
-        deadzoneRadiusPercent: 0.1,
-        smoothingAlpha: 0.35,
-      },
-    )
-    expect(centerAfterTravel.x).toBeGreaterThan(prevCenter.x)
-    expect(centerAfterTravel.y).toBeGreaterThan(prevCenter.y)
-    expect(centerAfterTravel.x).toBeLessThan(largeTravelPoint.x)
-    expect(centerAfterTravel.y).toBeLessThan(largeTravelPoint.y)
+    const suggestions = generateSmartZoomSuggestions(tightClusterTelemetry, fullRangeState, {
+      preset: "product-demo",
+    })
+
+    expect(suggestions).toHaveLength(1)
+    expect(suggestions[0].scale).toBe(1.5)
   })
 
-  it("keeps a large cursor jump inside the follow camera viewport", () => {
-    const cameraCenter = resolveInertialFollowCenter(
-      { x: 1_900, y: 540 },
-      { x: 960, y: 540 },
-      { width: 960, height: 540 },
-      { deadzoneRadiusPercent: 0.08, smoothingAlpha: 0.05 },
-    )
-    const target = zoomTargetForCursorPoint(cameraCenter, canvas, 2)
+  it("widens the crop when cluster points spread over 60% of the canvas width", () => {
+    // Two clicks 1152px apart (60% of 1920) need a wider crop than the preset's
+    // 1.5x would give, so generation falls back toward the auto-fit floor.
+    const spreadClusterTelemetry = normalizeCursorTelemetry({
+      recordingId: "spread-cluster",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        v2Event(3_000, 384, 540, "left-down", true),
+        v2Event(3_300, 1_536, 540, "left-down", true),
+      ],
+    })
 
-    expect(1_900).toBeGreaterThanOrEqual(target.x)
-    expect(1_900).toBeLessThanOrEqual(target.x + target.width)
-    expect(cameraCenter.x).toBeGreaterThan(960)
+    const suggestions = generateSmartZoomSuggestions(spreadClusterTelemetry, fullRangeState, {
+      preset: "product-demo",
+    })
+
+    expect(suggestions).toHaveLength(1)
+    const segment = suggestions[0]
+    expect(segment.scale).toBeLessThan(1.5)
+    for (const x of [384, 1_536]) {
+      expect(x).toBeGreaterThanOrEqual(segment.target.x)
+      expect(x).toBeLessThanOrEqual(segment.target.x + segment.target.width)
+    }
+    expect(540).toBeGreaterThanOrEqual(segment.target.y)
+    expect(540).toBeLessThanOrEqual(segment.target.y + segment.target.height)
+  })
+
+  it("centers a single-click segment on the click at the preset scale", () => {
+    const singleClickTelemetry = normalizeCursorTelemetry({
+      recordingId: "single-click",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [v2Event(3_000, 800, 600, "left-down", true)],
+    })
+
+    const suggestions = generateSmartZoomSuggestions(singleClickTelemetry, fullRangeState, {
+      preset: "product-demo",
+    })
+
+    expect(suggestions).toHaveLength(1)
+    const segment = suggestions[0]
+    expect(segment.scale).toBe(1.5)
+    expect(segment.target.x + segment.target.width / 2).toBeCloseTo(800, 5)
+    expect(segment.target.y + segment.target.height / 2).toBeCloseTo(600, 5)
+  })
+
+  it("weighs clicks 3:1 over dwells when picking the cluster center", () => {
+    const dwellThenClickTelemetry = normalizeCursorTelemetry({
+      recordingId: "dwell-click",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [
+        v2Event(1_000, 400, 540, "none"),
+        v2Event(1_200, 400, 540, "none"),
+        v2Event(1_400, 400, 540, "none"),
+        v2Event(1_600, 400, 540, "none"),
+        v2Event(1_800, 400, 540, "none"),
+        v2Event(2_000, 400, 540, "none"),
+        v2Event(2_100, 800, 540, "left-down", true),
+        v2Event(2_500, 1_900, 900, "none"),
+      ],
+    })
+
+    const suggestions = generateSmartZoomSuggestions(dwellThenClickTelemetry, fullRangeState, {
+      preset: "product-demo",
+      includeDwells: true,
+      minDwellMs: 500,
+    })
+
+    expect(suggestions).toHaveLength(1)
+    const target = suggestions[0].target
+    // (400 * 1 dwell + 800 * 3 click) / 4 = 700
+    expect(target.x + target.width / 2).toBeCloseTo(700, 5)
+  })
+
+  it("maps cursor points into zoom space as a stretch, not an aspect fit", () => {
+    // 9:16 canvas + 16:9 telemetry: zoom space spans the full canvas, so a
+    // source point at the bottom edge must reach y=1920, not the letterboxed
+    // middle band an aspect-fit mapping would produce.
+    const tallCanvas: TimelineCanvas = { ...canvas, width: 1080, height: 1920, padding: 0 }
+    const tallTelemetry = normalizeCursorTelemetry({
+      recordingId: "recording",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [v2Event(0, 960, 0, "none"), v2Event(1_000, 960, 1_080, "none")],
+    })
+    const tallTimeline = {
+      canvas: tallCanvas,
+      tracks: [
+        {
+          id: "screen",
+          kind: "screen" as const,
+          name: "Screen",
+          muted: false,
+          locked: false,
+          solo: false,
+          volume: 1,
+          clips: [
+            {
+              id: "screen-clip",
+              kind: "screen" as const,
+              assetId: "recording",
+              startMs: 0,
+              durationMs: 2_000,
+              sourceInMs: 0,
+              sourceOutMs: 2_000,
+              speed: 1,
+            },
+          ],
+        },
+      ],
+    } as any
+
+    expect(getCursorPointAtTimelineTime(tallTimeline, 0, tallTelemetry)).toEqual({
+      x: 540,
+      y: 0,
+    })
+    expect(getCursorPointAtTimelineTime(tallTimeline, 1_000, tallTelemetry)).toEqual({
+      x: 540,
+      y: 1_920,
+    })
   })
 
   it("evaluates canvas-fitted cursor position at timeline time via getCursorPointAtTimelineTime", () => {
@@ -263,5 +422,71 @@ describe("smart zoom telemetry analysis", () => {
     expect(point).not.toBeNull()
     expect(point?.x).toBe(960)
     expect(point?.y).toBe(540)
+  })
+
+  it("targets the canvas center for a click at source center even with canvas padding", () => {
+    const paddedState = makeTimelineState(
+      [{ startMs: 0, durationMs: 20_000, sourceInMs: 0, sourceOutMs: 20_000, speed: 1 }],
+      { padding: 96 },
+    )
+    const centeredTelemetry = normalizeCursorTelemetry({
+      recordingId: "recording",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [v2Event(3_000, 960, 540, "left-down", true)],
+    })
+
+    const suggestions = generateSmartZoomSuggestions(centeredTelemetry, paddedState, {
+      preset: "product-demo",
+    })
+
+    expect(suggestions).toHaveLength(1)
+    const target = suggestions[0].target
+    expect(target.x + target.width / 2).toBeCloseTo(paddedState.canvas.width / 2, 5)
+    expect(target.y + target.height / 2).toBeCloseTo(paddedState.canvas.height / 2, 5)
+  })
+
+  it("maps interaction times from source time to timeline time across offsets and speed", () => {
+    // Screen clip covers source [4000, 10000) at speed 2, so it occupies
+    // timeline [2000, 5000). A click at source 5000ms must land at 2500ms.
+    const state = makeTimelineState([
+      { startMs: 2_000, durationMs: 3_000, sourceInMs: 4_000, sourceOutMs: 10_000, speed: 2 },
+    ])
+    const clickTelemetry = normalizeCursorTelemetry({
+      recordingId: "recording",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [v2Event(5_000, 800, 600, "left-down", true), v2Event(9_900, 800, 600, "none")],
+    })
+
+    const suggestions = generateSmartZoomSuggestions(clickTelemetry, state, {
+      preset: "product-demo",
+      durationMs: 5_000,
+    })
+
+    expect(suggestions).toHaveLength(1)
+    const segment = suggestions[0]
+    // Click timeline time = 2000 + (5000-4000)/2 = 2500; the lead-in is the
+    // larger of clickLeadInMs (500) and transitionIn (450) + 120ms buffer =
+    // 570ms, and the 1200ms source-side click duration halves to 600ms at
+    // speed 2. So the segment covers 2500-570=1930 to 2500+600=3100.
+    expect(segment.startMs).toBe(1_930)
+    expect(segment.durationMs).toBe(1_170)
+  })
+
+  it("drops interactions whose source range was trimmed away", () => {
+    const state = makeTimelineState([
+      { startMs: 0, durationMs: 3_000, sourceInMs: 4_000, sourceOutMs: 10_000, speed: 1 },
+    ])
+    const removedTelemetry = normalizeCursorTelemetry({
+      recordingId: "recording",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: [v2Event(1_000, 800, 600, "left-down", true)],
+    })
+
+    expect(
+      generateSmartZoomSuggestions(removedTelemetry, state, { preset: "product-demo" }),
+    ).toEqual([])
   })
 })

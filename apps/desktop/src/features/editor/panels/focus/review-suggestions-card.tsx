@@ -8,8 +8,12 @@ import { MiniFocusThumbnail } from "./mini-focus-thumbnail"
 interface ReviewSuggestionsCardProps {
   suggestions: ManualZoomSegment[]
   canvas: { width: number; height: number }
+  /** Existing zoom segments that survive regeneration (manual/follow/locked). */
+  keptSegmentCount: number
   onAccept: (selectedSegments: ManualZoomSegment[]) => void
   onReject: () => void
+  /** Seeks the playhead to a suggestion's start so it can be previewed. */
+  onSeek?: (ms: number) => void
 }
 
 function badgeVariant(
@@ -36,8 +40,10 @@ function formatDuration(ms: number): string {
 export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
   suggestions: initialSuggestions,
   canvas,
+  keptSegmentCount,
   onAccept,
   onReject,
+  onSeek,
 }: ReviewSuggestionsCardProps) {
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set())
 
@@ -64,7 +70,7 @@ export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5 min-w-0">
-          <Sparkles className="size-4 shrink-0 text-purple-400" aria-hidden />
+          <Sparkles className="size-4 shrink-0 text-secondary" aria-hidden />
           <span className="text-xs font-semibold text-foreground truncate">
             Smart Suggestions ({activeSuggestions.length})
           </span>
@@ -107,7 +113,17 @@ export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
                 return (
                   <div
                     key={segment.id}
-                    className="group/item flex flex-col gap-1.5 rounded-md border border-border/70 bg-surface/80 p-2 text-xs transition-colors hover:border-border-strong hover:bg-surface"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Preview suggestion at ${formatTimecode(segment.startMs)}`}
+                    onClick={() => onSeek?.(segment.startMs)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault()
+                        onSeek?.(segment.startMs)
+                      }
+                    }}
+                    className="group/item flex flex-col gap-1.5 rounded-md border border-border/70 bg-surface/80 p-2 text-xs transition-colors cursor-pointer hover:border-border-strong hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                   >
                     <div className="flex items-center justify-between gap-1">
                       <div className="flex items-baseline gap-1 font-mono text-[11px] font-semibold tabular-nums text-foreground">
@@ -130,7 +146,11 @@ export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
                           size="sm"
                           variant="ghost"
                           className="size-5 p-0 text-subtle-foreground hover:text-recording hover:bg-recording/10 opacity-70 group-hover/item:opacity-100"
-                          onClick={() => toggleExclude(segment.id)}
+                          onClick={(event) => {
+                            // Keep row clicks reserved for playhead seek.
+                            event.stopPropagation()
+                            toggleExclude(segment.id)
+                          }}
                         >
                           <X className="size-3" aria-hidden />
                         </IconButton>
@@ -159,6 +179,11 @@ export const ReviewSuggestionsCard = memo(function ReviewSuggestionsCard({
           )}
         </ScrollArea>
       </div>
+
+      <p className="text-[10px] leading-relaxed text-muted-foreground">
+        {keptSegmentCount} manual zoom{keptSegmentCount === 1 ? "" : "s"} will be kept — accepting
+        only replaces generated suggestions.
+      </p>
 
       {/* Action Footer */}
       <div className="flex items-center gap-2 pt-0.5">

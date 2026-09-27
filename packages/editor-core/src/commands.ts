@@ -2811,6 +2811,7 @@ function applyAddZoomSegment(
     preset: command.preset ?? "product-demo",
     followDeadzonePercent: command.followDeadzonePercent,
     followSmoothingAlpha: command.followSmoothingAlpha,
+    followSpeed: command.followSpeed,
     label: command.label,
   }
   const segments = [...getManualZoomSegments(state), segment]
@@ -2870,6 +2871,7 @@ function applyUpdateZoomSegment(
     preset: command.preset ?? (hasManualEdit ? "manual-only" : current.preset),
     followDeadzonePercent: command.followDeadzonePercent ?? current.followDeadzonePercent,
     followSmoothingAlpha: command.followSmoothingAlpha ?? current.followSmoothingAlpha,
+    followSpeed: command.followSpeed ?? current.followSpeed,
     label: command.label ?? current.label,
   }
   const segments = getManualZoomSegments(state).map((segment) =>
@@ -2959,8 +2961,10 @@ function applyRegenerateZoomSuggestions(
 ): CommandResult<TimelineState> {
   const existing = getManualZoomSegments(state)
   const preserved = existing.filter((segment) => {
-    const mode = segment.mode ?? "manual"
-    return mode === "manual" || segment.locked
+    if (segment.locked) return true
+    if (segment.source === "manual" || segment.source === "follow") return true
+    // Legacy segments without a source are user-authored unless marked auto.
+    return segment.source === undefined && segment.mode !== "auto"
   })
   const generated = command.segments
     .map((segment) => ({
@@ -3381,6 +3385,7 @@ export function createAddZoomSegmentCommand(
     preset?: ManualZoomSegment["preset"]
     followDeadzonePercent?: number
     followSmoothingAlpha?: number
+    followSpeed?: ManualZoomSegment["followSpeed"]
     label?: string
   } = {},
 ): CommandRecord {
@@ -3400,6 +3405,7 @@ export function createAddZoomSegmentCommand(
     preset: options.preset,
     followDeadzonePercent: options.followDeadzonePercent,
     followSmoothingAlpha: options.followSmoothingAlpha,
+    followSpeed: options.followSpeed,
     label: options.label,
   }
 }
@@ -3421,6 +3427,7 @@ export function createUpdateZoomSegmentCommand(
     preset?: ManualZoomSegment["preset"]
     followDeadzonePercent?: number
     followSmoothingAlpha?: number
+    followSpeed?: ManualZoomSegment["followSpeed"]
     label?: string
   },
 ): CommandRecord {

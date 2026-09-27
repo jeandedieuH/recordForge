@@ -1,24 +1,49 @@
 import { useState } from "react"
 import type { ManualZoomSegment, ZoomEasing } from "@recordforge/contracts"
-import {
-  clampZoomTarget,
-  zoomSegmentBadges,
-  zoomTargetForCursorPoint,
-} from "@recordforge/cursor-core"
+import type { FollowSpeed } from "@recordforge/cursor-core"
+import { zoomSegmentBadges, zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import {
   createDeleteZoomSegmentCommand,
   createSplitZoomSegmentCommand,
 } from "@recordforge/editor-core"
 import { Lock, Unlock, ZoomIn } from "lucide-react"
-import { Badge, Button, Input, SimpleSelect, Switch, cn } from "@recordforge/ui"
+import {
+  Badge,
+  Button,
+  IconButton,
+  Input,
+  SimpleSelect,
+  Switch,
+  ToggleGroup,
+  ToggleGroupItem,
+  cn,
+} from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
-import { NumberField } from "./fields"
+import { DebouncedSlider, InspectorSection, NumberField } from "./fields"
 
 interface ZoomSegmentInspectorProps {
   segment: ManualZoomSegment
   onClear: () => void
 }
+
+const ZOOM_LEVEL_MIN = 1.1
+const ZOOM_LEVEL_MAX = 4
+const ZOOM_LEVEL_CHIPS = [1.25, 1.5, 2, 2.5]
+
+// The inspector only exposes the stable motion feels; other schema easings
+// (linear, spring, …) are still honored and shown as a read-only option.
+const ZOOM_FEEL_OPTIONS: { value: ZoomEasing; label: string }[] = [
+  { value: "smooth", label: "Smooth" },
+  { value: "cinematic", label: "Cinematic" },
+  { value: "snappy", label: "Snappy" },
+]
+
+const FOLLOW_SPEED_OPTIONS: { value: FollowSpeed; label: string }[] = [
+  { value: "relaxed", label: "Relaxed" },
+  { value: "balanced", label: "Balanced" },
+  { value: "tight", label: "Tight" },
+]
 
 function badgeVariant(
   variant: "default" | "secondary" | "outline" | "warning",
@@ -28,36 +53,86 @@ function badgeVariant(
   return variant
 }
 
+/**
+ * Label edits commit on blur/Enter so each keystroke does not enqueue a
+ * separate undo entry (update commands otherwise coalesce but still churn).
+ * Rendered with key={segment.id} so the draft resets when the selection moves.
+ */
+function LabelField({
+  segment,
+  disabled,
+  onCommit,
+}: {
+  segment: ManualZoomSegment
+  disabled: boolean
+  onCommit: (label: string | undefined) => void
+}) {
+  const [draft, setDraft] = useState(segment.label ?? "")
+
+  function commit() {
+    const next = draft.trim()
+    if (next === (segment.label ?? "")) return
+    onCommit(next === "" ? undefined : next)
+  }
+
+  return (
+    <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
+      <span>Segment Label</span>
+      <Input
+        value={draft}
+        placeholder="e.g. Focus on code, CTA click"
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault()
+            commit()
+            event.currentTarget.blur()
+          }
+        }}
+        disabled={disabled}
+        className="h-7 text-xs"
+      />
+    </label>
+  )
+}
+
 export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorProps) {
   const execute = useTimelineStore((state) => state.execute)
   const interaction = useTimelineInteraction()
   const timeline = useTimelineStore((state) => state.engine?.history.present)
-  const [extraPadding, setExtraPadding] = useState(0)
 
   function handleUpdate(update: Parameters<typeof interaction.updateZoomTarget>[1]) {
     interaction.updateZoomTarget(segment.id, update, { phase: "commit" })
   }
 
-  function clampTarget() {
-    if (!timeline) return
-    const clamped = clampZoomTarget(segment.target, timeline.canvas, extraPadding)
-    handleUpdate({ target: clamped })
-  }
-
   const canvasWidth = timeline?.canvas.width ?? 1920
   const canvasHeight = timeline?.canvas.height ?? 1080
+  const currentScale = Math.max(1, Math.min(8, canvasWidth / Math.max(1, segment.target.width)))
+  const isFollowMode = segment.mode === "follow-cursor"
+
+  function applyScalePreset(targetScale: number) {
+    const safeScale = Math.max(1.05, Math.min(8, targetScale))
+    const centerX = segment.target.x + segment.target.width / 2
+    const centerY = segment.target.y + segment.target.height / 2
+    const next = zoomTargetForCursorPoint(
+      { x: centerX, y: centerY },
+      { width: canvasWidth, height: canvasHeight, padding: 0 },
+      safeScale,
+    )
+    handleUpdate({ scale: safeScale, target: next })
+  }
 
   function setAnchor(anchorX: 0 | 0.5 | 1, anchorY: 0 | 0.5 | 1) {
     if (segment.locked || !timeline) return
-    const targetScale = Math.max(1.05, canvasWidth / Math.max(1, segment.target.width))
     const px = anchorX * canvasWidth
     const py = anchorY * canvasHeight
     const next = zoomTargetForCursorPoint(
       { x: px, y: py },
       { width: canvasWidth, height: canvasHeight, padding: 0 },
-      targetScale,
+      currentScale,
     )
-    handleUpdate({ target: next, scale: targetScale })
+    handleUpdate({ target: next, scale: currentScale })
   }
 
   const badges = zoomSegmentBadges(segment)
@@ -81,14 +156,17 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
     const clickY = event.clientY - rect.top
     const canvasClickX = (clickX / rect.width) * canvasWidth
     const canvasClickY = (clickY / rect.height) * canvasHeight
-    const targetScale = Math.max(1.05, canvasWidth / Math.max(1, segment.target.width))
     const next = zoomTargetForCursorPoint(
       { x: canvasClickX, y: canvasClickY },
       { width: canvasWidth, height: canvasHeight, padding: 0 },
-      targetScale,
+      currentScale,
     )
-    handleUpdate({ target: next, scale: targetScale })
+    handleUpdate({ target: next, scale: currentScale })
   }
+
+  const easingOptions = ZOOM_FEEL_OPTIONS.some((option) => option.value === segment.easing)
+    ? ZOOM_FEEL_OPTIONS
+    : [...ZOOM_FEEL_OPTIONS, { value: segment.easing, label: segment.easing }]
 
   return (
     <div className="flex flex-col gap-4">
@@ -99,19 +177,20 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           <span>Zoom Segment</span>
         </div>
         <div className="flex items-center gap-1">
-          <Button
+          <IconButton
+            label={segment.locked ? "Unlock segment" : "Lock segment"}
+            tooltipSide="bottom"
             variant="ghost"
             size="sm"
+            className="size-7"
             onClick={() => handleUpdate({ locked: !segment.locked })}
-            className="h-7 px-2 text-xs"
-            title={segment.locked ? "Unlock segment" : "Lock segment"}
           >
             {segment.locked ? (
               <Lock className="size-3.5" aria-hidden />
             ) : (
               <Unlock className="size-3.5 text-subtle-foreground" aria-hidden />
             )}
-          </Button>
+          </IconButton>
           <Button variant="ghost" size="sm" onClick={onClear} className="h-7 text-xs">
             Done
           </Button>
@@ -143,17 +222,132 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
         />
       </div>
 
-      {/* Label */}
-      <label className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-        <span>Segment Label</span>
-        <Input
-          value={segment.label ?? ""}
-          placeholder="e.g. Focus on code, CTA click"
-          onChange={(e) => handleUpdate({ label: e.target.value || undefined })}
+      <LabelField
+        key={segment.id}
+        segment={segment}
+        disabled={segment.locked}
+        onCommit={(label) => handleUpdate({ label })}
+      />
+
+      {/* Camera */}
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-3">
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-semibold text-foreground">Camera mode</span>
+          <ToggleGroup
+            type="single"
+            aria-label="Camera mode"
+            value={isFollowMode ? "follow-cursor" : "static"}
+            disabled={segment.locked}
+            onValueChange={(value) => {
+              if (!value) return
+              handleUpdate({ mode: value as "follow-cursor" | "static" })
+            }}
+            className="flex w-full rounded-md border border-border"
+          >
+            <ToggleGroupItem value="follow-cursor" className="h-7 flex-1 px-2 text-[11px]">
+              Follow cursor
+            </ToggleGroupItem>
+            <ToggleGroupItem value="static" className="h-7 flex-1 px-2 text-[11px]">
+              Fixed focus
+            </ToggleGroupItem>
+          </ToggleGroup>
+        </div>
+
+        {isFollowMode ? (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] text-subtle-foreground">Follow speed</span>
+            <ToggleGroup
+              type="single"
+              aria-label="Follow speed"
+              value={segment.followSpeed ?? "balanced"}
+              disabled={segment.locked}
+              onValueChange={(value) => {
+                if (!value) return
+                handleUpdate({ followSpeed: value as FollowSpeed })
+              }}
+              className="flex w-full rounded-md border border-border"
+            >
+              {FOLLOW_SPEED_OPTIONS.map((option) => (
+                <ToggleGroupItem
+                  key={option.value}
+                  value={option.value}
+                  className="h-7 flex-1 px-2 text-[11px]"
+                >
+                  {option.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
+        ) : null}
+
+        <div className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
+          <span>Zoom feel</span>
+          <SimpleSelect
+            aria-label="Zoom feel"
+            size="sm"
+            value={segment.easing}
+            onValueChange={(val) => handleUpdate({ easing: val as ZoomEasing })}
+            disabled={segment.locked}
+            className="w-36"
+            options={easingOptions}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-border">
+          <NumberField
+            label="Ease-In (ms)"
+            value={segment.transitionInMs ?? 400}
+            min={0}
+            step={50}
+            onChange={(val) => handleUpdate({ transitionInMs: val })}
+          />
+          <NumberField
+            label="Ease-Out (ms)"
+            value={segment.transitionOutMs ?? 400}
+            min={0}
+            step={50}
+            onChange={(val) => handleUpdate({ transitionOutMs: val })}
+          />
+        </div>
+      </div>
+
+      {/* Zoom level */}
+      <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-3">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold text-foreground">Zoom level</span>
+          <div className="flex items-center gap-1">
+            {ZOOM_LEVEL_CHIPS.map((chipScale) => (
+              <button
+                key={chipScale}
+                type="button"
+                disabled={segment.locked}
+                onClick={() => applyScalePreset(chipScale)}
+                className={cn(
+                  "px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors",
+                  Math.abs(currentScale - chipScale) < 0.05
+                    ? "border-primary bg-primary/10 text-primary font-semibold"
+                    : "border-border bg-surface-dim text-muted-foreground hover:bg-overlay hover:text-foreground",
+                )}
+              >
+                {chipScale}×
+              </button>
+            ))}
+          </div>
+        </div>
+        <DebouncedSlider
+          value={[Math.min(ZOOM_LEVEL_MAX, Math.max(ZOOM_LEVEL_MIN, currentScale))]}
+          min={ZOOM_LEVEL_MIN}
+          max={ZOOM_LEVEL_MAX}
+          step={0.05}
           disabled={segment.locked}
-          className="h-7 text-xs"
+          onValueCommit={([val]) => applyScalePreset(val)}
+          aria-label="Zoom level"
         />
-      </label>
+        <div className="flex justify-between text-[10px] text-muted-foreground">
+          <span>Magnification</span>
+          <span className="font-mono tabular-nums">{currentScale.toFixed(2)}×</span>
+        </div>
+      </div>
 
       {/* 2D Canvas Mini-map Focal Repositioner */}
       <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-3">
@@ -168,7 +362,7 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
             tabIndex={0}
             onClick={handleMiniMapClick}
             className={cn(
-              "relative cursor-crosshair rounded border border-border bg-black/40 overflow-hidden select-none transition-opacity",
+              "relative cursor-crosshair rounded border border-border bg-surface-dim overflow-hidden select-none transition-opacity",
               segment.locked && "cursor-not-allowed opacity-60",
             )}
             style={{ width: `${miniMapWidth}px`, height: `${miniMapHeight}px` }}
@@ -176,14 +370,14 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
           >
             {/* Rule of thirds grid */}
             <div className="pointer-events-none absolute inset-0 grid grid-cols-3 grid-rows-3 opacity-20">
-              <div className="border-b border-r border-dashed border-white" />
-              <div className="border-b border-r border-dashed border-white" />
-              <div className="border-b border-dashed border-white" />
-              <div className="border-b border-r border-dashed border-white" />
-              <div className="border-b border-r border-dashed border-white" />
-              <div className="border-b border-dashed border-white" />
-              <div className="border-r border-dashed border-white" />
-              <div className="border-r border-dashed border-white" />
+              <div className="border-b border-r border-dashed border-foreground" />
+              <div className="border-b border-r border-dashed border-foreground" />
+              <div className="border-b border-dashed border-foreground" />
+              <div className="border-b border-r border-dashed border-foreground" />
+              <div className="border-b border-r border-dashed border-foreground" />
+              <div className="border-b border-dashed border-foreground" />
+              <div className="border-r border-dashed border-foreground" />
+              <div className="border-r border-dashed border-foreground" />
               <div />
             </div>
 
@@ -286,123 +480,42 @@ export function ZoomSegmentInspector({ segment, onClear }: ZoomSegmentInspectorP
         </div>
       </div>
 
-      {/* Follow camera and the two stable easing choices are intentionally the only new controls. */}
-      <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-3">
-        <div className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
-          <span>Camera Mode</span>
-          <span className="rounded-md border border-primary/30 bg-primary/10 px-2 py-1 font-medium text-primary">
-            Follow cursor
-          </span>
-        </div>
-
-        <div className="flex items-center justify-between gap-2 text-[11px] text-subtle-foreground">
-          <span>Easing Curve</span>
-          <SimpleSelect
-            aria-label="Zoom easing"
-            size="sm"
-            value={segment.easing === "cinematic" ? "cinematic" : "smooth"}
-            onValueChange={(val) => handleUpdate({ easing: val as ZoomEasing })}
-            disabled={segment.locked}
-            className="w-36"
-            options={[
-              { value: "smooth", label: "Smooth" },
-              { value: "cinematic", label: "Cinematic" },
-            ]}
-          />
-        </div>
-
-        {/* Transition In / Out Durations */}
-        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-border">
+      {/* Advanced numeric fields — kept behind a disclosure because the
+          mini-map and zoom slider cover the common adjustments. */}
+      <InspectorSection title="Advanced" defaultOpen={false}>
+        <div className="grid grid-cols-2 gap-2">
           <NumberField
-            label="Ease-In (ms)"
-            value={segment.transitionInMs ?? 400}
-            min={0}
-            step={50}
-            onChange={(val) => handleUpdate({ transitionInMs: val })}
+            label="Target X"
+            value={segment.target.x}
+            onChange={(value) => handleUpdate({ target: { x: value } })}
           />
           <NumberField
-            label="Ease-Out (ms)"
-            value={segment.transitionOutMs ?? 400}
-            min={0}
-            step={50}
-            onChange={(val) => handleUpdate({ transitionOutMs: val })}
+            label="Target Y"
+            value={segment.target.y}
+            onChange={(value) => handleUpdate({ target: { y: value } })}
+          />
+          <NumberField
+            label="Target width"
+            value={segment.target.width}
+            onChange={(value) => handleUpdate({ target: { width: value } })}
+          />
+          <NumberField
+            label="Target height"
+            value={segment.target.height}
+            onChange={(value) => handleUpdate({ target: { height: value } })}
+          />
+          <NumberField
+            label="Start (ms)"
+            value={segment.startMs}
+            onChange={(value) => handleUpdate({ startMs: value })}
+          />
+          <NumberField
+            label="End (ms)"
+            value={segment.startMs + segment.durationMs}
+            onChange={(value) => handleUpdate({ endMs: value })}
           />
         </div>
-      </div>
-
-      {/* Numerical Target Dimensions */}
-      <div className="grid grid-cols-2 gap-2">
-        <NumberField
-          label="Target X"
-          value={segment.target.x}
-          onChange={(value) => handleUpdate({ target: { x: value } })}
-        />
-        <NumberField
-          label="Target Y"
-          value={segment.target.y}
-          onChange={(value) => handleUpdate({ target: { y: value } })}
-        />
-        <NumberField
-          label="Target width"
-          value={segment.target.width}
-          onChange={(value) => handleUpdate({ target: { width: value } })}
-        />
-        <NumberField
-          label="Target height"
-          value={segment.target.height}
-          onChange={(value) => handleUpdate({ target: { height: value } })}
-        />
-        <NumberField
-          label="Start (ms)"
-          value={segment.startMs}
-          onChange={(value) => handleUpdate({ startMs: value })}
-        />
-        <NumberField
-          label="End (ms)"
-          value={segment.startMs + segment.durationMs}
-          onChange={(value) => handleUpdate({ endMs: value })}
-        />
-        <NumberField
-          label="Scale"
-          value={Number((canvasWidth / Math.max(1, segment.target.width)).toFixed(2))}
-          step={0.1}
-          min={1}
-          onChange={(newScale) => {
-            const safeScale = Math.max(1.05, Math.min(8, newScale))
-            const centerX = segment.target.x + segment.target.width / 2
-            const centerY = segment.target.y + segment.target.height / 2
-            const next = zoomTargetForCursorPoint(
-              { x: centerX, y: centerY },
-              { width: canvasWidth, height: canvasHeight, padding: 0 },
-              safeScale,
-            )
-            handleUpdate({ scale: safeScale, target: next })
-          }}
-        />
-      </div>
-
-      {/* Safe Edges & Clamping */}
-      <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-3">
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] font-semibold">Safe Edges</span>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-[10px]"
-            disabled={segment.locked || !timeline}
-            onClick={clampTarget}
-          >
-            Clamp target
-          </Button>
-        </div>
-        <NumberField
-          label="Extra padding (px)"
-          value={extraPadding}
-          min={0}
-          step={1}
-          onChange={setExtraPadding}
-        />
-      </div>
+      </InspectorSection>
 
       {/* Action Buttons */}
       <div className="flex gap-2">

@@ -1,5 +1,6 @@
 import { memo } from "react"
 import type { ZoomPreset } from "@recordforge/contracts"
+import { ZOOM_PRESETS } from "@recordforge/cursor-core"
 import { AlertCircle, Loader2, Sparkles, Wand2 } from "lucide-react"
 import { Button, SimpleSelect } from "@recordforge/ui"
 
@@ -25,7 +26,7 @@ export const SmartZoomCard = memo(function SmartZoomCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <div className="flex size-5 items-center justify-center rounded-md bg-secondary/15 text-secondary">
-            <Sparkles className="size-3 text-purple-400" aria-hidden />
+            <Sparkles className="size-3" aria-hidden />
           </div>
           <span className="text-xs font-semibold text-foreground">Smart Zoom</span>
         </div>
@@ -36,19 +37,16 @@ export const SmartZoomCard = memo(function SmartZoomCard({
           value={preset}
           onValueChange={(val) => onPresetChange(val as ZoomPreset)}
           className="h-7 w-36 text-[11px]"
-          options={[
-            { value: "product-demo", label: "Product Demo" },
-            { value: "developer", label: "Developer (Code)" },
-            { value: "cinematic", label: "Cinematic" },
-            { value: "subtle", label: "Subtle" },
-            { value: "manual-only", label: "Manual Only" },
-          ]}
+          options={Object.values(ZOOM_PRESETS).map((entry) => ({
+            value: entry.id,
+            label: entry.label,
+          }))}
         />
       </div>
 
       <p className="text-[11px] leading-relaxed text-subtle-foreground">
-        Intelligent action clustering detects rapid clicks and code edits to generate smooth,
-        cinematic focus frames.
+        Detects cursor clicks and dwells in the recording and turns them into smooth, cinematic
+        focus frames.
       </p>
 
       {telemetryStatus === "unavailable" ? (
@@ -79,7 +77,7 @@ export const SmartZoomCard = memo(function SmartZoomCard({
         disabled={isReviewDisabled}
         onClick={onReviewSuggestions}
       >
-        <Wand2 className="size-3.5 text-purple-400" data-icon="inline-start" />
+        <Wand2 className="size-3.5 text-secondary" data-icon="inline-start" />
         <span>Generate & Review Suggestions</span>
       </Button>
     </div>

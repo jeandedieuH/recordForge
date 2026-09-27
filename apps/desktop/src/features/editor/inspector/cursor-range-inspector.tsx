@@ -35,17 +35,23 @@ export function CursorRangeInspector({ range, onClear }: CursorRangeInspectorPro
   const badges = cursorRangeOverrideLabels(range, baseSettings)
 
   function handleChange(updated: Partial<CursorSettings>) {
+    // Map the inspector's motion presets onto the named smoothing enum:
+    // Precise → off, Natural/Smooth → smooth, Cinematic (factor ≤ 0.15) → strong.
+    const smoothing =
+      updated.smoothMovement === undefined
+        ? undefined
+        : !updated.smoothMovement
+          ? "off"
+          : (updated.smoothFactor ?? rangeSettings.smoothFactor) <= 0.15
+            ? "strong"
+            : "smooth"
+
     execute(
       createUpdateCursorRangeCommand(range.id, {
         enabled: updated.enabled,
         presetId: updated.preset,
         scale: updated.scale,
-        smoothing:
-          updated.smoothMovement === undefined
-            ? undefined
-            : updated.smoothMovement
-              ? "smooth"
-              : "off",
+        smoothing,
         settings: updated,
       }),
     )

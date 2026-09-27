@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { Fragment, useState } from "react"
 import {
   ChevronsLeft,
   ChevronsRight,
@@ -40,12 +40,31 @@ import {
   cn,
 } from "@recordforge/ui"
 import { formatTime } from "@recordforge/editor-core"
+import { ZOOM_PRESETS } from "@recordforge/cursor-core"
 import type { MaskClip, TimelineMarker, ZoomPreset } from "@recordforge/contracts"
 import { formatTimelineTime } from "./timeline-ruler"
 import { parseTimecode } from "./timeline-navigation"
 import { TimelineShortcutsDialog } from "./timeline-shortcuts-dialog"
 
 export type TimelineTool = "select" | "split" | "range"
+
+/**
+ * Menu copy for each zoom preset in the Add Smart Zoom dropdown. Scale and
+ * easing come from the canonical ZOOM_PRESETS table; only the vibe tag and
+ * hint text live here since they are presentational.
+ */
+const smartZoomMenuPresets: Array<{
+  presetId: ZoomPreset
+  title?: string
+  vibe: string
+  hint: string
+}> = [
+  { presetId: "product-demo", vibe: "Smooth", hint: "Auto-tracks active cursor" },
+  { presetId: "developer", vibe: "Snappy", hint: "Crisp focus for code & UI" },
+  { presetId: "cinematic", vibe: "Cinematic", hint: "Smooth gliding camera" },
+  { presetId: "subtle", vibe: "Gentle", hint: "Light emphasis" },
+  { presetId: "manual-only", title: "Fixed Center", vibe: "Static", hint: "Centered screen frame" },
+]
 
 export interface TimelineToolbarProps {
   tool: TimelineTool
@@ -358,67 +377,28 @@ export function TimelineToolbar({
                 <DropdownMenuSeparator />
               </>
             ) : null}
-            <DropdownMenuItem
-              className="cursor-pointer py-1.5"
-              onClick={() => onAddZoom?.({ preset: "product-demo" })}
-            >
-              <div className="flex flex-col gap-0.5 w-full">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span>Standard Focus (1.5×)</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">Smooth</span>
-                </div>
-                <span className="text-[10px] text-muted-foreground">Auto-tracks active cursor</span>
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="cursor-pointer py-1.5"
-              onClick={() => onAddZoom?.({ preset: "developer" })}
-            >
-              <div className="flex flex-col gap-0.5 w-full">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span>Detail Close-up (2.0×)</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">Snappy</span>
-                </div>
-                <span className="text-[10px] text-muted-foreground">Crisp focus for code & UI</span>
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="cursor-pointer py-1.5"
-              onClick={() => onAddZoom?.({ preset: "cinematic" })}
-            >
-              <div className="flex flex-col gap-0.5 w-full">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span>Cinematic Pan (1.8×)</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">Cinematic</span>
-                </div>
-                <span className="text-[10px] text-muted-foreground">Smooth gliding camera</span>
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="cursor-pointer py-1.5"
-              onClick={() => onAddZoom?.({ preset: "subtle" })}
-            >
-              <div className="flex flex-col gap-0.5 w-full">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span>Subtle Zoom (1.25×)</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">Gentle</span>
-                </div>
-                <span className="text-[10px] text-muted-foreground">Light emphasis</span>
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              className="cursor-pointer py-1.5"
-              onClick={() => onAddZoom?.({ preset: "manual-only" })}
-            >
-              <div className="flex flex-col gap-0.5 w-full">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span>Fixed Center (1.5×)</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">Static</span>
-                </div>
-                <span className="text-[10px] text-muted-foreground">Centered screen frame</span>
-              </div>
-            </DropdownMenuItem>
+            {smartZoomMenuPresets.map(({ presetId, title, vibe, hint }, index) => {
+              const preset = ZOOM_PRESETS[presetId]
+              return (
+                <Fragment key={presetId}>
+                  {index === smartZoomMenuPresets.length - 1 ? <DropdownMenuSeparator /> : null}
+                  <DropdownMenuItem
+                    className="cursor-pointer py-1.5"
+                    onClick={() => onAddZoom?.({ preset: presetId })}
+                  >
+                    <div className="flex flex-col gap-0.5 w-full">
+                      <div className="flex items-center justify-between text-xs font-medium">
+                        <span>
+                          {title ?? preset.label} ({preset.scale}×)
+                        </span>
+                        <span className="font-mono text-[10px] text-muted-foreground">{vibe}</span>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground">{hint}</span>
+                    </div>
+                  </DropdownMenuItem>
+                </Fragment>
+              )
+            })}
           </DropdownMenuContent>
         </DropdownMenu>
 
