@@ -196,6 +196,27 @@ const WEBP_PRESETS: Array<{
   },
 ]
 
+export const GIF_MAX_DURATION_MS = 60_000
+
+// The GIF encoder builds one global palette, so FFmpeg buffers every frame
+// in RAM until the stream ends; exports are capped at one minute (mirrored by
+// MAX_GIF_DURATION_MS in Rust). The Selected range preset is judged by
+// its range length rather than the whole timeline. A selected-range preset
+// with no valid range reports false here — the existing range check already
+// blocks that state.
+export function exceedsGifDurationLimit(
+  container: "mp4" | "gif" | "webp",
+  preset: ExportPreset,
+  durationMs: number,
+  range: ExportRange | undefined,
+): boolean {
+  if (container !== "gif") return false
+  if (preset === "selected-range") {
+    return Boolean(range && range.endMs - range.startMs > GIF_MAX_DURATION_MS)
+  }
+  return durationMs > GIF_MAX_DURATION_MS
+}
+
 function isPresetSupported(
   preset: ExportPreset,
   canvas: TimelineCanvas | undefined,
@@ -329,7 +350,14 @@ export function ExportView({
     [durationMs, rangeEnd, rangeStart],
   )
   const isRunning = exportJob?.status === "running" || exportJob?.status === "pending"
-  const canStart = isPresetSupported(selectedPreset, canvas, selectedRange)
+  const gifDurationBlocked = exceedsGifDurationLimit(
+    container,
+    selectedPreset,
+    durationMs,
+    selectedRange,
+  )
+  const canStart =
+    isPresetSupported(selectedPreset, canvas, selectedRange) && !gifDurationBlocked
   const exportPercent = Math.min(100, Math.max(0, Math.round((exportJob?.progress ?? 0) * 100)))
 
   function selectPreset(preset: ExportPreset) {
@@ -504,7 +532,8 @@ export function ExportView({
               {presets.map((preset) => {
                 const supported =
                   preset.id === "selected-range" ||
-                  isPresetSupported(preset.id, canvas, selectedRange)
+                  (isPresetSupported(preset.id, canvas, selectedRange) &&
+                    !(isGif && durationMs > GIF_MAX_DURATION_MS))
                 const selected = selectedPreset === preset.id
                 return (
                   <button
@@ -537,7 +566,9 @@ export function ExportView({
             </div>
             {!canStart ? (
               <p className="text-xs text-warning">
-                Choose a compatible canvas or a positive range before starting this preset.
+                {gifDurationBlocked
+                  ? "GIF exports are limited to 60 seconds. Choose Selected range and pick a clip of 60 seconds or less."
+                  : "Choose a compatible canvas or a positive range before starting this preset."}
               </p>
             ) : null}
           </div>

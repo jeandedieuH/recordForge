@@ -1,6 +1,6 @@
 ---
 name: testing-recordforge-export
-description: How to exercise recordForge's real timeline export/render path end-to-end on a dev box without the full Tauri UI (bun/node_modules/dist may be absent) — temporary Rust shim + JSON-spec harness binary, media generation with lavfi frame counters, and how to verify chunked/parallel export output integrity (frame-exactness, seams, chapters, faststart).
+description: How to exercise recordForge's real timeline export/render path end-to-end on a dev box without the full Tauri UI (bun/node_modules/dist may be absent) — the checked-in export_harness binary behind the export-harness feature, media generation with lavfi frame counters, and how to verify chunked/parallel export output integrity (frame-exactness, seams, chapters, faststart).
 ---
 
 # Testing recordForge exports end-to-end without the app UI
@@ -9,17 +9,13 @@ description: How to exercise recordForge's real timeline export/render path end-
 
 Verifying changes in `apps/desktop/src-tauri/src/exports/mod.rs` (e.g. `run_render_plan`, chunked/parallel rendering, mux, chapters, captions) when the desktop UI can't be run — e.g. no bun, no `node_modules`, no frontend `dist`, or constructing a ≥20s multi-element project via UI is impractical.
 
-## Approach: temporary shim + harness binary (blessed fallback)
+## Approach: checked-in export harness binary
 
-The full export entry (`export_timeline` Tauri command) needs an AppHandle, SQLite rows, and a work dir. Instead add a **temporary** pub shim inside `exports/mod.rs` that calls the real render entry point directly:
+The full export entry (`export_timeline` Tauri command) needs an AppHandle, SQLite rows, and a work dir. Instead the repo ships a feature-gated harness binary that drives the real render entry points directly:
 
-- `pub fn devin_test_render(ffmpeg_path, output_path, plan, project_id, asset_paths, settings, cancel, on_progress, ffprobe_path, force_single_pass)` — for chunked-dispatcher changes, call `render_timeline_composition(...)`; for the single-pass baseline call `render_composition_window(CompositionWindow::full(plan), CompositionPass::standalone(), ...)`. Both are private — the shim must live *inside* `exports/mod.rs`.
-- `pub unsafe extern "C" fn devin_render_spec(spec_ptr, spec_len) -> i32` — deserializes a JSON spec (the same serde types `export_timeline` receives: `RenderPlan`, `ExportSettings`, asset-id→path map). Init `tracing_subscriber` with EnvFilter default `info` so the real `info!` log lines are visible on stderr.
-- `src/bin/chunked_harness.rs` — thin driver: `chunked_harness.exe <spec.json>` → calls `devin_render_spec`, returns its code.
-
-Build: `cargo build --lib --bin chunked_harness` — works even though `cargo test` fails to link on this box (the GNU-ld ordinal issue is **test-profile only**; cdylib+bin build fine).
-
-**Rust commands need** `export PATH="/c/ch/bin:/c/Users/Administrator/tools/mingw64/bin:$PATH"`.
+- `src/bin/export_harness.rs` — thin driver: `export_harness.exe <spec.json>` → `exports::run_export_harness_spec(&spec)`, exits with its status code.
+- `ExportHarnessSpec` (in `exports/mod.rs`, `#[cfg(feature = "export-harness")]`) — a JSON spec with the same serde types `export_timeline` receives: `plan` (`RenderPlan`), `settings` (`ExportSettings`), `assetPaths` (asset-id→path map), `ffmpegPath`, `ffprobePath`, `outputPath`, `forceSinglePass`. `forceSinglePass` routes through `render_composition_window` (one `CompositionPass::standalone()`); otherwise the chunked dispatcher runs. After rendering it runs `validate_export_output` and exits 1 on render or validation failure, 2 on spec parse failure.
+- Build: `cargo build --release --features export-harness --bin export_harness`. Without the feature the binary is skipped (plain `cargo build` never compiles it).
 
 ## ffmpeg/ffprobe resolution gotcha (Windows)
 
@@ -27,7 +23,9 @@ Build: `cargo build --lib --bin chunked_harness` — works even though `cargo te
 
 ## Media generation (self-identifying frames!)
 
-Generate sources with **burned-in frame counters + timecodes** so every output frame self-identifies its source index — makes seam/dup/drop bugs trivially provable:
+Generate sources with **burned-in frame counters + timecodes** so every output frame self-identifies its source index — makes seam/dup/drop bugs trivially provable.
+
+**Stream-start-delay pitfall:** a fixture encoded with B-frames plus audio (`libx264` + `aac`) starts its *video* stream ~2 frames late (`start_time` ≈ 0.0667 s vs audio/container 0). The exporter corrects for this on mid-segment cuts — when comparing chunked vs single-pass frame indices, account for it: a chunk boundary that ignores the delay shows a fixed ~2-frame shift from the first seam onward, not random noise.
 
 ```
 ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=32" -f lavfi -i "sine=frequency=440:duration=32" \
@@ -41,15 +39,17 @@ Read F-numbers by extracting frames (`-vf "select='between(t,11.24,11.45)',crop=
 
 Expected math on an 8-core box (`workers = cores/2` clamped 2..4 → 4; `chunk_frames = max(ceil(total/8), 2*fps)`):
 - 30s@30fps → 900 total frames, chunk_frames=113 → 8 chunks at boundaries 113,226,339,452,565,678,791.
-- Confirm chunking via: log line `export: rendering timeline in parallel chunks chunks=8 workers=4`, `%TEMP%/recordforge_chunks_{project}_{uuid}/chunk_NNNNN.mkv`, and `export: chunked render muxed`.
+- Confirm chunking via: log line `export: rendering timeline in parallel chunks chunks=8 workers=4`, `%TEMP%/recordforge_chunks_{project}_{uuid}/chunk_NNNNN.ts`, and `export: chunked render muxed`.
+- The harness itself runs `validate_export_output` after rendering — a non-zero exit already means frame count, duration, or audio expectations failed; check stderr for the detail.
 
 Correctness checklist:
 - `-count_frames` → `nb_read_frames` == `ceil(duration_ms*fps/1000)` exactly.
 - format duration within ~250ms of plan.
-- streams: v=h264 canvas size/fps; a=aac ≈duration.
-- `-show_chapters` for chapter_mode=embed; moov before mdat for faststart (`-v trace` atom order).
-- **Per-chunk frame counts**: capture `recordforge_chunks_*` mid-run (poll %TEMP% every ~20ms and copy new `.mkv` — they persist until job end; also grab `rf-filter-complex-*.txt` filter scripts). `ffprobe -count_frames` each `chunk_*.mkv` — any count ≠ expected frames for its window is a defect.
+- streams: v=h264 canvas size/fps; a=aac ≈duration. Chunked output must be **constant frame rate** — the concat list carries per-chunk `duration` lines, so uniform PTS deltas across every seam.
+- `-show_chapters` for chapter_mode=embed; moov before mdat for faststart (`-v trace` atom order); HEVC output carries `-tag:v hvc1`.
+- **Per-chunk frame counts**: capture `recordforge_chunks_*` mid-run (poll %TEMP% every ~20ms and copy new `.ts` — they persist until job end; also grab `rf-filter-complex-*.txt` filter scripts). `ffprobe -count_frames` each `chunk_*.ts` — any count ≠ expected frames for its window is a defect.
 - **Seam integrity**: extract ±1-frame windows at each boundary and read F-numbers; look for duplicated frames (same F at consecutive pts), missing frames, or freezes. Also compare `chunk_N_last.png` vs `chunk_N+1_first.png` (PSNR ~inf = true duplicate).
+- **Chunked vs single-pass PSNR must pair frames by index**, not by timestamp: `ffmpeg -i chunked.mp4 -i single.mp4 -lavfi "[0:v]settb=1/30,setpts=N[b];[1:v]settb=1/30,setpts=N[a];[a][b]psnr"`. Timestamp pairing mis-pairs any output that isn't CFR and can report bogus per-frame deltas.
 - Audio: `volumedetect` on ±0.2s windows straddling boundaries (sine → mean_volume ≈ -21dB, not -91dB silence).
 
 ## Pitfalls hit during PR #5 testing
@@ -63,9 +63,9 @@ Correctness checklist:
 
 ## Known-good repro for the boundary-dup bug (PR #5 — fixed in 5c6be54)
 
-A camera/overlay element **spanning a chunk boundary** caused one chunk to emit a duplicated final frame (total 901 vs 900). Repro: 30s plan, overlay [6800,8600)ms crossing boundary 7533ms → `chunk_00002.mkv` had 114 frames instead of 113. Overlay fully inside a chunk → clean. Zoom-only and plain-segment plans → clean.
+A camera/overlay element **spanning a chunk boundary** caused one chunk to emit a duplicated final frame (total 901 vs 900). Repro: 30s plan, overlay [6800,8600)ms crossing boundary 7533ms → `chunk_00002` had 114 frames instead of 113. Overlay fully inside a chunk → clean. Zoom-only and plain-segment plans → clean.
 
-Root cause was `overlay eof_action=repeat` on the camera shadow/border `loop=-1` secondaries leaking an extra tail frame; fixed by `trim=end_frame={window.frame_count}` on the windowed pass's final stream. **Keep this as a regression test**: if a future change removes the cap or adds another unbounded overlay branch, the 114th frame comes back — check `nb_read_frames` per `chunk_*.mkv` (expect 113/109 on the 30s/8-core math above).
+Root cause was `overlay eof_action=repeat` on the camera shadow/border `loop=-1` secondaries leaking an extra tail frame; fixed by bounding the final stream's duration. **Keep this as a regression test**: if a future change removes the bound or adds another unbounded overlay branch, the extra frame comes back — check `nb_read_frames` per `chunk_*.ts` (expect 113/109 on the 30s/8-core math above).
 
 ## Devin secrets needed
 

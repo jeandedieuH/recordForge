@@ -17,6 +17,7 @@ pub mod validation;
 pub mod window;
 pub mod window_effects;
 
+use std::time::Duration;
 use tauri::Manager;
 use tracing::{info, instrument};
 
@@ -63,6 +64,17 @@ pub fn run() {
             // Frameless chrome: apply the Mica backdrop per the stored setting
             // (falls back to opaque on failure or when disabled).
             window_effects::apply_startup_effects(app);
+            // Intermediates from exports killed mid-run outlive their guards;
+            // sweep day-old leftovers off the temp drive in the background.
+            std::thread::spawn(|| {
+                let removed = exports::sweep_stale_temp_files(
+                    &std::env::temp_dir(),
+                    Duration::from_secs(24 * 60 * 60),
+                );
+                if removed > 0 {
+                    info!(removed, "removed stale export temp files");
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

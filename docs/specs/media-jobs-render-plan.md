@@ -242,6 +242,18 @@ One camera model is shared by the preview, the FFmpeg `zoompan` graph, and the R
 | Job persistence | Export request is stored in `media_jobs.options` before the worker starts |
 | Job identity | Scheduler-created id is used for events, completion, cancellation, retry, and resume |
 
+### 5.5 Export execution
+
+How a compiled render plan reaches FFmpeg processes:
+
+- **Per-input seeking.** Segments intersecting the pass window are grouped into `-ss`/`-t` inputs per asset+stream (`plan_segment_inputs`): a request reuses the most recently opened window only when it continues forward within 2 s (`COALESCE_GAP_S`), so reordered or overlapping segments get their own input; each window carries a 0.5 s pre-roll (`SEEK_PREROLL_S`) for keyframe slack plus a 1 s tail margin for decoder flush. More than 24 planned inputs (`MAX_SEEK_INPUTS`, camera overlays included) falls back to the legacy one-input-per-asset layout for segments and cameras.
+- **Camera window clamping.** Every camera overlay intersecting the window gets a dedicated seek input clamped to ~1 s of decode padding, with the output-side cut snapped down to the frame grid (`camera_window_clamp`). Disjoint overlays contribute no input.
+- **Stream-start delay correction.** When the video stream's first frame starts past zero (B-frame delay, e.g. `start_time=0.0667`), a mid-segment cut aims `max(0, delay − source_in)` further into the file so the frame grid matches the standalone pass's `STARTPTS` anchoring. The same rule applies to clamped camera chains, and the (exclusive) window end extends by the delay plus one frame — capped at the segment's raw source end — so a chunk tail neither starves its last frames nor out-produces the single pass.
+- **Chunked pipeline.** Plans ≥ 20 s on ≥ 4-core machines render as `workers = clamp(cores/2, 2, 4)` parallel frame-exact windows, each its own FFmpeg process writing `chunk_{i:05}.ts` (MPEG-TS). Audio renders once as a continuous track, and a stream-copy concat mux joins the chunks with per-chunk `duration` lines — keeping the output constant frame rate — plus faststart and `-tag:v hvc1` for HEVC.
+- **Shared per-export state.** Probe results (`ProbeCache`) and generated plates (`PlateCache` — background, side-by-side background, canvas mask, camera shadow/mask/border) are cached across chunk passes and the hardware→software retry; owned temp files are dropped with the cache.
+- **Memory bounds.** The stdin rawvideo feed queues `clamp(96 MiB / frame_bytes, 4, 32)` frames, and each chunk pass caps `-filter_complex_threads`/`-threads` at `max(2, cores/workers)` so parallel FFmpeg processes don't oversubscribe. Cursor feeders and the writer stop on cancel or the shared halt flag.
+- **Disk safety.** Before rendering, `ensure_export_disk_space` requires a deliberately low bound (`estimate_export_bytes` at 0.01 bpp + 64 MiB) free on the output drive; chunked mode additionally requires 0.05 bpp + 256 MiB on the temp drive and falls back to a single pass otherwise. FFmpeg diagnostics matching "no space left on device" / "not enough space on the disk" / "disk full" surface as a `Storage` error telling the user to free space. At startup a background thread sweeps `STALE_EXPORT_TEMP_PREFIXES` entries older than 24 h from the temp dir.
+
 ---
 
 ## 6. Export Presets
@@ -256,7 +268,7 @@ One camera model is shared by the preview, the FFmpeg `zoompan` graph, and the R
 | `square` | MP4 | H.264 or HEVC | AAC 128kbps | Enabled only for square canvases |
 | `selected-range` | MP4 | Project codec | Project bitrate | Requires a positive range |
 
-Presets are capability-driven. Unsupported canvas shapes and invalid ranges are disabled in the UI and rejected by Rust.
+Presets are capability-driven. Unsupported canvas shapes and invalid ranges are disabled in the UI and rejected by Rust. Animated GIF exports are capped at 60 s (`MAX_GIF_DURATION_MS` / `GIF_MAX_DURATION_MS`); longer timelines require the Selected range preset, which is judged by the range length rather than the full timeline.
 
 ---
 

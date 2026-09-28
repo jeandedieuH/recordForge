@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tauri::Manager;
 use tracing::{info, instrument, warn};
 
@@ -46,6 +46,214 @@ struct TempExportDir(PathBuf);
 impl Drop for TempExportDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Temp artifacts an export leaves behind when the process dies mid-job.
+const STALE_EXPORT_TEMP_PREFIXES: [&str; 9] = [
+    "recordforge_chunks_",
+    "recordforge_bg_",
+    "recordforge_cam_shadow_",
+    "rf-filter-complex-",
+    "rf-mask-",
+    "rf-border-cam-",
+    "rf-chapters-",
+    "rf-captions-",
+    "rf-encoder-probe-",
+];
+
+/// Remove stale export temp artifacts that are direct children of `root`
+/// (the OS temp dir) and older than `max_age`. Prefix-matched so unrelated
+/// temp files survive; per-entry failures are ignored.
+pub(crate) fn sweep_stale_temp_files(root: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let cutoff = SystemTime::now().checked_sub(max_age);
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !STALE_EXPORT_TEMP_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            continue;
+        }
+        let is_stale = cutoff.is_none_or(|cutoff| {
+            entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified < cutoff)
+        });
+        if !is_stale {
+            continue;
+        }
+        let path = entry.path();
+        let removed_entry = if path.is_dir() {
+            std::fs::remove_dir_all(&path).is_ok()
+        } else {
+            std::fs::remove_file(&path).is_ok()
+        };
+        if removed_entry {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// What one composition run actually emitted — returned to the caller so
+/// output validation checks the rendered result instead of re-deriving the
+/// expectation from the plan.
+#[derive(Debug)]
+pub(crate) struct RenderOutcome {
+    /// `[aout]` was emitted (single/standalone pass) or the dedicated audio
+    /// job ran (chunked export).
+    pub has_audio: bool,
+}
+
+type MediaProber =
+    Box<dyn Fn(&Path, &str) -> Result<crate::database::media::MediaMetadata> + Send + Sync>;
+
+/// FFprobe metadata memoized across the passes of one export. A `None` prober
+/// disables probing entirely — callers then behave exactly like the legacy
+/// `ffprobe_path: None` path (no probe, specifier guesses only).
+pub(crate) struct ProbeCache {
+    prober: Option<MediaProber>,
+    entries: Mutex<HashMap<PathBuf, Arc<crate::database::media::MediaMetadata>>>,
+}
+
+impl ProbeCache {
+    fn new(ffprobe_path: Option<&Path>) -> Self {
+        let prober = ffprobe_path.map(|path| {
+            let path = path.to_string_lossy().to_string();
+            Box::new(move |input: &Path, asset_id: &str| {
+                crate::media::probe::probe_media(&path, input, asset_id)
+            }) as MediaProber
+        });
+        Self {
+            prober,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_prober(
+        prober: impl Fn(&Path, &str) -> Result<crate::database::media::MediaMetadata>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self {
+            prober: Some(Box::new(prober)),
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Probe `path` once per export, memoized under the path. `None` when
+    /// probing is disabled.
+    fn metadata(
+        &self,
+        path: &Path,
+        asset_id: &str,
+    ) -> Option<Result<Arc<crate::database::media::MediaMetadata>>> {
+        let prober = self.prober.as_ref()?;
+        // The lock is held across the probe call so parallel chunk passes
+        // probe each path exactly once.
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(hit) = entries.get(path) {
+            return Some(Ok(Arc::clone(hit)));
+        }
+        let metadata = match prober(path, asset_id) {
+            Ok(metadata) => Arc::new(metadata),
+            Err(error) => return Some(Err(error)),
+        };
+        entries.insert(path.to_path_buf(), Arc::clone(&metadata));
+        Some(Ok(metadata))
+    }
+
+    /// `video stream start − earliest stream start`, in seconds: the offset a
+    /// B-frame-delayed video stream carries into `STARTPTS` re-anchoring. 0
+    /// when unknown or probing is disabled.
+    fn video_start_delay_s(&self, path: &Path, asset_id: &str) -> f64 {
+        let Some(Ok(metadata)) = self.metadata(path, asset_id) else {
+            return 0.0;
+        };
+        let first_start = metadata
+            .streams
+            .iter()
+            .filter_map(|stream| stream.start_ms)
+            .min()
+            .unwrap_or(0);
+        metadata
+            .streams
+            .iter()
+            .filter(|stream| stream.kind == "video")
+            .filter_map(|stream| stream.start_ms)
+            .min()
+            .map(|start| start.saturating_sub(first_start) as f64 / 1000.0)
+            .unwrap_or(0.0)
+    }
+}
+
+/// Generated image inputs (canvas plates, camera masks/borders/shadows)
+/// memoized across the passes of one export. Cache-owned temp files are
+/// guarded until the cache drops so every chunk pass sees the same path.
+pub(crate) struct PlateCache {
+    entries: Mutex<HashMap<String, Option<PathBuf>>>,
+    guards: Mutex<Vec<TempMaskFile>>,
+}
+
+impl PlateCache {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            guards: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Return the plate for `key`, generating it once per export. `create`
+    /// yields the path plus whether it is a cache-owned temp file (owned
+    /// files are deleted when the export ends). `None` — "no plate" — is
+    /// memoized too.
+    fn get_or_create(
+        &self,
+        key: &str,
+        create: impl FnOnce() -> Result<Option<(PathBuf, bool)>>,
+    ) -> Result<Option<PathBuf>> {
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = entries.get(key) {
+            return Ok(entry.clone());
+        }
+        let created = create()?;
+        if let Some((path, true)) = &created {
+            self.guards
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(TempMaskFile(path.clone()));
+        }
+        let path = created.map(|(path, _)| path);
+        entries.insert(key.to_string(), path.clone());
+        Ok(path)
+    }
+}
+
+/// Per-export state shared by every composition pass: one probe memoization
+/// and one generated-plate memoization, so chunk passes stop redoing the same
+/// ffprobe/raster work and a hardware→software retry reuses both.
+pub(crate) struct CompositionShared {
+    probe: ProbeCache,
+    plates: PlateCache,
+}
+
+impl CompositionShared {
+    pub(crate) fn new(ffprobe_path: Option<&Path>) -> Self {
+        Self {
+            probe: ProbeCache::new(ffprobe_path),
+            plates: PlateCache::new(),
+        }
     }
 }
 
@@ -548,6 +756,7 @@ pub fn run_render_plan(
         std::fs::create_dir_all(parent)
             .map_err(|error| InternalError::Storage(format!("create export directory: {error}")))?;
     }
+    ensure_export_disk_space(output_path, &plan, &settings)?;
 
     update_progress(
         &db,
@@ -607,7 +816,10 @@ pub fn run_render_plan(
         Some("compositing timeline tracks"),
     )?;
     let resource_dir = app.path().resource_dir().ok();
-    let composition = render_timeline_composition(
+    // One probe/plate cache serves both the primary render and the software
+    // retry so the fallback does not re-run the same ffprobe/plate work.
+    let shared = CompositionShared::new(Some(ffprobe_path));
+    let composition = render_timeline_composition_shared(
         &ffmpeg,
         &partial_path,
         &plan,
@@ -618,45 +830,48 @@ pub fn run_render_plan(
         cancel.clone(),
         &progress_reporter,
         resource_dir.as_deref(),
-        Some(ffprobe_path),
+        &shared,
     );
     // A hardware encoder can fail to initialize even after a passing probe
     // (driver capabilities differ by resolution and pixel format), so retry
     // once on software instead of failing the export outright. Cancelled jobs
     // propagate unchanged.
-    if let Err(error) = composition {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed)
-            || encoder == encoding::ExportEncoder::Software
-        {
-            cleanup_export_files(output_path);
-            return Err(error);
+    let outcome = match composition {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                || encoder == encoding::ExportEncoder::Software
+            {
+                cleanup_export_files(output_path);
+                return Err(error);
+            }
+            warn!(
+                project_id = %project_id,
+                encoder = encoder.display_name(),
+                error = %error,
+                "hardware export encoder failed; retrying with software"
+            );
+            let retry_detail = format!(
+                "Hardware encoder ({}) failed: {}; retrying with software",
+                encoder.display_name(),
+                error
+            );
+            update_progress(&db, app, job_id, 0.05, "rendering", Some(&retry_detail))?;
+            render_timeline_composition_shared(
+                &ffmpeg,
+                &partial_path,
+                &plan,
+                project_id,
+                &asset_paths,
+                &settings,
+                encoding::ExportEncoder::Software,
+                cancel.clone(),
+                &progress_reporter,
+                resource_dir.as_deref(),
+                &shared,
+            )?
         }
-        warn!(
-            project_id = %project_id,
-            encoder = encoder.display_name(),
-            error = %error,
-            "hardware export encoder failed; retrying with software"
-        );
-        let retry_detail = format!(
-            "Hardware encoder ({}) failed: {}; retrying with software",
-            encoder.display_name(),
-            error
-        );
-        update_progress(&db, app, job_id, 0.05, "rendering", Some(&retry_detail))?;
-        render_timeline_composition(
-            &ffmpeg,
-            &partial_path,
-            &plan,
-            project_id,
-            &asset_paths,
-            &settings,
-            encoding::ExportEncoder::Software,
-            cancel.clone(),
-            &progress_reporter,
-            resource_dir.as_deref(),
-            Some(ffprobe_path),
-        )?;
-    }
+    };
 
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
@@ -699,7 +914,13 @@ pub fn run_render_plan(
         "validating",
         Some("validating rendered media"),
     )?;
-    validate_export_output(ffprobe_path, &partial_path, &plan, &settings)?;
+    validate_export_output(
+        ffprobe_path,
+        &partial_path,
+        &plan,
+        &settings,
+        outcome.has_audio,
+    )?;
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
@@ -730,15 +951,17 @@ pub fn run_render_plan(
 }
 
 // ---------------------------------------------------------------------------
-// Dev-only spec harness used by `src/bin/devin_harness.rs` to drive the real
-// composition entry points with a JSON spec — the same serde types
-// `export_timeline` receives — so export behavior can be reproduced
-// end-to-end on a dev box without the Tauri UI. Not referenced by the app.
+// Dev-only spec harness used by `src/bin/export_harness.rs` (built with
+// `--features export-harness`) to drive the real composition entry points
+// with a JSON spec — the same serde types `export_timeline` receives — so
+// export behavior can be reproduced end-to-end on a dev box without the
+// Tauri UI. Not compiled into the app.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "export-harness")]
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DevinRenderSpec {
+pub struct ExportHarnessSpec {
     pub plan: RenderPlan,
     pub settings: ExportSettings,
     pub asset_paths: HashMap<String, PathBuf>,
@@ -749,9 +972,11 @@ pub struct DevinRenderSpec {
     pub force_single_pass: bool,
 }
 
-/// Render a JSON `DevinRenderSpec` through the real export path.
-/// Returns 0 on success, 2 on spec parse failure, 1 on render failure.
-pub fn devin_render_spec(spec_json: &[u8]) -> i32 {
+/// Render a JSON `ExportHarnessSpec` through the real export path.
+/// Returns 0 on success, 2 on spec parse failure, 1 on render or output
+/// validation failure.
+#[cfg(feature = "export-harness")]
+pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -760,10 +985,10 @@ pub fn devin_render_spec(spec_json: &[u8]) -> i32 {
         .with_writer(std::io::stderr)
         .try_init();
 
-    let spec: DevinRenderSpec = match serde_json::from_slice(spec_json) {
+    let spec: ExportHarnessSpec = match serde_json::from_slice(spec_json) {
         Ok(spec) => spec,
         Err(error) => {
-            eprintln!("devin_render_spec: spec parse failed: {error}");
+            eprintln!("export_harness: spec parse failed: {error}");
             return 2;
         }
     };
@@ -772,12 +997,13 @@ pub fn devin_render_spec(spec_json: &[u8]) -> i32 {
     let on_progress = |ratio: f64| {
         eprintln!("[progress] {:.1}%", ratio.clamp(0.0, 1.0) * 100.0);
     };
+    let shared = CompositionShared::new(Some(Path::new(&spec.ffprobe_path)));
     let result = if spec.force_single_pass {
         render_composition_window(
             &spec.ffmpeg_path,
             Path::new(&spec.output_path),
             &spec.plan,
-            "devin-harness",
+            "export-harness",
             &spec.asset_paths,
             &spec.settings,
             encoding::ExportEncoder::Software,
@@ -785,33 +1011,44 @@ pub fn devin_render_spec(spec_json: &[u8]) -> i32 {
             None,
             &on_progress,
             None,
-            Some(Path::new(&spec.ffprobe_path)),
+            &shared,
             &CompositionWindow::full(&spec.plan),
             &CompositionPass::standalone(),
         )
     } else {
-        render_timeline_composition(
+        render_timeline_composition_shared(
             &spec.ffmpeg_path,
             Path::new(&spec.output_path),
             &spec.plan,
-            "devin-harness",
+            "export-harness",
             &spec.asset_paths,
             &spec.settings,
             encoding::ExportEncoder::Software,
             cancel,
             &on_progress,
             None,
-            Some(Path::new(&spec.ffprobe_path)),
+            &shared,
         )
     };
 
-    match result {
-        Ok(()) => 0,
+    let outcome = match result {
+        Ok(outcome) => outcome,
         Err(error) => {
-            eprintln!("devin_render_spec: render failed: {error}");
-            1
+            eprintln!("export_harness: render failed: {error}");
+            return 1;
         }
+    };
+    if let Err(error) = validate_export_output(
+        Path::new(&spec.ffprobe_path),
+        Path::new(&spec.output_path),
+        &spec.plan,
+        &spec.settings,
+        outcome.has_audio,
+    ) {
+        eprintln!("export_harness: output validation failed: {error}");
+        return 1;
     }
+    0
 }
 
 /// Returns a source size shared by every screen segment, or `None` when the
@@ -819,27 +1056,19 @@ pub fn devin_render_spec(spec_json: &[u8]) -> i32 {
 fn common_screen_source(
     segments: &[RenderSegment],
     asset_paths: &HashMap<String, PathBuf>,
-    ffprobe_path: Option<&Path>,
+    probe: &ProbeCache,
 ) -> Option<(u32, u32)> {
     let mut common: Option<(u32, u32)> = None;
     for segment in segments {
         let dimensions = if let (Some(w), Some(h)) = (segment.source_width, segment.source_height) {
             Some((w, h))
-        } else if let (Some(ffprobe), Some(path)) =
-            (ffprobe_path, asset_paths.get(&segment.asset_id))
-        {
-            if let Ok(metadata) = crate::media::probe::probe_media(
-                &ffprobe.to_string_lossy(),
-                path,
-                &segment.asset_id,
-            ) {
-                if let (Some(w), Some(h)) = (metadata.width, metadata.height) {
-                    Some((w as u32, h as u32))
-                } else {
-                    None
-                }
-            } else {
-                None
+        } else if let Some(path) = asset_paths.get(&segment.asset_id) {
+            match probe.metadata(path, &segment.asset_id) {
+                Some(Ok(metadata)) => match (metadata.width, metadata.height) {
+                    (Some(w), Some(h)) => Some((w as u32, h as u32)),
+                    _ => None,
+                },
+                _ => None,
             }
         } else {
             None
@@ -954,6 +1183,9 @@ fn video_screen_rect(
 /// items coexist so the graph can composite each at its own stack position —
 /// keeping the whole export a single encode. Keeping the graph here makes the
 /// export path authoritative for every control exposed by the editor.
+// Tests drive this entry point directly; production callers hold a
+// `CompositionShared` and use `render_timeline_composition_shared`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_timeline_composition(
     ffmpeg_path: &str,
@@ -967,8 +1199,41 @@ fn render_timeline_composition(
     on_progress: &(dyn Fn(f64) + Sync),
     resource_dir: Option<&Path>,
     ffprobe_path: Option<&Path>,
-) -> Result<()> {
-    if should_render_chunked(plan, settings) {
+) -> Result<RenderOutcome> {
+    let shared = CompositionShared::new(ffprobe_path);
+    render_timeline_composition_shared(
+        ffmpeg_path,
+        output_path,
+        plan,
+        project_id,
+        asset_paths,
+        settings,
+        encoder,
+        cancel,
+        on_progress,
+        resource_dir,
+        &shared,
+    )
+}
+
+/// `render_timeline_composition` with caller-owned per-export state so all
+/// passes of one export (chunks, hardware→software retry) share probe results
+/// and generated plates.
+#[allow(clippy::too_many_arguments)]
+fn render_timeline_composition_shared(
+    ffmpeg_path: &str,
+    output_path: &Path,
+    plan: &RenderPlan,
+    project_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    settings: &ExportSettings,
+    encoder: encoding::ExportEncoder,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    on_progress: &(dyn Fn(f64) + Sync),
+    resource_dir: Option<&Path>,
+    shared: &CompositionShared,
+) -> Result<RenderOutcome> {
+    if should_render_chunked(plan, settings) && chunk_temp_space_ok(plan, settings) {
         return render_timeline_chunked(
             ffmpeg_path,
             output_path,
@@ -980,7 +1245,7 @@ fn render_timeline_composition(
             cancel,
             on_progress,
             resource_dir,
-            ffprobe_path,
+            shared,
         );
     }
     render_composition_window(
@@ -995,7 +1260,7 @@ fn render_timeline_composition(
         None,
         on_progress,
         resource_dir,
-        ffprobe_path,
+        shared,
         &CompositionWindow::full(plan),
         &CompositionPass::standalone(),
     )
@@ -1076,6 +1341,10 @@ struct CompositionPass {
     include_audio: bool,
     /// Share of the machine the overlay producer may use (see CursorFramePlan).
     plate_divisor: usize,
+    /// Filter-graph/encoder thread cap; 0 leaves FFmpeg's default (standalone
+    /// passes). Chunk passes cap threads so `workers` parallel FFmpeg
+    /// processes share the machine instead of oversubscribing it.
+    threads: usize,
 }
 
 impl CompositionPass {
@@ -1084,6 +1353,7 @@ impl CompositionPass {
             standalone: true,
             include_audio: true,
             plate_divisor: 1,
+            threads: 0,
         }
     }
 }
@@ -1101,10 +1371,10 @@ fn render_composition_window(
     halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
     on_progress: &(dyn Fn(f64) + Sync),
     resource_dir: Option<&Path>,
-    ffprobe_path: Option<&Path>,
+    shared: &CompositionShared,
     window: &CompositionWindow,
     pass: &CompositionPass,
-) -> Result<()> {
+) -> Result<RenderOutcome> {
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
     }
@@ -1167,7 +1437,7 @@ fn render_composition_window(
         String::new()
     };
 
-    let screen_source = common_screen_source(&plan.segments, asset_paths, ffprobe_path);
+    let screen_source = common_screen_source(&plan.segments, asset_paths, &shared.probe);
     let full_screen_rect = video_screen_rect(canvas, screen_source, false);
     // `screen_*` is the fitted stream's base geometry: the side-by-side rect
     // when the layout is uniformly so, otherwise the full rect — for a
@@ -1186,51 +1456,280 @@ fn render_composition_window(
 
     let mut temp_mask_guards = Vec::new();
     let mut temp_dir_guards: Vec<TempExportDir> = Vec::new();
-    let bg_image_path = prepare_canvas_background_plate(
-        canvas,
-        (screen_x, screen_y, screen_w, screen_h),
-        asset_paths,
-        resource_dir,
+    let win_start_ms = window.start_ms();
+    let win_end_ms = window.end_ms();
+
+    // Per-pass source planning: each intersecting segment becomes a
+    // `SourceRequest` already cut to the window, and `plan_segment_inputs`
+    // coalesces forward-adjacent requests on the same asset into one
+    // `-ss`-seeked input so a chunk pass never decodes the whole file.
+    let mut segment_jobs: Vec<SegmentJob> = Vec::new();
+    let mut segment_requests: Vec<SourceRequest> = Vec::new();
+    for (index, segment) in plan.segments.iter().enumerate() {
+        let segment_start = segment.output_start_ms as f64;
+        let segment_end = segment.output_end_ms as f64;
+        let clamped_start = segment_start.clamp(win_start_ms, win_end_ms);
+        let clamped_end = segment_end.clamp(win_start_ms, win_end_ms);
+        if clamped_end <= clamped_start {
+            continue;
+        }
+        let cut_in_s = (clamped_start - segment_start) / 1000.0;
+        // A mid-segment cut re-anchors the sub-clip to the cut offset instead
+        // of zero so the fps resampler lands on the same absolute frame grid
+        // the unchunked render produces — chunk seams stay sample-identical.
+        // When the video stream starts late (B-frame delay) that first frame
+        // sits at `video_delay_s`, so a mid-segment cut aims past the delay.
+        let video_delay_s = asset_paths
+            .get(&segment.asset_id)
+            .map(|path| shared.probe.video_start_delay_s(path, &segment.asset_id))
+            .unwrap_or(0.0);
+        let source_in_s =
+            corrected_source_in_s(segment.source_in_ms, cut_in_s, segment.speed, video_delay_s);
+        // The exclusive trim end must keep every source frame that maps to
+        // an output inside the window: the stream's first frame sits
+        // `delay_s` into the file (B-frame start offset) and the resample
+        // anchor can overshoot the target by up to one source frame — both
+        // push the last needed frame past the naive end, and the chain's
+        // tpad would silently clone the last frame over the gap instead.
+        // Extra frames past the need are dropped by the trailing
+        // trim=duration anyway. Capping at the segment's raw source end
+        // keeps a window ending on the segment boundary identical to the
+        // single pass.
+        let base_s = segment.source_in_ms as f64 / 1000.0;
+        let delay_s = (video_delay_s - base_s).max(0.0);
+        let source_out_s = (base_s
+            + delay_s
+            + (cut_in_s + (clamped_end - clamped_start) / 1000.0) * segment.speed
+            + 1.0 / (canvas.fps.max(1) as f64))
+            .min(segment.source_out_ms as f64 / 1000.0);
+        segment_jobs.push(SegmentJob {
+            segment_index: index,
+            request_index: segment_requests.len(),
+            clamped_start,
+            clamped_end,
+            cut_in_s,
+        });
+        segment_requests.push(SourceRequest {
+            asset_id: segment.asset_id.clone(),
+            stream_index: segment.stream_index,
+            source_in_s,
+            source_out_s,
+        });
+    }
+
+    // Each camera overlay visible in this window gets a dedicated seek input
+    // clamped to ~1 s of decode padding around the window.
+    let mut camera_jobs: Vec<CameraJob> = Vec::new();
+    for (index, overlay) in plan.overlays.iter().enumerate() {
+        if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
+            continue;
+        }
+        if (overlay.output_end_ms as f64) <= win_start_ms
+            || (overlay.output_start_ms as f64) >= win_end_ms
+        {
+            continue;
+        }
+        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
+            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
+        }
+        let video_delay_s = asset_paths
+            .get(&overlay.asset_id)
+            .map(|path| shared.probe.video_start_delay_s(path, &overlay.asset_id))
+            .unwrap_or(0.0);
+        if let Some(clamp) = camera_window_clamp(
+            overlay.output_start_ms,
+            overlay.output_end_ms,
+            overlay.source_in_ms,
+            overlay.source_out_ms,
+            overlay.speed,
+            canvas.fps as f64,
+            win_start_ms,
+            win_end_ms,
+            video_delay_s,
+        ) {
+            camera_jobs.push(CameraJob {
+                overlay_index: index,
+                clamp,
+            });
+        }
+    }
+
+    // Beyond MAX_SEEK_INPUTS the legacy one-input-per-asset layout wins:
+    // every extra input costs a demuxer/decoder, and wide fan-out is worse
+    // than decoding each file once.
+    let seek_plan = plan_segment_inputs(&segment_requests)
+        .filter(|planned| planned.inputs.len() + camera_jobs.len() <= MAX_SEEK_INPUTS);
+
+    let asset_inputs = collect_input_assets(plan, asset_paths)?;
+    let hwaccel_inputs = encoder != encoding::ExportEncoder::Software;
+    let mut input_specs: Vec<InputSpec> = Vec::new();
+    // asset_id → input index. Holds every asset in the legacy layout, only
+    // audio-referenced assets in the seeked layout — segments and camera
+    // overlays consume their dedicated window inputs instead.
+    let mut input_indices: HashMap<String, usize> = HashMap::new();
+    // overlay index → (clamp, input index, input seek) for the camera loop.
+    let mut camera_inputs: HashMap<usize, (CameraClamp, usize, f64)> = HashMap::new();
+    // window index in `planned.inputs` → input_specs index.
+    let mut window_input_indices: Vec<usize> = Vec::new();
+    match &seek_plan {
+        Some(planned) => {
+            for window in &planned.inputs {
+                let path = asset_paths.get(&window.asset_id).cloned().ok_or_else(|| {
+                    InternalError::Media("render plan references an unknown asset".into())
+                })?;
+                window_input_indices.push(input_specs.len());
+                input_specs.push(InputSpec {
+                    key: format!("src:{}:{}", window.asset_id, window_input_indices.len() - 1),
+                    path,
+                    seek_s: Some(window.seek_s),
+                    duration_s: Some(window.end_s - window.seek_s + SEEK_TAIL_MARGIN_S),
+                    hwaccel: hwaccel_inputs,
+                });
+            }
+            for job in &camera_jobs {
+                let overlay = &plan.overlays[job.overlay_index];
+                let path = asset_paths.get(&overlay.asset_id).cloned().ok_or_else(|| {
+                    InternalError::Media("camera overlay references an unknown asset".into())
+                })?;
+                let seek_s = floor_to_ms(job.clamp.src_in_s - SEEK_PREROLL_S).max(0.0);
+                camera_inputs.insert(job.overlay_index, (job.clamp, input_specs.len(), seek_s));
+                input_specs.push(InputSpec {
+                    key: format!("cam:{}:{}", overlay.asset_id, job.overlay_index),
+                    path,
+                    seek_s: Some(seek_s),
+                    duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+                    hwaccel: hwaccel_inputs,
+                });
+            }
+            if pass.include_audio {
+                // Audio chains read asset-level (unseeked) inputs — atrim
+                // applies its own source offsets.
+                let mut audio_asset_ids = std::collections::BTreeSet::new();
+                if let Some(tracks) = &plan.audio_tracks {
+                    for track in tracks {
+                        audio_asset_ids.insert(&track.asset_id);
+                        audio_asset_ids
+                            .extend(track.segments.iter().map(|segment| &segment.asset_id));
+                    }
+                }
+                if let Some(track) = &plan.audio {
+                    audio_asset_ids.insert(&track.asset_id);
+                    audio_asset_ids.extend(track.segments.iter().map(|segment| &segment.asset_id));
+                }
+                for (asset_id, path) in &asset_inputs {
+                    if !audio_asset_ids.contains(asset_id) {
+                        continue;
+                    }
+                    input_indices.insert(asset_id.clone(), input_specs.len());
+                    input_specs.push(InputSpec {
+                        key: asset_id.clone(),
+                        path: path.clone(),
+                        seek_s: None,
+                        duration_s: None,
+                        hwaccel: false,
+                    });
+                }
+            }
+        }
+        None => {
+            for (asset_id, path) in &asset_inputs {
+                input_indices.insert(asset_id.clone(), input_specs.len());
+                input_specs.push(InputSpec {
+                    key: asset_id.clone(),
+                    path: path.clone(),
+                    seek_s: None,
+                    duration_s: None,
+                    hwaccel: hwaccel_inputs,
+                });
+            }
+            for job in &camera_jobs {
+                let overlay = &plan.overlays[job.overlay_index];
+                let input_index = *input_indices.get(&overlay.asset_id).ok_or_else(|| {
+                    InternalError::Media("camera overlay references an unknown asset".into())
+                })?;
+                // The legacy chain consumes the overlay's full source range.
+                let clamp = CameraClamp {
+                    cut_out_s: 0.0,
+                    chain_dur_s: (overlay.output_end_ms - overlay.output_start_ms) as f64 / 1000.0,
+                    src_in_s: overlay.source_in_ms as f64 / 1000.0,
+                    src_out_s: overlay.source_out_ms as f64 / 1000.0,
+                };
+                camera_inputs.insert(job.overlay_index, (clamp, input_index, 0.0));
+            }
+        }
+    }
+
+    // Plates are cached across the export's passes: the file is generated
+    // once and the same path is reused as an input in every chunk pass.
+    let bg_key = format!(
+        "bg:{}:{}:{}:{}",
+        screen_x.round() as i64,
+        screen_y.round() as i64,
+        screen_w.round() as i64,
+        screen_h.round() as i64
     );
+    let bg_image_path = shared.plates.get_or_create(&bg_key, || {
+        Ok(prepare_canvas_background_plate(
+            canvas,
+            (screen_x, screen_y, screen_w, screen_h),
+            asset_paths,
+            resource_dir,
+        )
+        .map(|path| {
+            let owned = is_owned_bg_plate(&path);
+            (path, owned)
+        }))
+    })?;
     // A baked canvas shadow tracks the video rect; when the rect moves with
     // the layout a second plate — composited only inside side-by-side
     // windows — keeps the shadow pinned to the smaller slot.
     let bg_sbs_image_path = if layout_varies && canvas.shadow {
-        sbs_screen_rect.and_then(|rect| {
-            prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
-        })
-    } else {
-        None
-    };
-    for bg_path in [&bg_image_path, &bg_sbs_image_path].into_iter().flatten() {
-        if bg_path.starts_with(std::env::temp_dir())
-            && bg_path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .is_some_and(|name| name.starts_with("recordforge_bg_"))
-        {
-            temp_mask_guards.push(TempMaskFile(bg_path.clone()));
+        match sbs_screen_rect {
+            Some(rect) => {
+                let key = format!(
+                    "bg_sbs:{}:{}:{}:{}",
+                    rect.0.round() as i64,
+                    rect.1.round() as i64,
+                    rect.2.round() as i64,
+                    rect.3.round() as i64
+                );
+                shared.plates.get_or_create(&key, || {
+                    Ok(
+                        prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
+                            .map(|path| {
+                                let owned = is_owned_bg_plate(&path);
+                                (path, owned)
+                            }),
+                    )
+                })?
+            }
+            None => None,
         }
-    }
-    let mut input_assets = collect_input_assets(plan, asset_paths)?;
-    let bg_input_index = if let Some(bg_path) = &bg_image_path {
-        let idx = input_assets.len();
-        input_assets.push(("canvas:background".to_string(), bg_path.clone()));
-        Some(idx)
     } else {
         None
     };
-    let bg_sbs_input_index = if let Some(bg_path) = &bg_sbs_image_path {
-        let idx = input_assets.len();
-        input_assets.push(("canvas:background_sbs".to_string(), bg_path.clone()));
-        Some(idx)
-    } else {
-        None
+    let push_generated = |input_specs: &mut Vec<InputSpec>, key: &str, path: &Path| -> usize {
+        input_specs.push(InputSpec {
+            key: key.to_string(),
+            path: path.to_path_buf(),
+            seek_s: None,
+            duration_s: None,
+            hwaccel: false,
+        });
+        input_specs.len() - 1
     };
+    let bg_input_index = bg_image_path
+        .as_ref()
+        .map(|path| push_generated(&mut input_specs, "canvas:background", path));
+    let bg_sbs_input_index = bg_sbs_image_path
+        .as_ref()
+        .map(|path| push_generated(&mut input_specs, "canvas:background_sbs", path));
     let chapters_input_index = if (settings.chapter_mode == "embed"
         || settings.chapter_mode == "both")
         && !plan.chapters.is_empty()
     {
+        // The ffmeta file stays per pass — it is near-free to write and the
+        // standalone pass maps it while chunk passes never do.
         let meta_content = generate_ffmetadata(project_id, &plan.chapters);
         let meta_path = std::env::temp_dir().join(format!(
             "rf-chapters-{}-{}.ffmeta",
@@ -1239,8 +1738,7 @@ fn render_composition_window(
         ));
         std::fs::write(&meta_path, meta_content.as_bytes())
             .map_err(|err| InternalError::Storage(format!("write ffmetadata: {err}")))?;
-        let idx = input_assets.len();
-        input_assets.push(("meta:chapters".to_string(), meta_path.clone()));
+        let idx = push_generated(&mut input_specs, "meta:chapters", &meta_path);
         temp_mask_guards.push(TempMaskFile(meta_path));
         Some(idx)
     } else {
@@ -1251,25 +1749,27 @@ fn render_composition_window(
         let radius = (canvas.border_radius as f32)
             .min(screen_w as f32 / 2.0)
             .min(screen_h as f32 / 2.0);
-        let mask_bytes = cursor::generate_rounded_rect_mask_png(
-            screen_w.round().max(1.0) as u32,
-            screen_h.round().max(1.0) as u32,
-            radius,
-        )
-        .map_err(|err| InternalError::Media(format!("generate canvas border mask: {err}")))?;
-        let mask_path = std::env::temp_dir().join(format!(
-            "rf-mask-canvas-{}-{}-{}-{}.png",
-            project_id,
-            screen_w.round() as u32,
-            screen_h.round() as u32,
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(&mask_path, &mask_bytes)
-            .map_err(|err| InternalError::Storage(format!("write canvas border mask: {err}")))?;
-        let idx = input_assets.len();
-        input_assets.push(("mask:canvas".to_string(), mask_path.clone()));
-        temp_mask_guards.push(TempMaskFile(mask_path));
-        Some(idx)
+        let mask_w = screen_w.round().max(1.0) as u32;
+        let mask_h = screen_h.round().max(1.0) as u32;
+        let key = format!("mask:canvas:{mask_w}:{mask_h}:{radius:.2}");
+        let mask_path = shared.plates.get_or_create(&key, || {
+            let mask_bytes = cursor::generate_rounded_rect_mask_png(mask_w, mask_h, radius)
+                .map_err(|err| {
+                    InternalError::Media(format!("generate canvas border mask: {err}"))
+                })?;
+            let mask_path = std::env::temp_dir().join(format!(
+                "rf-mask-canvas-{}-{}-{}-{}.png",
+                project_id,
+                mask_w,
+                mask_h,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&mask_path, &mask_bytes).map_err(|err| {
+                InternalError::Storage(format!("write canvas border mask: {err}"))
+            })?;
+            Ok(Some((mask_path, true)))
+        })?;
+        mask_path.map(|path| push_generated(&mut input_specs, "mask:canvas", &path))
     } else {
         None
     };
@@ -1277,10 +1777,9 @@ fn render_composition_window(
     let mut camera_mask_indices = HashMap::new();
     let mut camera_border_indices = HashMap::new();
     let mut camera_shadow_indices = HashMap::new();
-    for (index, overlay) in plan.overlays.iter().enumerate() {
-        if !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms {
-            continue;
-        }
+    for job in &camera_jobs {
+        let index = job.overlay_index;
+        let overlay = &plan.overlays[index];
         // Snap camera overlay dimensions and coordinates to even integers to prevent
         // YUV420 chroma subsampling misalignment and encoder EINVAL errors.
         let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
@@ -1289,96 +1788,100 @@ fn render_composition_window(
         let overlay_y = (overlay.y.round() as i32) / 2 * 2;
 
         if overlay.shadow_enabled.unwrap_or(false) {
-            if let Some(sp) = generate_camera_shadow_plate_png(
-                canvas.width,
-                canvas.height,
-                overlay_x as f64,
-                overlay_y as f64,
-                overlay_w as f64,
-                overlay_h as f64,
-                &overlay.shape,
-                overlay.shadow_color.as_deref(),
-                overlay.shadow_blur,
-                overlay.shadow_offset_x,
-                overlay.shadow_offset_y,
-            ) {
-                let idx = input_assets.len();
-                input_assets.push((format!("shadow:cam:{index}"), sp.clone()));
-                temp_mask_guards.push(TempMaskFile(sp));
-                camera_shadow_indices.insert(index, idx);
+            let key = format!("cam_shadow:{index}:{overlay_x}:{overlay_y}:{overlay_w}:{overlay_h}");
+            if let Some(sp) = shared.plates.get_or_create(&key, || {
+                Ok(generate_camera_shadow_plate_png(
+                    canvas.width,
+                    canvas.height,
+                    overlay_x as f64,
+                    overlay_y as f64,
+                    overlay_w as f64,
+                    overlay_h as f64,
+                    &overlay.shape,
+                    overlay.shadow_color.as_deref(),
+                    overlay.shadow_blur,
+                    overlay.shadow_offset_x,
+                    overlay.shadow_offset_y,
+                )
+                .map(|path| (path, true)))
+            })? {
+                camera_shadow_indices.insert(
+                    index,
+                    push_generated(&mut input_specs, &format!("shadow:cam:{index}"), &sp),
+                );
             }
         }
 
-        if overlay.shape == "circle" {
-            let mask_bytes = cursor::generate_circle_mask_png(overlay_w, overlay_h)
-                .map_err(|err| InternalError::Media(format!("generate circle mask: {err}")))?;
-            let mask_path = std::env::temp_dir().join(format!(
-                "rf-mask-cam-circle-{}-{}-{}-{}-{}.png",
-                project_id,
-                index,
-                overlay_w,
-                overlay_h,
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::write(&mask_path, &mask_bytes)
-                .map_err(|err| InternalError::Storage(format!("write circle mask: {err}")))?;
-            let idx = input_assets.len();
-            input_assets.push((format!("mask:cam_circle:{index}"), mask_path.clone()));
-            temp_mask_guards.push(TempMaskFile(mask_path));
-            camera_mask_indices.insert(index, idx);
-        } else if overlay.shape == "rounded" {
-            let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32;
-            let mask_bytes =
-                cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius)
-                    .map_err(|err| InternalError::Media(format!("generate rounded mask: {err}")))?;
-            let mask_path = std::env::temp_dir().join(format!(
-                "rf-mask-cam-rounded-{}-{}-{}-{}-{}.png",
-                project_id,
-                index,
-                overlay_w,
-                overlay_h,
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::write(&mask_path, &mask_bytes)
-                .map_err(|err| InternalError::Storage(format!("write rounded mask: {err}")))?;
-            let idx = input_assets.len();
-            input_assets.push((format!("mask:cam_rounded:{index}"), mask_path.clone()));
-            temp_mask_guards.push(TempMaskFile(mask_path));
-            camera_mask_indices.insert(index, idx);
+        if overlay.shape == "circle" || overlay.shape == "rounded" {
+            let shape = overlay.shape.as_str();
+            let key = format!("cam_mask:{index}:{shape}:{overlay_w}:{overlay_h}");
+            let mask_path = shared.plates.get_or_create(&key, || {
+                let mask_bytes = if overlay.shape == "circle" {
+                    cursor::generate_circle_mask_png(overlay_w, overlay_h).map_err(|err| {
+                        InternalError::Media(format!("generate circle mask: {err}"))
+                    })?
+                } else {
+                    let radius = (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32;
+                    cursor::generate_rounded_rect_mask_png(overlay_w, overlay_h, radius).map_err(
+                        |err| InternalError::Media(format!("generate rounded mask: {err}")),
+                    )?
+                };
+                let mask_path = std::env::temp_dir().join(format!(
+                    "rf-mask-cam-{shape}-{}-{}-{}-{}-{}.png",
+                    project_id,
+                    index,
+                    overlay_w,
+                    overlay_h,
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::write(&mask_path, &mask_bytes)
+                    .map_err(|err| InternalError::Storage(format!("write {shape} mask: {err}")))?;
+                Ok(Some((mask_path, true)))
+            })?;
+            if let Some(path) = mask_path {
+                camera_mask_indices.insert(
+                    index,
+                    push_generated(
+                        &mut input_specs,
+                        &format!("mask:cam_{shape}:{index}"),
+                        &path,
+                    ),
+                );
+            }
         }
 
         if let Some(border_width) = overlay.border_width.filter(|value| *value > 0.0) {
-            let border_bytes = generate_camera_border_png(
-                overlay_w,
-                overlay_h,
-                &overlay.shape,
-                border_width,
-                overlay.border_color.as_deref(),
-                overlay.border_opacity,
-            )
-            .map_err(|err| InternalError::Media(format!("generate camera border: {err}")))?;
-            let border_path = std::env::temp_dir().join(format!(
-                "rf-border-cam-{}-{}-{}-{}-{}.png",
-                project_id,
-                index,
-                overlay_w,
-                overlay_h,
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::write(&border_path, &border_bytes)
-                .map_err(|err| InternalError::Storage(format!("write camera border: {err}")))?;
-            let idx = input_assets.len();
-            input_assets.push((format!("border:cam:{index}"), border_path.clone()));
-            temp_mask_guards.push(TempMaskFile(border_path));
-            camera_border_indices.insert(index, idx);
+            let key = format!("cam_border:{index}:{overlay_w}:{overlay_h}");
+            let border_path = shared.plates.get_or_create(&key, || {
+                let border_bytes = generate_camera_border_png(
+                    overlay_w,
+                    overlay_h,
+                    &overlay.shape,
+                    border_width,
+                    overlay.border_color.as_deref(),
+                    overlay.border_opacity,
+                )
+                .map_err(|err| InternalError::Media(format!("generate camera border: {err}")))?;
+                let border_path = std::env::temp_dir().join(format!(
+                    "rf-border-cam-{}-{}-{}-{}-{}.png",
+                    project_id,
+                    index,
+                    overlay_w,
+                    overlay_h,
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::write(&border_path, &border_bytes)
+                    .map_err(|err| InternalError::Storage(format!("write camera border: {err}")))?;
+                Ok(Some((border_path, true)))
+            })?;
+            if let Some(path) = border_path {
+                camera_border_indices.insert(
+                    index,
+                    push_generated(&mut input_specs, &format!("border:cam:{index}"), &path),
+                );
+            }
         }
     }
-
-    let input_indices = input_assets
-        .iter()
-        .enumerate()
-        .map(|(index, (asset_id, _))| (asset_id.clone(), index))
-        .collect::<HashMap<_, _>>();
     let has_zoom = plan.zoom_segments.iter().any(|segment| segment.enabled);
     let can_pad_canvas = bg_input_index.is_none()
         && canvas.border_radius == 0
@@ -1409,21 +1912,16 @@ fn render_composition_window(
     } else {
         String::new()
     };
-    let win_start_ms = window.start_ms();
-    let win_end_ms = window.end_ms();
     let win_len_s = fmt_secs(window.end_s - window.start_s);
     let mut filled_ms = win_start_ms;
-    for (index, segment) in plan.segments.iter().enumerate() {
+    for job in &segment_jobs {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
-        let segment_start = segment.output_start_ms as f64;
-        let segment_end = segment.output_end_ms as f64;
-        let clamped_start = segment_start.clamp(win_start_ms, win_end_ms);
-        let clamped_end = segment_end.clamp(win_start_ms, win_end_ms);
-        if clamped_end <= clamped_start {
-            continue;
-        }
+        let index = job.segment_index;
+        let segment = &plan.segments[index];
+        let clamped_start = job.clamped_start;
+        let clamped_end = job.clamped_end;
         if clamped_start > filled_ms {
             let gap_label = format!("gap{index}");
             let gap_color = if bg_input_index.is_some() {
@@ -1439,29 +1937,41 @@ fn render_composition_window(
             video_labels.push(format!("[{gap_label}]"));
         }
         validate_segment_known(segment, project_id, asset_paths)?;
-        let input_index = *input_indices.get(&segment.asset_id).ok_or_else(|| {
-            InternalError::Media("render plan references an unknown asset".into())
-        })?;
+        let (input_index, seek_s) = match &seek_plan {
+            Some(planned) => {
+                let window_index = planned.assignment[job.request_index];
+                (
+                    window_input_indices[window_index],
+                    planned.inputs[window_index].seek_s,
+                )
+            }
+            None => (
+                *input_indices.get(&segment.asset_id).ok_or_else(|| {
+                    InternalError::Media("render plan references an unknown asset".into())
+                })?,
+                0.0,
+            ),
+        };
         let asset_path = asset_paths.get(&segment.asset_id).ok_or_else(|| {
             InternalError::Media("render plan references an unknown asset".into())
         })?;
         let input = resolve_video_stream_specifier(
-            ffprobe_path,
+            &shared.probe,
             asset_path,
             &segment.asset_id,
             input_index,
             segment.stream_index,
         )?;
         let label = format!("screen{index}");
-        // A mid-segment cut re-anchors the sub-clip to the cut offset instead
-        // of zero so the fps resampler lands on the same absolute frame grid
-        // the unchunked render produces — chunk seams stay sample-identical.
+        // The request's source range is absolute; with a `-ss` input the
+        // in-graph timestamps are shifted by the seek, so the trim subtracts
+        // it (a legacy input keeps the absolute range).
         let speed = segment.speed;
-        let cut_in_s = (clamped_start - segment_start) / 1000.0;
-        let source_in_s = segment.source_in_ms as f64 / 1000.0 + cut_in_s * speed;
-        let source_out_s = source_in_s + (clamped_end - clamped_start) / 1000.0 * speed;
-        let phase = if cut_in_s > 1e-9 {
-            format!("+{:.6}/TB", cut_in_s * speed)
+        let request = &segment_requests[job.request_index];
+        let source_in_s = request.source_in_s - seek_s;
+        let source_out_s = request.source_out_s - seek_s;
+        let phase = if job.cut_in_s > 1e-9 {
+            format!("+{:.6}/TB", job.cut_in_s * speed)
         } else {
             String::new()
         };
@@ -1770,7 +2280,7 @@ fn render_composition_window(
     let mut items_plate_label: Option<String> = None;
     let mut items_enable: Option<String> = None;
     if !cursor_renderers.is_empty() || has_overlay_items {
-        let plate_input_index = input_assets.len();
+        let plate_input_index = input_specs.len();
         let plate_source = format!("[{plate_input_index}:v]");
         // Shift the generated stream into absolute time so it framesyncs with
         // the shifted canvas stream (a full pass keeps the zero-shifted form).
@@ -1842,28 +2352,20 @@ fn render_composition_window(
         }
         validate_overlay(overlay, project_id, asset_paths, canvas)?;
         // Camera chains are timestamped absolutely, so a window-disjoint
-        // overlay would render nothing — skip its decode entirely.
-        if (overlay.output_end_ms as f64) <= win_start_ms
-            || (overlay.output_start_ms as f64) >= win_end_ms
-        {
+        // overlay would render nothing — it got no input, skip it entirely.
+        let Some((clamp, input_index, seek_s)) = camera_inputs.get(&index).copied() else {
             continue;
-        }
-        let input_index = *input_indices.get(&overlay.asset_id).ok_or_else(|| {
-            InternalError::Media("camera overlay references an unknown asset".into())
-        })?;
+        };
         let asset_path = asset_paths.get(&overlay.asset_id).ok_or_else(|| {
             InternalError::Media("camera overlay references an unknown asset".into())
         })?;
         let input = resolve_video_stream_specifier(
-            ffprobe_path,
+            &shared.probe,
             asset_path,
             &overlay.asset_id,
             input_index,
             overlay.stream_index,
         )?;
-        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
-            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
-        }
 
         let enable = format!(
             "between(t,{},{})",
@@ -1882,22 +2384,22 @@ fn render_composition_window(
             current_label = after_shadow_label;
         }
 
-        // 2. Format camera video stream (trim, speed, crop/cover, scale, opacity)
+        // 2. Format camera video stream (trim, speed, crop/cover, scale, opacity).
+        // `clamp` bounds the decode to this pass's window (plus padding); the
+        // `+cut/TB` term in setpts keeps the speed-normalized pts continuous
+        // with the un-clamped chain so downstream overlay timing is unchanged.
         let mut camera_filter = format!(
-            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS)/{:.6}",
-            seconds(overlay.source_in_ms),
-            seconds(overlay.source_out_ms),
+            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6}",
+            fmt_secs(clamp.src_in_s - seek_s),
+            fmt_secs(clamp.src_out_s - seek_s),
+            clamp.cut_out_s * overlay.speed,
             overlay.speed,
         );
         let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
         let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
         let overlay_x = (overlay.x.round() as i32) / 2 * 2;
         let overlay_y = (overlay.y.round() as i32) / 2 * 2;
-        let overlay_duration = seconds(
-            overlay
-                .output_end_ms
-                .saturating_sub(overlay.output_start_ms),
-        );
+        let overlay_duration = fmt_secs(clamp.chain_dur_s);
 
         if let Some(crop) = &overlay.crop {
             camera_filter.push_str(&format!(
@@ -1940,12 +2442,14 @@ fn render_composition_window(
             raw_label
         };
 
-        // 4. Shift timestamps to output_start_ms and composite camera on top of current canvas
-        let timed_camera_label = if overlay.output_start_ms > 0 {
+        // 4. Shift timestamps to the overlay's output start plus whatever the
+        // window clamp cut from the head, then composite on the canvas.
+        let timed_offset_s = overlay.output_start_ms as f64 / 1000.0 + clamp.cut_out_s;
+        let timed_camera_label = if timed_offset_s > 1e-9 {
             let label = format!("camera_timed{index}");
-            let offset = seconds(overlay.output_start_ms);
             filters.push(format!(
-                "[{masked_camera_label}]setpts=PTS+{offset}/TB[{label}]"
+                "[{masked_camera_label}]setpts=PTS+{:.6}/TB[{label}]",
+                timed_offset_s
             ));
             label
         } else {
@@ -2149,7 +2653,7 @@ fn render_composition_window(
             project_id,
             &input_indices,
             asset_paths,
-            ffprobe_path,
+            &shared.probe,
             duration_ms,
             &cancel,
         )?;
@@ -2168,15 +2672,43 @@ fn render_composition_window(
     // also safe on image/metadata inputs and GPU-less machines. Software
     // encodes keep a clean software command — including the hardware-retry
     // path, which re-enters here with `ExportEncoder::Software`.
-    let hwaccel_inputs = encoder != encoding::ExportEncoder::Software;
-    for (_, asset_path) in &input_assets {
-        if hwaccel_inputs {
+    // Chunk passes cap the filter graph's thread pool so `workers` parallel
+    // FFmpeg processes share the machine; standalone passes keep FFmpeg's
+    // default threading.
+    if pass.threads > 0 {
+        command
+            .arg("-filter_complex_threads")
+            .arg(pass.threads.to_string());
+    }
+    tracing::debug!(
+        project_id = %project_id,
+        inputs = %input_specs
+            .iter()
+            .map(|spec| {
+                let seeked = spec
+                    .seek_s
+                    .map(|seek| format!("@{seek:.3}+{}", spec.duration_s.unwrap_or(0.0)))
+                    .unwrap_or_default();
+                format!("{}{}", spec.key, seeked)
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        "export: composition pass inputs"
+    );
+    for spec in &input_specs {
+        if let Some(seek_s) = spec.seek_s {
+            command.args(["-ss", &fmt_secs(seek_s)]);
+        }
+        if let Some(duration_s) = spec.duration_s {
+            command.args(["-t", &fmt_secs(duration_s)]);
+        }
+        if spec.hwaccel {
             command.args(["-hwaccel", "auto"]);
         }
         command
             .args(["-thread_queue_size", "128"])
             .arg("-i")
-            .arg(asset_path);
+            .arg(&spec.path);
     }
     if let Some(frame_plan) = &cursor_plan {
         // The generated overlay stream is a transparent RGBA rawvideo feed over
@@ -2185,11 +2717,13 @@ fn render_composition_window(
         // the declared width doubles. A cursor-only stream is the fitted screen
         // rect, not the full canvas.
         let plate_width = frame_plan.width * if frame_plan.dual_plane { 2 } else { 1 };
+        let queue_size =
+            stdin_thread_queue_size(plate_width as usize * frame_plan.height as usize * 4);
         command
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{}x{}", plate_width, frame_plan.height)])
             .args(["-r", &canvas.fps.to_string()])
-            .args(["-thread_queue_size", "128"])
+            .args(["-thread_queue_size", &queue_size.to_string()])
             .arg("-i")
             .arg("-");
     }
@@ -2280,15 +2814,28 @@ fn render_composition_window(
             command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
         }
         // Embedded chapters and faststart belong to the finished file only —
-        // chunk intermediates defer both to the concat mux stage.
+        // chunk intermediates defer both to the concat mux stage. `hvc1`
+        // tags HEVC as Apple-player-compatible; chunk passes stay untagged
+        // (mpegts has no brand concept) and the mux stage tags the result.
         if pass.standalone {
+            command.args(hvc1_tag_args(settings));
             if let Some(idx) = chapters_input_index {
                 command.args(["-map_chapters", &idx.to_string()]);
             }
             command.args(["-movflags", "+faststart"]);
         }
     }
-    command.args(["-t", &win_len_s]).arg(output_path);
+    // Chunk intermediates are mpegts slices — stream-copy concat needs no
+    // per-slice global headers, and the concat list pins each slice's exact
+    // frame-count duration.
+    if !pass.standalone && !is_gif && !is_webp {
+        command.args(["-f", "mpegts"]);
+    }
+    command.args(["-t", &win_len_s]);
+    if pass.threads > 0 && encoder == encoding::ExportEncoder::Software {
+        command.arg("-threads").arg(pass.threads.to_string());
+    }
+    command.arg(output_path);
 
     run_export_ffmpeg(
         &mut command,
@@ -2299,7 +2846,8 @@ fn render_composition_window(
         Some(window.duration_ms),
         cursor_plan,
         Some(on_progress),
-    )
+    )?;
+    Ok(RenderOutcome { has_audio })
 }
 
 /// Append the audio graph — per-segment `atrim`/speed/volume chains padded to
@@ -2313,7 +2861,7 @@ fn append_audio_graph(
     project_id: &str,
     input_indices: &HashMap<String, usize>,
     asset_paths: &HashMap<String, PathBuf>,
-    ffprobe_path: Option<&Path>,
+    probe: &ProbeCache,
     duration_ms: u64,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<bool> {
@@ -2368,7 +2916,7 @@ fn append_audio_graph(
                 segment.stream_index
             };
             let Some(input) = resolve_audio_stream_specifier(
-                ffprobe_path,
+                probe,
                 asset_path,
                 &segment.asset_id,
                 input_index,
@@ -2438,6 +2986,208 @@ fn append_audio_graph(
     Ok(!audio_labels.is_empty())
 }
 
+/// One `-i` argument for the composition command: the file plus an optional
+/// `-ss`/`-t` decode window and whether hardware decode applies.
+struct InputSpec {
+    key: String,
+    path: PathBuf,
+    seek_s: Option<f64>,
+    duration_s: Option<f64>,
+    hwaccel: bool,
+}
+
+/// One segment's demand on a source file, already cut to the pass window.
+struct SourceRequest {
+    asset_id: String,
+    stream_index: Option<i32>,
+    source_in_s: f64,
+    source_out_s: f64,
+}
+
+/// Decode window of one `-ss`/`-t -i` input.
+struct SourceWindow {
+    asset_id: String,
+    stream_index: Option<i32>,
+    seek_s: f64,
+    end_s: f64,
+}
+
+struct SegmentInputPlan {
+    inputs: Vec<SourceWindow>,
+    /// request index → `inputs` index.
+    assignment: Vec<usize>,
+}
+
+/// Decode starts this far before the first needed frame so `-ss` always has
+/// keyframe slack, and runs this far past the last one for decoder flush.
+const SEEK_PREROLL_S: f64 = 0.5;
+const SEEK_TAIL_MARGIN_S: f64 = 1.0;
+/// Two requests on the same source fuse when the later one starts within this
+/// gap of the earlier one's end — replaying a small span beats a second
+/// demuxer/decoder on the file.
+const COALESCE_GAP_S: f64 = 2.0;
+/// Beyond this many seeked inputs the per-input demuxer/decoder cost loses to
+/// simply decoding the whole asset once, so the caller falls back to the
+/// legacy one-input-per-asset layout.
+const MAX_SEEK_INPUTS: usize = 24;
+
+/// Palette-quantized GIF encodes grow quadratically and browsers struggle with
+/// long loops; anything past this needs a Selected range export.
+const MAX_GIF_DURATION_MS: u64 = 60_000;
+
+fn floor_to_ms(value: f64) -> f64 {
+    (value * 1000.0).floor() / 1000.0
+}
+
+/// Group segment requests into `-ss`-seeked inputs. A request reuses the most
+/// recently opened window of the same (asset, stream) only when it continues
+/// forward within `COALESCE_GAP_S` — backward or reordered playback gets its
+/// own input rather than in-graph buffering of a rewound stream. `None` when
+/// the segment windows alone reach `MAX_SEEK_INPUTS` (the caller adds the
+/// camera overlay count before deciding).
+fn plan_segment_inputs(requests: &[SourceRequest]) -> Option<SegmentInputPlan> {
+    let mut inputs: Vec<SourceWindow> = Vec::new();
+    let mut assignment = Vec::with_capacity(requests.len());
+    for request in requests {
+        let reuse = inputs
+            .iter()
+            .rposition(|window| {
+                window.asset_id == request.asset_id && window.stream_index == request.stream_index
+            })
+            .filter(|&index| {
+                let gap = request.source_in_s - inputs[index].end_s;
+                (-1e-6..=COALESCE_GAP_S).contains(&gap)
+            });
+        let window_index = match reuse {
+            Some(index) => {
+                inputs[index].end_s = inputs[index].end_s.max(request.source_out_s);
+                index
+            }
+            None => {
+                if inputs.len() >= MAX_SEEK_INPUTS {
+                    return None;
+                }
+                inputs.push(SourceWindow {
+                    asset_id: request.asset_id.clone(),
+                    stream_index: request.stream_index,
+                    seek_s: floor_to_ms(request.source_in_s - SEEK_PREROLL_S).max(0.0),
+                    end_s: request.source_out_s,
+                });
+                inputs.len() - 1
+            }
+        };
+        assignment.push(window_index);
+    }
+    Some(SegmentInputPlan { inputs, assignment })
+}
+
+/// Where a camera overlay's filter chain cuts into its source when the pass
+/// window slices it: how much output time to drop from the head, how long the
+/// clamped chain runs, and the source range it decodes.
+#[derive(Clone, Copy)]
+struct CameraClamp {
+    /// Output-time seconds dropped from the overlay head (frame-grid aligned).
+    cut_out_s: f64,
+    /// Length of the clamped overlay chain, output seconds.
+    chain_dur_s: f64,
+    /// Source-second range the chain trims to (delay-corrected when cut).
+    src_in_s: f64,
+    src_out_s: f64,
+}
+
+/// Clamp a camera overlay to a composition window with ~1 s of decode padding
+/// on both sides so boundary chunks still composite the bubble. `None` when
+/// the overlay never intersects the window. `video_delay_s` is the asset's
+/// `ProbeCache::video_start_delay_s`; like the segment rule it only applies
+/// when the overlay's source_in precedes the first video frame, and only to a
+/// real cut (a fresh STARTPTS anchor). A full-window pass yields
+/// `cut_out_s = 0` and the overlay's whole duration — identical to the legacy
+/// chain apart from the `-ss` input.
+#[allow(clippy::too_many_arguments)]
+fn camera_window_clamp(
+    out_start_ms: u64,
+    out_end_ms: u64,
+    source_in_ms: u64,
+    source_out_ms: u64,
+    speed: f64,
+    fps: f64,
+    win_start_ms: f64,
+    win_end_ms: f64,
+    video_delay_s: f64,
+) -> Option<CameraClamp> {
+    if (out_end_ms as f64) <= win_start_ms || (out_start_ms as f64) >= win_end_ms {
+        return None;
+    }
+    let rel = ((win_start_ms - 1000.0 - out_start_ms as f64) / 1000.0).max(0.0);
+    let cut_out_s = (rel * fps).floor() / fps;
+    let clamped_end_ms = (out_end_ms as f64).min(win_end_ms + 1000.0);
+    let chain_dur_s = (clamped_end_ms - out_start_ms as f64) / 1000.0 - cut_out_s;
+    if chain_dur_s <= 0.0 {
+        return None;
+    }
+    let mut src_in_s = source_in_ms as f64 / 1000.0 + cut_out_s * speed;
+    if cut_out_s > 0.0 {
+        src_in_s += (video_delay_s - source_in_ms as f64 / 1000.0).max(0.0);
+    }
+    let src_out_s = (source_out_ms as f64 / 1000.0).min(src_in_s + chain_dur_s * speed);
+    Some(CameraClamp {
+        cut_out_s,
+        chain_dur_s,
+        src_in_s,
+        src_out_s,
+    })
+}
+
+/// `source_in` for a segment cut mid-way into the pass window. When the
+/// segment began before the video stream's first frame (B-frame delay), the
+/// standalone pass's `STARTPTS` anchor seats that first frame at
+/// `video_delay_s`, so a mid-segment cut must aim past the offset to land on
+/// the same frame the unchunked render emits.
+fn corrected_source_in_s(source_in_ms: u64, cut_in_s: f64, speed: f64, video_delay_s: f64) -> f64 {
+    let base = source_in_ms as f64 / 1000.0;
+    if cut_in_s <= 1e-9 {
+        return base;
+    }
+    base + cut_in_s * speed + (video_delay_s - base).max(0.0)
+}
+
+/// Stdin queue depth for the rawvideo plate feed: keep ~96 MiB of frames in
+/// flight so producer stalls don't starve the encoder, bounded so a 4K
+/// dual-plane feed stays reasonable.
+fn stdin_thread_queue_size(frame_bytes: usize) -> usize {
+    (96 * 1024 * 1024 / frame_bytes.max(1)).clamp(4, 32)
+}
+
+/// An intersecting segment within the pass window, in plan order.
+struct SegmentJob {
+    segment_index: usize,
+    /// Index into the `SourceRequest`/`SegmentInputPlan::assignment` vectors.
+    request_index: usize,
+    clamped_start: f64,
+    clamped_end: f64,
+    cut_in_s: f64,
+}
+
+/// A camera overlay intersecting the pass window with its clamped source
+/// range. Its input index and seek offset are bound once the input list is
+/// built (`camera_inputs` in the render function).
+#[derive(Clone, Copy)]
+struct CameraJob {
+    overlay_index: usize,
+    clamp: CameraClamp,
+}
+
+/// True when a background plate path is one of ours (temp-dir +
+/// `recordforge_bg_` name) rather than a user asset resolved into the plate —
+/// only owned files get a cleanup guard.
+fn is_owned_bg_plate(path: &Path) -> bool {
+    path.starts_with(std::env::temp_dir())
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("recordforge_bg_"))
+}
+
 /// Sub-millisecond seconds used by windowed (chunked) filters, where cut
 /// boundaries fall between millisecond marks.
 fn fmt_secs(value: f64) -> String {
@@ -2451,6 +3201,34 @@ fn escape_concat_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
         .replace('\'', "\\'")
+}
+
+/// `-tag:v hvc1` marks HEVC output as compatible with players that reject the
+/// `hev1` brand — applied to finished MP4 files only (the standalone pass and
+/// the concat mux), never to chunk intermediates (mpegts has no brand).
+fn hvc1_tag_args(settings: &ExportSettings) -> &'static [&'static str] {
+    if settings.codec == "hevc" {
+        &["-tag:v", "hvc1"]
+    } else {
+        &[]
+    }
+}
+
+/// Concat list for chunk intermediates. `.ts` slices carry no reliable
+/// duration metadata, so each entry pins `frames/fps` — keeps the demuxer's
+/// timeline (and the muxed duration) exact across seams.
+fn chunk_concat_list(entries: &[(PathBuf, u64)], fps: u64) -> String {
+    entries
+        .iter()
+        .map(|(path, frames)| {
+            format!(
+                "file '{}'\nduration {:.6}",
+                escape_concat_path(path),
+                *frames as f64 / fps.max(1) as f64
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Frame-exact `[first_frame, end_frame)` ranges covering `total_frames`.
@@ -2512,8 +3290,8 @@ fn render_timeline_chunked(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     on_progress: &(dyn Fn(f64) + Sync),
     resource_dir: Option<&Path>,
-    ffprobe_path: Option<&Path>,
-) -> Result<()> {
+    shared: &CompositionShared,
+) -> Result<RenderOutcome> {
     let canvas = plan
         .canvas
         .as_ref()
@@ -2532,6 +3310,11 @@ fn render_timeline_chunked(
     let workers = std::thread::available_parallelism()
         .map(|count| (count.get() / 2).clamp(2, 4))
         .unwrap_or(2);
+    // Each pass caps its filter-graph and software-encoder threads to a fair
+    // share of the machine; without it N parallel FFmpeg processes oversubscribe.
+    let pass_threads = std::thread::available_parallelism()
+        .map(|count| (count.get() / workers).max(2))
+        .unwrap_or(2);
     let chunk_frames = total_frames
         .div_ceil((workers * 2) as u64)
         .max(fps.saturating_mul(2));
@@ -2549,7 +3332,7 @@ fn render_timeline_chunked(
             None,
             on_progress,
             resource_dir,
-            ffprobe_path,
+            shared,
             &CompositionWindow::full(plan),
             &CompositionPass::standalone(),
         );
@@ -2588,7 +3371,7 @@ fn render_timeline_chunked(
         project_id,
         &audio_input_indices,
         asset_paths,
-        ffprobe_path,
+        &shared.probe,
         plan.duration_ms.max(1),
         &cancel,
     )?;
@@ -2681,12 +3464,13 @@ fn render_timeline_chunked(
         } else {
             let chunk_index = job - usize::from(audio_job);
             let (first_frame, end_frame) = boundaries[chunk_index];
-            let chunk_path = chunk_dir.join(format!("chunk_{chunk_index:05}.mkv"));
+            let chunk_path = chunk_dir.join(format!("chunk_{chunk_index:05}.ts"));
             let window = CompositionWindow::from_frames(first_frame, end_frame - first_frame, fps);
             let pass = CompositionPass {
                 standalone: false,
                 include_audio: false,
                 plate_divisor: workers,
+                threads: pass_threads,
             };
             render_composition_window(
                 ffmpeg_path,
@@ -2700,10 +3484,13 @@ fn render_timeline_chunked(
                 Some(&halt),
                 &report,
                 resource_dir,
-                ffprobe_path,
+                shared,
                 &window,
                 &pass,
             )
+            // Chunk pass outcomes are all video-only; the audio job's own
+            // result decides `has_audio` for the mux stage.
+            .map(|_| ())
         }
     };
 
@@ -2746,16 +3533,12 @@ fn render_timeline_chunked(
     }
 
     let list_path = chunk_dir.join("chunks.txt");
-    let list = boundaries
+    let entries: Vec<(PathBuf, u64)> = boundaries
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            let chunk_path = chunk_dir.join(format!("chunk_{index:05}.mkv"));
-            format!("file '{}'", escape_concat_path(&chunk_path))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&list_path, list)
+        .map(|(index, (first, end))| (chunk_dir.join(format!("chunk_{index:05}.ts")), end - first))
+        .collect();
+    std::fs::write(&list_path, chunk_concat_list(&entries, fps))
         .map_err(|error| InternalError::Storage(format!("write concat list: {error}")))?;
 
     let mut mux = crate::process::create_command(ffmpeg_path);
@@ -2780,8 +3563,9 @@ fn render_timeline_chunked(
     if has_chapters {
         mux.args(["-map_chapters", &mux_input_index.to_string()]);
     }
-    mux.args(["-c", "copy", "-movflags", "+faststart"])
-        .args(["-t", &seconds(plan.duration_ms)])
+    mux.args(["-c", "copy", "-movflags", "+faststart"]);
+    mux.args(hvc1_tag_args(settings));
+    mux.args(["-t", &seconds(plan.duration_ms)])
         .arg(output_path);
     on_progress(0.98);
     run_export_ffmpeg(
@@ -2800,7 +3584,7 @@ fn render_timeline_chunked(
         chunks = boundaries.len(),
         "export: chunked render muxed"
     );
-    Ok(())
+    Ok(RenderOutcome { has_audio })
 }
 
 /// Build one cursor renderer per enabled effect. Renderers are pure functions
@@ -3304,6 +4088,7 @@ fn feed_cursor_frames(
     stdin: &mut std::process::ChildStdin,
     cursor: &mut CursorFramePlan,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
+    halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
     let mut writer = std::io::BufWriter::with_capacity(256 * 1024, stdin);
     let plane_w = cursor.width as usize;
@@ -3336,6 +4121,7 @@ fn feed_cursor_frames(
             &mut writer,
             cursor,
             cancel,
+            halt,
             frame_byte_len,
             &zero_frame,
         );
@@ -3358,6 +4144,7 @@ fn feed_cursor_frames(
     // would grow the pool by one plate per frame until memory is exhausted.
     let free_buffers = Mutex::new(Vec::<Vec<u8>>::new());
     let dual_plane = cursor.dual_plane;
+    let halted = || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
 
     let result = std::thread::scope(|scope| -> Result<()> {
         for _ in 0..workers {
@@ -3394,6 +4181,8 @@ fn feed_cursor_frames(
                     loop {
                         if cancel.load(std::sync::atomic::Ordering::Relaxed)
                             || abort.load(std::sync::atomic::Ordering::Relaxed)
+                            || halt
+                                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
                         {
                             return;
                         }
@@ -3403,6 +4192,9 @@ fn feed_cursor_frames(
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             loop {
                                 if abort.load(std::sync::atomic::Ordering::Relaxed)
+                                    || halt.is_some_and(|flag| {
+                                        flag.load(std::sync::atomic::Ordering::Relaxed)
+                                    })
                                     || guard.next >= frame_count
                                 {
                                     return;
@@ -3476,6 +4268,9 @@ fn feed_cursor_frames(
         let mut pending = std::collections::BTreeMap::new();
         let result: Result<()> = (|| {
             while expected < frame_count {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) || halted() {
+                    return Err(InternalError::Media("export cancelled".into()).into());
+                }
                 let (frame_index, produced) = match frame_rx.recv() {
                     Ok(message) => message,
                     Err(_) => {
@@ -3483,6 +4278,7 @@ fn feed_cursor_frames(
                         // an unreported worker exit can leave a permanent gap.
                         if expected < frame_count
                             && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                            && !halted()
                         {
                             return Err(InternalError::Media(
                                 "overlay frame producer terminated early".into(),
@@ -3557,6 +4353,7 @@ fn feed_cursor_frames_sequential(
     writer: &mut std::io::BufWriter<&mut std::process::ChildStdin>,
     cursor: &mut CursorFramePlan,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
+    halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
     frame_byte_len: usize,
     zero_frame: &[u8],
 ) -> Result<()> {
@@ -3577,7 +4374,9 @@ fn feed_cursor_frames_sequential(
     .map_err(InternalError::Media)?;
 
     for frame_index in 0..cursor.frame_count {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed)
+            || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
         let (cursor_plane, items_plane) = state
@@ -3913,6 +4712,15 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
     if settings.preset == "selected-range" && settings.range.is_none() {
         return Err(InternalError::Media("selected-range export requires a range".into()).into());
     }
+    if (settings.container == "gif" || settings.preset.starts_with("gif-"))
+        && plan.duration_ms > MAX_GIF_DURATION_MS
+    {
+        return Err(InternalError::Media(
+            "GIF exports are limited to 60 seconds. Use Selected range to export a shorter clip."
+                .into(),
+        )
+        .into());
+    }
     if settings.preset == "vertical"
         && plan
             .canvas
@@ -3945,6 +4753,81 @@ fn audio_bitrate(settings: &ExportSettings) -> &'static str {
         "192k"
     } else {
         "128k"
+    }
+}
+
+/// Rough output-size bound for the disk preflight: canvas pixels × fps ×
+/// bits-per-pixel, plus the muxed audio stream. `bits_per_pixel` is chosen by
+/// the caller for the artifact being sized (final MP4 vs MPEG-TS chunks).
+fn estimate_export_bytes(plan: &RenderPlan, settings: &ExportSettings, bits_per_pixel: f64) -> u64 {
+    let duration_s = plan.duration_ms as f64 / 1000.0;
+    let (width, height, fps) = plan
+        .canvas
+        .as_ref()
+        .map(|canvas| {
+            (
+                canvas.width as f64,
+                canvas.height as f64,
+                canvas.fps.max(1) as f64,
+            )
+        })
+        .unwrap_or((1920.0, 1080.0, 30.0));
+    let video_bytes = width * height * fps * bits_per_pixel * duration_s / 8.0;
+    let audio_bps = if settings.container == "gif" || settings.container == "webp" {
+        0.0
+    } else if audio_bitrate(settings) == "192k" {
+        192_000.0
+    } else {
+        128_000.0
+    };
+    (video_bytes + audio_bps / 8.0 * duration_s) as u64
+}
+
+/// Preflight the output drive. The estimate is deliberately a low bound, so
+/// this only ever trips when the disk is plainly too small.
+fn ensure_export_disk_space(
+    output_path: &Path,
+    plan: &RenderPlan,
+    settings: &ExportSettings,
+) -> Result<()> {
+    const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+    let required = estimate_export_bytes(plan, settings, 0.01) + MARGIN_BYTES;
+    match crate::media::disk::available_space(output_path) {
+        Ok(free) if free < required => Err(InternalError::Storage(format!(
+            "Not enough free disk space for this export: about {:.1} GB needed, {:.1} GB free.",
+            required as f64 / 1024.0_f64.powi(3),
+            free as f64 / 1024.0_f64.powi(3)
+        ))
+        .into()),
+        Ok(_) => Ok(()),
+        Err(error) => {
+            warn!(error = %error, "could not check free disk space before export");
+            Ok(())
+        }
+    }
+}
+
+/// Chunked mode writes one MPEG-TS intermediate per pass to the temp drive,
+/// which may be a different volume than the output — check it can hold a more
+/// generous estimate and fall back to a single pass when it cannot.
+fn chunk_temp_space_ok(plan: &RenderPlan, settings: &ExportSettings) -> bool {
+    let probe = std::env::temp_dir().join("recordforge-space-probe");
+    match crate::media::disk::available_space(&probe) {
+        Ok(free) => {
+            let required = estimate_export_bytes(plan, settings, 0.05) + 256 * 1024 * 1024;
+            if free >= required {
+                return true;
+            }
+            info!(
+                free,
+                required, "insufficient temp space for chunked export, using single pass"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(error = %error, "could not check temp disk space for chunked export");
+            true
+        }
     }
 }
 
@@ -3995,6 +4878,15 @@ fn redact_paths(line: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// FFmpeg reports ENOSPC in a few phrasings depending on which writer or muxer
+/// trips over it — recognize them all so the user gets an actionable error.
+fn is_disk_full_diagnostic(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("no space left on device")
+        || lower.contains("not enough space on the disk")
+        || lower.contains("disk full")
 }
 
 /// Extract the most actionable FFmpeg error detail from raw stderr with all
@@ -4106,7 +4998,7 @@ fn run_export_ffmpeg(
 
         let fed = match cursor.as_mut() {
             Some(cursor_plan) => match child.stdin.take() {
-                Some(mut stdin) => feed_cursor_frames(&mut stdin, cursor_plan, cancel),
+                Some(mut stdin) => feed_cursor_frames(&mut stdin, cursor_plan, cancel, halt),
                 None => Err(InternalError::Media("cursor overlay stdin unavailable".into()).into()),
             },
             None => Ok(()),
@@ -4137,7 +5029,21 @@ fn run_export_ffmpeg(
                     let _ = std::fs::remove_file(partial_path);
                     let detail = ffmpeg_failure_detail(&diagnostic)
                         .unwrap_or_else(|| "no diagnostic output".into());
-                    tracing::error!(stage, detail = %detail, stderr = %String::from_utf8_lossy(&diagnostic), "ffmpeg export process failed");
+                    let stderr_text = String::from_utf8_lossy(&diagnostic);
+                    // Media paths must never reach logs (AGENTS.md security rules).
+                    let redacted_stderr = stderr_text
+                        .lines()
+                        .map(redact_paths)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    tracing::error!(stage, detail = %detail, stderr = %redacted_stderr, "ffmpeg export process failed");
+                    if is_disk_full_diagnostic(&stderr_text) {
+                        return Err(InternalError::Storage(
+                            "The disk ran out of space during export. Free up space and retry."
+                                .into(),
+                        )
+                        .into());
+                    }
                     return Err(InternalError::Media(format!("{stage} failed: {detail}")).into());
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(100)),
@@ -4157,6 +5063,7 @@ fn validate_export_output(
     path: &Path,
     plan: &RenderPlan,
     settings: &ExportSettings,
+    expect_audio: bool,
 ) -> Result<()> {
     let metadata =
         crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)
@@ -4240,15 +5147,7 @@ fn validate_export_output(
         }
         return Ok(());
     }
-    let expected_audio = plan.audio_tracks.as_ref().is_some_and(|tracks| {
-        tracks
-            .iter()
-            .any(|track| !track.muted && !track.segments.is_empty())
-    }) || plan
-        .audio
-        .as_ref()
-        .is_some_and(|track| !track.muted && !track.segments.is_empty());
-    if expected_audio != metadata.has_audio {
+    if expect_audio != metadata.has_audio {
         return Err(InternalError::Media("export audio stream failed validation".into()).into());
     }
     for stream in metadata
@@ -5884,23 +6783,21 @@ fn validate_segment(segment: &RenderSegment, _project_id: &str) -> Result<()> {
 }
 
 fn resolve_video_stream_specifier(
-    ffprobe_path: Option<&Path>,
+    probe: &ProbeCache,
     asset_path: &Path,
     asset_id: &str,
     input_index: usize,
     stream_index: Option<i32>,
 ) -> Result<String> {
-    let Some(ffprobe) = ffprobe_path else {
+    let Some(metadata) = probe.metadata(asset_path, asset_id) else {
         return Ok(stream_index.map_or_else(
             || format!("[{input_index}:v:0]"),
             |index| format!("[{input_index}:{index}]"),
         ));
     };
-    let metadata =
-        crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
-            .map_err(|_| {
-                InternalError::Media("probe render asset for stream selection failed".into())
-            })?;
+    let metadata = metadata.map_err(|_| {
+        InternalError::Media("probe render asset for stream selection failed".into())
+    })?;
     let video_streams = metadata
         .streams
         .iter()
@@ -5930,23 +6827,21 @@ fn resolve_video_stream_specifier(
 }
 
 fn resolve_audio_stream_specifier(
-    ffprobe_path: Option<&Path>,
+    probe: &ProbeCache,
     asset_path: &Path,
     asset_id: &str,
     input_index: usize,
     stream_index: Option<i32>,
 ) -> Result<Option<String>> {
-    let Some(ffprobe) = ffprobe_path else {
+    let Some(metadata) = probe.metadata(asset_path, asset_id) else {
         return Ok(Some(stream_index.map_or_else(
             || format!("[{input_index}:a:0]"),
             |index| format!("[{input_index}:{index}]"),
         )));
     };
-    let metadata =
-        crate::media::probe::probe_media(&ffprobe.to_string_lossy(), asset_path, asset_id)
-            .map_err(|_| {
-                InternalError::Media("probe render asset for stream selection failed".into())
-            })?;
+    let metadata = metadata.map_err(|_| {
+        InternalError::Media("probe render asset for stream selection failed".into())
+    })?;
     let audio_streams = metadata
         .streams
         .iter()
@@ -6148,6 +7043,306 @@ mod tests {
         assert!((window.start_s - 6.0).abs() < 1e-9);
         assert!((window.end_s - 12.0).abs() < 1e-9);
         assert_eq!(window.duration_ms, 6000);
+    }
+
+    fn source_request(asset: &str, stream: Option<i32>, in_s: f64, out_s: f64) -> SourceRequest {
+        SourceRequest {
+            asset_id: asset.to_string(),
+            stream_index: stream,
+            source_in_s: in_s,
+            source_out_s: out_s,
+        }
+    }
+
+    #[test]
+    fn plan_segment_inputs_coalesces_forward_gaps() {
+        let plan = plan_segment_inputs(&[
+            source_request("screen", Some(0), 60.0, 120.0),
+            // 1 s gap ≤ COALESCE_GAP_S: reuses the open window, extends its end.
+            source_request("screen", Some(0), 121.0, 180.0),
+        ])
+        .expect("plan");
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(plan.assignment, vec![0, 0]);
+        assert!((plan.inputs[0].seek_s - 59.5).abs() < 1e-9);
+        assert!((plan.inputs[0].end_s - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn plan_segment_inputs_splits_on_gap_reorder_overlap_and_stream() {
+        // Gap beyond COALESCE_GAP_S opens a new input.
+        let plan = plan_segment_inputs(&[
+            source_request("screen", None, 10.0, 20.0),
+            source_request("screen", None, 25.0, 30.0),
+        ])
+        .expect("plan");
+        assert_eq!(plan.inputs.len(), 2);
+        assert_eq!(plan.assignment, vec![0, 1]);
+
+        // Reordered (backward) playback gets its own input.
+        let plan = plan_segment_inputs(&[
+            source_request("screen", None, 100.0, 200.0),
+            source_request("screen", None, 50.0, 60.0),
+        ])
+        .expect("plan");
+        assert_eq!(plan.inputs.len(), 2);
+
+        // Overlapping an open window's end also opens a new input.
+        let plan = plan_segment_inputs(&[
+            source_request("screen", None, 10.0, 20.0),
+            source_request("screen", None, 15.0, 25.0),
+        ])
+        .expect("plan");
+        assert_eq!(plan.inputs.len(), 2);
+
+        // A different stream on the same asset never shares a window.
+        let plan = plan_segment_inputs(&[
+            source_request("screen", Some(0), 10.0, 20.0),
+            source_request("screen", Some(1), 12.0, 18.0),
+        ])
+        .expect("plan");
+        assert_eq!(plan.inputs.len(), 2);
+    }
+
+    #[test]
+    fn plan_segment_inputs_clamps_seek_to_zero_and_caps_inputs() {
+        // source_in below the preroll seeks from the file start.
+        let plan = plan_segment_inputs(&[source_request("screen", None, 0.2, 5.0)]).expect("plan");
+        assert_eq!(plan.inputs[0].seek_s, 0.0);
+
+        let requests: Vec<SourceRequest> = (0..=MAX_SEEK_INPUTS)
+            .map(|index| {
+                source_request(
+                    "screen",
+                    None,
+                    index as f64 * 10.0,
+                    index as f64 * 10.0 + 5.0,
+                )
+            })
+            .collect();
+        assert!(plan_segment_inputs(&requests).is_none());
+    }
+
+    #[test]
+    fn cut_segment_source_in_adds_video_start_delay() {
+        // B-frame-delayed source (video starts 66.7 ms in): a cut at 15 s aims
+        // 66.7 ms past so the chunk lands on the standalone pass's frame.
+        assert!((corrected_source_in_s(0, 15.0, 1.0, 0.0667) - 15.0667).abs() < 1e-4);
+        // An uncut segment is unchanged.
+        assert_eq!(corrected_source_in_s(60_000, 0.0, 1.0, 0.0667), 60.0);
+        // When the segment starts after the delay, nothing is added.
+        assert!((corrected_source_in_s(1_000, 15.0, 1.0, 0.0667) - 16.0).abs() < 1e-9);
+        // Speed scales the cut but not the delay term.
+        assert!((corrected_source_in_s(0, 10.0, 2.0, 0.0667) - 20.0667).abs() < 1e-4);
+    }
+
+    #[test]
+    fn camera_window_clamp_full_window_matches_the_unchanged_chain() {
+        let clamp = camera_window_clamp(0, 120_000, 0, 120_000, 1.0, 30.0, 0.0, 120_000.0, 0.0)
+            .expect("clamped");
+        assert_eq!(clamp.cut_out_s, 0.0);
+        assert!((clamp.chain_dur_s - 120.0).abs() < 1e-9);
+        assert_eq!(clamp.src_in_s, 0.0);
+        assert_eq!(clamp.src_out_s, 120.0);
+    }
+
+    #[test]
+    fn camera_window_clamp_cuts_to_the_chunk_window() {
+        // Window starts at 60 s, overlay begins at 1234 ms: rel = 57.766 s →
+        // cut snaps down to the frame grid.
+        let clamp = camera_window_clamp(
+            1234, 120_000, 5_000, 125_000, 1.0, 30.0, 60_000.0, 90_000.0, 0.0667,
+        )
+        .expect("clamped");
+        let expected_cut = (57.766_f64 * 30.0_f64).floor() / 30.0;
+        assert!((clamp.cut_out_s - expected_cut).abs() < 1e-9);
+        let cut_abs_s = 1.234 + clamp.cut_out_s;
+        assert!(cut_abs_s <= 59.0 + 1e-9);
+        assert!(cut_abs_s >= 58.0);
+        // Chain covers from the cut through window end + 1 s.
+        assert!((1.234 + clamp.cut_out_s + clamp.chain_dur_s - 91.0).abs() < 1e-9);
+        // source_in starts well past the first video frame, so no delay
+        // correction applies to the cut.
+        assert!((clamp.src_in_s - (5.0 + expected_cut)).abs() < 1e-9);
+        assert!((clamp.src_out_s - (clamp.src_in_s + clamp.chain_dur_s)).abs() < 1e-9);
+
+        // A source_in at the stream start does absorb the B-frame delay:
+        // the standalone chain's first frame sits at 0.0667 s, so a cut must
+        // aim past it.
+        let clamp = camera_window_clamp(
+            1234, 120_000, 0, 125_000, 1.0, 30.0, 60_000.0, 90_000.0, 0.0667,
+        )
+        .expect("clamped");
+        assert!((clamp.src_in_s - (expected_cut + 0.0667)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn camera_window_clamp_disjoint_window_returns_none() {
+        assert!(
+            camera_window_clamp(0, 10_000, 0, 10_000, 1.0, 30.0, 60_000.0, 90_000.0, 0.0).is_none()
+        );
+        assert!(camera_window_clamp(
+            90_000, 120_000, 0, 30_000, 1.0, 30.0, 60_000.0, 90_000.0, 0.0
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn stdin_queue_sizing_scales_with_frame_bytes() {
+        // 1080p single-plane RGBA.
+        assert_eq!(stdin_thread_queue_size(1920 * 1080 * 4), 12);
+        // 1080p dual-plane (cursor + items packed side by side).
+        assert_eq!(stdin_thread_queue_size(3840 * 1080 * 4), 6);
+        // 4K dual-plane clamps to the floor.
+        assert_eq!(stdin_thread_queue_size(7680 * 2160 * 4), 4);
+    }
+
+    #[test]
+    fn chunk_concat_list_writes_per_chunk_durations() {
+        let list = chunk_concat_list(
+            &[
+                (PathBuf::from("C:/tmp/chunk_00000.ts"), 300),
+                (PathBuf::from("C:/tmp/chunk_00001.ts"), 100),
+            ],
+            30,
+        );
+        assert_eq!(
+            list,
+            "file 'C:/tmp/chunk_00000.ts'\nduration 10.000000\nfile 'C:/tmp/chunk_00001.ts'\nduration 3.333333"
+        );
+    }
+
+    #[test]
+    fn hvc1_tag_applies_only_to_hevc() {
+        let hevc = ExportSettings {
+            preset: "balanced".into(),
+            codec: "hevc".into(),
+            encoder: "software".into(),
+            container: "mp4".into(),
+            caption_mode: "none".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+        assert_eq!(hvc1_tag_args(&hevc), &["-tag:v", "hvc1"]);
+        let h264 = ExportSettings {
+            codec: "h264".into(),
+            ..hevc
+        };
+        assert!(hvc1_tag_args(&h264).is_empty());
+    }
+
+    fn test_media_metadata(
+        streams: Vec<(&str, Option<u64>)>,
+    ) -> crate::database::media::MediaMetadata {
+        use crate::database::media::{MediaFormat, MediaMetadata, MediaStream};
+        MediaMetadata {
+            recording_id: "test".into(),
+            path: "asset.mp4".into(),
+            duration_ms: 0,
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            has_audio: false,
+            video_codec: None,
+            audio_codec: None,
+            bitrate_kbps: None,
+            streams: streams
+                .iter()
+                .enumerate()
+                .map(|(index, (kind, start_ms))| MediaStream {
+                    index: index as i32,
+                    kind: kind.to_string(),
+                    codec: String::new(),
+                    title: None,
+                    start_ms: *start_ms,
+                    duration_ms: None,
+                    codec_long_name: None,
+                    width: None,
+                    height: None,
+                    fps: None,
+                    bitrate_kbps: None,
+                    sample_rate: None,
+                    channels: None,
+                    channel_layout: None,
+                    language: None,
+                })
+                .collect(),
+            format: MediaFormat::default(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn probe_cache_probes_once_per_path_across_threads() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cache = ProbeCache::with_prober({
+            let calls = Arc::clone(&calls);
+            move |_, _| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(test_media_metadata(vec![
+                    ("video", Some(0)),
+                    ("audio", Some(0)),
+                ]))
+            }
+        });
+        let path = Path::new("C:/media/screen.mp4");
+        for _ in 0..3 {
+            assert!(cache.metadata(path, "screen").expect("enabled").is_ok());
+        }
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    assert!(cache.metadata(path, "screen").expect("enabled").is_ok());
+                });
+            }
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let disabled = ProbeCache::new(None);
+        assert!(disabled.metadata(path, "screen").is_none());
+    }
+
+    #[test]
+    fn probe_cache_video_start_delay_from_stream_offsets() {
+        let cache = ProbeCache::with_prober(|_, _| {
+            Ok(test_media_metadata(vec![
+                ("video", Some(67)),
+                ("audio", Some(0)),
+            ]))
+        });
+        let path = Path::new("C:/media/screen.mp4");
+        assert!((cache.video_start_delay_s(path, "screen") - 0.067).abs() < 1e-3);
+        let disabled = ProbeCache::new(None);
+        assert_eq!(disabled.video_start_delay_s(path, "screen"), 0.0);
+    }
+
+    #[test]
+    fn plate_cache_generates_once_and_guards_owned_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owned_path = dir.path().join("owned.png");
+        let kept_path = dir.path().join("kept.png");
+        std::fs::write(&kept_path, b"plate").expect("write kept plate");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        {
+            let cache = PlateCache::new();
+            for _ in 0..2 {
+                let path = cache
+                    .get_or_create("bg", || {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        std::fs::write(&owned_path, b"plate").expect("write owned plate");
+                        Ok(Some((owned_path.clone(), true)))
+                    })
+                    .expect("create plate");
+                assert_eq!(path.as_deref(), Some(owned_path.as_path()));
+            }
+            let kept = cache
+                .get_or_create("asset", || Ok(Some((kept_path.clone(), false))))
+                .expect("create plate");
+            assert_eq!(kept.as_deref(), Some(kept_path.as_path()));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(!owned_path.exists(), "owned plate deleted with the cache");
+        assert!(kept_path.exists(), "non-owned plate survives the cache");
     }
 
     fn valid_plan() -> RenderPlan {
@@ -7762,6 +8957,118 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_export_settings_gif_duration_cap() {
+        let mut plan = valid_plan();
+        plan.chapter_mode = "none".into();
+        let gif_settings = ExportSettings {
+            preset: "gif-balanced".into(),
+            codec: "gif".into(),
+            encoder: "auto".into(),
+            container: "gif".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "none".into(),
+            range: None,
+        };
+        plan.duration_ms = 60_000;
+        assert!(validate_export_settings(&gif_settings, &plan).is_ok());
+        plan.duration_ms = 60_001;
+        assert!(validate_export_settings(&gif_settings, &plan).is_err());
+        // The cap only applies to GIF — a long mp4 is unaffected.
+        let mp4_settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+        plan.duration_ms = 120_000;
+        plan.chapter_mode = "embed".into();
+        assert!(validate_export_settings(&mp4_settings, &plan).is_ok());
+    }
+
+    #[test]
+    fn estimate_export_bytes_counts_pixels_and_audio() {
+        let mut plan = valid_plan();
+        plan.duration_ms = 60_000;
+        let settings = ExportSettings {
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "auto".into(),
+            container: "mp4".into(),
+            caption_mode: "burn-in".into(),
+            chapter_mode: "embed".into(),
+            range: None,
+        };
+        // 1920*1080*30 * 0.01 bpp * 60 s / 8 + 128k/8 * 60 s.
+        let expected = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0 + 128_000.0 / 8.0 * 60.0) as u64;
+        assert_eq!(estimate_export_bytes(&plan, &settings, 0.01), expected);
+        // Animations mux no audio.
+        let gif_settings = ExportSettings {
+            preset: "gif-balanced".into(),
+            container: "gif".into(),
+            ..settings
+        };
+        let video_only = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0) as u64;
+        assert_eq!(
+            estimate_export_bytes(&plan, &gif_settings, 0.01),
+            video_only
+        );
+    }
+
+    #[test]
+    fn is_disk_full_diagnostic_matches_ffmpeg_phrasings() {
+        assert!(is_disk_full_diagnostic(
+            "av_interleaved_write_frame(): No space left on device"
+        ));
+        assert!(is_disk_full_diagnostic(
+            "Error writing trailer: Not enough space on the disk"
+        ));
+        assert!(is_disk_full_diagnostic("write failed: DISK FULL"));
+        assert!(!is_disk_full_diagnostic("Invalid argument"));
+        assert!(!is_disk_full_diagnostic("Conversion failed!"));
+    }
+
+    #[test]
+    fn sweep_stale_temp_files_removes_only_old_prefixed_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stale = dir.path().join("recordforge_chunks_abcd");
+        let fresh = dir.path().join("rf-mask-xyz.png");
+        let other = dir.path().join("unrelated-old-file.txt");
+        std::fs::write(&stale, b"x").expect("write");
+        std::fs::write(&fresh, b"x").expect("write");
+        std::fs::write(&other, b"x").expect("write");
+        let two_hours_ago = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        for path in [&stale, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open")
+                .set_modified(two_hours_ago)
+                .expect("mtime");
+        }
+
+        assert_eq!(
+            sweep_stale_temp_files(dir.path(), Duration::from_secs(60 * 60)),
+            1
+        );
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn sweep_stale_temp_files_removes_prefixed_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stale_dir = dir.path().join("recordforge_chunks_0123");
+        std::fs::create_dir_all(&stale_dir).expect("mkdir");
+        std::fs::write(stale_dir.join("chunk_00000.ts"), b"x").expect("write");
+        assert_eq!(sweep_stale_temp_files(dir.path(), Duration::ZERO), 1);
+        assert!(!stale_dir.exists());
+    }
+
+    #[test]
     fn test_temp_mask_file_cleanup() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mask_path = temp_dir.path().join("rf-mask-test.png");
@@ -8155,7 +9462,13 @@ mod tests {
         assert!(res.is_ok(), "render gif failed: {:?}", res.err());
         assert!(out_path.is_file(), "exported gif should exist");
 
-        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        let validation = validate_export_output(
+            &ffprobe,
+            &out_path,
+            &plan,
+            &settings,
+            res.expect("rendered").has_audio,
+        );
         assert!(
             validation.is_ok(),
             "validate gif failed: {:?}",
@@ -8291,7 +9604,13 @@ mod tests {
                 ratio
             );
 
-            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            let validation = validate_export_output(
+                &ffprobe,
+                &out_path,
+                &plan,
+                &settings,
+                res.expect("rendered").has_audio,
+            );
             assert!(
                 validation.is_ok(),
                 "validate mp4 for {} failed: {:?}",
@@ -8380,7 +9699,13 @@ mod tests {
                 out_path.is_file(),
                 "exported mp4 for 9:16 gradient should exist"
             );
-            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            let validation = validate_export_output(
+                &ffprobe,
+                &out_path,
+                &plan,
+                &settings,
+                res.expect("rendered").has_audio,
+            );
             assert!(
                 validation.is_ok(),
                 "validate mp4 for 9:16 gradient failed: {:?}",
@@ -8493,7 +9818,13 @@ mod tests {
                 out_path.is_file(),
                 "exported mp4 for 9:16 zoom should exist"
             );
-            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            let validation = validate_export_output(
+                &ffprobe,
+                &out_path,
+                &plan,
+                &settings,
+                res.expect("rendered").has_audio,
+            );
             assert!(
                 validation.is_ok(),
                 "validate mp4 for 9:16 zoom failed: {:?}",
@@ -8588,7 +9919,13 @@ mod tests {
                 out_path.is_file(),
                 "exported mp4 for 9:16 shadow border should exist"
             );
-            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            let validation = validate_export_output(
+                &ffprobe,
+                &out_path,
+                &plan,
+                &settings,
+                res.expect("rendered").has_audio,
+            );
             assert!(
                 validation.is_ok(),
                 "validate mp4 for 9:16 shadow border failed: {:?}",
@@ -8685,7 +10022,13 @@ mod tests {
                 out_path.is_file(),
                 "exported mp4 for 9:16 image bg should exist"
             );
-            let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+            let validation = validate_export_output(
+                &ffprobe,
+                &out_path,
+                &plan,
+                &settings,
+                res.expect("rendered").has_audio,
+            );
             assert!(
                 validation.is_ok(),
                 "validate mp4 for 9:16 image bg failed: {:?}",
@@ -8805,7 +10148,13 @@ mod tests {
         assert!(res.is_ok(), "render webp failed: {:?}", res.err());
         assert!(out_path.is_file(), "exported webp should exist");
 
-        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        let validation = validate_export_output(
+            &ffprobe,
+            &out_path,
+            &plan,
+            &settings,
+            res.expect("rendered").has_audio,
+        );
         assert!(
             validation.is_ok(),
             "validate webp failed: {:?}",
@@ -8920,7 +10269,13 @@ mod tests {
         assert!(res.is_ok(), "render gif downscaled failed: {:?}", res.err());
         assert!(out_path.is_file(), "exported downscaled gif should exist");
 
-        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        let validation = validate_export_output(
+            &ffprobe,
+            &out_path,
+            &plan,
+            &settings,
+            res.expect("rendered").has_audio,
+        );
         assert!(
             validation.is_ok(),
             "validate downscaled gif failed: {:?}",
@@ -10647,7 +12002,13 @@ mod tests {
         );
         assert!(out_path.is_file(), "output video exists");
 
-        let validation = validate_export_output(&ffprobe, &out_path, &plan, &settings);
+        let validation = validate_export_output(
+            &ffprobe,
+            &out_path,
+            &plan,
+            &settings,
+            res.expect("rendered").has_audio,
+        );
         assert!(validation.is_ok(), "validation: {:?}", validation.err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);

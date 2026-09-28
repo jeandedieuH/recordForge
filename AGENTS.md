@@ -141,6 +141,13 @@ $env:RECORD_FORGE_UPDATER_PUBLIC_KEY = "<public-key>"
 bun run prepare:updater
 ```
 
+Build the export harness (dev-only driver that renders a JSON `ExportHarnessSpec` through the real export pipeline, then validates the output):
+
+```bash
+cd apps/desktop/src-tauri
+cargo build --release --features export-harness --bin export_harness
+```
+
 Official desktop releases are published by `.github/workflows/release-desktop.yml` from `app-v*` tags. The workflow builds signed NSIS/MSI artifacts and uploads `latest.json` to the GitHub Release.
 
 ## Security Rules

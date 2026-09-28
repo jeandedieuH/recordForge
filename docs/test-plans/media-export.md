@@ -45,6 +45,9 @@
 | `apply_zoom_clamps_target_to_padded_content_area` | Padded/letterboxed screen with manual and smart zoom | Preview and export use the same crop and cursor coordinates |
 | `samples follow-cursor keyframes in source timeline time for selected-range exports` | Selected range containing follow-cursor zoom | Keyframes use source timeline time while output timestamps start at zero |
 | `test_render_selected_range` | Selected timeline range | Output starts at zero and preserves internal gaps |
+| `test_chunked_output_is_cfr` | ≥20 s export on a multi-core machine | Uniform PTS deltas across chunk seams (constant frame rate) |
+| `test_chunked_matches_single_pass` | Same spec rendered chunked and single-pass | Per-frame PSNR ≥ 35 dB, frames paired by index |
+| `test_hevc_hvc1_tag` | HEVC MP4 export | Video stream tag is `hvc1`; frame count and duration exact |
 
 ---
 
@@ -141,7 +144,9 @@ ffmpeg -f lavfi -i "testsrc2=size=1920x1080:rate=30:duration=10" \
 
 | Test | Scenario | Expected |
 |------|----------|----------|
-| `test_export_disk_full` | Export to full disk | Error before or during write; no corrupt file |
+| `test_export_disk_full` | Export to full disk | `Storage` error "The disk ran out of space during export. Free up space and retry."; no corrupt file |
+| `test_export_gif_over_60s` | GIF preset on a >60 s timeline | Rejected with the 60 s limit message; Selected range with a ≤60 s range still allowed |
+| `test_export_temp_sweep` | Stale `recordforge_*`/`rf-*` temp artifacts older than 24 h | Removed at app startup; fresh files and unrelated temp entries kept |
 | `test_export_readonly_dest` | Export to read-only directory | Error with permission message |
 | `test_export_overwrite` | Export to existing file | Confirmation dialog; overwrite or rename |
 | `test_export_long_path` | Path > 260 chars on Windows | Extended path prefix or error |

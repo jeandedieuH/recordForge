@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { resolveExportRange } from "./export-view"
+import { exceedsGifDurationLimit, resolveExportRange } from "./export-view"
 
 describe("resolveExportRange", () => {
   it("returns a rounded range when start and end are valid", () => {
@@ -31,5 +31,29 @@ describe("resolveExportRange", () => {
 
   it("returns undefined for empty recordings", () => {
     expect(resolveExportRange(0, 1_000, 0)).toBeUndefined()
+  })
+})
+
+describe("exceedsGifDurationLimit", () => {
+  it("blocks a full-length GIF over 60 seconds", () => {
+    expect(exceedsGifDurationLimit("gif", "gif-balanced", 61_000, undefined)).toBe(true)
+  })
+
+  it("allows a GIF at exactly 60 seconds", () => {
+    expect(exceedsGifDurationLimit("gif", "gif-balanced", 60_000, undefined)).toBe(false)
+  })
+
+  it("judges the selected range rather than the timeline", () => {
+    const range = { startMs: 10_000, endMs: 40_000 }
+    expect(exceedsGifDurationLimit("gif", "selected-range", 300_000, range)).toBe(false)
+  })
+
+  it("blocks a selected range over 60 seconds", () => {
+    const range = { startMs: 0, endMs: 61_000 }
+    expect(exceedsGifDurationLimit("gif", "selected-range", 300_000, range)).toBe(true)
+  })
+
+  it("never blocks mp4", () => {
+    expect(exceedsGifDurationLimit("mp4", "balanced", 600_000, undefined)).toBe(false)
   })
 })

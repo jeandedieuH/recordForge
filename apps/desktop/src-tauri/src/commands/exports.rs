@@ -81,21 +81,9 @@ pub fn reveal_export(job_id: String, state: State<'_, AppState>) -> Result<()> {
         return Err(InternalError::Storage("published export is missing".into()).into());
     }
 
-    #[cfg(windows)]
-    {
-        let validated_str = validated.to_string_lossy();
-        crate::process::create_command("explorer")
-            .args(["/select,", validated_str.as_ref()])
-            .spawn()
-            .map_err(|error| InternalError::Media(format!("reveal export: {error}")))?;
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = validated;
-        Err(InternalError::Media("reveal is only implemented on Windows".into()).into())
-    }
+    tauri_plugin_opener::reveal_item_in_dir(&validated)
+        .map_err(|error| InternalError::Media(format!("reveal export: {error}")))?;
+    Ok(())
 }
 
 /// Flash taskbar or request dock attention when an export finishes in the background.
