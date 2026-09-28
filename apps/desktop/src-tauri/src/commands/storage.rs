@@ -11,7 +11,8 @@ use crate::database::storage::{self as storage_db, StorageProfile, UploadJob};
 use crate::errors::{InternalError, Result};
 use crate::state::AppState;
 use crate::storage::drive::{
-    GoogleDriveClient, GoogleDriveConfig, GOOGLE_DRIVE_AUTH_SCOPE, GOOGLE_DRIVE_CLIENT_ID,
+    get_google_drive_client_id, get_google_drive_client_secret, GoogleDriveClient,
+    GoogleDriveConfig, GOOGLE_DRIVE_AUTH_SCOPE,
 };
 use crate::storage::local::{LocalFolderClient, LocalFolderConfig};
 use crate::storage::s3::{ConnectionTestResult, S3Client, S3Config};
@@ -309,9 +310,10 @@ pub async fn start_google_drive_oauth(
         .port();
 
     let redirect_uri = format!("http://127.0.0.1:{}", port);
+    let client_id = get_google_drive_client_id();
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
-        GOOGLE_DRIVE_CLIENT_ID, redirect_uri, GOOGLE_DRIVE_AUTH_SCOPE, challenge, state_str
+        client_id, redirect_uri, GOOGLE_DRIVE_AUTH_SCOPE, challenge, state_str
     );
 
     let app_clone = app.clone();
@@ -364,8 +366,11 @@ pub async fn start_google_drive_oauth(
                 if recv_state.as_deref() == Some(&state_clone) {
                     tauri::async_runtime::spawn(async move {
                         let http = reqwest::Client::new();
+                        let client_id = get_google_drive_client_id();
+                        let client_secret = get_google_drive_client_secret();
                         let params = [
-                            ("client_id", GOOGLE_DRIVE_CLIENT_ID),
+                            ("client_id", client_id.as_str()),
+                            ("client_secret", client_secret.as_str()),
                             ("code", &auth_code),
                             ("code_verifier", &verifier_clone),
                             ("grant_type", "authorization_code"),

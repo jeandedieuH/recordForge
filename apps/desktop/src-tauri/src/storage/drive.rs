@@ -19,6 +19,59 @@ pub const GOOGLE_DRIVE_CLIENT_ID: &str =
     "254207736726-t74i43783vr9gu3vava8uog2n9i9d15k.apps.googleusercontent.com";
 pub const GOOGLE_DRIVE_AUTH_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 
+/// Resolves Google Drive OAuth client ID from env, .env file, or fallback constant
+pub fn get_google_drive_client_id() -> String {
+    std::env::var("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_ID")
+        .or_else(|_| std::env::var("GOOGLE_DRIVE_CLIENT_ID"))
+        .or_else(|_| read_env_var_from_file("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_ID"))
+        .or_else(|_| read_env_var_from_file("GOOGLE_DRIVE_CLIENT_ID"))
+        .unwrap_or_else(|_| GOOGLE_DRIVE_CLIENT_ID.to_string())
+}
+
+/// Resolves Google Drive OAuth client secret from env or .env file
+pub fn get_google_drive_client_secret() -> String {
+    std::env::var("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET")
+        .or_else(|_| std::env::var("GOOGLE_DRIVE_CLIENT_SECRET"))
+        .or_else(|_| read_env_var_from_file("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET"))
+        .or_else(|_| read_env_var_from_file("GOOGLE_DRIVE_CLIENT_SECRET"))
+        .unwrap_or_default()
+}
+
+/// Helper to read a variable from local untracked `.env` files if not set in process env
+fn read_env_var_from_file(key: &str) -> std::result::Result<String, ()> {
+    let candidate_paths = [
+        std::path::PathBuf::from(".env"),
+        std::path::PathBuf::from("../.env"),
+        std::path::PathBuf::from("../../.env"),
+        std::path::PathBuf::from("apps/desktop/.env"),
+    ];
+
+    for path in &candidate_paths {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.starts_with('#') || line.is_empty() {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    if k.trim() == key {
+                        let mut val = v.trim();
+                        if (val.starts_with('"') && val.ends_with('"'))
+                            || (val.starts_with('\'') && val.ends_with('\''))
+                        {
+                            val = &val[1..val.len() - 1];
+                        }
+                        if !val.is_empty() {
+                            return Ok(val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoogleDriveConfig {
@@ -93,8 +146,11 @@ impl GoogleDriveClient {
             );
         }
 
+        let client_id = get_google_drive_client_id();
+        let client_secret = get_google_drive_client_secret();
         let params = [
-            ("client_id", GOOGLE_DRIVE_CLIENT_ID),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
             ("grant_type", "refresh_token"),
             ("refresh_token", &self.refresh_token),
         ];
