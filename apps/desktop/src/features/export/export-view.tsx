@@ -356,8 +356,7 @@ export function ExportView({
     durationMs,
     selectedRange,
   )
-  const canStart =
-    isPresetSupported(selectedPreset, canvas, selectedRange) && !gifDurationBlocked
+  const canStart = isPresetSupported(selectedPreset, canvas, selectedRange) && !gifDurationBlocked
   const exportPercent = Math.min(100, Math.max(0, Math.round((exportJob?.progress ?? 0) * 100)))
 
   function selectPreset(preset: ExportPreset) {
