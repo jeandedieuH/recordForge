@@ -94,6 +94,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Desktop OAuth client secret — Google's token endpoint requires it even
+          # for Desktop-app clients; compiled into the binary via option_env!.
+          RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET: ${{ secrets.RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET }}
         with:
           projectPath: apps/desktop
           tauriScript: bun tauri

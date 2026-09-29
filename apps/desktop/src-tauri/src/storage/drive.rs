@@ -28,13 +28,24 @@ pub fn get_google_drive_client_id() -> String {
         .unwrap_or_else(|_| GOOGLE_DRIVE_CLIENT_ID.to_string())
 }
 
-/// Resolves Google Drive OAuth client secret from env or .env file
+/// Resolves Google Drive OAuth client secret from env, .env file, or a value
+/// embedded at compile time.
+///
+/// Google's token endpoint requires `client_secret` for OAuth clients that have
+/// one — including "Desktop app" clients (verified against the live endpoint) —
+/// so release builds bake it in via RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET.
+/// This is an app credential, not a user credential: installed apps cannot keep
+/// secrets and Google treats this value as non-confidential.
 pub fn get_google_drive_client_secret() -> String {
     std::env::var("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET")
         .or_else(|_| std::env::var("GOOGLE_DRIVE_CLIENT_SECRET"))
         .or_else(|_| read_env_var_from_file("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET"))
         .or_else(|_| read_env_var_from_file("GOOGLE_DRIVE_CLIENT_SECRET"))
-        .unwrap_or_default()
+        .unwrap_or_else(|_| {
+            option_env!("RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET")
+                .unwrap_or_default()
+                .to_string()
+        })
 }
 
 /// Helper to read a variable from local untracked `.env` files if not set in process env
@@ -148,12 +159,16 @@ impl GoogleDriveClient {
 
         let client_id = get_google_drive_client_id();
         let client_secret = get_google_drive_client_secret();
-        let params = [
+        let mut params = vec![
             ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
             ("grant_type", "refresh_token"),
-            ("refresh_token", &self.refresh_token),
+            ("refresh_token", self.refresh_token.as_str()),
         ];
+        // A present-but-empty client_secret is rejected by the token endpoint —
+        // omit the parameter entirely when no secret is configured.
+        if !client_secret.is_empty() {
+            params.push(("client_secret", client_secret.as_str()));
+        }
 
         let resp = self
             .http

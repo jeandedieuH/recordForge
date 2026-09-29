@@ -348,46 +348,39 @@ pub async fn start_google_drive_oauth(
                 }
             }
 
-            let response_body = if code.is_some() && recv_state.as_deref() == Some(&state_clone) {
-                "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; Google Drive Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>"
-            } else {
-                "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Invalid state or missing authorization code.</p></body></html>"
-            };
+            // Exchange the authorization code before responding so the loopback
+            // page reflects the real outcome instead of claiming success early.
+            let outcome = match code.filter(|_| recv_state.as_deref() == Some(&state_clone)) {
+                Some(auth_code) => tauri::async_runtime::block_on(async {
+                    let http = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new());
+                    let client_id = get_google_drive_client_id();
+                    let client_secret = get_google_drive_client_secret();
+                    let redirect_uri = format!("http://127.0.0.1:{}", port);
+                    let mut params = vec![
+                        ("client_id", client_id.as_str()),
+                        ("code", auth_code.as_str()),
+                        ("code_verifier", verifier_clone.as_str()),
+                        ("grant_type", "authorization_code"),
+                        ("redirect_uri", redirect_uri.as_str()),
+                    ];
+                    // A present-but-empty client_secret is rejected by the token
+                    // endpoint — omit the parameter entirely when unset.
+                    if !client_secret.is_empty() {
+                        params.push(("client_secret", client_secret.as_str()));
+                    }
 
-            let http_response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            let _ = stream.write_all(http_response.as_bytes());
-            let _ = stream.flush();
-
-            if let Some(auth_code) = code {
-                if recv_state.as_deref() == Some(&state_clone) {
-                    tauri::async_runtime::spawn(async move {
-                        let http = reqwest::Client::new();
-                        let client_id = get_google_drive_client_id();
-                        let client_secret = get_google_drive_client_secret();
-                        let params = [
-                            ("client_id", client_id.as_str()),
-                            ("client_secret", client_secret.as_str()),
-                            ("code", &auth_code),
-                            ("code_verifier", &verifier_clone),
-                            ("grant_type", "authorization_code"),
-                            ("redirect_uri", &format!("http://127.0.0.1:{}", port)),
-                        ];
-
-                        let res = http
-                            .post("https://oauth2.googleapis.com/token")
-                            .form(&params)
-                            .send()
-                            .await;
-
-                        match res {
-                            Ok(resp) if resp.status().is_success() => {
-                                if let Ok(token_resp) =
-                                    resp.json::<crate::storage::drive::TokenResponse>().await
-                                {
+                    match http
+                        .post("https://oauth2.googleapis.com/token")
+                        .form(&params)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<crate::storage::drive::TokenResponse>().await {
+                                Ok(token_resp) => {
                                     // Fetch user email
                                     let mut email = None;
                                     if let Ok(about_res) = http
@@ -405,45 +398,48 @@ pub async fn start_google_drive_oauth(
                                             email = about.user.and_then(|u| u.email_address);
                                         }
                                     }
-
-                                    let _ = app_clone.emit(
-                                        "google-drive-oauth-completed",
-                                        OAuthCompletedEvent {
-                                            success: true,
-                                            refresh_token: token_resp.refresh_token,
-                                            account_email: email,
-                                            error: None,
-                                        },
-                                    );
+                                    Ok((token_resp.refresh_token, email))
                                 }
-                            }
-                            Ok(resp) => {
-                                let err = resp.text().await.unwrap_or_default();
-                                let _ = app_clone.emit(
-                                    "google-drive-oauth-completed",
-                                    OAuthCompletedEvent {
-                                        success: false,
-                                        refresh_token: None,
-                                        account_email: None,
-                                        error: Some(err),
-                                    },
-                                );
-                            }
-                            Err(e) => {
-                                let _ = app_clone.emit(
-                                    "google-drive-oauth-completed",
-                                    OAuthCompletedEvent {
-                                        success: false,
-                                        refresh_token: None,
-                                        account_email: None,
-                                        error: Some(e.to_string()),
-                                    },
-                                );
+                                Err(e) => Err(format!("failed to parse token response: {e}")),
                             }
                         }
-                    });
-                }
-            }
+                        Ok(resp) => Err(resp.text().await.unwrap_or_default()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }),
+                None => Err("Invalid state or missing authorization code.".to_string()),
+            };
+
+            let (response_body, event) = match outcome {
+                Ok((refresh_token, account_email)) => (
+                    "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; Google Drive Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>",
+                    OAuthCompletedEvent {
+                        success: true,
+                        refresh_token,
+                        account_email,
+                        error: None,
+                    },
+                ),
+                Err(err) => (
+                    "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Return to RecordForge for details.</p></body></html>",
+                    OAuthCompletedEvent {
+                        success: false,
+                        refresh_token: None,
+                        account_email: None,
+                        error: Some(err),
+                    },
+                ),
+            };
+
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = stream.write_all(http_response.as_bytes());
+            let _ = stream.flush();
+
+            let _ = app_clone.emit("google-drive-oauth-completed", event);
         }
     });
 
