@@ -757,17 +757,96 @@ fn zoompan_screen_center(center_canvas: f64, canvas_dim: f64, screen_dim: f64) -
     ((center_canvas / canvas_dim) * screen_dim).clamp(0.0, screen_dim)
 }
 
-pub(crate) fn build_zoompan_expressions(
+/// Per-segment expression payloads for one zoom segment, plus the time range
+/// needed to route `it` through the balanced segment tree.
+struct ZoompanSegmentExpr {
+    start_s: f64,
+    end_s: f64,
+    cond: String,
+    z: String,
+    cx: String,
+    cy: String,
+}
+
+/// Wrap `fallback` in the segment's guard condition, yielding
+/// `if(cond, expr, fallback)`. Chained over a sorted slice in ascending
+/// order this reproduces the "latest starting segment wins" selection the
+/// numeric evaluator applies.
+fn zoompan_segment_exprs_guard(
+    segment: &ZoompanSegmentExpr,
+    fallback: (String, String, String),
+) -> (String, String, String) {
+    (
+        format!("if({},{},{})", segment.cond, segment.z, fallback.0),
+        format!("if({},{},{})", segment.cond, segment.cx, fallback.1),
+        format!("if({},{},{})", segment.cond, segment.cy, fallback.2),
+    )
+}
+
+/// Number of segments folded into a single linear chain at a tree leaf.
+/// Small leaves keep `it` routing cheap while bounding tree depth.
+const ZOOMPAN_EXPR_LEAF_SEGMENTS: usize = 8;
+
+/// Combine the per-segment z/cx/cy expressions into three balanced
+/// `if(lt(it,split), left, right)` trees.
+///
+/// FFmpeg's expression parser rejects trees deeper than `MAX_DEPTH` (100) —
+/// and worse, `parse_primary` ignores the parse result for a function's
+/// second and third argument, so an over-deep subtree is silently dropped
+/// and the expression evaluates to a constant. A linear `if` chain over N
+/// zoom segments reaches depth ~N + leaf depth and overflows around ~75
+/// segments (observed on long recordings: the x/y expressions collapse to
+/// `if(lte(zoom,1.001),0,0)`, pinning the crop to the top-left corner while
+/// `z` still zooms). Routing `it` through a binary tree keeps depth O(log n).
+///
+/// Selection semantics are identical to the linear chain: for `it < split`
+/// only left segments can be active (segments are sorted by start, so every
+/// right segment starts at or after `split`); for `it >= split` the right
+/// subtree checks its (later-starting, higher-priority) segments first and
+/// falls back to a chain of the left segments still active past `split_s`.
+fn build_zoompan_segment_exprs(
+    segments: &[ZoompanSegmentExpr],
+    fallback: &(String, String, String),
+) -> (String, String, String) {
+    if segments.len() <= ZOOMPAN_EXPR_LEAF_SEGMENTS {
+        return segments.iter().fold(fallback.clone(), |acc, segment| {
+            zoompan_segment_exprs_guard(segment, acc)
+        });
+    }
+
+    let mid = segments.len() / 2;
+    let split_s = segments[mid].start_s;
+    let left = build_zoompan_segment_exprs(&segments[..mid], fallback);
+
+    // Left segments spanning the split can still be active at it >= split_s;
+    // they keep their original (lower) priority inside the right subtree.
+    let tail = segments[..mid]
+        .iter()
+        .filter(|segment| segment.end_s > split_s)
+        .fold(fallback.clone(), |acc, segment| {
+            zoompan_segment_exprs_guard(segment, acc)
+        });
+    let right = build_zoompan_segment_exprs(&segments[mid..], &tail);
+
+    let split = compact_num(split_s);
+    (
+        format!("if(lt(it,{split}),{},{})", left.0, right.0),
+        format!("if(lt(it,{split}),{},{})", left.1, right.1),
+        format!("if(lt(it,{split}),{},{})", left.2, right.2),
+    )
+}
+
+/// Build the guarded `if(cond, z|cx|cy, …)` payload for every enabled zoom
+/// segment, sorted so later-starting segments win when ranges overlap.
+fn collect_zoompan_segment_exprs(
     plan: &RenderPlan,
     canvas: &cursor::RenderCanvas,
     screen_w: f64,
     screen_h: f64,
-) -> (String, String, String) {
-    let mut z_expr = "1.0".to_string();
+) -> Vec<ZoompanSegmentExpr> {
     let full_cx = screen_w / 2.0;
     let full_cy = screen_h / 2.0;
-    let mut cx_expr = compact_num(full_cx);
-    let mut cy_expr = compact_num(full_cy);
+    let mut segment_exprs: Vec<ZoompanSegmentExpr> = Vec::new();
     let canvas_w = canvas.width as f64;
     let canvas_h = canvas.height as f64;
 
@@ -1057,10 +1136,34 @@ pub(crate) fn build_zoompan_expressions(
             format!("gte(it,{start_str})*lt(it,{end_str})")
         };
 
-        z_expr = format!("if({cond},{z_seg},{z_expr})");
-        cx_expr = format!("if({cond},{cx_seg},{cx_expr})");
-        cy_expr = format!("if({cond},{cy_seg},{cy_expr})");
+        segment_exprs.push(ZoompanSegmentExpr {
+            start_s,
+            end_s,
+            cond,
+            z: z_seg,
+            cx: cx_seg,
+            cy: cy_seg,
+        });
     }
+
+    segment_exprs
+}
+
+pub(crate) fn build_zoompan_expressions(
+    plan: &RenderPlan,
+    canvas: &cursor::RenderCanvas,
+    screen_w: f64,
+    screen_h: f64,
+) -> (String, String, String) {
+    let segment_exprs = collect_zoompan_segment_exprs(plan, canvas, screen_w, screen_h);
+    let (z_expr, cx_expr, cy_expr) = build_zoompan_segment_exprs(
+        &segment_exprs,
+        &(
+            "1.0".to_string(),
+            compact_num(screen_w / 2.0),
+            compact_num(screen_h / 2.0),
+        ),
+    );
 
     let x_expr = format!("if(lte(zoom,1.001),0,max(0,min(iw-iw/zoom,({cx_expr})-(iw/zoom)/2)))");
     let y_expr = format!("if(lte(zoom,1.001),0,max(0,min(ih-ih/zoom,({cy_expr})-(ih/zoom)/2)))");
@@ -1234,6 +1337,125 @@ mod tests {
             vars: &vars,
         }
         .expr()
+    }
+
+    // ------------------------------------------------------------------
+    // FFmpeg expression-tree depth (`libavutil/eval.c` `MAX_DEPTH` = 100).
+    // Leaf nodes have depth 0; every function call, operator, or `if` adds
+    // one to the depth of its deepest argument. FFmpeg's parser silently
+    // drops a function argument whose subtree overflows, so expressions
+    // must stay well under the limit.
+    // ------------------------------------------------------------------
+
+    struct ExprDepth<'a> {
+        text: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> ExprDepth<'a> {
+        fn skip_ws(&mut self) {
+            while self.pos < self.text.len() && self.text[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.text.get(self.pos).copied()
+        }
+
+        fn eat(&mut self, byte: u8) -> bool {
+            self.skip_ws();
+            if self.peek() == Some(byte) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn expr(&mut self) -> usize {
+            let mut depth = self.term();
+            loop {
+                if self.eat(b'+') || self.eat(b'-') {
+                    depth = depth.max(self.term()) + 1;
+                } else {
+                    return depth;
+                }
+            }
+        }
+
+        fn term(&mut self) -> usize {
+            let mut depth = self.unary();
+            loop {
+                if self.eat(b'*') || self.eat(b'/') || self.eat(b'%') {
+                    depth = depth.max(self.unary()) + 1;
+                } else {
+                    return depth;
+                }
+            }
+        }
+
+        fn unary(&mut self) -> usize {
+            self.skip_ws();
+            // Sign folds into the parsed node's `value`; it adds no depth.
+            if self.eat(b'-') || self.eat(b'+') {
+                self.unary()
+            } else {
+                self.primary()
+            }
+        }
+
+        fn primary(&mut self) -> usize {
+            self.skip_ws();
+            match self.peek() {
+                Some(b'(') => {
+                    self.pos += 1;
+                    let depth = self.expr();
+                    assert!(self.eat(b')'), "expected closing paren in expression");
+                    depth
+                }
+                Some(byte) if byte.is_ascii_digit() || byte == b'.' => {
+                    while self.pos < self.text.len()
+                        && (self.text[self.pos].is_ascii_digit() || self.text[self.pos] == b'.')
+                    {
+                        self.pos += 1;
+                    }
+                    0
+                }
+                Some(byte) if byte.is_ascii_alphabetic() || byte == b'_' => {
+                    while self.pos < self.text.len()
+                        && (self.text[self.pos].is_ascii_alphanumeric()
+                            || self.text[self.pos] == b'_')
+                    {
+                        self.pos += 1;
+                    }
+                    self.skip_ws();
+                    if self.peek() != Some(b'(') {
+                        return 0;
+                    }
+                    self.pos += 1;
+                    let mut depth = 0;
+                    loop {
+                        depth = depth.max(self.expr());
+                        if self.eat(b',') {
+                            continue;
+                        }
+                        assert!(self.eat(b')'), "expected ) after function args");
+                        break;
+                    }
+                    depth + 1
+                }
+                other => panic!("unexpected byte {other:?} at {}", self.pos),
+            }
+        }
+    }
+
+    fn ffmpeg_expr_depth(expression: &str) -> usize {
+        let mut parser = ExprDepth {
+            text: expression.as_bytes(),
+            pos: 0,
+        };
+        parser.expr()
     }
 
     fn test_plan(zoom_segments: Vec<RenderPlanZoomSegment>) -> RenderPlan {
@@ -1633,6 +1855,204 @@ mod tests {
                     frame.crop.height,
                 );
             }
+        }
+    }
+
+    /// A motion plan the size of a real follow-cursor zoom (~40 cubic
+    /// segments), which is what pushed the old linear if-chain past FFmpeg's
+    /// expression-tree depth limit on long recordings. Endpoints are shared
+    /// between neighbours like the cursor engine emits them: at a shared
+    /// boundary the numeric evaluator reports the earlier segment's `end`
+    /// while the FFmpeg expression evaluates the next segment's `start` —
+    /// equal only when the chain is continuous.
+    fn dense_motion_plan(
+        start_ms: u64,
+        end_ms: u64,
+        motion_segments: usize,
+    ) -> RenderPlanZoomMotionPlan {
+        let step = (end_ms - start_ms) / motion_segments.max(1) as u64;
+        let point = |i: usize| {
+            let t = i as f64 / motion_segments as f64;
+            RenderPlanZoomMotionPoint {
+                x: 200.0 + 1_200.0 * (t * 3.0).sin().abs(),
+                y: 120.0 + 700.0 * (t * 2.0).cos().abs(),
+            }
+        };
+        let segments = (0..motion_segments)
+            .map(|i| {
+                let start = point(i);
+                let end = point(i + 1);
+                RenderPlanZoomMotionSegment {
+                    start_ms: start_ms + i as u64 * step,
+                    end_ms: start_ms + (i as u64 + 1) * step,
+                    control1: RenderPlanZoomMotionPoint {
+                        x: start.x + (end.x - start.x) / 3.0,
+                        y: start.y + (end.y - start.y) / 3.0,
+                    },
+                    control2: RenderPlanZoomMotionPoint {
+                        x: start.x + (end.x - start.x) * 2.0 / 3.0,
+                        y: start.y + (end.y - start.y) * 2.0 / 3.0,
+                    },
+                    start,
+                    end,
+                }
+            })
+            .collect();
+        RenderPlanZoomMotionPlan {
+            version: 1,
+            kind: "cubic-bezier".into(),
+            segments,
+        }
+    }
+
+    /// Regression test for the FFmpeg `MAX_DEPTH` overflow: a long export
+    /// (~96 zoom segments, several with dense follow-cursor motion plans and
+    /// a few overlapping ranges) used to emit a linear `if` chain whose x/y
+    /// expressions exceeded 100 tree depth; FFmpeg then silently dropped the
+    /// overflowing argument and pinned the crop at (0,0) while `z` still
+    /// zoomed — the exported video zoomed onto the wrong region and the
+    /// rendered cursor missed its target.
+    #[test]
+    fn zoompan_expressions_stay_under_ffmpeg_depth_limit_on_long_plans() {
+        let canvas = cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            ..Default::default()
+        };
+        let easings = ["linear", "cinematic", "snappy", "smooth", "spring"];
+        let mut segments: Vec<RenderPlanZoomSegment> = Vec::new();
+        for i in 0..96u64 {
+            let start_ms = 4_000 + i * 12_000;
+            let end_ms = start_ms + 8_000;
+            let mut segment = zoom_segment(
+                &format!("seg-{i:02}"),
+                start_ms,
+                end_ms,
+                RenderCropFloat {
+                    x: (i * 37 % 960) as f64,
+                    y: (i * 53 % 540) as f64,
+                    width: 640.0 + (i % 3) as f64 * 160.0,
+                    height: 360.0 + (i % 3) as f64 * 90.0,
+                },
+                1.5 + (i % 4) as f64 * 0.5,
+                easings[i as usize % easings.len()],
+                if i % 2 == 0 { 300 } else { 0 },
+                if i % 3 == 0 { 400 } else { 0 },
+                if i % 5 == 0 {
+                    Some(RenderCropFloat {
+                        x: 100.0,
+                        y: 60.0,
+                        width: 960.0,
+                        height: 540.0,
+                    })
+                } else {
+                    None
+                },
+            );
+            if i % 7 == 3 {
+                segment.mode = "follow-cursor".into();
+                segment.motion_plan = Some(dense_motion_plan(start_ms, end_ms, 40));
+            }
+            segments.push(segment);
+        }
+        // Overlapping ranges exercise the right-subtree fallback tails: a
+        // later-starting segment must win while it is active, and the earlier
+        // segment must take over again once the overlap ends.
+        let overlap_a = zoom_segment(
+            "overlap-a",
+            50_000,
+            90_000,
+            RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            2.0,
+            "linear",
+            0,
+            0,
+            None,
+        );
+        let overlap_b = zoom_segment(
+            "overlap-b",
+            70_000,
+            80_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 640.0,
+                height: 360.0,
+            },
+            3.0,
+            "linear",
+            0,
+            0,
+            None,
+        );
+        segments.push(overlap_a);
+        segments.push(overlap_b);
+
+        let plan = test_plan(segments.clone());
+        let (z_expr, x_expr, y_expr) = build_zoompan_expressions(&plan, &canvas, 1_920.0, 1_080.0);
+
+        // The old linear if-chain over these same segments would exceed
+        // FFmpeg's MAX_DEPTH (100) — measure it to pin down the regression.
+        let segment_exprs = collect_zoompan_segment_exprs(&plan, &canvas, 1_920.0, 1_080.0);
+        let fallback = ("1.0".to_string(), "960".to_string(), "540".to_string());
+        let linear = segment_exprs.iter().fold(fallback.clone(), |acc, segment| {
+            zoompan_segment_exprs_guard(segment, acc)
+        });
+        assert!(
+            ffmpeg_expr_depth(&format!(
+                "if(lte(zoom,1.001),0,max(0,min(iw-iw/zoom,({})-(iw/zoom)/2)))",
+                linear.1
+            )) > 100,
+            "linear chain should reproduce the historical overflow"
+        );
+
+        for (name, expr) in [("z", &z_expr), ("x", &x_expr), ("y", &y_expr)] {
+            let depth = ffmpeg_expr_depth(expr);
+            assert!(
+                depth <= 80,
+                "{name} expression depth {depth} approaches FFmpeg's MAX_DEPTH (100)"
+            );
+        }
+
+        // Parity against the numeric evaluator on a dense grid, including
+        // the overlap windows and motion-plan holds.
+        let iw = 1_920.0;
+        let ih = 1_080.0;
+        let canvas_w = canvas.width as f64;
+        let canvas_h = canvas.height as f64;
+        let duration_ms = 4_000.0 + 96.0 * 12_000.0;
+        for step in 0..=600 {
+            let t_ms = step as f64 * duration_ms / 600.0;
+            let it_s = t_ms / 1_000.0;
+
+            let state = evaluate_zoom_transform(&segments, canvas.width, canvas.height, 0, t_ms);
+            let zoom_num = (canvas_w / state.crop_w.max(1e-6)).clamp(1.0, 10.0);
+            let zoom_expr = eval_ffmpeg_expr(&z_expr, it_s, iw, ih, f64::NAN).clamp(1.0, 10.0);
+            assert!(
+                (zoom_expr - zoom_num).abs() < 0.01,
+                "zoom at {t_ms}ms: expr {zoom_expr} vs numeric {zoom_num}"
+            );
+
+            let x_expr_val = eval_ffmpeg_expr(&x_expr, it_s, iw, ih, zoom_expr);
+            let y_expr_val = eval_ffmpeg_expr(&y_expr, it_s, iw, ih, zoom_expr);
+            let expected_x =
+                (state.crop_x / canvas_w * iw).clamp(0.0, (iw - iw / zoom_num).max(0.0));
+            let expected_y =
+                (state.crop_y / canvas_h * ih).clamp(0.0, (ih - ih / zoom_num).max(0.0));
+            assert!(
+                (x_expr_val - expected_x).abs() < 0.75,
+                "x at {t_ms}ms: expr {x_expr_val} vs numeric {expected_x}"
+            );
+            assert!(
+                (y_expr_val - expected_y).abs() < 0.75,
+                "y at {t_ms}ms: expr {y_expr_val} vs numeric {expected_y}"
+            );
         }
     }
 }
