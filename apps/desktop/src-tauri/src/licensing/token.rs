@@ -23,9 +23,8 @@ pub const TOKEN_VERSION: u8 = 1;
 /// `kid` → base64url/raw base64 public key material for production tokens.
 /// Populated when the production Ed25519 keypair is generated (Phase 0); the
 /// private half lives only in the license server environment.
-const PRODUCTION_KEYS: &[(&str, &str)] = &[
-    ("prod-1","MfUSAhiudySsQhuHGoJkBcKSps3oah7pPM1NpY6/OdQ="),
-];
+const PRODUCTION_KEYS: &[(&str, &str)] =
+    &[("prod-1", "MfUSAhiudySsQhuHGoJkBcKSps3oah7pPM1NpY6/OdQ=")];
 
 /// `kid` → public key for admin-issued offline tokens. The admin private key
 /// lives only on the owner's machine (`license-admin-key.json`, gitignored);
