@@ -38,6 +38,7 @@ import {
   validateNoOverlap,
 } from "@recordforge/domain"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
+import { getClipGroupId } from "./grouping"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
   AddAnnotationClipCommand,
@@ -60,6 +61,8 @@ import type {
   DeleteZoomSegmentCommand,
   DuplicateClipCommand,
   DuplicateClipsCommand,
+  GroupClipsCommand,
+  UngroupClipsCommand,
   ImportCaptionCuesCommand,
   MoveClipCommand,
   MoveClipsCommand,
@@ -71,6 +74,7 @@ import type {
   RippleDeleteClipCommand,
   RippleDeleteClipsCommand,
   RippleDeleteRangeCommand,
+  RippleDeleteRangesCommand,
   SplitClipCommand,
   SplitAllClipsCommand,
   SplitCursorRangeCommand,
@@ -409,7 +413,9 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
-    case "delete-clips": {
+    case "delete-clips":
+    case "group-clips":
+    case "ungroup-clips": {
       const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
       if (foundClips.some((found) => !found)) {
         return { ok: false, error: editorError("clip_not_found", "Clip not found") }
@@ -421,6 +427,21 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
         return {
           ok: false,
           error: editorError("track_locked", `Track "${lockedClip.track.name}" is locked`),
+        }
+      }
+      if (command.kind === "group-clips" && command.clipIds.length < 2) {
+        return {
+          ok: false,
+          error: editorError("invalid_group", "A group needs at least two clips"),
+        }
+      }
+      if (
+        command.kind === "ungroup-clips" &&
+        !foundClips.some((found) => found?.clip && getClipGroupId(found.clip))
+      ) {
+        return {
+          ok: false,
+          error: editorError("not_grouped", "None of the selected clips are grouped"),
         }
       }
       return { ok: true, value: undefined }
@@ -461,6 +482,15 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
     case "delete-range":
     case "ripple-delete-range": {
       if (command.startMs >= command.endMs) {
+        return {
+          ok: false,
+          error: editorError("invalid_range", "Range end must be greater than range start"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "ripple-delete-ranges": {
+      if (command.ranges.some((range) => range.startMs >= range.endMs)) {
         return {
           ok: false,
           error: editorError("invalid_range", "Range end must be greater than range start"),
@@ -757,12 +787,18 @@ export function applyCommand(
       return applyDeleteClip(state, command)
     case "delete-clips":
       return applyDeleteClips(state, command)
+    case "group-clips":
+      return applyGroupClips(state, command)
+    case "ungroup-clips":
+      return applyUngroupClips(state, command)
     case "ripple-delete-clip":
       return applyRippleDeleteClip(state, command)
     case "delete-range":
       return applyDeleteRange(state, command)
     case "ripple-delete-range":
       return applyRippleDeleteRange(state, command)
+    case "ripple-delete-ranges":
+      return applyRippleDeleteRanges(state, command)
     case "ripple-delete-clips":
       return applyRippleDeleteClips(state, command)
     case "update-track":
@@ -1463,6 +1499,9 @@ function applyDuplicateClip(
 
   const newClipId = command.newClipId ?? `${clip.id}:dup:${newStartMs}`
   const newClip = duplicateClipWithStart(clip, newClipId, newStartMs)
+  // A lone copy of a grouped clip must not keep the source group — otherwise
+  // selecting it would still pull the whole original group into the selection.
+  delete newClip.groupId
   const newClips = [...track.clips, newClip]
   const trackResult = sortAndValidateTrack(
     updateTrackInState(state, track.id, { ...track, clips: newClips }),
@@ -1544,12 +1583,25 @@ function applyDuplicateClips(
 
   const effectiveDeltaMs = deltaMs!
   const duplicatedByTrack = new Map<string, TimelineClip[]>()
+  // Grouped sources duplicate as a new unit: every distinct source groupId maps
+  // to a fresh groupId so the copies stay linked without merging into the
+  // original group.
+  const remappedGroupIds = new Map<string, string>()
   for (const { track, clip } of foundClips) {
     const newClip = duplicateClipWithStart(
       clip,
       `${clip.id}:dup:${clip.startMs + effectiveDeltaMs}`,
       clip.startMs + effectiveDeltaMs,
     )
+    const sourceGroupId = getClipGroupId(clip)
+    if (sourceGroupId) {
+      let mappedGroupId = remappedGroupIds.get(sourceGroupId)
+      if (!mappedGroupId) {
+        mappedGroupId = `group:${crypto.randomUUID()}`
+        remappedGroupIds.set(sourceGroupId, mappedGroupId)
+      }
+      newClip.groupId = mappedGroupId
+    }
     const trackClips = duplicatedByTrack.get(track.id) ?? []
     trackClips.push(newClip)
     duplicatedByTrack.set(track.id, trackClips)
@@ -1756,6 +1808,41 @@ function applyDeleteClips(
   return { ok: true, value: { ...state, tracks, updatedAt: now() } }
 }
 
+// Members of a previous group keep that membership only while at least one
+// sibling stays behind; regrouping replaces the id wholesale, which also lets a
+// clip migrate groups without an explicit leave step.
+function applyGroupClips(
+  state: TimelineState,
+  command: GroupClipsCommand,
+): CommandResult<TimelineState> {
+  const clipIds = new Set(command.clipIds)
+  const groupId = command.groupId ?? `group:${crypto.randomUUID()}`
+  const tracks = state.tracks.map((track) => ({
+    ...track,
+    clips: track.clips.map((clip) => (clipIds.has(clip.id) ? { ...clip, groupId } : clip)),
+  }))
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+// Clearing the key entirely (rather than setting undefined) keeps serialized
+// project files free of dead group fields.
+function applyUngroupClips(
+  state: TimelineState,
+  command: UngroupClipsCommand,
+): CommandResult<TimelineState> {
+  const clipIds = new Set(command.clipIds)
+  const tracks = state.tracks.map((track) => ({
+    ...track,
+    clips: track.clips.map((clip) => {
+      if (!clipIds.has(clip.id)) return clip
+      const next = { ...clip }
+      delete (next as { groupId?: string }).groupId
+      return next
+    }),
+  }))
+  return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
 function applyDeleteRange(
   state: TimelineState,
   command: DeleteRangeCommand,
@@ -1792,6 +1879,24 @@ function mergeTimelineRanges(
     }
   }
   return merged
+}
+
+// Smart Cut: delete arbitrary ranges as one undoable command. Overlapping
+// ranges are merged, then applied latest-first so earlier coordinates stay
+// valid while each deletion shifts the tail.
+function applyRippleDeleteRanges(
+  state: TimelineState,
+  command: RippleDeleteRangesCommand,
+): CommandResult<TimelineState> {
+  const mergedRanges = mergeTimelineRanges(command.ranges).sort(
+    (a, b) => b.startMs - a.startMs || b.endMs - a.endMs,
+  )
+  let next = state
+  for (const range of mergedRanges) {
+    if (range.endMs <= range.startMs) continue
+    next = applyDeleteRangeInternal(next, range.startMs, range.endMs, true)
+  }
+  return { ok: true, value: next }
 }
 
 function applyRippleDeleteClips(
@@ -3247,6 +3352,26 @@ export function createDeleteClipsCommand(clipIds: string[]): CommandRecord {
   }
 }
 
+export function createGroupClipsCommand(
+  clipIds: string[],
+  options: { groupId?: string } = {},
+): CommandRecord {
+  return {
+    kind: "group-clips",
+    name: "Group clips",
+    clipIds: [...new Set(clipIds)],
+    groupId: options.groupId,
+  }
+}
+
+export function createUngroupClipsCommand(clipIds: string[]): CommandRecord {
+  return {
+    kind: "ungroup-clips",
+    name: "Ungroup clips",
+    clipIds: [...new Set(clipIds)],
+  }
+}
+
 export function createRippleDeleteClipCommand(clipId: string): CommandRecord {
   return {
     kind: "ripple-delete-clip",
@@ -3270,6 +3395,17 @@ export function createRippleDeleteRangeCommand(startMs: number, endMs: number): 
     name: "Ripple delete range",
     startMs,
     endMs,
+  }
+}
+
+// Smart Cut: one command covering every silence range → a single undo step.
+export function createRippleDeleteRangesCommand(
+  ranges: { startMs: number; endMs: number }[],
+): CommandRecord {
+  return {
+    kind: "ripple-delete-ranges",
+    name: `Remove ${ranges.length} silence${ranges.length === 1 ? "" : "s"}`,
+    ranges,
   }
 }
 

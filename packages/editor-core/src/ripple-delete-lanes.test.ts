@@ -13,6 +13,7 @@ import {
   createRippleDeleteClipCommand,
   createRippleDeleteClipsCommand,
   createRippleDeleteRangeCommand,
+  createRippleDeleteRangesCommand,
   createDeleteRangeCommand,
   executeCommand,
   getManualZoomSegments,
@@ -418,5 +419,63 @@ describe("Ripple Delete Across All Timeline Lanes", () => {
     expect(zooms[0]).toMatchObject({ id: "zoom-1", startMs: 6_000, durationMs: 2_000 })
     // zoom-2 shifted left by 2,000 from 14,000 to 12,000
     expect(zooms[1]).toMatchObject({ id: "zoom-2", startMs: 12_000, durationMs: 3_000 })
+  })
+})
+
+describe("ripple-delete-ranges (Smart Cut batch)", () => {
+  it("removes multiple ranges in one command, latest-first", () => {
+    const engine = createEngine(makeLanesState())
+    // Silences at [2,000, 4,000] and [12,000, 14,000] — 4 s removed total.
+    const result = executeCommand(
+      engine,
+      createRippleDeleteRangesCommand([
+        { startMs: 12_000, endMs: 14_000 },
+        { startMs: 2_000, endMs: 4_000 },
+      ]),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    const state = result.value.history.present
+    // screen-1 [0,5000] cut → [0,2000]+[2000,3000]; screen-2 [5000,10000]
+    // → [3000,8000]; screen-3 [10000,20000] splits at the later cut →
+    // [8000,10000] + [10000,16000].
+    const screenClips = state.tracks[0].clips
+    expect(screenClips.map((c) => [c.startMs, c.durationMs])).toEqual([
+      [0, 2_000],
+      [2_000, 1_000],
+      [3_000, 5_000],
+      [8_000, 2_000],
+      [10_000, 6_000],
+    ])
+    // marker-intro stays; marker-mid 7000→5000; marker-outro 16000→12000
+    expect(state.markers).toEqual([
+      { id: "marker-intro", timeMs: 1_000, label: "Intro", color: "#f59e0b" },
+      { id: "marker-mid", timeMs: 5_000, label: "Action", color: "#f59e0b" },
+      { id: "marker-outro", timeMs: 12_000, label: "Outro", color: "#f59e0b" },
+    ])
+  })
+
+  it("merges overlapping ranges and rejects empty ranges", () => {
+    const engine = createEngine(makeLanesState())
+    const merged = executeCommand(
+      engine,
+      createRippleDeleteRangesCommand([
+        { startMs: 2_000, endMs: 4_000 },
+        { startMs: 3_000, endMs: 5_000 },
+      ]),
+    )
+    expect(merged.ok).toBe(true)
+    if (!merged.ok) return
+    // Merged [2000,5000] — 3 s removed from the 20 s timeline.
+    const screenClips = merged.value.history.present.tracks[0].clips
+    const total = screenClips.reduce((sum, c) => sum + c.durationMs, 0)
+    expect(total).toBe(20_000 - 3_000)
+
+    const bad = executeCommand(
+      createEngine(makeLanesState()),
+      createRippleDeleteRangesCommand([{ startMs: 5_000, endMs: 5_000 }]),
+    )
+    expect(bad.ok).toBe(false)
   })
 })

@@ -158,9 +158,20 @@ RecordForge strictly complies with local-first security boundaries:
 
 ---
 
-## 📜 License
+## � Free & Pro
 
-RecordForge is licensed under the **GNU General Public License v3.0 (GPL-3.0-or-later)**. See the [LICENSE](LICENSE) file for details.
+RecordForge ships two tiers:
+
+- **Free** — the full recorder and editor: capture up to 4K, the complete timeline, captions, cursor effects, GIF/WebP, hardware encoders, exports up to 1080p, and cloud uploads through your own storage. No watermark, no time limit, no account.
+- **Pro Lifetime** — a one-time purchase that unlocks 1440p/4K export presets, non-16:9 canvases, chapters & YouTube timestamps, all title presets beyond Clean Text, and annotations — on up to 3 personal devices, with lifetime updates.
+
+Pro features stay usable in the Free editor; at export you can upgrade or export without them. See the pricing page for the current offer.
+
+## �📜 License
+
+The RecordForge **desktop app** is licensed under the **GNU General Public License v3.0 (GPL-3.0-or-later)** — including the gated-feature engines and the license client. See the [LICENSE](LICENSE) file for details.
+
+The project is **open core**: the license server and hosted services live in a private repository, and Pro keys are governed by [PRO-LICENSE-TERMS.md](PRO-LICENSE-TERMS.md). Read [LICENSING.md](LICENSING.md) for the full model, [TRADEMARKS.md](TRADEMARKS.md) if you plan to fork, and [CLA.md](CLA.md) before contributing.
 
 ```
 Copyright (C) 2024-present Prestige Tech & RecordForge Contributors

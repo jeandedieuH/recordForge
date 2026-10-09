@@ -16,8 +16,9 @@
 //! `interpolateCrop` in `packages/editor-core/src/composition.ts`.
 
 use super::{
-    cursor, RenderCropFloat, RenderPlan, RenderPlanZoomKeyframe, RenderPlanZoomMotionPlan,
-    RenderPlanZoomMotionPoint, RenderPlanZoomMotionSegment, RenderPlanZoomSegment,
+    cursor, ReframeKeyframe, RenderCropFloat, RenderPlan, RenderPlanReframe,
+    RenderPlanZoomKeyframe, RenderPlanZoomMotionPlan, RenderPlanZoomMotionPoint,
+    RenderPlanZoomMotionSegment, RenderPlanZoomSegment,
 };
 
 /// Crop/zoom state at one output timestamp in canvas coordinates.
@@ -1171,6 +1172,148 @@ pub(crate) fn build_zoompan_expressions(
     (z_expr, x_expr, y_expr)
 }
 
+// ---------------------------------------------------------------------------
+// Auto-reframe (Pro): crop the screen stream to the canvas content aspect.
+// `fill` crops centered; `cursor-follow` pans the crop window between
+// normalized keyframes media-core sampled from cursor telemetry.
+// ---------------------------------------------------------------------------
+
+/// Aspect of the canvas content area (canvas minus padding on each side) —
+/// the exact ratio the reframe crop targets so the fitted screen stream
+/// fills it without letterboxing. Mirrors `video_screen_rect`'s content box.
+pub(crate) fn reframe_content_aspect(canvas: &cursor::RenderCanvas) -> f64 {
+    let padding = canvas.padding as f64 * 2.0;
+    (canvas.width as f64 - padding).max(1.0) / (canvas.height as f64 - padding).max(1.0)
+}
+
+/// The effective source dimensions a segment becomes after the reframe crop,
+/// used to fit the screen rect so the cropped stream fills the content area.
+pub(crate) fn reframe_source_dims(source: (u32, u32), content_aspect: f64) -> (u32, u32) {
+    let even = |v: f64| ((v / 2.0).round() * 2.0).max(2.0) as u32;
+    let (w, h) = (source.0 as f64, source.1 as f64);
+    if w / h > content_aspect {
+        (even(h * content_aspect), source.1)
+    } else {
+        (source.0, even(w / content_aspect))
+    }
+}
+
+/// Linear interpolation between two keyframe points, evaluated on `t`.
+fn reframe_ramp(t0: f64, n0: f64, t1: f64, n1: f64) -> String {
+    if (t1 - t0).abs() < 1e-6 {
+        return compact_num(n1);
+    }
+    format!(
+        "{}+({}-({}))*(t-({}))/{}",
+        compact_num(n0),
+        compact_num(n1),
+        compact_num(n0),
+        compact_num(t0),
+        compact_num(t1 - t0),
+    )
+}
+
+/// Nested-if chain interpolating `pts` linearly: for t in [T_i, T_{i+1})
+/// yields the ramp between keyframes i and i+1; after the last point it
+/// yields the last value. pts must be non-empty and time-sorted.
+fn reframe_norm_chain(pts: &[(f64, f64)]) -> String {
+    let mut expr = compact_num(pts[pts.len() - 1].1);
+    for i in (1..pts.len()).rev() {
+        let (t0, n0) = pts[i - 1];
+        let (t1, n1) = pts[i];
+        expr = format!(
+            "if(lt(t,{}),{},{})",
+            compact_num(t1),
+            reframe_ramp(t0, n0, t1, n1),
+            expr
+        );
+    }
+    expr
+}
+
+/// Piecewise-linear interpolation of the normalized crop center across the
+/// segment's local time axis. Times are shifted by the segment's output
+/// start because `t` inside its filter chain counts output seconds from the
+/// segment start (the phase re-anchor keeps chunked passes identical).
+///
+/// A single nested-if chain adds ~1 parser depth per keyframe and FFmpeg's
+/// eval caps at 100, so long series are chunked: a top-level if-chain routes
+/// `t` into a per-chunk chain (~20 keyframes), keeping total depth around
+/// chunks + chunk size — hundreds of keyframes stay far under the limit.
+fn reframe_norm_expression(keyframes: &[ReframeKeyframe], seg_start_s: f64, use_y: bool) -> String {
+    const CHUNK: usize = 20;
+    let pts: Vec<(f64, f64)> = keyframes
+        .iter()
+        .map(|kf| {
+            (
+                kf.time_ms as f64 / 1000.0 - seg_start_s,
+                if use_y { kf.y } else { kf.x },
+            )
+        })
+        .collect();
+    // Chunk boundaries share one point so the pan ramps continuously across
+    // them: chunk k interpolates pts[bounds[k]..=bounds[k+1]].
+    let stride = CHUNK - 1;
+    let mut bounds = vec![0usize];
+    while *bounds.last().unwrap() + stride < pts.len() - 1 {
+        bounds.push(bounds.last().unwrap() + stride);
+    }
+    let chains: Vec<String> = bounds
+        .iter()
+        .enumerate()
+        .map(|(k, &start)| {
+            let end = bounds.get(k + 1).copied().unwrap_or(pts.len() - 1);
+            reframe_norm_chain(&pts[start..=end])
+        })
+        .collect();
+    // Router: t below a chunk's first keyframe time falls to the previous
+    // chain; a leading clamp holds the first value for t before T0.
+    let mut expr = chains[chains.len() - 1].clone();
+    for k in (1..chains.len()).rev() {
+        expr = format!(
+            "if(lt(t,{}),{},{})",
+            compact_num(pts[bounds[k]].0),
+            chains[k - 1],
+            expr
+        );
+    }
+    format!(
+        "if(lt(t,{}),{},{})",
+        compact_num(pts[0].0),
+        compact_num(pts[0].1),
+        expr
+    )
+}
+
+/// `crop` fragment for one screen segment. The window size evaluates against
+/// the segment's runtime `iw`/`ih`, so mixed-aspect sources still land an
+/// exact content-aspect crop; the pan axis is likewise selected per frame so
+/// a tall source pans vertically and a wide one horizontally.
+pub(crate) fn build_reframe_crop(
+    reframe: &RenderPlanReframe,
+    content_aspect: f64,
+    seg_output_start_s: f64,
+) -> String {
+    let ar = compact_num(content_aspect);
+    let (x_pan, y_pan) = if reframe.mode == "cursor-follow" && !reframe.keyframes.is_empty() {
+        (
+            format!(
+                "max(0,min(iw-ow,iw*{}-ow/2))",
+                reframe_norm_expression(&reframe.keyframes, seg_output_start_s, false)
+            ),
+            format!(
+                "max(0,min(ih-oh,ih*{}-oh/2))",
+                reframe_norm_expression(&reframe.keyframes, seg_output_start_s, true)
+            ),
+        )
+    } else {
+        ("(iw-ow)/2".to_string(), "(ih-oh)/2".to_string())
+    };
+    format!(
+        "crop=w='trunc(min(iw,ih*{ar})/2)*2':h='trunc(min(ih,iw/{ar})/2)*2':x='if(gt(iw,ih*{ar}),{x_pan},(iw-ow)/2)':y='if(gt(ih,iw/{ar}),{y_pan},(ih-oh)/2)'"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1460,6 +1603,7 @@ mod tests {
 
     fn test_plan(zoom_segments: Vec<RenderPlanZoomSegment>) -> RenderPlan {
         RenderPlan {
+            reframe: None,
             project_id: "camera-test".into(),
             duration_ms: 5_000,
             segments: vec![super::super::RenderSegment {
@@ -1499,6 +1643,7 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         }
     }
 
@@ -2054,5 +2199,129 @@ mod tests {
                 "y at {t_ms}ms: expr {y_expr_val} vs numeric {expected_y}"
             );
         }
+    }
+
+    fn eval_reframe_norm(expression: &str, t_s: f64) -> f64 {
+        let vars = [("t", t_s)];
+        ExprEval {
+            text: expression.as_bytes(),
+            pos: 0,
+            vars: &vars,
+        }
+        .expr()
+    }
+
+    #[test]
+    fn reframe_norm_lerps_keyframes_and_clamps_ends() {
+        let keyframes = vec![
+            ReframeKeyframe {
+                time_ms: 0,
+                x: 0.2,
+                y: 0.9,
+            },
+            ReframeKeyframe {
+                time_ms: 2_000,
+                x: 0.8,
+                y: 0.1,
+            },
+        ];
+        let expr = reframe_norm_expression(&keyframes, 0.0, false);
+        assert!((eval_reframe_norm(&expr, -1.0) - 0.2).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 0.0) - 0.2).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 1.0) - 0.5).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 2.0) - 0.8).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 9.0) - 0.8).abs() < 1e-6);
+
+        let y_expr = reframe_norm_expression(&keyframes, 0.0, true);
+        assert!((eval_reframe_norm(&y_expr, 1.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reframe_norm_shifts_keyframes_by_segment_output_start() {
+        // A segment starting at 10s sees keyframe times as local offsets, so
+        // t=0 inside its chain must evaluate the 10s keyframe.
+        let keyframes = vec![
+            ReframeKeyframe {
+                time_ms: 10_000,
+                x: 0.25,
+                y: 0.5,
+            },
+            ReframeKeyframe {
+                time_ms: 12_000,
+                x: 0.75,
+                y: 0.5,
+            },
+        ];
+        let expr = reframe_norm_expression(&keyframes, 10.0, false);
+        assert!((eval_reframe_norm(&expr, 0.0) - 0.25).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 1.0) - 0.5).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 2.0) - 0.75).abs() < 1e-6);
+        assert!((eval_reframe_norm(&expr, 8.0) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reframe_expression_stays_under_ffmpeg_parser_depth() {
+        // libavutil/eval.c caps the parse at MAX_DEPTH = 100; the chunked
+        // router must keep long keyframe series far under it.
+        let keyframes: Vec<ReframeKeyframe> = (0..400)
+            .map(|i| ReframeKeyframe {
+                time_ms: i as u64 * 1_000,
+                x: (i as f64 * 0.7) % 1.0,
+                y: 0.5,
+            })
+            .collect();
+        let expr = reframe_norm_expression(&keyframes, 0.0, false);
+        assert!(
+            ffmpeg_expr_depth(&expr) < 90,
+            "depth {} exceeded safety margin",
+            ffmpeg_expr_depth(&expr)
+        );
+        // Continuity spot-checks across chunk boundaries (stride 19): at
+        // t=19.5 the pan lerps between kf[19] (x=0.3) and kf[20] (x=0.0).
+        let at = |t: f64| eval_reframe_norm(&expr, t);
+        assert!((at(0.0) - 0.0).abs() < 1e-6);
+        assert!((at(19.5) - 0.15).abs() < 1e-6);
+        // Past the last keyframe the pan holds its final position.
+        assert!((at(500.0) - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reframe_crop_fill_centers_and_follow_pans() {
+        let fill = build_reframe_crop(
+            &RenderPlanReframe {
+                mode: "fill".into(),
+                keyframes: vec![],
+            },
+            0.5625,
+            0.0,
+        );
+        assert!(fill.contains("crop=w='trunc(min(iw,ih*0.562)/2)*2'"));
+        assert!(fill.contains("(iw-ow)/2"));
+
+        let follow = build_reframe_crop(
+            &RenderPlanReframe {
+                mode: "cursor-follow".into(),
+                keyframes: vec![ReframeKeyframe {
+                    time_ms: 0,
+                    x: 0.3,
+                    y: 0.6,
+                }],
+            },
+            0.5625,
+            0.0,
+        );
+        assert!(follow.contains("max(0,min(iw-ow"));
+        assert!(follow.contains("max(0,min(ih-oh"));
+    }
+
+    #[test]
+    fn reframe_source_dims_crops_to_content_aspect() {
+        // 16:9 source into a 9:16 content area crops the width.
+        assert_eq!(reframe_source_dims((2560, 1440), 0.5625), (810, 1440));
+        // Portrait source into 16:9 content crops the height.
+        assert_eq!(reframe_source_dims((1080, 1920), 16.0 / 9.0), (1080, 608));
+        // Matching aspect is a no-op.
+        let dims = reframe_source_dims((1920, 1080), 16.0 / 9.0);
+        assert!(dims.0 <= 1920 && dims.1 <= 1080);
     }
 }

@@ -10,6 +10,7 @@ import {
   FileImage,
   GripVertical,
   Headphones,
+  ListChecks,
   Lock,
   LockOpen,
   Monitor,
@@ -54,6 +55,7 @@ interface TimelineTrackHeaderProps {
   onToggleTrackCollapsed: (track: TimelineTrack) => void
   onCycleTrackHeight: (track: TimelineTrack) => void
   onRenameTrack?: (track: TimelineTrack, name: string) => void
+  onSelectTrackClips?: (track: TimelineTrack) => void
 }
 
 function getTrackIcon(track: TimelineTrack): LucideIcon {
@@ -182,6 +184,7 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
   onToggleTrackCollapsed,
   onCycleTrackHeight,
   onRenameTrack,
+  onSelectTrackClips,
 }: TimelineTrackHeaderProps) {
   const TrackIcon = getTrackIcon(track)
   const accent = getTrackAccentColor(track)
@@ -453,6 +456,14 @@ export const TimelineTrackHeader = memo(function TimelineTrackHeader({
         <ContextMenuItem onSelect={() => onCycleTrackHeight(track)}>
           Cycle track height
         </ContextMenuItem>
+        {onSelectTrackClips && track.clips.length > 0 ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={() => onSelectTrackClips(track)}>
+              <ListChecks className="size-3.5 mr-2" /> Select all clips
+            </ContextMenuItem>
+          </>
+        ) : null}
       </ContextMenuContent>
     </ContextMenu>
   )

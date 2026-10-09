@@ -20,6 +20,8 @@ import {
 } from "@recordforge/ui"
 import type { AnnotationArrowStyle } from "@recordforge/contracts"
 import { Check, FolderOpen, MousePointer2, Pencil, Plus, Shapes } from "lucide-react"
+import { useLicenseStore } from "../../../stores/license-store"
+import { ProBadge } from "../../licensing/pro-badge"
 import { PresetBrowser, type BrowserPreset } from "./preset-browser"
 import { PresetThumbnail } from "../presets/preset-thumbnail"
 import { AnnotationShapePicker } from "../annotations/annotation-shape-picker"
@@ -45,6 +47,8 @@ export function AnnotationsPanel({
   onToggleDrawMode,
 }: AnnotationsPanelProps) {
   const [browserOpen, setBrowserOpen] = useState(false)
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const selectedId = useTimelineStore((state) =>
     state.view.selection?.kind === "clip" ? state.view.selection.primaryClipId : null,
@@ -87,6 +91,10 @@ export function AnnotationsPanel({
   }
 
   function handleAddAnnotation() {
+    if (!isPro) {
+      openUpgradeDialog(["annotations"])
+      return
+    }
     const store = useTimelineStore.getState()
     const current = store.engine?.history.present
     if (!current) return
@@ -122,7 +130,10 @@ export function AnnotationsPanel({
           <Shapes className="size-4" aria-hidden />
         </div>
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">Annotations</h3>
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            Annotations
+            {!isPro ? <ProBadge /> : null}
+          </h3>
           <p className="text-xs text-muted-foreground">Make the important part clear.</p>
         </div>
       </div>
@@ -252,7 +263,13 @@ export function AnnotationsPanel({
         <Button
           variant={drawMode ? "secondary" : "outline"}
           aria-pressed={drawMode}
-          onClick={() => onToggleDrawMode(!drawMode)}
+          onClick={() => {
+            if (!drawMode && !isPro) {
+              openUpgradeDialog(["annotations"])
+              return
+            }
+            onToggleDrawMode(!drawMode)
+          }}
           disabled={!timeline}
           className="w-full"
         >

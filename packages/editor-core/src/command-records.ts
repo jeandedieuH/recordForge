@@ -188,6 +188,25 @@ export const deleteClipsCommandSchema = commandMetaSchema.extend({
 
 export type DeleteClipsCommand = z.infer<typeof deleteClipsCommandSchema>
 
+// Clip groups: members share a groupId so selection-driven edits treat them as
+// one unit. `groupId` is optional so fixtures can pin deterministic ids.
+export const groupClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("group-clips"),
+  clipIds: z.array(z.string()).min(2),
+  groupId: z.string().optional(),
+})
+
+export type GroupClipsCommand = z.infer<typeof groupClipsCommandSchema>
+
+// Removes exactly the listed clips from their groups; clips not listed keep
+// their membership, so partial-selection ungroup is supported.
+export const ungroupClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("ungroup-clips"),
+  clipIds: z.array(z.string()).min(1),
+})
+
+export type UngroupClipsCommand = z.infer<typeof ungroupClipsCommandSchema>
+
 export const rippleDeleteClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("ripple-delete-clip"),
   clipId: z.string(),
@@ -210,6 +229,16 @@ export const rippleDeleteRangeCommandSchema = commandMetaSchema.extend({
 })
 
 export type RippleDeleteRangeCommand = z.infer<typeof rippleDeleteRangeCommandSchema>
+
+// Smart Cut applies many silence removals as one command → one undo step.
+export const rippleDeleteRangesCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("ripple-delete-ranges"),
+  ranges: z
+    .array(z.object({ startMs: z.number().int().min(0), endMs: z.number().int().min(0) }))
+    .min(1),
+})
+
+export type RippleDeleteRangesCommand = z.infer<typeof rippleDeleteRangesCommandSchema>
 
 export const rippleDeleteClipsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("ripple-delete-clips"),
@@ -582,9 +611,12 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   deleteClipCommandSchema,
   moveClipsCommandSchema,
   deleteClipsCommandSchema,
+  groupClipsCommandSchema,
+  ungroupClipsCommandSchema,
   rippleDeleteClipCommandSchema,
   deleteRangeCommandSchema,
   rippleDeleteRangeCommandSchema,
+  rippleDeleteRangesCommandSchema,
   rippleDeleteClipsCommandSchema,
   updateTrackCommandSchema,
   updateClipAudioCommandSchema,

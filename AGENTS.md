@@ -25,7 +25,8 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 | UI kit                   | `@recordforge/ui` (shadcn model: Radix + Tailwind v4 + CVA, spec-010)                                             |
 | Icons                    | lucide-react (no emoji in product UI)                                                                             |
 | Font                     | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
-| License                  | GNU General Public License v3.0 (GPL-3.0-or-later)                                                                |
+| License                  | GNU General Public License v3.0 (GPL-3.0-or-later), open core — see `LICENSING.md`                                |
+| Licensing                | Ed25519 offline tokens, `machine-uid` device binding, OS-vault license key (`src-tauri/src/licensing/`)            |
 
 ## Repository Layout
 
@@ -54,8 +55,7 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 
 ## V1 Non-Goals
 
-- RecordForge-hosted share links
-- Public web video pages
+- Public web video pages (Instant Share viewer lives in the private `recordforge-cloud` repo, Phase 2)
 - User accounts and workspaces
 - Cloud collaboration
 - Full professional editor features
@@ -163,6 +163,12 @@ Release builds embed the Google Drive OAuth client secret via `RECORD_FORGE_GOOG
 - Do not log screen content, audio transcripts, or user media.
 - The updater uses Tauri signature verification and public GitHub Release metadata; never commit or expose `TAURI_SIGNING_PRIVATE_KEY`.
 - Only the official release workflow may build updater artifacts; local and fork builds should not inherit the official updater signing trust.
+- License keys live only in the OS credential vault (`storage/vault.rs`, account `pro-license-key`); the signed token file in the app data dir is not a secret but must never carry raw device identifiers — the token binds `sha256(machine-uid + salt)` only.
+- Do not log license keys, tokens, or device IDs. The license server is contacted only for activate/deactivate/refresh (ADR 016).
+
+## Licensing (Open Core)
+
+The desktop app is GPL-3.0-or-later; hosted services and the license server live in the private `recordforge-cloud` repo (ADR 015). Free-tier export entitlements are enforced **in Rust** at every export entry point (`JobManager` start/retry/resume) — never trust UI state for gating (ADR 016). Free output is capped to 1920×1080 via `ExportOutputCap` passed into `run_render_plan`. Debug builds accept `dev:`-prefixed tokens signed by `RECORD_FORGE_DEV_LICENSE_PUBLIC_KEY`; generate them with `bun run --cwd tooling/scripts license-keys token`. Every build (including production) accepts `admin:`-prefixed tokens signed by the owner's offline admin keypair — public half embedded as `ADMIN_KEYS` in `licensing/token.rs`, private half in the gitignored `license-admin-key.json`; mint with `license-keys token --prefix admin`. Admin licenses are fully local and never contact the license server.
 
 ## Rules for Adding Dependencies
 

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { exceedsGifDurationLimit, resolveExportRange } from "./export-view"
+import type { TimelineCanvas } from "@recordforge/contracts"
+import {
+  exceedsGifDurationLimit,
+  isPresetSupported,
+  PRO_PRESETS,
+  resolveExportRange,
+} from "./export-view"
 
 describe("resolveExportRange", () => {
   it("returns a rounded range when start and end are valid", () => {
@@ -55,5 +61,52 @@ describe("exceedsGifDurationLimit", () => {
 
   it("never blocks mp4", () => {
     expect(exceedsGifDurationLimit("mp4", "balanced", 600_000, undefined)).toBe(false)
+  })
+})
+
+describe("PRO_PRESETS", () => {
+  it("maps the 4K and social presets to their license feature keys", () => {
+    expect(PRO_PRESETS["ultra-4k"]).toBe("high-res-export")
+    expect(PRO_PRESETS["ultra-4k-60"]).toBe("high-res-export")
+    expect(PRO_PRESETS.vertical).toBe("custom-aspect-ratio")
+    expect(PRO_PRESETS.square).toBe("custom-aspect-ratio")
+  })
+
+  it("leaves the 1080p presets ungated", () => {
+    expect(PRO_PRESETS.balanced).toBeUndefined()
+    expect(PRO_PRESETS["default-mp4"]).toBeUndefined()
+    expect(PRO_PRESETS["selected-range"]).toBeUndefined()
+  })
+})
+
+describe("isPresetSupported", () => {
+  const canvas1080 = {
+    width: 1920,
+    height: 1080,
+  } as TimelineCanvas
+  const canvas4k = { ...canvas1080, width: 3840, height: 2160 } as TimelineCanvas
+
+  it("enables Ultra 4K presets only on a 2160p-tier canvas", () => {
+    expect(isPresetSupported("ultra-4k", canvas4k, undefined)).toBe(true)
+    expect(isPresetSupported("ultra-4k-60", canvas4k, undefined)).toBe(true)
+    expect(isPresetSupported("ultra-4k", canvas1080, undefined)).toBe(false)
+    expect(isPresetSupported("ultra-4k", undefined, undefined)).toBe(false)
+  })
+
+  it("treats 1440p canvases as below the Ultra tier", () => {
+    const canvas1440 = { ...canvas1080, width: 2560, height: 1440 } as TimelineCanvas
+    expect(isPresetSupported("ultra-4k", canvas1440, undefined)).toBe(false)
+  })
+
+  it("keeps ratio presets bound to canvas orientation", () => {
+    const vertical = { ...canvas1080, width: 1080, height: 1920 } as TimelineCanvas
+    expect(isPresetSupported("vertical", vertical, undefined)).toBe(true)
+    expect(isPresetSupported("vertical", canvas1080, undefined)).toBe(false)
+    expect(
+      isPresetSupported("square", { ...canvas1080, height: 1080 } as TimelineCanvas, undefined),
+    ).toBe(false)
+    expect(
+      isPresetSupported("square", { ...vertical, height: 1080 } as TimelineCanvas, undefined),
+    ).toBe(true)
   })
 })

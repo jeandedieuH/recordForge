@@ -27,6 +27,7 @@ import {
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { CaptionCueList } from "../captions/caption-cue-list"
 import { CaptionImportPanel } from "../captions/caption-import-panel"
+import { AiCaptionsCard } from "../captions/ai-captions-card"
 import { CaptionStylePicker } from "../captions/caption-style-picker"
 import { CAPTION_PLACEMENT_OPTIONS } from "../captions/caption-styles"
 
@@ -198,6 +199,8 @@ export function CaptionsPanel() {
         </Button>
 
         <CaptionImportPanel style={style} placement={placement} />
+
+        <AiCaptionsCard style={style} placement={placement} />
       </footer>
 
       <AlertDialog open={confirmRemoveAll} onOpenChange={setConfirmRemoveAll}>

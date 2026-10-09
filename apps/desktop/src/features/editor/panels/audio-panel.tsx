@@ -3,6 +3,7 @@ import { createUpdateClipAudioCommand, createUpdateTrackCommand } from "@recordf
 import { Volume2 } from "lucide-react"
 import { NumberInputField, Skeleton, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { SmartCutCard } from "./smart-cut-card"
 
 export function AudioPanel() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
@@ -72,6 +73,10 @@ export function AudioPanel() {
         ) : (
           <p className="text-[11px] text-subtle-foreground">No timeline loaded.</p>
         )}
+      </div>
+
+      <div className="border-t border-border pt-3">
+        <SmartCutCard />
       </div>
     </div>
   )

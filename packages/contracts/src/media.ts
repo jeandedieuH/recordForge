@@ -266,3 +266,11 @@ export const preparedMediaSchema = z.object({
 })
 
 export type PreparedMedia = z.infer<typeof preparedMediaSchema>
+
+// A silence range detected by `detect_silences` (Smart Cut — Pro). Both
+// bounds are timeline-relative milliseconds on the source media.
+export const silenceRangeSchema = z.object({
+  startMs: z.number().int().min(0),
+  endMs: z.number().int().min(0),
+})
+export type SilenceRange = z.infer<typeof silenceRangeSchema>

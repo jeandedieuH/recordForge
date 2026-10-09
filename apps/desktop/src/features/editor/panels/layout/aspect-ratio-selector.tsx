@@ -1,6 +1,7 @@
 import type { CanvasAspectRatio } from "@recordforge/contracts"
 import { Monitor, Smartphone, Square, Tv } from "lucide-react"
 import { cn } from "@recordforge/ui"
+import { ProBadge } from "../../../licensing/pro-badge"
 
 interface AspectRatioOption {
   value: CanvasAspectRatio
@@ -63,15 +64,27 @@ export const ASPECT_RATIO_OPTIONS: AspectRatioOption[] = [
 interface AspectRatioSelectorProps {
   value: CanvasAspectRatio | undefined
   onChange: (option: AspectRatioOption) => void
+  /**
+   * Free tier marks non-16:9 ratios as Pro. When provided, gated options show
+   * a PRO badge and clicking them calls `onProSelect` instead of `onChange`.
+   */
+  proValues?: CanvasAspectRatio[]
+  onProSelect?: (value: CanvasAspectRatio) => void
 }
 
-export function AspectRatioSelector({ value = "16:9", onChange }: AspectRatioSelectorProps) {
+export function AspectRatioSelector({
+  value = "16:9",
+  onChange,
+  proValues = [],
+  onProSelect,
+}: AspectRatioSelectorProps) {
   const current = value ?? "16:9"
 
   return (
     <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="Canvas aspect ratio">
       {ASPECT_RATIO_OPTIONS.map((opt) => {
         const isSelected = current === opt.value
+        const isProGated = proValues.includes(opt.value)
         const Icon = opt.icon
 
         return (
@@ -80,7 +93,7 @@ export function AspectRatioSelector({ value = "16:9", onChange }: AspectRatioSel
             type="button"
             role="radio"
             aria-checked={isSelected}
-            onClick={() => onChange(opt)}
+            onClick={() => (isProGated ? onProSelect?.(opt.value) : onChange(opt))}
             className={cn(
               "group relative flex flex-col items-center justify-between rounded-lg border p-2 text-left transition-all",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60",
@@ -111,7 +124,10 @@ export function AspectRatioSelector({ value = "16:9", onChange }: AspectRatioSel
 
             <div className="mt-1.5 w-full">
               <p className="truncate text-[10px] font-medium text-foreground">{opt.sublabel}</p>
-              <p className="font-mono text-[9px] text-muted-foreground">{opt.resolution}</p>
+              <div className="flex items-center justify-between gap-1">
+                <p className="font-mono text-[9px] text-muted-foreground">{opt.resolution}</p>
+                {isProGated ? <ProBadge /> : null}
+              </div>
             </div>
           </button>
         )

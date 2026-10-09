@@ -1,16 +1,23 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type {
+  AudioMastering,
+  BrandCards,
+  WebcamBackground,
+  BrandWatermark,
+  CanvasAspectRatio,
   ExportEncoderPreference,
   ExportPreset,
   ExportRange,
   MediaJob,
   ProjectExportSettings,
+  ReframeMode,
   RenderCaptionMode,
   RenderChapterMode,
   TimelineCanvas,
   TimelineMarker,
 } from "@recordforge/contracts"
-import { formatYouTubeChapters } from "@recordforge/editor-core"
+import { canvasResolutionTier, formatYouTubeChapters } from "@recordforge/editor-core"
+import type { ProFeatureKey } from "@recordforge/contracts"
 import {
   ArrowLeft,
   Bookmark,
@@ -19,23 +26,37 @@ import {
   ChevronUp,
   Copy,
   Film,
+  Keyboard,
+  LayoutGrid,
   Pause,
   Play,
+  Share2,
   Zap,
 } from "lucide-react"
 import {
   Badge,
   Button,
+  Input,
   NumberInputField,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Switch,
+  useToast,
 } from "@recordforge/ui"
 import { ExportProgressCard } from "./components/export-progress-card"
 import { formatDuration } from "../../lib/format"
+import { toErrorMessage } from "../../lib/errors"
+import { shareExport, shareToProfile } from "../../lib/share"
 import { UploadDialog } from "../storage/components/upload-dialog"
+import { useLicenseStore } from "../../stores/license-store"
+import { useStorageStore } from "../storage/storage-store"
+import { ProBadge } from "../licensing/pro-badge"
+import { BrandWatermarkCard } from "./brand-watermark-card"
+import { VirtualBackgroundCard } from "./virtual-background-card"
+import { YouTubePublishCard } from "./youtube-publish-card"
 
 interface ExportViewProps {
   projectName?: string
@@ -46,6 +67,15 @@ interface ExportViewProps {
   onCaptionModeChange?: (mode: RenderCaptionMode) => void
   chapterMode?: RenderChapterMode
   onChapterModeChange?: (mode: RenderChapterMode) => void
+  onAudioMasteringChange?: (mastering: AudioMastering) => void
+  onBrandWatermarkChange?: (watermark: BrandWatermark) => void
+  onBrandCardsChange?: (cards: BrandCards) => void
+  onWebcamBackgroundChange?: (background: WebcamBackground) => void
+  onKeystrokeOverlayChange?: (enabled: boolean) => void
+  onReframeModeChange?: (mode: ReframeMode) => void
+  // Batch-export format selection; empty = current canvas only.
+  formats?: CanvasAspectRatio[]
+  onFormatsChange?: (formats: CanvasAspectRatio[]) => void
   markers?: TimelineMarker[]
   onContainerChange?: (container: "mp4" | "gif" | "webp") => void
   onPresetChange?: (preset: ExportPreset) => void
@@ -63,6 +93,14 @@ interface ExportViewProps {
   onBack: () => void
   onStartExport?: () => void | Promise<void>
 }
+
+const EXPORT_FORMAT_OPTIONS: Array<{ value: CanvasAspectRatio; label: string }> = [
+  { value: "16:9", label: "Landscape 16:9" },
+  { value: "9:16", label: "Vertical 9:16" },
+  { value: "1:1", label: "Square 1:1" },
+  { value: "4:5", label: "Portrait 4:5" },
+  { value: "5:4", label: "Wide 5:4" },
+]
 
 const MP4_PRESETS: Array<{
   id: ExportPreset
@@ -196,6 +234,14 @@ const WEBP_PRESETS: Array<{
   },
 ]
 
+/** Presets requiring a Pro license, mapped to the feature key that owns them. */
+export const PRO_PRESETS: Partial<Record<ExportPreset, ProFeatureKey>> = {
+  "ultra-4k": "high-res-export",
+  "ultra-4k-60": "high-res-export",
+  vertical: "custom-aspect-ratio",
+  square: "custom-aspect-ratio",
+}
+
 export const GIF_MAX_DURATION_MS = 60_000
 
 // The GIF encoder builds one global palette, so FFmpeg buffers every frame
@@ -217,13 +263,18 @@ export function exceedsGifDurationLimit(
   return durationMs > GIF_MAX_DURATION_MS
 }
 
-function isPresetSupported(
+export function isPresetSupported(
   preset: ExportPreset,
   canvas: TimelineCanvas | undefined,
   range: ExportRange | null | undefined,
 ): boolean {
   if (preset === "vertical") return Boolean(canvas && canvas.height > canvas.width)
   if (preset === "square") return Boolean(canvas && canvas.width === canvas.height)
+  // Ultra 4K is an encode profile only — output size comes from the canvas,
+  // so the preset is honest only when the canvas is at the 2160p tier.
+  if (preset === "ultra-4k" || preset === "ultra-4k-60") {
+    return Boolean(canvas && canvasResolutionTier(canvas) === "2160p")
+  }
   if (preset === "selected-range") return Boolean(range && range.endMs > range.startMs)
   return true
 }
@@ -265,6 +316,14 @@ export function ExportView({
   onCaptionModeChange,
   chapterMode = "embed",
   onChapterModeChange,
+  onAudioMasteringChange,
+  onBrandWatermarkChange,
+  onBrandCardsChange,
+  onWebcamBackgroundChange,
+  onKeystrokeOverlayChange,
+  onReframeModeChange,
+  formats = [],
+  onFormatsChange,
   markers = [],
   onContainerChange,
   onPresetChange,
@@ -281,6 +340,7 @@ export function ExportView({
   onBack,
   onStartExport,
 }: ExportViewProps) {
+  const currentAspect: CanvasAspectRatio = canvas?.aspectRatio ?? "16:9"
   const container =
     exportSettings?.container ??
     (exportSettings?.preset?.startsWith("gif-")
@@ -292,6 +352,26 @@ export function ExportView({
   const isWebp = container === "webp"
   const isAnimation = isGif || isWebp
   const presets = isWebp ? WEBP_PRESETS : isGif ? GIF_PRESETS : MP4_PRESETS
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
+  const { toast } = useToast()
+  // Instant Share — MP4-only Pro feature (docs/specs/instant-share.md).
+  // `shareTarget` is "hosted" or the id of an S3 storage profile (BYO bucket).
+  const [shareEnabled, setShareEnabled] = useState(false)
+  const [shareTarget, setShareTarget] = useState("hosted")
+  const [shareState, setShareState] = useState<"idle" | "uploading" | "done" | "failed">("idle")
+  // Pro Cloud extras — password + custom expiry for the hosted viewer.
+  const [sharePassword, setSharePassword] = useState("")
+  const [shareExpiryDays, setShareExpiryDays] = useState("30")
+  const sharedRef = useRef<string | null>(null)
+  const s3Profiles = useStorageStore((state) => state.profiles).filter((p) => p.kind === "s3")
+  const fetchProfiles = useStorageStore((state) => state.fetchProfiles)
+
+  // The BYO destination list is empty until profiles are loaded — fetch on
+  // mount rather than requiring a Storage-page visit first.
+  useEffect(() => {
+    void fetchProfiles()
+  }, [fetchProfiles])
 
   const [selectedPreset, setSelectedPreset] = useState<ExportPreset>(
     normalizePreset(exportSettings?.preset, container),
@@ -359,7 +439,80 @@ export function ExportView({
   const canStart = isPresetSupported(selectedPreset, canvas, selectedRange) && !gifDurationBlocked
   const exportPercent = Math.min(100, Math.max(0, Math.round((exportJob?.progress ?? 0) * 100)))
 
+  // Instant Share: when the export lands with the toggle on, upload the MP4
+  // and copy the viewer link. Runs once per output path; a failed share never
+  // touches the local export.
+  const outputPath = exportJob?.outputs?.outputPath
+  useEffect(() => {
+    if (!shareEnabled || !isPro || isAnimation) return
+    if (exportJob?.status !== "completed" || !outputPath) return
+    if (sharedRef.current === outputPath) return
+    sharedRef.current = outputPath
+    setShareState("uploading")
+    const wantsCaptions = captionMode === "sidecar"
+    const shareArgs = {
+      path: outputPath,
+      title: projectName || "RecordForge export",
+      durationMs,
+      width: canvas?.width ?? 1920,
+      height: canvas?.height ?? 1080,
+      fps: canvas?.fps ?? 30,
+      chapters: markers.map((marker) => ({ t: marker.timeMs, label: marker.label })),
+      allowDownload: true,
+      allowEmbed: true,
+      captionsPath: wantsCaptions ? outputPath.replace(/\.mp4$/i, ".srt") : undefined,
+      // Hosted-only extras — BYO-bucket targets ignore these (their player
+      // page can't enforce passwords or expiry server-side).
+      password: shareTarget === "hosted" && sharePassword ? sharePassword : undefined,
+      expiresInDays:
+        shareTarget === "hosted" ? Number.parseInt(shareExpiryDays, 10) || 30 : undefined,
+    }
+    // "hosted" goes through recordforge-cloud; anything else is an S3 profile
+    // id for the bring-your-own-bucket player page.
+    const upload =
+      shareTarget === "hosted" ? shareExport(shareArgs) : shareToProfile(shareTarget, shareArgs)
+    upload
+      .then(async (result) => {
+        setShareState("done")
+        await navigator.clipboard.writeText(result.url).catch(() => undefined)
+        toast({
+          title: "Share link copied",
+          description: result.url,
+        })
+      })
+      .catch((error) => {
+        setShareState("failed")
+        toast({
+          title: "Export done — share failed",
+          description: toErrorMessage(error),
+          variant: "warning",
+        })
+      })
+  }, [
+    shareEnabled,
+    isPro,
+    isAnimation,
+    exportJob?.status,
+    outputPath,
+    captionMode,
+    projectName,
+    durationMs,
+    canvas,
+    markers,
+    toast,
+    shareTarget,
+    sharePassword,
+    shareExpiryDays,
+  ])
+
   function selectPreset(preset: ExportPreset) {
+    // Pro presets stay clickable on Free — selecting one opens the upgrade
+    // dialog instead of applying, so the gate is discoverable.
+    const proGate = PRO_PRESETS[preset]
+    if (!isPro && proGate) {
+      openUpgradeDialog([proGate])
+      return
+    }
     // "Selected range" stays clickable even while the draft range is invalid —
     // disabling the card would deadlock it, since the inputs hide once another
     // preset is selected. Selecting it normalizes the draft instead.
@@ -529,8 +682,10 @@ export function ExportView({
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {presets.map((preset) => {
+                const proGated = !isPro && preset.id in PRO_PRESETS
                 const supported =
                   preset.id === "selected-range" ||
+                  proGated ||
                   (isPresetSupported(preset.id, canvas, selectedRange) &&
                     !(isGif && durationMs > GIF_MAX_DURATION_MS))
                 const selected = selectedPreset === preset.id
@@ -549,9 +704,11 @@ export function ExportView({
                   >
                     <div className="flex items-start justify-between gap-2">
                       <span className="font-semibold text-foreground">{preset.label}</span>
-                      {preset.id === "balanced" ||
-                      preset.id === "gif-balanced" ||
-                      preset.id === "webp-balanced" ? (
+                      {proGated ? <ProBadge /> : null}
+                      {!proGated &&
+                      (preset.id === "balanced" ||
+                        preset.id === "gif-balanced" ||
+                        preset.id === "webp-balanced") ? (
                         <Badge variant="accent">Recommended</Badge>
                       ) : null}
                     </div>
@@ -751,6 +908,7 @@ export function ExportView({
               <span className="flex items-center gap-2 font-label">
                 <Bookmark className="size-4 text-primary" aria-hidden />
                 Chapters and Markers
+                {!isPro && markers.length > 0 ? <ProBadge /> : null}
               </span>
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="text-[10px] font-normal">
@@ -767,10 +925,20 @@ export function ExportView({
               <div className="flex flex-col gap-5 border-t border-border p-5">
                 {!isAnimation ? (
                   <label className="flex flex-col gap-1.5 text-xs text-subtle-foreground">
-                    Chapter delivery
+                    <span className="flex items-center gap-2">
+                      Chapter delivery
+                      {!isPro ? <ProBadge /> : null}
+                    </span>
                     <Select
                       value={chapterMode}
-                      onValueChange={(value) => onChapterModeChange?.(value as RenderChapterMode)}
+                      onValueChange={(value) => {
+                        // Chapter output is Pro; "none" stays available on Free.
+                        if (!isPro && value !== "none") {
+                          openUpgradeDialog(["chapters"])
+                          return
+                        }
+                        onChapterModeChange?.(value as RenderChapterMode)
+                      }}
                       disabled={isRunning}
                     >
                       <SelectTrigger
@@ -806,7 +974,13 @@ export function ExportView({
                         variant="outline"
                         size="sm"
                         className="h-7 gap-1.5 text-xs"
-                        onClick={() => void handleCopyYouTubeChapters()}
+                        onClick={() => {
+                          if (!isPro) {
+                            openUpgradeDialog(["chapters"])
+                            return
+                          }
+                          void handleCopyYouTubeChapters()
+                        }}
                       >
                         {copiedTimestamps ? (
                           <>
@@ -817,6 +991,7 @@ export function ExportView({
                           <>
                             <Copy className="size-3.5" />
                             <span>Copy timestamps</span>
+                            {!isPro ? <ProBadge /> : null}
                           </>
                         )}
                       </Button>
@@ -863,13 +1038,321 @@ export function ExportView({
               )}
             </button>
             {audioAccordionOpen ? (
-              <div className="border-t border-border p-5 text-xs text-subtle-foreground">
-                {isAnimation
-                  ? `Animated ${isWebp ? "WebP" : "GIF"} files do not support audio tracks. The exported file will be video-only.`
-                  : "Audio tracks use the saved mute, solo, gain, fade, role, and speed settings."}
+              <div className="flex flex-col gap-4 border-t border-border p-5 text-xs text-subtle-foreground">
+                <p>
+                  {isAnimation
+                    ? `Animated ${isWebp ? "WebP" : "GIF"} files do not support audio tracks. The exported file will be video-only.`
+                    : "Audio tracks use the saved mute, solo, gain, fade, role, and speed settings."}
+                </p>
+                {!isAnimation ? (
+                  <>
+                    {/* Studio Audio — Pro mastering applied to the final mix.
+                        Free users can toggle the controls to see the gate. */}
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="flex items-center gap-2 text-foreground">
+                        Noise reduction
+                        {!isPro ? <ProBadge /> : null}
+                      </span>
+                      <Switch
+                        checked={exportSettings?.audioMastering?.denoise ?? false}
+                        disabled={isRunning}
+                        onCheckedChange={(next) => {
+                          if (!isPro) {
+                            openUpgradeDialog(["studio-audio"])
+                            return
+                          }
+                          onAudioMasteringChange?.({
+                            denoise: next,
+                            loudnessTarget: exportSettings?.audioMastering?.loudnessTarget ?? null,
+                          })
+                        }}
+                        aria-label="Noise reduction"
+                      />
+                    </div>
+                    <label className="flex flex-col gap-1.5">
+                      <span className="flex items-center gap-2 text-foreground">
+                        Loudness target
+                        {!isPro ? <ProBadge /> : null}
+                      </span>
+                      <Select
+                        value={
+                          exportSettings?.audioMastering?.loudnessTarget != null
+                            ? String(exportSettings.audioMastering.loudnessTarget)
+                            : "off"
+                        }
+                        onValueChange={(value) => {
+                          if (!isPro) {
+                            openUpgradeDialog(["studio-audio"])
+                            return
+                          }
+                          onAudioMasteringChange?.({
+                            denoise: exportSettings?.audioMastering?.denoise ?? false,
+                            loudnessTarget: value === "off" ? null : Number(value),
+                          })
+                        }}
+                        disabled={isRunning}
+                      >
+                        <SelectTrigger className="h-8 w-full" aria-label="Loudness target">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="off">Off — keep original loudness</SelectItem>
+                          <SelectItem value="-14">−14 LUFS — YouTube</SelectItem>
+                          <SelectItem value="-16">−16 LUFS — Podcast</SelectItem>
+                          <SelectItem value="-19">−19 LUFS — Streaming</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+                    <p className="text-[11px]">
+                      Studio Audio applies noise reduction and broadcast loudness normalization to
+                      the final mixed track at export.
+                    </p>
+                  </>
+                ) : null}
               </div>
             ) : null}
           </div>
+
+          {exportSettings ? (
+            <BrandWatermarkCard
+              watermark={exportSettings.brandWatermark}
+              cards={exportSettings.brandCards}
+              onCardsChange={(cards) => onBrandCardsChange?.(cards)}
+              disabled={isRunning}
+              onChange={(watermark) => onBrandWatermarkChange?.(watermark)}
+            />
+          ) : null}
+
+          {exportSettings ? (
+            <VirtualBackgroundCard
+              background={exportSettings.webcamBackground}
+              disabled={isRunning}
+              onChange={(background) => onWebcamBackgroundChange?.(background)}
+            />
+          ) : null}
+
+          {/* Keystroke overlay (Pro): only renders when the recording captured
+              modifier combos — the badge toggle is harmless otherwise. */}
+          {exportSettings ? (
+            <div className="overflow-hidden rounded-xl border border-border bg-surface">
+              <div className="flex w-full items-center justify-between p-4">
+                <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground font-label">
+                  <Keyboard className="size-4 text-primary" aria-hidden />
+                  Keystroke badges
+                  {!isPro ? <ProBadge /> : null}
+                </span>
+                <Switch
+                  checked={exportSettings.keystrokeOverlay.enabled}
+                  disabled={isRunning}
+                  aria-label="Keystroke badges"
+                  onCheckedChange={(enabled) => {
+                    if (enabled && !isPro) {
+                      openUpgradeDialog(["keystroke-overlay"])
+                      return
+                    }
+                    onKeystrokeOverlayChange?.(enabled)
+                  }}
+                />
+              </div>
+              {exportSettings.keystrokeOverlay.enabled ? (
+                <p className="border-t border-border px-5 py-3 text-xs text-subtle-foreground">
+                  Modifier combos recorded during capture (Ctrl+C, Alt+Tab…) appear as bottom-center
+                  badges. Plain typing is never recorded or shown.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Multi-format batch export (Pro): extra canvas aspects render as
+              separate files in one pass; the reframe mode decides how the
+              screen fills non-matching aspects. */}
+          {!isAnimation && exportSettings ? (
+            <div className="overflow-hidden rounded-xl border border-border bg-surface">
+              <div className="flex w-full items-center justify-between p-4">
+                <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground font-label">
+                  <LayoutGrid className="size-4 text-primary" aria-hidden />
+                  Output formats
+                  {!isPro ? <ProBadge /> : null}
+                </span>
+              </div>
+              <div className="flex flex-col gap-3 border-t border-border p-5 text-xs text-subtle-foreground">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                  {EXPORT_FORMAT_OPTIONS.map((option) => {
+                    const isCurrent = currentAspect === option.value
+                    const checked =
+                      formats.length === 0 ? isCurrent : formats.includes(option.value)
+                    return (
+                      <label key={option.value} className="flex items-center justify-between gap-2">
+                        <span className="text-foreground">
+                          {option.label}
+                          {isCurrent ? " (canvas)" : ""}
+                        </span>
+                        <Switch
+                          checked={checked}
+                          disabled={isRunning || (isCurrent && formats.length <= 1)}
+                          aria-label={`Export ${option.label}`}
+                          onCheckedChange={(next) => {
+                            if (option.value !== "16:9" && !isPro && next) {
+                              openUpgradeDialog(["custom-aspect-ratio"])
+                              return
+                            }
+                            const base = formats.length === 0 ? [currentAspect] : formats
+                            onFormatsChange?.(
+                              next
+                                ? [...base.filter((f) => f !== option.value), option.value]
+                                : base.filter((f) => f !== option.value),
+                            )
+                          }}
+                        />
+                      </label>
+                    )
+                  })}
+                </div>
+                <label className="flex flex-col gap-1.5">
+                  <span>Reframe for non-matching formats</span>
+                  <Select
+                    value={exportSettings.reframeMode}
+                    onValueChange={(mode) => {
+                      if (mode !== "fit" && !isPro) {
+                        openUpgradeDialog(["auto-reframe"])
+                        return
+                      }
+                      onReframeModeChange?.(mode as ReframeMode)
+                    }}
+                    disabled={isRunning}
+                  >
+                    <SelectTrigger className="h-8 w-full" aria-label="Reframe mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="fit">Fit — letterbox inside canvas</SelectItem>
+                      <SelectItem value="fill">Fill — centered crop</SelectItem>
+                      <SelectItem value="cursor-follow">
+                        Cursor follow — crop pans with the cursor
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </label>
+                <p className="text-[11px]">
+                  Each selected format exports as its own file (e.g. name-vertical.mp4). Cursor
+                  follow uses the recorded cursor telemetry to pan a centered crop across the
+                  screen.
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          {!isAnimation ? (
+            <div className="overflow-hidden rounded-xl border border-border bg-surface">
+              <div className="flex w-full items-center justify-between p-4">
+                <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground font-label">
+                  <Share2 className="size-4 text-track-voiceover" aria-hidden />
+                  Instant Share
+                  {!isPro ? <ProBadge /> : null}
+                </span>
+                <Switch
+                  checked={shareEnabled}
+                  disabled={isRunning}
+                  onCheckedChange={(next) => {
+                    // Free users get the upgrade dialog instead of the toggle —
+                    // same discoverability pattern as the Pro presets above.
+                    if (!isPro) {
+                      openUpgradeDialog(["instant-share"])
+                      return
+                    }
+                    setShareEnabled(next)
+                  }}
+                  aria-label="Upload this export as a share link"
+                />
+              </div>
+              <div className="flex flex-col gap-3 border-t border-border p-5 text-xs text-subtle-foreground">
+                <label className="flex flex-col gap-1.5">
+                  <span>Share destination</span>
+                  <Select
+                    value={shareTarget}
+                    onValueChange={setShareTarget}
+                    disabled={isRunning || !isPro}
+                  >
+                    <SelectTrigger className="h-8 w-full" aria-label="Share destination">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="hosted">RecordForge cloud (10 active links)</SelectItem>
+                      {s3Profiles.map((profile) => (
+                        <SelectItem key={profile.id} value={profile.id}>
+                          My bucket — {profile.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </label>
+                {shareTarget === "hosted" ? (
+                  <div className="flex gap-3">
+                    <label className="flex flex-1 flex-col gap-1.5">
+                      <span>Password (optional)</span>
+                      <Input
+                        type="password"
+                        value={sharePassword}
+                        onChange={(event) => setSharePassword(event.target.value)}
+                        placeholder="Public link"
+                        maxLength={128}
+                        disabled={isRunning || !isPro}
+                        className="h-8"
+                      />
+                    </label>
+                    <label className="flex w-32 flex-col gap-1.5">
+                      <span>Expires</span>
+                      <Select
+                        value={shareExpiryDays}
+                        onValueChange={setShareExpiryDays}
+                        disabled={isRunning || !isPro}
+                      >
+                        <SelectTrigger className="h-8 w-full" aria-label="Link expiry">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="1">1 day</SelectItem>
+                          <SelectItem value="7">7 days</SelectItem>
+                          <SelectItem value="30">30 days</SelectItem>
+                          <SelectItem value="90">90 days</SelectItem>
+                          <SelectItem value="365">1 year</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+                  </div>
+                ) : null}
+                <p>
+                  {shareTarget === "hosted"
+                    ? `Uploads the finished MP4 to a hosted viewer and copies the link — chapters${
+                        captionMode === "sidecar" ? " and captions" : ""
+                      } included. Viewers can leave timestamped comments; password links stay unlisted.`
+                    : "Uploads the MP4 plus a player page to your bucket — unlimited links, your storage, your rules."}
+                </p>
+                {shareState === "uploading" ? (
+                  <span className="font-medium text-foreground">
+                    Sharing — the link copies to your clipboard when the upload lands…
+                  </span>
+                ) : null}
+                {shareState === "failed" ? (
+                  <span className="font-medium text-warning">
+                    The export finished but sharing failed — toggle off and back on to retry after
+                    the next export.
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Direct YouTube publishing (Pro) — appears once an MP4 export has
+              completed; uploads the finished file with title/desc/chapters. */}
+          {!isAnimation ? (
+            <YouTubePublishCard
+              exportJob={exportJob}
+              projectName={projectName ?? "RecordForge export"}
+              markers={markers}
+              disabled={isRunning}
+            />
+          ) : null}
         </div>
       </div>
 

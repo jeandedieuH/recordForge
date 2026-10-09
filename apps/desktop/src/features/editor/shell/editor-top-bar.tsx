@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react"
 import { ArrowLeft, FileOutput, ListTodo, Redo2, Save, Undo2, X } from "lucide-react"
-import { getRedoLabel, getUndoLabel } from "@recordforge/editor-core"
+import { analyzeProFeatureUsage, getRedoLabel, getUndoLabel } from "@recordforge/editor-core"
 import { Badge, Button, IconButton, Separator, SimpleSelect } from "@recordforge/ui"
 import { useEditorStore, type SaveStatus } from "../../../stores/editor-store"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { useLicenseStore } from "../../../stores/license-store"
+import { ProUsageChip } from "../../licensing/pro-usage-chip"
 import { HealthPopover } from "./health-popover"
 import { JobsDrawer } from "./jobs-drawer"
 
@@ -33,6 +35,17 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
 
   const undoLabel = useMemo(() => (engine ? getUndoLabel(engine) : null), [engine])
   const redoLabel = useMemo(() => (engine ? getRedoLabel(engine) : null), [engine])
+
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
+  const exportSettings = useTimelineStore((state) => state.project?.exportSettings)
+  // Analyze against the saved export settings so Free-compatible states (e.g.
+  // markers with chapter output disabled) don't over-report Pro usage.
+  const proAnalysis = useMemo(
+    () =>
+      timeline && !isPro ? analyzeProFeatureUsage(timeline, exportSettings ?? undefined) : null,
+    [timeline, isPro, exportSettings],
+  )
 
   const isExporting = activeExportJob?.status === "running" || activeExportJob?.status === "pending"
 
@@ -70,6 +83,12 @@ export function EditorTopBar({ onClose, onOpenExport }: EditorTopBarProps) {
               {saveStatusText(saveStatus)}
             </Badge>
             {isDirty ? <span className="sr-only">There are unsaved changes</span> : null}
+            <ProUsageChip
+              analysis={proAnalysis}
+              onClick={() =>
+                openUpgradeDialog(proAnalysis?.features.map((feature) => feature.feature))
+              }
+            />
           </div>
         </div>
 

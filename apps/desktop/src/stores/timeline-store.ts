@@ -3,10 +3,12 @@ import {
   cursorSettingsSchema,
   defaultSmartZoomSettings,
   recordingPreferencesSchema,
+  type CanvasAspectRatio,
   type ExportEncoderPreference,
   type ExportPreset,
   type ExportRange,
   type LibraryRecording,
+  type ReframeMode,
   type MediaJob,
   type CursorTelemetryFile,
   type MediaMetadata,
@@ -29,12 +31,17 @@ import {
   type ExecuteOptions,
   type TimelineCommand,
   type TimelineSelection,
+  type AudioMastering,
+  type BrandCards,
+  type WebcamBackground,
+  type BrandWatermark,
   type RenderCaptionMode,
   type RenderChapterMode,
   type TimelineState,
   undoCommand,
 } from "@recordforge/editor-core"
-import { buildRenderPlan } from "@recordforge/media-core"
+import { buildRenderPlan, freeExportSettings } from "@recordforge/media-core"
+import { canvasDimensionsForAspect } from "@recordforge/domain"
 import {
   getProjectAssetPaths,
   relinkAsset as relinkAssetRequest,
@@ -61,6 +68,7 @@ import {
   requestPreviewProxy,
 } from "../lib/media"
 import { exportTimeline, retryExport as retryExportRequest, revealExport } from "../lib/timeline"
+import { useLicenseStore } from "./license-store"
 import { notifyExportFinished } from "../lib/export-notifications"
 import { useEditorStore } from "./editor-store"
 
@@ -132,6 +140,16 @@ interface TimelineStore {
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
   setChapterMode: (mode: RenderChapterMode) => void
+  setAudioMastering: (mastering: AudioMastering) => void
+  setBrandWatermark: (watermark: BrandWatermark) => void
+  setBrandCards: (cards: BrandCards) => void
+  setWebcamBackground: (background: WebcamBackground) => void
+  setKeystrokeOverlay: (enabled: boolean) => void
+  setReframeMode: (mode: ReframeMode) => void
+  // Multi-format batch export (Pro): canvas aspects selected in the export
+  // view; empty means "current canvas only".
+  exportFormats: CanvasAspectRatio[]
+  setExportFormats: (formats: CanvasAspectRatio[]) => void
   setExportContainer: (container: "mp4" | "gif" | "webp") => void
   setExportPreset: (preset: ExportPreset) => void
   setExportCodec: (codec: "h264" | "hevc" | "gif" | "webp") => void
@@ -166,13 +184,34 @@ interface TimelineStore {
   // Phase 1: reset the session without saving (used by unmount cleanup).
   resetSession: () => void
 
-  export: (outputPath: string) => Promise<void>
+  export: (
+    outputPath: string,
+    options?: { stripProFeatures?: boolean; formats?: CanvasAspectRatio[] },
+  ) => Promise<void>
   clearError: () => void
   // Phase 2: surface a validation or commit error without mutating project state.
   setError: (message: string) => void
 }
 
 const AUTOSAVE_DELAY_MS = 2000
+
+// Output-path tags for batch-export alternates (`name-vertical.mp4`).
+const EXPORT_FORMAT_TAGS: Record<CanvasAspectRatio, string> = {
+  "16:9": "landscape",
+  "9:16": "vertical",
+  "1:1": "square",
+  "4:5": "portrait-4x5",
+  "5:4": "wide-5x4",
+}
+
+function suffixExportPath(outputPath: string, format: CanvasAspectRatio): string {
+  const tag = EXPORT_FORMAT_TAGS[format]
+  const dot = outputPath.lastIndexOf(".")
+  return dot < 0
+    ? `${outputPath}-${tag}`
+    : `${outputPath.slice(0, dot)}-${tag}${outputPath.slice(dot)}`
+}
+
 const SNAPSHOT_COMMANDS = new Set([
   "delete-clip",
   "delete-clips",
@@ -181,6 +220,7 @@ const SNAPSHOT_COMMANDS = new Set([
   "ripple-delete-clip",
   "ripple-delete-clips",
   "ripple-delete-range",
+  "ripple-delete-ranges",
   "delete-track",
   "delete-cursor-range",
   "delete-zoom-segment",
@@ -433,13 +473,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         missingAssets = loaded.missingAssets
       } else {
         const cameraSyncOffsetMs = storedPreferences?.cameraSyncOffsetMs ?? 0
+        const canvasPolicy = useLicenseStore.getState().status.tier === "pro" ? "source" : "free"
         project = createProjectFromRecording(
           recording,
           meta,
           recording.name,
           undefined,
           undefined,
-          { cameraSyncOffsetMs },
+          { cameraSyncOffsetMs, canvasPolicy },
         )
         if (defaultCursorRaw) {
           try {
@@ -1025,6 +1066,84 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
+  setAudioMastering: (mastering) => {
+    const project = get().project
+    if (!project) return
+    const current = project.exportSettings.audioMastering
+    if (
+      current?.denoise === mastering.denoise &&
+      current?.loudnessTarget === mastering.loudnessTarget
+    ) {
+      return
+    }
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, audioMastering: mastering },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setBrandWatermark: (watermark) => {
+    const project = get().project
+    if (!project) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, brandWatermark: watermark },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setBrandCards: (cards) => {
+    const project = get().project
+    if (!project) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, brandCards: cards },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setWebcamBackground: (background) => {
+    const project = get().project
+    if (!project) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, webcamBackground: background },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setKeystrokeOverlay: (enabled) => {
+    const project = get().project
+    if (!project) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, keystrokeOverlay: { enabled } },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setReframeMode: (mode) => {
+    const project = get().project
+    if (!project || project.exportSettings.reframeMode === mode) return
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, reframeMode: mode },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  exportFormats: [],
+  setExportFormats: (formats) => {
+    set({ exportFormats: [...new Set(formats)] })
+  },
+
   setExportContainer: (container) => {
     const project = get().project
     if (!project || project.exportSettings.container === container) return
@@ -1188,7 +1307,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     set({ draftTimeline: null, draftError: null })
   },
 
-  export: async (outputPath) => {
+  export: async (outputPath, options) => {
     const { engine, recording, project } = get()
     if (!engine || !recording || !project) return
 
@@ -1247,31 +1366,66 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       chapterMode: sanitizedChapterMode,
     }
 
-    const plan = buildRenderPlan({
-      state: engine.history.present,
-      projectId: currentProject.id,
-      settings: effectiveExportSettings,
-      captionMode: effectiveExportSettings.captionMode,
-      chapterMode: effectiveExportSettings.chapterMode,
-      assets: currentProject.assets,
-      cursorTelemetry: get().cursorTelemetry,
-      cursorEngine: get().cursorEngine,
-    })
-    if (!plan.ok) {
-      set({ error: plan.error.message })
-      return
-    }
-    try {
-      const job = await exportTimeline({
+    // Free tier: "Export without Pro features" strips premium content and
+    // neutralizes Pro-only settings so the plan passes Rust's entitlement
+    // check. The 1080p output cap is applied separately in Rust.
+    const strip =
+      options?.stripProFeatures === true && useLicenseStore.getState().status.tier !== "pro"
+    const finalSettings = strip
+      ? freeExportSettings(effectiveExportSettings)
+      : effectiveExportSettings
+
+    // Multi-format batch export (Pro): each requested canvas aspect becomes
+    // an independent durable job. The primary format keeps the user's chosen
+    // output path; alternates get a format tag (`name-vertical.mp4`).
+    const canvas = engine.history.present.canvas
+    const currentAspect: CanvasAspectRatio = canvas.aspectRatio ?? "16:9"
+    const requested = options?.formats?.length ? [...new Set(options.formats)] : [currentAspect]
+    // The current aspect exports first so an entitlement failure on an
+    // alternate never orphans the primary job.
+    const formats = requested.includes(currentAspect)
+      ? [currentAspect, ...requested.filter((format) => format !== currentAspect)]
+      : requested
+
+    let firstJob: Awaited<ReturnType<typeof exportTimeline>> | null = null
+    for (const [index, format] of formats.entries()) {
+      const variantState = {
+        ...engine.history.present,
+        canvas: {
+          ...canvas,
+          ...canvasDimensionsForAspect(canvas, format),
+          aspectRatio: format,
+        },
+      }
+      const plan = buildRenderPlan({
+        state: variantState,
         projectId: currentProject.id,
-        outputPath,
-        plan: plan.value,
-        settings: effectiveExportSettings,
+        settings: finalSettings,
+        captionMode: finalSettings.captionMode,
+        chapterMode: finalSettings.chapterMode,
+        assets: currentProject.assets,
+        cursorTelemetry: get().cursorTelemetry,
+        cursorEngine: get().cursorEngine,
+        stripProFeatures: strip,
       })
-      set({ activeExportJob: job })
-    } catch (err) {
-      set({ error: toErrorMessage(err) })
+      if (!plan.ok) {
+        set({ error: plan.error.message })
+        return
+      }
+      try {
+        const job = await exportTimeline({
+          projectId: currentProject.id,
+          outputPath: index === 0 ? outputPath : suffixExportPath(outputPath, format),
+          plan: plan.value,
+          settings: finalSettings,
+        })
+        firstJob ??= job
+      } catch (err) {
+        set({ error: toErrorMessage(err) })
+        return
+      }
     }
+    set({ activeExportJob: firstJob })
   },
 
   // Phase 1: bump the project revision, keep the editor store in sync, and

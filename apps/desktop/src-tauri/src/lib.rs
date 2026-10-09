@@ -5,21 +5,24 @@ pub mod errors;
 pub mod events;
 pub mod exports;
 pub mod jobs;
+pub mod licensing;
 pub mod media;
 pub mod path_policy;
 pub mod process;
 pub mod projects;
+pub mod publish;
 pub mod shortcuts;
 pub mod state;
 pub mod storage;
 pub mod tray;
 pub mod validation;
+pub mod whisper;
 pub mod window;
 pub mod window_effects;
 
 use std::time::Duration;
 use tauri::Manager;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use errors::Result;
 
@@ -73,6 +76,18 @@ pub fn run() {
                 );
                 if removed > 0 {
                     info!(removed, "removed stale export temp files");
+                }
+            });
+            // Background license refresh: runs at most every 30 days while
+            // online (see licensing::LicenseManager::refresh_due). A network
+            // failure never removes Pro — only an explicit "revoked" answer.
+            let license = app.state::<state::AppState>().license.clone();
+            tauri::async_runtime::spawn(async move {
+                if !license.refresh_due() {
+                    return;
+                }
+                if let Err(error) = license.refresh().await {
+                    warn!(error = %error, "background license refresh failed");
                 }
             });
             Ok(())
@@ -147,6 +162,13 @@ pub fn run() {
             commands::recording::cancel_region_picker,
             commands::recording::show_main_window,
             commands::captions::read_caption_source,
+            commands::captions::get_ai_captions_status,
+            commands::captions::download_ai_captions_engine,
+            commands::captions::delete_ai_captions_model,
+            commands::captions::transcribe_captions,
+            commands::background::get_virtual_background_status,
+            commands::background::download_virtual_background_model,
+            commands::background::delete_virtual_background_model,
             commands::media::prepare_media,
             commands::media::cancel_media_job,
             commands::media::get_media_job,
@@ -154,6 +176,15 @@ pub fn run() {
             commands::media::get_media_metadata,
             commands::media::delete_derivatives,
             commands::media::estimate_prepare_disk_space,
+            commands::media::detect_silences,
+            commands::publish::start_youtube_oauth,
+            commands::publish::youtube_connection_status,
+            commands::publish::disconnect_youtube,
+            commands::publish::publish_to_youtube,
+            commands::publish::cancel_youtube_publish,
+            commands::recording::open_teleprompter,
+            commands::recording::close_teleprompter,
+            commands::recording::teleprompter_is_open,
             commands::projects::load_project_for_recording,
             commands::projects::list_projects,
             commands::projects::save_project,
@@ -194,6 +225,16 @@ pub fn run() {
             commands::updates::get_update_readiness,
             commands::updates::begin_update_install,
             commands::updates::cancel_update_install,
+            commands::license::get_license_status,
+            commands::license::activate_license,
+            commands::license::deactivate_license,
+            commands::license::refresh_license,
+            commands::share::share_export,
+            commands::share::share_to_profile,
+            commands::share::list_shares,
+            commands::share::share_analytics,
+            commands::share::renew_share,
+            commands::share::revoke_share,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -126,12 +126,52 @@ export function aspectRatioValue(aspectRatio: CanvasAspectRatio | undefined): nu
   return null
 }
 
-/** Fit a requested framing preset while preserving the supplied output area. */
+/**
+ * Output resolution tiers, keyed by the canvas short edge so orientation is
+ * irrelevant: a 2560×1440 widescreen is "1440p", a 1440×2560 vertical is the
+ * same tier. (The previous max-edge rule mistook a 2560×1440 canvas for 4K.)
+ */
+export const CANVAS_RESOLUTION_TIERS = ["1080p", "1440p", "2160p"] as const
+export type CanvasResolutionTier = (typeof CANVAS_RESOLUTION_TIERS)[number]
+
+export const CANVAS_TIER_SHORT_EDGE: Record<CanvasResolutionTier, number> = {
+  "1080p": 1080,
+  "1440p": 1440,
+  "2160p": 2160,
+}
+
+export function canvasResolutionTier(current?: CanvasSize): CanvasResolutionTier {
+  if (!current) return "1080p"
+  const shortEdge = Math.min(current.width, current.height)
+  if (shortEdge >= CANVAS_TIER_SHORT_EDGE["2160p"]) return "2160p"
+  if (shortEdge >= CANVAS_TIER_SHORT_EDGE["1440p"]) return "1440p"
+  return "1080p"
+}
+
+const SIXTEEN_NINE = 16 / 9
+const ASPECT_TOLERANCE = 0.005
+
+/**
+ * Free-tier canvases must measure 16:9 on their actual pixel dimensions,
+ * allowing ±0.5% for rounding on odd source sizes (mirrors the Rust
+ * entitlement check in `licensing/entitlements.rs`).
+ */
+export function canvasIsSixteenNine(canvas: CanvasSize): boolean {
+  if (canvas.height <= 0) return false
+  return Math.abs(canvas.width / canvas.height / SIXTEEN_NINE - 1) <= ASPECT_TOLERANCE
+}
+
+/**
+ * Fit a requested framing preset. The base dimension is the canvas's
+ * resolution-tier short edge, so relayouts keep the current tier (2160p
+ * canvases stay 2160-base, 1440p stays 1440-base, everything else 1080).
+ */
 export function canvasSizeForAspectRatio(
   aspectRatio: CanvasAspectRatio,
   current?: CanvasSize,
+  tier?: CanvasResolutionTier,
 ): CanvasSize {
-  const baseDimension = current && Math.max(current.width, current.height) >= 2160 ? 2160 : 1080
+  const baseDimension = CANVAS_TIER_SHORT_EDGE[tier ?? canvasResolutionTier(current)]
 
   switch (aspectRatio) {
     case "16:9":

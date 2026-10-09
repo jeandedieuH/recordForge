@@ -128,7 +128,7 @@ pub(super) fn subtitles_filter(
 /// on the quoted value, so a `:` separator needs a single backslash (`\:`) and
 /// an embedded quote needs `\'`. A doubled backslash there de-escapes to a
 /// bare `\` before a real separator and the value splits mid-path.
-fn escape_filter_path(path: &Path) -> String {
+pub(crate) fn escape_filter_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
         .replace('\'', "\\'")

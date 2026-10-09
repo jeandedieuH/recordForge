@@ -50,6 +50,10 @@ struct ActiveSession {
     webcam_segments_started: usize,
     webcam_capture_failed: bool,
     cursor_tracker: Option<super::cursor_v2::CursorTrackerV2>,
+    /// Session-long keystroke sampler (Pro keystroke overlay). Unlike the
+    /// cursor tracker it is NOT restarted per segment — it timestamps against
+    /// the first segment's origin for the whole session.
+    keystroke_sampler: Option<super::keystrokes::KeystrokeSampler>,
     /// First timestamp owned by the active cursor segment. Keeping this boundary
     /// prevents startup alignment for a resumed segment from shifting history.
     cursor_segment_start_ms: u64,
@@ -75,6 +79,9 @@ struct SegmentCaptures {
     webcam_preview_server: Option<super::preview_server::WebcamPreviewServer>,
     webcam_failed: bool,
     cursor_tracker: super::cursor_v2::CursorTrackerV2,
+    /// The segment's timeline anchor — the keystroke sampler stamps events
+    /// against the first segment's origin so badges land on video time.
+    timeline_origin_instant: std::time::Instant,
 }
 
 /// Build the manifest cursor descriptor in encoded-frame coordinates. The
@@ -426,6 +433,7 @@ impl Recorder {
             webcam_segments_started: 0,
             webcam_capture_failed: false,
             cursor_tracker: None,
+            keystroke_sampler: None,
             cursor_segment_start_ms: 0,
             segment_index: 0,
             total_recorded_ms: 0,
@@ -500,6 +508,14 @@ impl Recorder {
         session.webcam_preview_server = captures.webcam_preview_server;
         session.webcam_capture_failed |= captures.webcam_failed;
         session.cursor_tracker = Some(captures.cursor_tracker);
+        // Keystroke sampler starts on the first segment only — a resume keeps
+        // the running sampler (timestamps stay on the session clock).
+        if session.keystroke_sampler.is_none() && session.config.capture_keystrokes {
+            session.keystroke_sampler = Some(super::keystrokes::KeystrokeSampler::start(
+                session.work_dir.clone(),
+                captures.timeline_origin_instant,
+            ));
+        }
         let bounds = session.config.source.bounds;
         session.started_at = Some(chrono::Utc::now());
         {
@@ -857,6 +873,7 @@ impl Recorder {
             webcam_preview_server,
             webcam_failed,
             cursor_tracker,
+            timeline_origin_instant: timeline_origin.instant,
         })
     }
 
@@ -1206,6 +1223,9 @@ impl Recorder {
                 if let Some(mut tracker) = session.cursor_tracker.take() {
                     tracker.stop();
                 }
+                if let Some(sampler) = session.keystroke_sampler.take() {
+                    sampler.stop();
+                }
                 if let Ok(mut manifest) = session.manifest.lock() {
                     manifest.set_state(RecorderState::Failed);
                     if let Err(write_error) = manifest.write() {
@@ -1377,6 +1397,9 @@ impl Recorder {
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
         }
+        if let Some(sampler) = session.keystroke_sampler.take() {
+            sampler.stop();
+        }
 
         match std::fs::remove_dir_all(&work_dir) {
             Ok(()) => {
@@ -1521,6 +1544,11 @@ impl Recorder {
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
             self.align_cursor_segment(&session.work_dir, session.cursor_segment_start_ms, timeline);
+        }
+        // Session-level sampler: stop here (not on pause) so events span all
+        // segments. Writes keystrokes.json into the work dir.
+        if let Some(sampler) = session.keystroke_sampler.take() {
+            sampler.stop();
         }
 
         session.total_recorded_ms += final_stats.duration_ms;
@@ -2270,6 +2298,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: true,
             smart_zoom_preset: "cinematic".into(),
+            capture_keystrokes: false,
         };
 
         let session_id = recorder.prepare(config.clone()).expect("prepare session");
@@ -2354,6 +2383,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         };
 
         let session_id = recorder.prepare(config).expect("prepare countdown session");
@@ -2412,6 +2442,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         }
     }
 
@@ -2451,6 +2482,7 @@ mod tests {
             webcam_segments_started: 0,
             webcam_capture_failed: false,
             cursor_tracker: None,
+            keystroke_sampler: None,
             cursor_segment_start_ms: 0,
             segment_index: 0,
             total_recorded_ms: 0,
@@ -2619,6 +2651,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         };
 
         let session_id = recorder.prepare(config).expect("prepare session");
@@ -2676,6 +2709,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         };
 
         let session_id = recorder.prepare(config).expect("prepare session");
@@ -2759,6 +2793,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         };
 
         let session_id = recorder.prepare(config).expect("prepare session");

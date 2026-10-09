@@ -20,6 +20,7 @@ import {
   createUpdateClipTransformCommand,
   createUpdateMaskClipCommand,
   createUpdateZoomSegmentCommand,
+  expandClipIdsThroughGroups,
   findClip,
   getManualZoomSegments,
   type BuildCommandResult,
@@ -162,18 +163,25 @@ function buildMoveCommand(
     }
   }
 
-  if (
-    selection?.kind === "clip" &&
-    selection.clipIds.length > 1 &&
-    selection.clipIds.includes(clip.id)
-  ) {
+  // The dragged clip may not be selected yet (drags begin before click
+  // selection commits), so fall back to the clip alone; group expansion then
+  // pulls in every movable member either way. Members on locked tracks or
+  // locked ranges stay behind rather than failing the whole gesture.
+  const selectedIds =
+    selection?.kind === "clip" && selection.clipIds.includes(clip.id)
+      ? selection.clipIds
+      : [clip.id]
+  const moveIds = expandClipIdsThroughGroups(base, selectedIds).filter((id) => {
+    const foundMember = findClip(base, id)
+    if (!foundMember) return false
+    const memberLocked = "locked" in foundMember.clip && Boolean(foundMember.clip.locked)
+    return !(foundMember.track.locked || memberLocked)
+  })
+  if (moveIds.length > 1) {
     return {
       ok: true,
       value: {
-        command: createMoveClipsCommand(
-          selection.clipIds,
-          Math.round(draft.newStartMs - clip.startMs),
-        ),
+        command: createMoveClipsCommand(moveIds, Math.round(draft.newStartMs - clip.startMs)),
         hint: null,
       },
     }

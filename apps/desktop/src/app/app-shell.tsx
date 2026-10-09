@@ -18,6 +18,8 @@ import {
 } from "@recordforge/ui"
 import { EditorSession, EditorView } from "../features/editor"
 import { ExportView } from "../features/export"
+import { ExportGateDialog, UpgradeDialog } from "../features/licensing"
+import { collectCameraSources } from "../features/editor/camera/camera-sources"
 import { LibraryView } from "../features/library"
 import { ProjectsView } from "../features/projects"
 import { StorageView } from "../features/storage"
@@ -31,11 +33,18 @@ import { getSetting, isTauri, setSetting } from "../lib/settings"
 import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
 import { useTimelineStore } from "../stores/timeline-store"
+import { useLicenseStore } from "../stores/license-store"
 import { useRecorderStore } from "../hooks/use-recorder"
 import { useUpdaterStore } from "../stores/updater-store"
 import { ViewErrorBoundary } from "../components/error-boundary"
 import { Sidebar, type View } from "./sidebar"
 import { Titlebar } from "./titlebar"
+import {
+  analyzeProFeatureUsage,
+  canvasIsSixteenNine,
+  createUpdateCanvasCommand,
+  type ProUsageAnalysis,
+} from "@recordforge/editor-core"
 
 const VIEW_TITLES: Record<View, string> = {
   library: "Library",
@@ -56,6 +65,20 @@ export function AppShell() {
   // Opened by the Rust `request-discard-confirmation` event (tray menu): the
   // destructive action itself runs only after the user confirms here.
   const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false)
+  // Free-tier export gate: set when "Choose destination" finds Pro features in
+  // the timeline. Drives the ExportGateDialog; the strip path re-enters the
+  // normal save-dialog flow with `stripProFeatures`.
+  const [exportGate, setExportGate] = useState<{
+    open: boolean
+    analysis: ProUsageAnalysis | null
+  }>({ open: false, analysis: null })
+  // The strip path can't fix non-16:9 canvas geometry — only converting the
+  // canvas can — so the gate needs the real canvas state, not just the
+  // feature list (a vertical *preset* on a 16:9 canvas strips fine).
+  const exportCanvasNonStandard = useTimelineStore((state) => {
+    const canvas = state.engine?.history.present.canvas
+    return canvas ? !canvasIsSixteenNine(canvas) : false
+  })
 
   const editorRecordingId = useEditorStore((state) => state.recordingId)
   const openEditor = useEditorStore((state) => state.open)
@@ -82,6 +105,14 @@ export function AppShell() {
   )
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
   const setChapterMode = useTimelineStore((state) => state.setChapterMode)
+  const setAudioMastering = useTimelineStore((state) => state.setAudioMastering)
+  const setBrandWatermark = useTimelineStore((state) => state.setBrandWatermark)
+  const setBrandCards = useTimelineStore((state) => state.setBrandCards)
+  const setWebcamBackground = useTimelineStore((state) => state.setWebcamBackground)
+  const setKeystrokeOverlay = useTimelineStore((state) => state.setKeystrokeOverlay)
+  const setReframeMode = useTimelineStore((state) => state.setReframeMode)
+  const exportFormats = useTimelineStore((state) => state.exportFormats)
+  const setExportFormats = useTimelineStore((state) => state.setExportFormats)
   const timelineMarkers = useTimelineStore((state) => state.engine?.history.present.markers)
   const setExportContainer = useTimelineStore((state) => state.setExportContainer)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
@@ -96,6 +127,8 @@ export function AppShell() {
   const timelineError = useTimelineStore((state) => state.error)
   const clearTimelineError = useTimelineStore((state) => state.clearError)
   const activeExportJob = useTimelineStore((state) => state.activeExportJob)
+  const upgradeDialogOpen = useLicenseStore((state) => state.upgradeDialogOpen)
+  const upgradeContext = useLicenseStore((state) => state.upgradeContext)
   const detectedEncoders = useRecorderStore((state) => state.encoders)
   const loadEncoders = useRecorderStore((state) => state.loadEncoders)
   const loadRecovery = useRecorderStore((state) => state.loadRecovery)
@@ -129,6 +162,14 @@ export function AppShell() {
     if (!isTauri()) return
     void loadEncoders()
   }, [loadEncoders])
+
+  // Load the local license state once and keep it synced via the Rust
+  // license-changed event. Free is the safe fallback if the read fails.
+  useEffect(() => {
+    void useLicenseStore.getState().load()
+    void useLicenseStore.getState().startListening()
+    return () => useLicenseStore.getState().stopListening()
+  }, [])
 
   // Scan for interrupted sessions once at startup so a force-quit recording is
   // surfaced immediately, not only when the user happens to open the Library.
@@ -344,7 +385,34 @@ export function AppShell() {
     setActiveView(view)
   }
 
-  async function handleStartExport() {
+  /**
+   * Mirror the animation chapter-mode sanitization in timeline-store.export so
+   * the gate analysis sees the same effective settings Rust will.
+   */
+  function analyzeCurrentExport(): ProUsageAnalysis | null {
+    const timeline = useTimelineStore.getState().engine?.history.present
+    if (!timeline || !exportSettings) return null
+    const isAnimation =
+      exportSettings.container === "gif" ||
+      exportSettings.container === "webp" ||
+      exportSettings.preset.startsWith("gif-") ||
+      exportSettings.preset.startsWith("webp-")
+    const chapterMode = isAnimation
+      ? exportSettings.chapterMode === "both" || exportSettings.chapterMode === "sidecar"
+        ? "sidecar"
+        : "none"
+      : exportSettings.chapterMode
+    return analyzeProFeatureUsage(timeline, {
+      preset: exportSettings.preset,
+      chapterMode,
+      audioMastering: exportSettings.audioMastering,
+      brandWatermark: exportSettings.brandWatermark,
+      keystrokeOverlay: exportSettings.keystrokeOverlay,
+      reframeMode: exportSettings.reframeMode,
+    })
+  }
+
+  async function chooseOutputAndExport(stripProFeatures: boolean) {
     if (!timelineRecording) return
     try {
       const isGif =
@@ -379,10 +447,55 @@ export function AppShell() {
       if (!outputPath) return
       // Phase 1: the export path flushes and freezes a durable project revision
       // before building the render plan, so it never exports unsaved edits.
-      await timelineExport(outputPath)
+      await timelineExport(outputPath, {
+        stripProFeatures,
+        formats: useTimelineStore.getState().exportFormats,
+      })
     } catch (error) {
       useTimelineStore.setState({ error: toErrorMessage(error) })
     }
+  }
+
+  async function handleStartExport() {
+    if (!timelineRecording) return
+    const isPro = useLicenseStore.getState().status.tier === "pro"
+    if (!isPro) {
+      const analysis = analyzeCurrentExport()
+      if (analysis?.requiresPro) {
+        setExportGate({ open: true, analysis })
+        return
+      }
+    }
+    await chooseOutputAndExport(false)
+  }
+
+  /** Export-gate: "Convert canvas to 16:9" — reuses the same smart-layout
+   * command as the layout panel so the switch is undoable. */
+  function handleConvertCanvas() {
+    const state = useTimelineStore.getState()
+    const timeline = state.engine?.history.present
+    if (!timeline) return
+    state.execute(
+      createUpdateCanvasCommand(
+        { aspectRatio: "16:9" },
+        {
+          cameraSources: collectCameraSources(timeline, {
+            project: state.project,
+            metadata: state.metadata,
+            activeJob: state.activeJob,
+            recording: state.recording,
+          }),
+        },
+      ),
+    )
+    // The aspect gate is resolved, but other Pro features may still remain.
+    const nextAnalysis = analyzeCurrentExport()
+    if (nextAnalysis?.requiresPro) {
+      setExportGate({ open: true, analysis: nextAnalysis })
+      return
+    }
+    setExportGate({ open: false, analysis: null })
+    void chooseOutputAndExport(false)
   }
 
   return (
@@ -482,6 +595,14 @@ export function AppShell() {
                   onCaptionModeChange={setCaptionMode}
                   chapterMode={chapterMode}
                   onChapterModeChange={setChapterMode}
+                  onAudioMasteringChange={setAudioMastering}
+                  onBrandWatermarkChange={setBrandWatermark}
+                  onBrandCardsChange={setBrandCards}
+                  onWebcamBackgroundChange={setWebcamBackground}
+                  onKeystrokeOverlayChange={setKeystrokeOverlay}
+                  onReframeModeChange={setReframeMode}
+                  formats={exportFormats}
+                  onFormatsChange={setExportFormats}
                   markers={timelineMarkers}
                   onContainerChange={setExportContainer}
                   onPresetChange={setExportPreset}
@@ -545,6 +666,33 @@ export function AppShell() {
           onClose={() => setIsNewRecordingOpen(false)}
           onStart={handleStartRecording}
           onNavigateToSettings={() => setActiveView("settings")}
+        />
+
+        {/* Global licensing dialogs — Pro badges and the export gate share the
+            single upgrade surface. */}
+        <ExportGateDialog
+          open={exportGate.open}
+          onOpenChange={(open) => setExportGate((current) => ({ ...current, open }))}
+          analysis={exportGate.analysis}
+          canvasIsNonStandard={exportCanvasNonStandard}
+          onUpgrade={() => {
+            setExportGate({ open: false, analysis: null })
+            useLicenseStore
+              .getState()
+              .openUpgradeDialog(exportGate.analysis?.features.map((feature) => feature.feature))
+          }}
+          onExportStripped={() => {
+            setExportGate({ open: false, analysis: null })
+            void chooseOutputAndExport(true)
+          }}
+          onConvertCanvas={handleConvertCanvas}
+        />
+        <UpgradeDialog
+          open={upgradeDialogOpen}
+          onOpenChange={(open) => {
+            if (!open) useLicenseStore.getState().closeUpgradeDialog()
+          }}
+          features={upgradeContext}
         />
 
         {/* Tray-initiated discard confirmation (destructive, ADR 011) */}

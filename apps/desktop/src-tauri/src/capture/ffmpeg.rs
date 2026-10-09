@@ -1823,6 +1823,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         };
         let (screen_command, _) =
             build_screen_command("ffmpeg", &config, &profile, "libx264", "seg.mp4", false);
@@ -2231,6 +2232,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         }
     }
 
@@ -2376,6 +2378,7 @@ mod tests {
             gpu_screen_capture: true,
             smart_zoom_enabled: false,
             smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
         };
         let (command, backend) = build_screen_command(
             "ffmpeg",

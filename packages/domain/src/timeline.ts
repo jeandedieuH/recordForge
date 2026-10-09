@@ -10,6 +10,7 @@ import type {
   AudioClip,
   AudioRole,
   CameraClip,
+  CanvasAspectRatio,
   CursorEffectClip,
   LibraryRecording,
   MediaMetadata,
@@ -247,6 +248,58 @@ function recordingVideoDurationMs(recording: LibraryRecording, metadata: MediaMe
 
 export interface CreateTimelineOptions {
   cameraSyncOffsetMs?: number
+  /**
+   * Canvas sizing policy for new projects.
+   * - `"source"` (default): canvas matches the recording, any aspect/size.
+   * - `"free"`: canvas is always 16:9 and never above 1920×1080, so a
+   *   Free-tier project can never exceed the raster cap or the 16:9
+   *   entitlement. The source video still fits inside the existing
+   *   background/padding system, letterboxed automatically.
+   */
+  canvasPolicy?: "source" | "free"
+}
+
+const FREE_MAX_WIDTH = 1920
+const FREE_MAX_HEIGHT = 1080
+const SIXTEEN_NINE = 16 / 9
+const ASPECT_TOLERANCE = 0.005
+
+/**
+ * Resolve the canvas size for a new project under the Free canvas policy:
+ * source dimensions when the recording is already 16:9 at ≤1080p, otherwise
+ * a fixed 1920×1080 canvas (vertical/square sources are letterboxed by the
+ * existing canvas-fit logic).
+ */
+export function freeCanvasSize(
+  sourceWidth: number,
+  sourceHeight: number,
+): { width: number; height: number } {
+  const ratio = sourceWidth / Math.max(1, sourceHeight)
+  const isSixteenNine = Math.abs(ratio / SIXTEEN_NINE - 1) <= ASPECT_TOLERANCE
+  if (isSixteenNine && sourceWidth <= FREE_MAX_WIDTH && sourceHeight <= FREE_MAX_HEIGHT) {
+    return { width: sourceWidth, height: sourceHeight }
+  }
+  return { width: FREE_MAX_WIDTH, height: FREE_MAX_HEIGHT }
+}
+
+/**
+ * Canvas dimensions for one batch-export format variant. The canvas short
+ * edge is preserved so a 1080p 16:9 project yields 1080×1920 vertical and
+ * 1080×1080 square variants — the standard social-export sizes — rather
+ * than shrinking the output. Rounded to even pixels for encoder/chroma
+ * constraints.
+ */
+export function canvasDimensionsForAspect(
+  canvas: { width: number; height: number },
+  aspectRatio: CanvasAspectRatio,
+): { width: number; height: number } {
+  const [aw, ah] = aspectRatio.split(":").map(Number)
+  const ratio = aw / ah
+  const short = Math.max(2, Math.min(canvas.width, canvas.height))
+  const even = (v: number) => Math.max(2, Math.round(v / 2) * 2)
+  return ratio >= 1
+    ? { width: even(short * ratio), height: short }
+    : { width: short, height: even(short / ratio) }
 }
 
 export function createTimelineFromRecording(
@@ -260,6 +313,12 @@ export function createTimelineFromRecording(
   const videoStreams = metadata.streams.filter((stream) => stream.kind === "video")
   const primaryVideo = videoStreams[0]
   const duration = recordingVideoDurationMs(recording, metadata)
+  const sourceWidth = metadata.width ?? recording.width
+  const sourceHeight = metadata.height ?? recording.height
+  const canvasSize =
+    options?.canvasPolicy === "free"
+      ? freeCanvasSize(sourceWidth, sourceHeight)
+      : { width: sourceWidth, height: sourceHeight }
   const cameraStreams = recording.webcamPath
     ? [standaloneWebcamStream(recording, metadata, duration)].filter(
         (stream): stream is MediaStream => Boolean(stream),
@@ -296,12 +355,10 @@ export function createTimelineFromRecording(
   const cameraStream = cameraStreams[0]
   const hasCamera = Boolean(cameraStream)
   if (cameraStream) {
-    const width = metadata.width ?? recording.width
-    const height = metadata.height ?? recording.height
-    const cameraSourceWidth = cameraStream.width ?? (recording.webcamPath ? 1280 : width)
-    const cameraSourceHeight = cameraStream.height ?? (recording.webcamPath ? 720 : height)
+    const cameraSourceWidth = cameraStream.width ?? (recording.webcamPath ? 1280 : sourceWidth)
+    const cameraSourceHeight = cameraStream.height ?? (recording.webcamPath ? 720 : sourceHeight)
     const transform = buildCameraPresetTransform("vertical-pip", {
-      canvas: { width, height, padding: 96 },
+      canvas: { ...canvasSize, padding: 96 },
       source: { width: cameraSourceWidth, height: cameraSourceHeight },
     })
     const rawOffset = Math.round(options?.cameraSyncOffsetMs ?? 0)
@@ -337,8 +394,8 @@ export function createTimelineFromRecording(
     name: name ?? recording.name,
     recordingId: recording.id,
     canvas: {
-      width: metadata.width ?? recording.width,
-      height: metadata.height ?? recording.height,
+      width: canvasSize.width,
+      height: canvasSize.height,
       fps: metadata.fps ? Math.round(metadata.fps) : recording.fps,
       background: DEFAULT_CANVAS_BACKGROUND,
       padding: hasCamera ? 96 : 24,

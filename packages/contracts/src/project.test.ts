@@ -201,6 +201,32 @@ describe("project contract", () => {
       container: "mp4",
       captionMode: "burn-in",
       chapterMode: "embed",
+      audioMastering: { denoise: false, loudnessTarget: null },
+      brandWatermark: {
+        enabled: false,
+        logoPath: null,
+        position: "bottom-right",
+        scalePercent: 8,
+        opacity: 0.85,
+      },
+      brandCards: {
+        enabled: false,
+        introMs: 0,
+        outroMs: 0,
+        title: null,
+        subtitle: null,
+        background: "#0f172a",
+        textColor: "#f8fafc",
+        fontPath: null,
+      },
+      keystrokeOverlay: { enabled: false },
+      reframeMode: "fit",
+      webcamBackground: {
+        enabled: false,
+        mode: "blur",
+        blurSigma: 20,
+        replaceColor: "#0f172a",
+      },
     })
 
     expect(projectExportSettingsSchema.parse({ preset: "smooth-60fps" }).preset).toBe(
@@ -239,6 +265,32 @@ describe("project contract", () => {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "none",
+      audioMastering: { denoise: false, loudnessTarget: null },
+      brandWatermark: {
+        enabled: false,
+        logoPath: null,
+        position: "bottom-right",
+        scalePercent: 8,
+        opacity: 0.85,
+      },
+      brandCards: {
+        enabled: false,
+        introMs: 0,
+        outroMs: 0,
+        title: null,
+        subtitle: null,
+        background: "#0f172a",
+        textColor: "#f8fafc",
+        fontPath: null,
+      },
+      keystrokeOverlay: { enabled: false },
+      reframeMode: "fit",
+      webcamBackground: {
+        enabled: false,
+        mode: "blur",
+        blurSigma: 20,
+        replaceColor: "#0f172a",
+      },
     })
     expect(
       projectExportSettingsSchema.parse({
@@ -254,6 +306,32 @@ describe("project contract", () => {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "none",
+      audioMastering: { denoise: false, loudnessTarget: null },
+      brandWatermark: {
+        enabled: false,
+        logoPath: null,
+        position: "bottom-right",
+        scalePercent: 8,
+        opacity: 0.85,
+      },
+      brandCards: {
+        enabled: false,
+        introMs: 0,
+        outroMs: 0,
+        title: null,
+        subtitle: null,
+        background: "#0f172a",
+        textColor: "#f8fafc",
+        fontPath: null,
+      },
+      keystrokeOverlay: { enabled: false },
+      reframeMode: "fit",
+      webcamBackground: {
+        enabled: false,
+        mode: "blur",
+        blurSigma: 20,
+        replaceColor: "#0f172a",
+      },
     })
   })
 

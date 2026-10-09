@@ -1,6 +1,6 @@
 [package]
 name = "recordforge-desktop"
-version = "1.6.4"
+version = "2.0.0"
 description = "Local-first screen recorder and lightweight editor"
 authors = ["prestige-tech & RecordForge contributors"]
 license = "GPL-3.0-or-later"
@@ -46,8 +46,16 @@ tiny-skia = "0.11.4"
 fontdb = { version = "0.23.0", features = ["memmap"] }
 base64 = "0.22"
 hmac = "0.12"
+ed25519-dalek = "2"
+machine-uid = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = { version = "0.3", default-features = false }
+zip = { version = "2", default-features = false }
+# whisper.cpp ships the Linux engine as .tar.gz (macOS/Windows use .zip above).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+tract-onnx = "0.23.8"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"

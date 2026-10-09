@@ -4,6 +4,8 @@ import { Bookmark, Check, Copy, FileOutput } from "lucide-react"
 import { Badge, Button, EmptyState } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useEditorStore } from "../../../stores/editor-store"
+import { useLicenseStore } from "../../../stores/license-store"
+import { ProBadge } from "../../licensing/pro-badge"
 
 interface ExportPanelProps {
   onOpenExport?: () => void
@@ -18,6 +20,8 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
     (state) => state.project?.exportSettings.chapterMode ?? "embed",
   )
   const saveStatus = useEditorStore((state) => state.saveStatus)
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const [copiedTimestamps, setCopiedTimestamps] = useState(false)
 
   const durationMs = timeline ? getTotalDuration(timeline) : 0
@@ -25,6 +29,11 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
   const markerCount = timeline?.markers?.length ?? 0
 
   async function handleCopyYouTubeChapters() {
+    // Chapter output — including the YouTube timestamps copy — is Pro.
+    if (!isPro) {
+      openUpgradeDialog(["chapters"])
+      return
+    }
     if (!timeline || markerCount === 0) return
     const text = formatYouTubeChapters(
       timeline.markers,
@@ -102,6 +111,7 @@ export function ExportPanel({ onOpenExport }: ExportPanelProps) {
             <span className="flex items-center gap-1.5 font-medium text-foreground">
               <Bookmark className="size-3.5 text-primary" />
               YouTube Timestamps
+              {!isPro ? <ProBadge /> : null}
             </span>
             <Button
               variant="outline"

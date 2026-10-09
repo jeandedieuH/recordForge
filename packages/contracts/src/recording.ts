@@ -165,6 +165,9 @@ export const recordingConfigSchema = z.object({
   systemAudioDeviceId: z.string().nullish(),
   smartZoomEnabled: z.boolean().default(false),
   smartZoomPreset: recordingSmartZoomPresetSchema.default("product-demo"),
+  // Keystroke overlay (Pro): capture modifier-combo presses for the export
+  // overlay. Opt-in — plain typing is never recorded.
+  captureKeystrokes: z.boolean().default(false),
 })
 
 export type RecordingConfig = z.infer<typeof recordingConfigSchema>
@@ -504,6 +507,7 @@ export const recordingPreferencesSchema = z.object({
   webcamId: z.string().nullable().default(null),
   webcamName: z.string().nullable().default(null),
   cameraSyncOffsetMs: z.number().int().min(-2000).max(5000).default(0),
+  captureKeystrokes: z.boolean().default(false),
 })
 
 export type RecordingPreferences = z.infer<typeof recordingPreferencesSchema>
@@ -528,6 +532,7 @@ export const defaultRecordingPreferences: RecordingPreferences = {
   webcamId: null,
   webcamName: null,
   cameraSyncOffsetMs: 0,
+  captureKeystrokes: false,
 }
 
 export function reconcileMicrophone(

@@ -2,9 +2,12 @@ import { useState } from "react"
 import type { CanvasAspectRatio } from "@recordforge/contracts"
 import {
   DEFAULT_CANVAS_BACKGROUND,
+  canvasResolutionTier,
+  canvasSizeForAspectRatio,
   createUpdateCanvasCommand,
   getBackgroundKind,
   type BackgroundKind,
+  type CanvasResolutionTier,
 } from "@recordforge/editor-core"
 import {
   Button,
@@ -27,8 +30,10 @@ import {
   Image as ImageIcon,
 } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { useLicenseStore } from "../../../stores/license-store"
 import { collectCameraSources } from "../camera/camera-sources"
-import { AspectRatioSelector } from "./layout/aspect-ratio-selector"
+import { AspectRatioSelector, ASPECT_RATIO_OPTIONS } from "./layout/aspect-ratio-selector"
+import { ResolutionSelector } from "./layout/resolution-selector"
 import { SolidBackgroundPicker } from "./layout/solid-background-picker"
 import { GradientBackgroundPicker } from "./layout/gradient-background-picker"
 import { ImageBackgroundPicker } from "./layout/image-background-picker"
@@ -46,6 +51,8 @@ const RADIUS_PRESETS = [
 export function LayoutPanel() {
   const execute = useTimelineStore((state) => state.execute)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const isLoading = useTimelineStore((state) => state.isLoading)
   const project = useTimelineStore((state) => state.project)
   const metadata = useTimelineStore((state) => state.metadata)
@@ -134,6 +141,18 @@ export function LayoutPanel() {
     )
   }
 
+  // Resolution tier changes send the tier-exact dims; applyUpdateCanvas
+  // re-derives them from the aspect ratio, so the two stay consistent.
+  const handleResolutionChange = (tier: CanvasResolutionTier) => {
+    const size = canvasSizeForAspectRatio(canvas.aspectRatio ?? "16:9", canvas, tier)
+    execute(
+      createUpdateCanvasCommand(
+        { width: size.width, height: size.height },
+        { cameraSources: collectCameraSources(timeline, cameraSourceCtx) },
+      ),
+    )
+  }
+
   const isCustomYRatio = canvas.aspectRatio && canvas.aspectRatio !== "16:9"
 
   return (
@@ -155,6 +174,35 @@ export function LayoutPanel() {
         <AspectRatioSelector
           value={canvas.aspectRatio ?? "16:9"}
           onChange={handleAspectRatioChange}
+          proValues={
+            isPro
+              ? []
+              : ASPECT_RATIO_OPTIONS.filter((option) => option.value !== "16:9").map(
+                  (option) => option.value,
+                )
+          }
+          onProSelect={() => openUpgradeDialog(["custom-aspect-ratio"])}
+        />
+      </div>
+
+      {/* Output resolution tier — 1440p/2160p canvases are Pro (exports over
+          1080p are gated); the command engine keeps the smart-layout
+          transforms via the same update-canvas command. */}
+      <div className="flex flex-col gap-2">
+        <label className="flex items-center justify-between text-xs font-semibold text-foreground">
+          Output Resolution
+          {canvasResolutionTier(canvas) !== "1080p" ? (
+            <span className="font-mono text-[10px] font-normal text-muted-foreground">
+              capped at 1080p on Free
+            </span>
+          ) : null}
+        </label>
+        <ResolutionSelector
+          value={canvasResolutionTier(canvas)}
+          aspectRatio={canvas.aspectRatio ?? "16:9"}
+          onChange={handleResolutionChange}
+          proValues={isPro ? [] : ["1440p", "2160p"]}
+          onProSelect={() => openUpgradeDialog(["high-res-export"])}
         />
       </div>
 

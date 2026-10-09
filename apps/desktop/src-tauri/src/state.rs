@@ -290,4 +290,7 @@ pub struct AppState {
     pub storage_manager: crate::storage::StorageManager,
     /// Application-wide gate used to prevent work starting during an update install.
     pub update_gate: Arc<UpdateGate>,
+    /// License state: entitlements consulted by export validation, and the
+    /// token store behind the licensing commands.
+    pub license: Arc<crate::licensing::LicenseManager>,
 }

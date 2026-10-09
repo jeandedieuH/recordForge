@@ -42,7 +42,10 @@ import {
   overlayRenderPlanSchema,
   sortClips,
   textClipSchema,
+  titleDesignSchema,
+  defaultCursorSettings,
 } from "@recordforge/domain"
+import type { TitleDesign } from "@recordforge/domain"
 
 function editorError(code: string, message: string): AppError {
   return { category: "editor", code, message }
@@ -1021,6 +1024,158 @@ function buildAudioTracks(state: TimelineState, range: ExportRange | undefined):
   })
 }
 
+/**
+ * Free-tier Clean Text: keeps the clip's wording, transform, and any
+ * compatible style controls (appearance, sizes, spacing) while forcing the
+ * free template. Clips without a design (legacy presets) get the default.
+ */
+function cleanTextDesign(design: TitleDesign | undefined): TitleDesign {
+  const base = design ?? titleDesignSchema.parse({ version: 1, template: "clean-text" })
+  return { ...base, template: "clean-text" }
+}
+
+/**
+ * Derive a Free-clean timeline copy: annotation clips are disabled (project
+ * data stays intact — only the render plan loses them) and premium title
+ * designs are converted to Clean Text. Mirrors the Free fallbacks in ADR 016.
+ */
+export function stripProTimelineFeatures(state: TimelineState): TimelineState {
+  return {
+    ...state,
+    tracks: state.tracks.map((track) => ({
+      ...track,
+      clips: track.clips.map((clip) => {
+        if (clip.kind === "annotation") {
+          return clip.enabled === false ? clip : { ...clip, enabled: false }
+        }
+        if (clip.kind === "text" && clip.titleDesign?.template !== "clean-text") {
+          return { ...clip, titleDesign: cleanTextDesign(clip.titleDesign) }
+        }
+        return clip
+      }),
+    })),
+  }
+}
+
+/**
+ * Neutralize Pro-only export settings for a Free export: 4K presets fall back
+ * to `high-quality` (the 1080p output cap still applies), ratio presets fall
+ * back to `balanced`, and chapter output is disabled — markers stay in the
+ * project and remain free.
+ */
+export function freeExportSettings(settings: ProjectExportSettings): ProjectExportSettings {
+  const preset =
+    settings.preset === "ultra-4k" || settings.preset === "ultra-4k-60"
+      ? "high-quality"
+      : settings.preset === "vertical" || settings.preset === "square"
+        ? "balanced"
+        : settings.preset
+  return {
+    ...settings,
+    preset,
+    chapterMode: "none",
+    // Studio Audio is Pro — Free exports keep the raw mixed track.
+    audioMastering: { denoise: false, loudnessTarget: null },
+    // Brand Kit is Pro — no watermark or intro/outro cards on Free exports.
+    brandWatermark: { ...settings.brandWatermark, enabled: false },
+    brandCards: { ...settings.brandCards, enabled: false },
+    // Keystroke overlay is Pro — badges never render on Free exports.
+    keystrokeOverlay: { enabled: false },
+    // Auto-reframe is Pro — Free exports letterbox as before.
+    reframeMode: "fit",
+    // Virtual background is Pro — camera feeds composite untouched.
+    webcamBackground: { ...settings.webcamBackground, enabled: false },
+  }
+}
+
+// Auto-reframe sampling: cursor position is polled at a fixed cadence, EMA-
+// smoothed, then decimated — a keyframe survives only on a meaningful move or
+// dwell timeout so the FFmpeg expression stays compact (see
+// `build_reframe_crop` in exports). 400 ms ≈ 2 samples per rendered frame at
+// 60 fps source telemetry.
+const REFRAME_SAMPLE_STEP_MS = 400
+const REFRAME_SMOOTH_ALPHA = 0.2
+const REFRAME_MOVE_THRESHOLD = 0.04
+const REFRAME_MAX_DWELL_MS = 4000
+const REFRAME_MAX_KEYFRAMES = 400
+
+/**
+ * Build the plan-level reframe spec for `fill`/`cursor-follow` exports.
+ * Returns `undefined` for `fit`, when the source already matches the canvas
+ * content aspect (a crop would be a no-op), or when no source dimensions are
+ * known. `cursor-follow` degrades to a static `fill` when no cursor telemetry
+ * is available — the crop still applies.
+ */
+function buildReframeSpec(
+  state: TimelineState,
+  segments: RenderSegment[],
+  mode: "fill" | "cursor-follow",
+  cursorEngine: CursorEngine | null,
+): RenderPlan["reframe"] {
+  const padding = (state.canvas.padding ?? 0) * 2
+  const contentAspect =
+    Math.max(1, state.canvas.width - padding) / Math.max(1, state.canvas.height - padding)
+  const first = segments[0]
+  const sourceW = first.sourceWidth ?? cursorEngine?.telemetry.sourceWidth
+  const sourceH = first.sourceHeight ?? cursorEngine?.telemetry.sourceHeight
+  // Skip only on a KNOWN match — with unknown source dims the crop still
+  // applies at render time, where `min(iw,ih*AR)` self-resolves to a no-op.
+  if (sourceW && sourceH && Math.abs(sourceW / sourceH - contentAspect) < 0.01) {
+    return undefined
+  }
+
+  if (mode === "fill" || !cursorEngine || cursorEngine.telemetry.events.length === 0) {
+    return { mode: "fill", keyframes: [] }
+  }
+
+  const keyframes: Array<{ timeMs: number; x: number; y: number }> = []
+  let smoothX = 0.5
+  let smoothY = 0.5
+  let lastEmitT = -Infinity
+  let lastEmitX = 0.5
+  let lastEmitY = 0.5
+
+  for (const segment of segments) {
+    const span = segment.outputEndMs - segment.outputStartMs
+    if (span <= 0) continue
+    for (let t = 0; t <= span; t += REFRAME_SAMPLE_STEP_MS) {
+      const sourceMs = segment.sourceInMs + t * segment.speed
+      const frame = cursorEngine.evaluate(sourceMs, defaultCursorSettings)
+      const nx = Math.min(1, Math.max(0, frame.sourceX / (sourceW ?? 1)))
+      const ny = Math.min(1, Math.max(0, frame.sourceY / (sourceH ?? 1)))
+      smoothX += (nx - smoothX) * REFRAME_SMOOTH_ALPHA
+      smoothY += (ny - smoothY) * REFRAME_SMOOTH_ALPHA
+      const outT = Math.round(segment.outputStartMs + t)
+      const moved =
+        Math.abs(smoothX - lastEmitX) > REFRAME_MOVE_THRESHOLD ||
+        Math.abs(smoothY - lastEmitY) > REFRAME_MOVE_THRESHOLD
+      if (keyframes.length === 0 || moved || outT - lastEmitT >= REFRAME_MAX_DWELL_MS) {
+        keyframes.push({ timeMs: outT, x: smoothX, y: smoothY })
+        lastEmitT = outT
+        lastEmitX = smoothX
+        lastEmitY = smoothY
+      }
+    }
+    // Pin the segment boundary so the crop lands exactly on the cursor's
+    // position at a cut instead of interpolating across it.
+    const last = keyframes[keyframes.length - 1]
+    if (last && last.timeMs < segment.outputEndMs - 1) {
+      keyframes.push({ timeMs: Math.round(segment.outputEndMs), x: smoothX, y: smoothY })
+      lastEmitT = Math.round(segment.outputEndMs)
+    }
+  }
+
+  // Long timelines decimate further rather than exploding the expression.
+  if (keyframes.length > REFRAME_MAX_KEYFRAMES) {
+    const stride = Math.ceil(keyframes.length / REFRAME_MAX_KEYFRAMES)
+    const reduced = keyframes.filter((_, index) => index % stride === 0)
+    const last = keyframes[keyframes.length - 1]
+    if (reduced[reduced.length - 1] !== last) reduced.push(last)
+    return { mode: "cursor-follow", keyframes: reduced }
+  }
+  return { mode: "cursor-follow", keyframes }
+}
+
 export interface BuildRenderPlanInput {
   state: TimelineState
   projectId: string
@@ -1031,6 +1186,12 @@ export interface BuildRenderPlanInput {
   assets?: ProjectAsset[]
   cursorTelemetry?: CursorTelemetryFile | null
   cursorEngine?: CursorEngine | null
+  /**
+   * Free-tier export: run the timeline through `stripProTimelineFeatures`
+   * first and force `chapterMode` to `none` so the plan passes Rust's Free
+   * entitlement check. Pair with `freeExportSettings`.
+   */
+  stripProFeatures?: boolean
 }
 
 // Build a render plan from timeline metadata only. Rust resolves project assets
@@ -1038,7 +1199,7 @@ export interface BuildRenderPlanInput {
 export function buildRenderPlan(
   input: BuildRenderPlanInput,
 ): { ok: true; value: RenderPlan } | { ok: false; error: AppError } {
-  const { state } = input
+  const state = input.stripProFeatures ? stripProTimelineFeatures(input.state) : input.state
   if (!input.projectId.trim()) {
     return {
       ok: false,
@@ -1091,9 +1252,12 @@ export function buildRenderPlan(
 
   const cameraTrack = state.tracks.find((track) => track.kind === "camera")
   const audioTracks = buildAudioTracks(state, effectiveRange)
+  // One engine instance feeds both zoom motion plans and reframe keyframes.
+  const cursorEngine =
+    input.cursorEngine ?? (input.cursorTelemetry ? createCursorEngine(input.cursorTelemetry) : null)
   const zoomSegments = toZoomSegments(state, effectiveRange, {
     cursorTelemetry: input.cursorTelemetry,
-    cursorEngine: input.cursorEngine,
+    cursorEngine,
   })
   const cursorEffects = toCursorEffects(state, effectiveRange, input.assets)
   const captions = toCaptions(state, effectiveRange, durationMs)
@@ -1144,6 +1308,16 @@ export function buildRenderPlan(
     ? toOverlays(cameraTrack.clips, state.canvas, !cameraTrack.muted, effectiveRange, input.assets)
     : []
   const firstScreenAssetId = segments[0].assetId
+  const chapterMode =
+    input.settings?.container === "gif" ||
+    input.settings?.container === "webp" ||
+    (typeof input.settings?.preset === "string" &&
+      (input.settings.preset.startsWith("gif-") || input.settings.preset.startsWith("webp-")))
+      ? (input.chapterMode ?? input.settings?.chapterMode) === "both" ||
+        (input.chapterMode ?? input.settings?.chapterMode) === "sidecar"
+        ? "sidecar"
+        : "none"
+      : (input.chapterMode ?? input.settings?.chapterMode ?? "embed")
   return {
     ok: true,
     value: {
@@ -1163,16 +1337,7 @@ export function buildRenderPlan(
       captions,
       captionMode: input.captionMode ?? input.settings?.captionMode ?? "burn-in",
       chapters,
-      chapterMode:
-        input.settings?.container === "gif" ||
-        input.settings?.container === "webp" ||
-        (typeof input.settings?.preset === "string" &&
-          (input.settings.preset.startsWith("gif-") || input.settings.preset.startsWith("webp-")))
-          ? (input.chapterMode ?? input.settings?.chapterMode) === "both" ||
-            (input.chapterMode ?? input.settings?.chapterMode) === "sidecar"
-            ? "sidecar"
-            : "none"
-          : (input.chapterMode ?? input.settings?.chapterMode ?? "embed"),
+      chapterMode: input.stripProFeatures ? "none" : chapterMode,
       masks,
       zoomSegments,
       cursorEffects,
@@ -1180,6 +1345,12 @@ export function buildRenderPlan(
       annotations,
       texts,
       images,
+      // Auto-reframe (Pro): a non-"fit" mode crops the screen stream to the
+      // canvas content aspect; keyframes pan the crop along cursor telemetry.
+      reframe:
+        input.settings?.reframeMode && input.settings.reframeMode !== "fit"
+          ? buildReframeSpec(state, segments, input.settings.reframeMode, cursorEngine)
+          : undefined,
     },
   }
 }

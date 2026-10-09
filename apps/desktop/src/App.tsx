@@ -6,6 +6,7 @@ import { CountdownWindow } from "./features/recorder/countdown-window"
 import { FloatingControls } from "./features/recorder/floating-controls"
 import { RegionPickerWindow } from "./features/recorder/region-picker-window"
 import { WebcamPreviewWindow } from "./features/recorder/webcam-preview-window"
+import { TeleprompterWindow } from "./features/teleprompter/teleprompter-window"
 import { useRecorderPolling, useRecorderStatusEvents } from "./hooks/use-recorder"
 import { isTauri } from "./lib/settings"
 import { useRecorderStore } from "./stores/recorder-store"
@@ -53,6 +54,7 @@ function App() {
     params.get("webcam_preview") === "1" ||
     params.get("webcam-preview") === "1" ||
     windowKind === "webcam-preview"
+  const isTeleprompter = params.get("teleprompter") === "1" || windowKind === "teleprompter"
 
   useEffect(() => {
     const root = document.documentElement
@@ -72,13 +74,14 @@ function App() {
       delete root.dataset.webcamPreview
       root.removeAttribute("data-webcam-preview")
     }
-  }, [isBoundary, isCountdown, isFloating, isRegionPicker, isWebcamPreview])
+  }, [isBoundary, isCountdown, isFloating, isRegionPicker, isTeleprompter, isWebcamPreview])
 
   // Reveal the main window smoothly on startup once React has mounted and the
   // initial DOM/theme is ready. This eliminates any transparent/empty window flash.
   useEffect(() => {
     if (!isTauri()) return
-    const isAuxiliary = isFloating || isBoundary || isCountdown || isRegionPicker || isWebcamPreview
+    const isAuxiliary =
+      isFloating || isBoundary || isCountdown || isRegionPicker || isWebcamPreview || isTeleprompter
     if (!isAuxiliary) {
       const animFrame = requestAnimationFrame(() => {
         const appWindow = getCurrentWindow()
@@ -88,7 +91,7 @@ function App() {
       })
       return () => cancelAnimationFrame(animFrame)
     }
-  }, [isBoundary, isCountdown, isFloating, isRegionPicker, isWebcamPreview])
+  }, [isBoundary, isCountdown, isFloating, isRegionPicker, isTeleprompter, isWebcamPreview])
 
   return (
     <AppErrorBoundary>
@@ -102,6 +105,8 @@ function App() {
         <FloatingControls />
       ) : isWebcamPreview ? (
         <WebcamPreviewWindow />
+      ) : isTeleprompter ? (
+        <TeleprompterWindow />
       ) : (
         <Suspense
           fallback={

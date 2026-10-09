@@ -12,6 +12,7 @@ pub enum ErrorCategory {
     Editor,
     Permissions,
     Update,
+    Licensing,
     Unknown,
 }
 
@@ -67,6 +68,7 @@ impl ErrorCategory {
             ErrorCategory::Editor => "editor",
             ErrorCategory::Permissions => "permissions",
             ErrorCategory::Update => "update",
+            ErrorCategory::Licensing => "licensing",
             ErrorCategory::Unknown => "unknown",
         }
     }
@@ -99,6 +101,8 @@ pub enum InternalError {
     Permissions(String),
     #[error("update failed: {0}")]
     Update(String),
+    #[error("licensing failed: {0}")]
+    Licensing(String),
     #[error("unknown error: {0}")]
     Unknown(String),
 }
@@ -139,6 +143,9 @@ impl From<InternalError> for AppError {
             }
             InternalError::Update(msg) => {
                 AppError::new(ErrorCategory::Update, "update_failed", msg)
+            }
+            InternalError::Licensing(msg) => {
+                AppError::new(ErrorCategory::Licensing, "licensing_failed", msg)
             }
             InternalError::Unknown(msg) => AppError::new(ErrorCategory::Unknown, "unknown", msg),
         }

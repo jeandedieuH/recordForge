@@ -4,12 +4,12 @@
 
 The overlay engine uses the following four font files for preview/export parity:
 
-| Family | File | License | Role |
-| --- | --- | --- | --- |
-| Inter Variable | `Inter-VariableFont_slnt,wght.ttf` | SIL Open Font License 1.1 | Default sans |
-| Source Serif 4 | `SourceSerif4-Regular.ttf` | SIL Open Font License 1.1 | Serif fallback |
-| JetBrains Mono | `JetBrainsMono-Regular.ttf` | SIL Open Font License 1.1 | Monospace fallback |
-| Outfit | `Outfit-VariableFont_wght.ttf` | SIL Open Font License 1.1 | Heading |
+| Family         | File                               | License                   | Role               |
+| -------------- | ---------------------------------- | ------------------------- | ------------------ |
+| Inter Variable | `Inter-VariableFont_slnt,wght.ttf` | SIL Open Font License 1.1 | Default sans       |
+| Source Serif 4 | `SourceSerif4-Regular.ttf`         | SIL Open Font License 1.1 | Serif fallback     |
+| JetBrains Mono | `JetBrainsMono-Regular.ttf`        | SIL Open Font License 1.1 | Monospace fallback |
+| Outfit         | `Outfit-VariableFont_wght.ttf`     | SIL Open Font License 1.1 | Heading            |
 
 The selected families are approved for application bundling under `OFL-1.1`. The
 upstream copyright and license notices must remain with the corresponding font

@@ -63,6 +63,10 @@ pub struct RecordingConfig {
     pub smart_zoom_enabled: bool,
     #[serde(default = "default_smart_zoom_preset")]
     pub smart_zoom_preset: String,
+    /// Opt-in keystroke overlay capture (Pro): modifier combos only — plain
+    /// typing is never logged.
+    #[serde(default)]
+    pub capture_keystrokes: bool,
 }
 
 fn default_gpu_screen_capture() -> bool {

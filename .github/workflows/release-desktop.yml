@@ -97,6 +97,9 @@ jobs:
           # Desktop OAuth client secret — Google's token endpoint requires it even
           # for Desktop-app clients; compiled into the binary via option_env!.
           RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET: ${{ secrets.RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET }}
+          # License server base URL (https://<deployment>.convex.site) — compiled
+          # in via option_env!. A repo variable, not a secret, so forks build Free.
+          RECORD_FORGE_LICENSE_SERVER_URL: ${{ vars.RECORD_FORGE_LICENSE_SERVER_URL }}
         with:
           projectPath: apps/desktop
           tauriScript: bun tauri

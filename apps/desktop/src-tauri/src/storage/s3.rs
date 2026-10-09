@@ -204,6 +204,26 @@ impl S3Client {
         progress_cb: impl Fn(u64, u64),
         cancel_flag: &AtomicBool,
     ) -> Result<String> {
+        self.upload_file_typed(
+            local_path,
+            destination_name,
+            "video/mp4",
+            progress_cb,
+            cancel_flag,
+        )
+        .await
+    }
+
+    /// Same as `upload_file` but with an explicit Content-Type — BYO share
+    /// uploads HTML player pages and VTT sidecars alongside the video.
+    pub async fn upload_file_typed(
+        &self,
+        local_path: &Path,
+        destination_name: &str,
+        content_type: &str,
+        progress_cb: impl Fn(u64, u64),
+        cancel_flag: &AtomicBool,
+    ) -> Result<String> {
         let mut file = File::open(local_path)
             .map_err(|e| InternalError::Storage(format!("failed to open file for upload: {e}")))?;
         let file_len = file
@@ -250,7 +270,7 @@ impl S3Client {
                 .header("x-amz-date", &amz_date)
                 .header("x-amz-content-sha256", &payload_hash)
                 .header("authorization", &auth_header)
-                .header("content-type", "video/mp4")
+                .header("content-type", content_type)
                 .body(buffer)
                 .send()
                 .await
@@ -292,7 +312,7 @@ impl S3Client {
             .header("x-amz-date", &amz_date)
             .header("x-amz-content-sha256", &payload_hash)
             .header("authorization", &auth_header)
-            .header("content-type", "video/mp4")
+            .header("content-type", content_type)
             .send()
             .await
             .map_err(|e| {

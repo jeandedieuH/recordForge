@@ -561,6 +561,59 @@ fn logical_capture_rect(app: &tauri::AppHandle, bounds: Bounds) -> (Position, Si
     )
 }
 
+/// Teleprompter window — a floating, capture-excluded notes view (Pro).
+pub struct TeleprompterWindow;
+
+impl TeleprompterWindow {
+    const LABEL: &'static str = "teleprompter";
+
+    /// Open or focus the teleprompter. `content_protected` keeps the window
+    /// out of screen capture (WDA_EXCLUDEFROMCAPTURE on Windows, NSWindow
+    /// sharingType=.none on macOS) so speaker notes never leak into a
+    /// recording even when recording the full screen.
+    pub fn open_or_focus(app: &tauri::AppHandle) -> Result<()> {
+        if let Some(window) = app.get_webview_window(Self::LABEL) {
+            if let Err(error) = window.set_content_protected(true) {
+                tracing::warn!(error = ?error, "protect teleprompter from capture failed");
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
+            return Ok(());
+        }
+
+        tauri::WebviewWindowBuilder::new(
+            app,
+            Self::LABEL,
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'teleprompter';")
+        .title("RecordForge Teleprompter")
+        .inner_size(560.0, 420.0)
+        .min_inner_size(360.0, 240.0)
+        .always_on_top(true)
+        .content_protected(true)
+        .resizable(true)
+        .build()
+        .map(|_| ())
+        .map_err(|error| {
+            InternalError::Unknown(format!("failed to create teleprompter window: {error:?}"))
+                .into()
+        })
+    }
+
+    /// Close the teleprompter window if open.
+    pub fn close(app: &tauri::AppHandle) {
+        if let Some(window) = app.get_webview_window(Self::LABEL) {
+            let _ = window.close();
+        }
+    }
+
+    /// Whether the teleprompter window is currently open.
+    pub fn is_open(app: &tauri::AppHandle) -> bool {
+        app.get_webview_window(Self::LABEL).is_some()
+    }
+}
+
 #[allow(dead_code)]
 fn query_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());

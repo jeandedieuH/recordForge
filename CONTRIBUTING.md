@@ -106,9 +106,10 @@ bun run test
    - `docs/documentation-update`
    - `perf/optimization-target`
 2. **Keep PRs Focused:** Small, single-purpose pull requests are reviewed and merged much faster than monolithic diffs.
-3. **Write Tests:** Add unit tests for new logic in packages (`packages/*`) or frontend components (`apps/desktop/src/**/__tests__`).
-4. **Check Capabilities:** If your change requires modifying Tauri security permissions (`src-tauri/capabilities/`), note it clearly in the PR description for security review.
-5. **Fill the PR Template:** Complete all sections of the [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md).
+3. **Sign the CLA:** The CLA Assistant bot comments on your first pull request. Signing once covers all future contributions — it lets the project ship your work in the GPL codebase and in the dual-licensed official builds. See [CLA.md](CLA.md).
+4. **Write Tests:** Add unit tests for new logic in packages (`packages/*`) or frontend components (`apps/desktop/src/**/__tests__`).
+5. **Check Capabilities:** If your change requires modifying Tauri security permissions (`src-tauri/capabilities/`), note it clearly in the PR description for security review.
+6. **Fill the PR Template:** Complete all sections of the [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md).
 
 ---
 

@@ -33,6 +33,15 @@ export function CtaSection() {
                 <ArrowDown className="size-4" aria-hidden />
               </span>
             </Link>
+            <p className="text-xs text-muted-foreground">
+              Free forever ·{" "}
+              <Link
+                to="/pricing"
+                className="font-medium text-foreground underline-offset-4 transition-colors duration-fast ease-forge hover:text-accent hover:underline"
+              >
+                Pro from $29 — one-time
+              </Link>
+            </p>
             <div className="flex items-center gap-4 text-subtle-foreground">
               <span className="flex items-center gap-1.5 text-xs">
                 <AppWindow className="size-4" aria-hidden /> Windows

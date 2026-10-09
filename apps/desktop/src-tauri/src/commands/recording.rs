@@ -67,6 +67,13 @@ pub fn init(app: &tauri::App) -> Result<()> {
     // media jobs so export and proxy pick hardware encoders without re-probing.
     let available_encoders = recorder.available_encoders().to_vec();
 
+    // License state loads before the job manager so a resumed export is
+    // re-validated against the *current* entitlement snapshot.
+    let license = Arc::new(crate::licensing::LicenseManager::load(
+        &app_data_dir,
+        app.handle().clone(),
+    ));
+
     let job_manager = JobManager::new(
         app.handle().clone(),
         Arc::clone(&db),
@@ -75,6 +82,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         path_policy.clone(),
         available_encoders,
         recorder.resource_gate(),
+        Arc::clone(&license),
     );
 
     // Resume any pending or interrupted jobs from a previous run.
@@ -99,7 +107,18 @@ pub fn init(app: &tauri::App) -> Result<()> {
         path_policy,
         storage_manager,
         update_gate: Arc::new(crate::state::UpdateGate::default()),
+        license: Arc::clone(&license),
     });
+
+    // Background entitlement refresh — runs at most once per 30 days and a
+    // network failure never removes Pro (ADR 016).
+    if license.refresh_due() {
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = license.refresh().await {
+                tracing::warn!(error = %error, "background license refresh failed");
+            }
+        });
+    }
 
     Ok(())
 }
@@ -1009,6 +1028,41 @@ pub fn show_main_window(app: tauri::AppHandle) -> Result<()> {
 pub fn hide_floating_controls(app: tauri::AppHandle) -> Result<()> {
     crate::window::FloatingWindow::hide(&app);
     Ok(())
+}
+
+/// Open the teleprompter window (Pro). The window is capture-protected so
+/// notes never appear in a screen recording.
+#[tauri::command]
+#[instrument]
+pub async fn open_teleprompter(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<()> {
+    if !state.license.entitlements().pro_enabled {
+        return Err(crate::errors::AppError::new(
+            crate::errors::ErrorCategory::Licensing,
+            "pro_feature_required",
+            "This feature requires RecordForge Pro",
+        )
+        .with_details(
+            [("features".to_string(), serde_json::json!(["teleprompter"]))]
+                .into_iter()
+                .collect(),
+        ));
+    }
+    crate::window::TeleprompterWindow::open_or_focus(&app)
+}
+
+/// Close the teleprompter window.
+#[tauri::command]
+#[instrument]
+pub fn close_teleprompter(app: tauri::AppHandle) -> Result<()> {
+    crate::window::TeleprompterWindow::close(&app);
+    Ok(())
+}
+
+/// Whether the teleprompter window is open (drives the toolbar toggle state).
+#[tauri::command]
+#[instrument]
+pub fn teleprompter_is_open(app: tauri::AppHandle) -> bool {
+    crate::window::TeleprompterWindow::is_open(&app)
 }
 
 /// Open the floating webcam preview window.

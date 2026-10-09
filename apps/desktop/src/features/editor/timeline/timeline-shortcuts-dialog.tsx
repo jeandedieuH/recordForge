@@ -50,6 +50,22 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     ],
   },
   {
+    title: "Selection & Grouping",
+    items: [
+      { description: "Select all clips", keys: ["Ctrl", "A"] },
+      { description: "Cycle through clips", keys: ["Tab", "Shift", "Tab"] },
+      { description: "Extend selection to clicked clip", keys: ["Shift", "Click"] },
+      { description: "Add / remove clip from selection", keys: ["Ctrl", "Click"] },
+      { description: "Marquee select (track-bounded)", keys: ["Drag"] },
+      { description: "Add marquee to selection", keys: ["Shift", "Drag"] },
+      { description: "Select single clip inside a group", keys: ["Alt", "Click"] },
+      {
+        description: "Group / ungroup selected clips",
+        keys: ["Ctrl", "G", "/", "Ctrl", "Shift", "G"],
+      },
+    ],
+  },
+  {
     title: "Editing & Clips",
     items: [
       { description: "Split selected clip at playhead", keys: ["S"] },

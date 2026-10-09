@@ -22,6 +22,8 @@ import {
 } from "@recordforge/ui"
 import { Search, Star, Trash2, Type, X } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { useLicenseStore } from "../../../stores/license-store"
+import { ProBadge } from "../../licensing/pro-badge"
 import { TitlePreview } from "./title-preview"
 import { TitleSelectedPreview } from "./title-selected-preview"
 import {
@@ -41,6 +43,11 @@ export interface TitlePresetBrowserProps {
   previewClip?: TextClip
 }
 
+/** Only the Clean Text preset is Free; everything else needs Pro. */
+function presetRequiresPro(preset: TextPresetRecord): boolean {
+  return preset.definition.titleDesign?.template !== "clean-text"
+}
+
 /** Browsing is deliberately non-mutating: only the explicit action buttons edit the timeline. */
 export function TitlePresetBrowser({
   selectedPresetId,
@@ -52,6 +59,8 @@ export function TitlePresetBrowser({
   const { registry, snapshot, isLoading, error, retry } = useTitleRegistry()
   const { query, group, collection, recentIds, setFilters, forget } = useTitleLibraryState()
   const { toast } = useToast()
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const [previewId, setPreviewId] = useState<string | undefined>(selectedPresetId)
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<TextPresetRecord | null>(null)
@@ -240,8 +249,20 @@ export function TitlePresetBrowser({
                 previewClip={previewClip}
                 canvasWidth={previewClip ? canvasWidth : 1920}
                 canvasHeight={previewClip ? canvasHeight : 1080}
-                onAdd={onAdd}
-                onReplace={onReplace}
+                onAdd={(preset) => {
+                  if (!isPro && presetRequiresPro(preset)) {
+                    openUpgradeDialog(["premium-titles"])
+                    return
+                  }
+                  onAdd?.(preset)
+                }}
+                onReplace={(preset, options) => {
+                  if (!isPro && presetRequiresPro(preset)) {
+                    openUpgradeDialog(["premium-titles"])
+                    return
+                  }
+                  onReplace?.(preset, options)
+                }}
               />
             ) : null}
             <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
@@ -283,12 +304,13 @@ export function TitlePresetBrowser({
                       </span>
                     </button>
                     <div className="flex items-center gap-1 px-2 pb-1.5">
-                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-xs text-muted-foreground">
                         {custom
                           ? "Custom"
                           : capitalize(
                               getTitlePresetGroup(preset.definition.titleDesign?.template),
                             )}
+                        {!isPro && presetRequiresPro(preset) ? <ProBadge /> : null}
                       </span>
                       <IconButton
                         label={`${favorite ? "Unfavorite" : "Favorite"} ${preset.name}`}

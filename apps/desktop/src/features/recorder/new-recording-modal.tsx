@@ -2,10 +2,12 @@ import { useEffect, useState } from "react"
 import { listen } from "@tauri-apps/api/event"
 import {
   Crop,
+  Keyboard,
   Mic,
   Monitor,
   MonitorUp,
   Pencil,
+  ScrollText,
   Sparkles,
   Video,
   Volume2,
@@ -28,9 +30,11 @@ import {
 } from "@recordforge/ui"
 import type { Bounds, RecordingConfig } from "@recordforge/contracts"
 import { boundsSchema, webcamPreviewModeSchema } from "@recordforge/contracts"
-import { openRegionPicker } from "../../lib/recorder"
+import { openRegionPicker, openTeleprompter } from "../../lib/recorder"
 import { toErrorMessage } from "../../lib/errors"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { useLicenseStore } from "../../stores/license-store"
+import { ProBadge } from "../licensing/pro-badge"
 import { WebcamPreview } from "./webcam-preview"
 
 interface NewRecordingModalProps {
@@ -47,6 +51,8 @@ export function NewRecordingModal({
   onNavigateToSettings,
 }: NewRecordingModalProps) {
   const { toast } = useToast()
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const {
     sources,
     sourcesLoaded,
@@ -122,6 +128,18 @@ export function NewRecordingModal({
   function handleOpenRegionPicker() {
     openRegionPicker().catch((error) => {
       toast({ title: "Could not open the region picker", description: toErrorMessage(error) })
+    })
+  }
+
+  // Teleprompter (Pro): capture-protected notes window — the Rust side
+  // re-checks the entitlement so this badge is purely informational.
+  function handleOpenTeleprompter() {
+    if (!isPro) {
+      openUpgradeDialog(["teleprompter"])
+      return
+    }
+    openTeleprompter().catch((error) => {
+      toast({ title: "Could not open the teleprompter", description: toErrorMessage(error) })
     })
   }
 
@@ -744,22 +762,69 @@ export function NewRecordingModal({
                     </div>
                   </div>
                 </div>
+
+                {/* Keystroke overlay (Pro): captures modifier combos only —
+                    plain typing is never logged. */}
+                <div className="rounded-lg border border-border bg-surface-dim p-3.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
+                        <Keyboard className="size-4" aria-hidden />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-foreground">
+                            Keystroke Overlay
+                          </span>
+                          {!isPro ? <ProBadge /> : null}
+                        </div>
+                        <p className="mt-0.5 truncate text-xs text-subtle-foreground">
+                          {preferences.captureKeystrokes
+                            ? "Shortcuts like Ctrl+C will appear as on-screen badges."
+                            : "Show shortcut badges in the exported video."}
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={preferences.captureKeystrokes}
+                      aria-label="Capture keystroke overlay"
+                      onCheckedChange={(checked) => {
+                        if (checked && !isPro) {
+                          openUpgradeDialog(["keystroke-overlay"])
+                          return
+                        }
+                        savePreferences({ captureKeystrokes: checked })
+                      }}
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           </div>
 
           {/* Modal Footer */}
           <div className="flex shrink-0 items-center justify-between border-t border-border bg-background px-6 py-4">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                onClose()
-                onNavigateToSettings?.()
-              }}
-              className="border-border bg-surface-dim text-xs font-medium text-muted-foreground hover:bg-overlay hover:text-foreground cursor-pointer"
-            >
-              Advanced Settings
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  onClose()
+                  onNavigateToSettings?.()
+                }}
+                className="border-border bg-surface-dim text-xs font-medium text-muted-foreground hover:bg-overlay hover:text-foreground cursor-pointer"
+              >
+                Advanced Settings
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={handleOpenTeleprompter}
+                className="border-border bg-surface-dim text-xs font-medium text-muted-foreground hover:bg-overlay hover:text-foreground cursor-pointer"
+              >
+                <ScrollText className="size-3.5" aria-hidden />
+                Teleprompter
+                {!isPro ? <ProBadge /> : null}
+              </Button>
+            </div>
 
             <Button
               onClick={handleStartRecording}

@@ -116,9 +116,13 @@ pub struct JobManager {
     // Shared with the recorder: jobs hold a permit for their whole run so a
     // queued job never encodes while capture or finalization is active.
     resource_gate: Arc<crate::state::CaptureWorkGate>,
+    // Entitlements are checked at every export entry point (start, retry,
+    // startup resume) so a persisted Pro export can't outlive the license.
+    license: Arc<crate::licensing::LicenseManager>,
 }
 
 impl JobManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: tauri::AppHandle,
         db: Arc<Mutex<rusqlite::Connection>>,
@@ -127,6 +131,7 @@ impl JobManager {
         path_policy: PathPolicy,
         available_encoders: Vec<String>,
         resource_gate: Arc<crate::state::CaptureWorkGate>,
+        license: Arc<crate::licensing::LicenseManager>,
     ) -> Self {
         Self {
             app,
@@ -139,6 +144,7 @@ impl JobManager {
             worker_lock: Arc::new(Mutex::new(())),
             start_lock: Arc::new(Mutex::new(())),
             resource_gate,
+            license,
         }
     }
 
@@ -297,6 +303,8 @@ impl JobManager {
             .map_err(|_| InternalError::Unknown("job start mutex poisoned".into()))?;
         request.plan.validate()?;
         crate::exports::validate_export_settings(&request.settings, &request.plan)?;
+        self.license
+            .enforce_export(&request.plan, &request.settings)?;
         if request.plan.project_id != request.project_id {
             return Err(InternalError::Project(
                 "render plan project does not match export project".into(),
@@ -404,6 +412,8 @@ impl JobManager {
             })?;
         request.plan.validate()?;
         crate::exports::validate_export_settings(&request.settings, &request.plan)?;
+        self.license
+            .enforce_export(&request.plan, &request.settings)?;
         let expected_ext = expected_export_extension(&request.settings);
         let destination_path = Path::new(&request.output_path);
         if !destination_path
@@ -445,6 +455,9 @@ impl JobManager {
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
             resource_gate: Arc::clone(&self.resource_gate),
+            // The cap is resolved at spawn — a downgrade between enqueue and
+            // retry/resume applies the Free raster limit.
+            output_cap: self.license.entitlements().output_cap(),
             job_id: job.id,
             request,
         };
@@ -569,6 +582,16 @@ impl JobManager {
                     self.fail_unresumable_job(&job.id, "stored export settings are invalid")?;
                     continue;
                 }
+                // A Pro export persisted before the license lapsed must not
+                // slip through on resume — re-check current entitlements.
+                if self
+                    .license
+                    .enforce_export(&request.plan, &request.settings)
+                    .is_err()
+                {
+                    self.fail_unresumable_job(&job.id, "stored export requires RecordForge Pro")?;
+                    continue;
+                }
                 let expected_ext = expected_export_extension(&request.settings);
                 let destination = Path::new(&request.output_path);
                 if !destination
@@ -662,6 +685,7 @@ struct ExportWorker {
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
     resource_gate: Arc<crate::state::CaptureWorkGate>,
+    output_cap: Option<crate::exports::ExportOutputCap>,
     job_id: String,
     request: ExportRequest,
 }
@@ -703,6 +727,7 @@ impl ExportWorker {
             &self.app,
             cancel.clone(),
             &self.available_encoders,
+            self.output_cap,
         );
 
         match result {

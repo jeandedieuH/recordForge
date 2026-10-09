@@ -138,6 +138,19 @@ export async function openFloatingControls(): Promise<void> {
   return invokeValidated<void>("open_floating_controls")
 }
 
+// Teleprompter (Pro) — capture-protected floating notes window.
+export async function openTeleprompter(): Promise<void> {
+  return invokeValidated<void>("open_teleprompter")
+}
+
+export async function closeTeleprompter(): Promise<void> {
+  return invokeValidated<void>("close_teleprompter")
+}
+
+export async function teleprompterIsOpen(): Promise<boolean> {
+  return invokeValidated("teleprompter_is_open", {}, z.boolean())
+}
+
 export async function openRegionPicker(): Promise<void> {
   return invokeValidated<void>("open_region_picker")
 }

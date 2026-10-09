@@ -9,6 +9,7 @@ export const errorCategorySchema = z.enum([
   "editor",
   "permissions",
   "update",
+  "licensing",
   "unknown",
 ])
 

@@ -3,10 +3,12 @@ import {
   diskSpaceEstimateSchema,
   mediaJobSchema,
   mediaMetadataSchema,
+  silenceRangeSchema,
   type DiskSpaceEstimate,
   type MediaJob,
   type MediaMetadata,
   type PrepareMediaOptions,
+  type SilenceRange,
 } from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 
@@ -71,6 +73,23 @@ export async function estimatePrepareDiskSpace(
       includeProxy: options?.includeProxy,
     },
     diskSpaceEstimateSchema,
+  )
+}
+
+// Smart Cut (Pro): scan the recording's audio for silence ranges the editor
+// can ripple-delete in one command.
+export async function detectSilences(
+  recordingId: string,
+  options?: { thresholdDb?: number; minDurationMs?: number },
+): Promise<SilenceRange[]> {
+  return invokeValidated(
+    "detect_silences",
+    {
+      recordingId,
+      thresholdDb: options?.thresholdDb,
+      minDurationMs: options?.minDurationMs,
+    },
+    silenceRangeSchema.array(),
   )
 }
 

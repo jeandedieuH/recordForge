@@ -30,6 +30,7 @@ import {
   createDeleteZoomSegmentCommand,
   createDuplicateClipCommand,
   createDuplicateClipsCommand,
+  createGroupClipsCommand,
   createMoveClipCommand,
   createMoveClipsCommand,
   createMoveTrackCommand,
@@ -42,13 +43,21 @@ import {
   createSplitCursorRangeCommand,
   createSplitZoomSegmentCommand,
   createTrimClipCommand,
+  createUngroupClipsCommand,
   createUpdateClipAudioCommand,
   createUpdateCursorRangeCommand,
   createUpdateMarkerCommand,
   createUpdateTrackCommand,
   createUpdateZoomSegmentCommand,
+  clipsInTimelineOrder,
+  expandClipIdsThroughGroups,
+  extendClipSelection,
   findClip,
+  getClipGroupId,
   getManualZoomSegments,
+  mergeClipIds,
+  selectAllClipIds,
+  toggleClipSelection,
   resolvePreviewComposition,
   sourceToTimelineForTrack,
   zoomTransformToCss,
@@ -1347,43 +1356,142 @@ export function TimelineView({
       // Split clicks are handled directly at the pointer position by TimelineLanes
       return
     }
+    if (!timeline) return
+    // Alt-click isolates a single clip even inside a group; plain clicks and
+    // modifier gestures always complete groups unless Alt bypasses them.
+    const expandGroups = !event.altKey
+    const memberIds = expandGroups ? expandClipIdsThroughGroups(timeline, [clip.id]) : [clip.id]
+
     if (event.shiftKey && view.selection?.kind === "clip") {
-      const current = findClip(timeline!, view.selection.primaryClipId)?.clip
-      if (current) {
-        setSelection({
-          kind: "range",
-          startMs: Math.min(current.startMs, clip.startMs),
-          endMs: Math.max(current.startMs + current.durationMs, clip.startMs + clip.durationMs),
-        })
-        return
-      }
+      const next = extendClipSelection(timeline, view.selection, clip.id, { expandGroups })
+      if (next) setSelection(next)
+      return
     }
     if (event.ctrlKey || event.metaKey) {
       const current =
         view.selection?.kind === "clip"
           ? view.selection
           : { kind: "clip" as const, primaryClipId: clip.id, clipIds: [], trackId: track.id }
-      const clipIds = current.clipIds.includes(clip.id)
-        ? current.clipIds.filter((id) => id !== clip.id)
-        : [...current.clipIds, clip.id]
-      if (clipIds.length === 0) {
-        setSelection(null)
-        return
+      const next = toggleClipSelection(current, clip.id, track.id, memberIds)
+      setSelection(next.clipIds.length === 0 ? null : next)
+      return
+    }
+    setSelection({ kind: "clip", primaryClipId: clip.id, clipIds: memberIds, trackId: track.id })
+  }
+
+  function selectMultipleClips(
+    clipIds: string[],
+    primaryClipId: string,
+    trackId: string,
+    options?: { additive?: boolean; expandGroups?: boolean },
+  ) {
+    if (!timeline) return
+    const expanded =
+      options?.expandGroups === false ? clipIds : expandClipIdsThroughGroups(timeline, clipIds)
+    if (options?.additive && view.selection?.kind === "clip") {
+      const merged = mergeClipIds(view.selection.clipIds, expanded)
+      const nextPrimary = view.selection.clipIds.includes(view.selection.primaryClipId)
+        ? view.selection.primaryClipId
+        : primaryClipId
+      setSelection({ kind: "clip", primaryClipId: nextPrimary, clipIds: merged, trackId })
+      return
+    }
+    if (expanded.length === 0) return
+    setSelection({ kind: "clip", primaryClipId, clipIds: expanded, trackId })
+  }
+
+  function selectTrackClips(track: TimelineTrack) {
+    if (!timeline) return
+    const clipIds = [...track.clips].sort((a, b) => a.startMs - b.startMs).map((clip) => clip.id)
+    if (clipIds.length === 0) return
+    setSelection({
+      kind: "clip",
+      primaryClipId: clipIds[0],
+      clipIds: expandClipIdsThroughGroups(timeline, clipIds),
+      trackId: track.id,
+    })
+  }
+
+  const selectAllClips = useCallback(() => {
+    if (!timeline) return
+    const clipIds = selectAllClipIds(timeline)
+    if (clipIds.length === 0) return
+    setSelection({ kind: "clip", primaryClipId: clipIds[0], clipIds })
+  }, [timeline, setSelection])
+
+  // Tab cycling skips the whole current selection so grouped units advance as
+  // one stop instead of stepping through every member.
+  const cycleClipSelection = useCallback(
+    (direction: 1 | -1) => {
+      if (!timeline) return
+      const ordered = clipsInTimelineOrder(timeline)
+      if (ordered.length === 0) return
+      const selection = view.selection?.kind === "clip" ? view.selection : null
+      const selectedIds = new Set(selection?.clipIds ?? [])
+      const primaryIndex = selection
+        ? ordered.findIndex(({ clip }) => clip.id === selection.primaryClipId)
+        : -1
+      let entry = ordered[0]
+      if (primaryIndex >= 0) {
+        const count = ordered.length
+        for (let step = 1; step <= count; step++) {
+          const candidate = ordered[(((primaryIndex + direction * step) % count) + count) % count]
+          if (!selectedIds.has(candidate.clip.id)) {
+            entry = candidate
+            break
+          }
+        }
       }
       setSelection({
         kind: "clip",
-        primaryClipId: clip.id,
-        clipIds,
-        trackId: track.id,
+        primaryClipId: entry.clip.id,
+        clipIds: expandClipIdsThroughGroups(timeline, [entry.clip.id]),
+        trackId: entry.track.id,
+      })
+    },
+    [timeline, view.selection, setSelection],
+  )
+
+  const groupSelectedClips = useCallback(() => {
+    if (!timeline) return
+    const selection = view.selection?.kind === "clip" ? view.selection : null
+    if (!selection || selection.clipIds.length < 2) {
+      toast({
+        title: "Nothing to group",
+        description: "Select at least two clips to create a group.",
       })
       return
     }
-    setSelection({ kind: "clip", primaryClipId: clip.id, clipIds: [clip.id], trackId: track.id })
-  }
+    if (execute(createGroupClipsCommand(selection.clipIds))) {
+      toast({
+        title: "Clips grouped",
+        description: `${selection.clipIds.length} clips now move and edit as one.`,
+      })
+    } else {
+      toast({
+        title: "Cannot group clips",
+        description: useTimelineStore.getState().error ?? "Some clips or tracks are locked.",
+        variant: "error",
+      })
+    }
+  }, [timeline, view.selection, execute, toast])
 
-  function selectMultipleClips(clipIds: string[], primaryClipId: string, trackId: string) {
-    setSelection({ kind: "clip", primaryClipId, clipIds, trackId })
-  }
+  const ungroupSelectedClips = useCallback(() => {
+    if (!timeline) return
+    const selection = view.selection?.kind === "clip" ? view.selection : null
+    if (!selection) return
+    // Only the selected clips leave their groups; a partially-selected member
+    // can detach while its siblings stay grouped.
+    const clipIds = selection.clipIds.filter((clipId) => {
+      const found = findClip(timeline, clipId)
+      return found ? getClipGroupId(found.clip) !== undefined : false
+    })
+    if (clipIds.length === 0) {
+      toast({ title: "Nothing to ungroup", description: "The selected clips are not grouped." })
+      return
+    }
+    execute(createUngroupClipsCommand(clipIds))
+  }, [timeline, view.selection, execute, toast])
 
   function selectRange(startMs: number, endMs: number) {
     if (endMs <= startMs) return
@@ -1619,6 +1727,13 @@ export function TimelineView({
       } else if (hasModifier && key === "d") {
         event.preventDefault()
         duplicateSelected()
+      } else if (hasModifier && key === "a") {
+        event.preventDefault()
+        selectAllClips()
+      } else if (hasModifier && key === "g") {
+        event.preventDefault()
+        if (event.shiftKey) ungroupSelectedClips()
+        else groupSelectedClips()
       } else if (hasModifier && (key === "=" || key === "+")) {
         event.preventDefault()
         setZoom(Math.min(100, Math.round(view.zoom + 10)))
@@ -1696,6 +1811,9 @@ export function TimelineView({
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault()
         deleteSelected(event.shiftKey)
+      } else if (event.key === "Tab") {
+        event.preventDefault()
+        cycleClipSelection(event.shiftKey ? -1 : 1)
       } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault()
         const direction = event.key === "ArrowLeft" ? -1 : 1
@@ -1788,14 +1906,17 @@ export function TimelineView({
     },
     [
       addMarker,
+      cycleClipSelection,
       deleteSelected,
       duplicateSelected,
       execute,
       frameMs,
+      groupSelectedClips,
       handleAddZoom,
       jumpToNextCut,
       jumpToPreviousCut,
       nudgeSelected,
+      selectAllClips,
       overlayInteraction,
       pause,
       play,
@@ -1812,6 +1933,7 @@ export function TimelineView({
       togglePlay,
       trimSelected,
       undo,
+      ungroupSelectedClips,
       view.durationMs,
       view.isPlaying,
       view.playbackRate,
@@ -2355,6 +2477,9 @@ export function TimelineView({
           onSelectClip={selectClip}
           onSelectMultipleClips={selectMultipleClips}
           onSelectRange={selectRange}
+          onSelectTrackClips={selectTrackClips}
+          onGroupClips={groupSelectedClips}
+          onUngroupClips={ungroupSelectedClips}
           onMoveClip={interaction.moveClip}
           onTrimClip={interaction.trimClip}
           onSelectMarker={selectMarker}

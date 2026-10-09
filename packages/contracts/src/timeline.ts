@@ -188,6 +188,9 @@ export const timelineClipBaseSchema = z.object({
   sourceInMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   sourceOutMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   speed: z.number().positive().default(1),
+  // Optional clip-group membership. Clips sharing a groupId select and edit as
+  // one unit; optional so v1 projects load unchanged.
+  groupId: z.string().optional(),
 })
 
 export type TimelineClipBase = z.infer<typeof timelineClipBaseSchema>
@@ -290,6 +293,8 @@ export const cursorEffectClipSchema = z.object({
   settings: cursorEffectSettingsSchema.default({}),
   enabled: z.boolean().default(true),
   locked: z.boolean().default(false),
+  // Cursor ranges can join clip groups so a range moves with its media clips.
+  groupId: z.string().optional(),
 })
 
 export type CursorEffectClip = z.infer<typeof cursorEffectClipSchema>
@@ -695,6 +700,89 @@ export const renderPlanChapterSchema = z.object({
 })
 export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
 
+/** Studio Audio mastering options applied to the final mixed audio (Pro). */
+export const audioMasteringSchema = z.object({
+  // FFmpeg afftdn — frequency-domain denoise tuned for speech noise floors.
+  denoise: z.boolean().default(false),
+  // Integrated loudness target in LUFS (loudnorm). null = normalization off.
+  loudnessTarget: z.number().min(-30).max(-5).nullable().default(null),
+})
+export type AudioMastering = z.infer<typeof audioMasteringSchema>
+
+/** Brand Kit watermark: a logo composited over every frame at export (Pro). */
+export const brandWatermarkSchema = z.object({
+  enabled: z.boolean().default(false),
+  // Absolute path to a PNG/JPG logo; the picker copies it into app data.
+  logoPath: z.string().nullable().default(null),
+  position: z
+    .enum(["top-left", "top-right", "bottom-left", "bottom-right"])
+    .default("bottom-right"),
+  // Width as a percent of output width; height keeps aspect.
+  scalePercent: z.number().min(2).max(30).default(8),
+  opacity: z.number().min(0.1).max(1).default(0.85),
+})
+export type BrandWatermark = z.infer<typeof brandWatermarkSchema>
+
+/**
+ * Brand Kit intro/outro cards (Pro): solid-color cards with brand text +
+ * logo rendered as real video segments at the head/tail of the export.
+ * The font/logo pickers copy files into app data — absolute paths only.
+ */
+export const brandCardsSchema = z.object({
+  enabled: z.boolean().default(false),
+  // 0 disables each side independently.
+  introMs: z.number().int().min(0).max(10_000).default(0),
+  outroMs: z.number().int().min(0).max(10_000).default(0),
+  title: z.string().max(120).nullable().default(null),
+  subtitle: z.string().max(200).nullable().default(null),
+  background: z.string().default("#0f172a"),
+  textColor: z.string().default("#f8fafc"),
+  fontPath: z.string().nullable().default(null),
+})
+export type BrandCards = z.infer<typeof brandCardsSchema>
+
+/**
+ * Auto-reframe (Pro): how a non-matching canvas aspect handles the screen
+ * source. `fit` = letterbox into the content area (legacy behavior), `fill` =
+ * centered crop filling the canvas, `cursor-follow` = the crop window pans to
+ * track the recorded cursor. The plan carries `reframe` only for the two
+ * cropping modes.
+ */
+export const reframeModeSchema = z.enum(["fit", "fill", "cursor-follow"])
+export type ReframeMode = z.infer<typeof reframeModeSchema>
+
+/**
+ * Virtual background (Pro): on-device person segmentation cuts the webcam
+ * feed out of its backdrop — `blur` re-composites it over a blurred copy,
+ * `replace` over a solid brand color. The model is downloaded on demand;
+ * the mask video is pre-rendered per camera asset at export.
+ */
+export const webcamBackgroundSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(["blur", "replace"]).default("blur"),
+  blurSigma: z.number().min(2).max(80).default(20),
+  replaceColor: z.string().default("#0f172a"),
+})
+export type WebcamBackground = z.infer<typeof webcamBackgroundSchema>
+
+export const renderPlanReframeKeyframeSchema = z.object({
+  // Output-timeline timestamp of this pan keyframe.
+  timeMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+  // Desired crop-center in normalized source coordinates (0..1).
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+})
+export type RenderPlanReframeKeyframe = z.infer<typeof renderPlanReframeKeyframeSchema>
+
+export const renderPlanReframeSchema = z.object({
+  // "fit" never reaches the plan — the field is omitted instead.
+  mode: z.enum(["fill", "cursor-follow"]),
+  // Empty for `fill` (static center crop) and as a graceful fallback when a
+  // cursor-follow export has no telemetry.
+  keyframes: z.array(renderPlanReframeKeyframeSchema).default([]),
+})
+export type RenderPlanReframe = z.infer<typeof renderPlanReframeSchema>
+
 export const exportSettingsSchema = z.object({
   preset: exportPresetSchema.default("default-mp4"),
   codec: z.enum(["h264", "hevc", "gif", "webp"]).default("h264"),
@@ -703,6 +791,33 @@ export const exportSettingsSchema = z.object({
   captionMode: renderCaptionModeSchema.default("burn-in"),
   chapterMode: renderChapterModeSchema.default("embed"),
   range: exportRangeSchema.nullish(),
+  audioMastering: audioMasteringSchema.default({ denoise: false, loudnessTarget: null }),
+  brandWatermark: brandWatermarkSchema.default({
+    enabled: false,
+    logoPath: null,
+    position: "bottom-right",
+    scalePercent: 8,
+    opacity: 0.85,
+  }),
+  // Keystroke overlay (Pro) — modifier-combo badges captured during recording.
+  keystrokeOverlay: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+  reframeMode: reframeModeSchema.default("fit"),
+  brandCards: brandCardsSchema.default({
+    enabled: false,
+    introMs: 0,
+    outroMs: 0,
+    title: null,
+    subtitle: null,
+    background: "#0f172a",
+    textColor: "#f8fafc",
+    fontPath: null,
+  }),
+  webcamBackground: webcamBackgroundSchema.default({
+    enabled: false,
+    mode: "blur",
+    blurSigma: 20,
+    replaceColor: "#0f172a",
+  }),
 })
 export type ExportSettings = z.infer<typeof exportSettingsSchema>
 
@@ -1048,6 +1163,9 @@ export const renderPlanSchema = z
     annotations: z.array(renderPlanAnnotationSchema).default([]),
     texts: z.array(renderPlanTextSchema).default([]),
     images: z.array(renderPlanImageSchema).default([]),
+    // Auto-reframe (Pro): crop the screen stream to the canvas content aspect,
+    // optionally panning along cursor telemetry keyframes.
+    reframe: renderPlanReframeSchema.optional(),
   })
   .superRefine((plan, context) => {
     let cursorMs = 0

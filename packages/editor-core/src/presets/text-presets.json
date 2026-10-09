@@ -403,7 +403,7 @@
       "category": "lower-third",
       "tags": ["lower third", "social", "handle", "follow", "creator"],
       "definition": {
-        "defaultPrimaryText": "@recordforge_app",
+        "defaultPrimaryText": "@recordforge",
         "defaultSecondaryText": "Subscribe for weekly product updates & devlogs",
         "defaultTagText": "FOLLOW",
         "width": 390,

@@ -31,6 +31,9 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { isTauri } from "../../lib/settings"
 import { useRecorderStore } from "../../hooks/use-recorder"
+import { useLicenseStore } from "../../stores/license-store"
+import { PRO_CHECKOUT_URL } from "../../lib/license"
+import { ProBadge } from "../licensing"
 import { UpdateCard } from "../updater"
 
 export interface AboutViewProps {
@@ -52,6 +55,8 @@ export function AboutView({
 }: AboutViewProps) {
   const { toast } = useToast()
   const diagnostics = useRecorderStore((state) => state.diagnostics)
+  const licenseStatus = useLicenseStore((state) => state.status)
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const [isCopying, setIsCopying] = useState(false)
   const [appVersion, setAppVersion] = useState("development")
 
@@ -103,7 +108,8 @@ export function AboutView({
         "RecordForge Desktop System Report",
         "================================",
         `App Version: ${appVersion}`,
-        "Licensing: Free & Open-Source (GNU GPLv3)",
+        `License Tier: ${licenseStatus.tier === "pro" ? "Pro" : "Free"}`,
+        "Core Licensing: GNU GPLv3 (open-core)",
         `Source Repository: ${GITHUB_REPO_URL}`,
         `Platform: ${os}`,
         `Processor: ${cpu}`,
@@ -239,12 +245,15 @@ export function AboutView({
                     Licensing & Distribution
                   </CardTitle>
                 </div>
-                <Badge variant="accent" className="text-[10px] uppercase font-semibold">
-                  GNU GPLv3
-                </Badge>
+                <div className="flex items-center gap-1.5">
+                  <Badge variant="accent" className="text-[10px] uppercase font-semibold">
+                    GNU GPLv3
+                  </Badge>
+                  {licenseStatus.tier === "pro" ? <ProBadge /> : null}
+                </div>
               </div>
               <CardDescription className="text-xs text-subtle-foreground">
-                Copyleft free software license and community permissions.
+                Open-core licensing — GPL source, optional Pro entitlements.
               </CardDescription>
             </CardHeader>
 
@@ -252,15 +261,16 @@ export function AboutView({
               <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-2">
                 <div className="flex items-center gap-2 font-semibold text-foreground">
                   <Info className="size-4 text-primary shrink-0" />
-                  <span>100% Free & Open-Source Software</span>
+                  <span>Open-core free software</span>
                 </div>
                 <p className="text-subtle-foreground leading-relaxed">
-                  RecordForge is free and open-source software licensed under the{" "}
+                  The RecordForge app is licensed under the{" "}
                   <strong className="text-foreground font-semibold">
                     GNU General Public License v3.0 (GPL-3.0-or-later)
                   </strong>
-                  . You are free to inspect, modify, and contribute to the source code. All
-                  recordings and edits remain 100% private to your machine.
+                  . Hosted services, license-key issuance, and the RecordForge name and logo are
+                  reserved for official releases. All recordings and edits remain 100% private to
+                  your machine.
                 </p>
               </div>
 
@@ -306,62 +316,91 @@ export function AboutView({
           </div>
         </Card>
 
-        {/* Version 2 Roadmap & Premium Tiers */}
-        <Card className="rounded-2xl border border-border bg-surface shadow-e1">
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Wand2 className="size-5 text-accent" />
-                <CardTitle className="text-base font-semibold text-foreground">
-                  Version 2 Roadmap & Premium
-                </CardTitle>
-              </div>
-              <Badge variant="warning" className="text-[10px] uppercase font-semibold">
-                In Development
-              </Badge>
-            </div>
-            <CardDescription className="text-xs text-subtle-foreground">
-              Our transparent monetization and evolution plan.
-            </CardDescription>
-          </CardHeader>
-
-          <CardContent className="space-y-4 text-xs">
-            <p className="text-subtle-foreground leading-relaxed">
-              We believe in honest, predictable software. Most of RecordForge will always remain
-              free. <strong className="text-foreground font-semibold">Version 2.0</strong> will ship
-              with optional paid premium features designed for power creators and teams.
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-              <div className="rounded-xl border border-border bg-surface-dim p-3.5 space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                  <CheckCircle2 className="size-3.5 text-emerald-400" />
-                  <span>Always Free</span>
+        {/* Free vs Pro */}
+        <Card className="rounded-2xl border border-border bg-surface shadow-e1 flex flex-col justify-between">
+          <div>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Wand2 className="size-5 text-accent" />
+                  <CardTitle className="text-base font-semibold text-foreground">
+                    RecordForge Pro
+                  </CardTitle>
                 </div>
-                <ul className="space-y-1.5 text-[11px] text-subtle-foreground">
-                  <li>• Unlimited 4K 60FPS screen capture</li>
-                  <li>• WASAPI precision audio mixing</li>
-                  <li>• Proxy timeline editor & cuts</li>
-                  <li>• Local MP4 hardware export</li>
-                  <li>• Vector cursor smoothing</li>
-                </ul>
+                {licenseStatus.tier === "pro" ? (
+                  <ProBadge />
+                ) : (
+                  <Badge variant="outline" className="text-[10px] uppercase font-semibold">
+                    One-time purchase
+                  </Badge>
+                )}
+              </div>
+              <CardDescription className="text-xs text-subtle-foreground">
+                {licenseStatus.tier === "pro"
+                  ? `Active on this device${licenseStatus.plan ? ` · ${licenseStatus.plan}` : ""}.`
+                  : "A lifetime license that funds development — no subscription."}
+              </CardDescription>
+            </CardHeader>
+
+            <CardContent className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div className="rounded-xl border border-border bg-surface-dim p-3.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                    <CheckCircle2 className="size-3.5 text-emerald-400" />
+                    <span>Free</span>
+                  </div>
+                  <ul className="space-y-1.5 text-[11px] text-subtle-foreground">
+                    <li>• Unlimited 4K 60FPS screen capture</li>
+                    <li>• Full timeline editor, cuts, captions</li>
+                    <li>• 16:9 exports up to 1080p</li>
+                    <li>• Clean Text title preset</li>
+                    <li>• Local MP4 hardware export</li>
+                  </ul>
+                </div>
+
+                <div className="rounded-xl border border-warning/30 bg-warning/5 p-3.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-warning">
+                    <Flame className="size-3.5 text-warning" />
+                    <span>Pro</span>
+                  </div>
+                  <ul className="space-y-1.5 text-[11px] text-subtle-foreground">
+                    <li>• 1440p & 4K exports (Ultra 4K)</li>
+                    <li>• Vertical, square & custom ratios</li>
+                    <li>• Chapters & YouTube timestamps</li>
+                    <li>• Every title preset beyond Clean Text</li>
+                    <li>• Annotations — shapes, arrows, callouts</li>
+                  </ul>
+                </div>
               </div>
 
-              <div className="rounded-xl border border-secondary/30 bg-secondary/5 p-3.5 space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-secondary">
-                  <Flame className="size-3.5 text-secondary" />
-                  <span>Version 2 Premium</span>
-                </div>
-                <ul className="space-y-1.5 text-[11px] text-subtle-foreground">
-                  <li>• AI smart-zoom auto-framing</li>
-                  <li>• Multi-track studio audio isolation</li>
-                  <li>• Cloud team sync & instant share</li>
-                  <li>• Custom brand kits & intro cards</li>
-                  <li>• Automatic speech captions & search</li>
-                </ul>
-              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                One-time purchase, lifetime updates, 3 personal devices. Activation is a single
+                online check — Pro then works fully offline. Coming next: instant web delivery and
+                share links.
+              </p>
+            </CardContent>
+          </div>
+
+          {licenseStatus.tier !== "pro" ? (
+            <div className="p-6 pt-0">
+              <Button
+                variant="primary"
+                size="sm"
+                className="w-full text-xs h-9 cursor-pointer gap-2"
+                onClick={() => {
+                  if (isTauri()) {
+                    openUpgradeDialog()
+                  } else {
+                    handleOpenUrl(PRO_CHECKOUT_URL, "RecordForge Pro")
+                  }
+                }}
+              >
+                <Sparkles className="size-3.5" />
+                <span>Upgrade to Pro</span>
+                <ExternalLink className="size-3 text-primary-foreground/70 ml-auto" />
+              </Button>
             </div>
-          </CardContent>
+          ) : null}
         </Card>
       </div>
 

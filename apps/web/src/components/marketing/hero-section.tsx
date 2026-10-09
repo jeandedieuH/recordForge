@@ -66,6 +66,7 @@ export function HeroSection({ version }: HeroSectionProps) {
         <Reveal delay={260}>
           <div className="mt-9 flex flex-col items-center gap-3 sm:flex-row">
             {/* Button-in-button: nested icon circle inside the primary pill. */}
+            {/* Button-in-button: nested icon circle inside the primary pill. */}
             <Link
               to="/download"
               className="group inline-flex items-center gap-3 rounded-full bg-primary py-2 pl-6 pr-2 text-sm font-semibold text-white shadow-e2 transition-[transform,background-color] duration-base ease-forge hover:bg-primary/90 active:scale-[0.98]"
@@ -88,6 +89,12 @@ export function HeroSection({ version }: HeroSectionProps) {
                 aria-hidden
               />
             </a>
+            <Link
+              to="/pricing"
+              className="text-sm font-medium text-muted-foreground underline-offset-4 transition-colors duration-fast ease-forge hover:text-foreground hover:underline"
+            >
+              Free & Pro — see pricing
+            </Link>
           </div>
         </Reveal>
 

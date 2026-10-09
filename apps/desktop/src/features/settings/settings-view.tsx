@@ -42,6 +42,7 @@ import { CursorInspector } from "../editor/cursor"
 import { StorageSettings } from "./storage-settings"
 import { SmartZoomSettings } from "./smart-zoom-settings"
 import { AboutView } from "../about"
+import { LicenseSettings } from "../licensing"
 
 export type SettingsTab = "general" | "quality" | "cursor" | "diagnostics" | "storage" | "about"
 
@@ -329,6 +330,10 @@ export function SettingsView({
       {/* Tab 1: General & Appearance */}
       {activeTab === "general" ? (
         <div className="space-y-6">
+          {/* License status + activation — Free shows the key input, Pro shows
+              plan/device metadata and the deactivate control. */}
+          <LicenseSettings />
+
           {/* Theme Selection Cards */}
           <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">
             <div>

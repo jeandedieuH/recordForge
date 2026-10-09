@@ -10,6 +10,7 @@ pub mod encoder;
 pub mod engine;
 pub mod fakes;
 pub mod ffmpeg;
+pub mod keystrokes;
 pub mod linux_portal;
 pub mod manifest;
 pub mod media;

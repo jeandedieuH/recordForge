@@ -624,6 +624,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         webcamDeviceId: camId || undefined,
         smartZoomEnabled: state.preferences.smartZoomEnabled,
         smartZoomPreset: state.preferences.smartZoomPreset,
+        captureKeystrokes: state.preferences.captureKeystrokes,
       }
 
       void get().savePreferences({
@@ -638,6 +639,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         systemAudioId: sysId || get().preferences.systemAudioId,
         webcamEnabled: Boolean(camId),
         webcamId: camId || get().preferences.webcamId,
+        // Not set here — preserve the modal's keystroke-overlay toggle.
+        captureKeystrokes: get().preferences.captureKeystrokes,
       })
 
       const configuredCountdown = isTauri()

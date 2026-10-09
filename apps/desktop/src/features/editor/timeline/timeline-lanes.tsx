@@ -14,6 +14,7 @@ import type {
 } from "@recordforge/contracts"
 import {
   buildSnapTargets,
+  getClipGroupId,
   snapTime,
   trackAllowsOverlap,
   type SnapTarget,
@@ -84,8 +85,16 @@ export interface TimelineLanesProps {
   onSetScroll: (ms: number) => void
   onSetZoom?: (zoom: number) => void
   onSelectClip: (clip: TimelineClip, track: TimelineTrack, event: React.MouseEvent) => void
-  onSelectMultipleClips?: (clipIds: string[], primaryClipId: string, trackId: string) => void
+  onSelectMultipleClips?: (
+    clipIds: string[],
+    primaryClipId: string,
+    trackId: string,
+    options?: { additive?: boolean; expandGroups?: boolean },
+  ) => void
   onSelectRange: (startMs: number, endMs: number) => void
+  onSelectTrackClips?: (track: TimelineTrack) => void
+  onGroupClips?: () => void
+  onUngroupClips?: () => void
   onMoveClip: (
     clip: TimelineClip,
     track: TimelineTrack,
@@ -260,6 +269,9 @@ export function TimelineLanes({
   onSelectClip,
   onSelectMultipleClips,
   onSelectRange,
+  onSelectTrackClips,
+  onGroupClips,
+  onUngroupClips,
   onMoveClip,
   onTrimClip,
   onSelectMarker,
@@ -298,19 +310,34 @@ export function TimelineLanes({
   const [viewportWidth, setViewportWidth] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
 
-  const [marquee, setMarquee] = useState<{ startMs: number; endMs: number } | null>(null)
+  const [marquee, setMarquee] = useState<{
+    startMs: number
+    endMs: number
+    topPx: number
+    bottomPx: number
+  } | null>(null)
   const [razorHoverMs, setRazorHoverMs] = useState<number | null>(null)
   const [snapGuide, setSnapGuide] = useState<SnapTarget | null>(null)
 
   const marqueePointerRef = useRef<{
     pointerId: number
     startMs: number
+    startContentY: number
     moved: boolean
   } | null>(null)
 
   const selectedClipIds = new Set(view.selection?.kind === "clip" ? view.selection.clipIds : [])
   const selectedMarkerId = view.selection?.kind === "marker" ? view.selection.markerId : null
   const selectedZoomId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
+
+  const selectionCanGroup = selectedClipIds.size >= 2
+  const selectionHasGroup = useMemo(() => {
+    if (view.selection?.kind !== "clip") return false
+    const ids = new Set(view.selection.clipIds)
+    return timeline.tracks.some((track) =>
+      track.clips.some((clip) => ids.has(clip.id) && getClipGroupId(clip) !== undefined),
+    )
+  }, [timeline.tracks, view.selection])
 
   const scrollMargin = RULER_TOTAL_HEIGHT
 
@@ -447,6 +474,19 @@ export function TimelineLanes({
     return { track, virtualTrack }
   })
 
+  // Track row bounds in content coordinates (0 = top of the ruler). The 2D
+  // marquee hit-tests these so a horizontal drag only grabs clips on the rows
+  // the box actually covers.
+  const trackRowBounds = useMemo(() => {
+    let top = scrollMargin
+    return timeline.tracks.map((track) => {
+      const height = getTrackHeight(track, view)
+      const row = { trackId: track.id, top, bottom: top + height }
+      top += height
+      return row
+    })
+  }, [timeline.tracks, view, scrollMargin])
+
   function handleScroll() {
     const element = scrollRef.current
     if (!element) return
@@ -461,6 +501,15 @@ export function TimelineLanes({
     const bounds = element.getBoundingClientRect()
     const position = Math.max(0, clientX - bounds.left + element.scrollLeft)
     return Math.min(view.durationMs, Math.max(0, position / pixelsPerMs))
+  }
+
+  // Vertical counterpart to timelineTimeFromClientX: client Y mapped into the
+  // scroll content's coordinate space (0 = ruler top, tracks start at scrollMargin).
+  function timelineContentYFromClientY(clientY: number): number {
+    const element = scrollRef.current
+    if (!element) return 0
+    const bounds = element.getBoundingClientRect()
+    return clientY - bounds.top + element.scrollTop
   }
 
   // Wheel handling: Ctrl+Wheel for zoom centered on cursor; Shift+Wheel for pan
@@ -613,10 +662,17 @@ export function TimelineLanes({
       }
     }
     onSeek(targetSeekMs)
-    onDeselectAll?.()
+    // Shift-held drags extend the selection instead of replacing it, so the
+    // current selection must survive the pointer-down.
+    if (!e.shiftKey) onDeselectAll?.()
 
     // Set up marquee in case user drags
-    marqueePointerRef.current = { pointerId: e.pointerId, startMs, moved: false }
+    marqueePointerRef.current = {
+      pointerId: e.pointerId,
+      startMs,
+      startContentY: timelineContentYFromClientY(e.clientY),
+      moved: false,
+    }
     e.currentTarget.setPointerCapture(e.pointerId)
   }
 
@@ -642,11 +698,22 @@ export function TimelineLanes({
     if (!gesture || gesture.pointerId !== e.pointerId) return
 
     const currentMs = timelineTimeFromClientX(e.clientX)
-    if (Math.abs(currentMs - gesture.startMs) < 40 && !gesture.moved) return
+    const currentContentY = timelineContentYFromClientY(e.clientY)
+    if (
+      Math.abs(currentMs - gesture.startMs) < 40 &&
+      Math.abs(currentContentY - gesture.startContentY) < 8 &&
+      !gesture.moved
+    )
+      return
     gesture.moved = true
+    // Clamp the box to the track region so it never paints over the ruler.
+    const topPx = Math.max(scrollMargin, Math.min(gesture.startContentY, currentContentY))
+    const bottomPx = Math.min(contentHeight, Math.max(gesture.startContentY, currentContentY))
     setMarquee({
       startMs: Math.min(gesture.startMs, currentMs),
       endMs: Math.max(gesture.startMs, currentMs),
+      topPx,
+      bottomPx,
     })
     e.preventDefault()
   }
@@ -663,11 +730,26 @@ export function TimelineLanes({
       if (tool === "range") {
         onSelectRange(minMs, maxMs)
       } else {
-        // Select all clips intersecting the marquee
+        // 2D marquee: only clips on rows the box vertically covers are hit.
+        const topPx = Math.max(
+          scrollMargin,
+          Math.min(gesture.startContentY, timelineContentYFromClientY(e.clientY)),
+        )
+        const bottomPx = Math.min(
+          contentHeight,
+          Math.max(gesture.startContentY, timelineContentYFromClientY(e.clientY)),
+        )
+        const coveredTrackIds = new Set(
+          trackRowBounds
+            .filter((row) => row.bottom > topPx && row.top < bottomPx)
+            .map((row) => row.trackId),
+        )
+
         const matchingClipIds: string[] = []
         let primaryClip: { id: string; trackId: string } | null = null
 
         for (const track of timeline.tracks) {
+          if (!coveredTrackIds.has(track.id)) continue
           for (const clip of track.clips) {
             if (clip.startMs <= maxMs && clip.startMs + clip.durationMs >= minMs) {
               matchingClipIds.push(clip.id)
@@ -677,8 +759,13 @@ export function TimelineLanes({
         }
 
         if (matchingClipIds.length > 0 && primaryClip && onSelectMultipleClips) {
-          onSelectMultipleClips(matchingClipIds, primaryClip.id, primaryClip.trackId)
-        } else if (matchingClipIds.length === 0 && onDeselectAll) {
+          // Shift adds to the current selection; Alt skips group expansion so
+          // a marquee can isolate individual clips out of a group.
+          onSelectMultipleClips(matchingClipIds, primaryClip.id, primaryClip.trackId, {
+            additive: e.shiftKey,
+            expandGroups: !e.altKey,
+          })
+        } else if (matchingClipIds.length === 0 && !e.shiftKey && onDeselectAll) {
           onDeselectAll()
         }
       }
@@ -900,6 +987,7 @@ export function TimelineLanes({
                     onToggleTrackCollapsed={onToggleTrackCollapsed}
                     onCycleTrackHeight={onCycleTrackHeight}
                     onRenameTrack={onRenameTrack}
+                    onSelectTrackClips={onSelectTrackClips}
                   />
                 )
               })}
@@ -982,8 +1070,22 @@ export function TimelineLanes({
 
                 {/* Range Selection / Marquee Overlay */}
                 {(() => {
-                  const range =
-                    marquee ?? (view.selection?.kind === "range" ? view.selection : null)
+                  // An in-progress select-tool marquee carries real 2D bounds;
+                  // persisted range selections and range-tool drags stay
+                  // full-height so they read as a whole-timeline range.
+                  if (marquee) {
+                    const bounded = tool === "select"
+                    return (
+                      <TimelineMarquee
+                        startMs={marquee.startMs}
+                        endMs={marquee.endMs}
+                        pixelsPerMs={pixelsPerMs}
+                        top={bounded ? marquee.topPx : scrollMargin}
+                        height={bounded ? Math.max(4, marquee.bottomPx - marquee.topPx) : undefined}
+                      />
+                    )
+                  }
+                  const range = view.selection?.kind === "range" ? view.selection : null
                   if (!range) return null
                   return (
                     <TimelineMarquee
@@ -1192,6 +1294,10 @@ export function TimelineLanes({
                               onSeek={onSeek}
                               onCursorRangeAction={onCursorRangeAction}
                               onUpdateAudio={onUpdateClipAudio}
+                              canGroup={selectionCanGroup}
+                              canUngroup={selectionHasGroup}
+                              onGroupClips={onGroupClips}
+                              onUngroupClips={onUngroupClips}
                             />
                           )
                         })

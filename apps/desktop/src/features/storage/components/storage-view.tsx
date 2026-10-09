@@ -4,6 +4,7 @@ import { Button, Card } from "@recordforge/ui"
 import { useStorageStore } from "../storage-store"
 import { StorageProfilesManager } from "./storage-profiles-manager"
 import { UploadJobsPanel } from "./upload-jobs-panel"
+import { SharedLinksCard } from "../../sharing/shared-links-card"
 
 interface StorageViewProps {
   onNavigateToSettings?: () => void
@@ -158,6 +159,10 @@ export function StorageView(_props: StorageViewProps) {
 
         <div className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
           <UploadJobsPanel />
+        </div>
+
+        <div className="rounded-2xl border border-border bg-surface p-6 shadow-sm">
+          <SharedLinksCard />
         </div>
       </div>
     </div>

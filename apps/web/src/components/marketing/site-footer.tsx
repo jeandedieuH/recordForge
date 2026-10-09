@@ -7,6 +7,7 @@ const FOOTER_COLUMNS = [
     heading: "Product",
     links: [
       { label: "Download", href: "/download", internal: true },
+      { label: "Pricing", href: "/pricing", internal: true },
       { label: "Features", href: "/#features", internal: false },
       { label: "Release notes", href: RELEASES_URL, internal: false },
     ],
@@ -23,6 +24,8 @@ const FOOTER_COLUMNS = [
     heading: "Legal",
     links: [
       { label: "GPL-3.0 license", href: `${GITHUB_URL}/blob/main/LICENSE`, internal: false },
+      { label: "Pro terms", href: `${GITHUB_URL}/blob/main/PRO-LICENSE-TERMS.md`, internal: false },
+      { label: "Trademark policy", href: `${GITHUB_URL}/blob/main/TRADEMARKS.md`, internal: false },
       { label: "Security", href: `${GITHUB_URL}/blob/main/SECURITY.md`, internal: false },
     ],
   },

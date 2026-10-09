@@ -96,8 +96,8 @@ describe("Asset Path Resolution & URL Helpers", () => {
 
   describe("resolveAssetPath", () => {
     const workDirWindows =
-      "C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1"
-    const workDirPosix = "/home/user/.config/com.recordforge.app/sessions/sess-1"
+      "C:\\Users\\user\\AppData\\Roaming\\dev.prestigetech.recordforge\\sessions\\sess-1"
+    const workDirPosix = "/home/user/.config/dev.prestigetech.recordforge/sessions/sess-1"
 
     it("returns normalized absolute paths", () => {
       const winPath = "C:\\temp\\image.png"
@@ -116,7 +116,7 @@ describe("Asset Path Resolution & URL Helpers", () => {
       const relative = "assets/4c8966f0562843da-prestigelearning.png"
       const resolved = resolveAssetPath(relative, workDirWindows)
       expect(resolved).toBe(
-        "C:/Users/user/AppData/Roaming/com.recordforge.app/sessions/sess-1/assets/4c8966f0562843da-prestigelearning.png",
+        "C:/Users/user/AppData/Roaming/dev.prestigetech.recordforge/sessions/sess-1/assets/4c8966f0562843da-prestigelearning.png",
       )
     })
 
@@ -130,10 +130,10 @@ describe("Asset Path Resolution & URL Helpers", () => {
 
     it("strips Windows verbatim prefix from workDir during join", () => {
       const verbatimWorkDir =
-        "\\\\?\\C:\\Users\\user\\AppData\\Roaming\\com.recordforge.app\\sessions\\sess-1"
+        "\\\\?\\C:\\Users\\user\\AppData\\Roaming\\dev.prestigetech.recordforge\\sessions\\sess-1"
       const relative = "assets/image.png"
       expect(resolveAssetPath(relative, verbatimWorkDir)).toBe(
-        "C:/Users/user/AppData/Roaming/com.recordforge.app/sessions/sess-1/assets/image.png",
+        "C:/Users/user/AppData/Roaming/dev.prestigetech.recordforge/sessions/sess-1/assets/image.png",
       )
     })
 

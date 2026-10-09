@@ -1,9 +1,13 @@
 pub mod assets;
+pub mod background;
 pub mod captions;
 pub mod exports;
+pub mod license;
 pub mod media;
 pub mod projects;
+pub mod publish;
 pub mod recording;
 pub mod settings;
+pub mod share;
 pub mod storage;
 pub mod updates;

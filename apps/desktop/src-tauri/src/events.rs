@@ -15,6 +15,7 @@ pub mod event_names {
     pub const RECORDER_MARKER: &str = "recorder-marker";
     pub const REQUEST_DISCARD_CONFIRMATION: &str = "request-discard-confirmation";
     pub const RECORDER_FINALIZATION_PROGRESS: &str = "recorder-finalization-progress";
+    pub const LICENSE_CHANGED: &str = "license-changed";
 }
 
 /// Publishes Tauri events to the React UI.
@@ -32,6 +33,15 @@ impl<'a> EventPublisher<'a> {
         self.handle
             .emit(event_names::MEDIA_JOB_UPDATE, job)
             .map_err(|e| crate::errors::InternalError::Unknown(format!("emit: {e}")).into())
+    }
+
+    /// Broadcast the current license status after activate/deactivate/refresh.
+    pub fn license_changed(&self, status: &crate::licensing::LicenseStatus) -> Result<()> {
+        self.handle
+            .emit(event_names::LICENSE_CHANGED, status)
+            .map_err(|e| {
+                crate::errors::InternalError::Unknown(format!("emit license changed: {e}")).into()
+            })
     }
 }
 

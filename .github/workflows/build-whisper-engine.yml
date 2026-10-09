@@ -1,0 +1,147 @@
+name: Build Whisper Engine
+
+# Builds whisper.cpp `whisper-cli` binaries for the platforms upstream does
+# not ship a runnable binary for — macOS (arm64/x64) and Windows ARM64 — and
+# publishes them to the `whisper-engine-<ref>` GitHub release on this repo.
+# The desktop app downloads them on demand (src-tauri/src/whisper.rs).
+#
+# Run manually via workflow_dispatch. Re-run after bumping the engine pin in
+# whisper.rs (WHISPER_VERSION), keeping the release tag aligned:
+# `whisper-engine-<version>`.
+#
+# Builds are fully static (BUILD_SHARED_LIBS=OFF) so each artifact is a
+# single self-contained binary — no DLL/.so/.dylib sprawl, no symlink chains.
+# On macOS the Metal backend + metallib are embedded, so Apple Silicon gets
+# GPU-accelerated transcription out of the box; binaries are ad-hoc signed by
+# the linker and downloads via reqwest carry no quarantine xattr, so they run
+# without a Gatekeeper prompt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_ref:
+        description: "whisper.cpp tag or commit to build"
+        default: "v1.9.2"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64 — macos-latest runners are Apple Silicon.
+          - asset: darwin-arm64
+            os: macos-latest
+          # macOS x64 — macos-13 is the last Intel hosted runner.
+          - asset: darwin-x64
+            os: macos-13
+          # Windows ARM64 — MSVC cross-compiles ARM64 from x64 runners.
+          - asset: win-arm64
+            os: windows-latest
+            cmake_generator_args: "-A ARM64"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out whisper.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ inputs.whisper_ref }}
+          path: whisper
+
+      - name: Build whisper-cli (macOS)
+        if: runner.os == 'macOS'
+        working-directory: whisper
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_METAL_EMBED_LIBRARY=ON
+          cmake --build build --config Release -j --target whisper-cli
+
+      - name: Build whisper-cli (Windows ARM64 cross-compile)
+        if: runner.os == 'Windows'
+        working-directory: whisper
+        run: |
+          cmake -B build ${{ matrix.cmake_generator_args }} -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+          cmake --build build --config Release --target whisper-cli
+
+      - name: Smoke test (macOS runners execute their own arch)
+        if: runner.os == 'macOS'
+        working-directory: whisper
+        run: ./build/bin/whisper-cli --help | head -5
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        working-directory: whisper
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cd build/bin
+          zip "$GITHUB_WORKSPACE/dist/whisper-bin-${{ matrix.asset }}.zip" whisper-cli
+          cd "$GITHUB_WORKSPACE/whisper"
+          zip -j "$GITHUB_WORKSPACE/dist/whisper-bin-${{ matrix.asset }}.zip" LICENSE
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        working-directory: whisper
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/dist" | Out-Null
+          Compress-Archive -Path build\bin\Release\whisper-cli.exe, LICENSE -DestinationPath "$env:GITHUB_WORKSPACE/dist/whisper-bin-${{ matrix.asset }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-bin-${{ matrix.asset }}
+          path: dist/whisper-bin-${{ matrix.asset }}.zip
+
+  # Publishes the tract-compatible MediaPipe Selfie Segmentation model used
+  # by the virtual-background export feature (exports/background.rs). The
+  # canonical HF mirror's tail Resize op defeats tract's analyser; the PINTO
+  # zoo only ships a heavyweight tarball, so we extract the 450 KB onnx and
+  # serve it from a dedicated release.
+  seg-model:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and extract PINTO segmentation model
+        run: |
+          curl -sL "https://s3.ap-northeast-2.wasabisys.com/pinto-model-zoo/109_Selfie_Segmentation/resources.tar.gz" -o resources.tar.gz
+          tar -xzf resources.tar.gz "saved_model_tflite_tfjs_tftrt_onnx_coreml/model_float32.onnx"
+          mv "saved_model_tflite_tfjs_tftrt_onnx_coreml/model_float32.onnx" selfie-segmentation-256.onnx
+
+      - name: Publish to seg-model release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: seg-model-v1
+          name: "Segmentation model v1 (virtual background)"
+          body: |
+            `selfie-segmentation-256.onnx` — MediaPipe Selfie Segmentation
+            (PINTO export, NHWC 256×256 input, Apache-2.0). Downloaded on
+            demand by the virtual-background export feature — see
+            `apps/desktop/src-tauri/src/exports/background.rs`.
+          files: selfie-segmentation-256.onnx
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: whisper-bin-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to whisper-engine release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: whisper-engine-${{ inputs.whisper_ref }}
+          name: "Whisper engine ${{ inputs.whisper_ref }} (self-hosted builds)"
+          body: |
+            Statically built `whisper-cli` binaries for platforms upstream does
+            not publish a runnable CLI for. Downloaded on demand by RecordForge's
+            AI Captions feature — see `apps/desktop/src-tauri/src/whisper.rs`.
+          files: dist/*.zip

@@ -7,6 +7,7 @@ import { GitHubIcon } from "./github-icon"
 const NAV_LINKS = [
   { label: "Features", to: "/", hash: "features" },
   { label: "Why local-first", to: "/", hash: "local-first" },
+  { label: "Pricing", to: "/pricing", hash: "" },
 ] as const
 
 /**

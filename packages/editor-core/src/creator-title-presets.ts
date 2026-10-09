@@ -313,7 +313,7 @@ export const CREATOR_TITLE_PRESET_CATALOG: PresetCatalog<TextPresetValues> = {
       {
         defaultPrimaryText: "Try it on your next project",
         defaultSecondaryText: "Start small. Make something useful.",
-        defaultTagText: "recordforge.app",
+        defaultTagText: "recordforge.prestigetech.dev",
         width: 1200,
         height: 320,
         fontFamily: "heading",

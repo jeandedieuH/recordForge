@@ -47,6 +47,27 @@ impl StorageManager {
         }
     }
 
+    /// The upload-source validation every entry point shares — recording
+    /// paths, export destinations, and imported external assets.
+    pub fn validate_upload_source(&self, path: &Path) -> Result<PathBuf> {
+        self.path_policy
+            .validate_recording_path(path)
+            .or_else(|_| self.path_policy.validate_export_destination(path))
+            .or_else(|_| self.path_policy.validate_external_asset_path(path))
+            .map_err(|e| InternalError::Storage(format!("unauthorized file path: {e}")).into())
+    }
+
+    /// Load a configured storage profile by id (share commands need provider
+    /// config + vault keys without going through the job queue).
+    pub fn load_profile(&self, profile_id: &str) -> Result<StorageProfile> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("db mutex poisoned".into()))?;
+        get_profile_by_id(&conn, profile_id)?
+            .ok_or_else(|| InternalError::Storage(format!("profile {profile_id} not found")).into())
+    }
+
     pub fn start_upload(
         &self,
         profile_id: &str,
@@ -56,12 +77,7 @@ impl StorageManager {
         custom_destination_name: Option<String>,
     ) -> Result<UploadJob> {
         let path = Path::new(local_path);
-        let validated_path = self
-            .path_policy
-            .validate_recording_path(path)
-            .or_else(|_| self.path_policy.validate_export_destination(path))
-            .or_else(|_| self.path_policy.validate_external_asset_path(path))
-            .map_err(|e| InternalError::Storage(format!("unauthorized file path: {e}")))?;
+        let validated_path = self.validate_upload_source(path)?;
 
         if !validated_path.is_file() {
             return Err(InternalError::Storage(format!("file not found at {}", local_path)).into());

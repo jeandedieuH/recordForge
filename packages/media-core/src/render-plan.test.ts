@@ -1487,6 +1487,32 @@ describe("render-plan", () => {
         container: "mp4",
         captionMode: "burn-in",
         chapterMode: "embed",
+        audioMastering: { denoise: false, loudnessTarget: null },
+        brandWatermark: {
+          enabled: false,
+          logoPath: null,
+          position: "bottom-right",
+          scalePercent: 8,
+          opacity: 0.85,
+        },
+        brandCards: {
+          enabled: false,
+          introMs: 0,
+          outroMs: 0,
+          title: null,
+          subtitle: null,
+          background: "#0f172a",
+          textColor: "#f8fafc",
+          fontPath: null,
+        },
+        keystrokeOverlay: { enabled: false },
+        reframeMode: "fit",
+        webcamBackground: {
+          enabled: false,
+          mode: "blur" as const,
+          blurSigma: 20,
+          replaceColor: "#0f172a",
+        },
       },
     })
     expect(validatedExport.plan.durationMs).toBe(plan.durationMs)
@@ -1571,6 +1597,32 @@ describe("render-plan", () => {
         encoder: "auto",
         captionMode: "burn-in",
         chapterMode: "none",
+        audioMastering: { denoise: false, loudnessTarget: null },
+        brandWatermark: {
+          enabled: false,
+          logoPath: null,
+          position: "bottom-right",
+          scalePercent: 8,
+          opacity: 0.85,
+        },
+        brandCards: {
+          enabled: false,
+          introMs: 0,
+          outroMs: 0,
+          title: null,
+          subtitle: null,
+          background: "#0f172a",
+          textColor: "#f8fafc",
+          fontPath: null,
+        },
+        keystrokeOverlay: { enabled: false },
+        reframeMode: "fit",
+        webcamBackground: {
+          enabled: false,
+          mode: "blur" as const,
+          blurSigma: 20,
+          replaceColor: "#0f172a",
+        },
       },
     })
     expect(plan.ok).toBe(true)
@@ -1592,6 +1644,32 @@ describe("render-plan", () => {
         encoder: "auto",
         captionMode: "burn-in",
         chapterMode: "embed",
+        audioMastering: { denoise: false, loudnessTarget: null },
+        brandWatermark: {
+          enabled: false,
+          logoPath: null,
+          position: "bottom-right",
+          scalePercent: 8,
+          opacity: 0.85,
+        },
+        brandCards: {
+          enabled: false,
+          introMs: 0,
+          outroMs: 0,
+          title: null,
+          subtitle: null,
+          background: "#0f172a",
+          textColor: "#f8fafc",
+          fontPath: null,
+        },
+        keystrokeOverlay: { enabled: false },
+        reframeMode: "fit",
+        webcamBackground: {
+          enabled: false,
+          mode: "blur" as const,
+          blurSigma: 20,
+          replaceColor: "#0f172a",
+        },
       },
     })
     expect(plan.ok).toBe(true)
@@ -1667,6 +1745,32 @@ describe("render-plan", () => {
         container: "mp4",
         captionMode: "burn-in",
         chapterMode: "embed",
+        audioMastering: { denoise: false, loudnessTarget: null },
+        brandWatermark: {
+          enabled: false,
+          logoPath: null,
+          position: "bottom-right",
+          scalePercent: 8,
+          opacity: 0.85,
+        },
+        brandCards: {
+          enabled: false,
+          introMs: 0,
+          outroMs: 0,
+          title: null,
+          subtitle: null,
+          background: "#0f172a",
+          textColor: "#f8fafc",
+          fontPath: null,
+        },
+        keystrokeOverlay: { enabled: false },
+        reframeMode: "fit",
+        webcamBackground: {
+          enabled: false,
+          mode: "blur" as const,
+          blurSigma: 20,
+          replaceColor: "#0f172a",
+        },
       },
     })
     expect(validatedExport.success).toBe(true)
@@ -1893,5 +1997,101 @@ describe("render-plan", () => {
       const validated = renderPlanSchema.safeParse(plan.value)
       expect(validated.success).toBe(true)
     })
+  })
+})
+
+describe("auto-reframe", () => {
+  function telemetryAt(times: Array<[number, number, number]>) {
+    return normalizeCursorTelemetry({
+      recordingId: "rec-1",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      events: times.map(([tMs, x, y]) => ({
+        tMs,
+        rawX: x,
+        rawY: y,
+        sourceX: x,
+        sourceY: y,
+        shapeId: "arrow",
+        buttonEvent: "none",
+        visible: true,
+        buttons: { left: false, right: false, middle: false, x1: false, x2: false },
+        shapeChanged: false,
+      })),
+    })
+  }
+
+  function verticalCanvas(state: TimelineState) {
+    state.canvas = { ...state.canvas, width: 1080, height: 1920, aspectRatio: "9:16" }
+    return state
+  }
+
+  it("emits a static fill spec for a mismatched canvas without telemetry", () => {
+    const state = verticalCanvas(makeTimeline())
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      settings: { reframeMode: "fill" } as never,
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.reframe).toEqual({ mode: "fill", keyframes: [] })
+    expect(renderPlanSchema.safeParse(plan.value).success).toBe(true)
+  })
+
+  it("pans the crop along cursor telemetry keyframes in output time", () => {
+    const state = verticalCanvas(makeTimeline())
+    const telemetry = telemetryAt([
+      [0, 200, 540],
+      [10_000, 1600, 540],
+      [20_000, 1600, 540],
+    ])
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      settings: { reframeMode: "cursor-follow" } as never,
+      cursorTelemetry: telemetry,
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const reframe = plan.value.reframe
+    expect(reframe?.mode).toBe("cursor-follow")
+    expect(reframe && reframe.keyframes.length).toBeGreaterThan(1)
+    const first = reframe!.keyframes[0]
+    const last = reframe!.keyframes[reframe!.keyframes.length - 1]
+    expect(first.timeMs).toBe(0)
+    // Cursor moves left→right: smoothed normalized centers move right.
+    expect(first.x).toBeLessThan(0.5)
+    expect(last.x).toBeGreaterThan(0.6)
+    for (const kf of reframe!.keyframes) {
+      expect(kf.x).toBeGreaterThanOrEqual(0)
+      expect(kf.x).toBeLessThanOrEqual(1)
+    }
+    expect(renderPlanSchema.safeParse(plan.value).success).toBe(true)
+  })
+
+  it("omits the spec when the canvas already matches the source aspect", () => {
+    const state = makeTimeline() // 1920×1080 canvas, 16:9
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      settings: { reframeMode: "cursor-follow" } as never,
+      cursorTelemetry: telemetryAt([[0, 960, 540]]),
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.reframe).toBeUndefined()
+  })
+
+  it("omits the spec in fit mode", () => {
+    const state = verticalCanvas(makeTimeline())
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      settings: { reframeMode: "fit" } as never,
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.value.reframe).toBeUndefined()
   })
 })

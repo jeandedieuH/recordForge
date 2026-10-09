@@ -2694,6 +2694,7 @@ mod tests {
         };
         let plan = crate::exports::RenderPlan {
             zoom_segments: vec![zoom.clone()],
+            keystrokes: Vec::new(),
             ..tests_plan()
         };
         // canvas = output frame dims; zoompan input = the 256x144 source.
@@ -2810,6 +2811,7 @@ mod tests {
 
     fn tests_plan() -> crate::exports::RenderPlan {
         crate::exports::RenderPlan {
+            reframe: None,
             project_id: "cursor-reg-test".into(),
             duration_ms: 2_000,
             segments: segments(),
@@ -2834,6 +2836,7 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         }
     }
 }

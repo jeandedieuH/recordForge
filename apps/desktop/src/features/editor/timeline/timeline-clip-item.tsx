@@ -11,6 +11,8 @@ import {
   Captions,
   Copy,
   FileImage,
+  Link2,
+  Link2Off,
   Lock,
   Monitor,
   MousePointer2,
@@ -106,6 +108,12 @@ export interface TimelineClipItemProps {
   ) => void
   sublaneIndex?: number
   sublaneCount?: number
+  // Group affordances act on the whole selection, not just this clip; the
+  // parent decides whether they're currently meaningful.
+  canGroup?: boolean
+  canUngroup?: boolean
+  onGroupClips?: () => void
+  onUngroupClips?: () => void
 }
 
 function getClipIcon(clip: TimelineClip, track: TimelineTrack): LucideIcon {
@@ -260,6 +268,10 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   onUpdateAudio,
   sublaneIndex = 0,
   sublaneCount = 1,
+  canGroup = false,
+  canUngroup = false,
+  onGroupClips,
+  onUngroupClips,
 }: TimelineClipItemProps) {
   const gestureRef = useRef<ClipGesture | null>(null)
   const suppressClickRef = useRef(false)
@@ -289,6 +301,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const topOffset = sublaneCount > 1 ? sublaneIndex * (clipHeight + 3) : 0
   const cursorRange = clip.kind === "cursor-effect" ? clip : null
   const isLocked = track.locked || (cursorRange ? cursorRange.locked : false)
+  const isGrouped = "groupId" in clip && Boolean(clip.groupId)
 
   const isPlayheadInside =
     playheadMs > clip.startMs + 1 && playheadMs < clip.startMs + clip.durationMs - 1
@@ -423,7 +436,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
           role="button"
           tabIndex={0}
           data-timeline-clip
-          aria-label={`${getClipLabel(clip, track)}`}
+          aria-label={`${getClipLabel(clip, track)}${isGrouped ? " (grouped)" : ""}`}
           aria-pressed={selected}
           className={cn(
             "group/clip absolute flex min-w-8 items-center overflow-hidden rounded-lg border text-left shadow-xs transition-all duration-fast select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
@@ -616,6 +629,9 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             {isLocked ? (
               <Lock className="size-2.5 shrink-0 text-warning opacity-80" aria-hidden />
             ) : null}
+            {isGrouped ? (
+              <Link2 className="size-2.5 shrink-0 text-primary opacity-90" aria-hidden />
+            ) : null}
           </div>
 
           {/* End Trim Handle (Tactile Bracket) */}
@@ -686,6 +702,16 @@ export const TimelineClipItem = memo(function TimelineClipItem({
         <ContextMenuItem onSelect={() => onDuplicateClip(clip)} disabled={isLocked}>
           <Copy className="size-3.5 mr-2" /> Duplicate
         </ContextMenuItem>
+        {onGroupClips || onUngroupClips ? (
+          <>
+            <ContextMenuItem onSelect={() => onGroupClips?.()} disabled={!canGroup || isLocked}>
+              <Link2 className="size-3.5 mr-2" /> Group selection (Ctrl+G)
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => onUngroupClips?.()} disabled={!canUngroup || isLocked}>
+              <Link2Off className="size-3.5 mr-2" /> Ungroup (Ctrl+Shift+G)
+            </ContextMenuItem>
+          </>
+        ) : null}
         {isPlayheadInside ? (
           <ContextMenuItem onSelect={() => onSplitClip(clip, playheadMs)} disabled={isLocked}>
             <Scissors className="size-3.5 mr-2" /> Split at playhead (

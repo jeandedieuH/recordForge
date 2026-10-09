@@ -16,12 +16,18 @@ use tiny_skia::{
 };
 
 mod annotations;
+pub(crate) mod background;
 mod camera;
 mod captions;
+mod cards;
 mod cursor;
 mod encoding;
+mod keystrokes;
+
+pub(crate) use cards::{apply_brand_cards, BrandCards};
 
 pub(crate) use camera::build_zoompan_expressions;
+use camera::{build_reframe_crop, reframe_content_aspect, reframe_source_dims};
 // Re-exported for tests and sibling modules that validate against the shared
 // camera geometry helpers.
 #[allow(unused_imports)]
@@ -30,6 +36,7 @@ pub(crate) use camera::{
 };
 
 pub use annotations::{RenderPlanAnnotation, RenderPlanImage, RenderPlanText};
+pub use cursor::RenderCanvas;
 
 /// Auto-cleanup guard for temporary mask PNG files and filter complex scripts generated during timeline compositing.
 struct TempMaskFile(PathBuf);
@@ -41,7 +48,7 @@ impl Drop for TempMaskFile {
 }
 
 /// Removes a whole temp directory (caption script + embedded font) on drop.
-struct TempExportDir(PathBuf);
+pub(crate) struct TempExportDir(PathBuf);
 
 impl Drop for TempExportDir {
     fn drop(&mut self) {
@@ -246,6 +253,8 @@ impl PlateCache {
 pub(crate) struct CompositionShared {
     probe: ProbeCache,
     plates: PlateCache,
+    /// asset_id → pre-rendered segmentation mask video (virtual background).
+    masks: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 impl CompositionShared {
@@ -253,6 +262,7 @@ impl CompositionShared {
         Self {
             probe: ProbeCache::new(ffprobe_path),
             plates: PlateCache::new(),
+            masks: std::collections::HashMap::new(),
         }
     }
 }
@@ -336,6 +346,33 @@ pub struct RenderPlan {
     pub texts: Vec<RenderPlanText>,
     #[serde(default)]
     pub images: Vec<RenderPlanImage>,
+    /// Keystroke-overlay events — attached by `run_render_plan` from the work
+    /// dir's keystrokes.json; never sent by the frontend.
+    #[serde(default)]
+    pub keystrokes: Vec<crate::capture::keystrokes::KeystrokeEvent>,
+    /// Auto-reframe (Pro): crops the screen stream to the canvas content
+    /// aspect; keyframes pan the crop window along cursor telemetry.
+    #[serde(default)]
+    pub reframe: Option<RenderPlanReframe>,
+}
+
+/// Auto-reframe spec: `fill` = static centered crop; `cursor-follow` = the
+/// crop window pans between normalized keyframes sampled from cursor
+/// telemetry by media-core (output-timeline ms, 0..1 source coordinates).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenderPlanReframe {
+    pub mode: String,
+    #[serde(default)]
+    pub keyframes: Vec<ReframeKeyframe>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReframeKeyframe {
+    pub time_ms: u64,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -585,6 +622,113 @@ pub struct ExportSettings {
     pub chapter_mode: String,
     #[serde(default)]
     pub range: Option<ExportRange>,
+    #[serde(default)]
+    pub audio_mastering: Option<AudioMastering>,
+    #[serde(default)]
+    pub brand_watermark: Option<BrandWatermark>,
+    #[serde(default)]
+    pub keystroke_overlay: Option<KeystrokeOverlay>,
+    #[serde(default)]
+    pub reframe_mode: Option<String>,
+    #[serde(default)]
+    pub brand_cards: Option<BrandCards>,
+    #[serde(default)]
+    pub webcam_background: Option<background::WebcamBackground>,
+}
+
+/// Keystroke overlay (Pro): modifier-combo badges captured during recording.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeystrokeOverlay {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Brand Kit (Pro): a logo watermark composited over the final raster. The
+/// overlay runs after the output-cap scale so `scale_percent` always measures
+/// against delivered pixels.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrandWatermark {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub logo_path: Option<String>,
+    #[serde(default = "default_watermark_position")]
+    pub position: String,
+    #[serde(default = "default_watermark_scale")]
+    pub scale_percent: f64,
+    #[serde(default = "default_watermark_opacity")]
+    pub opacity: f64,
+}
+
+fn default_watermark_position() -> String {
+    "bottom-right".into()
+}
+fn default_watermark_scale() -> f64 {
+    8.0
+}
+fn default_watermark_opacity() -> f64 {
+    0.85
+}
+
+impl BrandWatermark {
+    /// Active only when enabled AND the logo file still exists — a moved or
+    /// deleted logo degrades to no watermark rather than failing the export.
+    /// The filesystem stat runs once per render pass, not per frame.
+    pub fn active_logo(&self) -> Option<&str> {
+        let path = self.logo_path.as_deref()?;
+        if self.enabled && std::path::Path::new(path).is_file() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+}
+
+/// Studio Audio (Pro): mastering filters applied to the final mixed track.
+/// `denoise` is FFmpeg's frequency-domain `afftdn` tuned for speech noise
+/// floors; `loudness_target` runs one-pass `loudnorm` at the chosen LUFS
+/// (dynamic normalization — a measured two-pass run would double export time
+/// for a marginal accuracy gain on speech-heavy screen recordings).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioMastering {
+    #[serde(default)]
+    pub denoise: bool,
+    #[serde(default)]
+    pub loudness_target: Option<f64>,
+}
+
+impl AudioMastering {
+    /// Filter suffix appended onto the `[aout]` chain, e.g.
+    /// `,afftdn=nr=12:nf=-50,loudnorm=I=-16:TP=-1.5:LRA=11`. Empty when off.
+    pub fn filter_suffix(&self) -> String {
+        let mut suffix = String::new();
+        if self.denoise {
+            // nr=12dB reduction, nf=-50dB noise floor — gentle enough to keep
+            // voice natural, strong enough to kill hiss/fan noise.
+            suffix.push_str(",afftdn=nr=12:nf=-50");
+        }
+        if let Some(target) = self.loudness_target {
+            // TP=-1.5 true-peak ceiling matches YouTube/podcast delivery.
+            suffix.push_str(&format!(",loudnorm=I={target}:TP=-1.5:LRA=11"));
+        }
+        suffix
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.denoise || self.loudness_target.is_some()
+    }
+}
+
+impl ExportSettings {
+    fn audio_mastering_suffix(&self) -> String {
+        self.audio_mastering
+            .as_ref()
+            .map(|mastering| mastering.filter_suffix())
+            .unwrap_or_default()
+    }
 }
 
 fn default_export_preset() -> String {
@@ -605,6 +749,42 @@ fn default_export_container() -> String {
 
 fn default_chapter_mode() -> String {
     "embed".into()
+}
+
+/// Maximum raster an export may emit, driven by the license tier. `None`
+/// keeps the canvas size; Free-tier exports pass `FULL_HD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportOutputCap {
+    pub max_width: u32,
+    pub max_height: u32,
+}
+
+impl ExportOutputCap {
+    pub const FULL_HD: Self = Self {
+        max_width: 1920,
+        max_height: 1080,
+    };
+}
+
+/// Fit `width`×`height` inside the cap preserving aspect (even dimensions,
+/// minimum 2). With no cap — or a canvas already inside it — the canvas size
+/// is returned unchanged so uncapped exports emit byte-identical filters.
+pub fn capped_output_dimensions(
+    width: u32,
+    height: u32,
+    cap: Option<ExportOutputCap>,
+) -> (u32, u32) {
+    let Some(cap) = cap else {
+        return (width, height);
+    };
+    if width <= cap.max_width && height <= cap.max_height {
+        return (width, height);
+    }
+    let scale = (cap.max_width as f64 / width as f64).min(cap.max_height as f64 / height as f64);
+    let out_w = ((width as f64 * scale).round() as u32 / 2 * 2).max(2);
+    let out_h = ((height as f64 * scale).round() as u32 / 2 * 2).max(2);
+    (out_w, out_h)
 }
 
 pub fn escape_ffmetadata_value(val: &str) -> String {
@@ -700,7 +880,7 @@ pub fn run_render_plan(
     job_id: &str,
     project_id: &str,
     output_path: &Path,
-    plan: RenderPlan,
+    mut plan: RenderPlan,
     settings: ExportSettings,
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
@@ -708,6 +888,7 @@ pub fn run_render_plan(
     app: &tauri::AppHandle,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     available_encoders: &[String],
+    output_cap: Option<ExportOutputCap>,
 ) -> Result<()> {
     plan.validate()?;
     if plan.project_id != project_id {
@@ -738,6 +919,19 @@ pub fn run_render_plan(
         )
         .into());
     }
+    // Keystroke overlay events live in the work dir — attach post-plan so the
+    // frontend never touches the session filesystem. Only when enabled: a
+    // stale file must not leak badges into an export that opted out.
+    if settings
+        .keystroke_overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.enabled)
+    {
+        plan.keystrokes = crate::capture::keystrokes::load_events(&work_dir);
+    } else {
+        plan.keystrokes.clear();
+    }
+
     let asset_paths = crate::projects::load_asset_path_map(&work_dir)?;
     let managed_paths = managed_export_paths(output_path, &plan);
     if asset_paths.values().any(|asset_path| {
@@ -818,7 +1012,74 @@ pub fn run_render_plan(
     let resource_dir = app.path().resource_dir().ok();
     // One probe/plate cache serves both the primary render and the software
     // retry so the fallback does not re-run the same ffprobe/plate work.
-    let shared = CompositionShared::new(Some(ffprobe_path));
+    let mut shared = CompositionShared::new(Some(ffprobe_path));
+
+    // Virtual background: pre-render one segmentation mask per camera asset
+    // before any pass runs — the masks feed the graph as regular inputs and
+    // are shared across chunks. The model is provisioned by the UI beforehand
+    // (download-on-demand), matching the whisper engine's contract.
+    let mut _mask_dir_guard: Option<TempExportDir> = None;
+    if settings
+        .webcam_background
+        .as_ref()
+        .is_some_and(|bg| bg.is_active())
+        && plan
+            .overlays
+            .iter()
+            .any(|overlay| overlay.visible && overlay.output_end_ms > overlay.output_start_ms)
+    {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| InternalError::Storage(format!("resolve app data dir: {e}")))?;
+        let model = background::model_path(&app_data_dir);
+        if !model.exists() {
+            return Err(InternalError::Media(
+                "virtual background model is not downloaded yet".into(),
+            )
+            .into());
+        }
+        let mask_dir = std::env::temp_dir().join(format!(
+            "recordforge_masks_{}_{}",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&mask_dir)
+            .map_err(|e| InternalError::Storage(format!("create mask dir: {e}")))?;
+        _mask_dir_guard = Some(TempExportDir(mask_dir.clone()));
+        let asset_ids: std::collections::BTreeSet<&str> = plan
+            .overlays
+            .iter()
+            .filter(|overlay| overlay.visible && overlay.output_end_ms > overlay.output_start_ms)
+            .map(|overlay| overlay.asset_id.as_str())
+            .collect();
+        for asset_id in asset_ids {
+            let Some(source) = asset_paths.get(asset_id) else {
+                continue;
+            };
+            update_progress(
+                &db,
+                app,
+                job_id,
+                0.05,
+                "rendering",
+                Some("segmenting camera background"),
+            )?;
+            let mask_path = mask_dir.join(format!("mask-{asset_id}.mp4"));
+            let reporter = &progress_reporter;
+            background::generate_mask(
+                ffmpeg_path,
+                ffprobe_path,
+                &model,
+                source,
+                &mask_path,
+                &cancel,
+                &|ratio| reporter(ratio * 0.02),
+            )?;
+            shared.masks.insert(asset_id.to_string(), mask_path);
+        }
+    }
+
     let composition = render_timeline_composition_shared(
         &ffmpeg,
         &partial_path,
@@ -831,6 +1092,7 @@ pub fn run_render_plan(
         &progress_reporter,
         resource_dir.as_deref(),
         &shared,
+        output_cap,
     );
     // A hardware encoder can fail to initialize even after a passing probe
     // (driver capabilities differ by resolution and pixel format), so retry
@@ -869,6 +1131,7 @@ pub fn run_render_plan(
                 &progress_reporter,
                 resource_dir.as_deref(),
                 &shared,
+                output_cap,
             )?
         }
     };
@@ -876,6 +1139,50 @@ pub fn run_render_plan(
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
+    }
+
+    // Brand cards (Pro): rendered segments concat-muxed around the finished
+    // partial; the added duration feeds the output validation below.
+    if let Some(cards) = settings.brand_cards.as_ref() {
+        if cards.card_durations().is_some() {
+            let (canvas_width, canvas_height, canvas_fps) = plan
+                .canvas
+                .as_ref()
+                .map(|canvas| {
+                    let (w, h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
+                    (w, h, canvas.fps)
+                })
+                .unwrap_or((1920, 1080, 30));
+            update_progress(
+                &db,
+                app,
+                job_id,
+                0.96,
+                "brand",
+                Some("rendering brand cards"),
+            )?;
+            let added_ms = apply_brand_cards(
+                std::path::Path::new(&ffmpeg),
+                ffprobe_path,
+                &partial_path,
+                cards,
+                settings
+                    .brand_watermark
+                    .as_ref()
+                    .and_then(|watermark| watermark.active_logo())
+                    .map(std::path::Path::new),
+                canvas_width,
+                canvas_height,
+                canvas_fps.max(1),
+                outcome.has_audio,
+                project_id,
+                &plan.chapters,
+                &settings,
+                encoder,
+                &cancel,
+            )?;
+            plan.duration_ms = plan.duration_ms.saturating_add(added_ms);
+        }
     }
 
     if plan.caption_mode == "sidecar" {
@@ -914,12 +1221,17 @@ pub fn run_render_plan(
         "validating",
         Some("validating rendered media"),
     )?;
-    validate_export_output(
+    let output_dims = plan
+        .canvas
+        .as_ref()
+        .map(|canvas| capped_output_dimensions(canvas.width, canvas.height, output_cap));
+    validate_export_output_with_dims(
         ffprobe_path,
         &partial_path,
         &plan,
         &settings,
         outcome.has_audio,
+        output_dims,
     )?;
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
@@ -970,6 +1282,10 @@ pub struct ExportHarnessSpec {
     pub output_path: String,
     #[serde(default)]
     pub force_single_pass: bool,
+    /// Free-tier raster cap applied at the final filter node, so harness specs
+    /// can exercise the same downscale path licensed exports use.
+    #[serde(default)]
+    pub output_cap: Option<ExportOutputCap>,
 }
 
 /// Render a JSON `ExportHarnessSpec` through the real export path.
@@ -1014,6 +1330,7 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             &shared,
             &CompositionWindow::full(&spec.plan),
             &CompositionPass::standalone(),
+            spec.output_cap,
         )
     } else {
         render_timeline_composition_shared(
@@ -1028,6 +1345,7 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             &on_progress,
             None,
             &shared,
+            spec.output_cap,
         )
     };
 
@@ -1038,12 +1356,18 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             return 1;
         }
     };
-    if let Err(error) = validate_export_output(
+    let harness_dims = spec
+        .plan
+        .canvas
+        .as_ref()
+        .map(|canvas| capped_output_dimensions(canvas.width, canvas.height, spec.output_cap));
+    if let Err(error) = validate_export_output_with_dims(
         Path::new(&spec.ffprobe_path),
         Path::new(&spec.output_path),
         &spec.plan,
         &spec.settings,
         outcome.has_audio,
+        harness_dims,
     ) {
         eprintln!("export_harness: output validation failed: {error}");
         return 1;
@@ -1213,6 +1537,7 @@ fn render_timeline_composition(
         on_progress,
         resource_dir,
         &shared,
+        None,
     )
 }
 
@@ -1232,6 +1557,7 @@ fn render_timeline_composition_shared(
     on_progress: &(dyn Fn(f64) + Sync),
     resource_dir: Option<&Path>,
     shared: &CompositionShared,
+    output_cap: Option<ExportOutputCap>,
 ) -> Result<RenderOutcome> {
     if should_render_chunked(plan, settings) && chunk_temp_space_ok(plan, settings) {
         return render_timeline_chunked(
@@ -1246,6 +1572,7 @@ fn render_timeline_composition_shared(
             on_progress,
             resource_dir,
             shared,
+            output_cap,
         );
     }
     render_composition_window(
@@ -1263,6 +1590,7 @@ fn render_timeline_composition_shared(
         shared,
         &CompositionWindow::full(plan),
         &CompositionPass::standalone(),
+        output_cap,
     )
 }
 
@@ -1374,6 +1702,7 @@ fn render_composition_window(
     shared: &CompositionShared,
     window: &CompositionWindow,
     pass: &CompositionPass,
+    output_cap: Option<ExportOutputCap>,
 ) -> Result<RenderOutcome> {
     if plan.segments.is_empty() {
         return Err(InternalError::Media("timeline has no video segments".into()).into());
@@ -1438,18 +1767,29 @@ fn render_composition_window(
     };
 
     let screen_source = common_screen_source(&plan.segments, asset_paths, &shared.probe);
-    let full_screen_rect = video_screen_rect(canvas, screen_source, false);
+    // Auto-reframe (Pro): the screen stream is cropped to the canvas content
+    // aspect inside each segment chain, so the fitted rect must be computed
+    // against the cropped source — otherwise the fit still letterboxes.
+    let reframe_aspect = plan
+        .reframe
+        .as_ref()
+        .map(|_| reframe_content_aspect(canvas));
+    let rect_source = match (plan.reframe.as_ref(), screen_source, reframe_aspect) {
+        (Some(_), Some(source), Some(aspect)) => Some(reframe_source_dims(source, aspect)),
+        _ => screen_source,
+    };
+    let full_screen_rect = video_screen_rect(canvas, rect_source, false);
     // `screen_*` is the fitted stream's base geometry: the side-by-side rect
     // when the layout is uniformly so, otherwise the full rect — for a
     // varying layout the stream is rendered at the larger full geometry and
     // eval-scaled down inside side-by-side windows.
     let (screen_x, screen_y, screen_w, screen_h) = if uniform_sbs {
-        video_screen_rect(canvas, screen_source, true)
+        video_screen_rect(canvas, rect_source, true)
     } else {
         full_screen_rect
     };
     let sbs_screen_rect = if layout_varies {
-        Some(video_screen_rect(canvas, screen_source, true))
+        Some(video_screen_rect(canvas, rect_source, true))
     } else {
         None
     };
@@ -1569,6 +1909,8 @@ fn render_composition_window(
     let mut input_indices: HashMap<String, usize> = HashMap::new();
     // overlay index → (clamp, input index, input seek) for the camera loop.
     let mut camera_inputs: HashMap<usize, (CameraClamp, usize, f64)> = HashMap::new();
+    // overlay index → input index of the segmentation mask (virtual bg).
+    let mut mask_inputs: HashMap<usize, usize> = HashMap::new();
     // window index in `planned.inputs` → input_specs index.
     let mut window_input_indices: Vec<usize> = Vec::new();
     match &seek_plan {
@@ -1600,6 +1942,18 @@ fn render_composition_window(
                     duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
                     hwaccel: hwaccel_inputs,
                 });
+                // Virtual background: the mask rides the same window clamp —
+                // it's frame-aligned to the camera source.
+                if let Some(mask_path) = shared.masks.get(&overlay.asset_id) {
+                    mask_inputs.insert(job.overlay_index, input_specs.len());
+                    input_specs.push(InputSpec {
+                        key: format!("mask:{}:{}", overlay.asset_id, job.overlay_index),
+                        path: mask_path.clone(),
+                        seek_s: Some(seek_s),
+                        duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+                        hwaccel: false,
+                    });
+                }
             }
             if pass.include_audio {
                 // Audio chains read asset-level (unseeked) inputs — atrim
@@ -1655,6 +2009,16 @@ fn render_composition_window(
                     src_out_s: overlay.source_out_ms as f64 / 1000.0,
                 };
                 camera_inputs.insert(job.overlay_index, (clamp, input_index, 0.0));
+                if let Some(mask_path) = shared.masks.get(&overlay.asset_id) {
+                    mask_inputs.insert(job.overlay_index, input_specs.len());
+                    input_specs.push(InputSpec {
+                        key: format!("mask:{}:{}", overlay.asset_id, job.overlay_index),
+                        path: mask_path.clone(),
+                        seek_s: None,
+                        duration_s: None,
+                        hwaccel: false,
+                    });
+                }
             }
         }
     }
@@ -1982,6 +2346,15 @@ fn render_composition_window(
         );
         if (speed - 1.0).abs() > f64::EPSILON {
             filter.push_str(&format!(",setpts=PTS/{:.6}", speed));
+        }
+        // Auto-reframe crop runs in source space before the fit-to-rect scale;
+        // `t` here is already output-relative to this segment, so keyframes
+        // are shifted by the segment's output start.
+        if let (Some(reframe), Some(aspect)) = (plan.reframe.as_ref(), reframe_aspect) {
+            filter.push_str(&format!(
+                ",{}",
+                build_reframe_crop(reframe, aspect, segment.output_start_ms as f64 / 1000.0)
+            ));
         }
         let pad_color = if bg_input_index.is_some() {
             "black@0".to_string()
@@ -2388,13 +2761,10 @@ fn render_composition_window(
         // `clamp` bounds the decode to this pass's window (plus padding); the
         // `+cut/TB` term in setpts keeps the speed-normalized pts continuous
         // with the un-clamped chain so downstream overlay timing is unchanged.
-        let mut camera_filter = format!(
-            "{input}trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6}",
-            fmt_secs(clamp.src_in_s - seek_s),
-            fmt_secs(clamp.src_out_s - seek_s),
-            clamp.cut_out_s * overlay.speed,
-            overlay.speed,
-        );
+        // Geometry ops shared by the camera stream and its segmentation
+        // mask — the mask is rendered at source dims, so it passes through
+        // the identical crop/scale to stay pixel-aligned.
+        let mut geometry_ops = String::new();
         let overlay_w = ((overlay.width.round() as u32) / 2 * 2).max(2);
         let overlay_h = ((overlay.height.round() as u32) / 2 * 2).max(2);
         let overlay_x = (overlay.x.round() as i32) / 2 * 2;
@@ -2402,18 +2772,28 @@ fn render_composition_window(
         let overlay_duration = fmt_secs(clamp.chain_dur_s);
 
         if let Some(crop) = &overlay.crop {
-            camera_filter.push_str(&format!(
+            geometry_ops.push_str(&format!(
                 ",crop={}:{}:{}:{}",
                 crop.width, crop.height, crop.x, crop.y
             ));
-            camera_filter.push_str(&format!(
+            geometry_ops.push_str(&format!(
                 ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={overlay_w}:{overlay_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ));
         } else {
-            camera_filter.push_str(&format!(
+            geometry_ops.push_str(&format!(
                 ",scale={overlay_w}:{overlay_h}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={overlay_w}:{overlay_h}:(iw-ow)/2:(ih-oh)/2"
             ));
         }
+
+        let time_ops = format!(
+            "trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6}",
+            fmt_secs(clamp.src_in_s - seek_s),
+            fmt_secs(clamp.src_out_s - seek_s),
+            clamp.cut_out_s * overlay.speed,
+            overlay.speed,
+        );
+        let mut camera_filter = format!("{input}{time_ops}");
+        camera_filter.push_str(&geometry_ops);
         if overlay.opacity < 1.0 {
             camera_filter.push_str(&format!(",colorchannelmixer=aa={:.4}", overlay.opacity));
         }
@@ -2422,24 +2802,59 @@ fn render_composition_window(
             canvas.fps
         ));
 
-        // 3. Mask camera video stream (for circle and rounded shapes)
-        let masked_camera_label = if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
-            let raw_label = format!("camera_unmasked{index}");
-            let mask_label = format!("cam_mask_loop{index}");
-            let masked_label = format!("camera_masked{index}");
+        // 3. Virtual background: cut the person out via the segmentation
+        // mask and composite over a blurred or filled backdrop. Runs before
+        // the shape mask so circle/rounded crops keep working.
+        let camera_stream_label = if let Some(&mask_idx) = mask_inputs.get(&index) {
+            let raw_label = format!("camera_vb_raw{index}");
             camera_filter.push_str(&format!("[{raw_label}]"));
             filters.push(camera_filter);
+            camera_filter = String::new();
+            // Mask chain: same source-clock trim + geometry, gray out.
+            let bg_mask_label = format!("camera_vb_mask{index}");
+            let fg_label = format!("camera_vb_fg{index}");
+            let back_label = format!("camera_vb_back{index}");
+            let comp_label = format!("camera_vb_comp{index}");
+            filters.push(format!(
+                "[{mask_idx}:v:0]{time_ops}{geometry_ops},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={overlay_duration},trim=duration={overlay_duration},setpts=PTS-STARTPTS,format=gray[{bg_mask_label}]",
+                canvas.fps
+            ));
+            let bg_spec = settings.webcam_background.clone().unwrap_or_default();
+            let backdrop = if bg_spec.mode == "replace" {
+                // drawbox t=fill covers the frame without a lavfi input.
+                format!(
+                    "drawbox=x=0:y=0:w=iw:h=ih:color={}:t=fill",
+                    cards::sanitize_color(&bg_spec.replace_color, "#0f172a")
+                )
+            } else {
+                format!("gblur=sigma={:.1}", bg_spec.blur_sigma.clamp(2.0, 80.0))
+            };
+            filters.push(format!(
+                "[{raw_label}]split=2[cam_vb_a{index}][cam_vb_b{index}];\
+                 [cam_vb_a{index}][{bg_mask_label}]alphamerge[{fg_label}];\
+                 [cam_vb_b{index}]{backdrop}[{back_label}];\
+                 [{back_label}][{fg_label}]overlay=0:0[{comp_label}]"
+            ));
+            comp_label
+        } else {
+            let label = format!("camera_vb_skip{index}");
+            camera_filter.push_str(&format!("[{label}]"));
+            filters.push(camera_filter);
+            label
+        };
+
+        // 4. Mask camera video stream (for circle and rounded shapes)
+        let masked_camera_label = if let Some(&cam_mask_idx) = camera_mask_indices.get(&index) {
+            let mask_label = format!("cam_mask_loop{index}");
+            let masked_label = format!("camera_masked{index}");
             filters.push(format!(
                 "[{cam_mask_idx}:v]format=gray,scale={overlay_w}:{overlay_h},setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={overlay_duration},setpts=PTS-STARTPTS[{mask_label}];\
-                 [{raw_label}][{mask_label}]alphamerge[{masked_label}]",
+                 [{camera_stream_label}][{mask_label}]alphamerge[{masked_label}]",
                 canvas.fps
             ));
             masked_label
         } else {
-            let raw_label = format!("camera_raw{index}");
-            camera_filter.push_str(&format!("[{raw_label}]"));
-            filters.push(camera_filter);
-            raw_label
+            camera_stream_label
         };
 
         // 4. Shift timestamps to the overlay's output start plus whatever the
@@ -2634,8 +3049,80 @@ fn render_composition_window(
     } else {
         format!("trim=end_frame={},", window.frame_count)
     };
+    // License-driven output cap: when the resolved output is smaller than the
+    // canvas (Free tier above 1080p), the composed stream is downscaled at the
+    // final node — every pass (standalone, chunk intermediates, GIF/WebP)
+    // emits the capped raster, so chunk concat still stream-copies.
+    let (out_w, out_h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
+    let output_scale = if (out_w, out_h) != (canvas.width, canvas.height) {
+        format!("scale={out_w}:{out_h}:flags=lanczos,")
+    } else {
+        String::new()
+    };
+    // Brand Kit watermark: a still logo overlaid on the final raster, after
+    // the output-cap scale so scale_percent measures delivered pixels. The
+    // logo input loops forever (still frame) and overlay `eof_action=repeat`
+    // pins it — same trick as the camera border chain.
+    let watermark = settings.brand_watermark.as_ref();
+    if let Some(logo_path) = watermark.and_then(|w| w.active_logo()) {
+        let watermark = watermark.expect("active_logo implies watermark");
+        let logo_index = input_specs.len();
+        input_specs.push(InputSpec {
+            key: "brand:logo".to_string(),
+            path: std::path::PathBuf::from(logo_path),
+            seek_s: None,
+            duration_s: None,
+            hwaccel: false,
+        });
+        let logo_width =
+            ((out_w as f64 * watermark.scale_percent / 100.0).round() as u32).max(2) & !1;
+        let margin = ((out_w as f64 * 0.02).round() as u32).max(16);
+        let (x_expr, y_expr) = match watermark.position.as_str() {
+            "top-left" => (format!("{margin}"), format!("{margin}")),
+            "top-right" => (format!("W-w-{margin}"), format!("{margin}")),
+            "bottom-left" => (format!("{margin}"), format!("H-h-{margin}")),
+            _ => (format!("W-w-{margin}"), format!("H-h-{margin}")),
+        };
+        filters.push(format!(
+            "[{logo_index}:v]scale={logo_width}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={:.2},loop=loop=-1:size=1:start=0,setsar=1[brandlogo]",
+            watermark.opacity
+        ));
+        filters.push(format!(
+            "[{current_label}]{reanchor}{frame_cap}{output_scale}[brandbase]"
+        ));
+        filters.push(format!(
+            "[brandbase][brandlogo]overlay=x={x_expr}:y={y_expr}:eof_action=repeat:format=auto[brandout]"
+        ));
+        current_label = "brandout".to_string();
+    } else {
+        filters.push(format!(
+            "[{current_label}]{reanchor}{frame_cap}{output_scale}null[postscale]"
+        ));
+        current_label = "postscale".to_string();
+    }
+
+    // Keystroke overlay (Pro): modifier-combo badges drawn on the final
+    // raster — above the watermark — gated to each event's display window.
+    if !plan.keystrokes.is_empty() {
+        let keystroke_dir = std::env::temp_dir().join(format!(
+            "rf-keystrokes-{}-{}",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        let font_path = keystrokes::write_font(&keystroke_dir)?;
+        temp_dir_guards.push(TempExportDir(keystroke_dir));
+        current_label = keystrokes::append_badge_chain(
+            &mut filters,
+            &current_label,
+            &plan.keystrokes,
+            out_w,
+            out_h,
+            &font_path,
+        );
+    }
+
     filters.push(format!(
-        "[{current_label}]{reanchor}{frame_cap}format={final_pix_fmt}[{final_label}]"
+        "[{current_label}]format={final_pix_fmt}[{final_label}]"
     ));
     current_label = final_label.to_string();
 
@@ -2649,6 +3136,7 @@ fn render_composition_window(
         && !is_webp
         && append_audio_graph(
             &mut filters,
+            &settings.audio_mastering_suffix(),
             plan,
             project_id,
             &input_indices,
@@ -2807,8 +3295,8 @@ fn render_composition_window(
             settings,
             encoder,
             canvas.fps,
-            canvas.width,
-            canvas.height,
+            out_w,
+            out_h,
         );
         if has_audio {
             command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
@@ -2857,6 +3345,7 @@ fn render_composition_window(
 #[allow(clippy::too_many_arguments)]
 fn append_audio_graph(
     filters: &mut Vec<String>,
+    mastering_suffix: &str,
     plan: &RenderPlan,
     project_id: &str,
     input_indices: &HashMap<String, usize>,
@@ -2971,16 +3460,18 @@ fn append_audio_graph(
     if audio_labels.len() == 1 {
         let label = "aout";
         filters.push(format!(
-            "{}atrim=duration={}[{label}]",
+            "{}atrim=duration={}{}[{label}]",
             audio_labels[0],
-            seconds(duration_ms)
+            seconds(duration_ms),
+            mastering_suffix,
         ));
     } else if !audio_labels.is_empty() {
         filters.push(format!(
-            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
+            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}{}[aout]",
             audio_labels.join(""),
             audio_labels.len(),
             seconds(duration_ms),
+            mastering_suffix,
         ));
     }
     Ok(!audio_labels.is_empty())
@@ -3197,7 +3688,7 @@ fn fmt_secs(value: f64) -> String {
 /// Escape a path for the concat demuxer list file: the demuxer treats `\`
 /// (escape char) and `'` (quoting) as special, so paths go in as forward-
 /// slashes with embedded quotes escaped.
-fn escape_concat_path(path: &Path) -> String {
+pub(crate) fn escape_concat_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
         .replace('\'', "\\'")
@@ -3206,7 +3697,7 @@ fn escape_concat_path(path: &Path) -> String {
 /// `-tag:v hvc1` marks HEVC output as compatible with players that reject the
 /// `hev1` brand — applied to finished MP4 files only (the standalone pass and
 /// the concat mux), never to chunk intermediates (mpegts has no brand).
-fn hvc1_tag_args(settings: &ExportSettings) -> &'static [&'static str] {
+pub(crate) fn hvc1_tag_args(settings: &ExportSettings) -> &'static [&'static str] {
     if settings.codec == "hevc" {
         &["-tag:v", "hvc1"]
     } else {
@@ -3291,6 +3782,7 @@ fn render_timeline_chunked(
     on_progress: &(dyn Fn(f64) + Sync),
     resource_dir: Option<&Path>,
     shared: &CompositionShared,
+    output_cap: Option<ExportOutputCap>,
 ) -> Result<RenderOutcome> {
     let canvas = plan
         .canvas
@@ -3335,6 +3827,7 @@ fn render_timeline_chunked(
             shared,
             &CompositionWindow::full(plan),
             &CompositionPass::standalone(),
+            output_cap,
         );
     }
     info!(
@@ -3367,6 +3860,7 @@ fn render_timeline_chunked(
     let mut audio_filters = Vec::new();
     let has_audio = append_audio_graph(
         &mut audio_filters,
+        &settings.audio_mastering_suffix(),
         plan,
         project_id,
         &audio_input_indices,
@@ -3487,6 +3981,7 @@ fn render_timeline_chunked(
                 shared,
                 &window,
                 &pass,
+                output_cap,
             )
             // Chunk pass outcomes are all video-only; the audio job's own
             // result decides `has_audio` for the mux stage.
@@ -3704,7 +4199,7 @@ fn load_cursor_engine(
 /// side by side — cursor on the left, overlay items on the right — so the
 /// filter graph can composite them at different stack positions.
 #[allow(dead_code)]
-struct CursorFramePlan {
+pub(crate) struct CursorFramePlan {
     fps: u32,
     /// Dimensions of each plane written to FFmpeg's stdin. Equal to the canvas
     /// size except for a cursor-only stream, where the plane is the fitted
@@ -4948,7 +5443,7 @@ fn is_progress_line(line: &str) -> bool {
 /// chunked export sets it when any pass fails so the other FFmpeg processes
 /// die immediately instead of finishing their slices.
 #[allow(clippy::too_many_arguments)]
-fn run_export_ffmpeg(
+pub(crate) fn run_export_ffmpeg(
     command: &mut Command,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
@@ -5058,12 +5553,28 @@ fn run_export_ffmpeg(
     })
 }
 
+/// Test-facing validator: canvas-size expectations (no license cap).
+#[cfg(test)]
 fn validate_export_output(
     ffprobe_path: &Path,
     path: &Path,
     plan: &RenderPlan,
     settings: &ExportSettings,
     expect_audio: bool,
+) -> Result<()> {
+    validate_export_output_with_dims(ffprobe_path, path, plan, settings, expect_audio, None)
+}
+
+/// `validate_export_output` honoring the license output cap: `output_dims`
+/// is the resolved raster the final filter node emits (canvas size when the
+/// cap leaves it unchanged, `None` = canvas size).
+fn validate_export_output_with_dims(
+    ffprobe_path: &Path,
+    path: &Path,
+    plan: &RenderPlan,
+    settings: &ExportSettings,
+    expect_audio: bool,
+    output_dims: Option<(u32, u32)>,
 ) -> Result<()> {
     let metadata =
         crate::media::probe::probe_media(&ffprobe_path.to_string_lossy(), path, &plan.project_id)
@@ -5087,6 +5598,9 @@ fn validate_export_output(
         .ok_or_else(|| InternalError::Media("render canvas is required".into()))?;
     let is_gif = settings.container == "gif" || settings.preset.starts_with("gif-");
     let is_webp = settings.container == "webp" || settings.preset.starts_with("webp-");
+    // `output_dims` reflects the license cap applied at the final filter
+    // node; absent a cap it equals the canvas size.
+    let (expected_w, expected_h) = output_dims.unwrap_or((canvas.width, canvas.height));
     if is_gif {
         let max_width = match settings.preset.as_str() {
             "gif-fast" => Some(640),
@@ -5094,8 +5608,8 @@ fn validate_export_output(
             _ => Some(960),
         };
         let expected_w = max_width
-            .map(|m| (canvas.width.min(m) / 2) * 2)
-            .unwrap_or(canvas.width);
+            .map(|m| (expected_w.min(m) / 2) * 2)
+            .unwrap_or(expected_w);
         if video.width != Some(expected_w as i32)
             || video.height.is_none()
             || video.height.unwrap_or(0) <= 0
@@ -5109,16 +5623,15 @@ fn validate_export_output(
             _ => Some(1280),
         };
         let expected_w = max_width
-            .map(|m| (canvas.width.min(m) / 2) * 2)
-            .unwrap_or(canvas.width);
+            .map(|m| (expected_w.min(m) / 2) * 2)
+            .unwrap_or(expected_w);
         if video.width != Some(expected_w as i32)
             || video.height.is_none()
             || video.height.unwrap_or(0) <= 0
         {
             return Err(InternalError::Media("export dimensions failed validation".into()).into());
         }
-    } else if video.width != Some(canvas.width as i32) || video.height != Some(canvas.height as i32)
-    {
+    } else if video.width != Some(expected_w as i32) || video.height != Some(expected_h as i32) {
         return Err(InternalError::Media("export dimensions failed validation".into()).into());
     }
     let expected_video_codec = if settings.container == "gif" || settings.codec == "gif" {
@@ -6871,7 +7384,7 @@ fn resolve_audio_stream_specifier(
         .map(|stream| format!("[{input_index}:{}]", stream.index)))
 }
 
-fn seconds(milliseconds: u64) -> String {
+pub(crate) fn seconds(milliseconds: u64) -> String {
     format!("{:.3}", milliseconds as f64 / 1000.0)
 }
 
@@ -7215,6 +7728,8 @@ mod tests {
     #[test]
     fn hvc1_tag_applies_only_to_hevc() {
         let hevc = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "hevc".into(),
             encoder: "software".into(),
@@ -7222,10 +7737,16 @@ mod tests {
             caption_mode: "none".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert_eq!(hvc1_tag_args(&hevc), &["-tag:v", "hvc1"]);
         let h264 = ExportSettings {
             codec: "h264".into(),
+            brand_watermark: None,
+            keystroke_overlay: None,
             ..hevc
         };
         assert!(hvc1_tag_args(&h264).is_empty());
@@ -7347,6 +7868,7 @@ mod tests {
 
     fn valid_plan() -> RenderPlan {
         RenderPlan {
+            reframe: None,
             project_id: "project-1".into(),
             duration_ms: 3_000,
             segments: vec![
@@ -7407,6 +7929,7 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         }
     }
 
@@ -7709,6 +8232,8 @@ mod tests {
         let plan = valid_plan();
         for preset in ["smooth-60fps", "ultra-4k", "ultra-4k-60"] {
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: preset.into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -7716,10 +8241,16 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "embed".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &plan).is_ok());
         }
         let settings_4k = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "ultra-4k".into(),
             codec: "h264".into(),
             encoder: "software".into(),
@@ -7727,6 +8258,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert_eq!(audio_bitrate(&settings_4k), "192k");
     }
@@ -7735,6 +8270,8 @@ mod tests {
     fn validates_encoder_preference_and_defaults_missing_fields() {
         let plan = valid_plan();
         let mut settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "default-mp4".into(),
             codec: "h264".into(),
             encoder: "nvenc".into(),
@@ -7742,6 +8279,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &plan).is_err());
         settings.encoder = "auto".into();
@@ -8537,6 +9078,7 @@ mod tests {
         };
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-sbs-gap".into(),
             duration_ms: 6000,
             segments: vec![RenderSegment {
@@ -8578,9 +9120,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -8588,6 +9133,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -8617,7 +9166,7 @@ mod tests {
                 .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "extract frame at {}", at_s);
+            assert!(output.status.success(), "extract frame at {at_s}");
             assert_eq!(output.stdout.len(), 1280 * 720 * 3);
             output.stdout
         };
@@ -8826,12 +9375,33 @@ mod tests {
     }
 
     #[test]
+    fn test_capped_output_dimensions() {
+        let cap = Some(ExportOutputCap::FULL_HD);
+
+        // 4K / 1440p 16:9 canvases fit exactly inside 1080p
+        assert_eq!(capped_output_dimensions(3840, 2160, cap), (1920, 1080));
+        assert_eq!(capped_output_dimensions(2560, 1440, cap), (1920, 1080));
+        // Vertical canvases keep their aspect ratio
+        assert_eq!(capped_output_dimensions(1080, 1920, cap), (608, 1080));
+        // Odd source dims round to even encoder-safe values
+        let (w, h) = capped_output_dimensions(2555, 1438, cap);
+        assert_eq!(w % 2, 0);
+        assert_eq!(h % 2, 0);
+        assert!(w <= 1920 && h <= 1080);
+        // Already-inside sizes pass through untouched, and no cap is a no-op
+        assert_eq!(capped_output_dimensions(1920, 1080, cap), (1920, 1080));
+        assert_eq!(capped_output_dimensions(3840, 2160, None), (3840, 2160));
+    }
+
+    #[test]
     fn test_validate_export_settings_chapter_modes() {
         let plan = valid_plan();
         for mode in ["embed", "sidecar", "both", "none"] {
             let mut p = plan.clone();
             p.chapter_mode = mode.into();
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: "default-mp4".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -8839,6 +9409,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: mode.into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -8846,6 +9420,8 @@ mod tests {
         let mut p = plan.clone();
         p.chapter_mode = "embed".into();
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "default-mp4".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -8853,6 +9429,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "invalid_mode".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_err());
     }
@@ -8864,6 +9444,8 @@ mod tests {
             let mut p = plan.clone();
             p.chapter_mode = "none".into();
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: preset.into(),
                 codec: "gif".into(),
                 encoder: "auto".into(),
@@ -8871,6 +9453,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -8879,6 +9465,8 @@ mod tests {
         let mut p = plan.clone();
         p.chapter_mode = "none".into();
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -8886,6 +9474,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -8893,6 +9485,8 @@ mod tests {
         let mut p_sidecar = plan.clone();
         p_sidecar.chapter_mode = "sidecar".into();
         let settings_sidecar = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -8900,6 +9494,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -8916,6 +9514,8 @@ mod tests {
             let mut p = plan.clone();
             p.chapter_mode = "none".into();
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: preset.into(),
                 codec: "webp".into(),
                 encoder: "auto".into(),
@@ -8923,6 +9523,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -8931,6 +9535,8 @@ mod tests {
         let mut p = plan.clone();
         p.chapter_mode = "none".into();
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -8938,6 +9544,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -8945,6 +9555,8 @@ mod tests {
         let mut p_sidecar = plan.clone();
         p_sidecar.chapter_mode = "sidecar".into();
         let settings_sidecar = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -8952,6 +9564,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -8961,6 +9577,8 @@ mod tests {
         let mut plan = valid_plan();
         plan.chapter_mode = "none".into();
         let gif_settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -8968,6 +9586,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         plan.duration_ms = 60_000;
         assert!(validate_export_settings(&gif_settings, &plan).is_ok());
@@ -8975,6 +9597,8 @@ mod tests {
         assert!(validate_export_settings(&gif_settings, &plan).is_err());
         // The cap only applies to GIF — a long mp4 is unaffected.
         let mp4_settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -8982,6 +9606,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         plan.duration_ms = 120_000;
         plan.chapter_mode = "embed".into();
@@ -8993,6 +9621,8 @@ mod tests {
         let mut plan = valid_plan();
         plan.duration_ms = 60_000;
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -9000,6 +9630,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         // 1920*1080*30 * 0.01 bpp * 60 s / 8 + 128k/8 * 60 s.
         let expected = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0 + 128_000.0 / 8.0 * 60.0) as u64;
@@ -9008,6 +9642,9 @@ mod tests {
         let gif_settings = ExportSettings {
             preset: "gif-balanced".into(),
             container: "gif".into(),
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
             ..settings
         };
         let video_only = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0) as u64;
@@ -9117,6 +9754,7 @@ mod tests {
         }
         let plan = RenderPlan {
             zoom_segments,
+            keystrokes: Vec::new(),
             ..valid_plan()
         };
         let canvas = cursor::RenderCanvas {
@@ -9190,6 +9828,7 @@ mod tests {
                     segments: motion_segments,
                 }),
             }],
+            keystrokes: Vec::new(),
             ..valid_plan()
         };
         let canvas = cursor::RenderCanvas {
@@ -9259,6 +9898,7 @@ mod tests {
         asset_paths.insert("asset-screen".to_string(), screen_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-zoom-dense-project".into(),
             duration_ms: 2000,
             segments: vec![RenderSegment {
@@ -9323,9 +9963,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -9333,6 +9976,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -9395,6 +10042,7 @@ mod tests {
         asset_paths.insert("asset-screen".to_string(), screen_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-gif-project".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -9434,9 +10082,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -9444,6 +10095,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -9525,6 +10180,7 @@ mod tests {
         for (ratio, w, h) in test_cases {
             let out_path = temp_dir.join(format!("out_{}.mp4", ratio.replace(':', "_")));
             let plan = RenderPlan {
+                reframe: None,
                 project_id: format!("test-ratio-{}", ratio),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
@@ -9567,9 +10223,12 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
+                keystrokes: Vec::new(),
             };
 
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9577,6 +10236,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -9623,6 +10286,7 @@ mod tests {
         {
             let out_path = temp_dir.join("out_9_16_gradient.mp4");
             let plan = RenderPlan {
+                reframe: None,
                 project_id: "test-ratio-9-16-gradient".into(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
@@ -9665,9 +10329,12 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
+                keystrokes: Vec::new(),
             };
 
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9675,6 +10342,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -9717,6 +10388,7 @@ mod tests {
         {
             let out_path = temp_dir.join("out_9_16_zoom.mp4");
             let plan = RenderPlan {
+                reframe: None,
                 project_id: "test-ratio-9-16-zoom".into(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
@@ -9784,9 +10456,12 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
+                keystrokes: Vec::new(),
             };
 
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9794,6 +10469,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -9836,6 +10515,7 @@ mod tests {
         {
             let out_path = temp_dir.join("out_9_16_shadow_border.mp4");
             let plan = RenderPlan {
+                reframe: None,
                 project_id: "test-ratio-9-16-shadow-border".into(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
@@ -9885,9 +10565,12 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
+                keystrokes: Vec::new(),
             };
 
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9895,6 +10578,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -9943,6 +10630,7 @@ mod tests {
 
             let out_path = temp_dir.join("out_9_16_image_bg.mp4");
             let plan = RenderPlan {
+                reframe: None,
                 project_id: "test-ratio-9-16-image-bg".into(),
                 duration_ms: 500,
                 segments: vec![RenderSegment {
@@ -9988,9 +10676,12 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
+                keystrokes: Vec::new(),
             };
 
             let settings = ExportSettings {
+                reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9998,6 +10689,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
+                keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -10081,6 +10776,7 @@ mod tests {
         asset_paths.insert("asset-screen".to_string(), screen_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-webp-project".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -10120,9 +10816,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -10130,6 +10829,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -10202,6 +10905,7 @@ mod tests {
         asset_paths.insert("screen-1".into(), screen_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-gif-downscale".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -10241,9 +10945,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "gif-fast".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -10251,6 +10958,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -10392,6 +11103,7 @@ mod tests {
         asset_paths.insert("asset-screen".to_string(), video_path.clone());
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-project-1".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -10453,9 +11165,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10463,6 +11178,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
         let res = render_timeline_composition(
             &*ffmpeg.to_string_lossy(),
@@ -10833,6 +11552,7 @@ mod tests {
         asset_paths.insert("asset-cursor".to_string(), screen_path.clone());
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-layering".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -10956,9 +11676,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10966,6 +11689,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11296,6 +12023,7 @@ mod tests {
         asset_paths.insert("rec-1:webcam:2".to_string(), webcam_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-webcam-project".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -11360,9 +12088,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11370,6 +12101,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11471,6 +12206,7 @@ mod tests {
         asset_paths.insert("rec-1:microphone:1".to_string(), mic_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-webcam-full-project".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -11578,9 +12314,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11588,6 +12327,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11676,6 +12419,7 @@ mod tests {
 
         // Include all 3 modes (redact, blur, pixelate) with odd coordinates to verify outward even snapping
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-mask-export-project".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -11767,9 +12511,12 @@ mod tests {
             annotations: Vec::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11777,6 +12524,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11872,6 +12623,7 @@ mod tests {
 
         // Canvas 4:5 (240x300) with two overlays having ODD dimensions and float coordinates
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-cam-align".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -11970,9 +12722,12 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapters: Vec::new(),
             chapter_mode: "none".into(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11980,6 +12735,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12077,6 +12836,7 @@ mod tests {
         asset_paths.insert("camera-asset".to_string(), camera_path);
 
         let plan = RenderPlan {
+            reframe: None,
             project_id: "test-cam-render".into(),
             duration_ms: 1000,
             segments: vec![RenderSegment {
@@ -12143,9 +12903,12 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapters: Vec::new(),
             chapter_mode: "none".into(),
+            keystrokes: Vec::new(),
         };
 
         let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -12153,6 +12916,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
