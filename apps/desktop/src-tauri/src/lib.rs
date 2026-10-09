@@ -57,6 +57,10 @@ pub fn run() {
 
             if let Err(err) = commands::recording::init(app) {
                 tracing::error!(error = ?err, "failed to initialize recorder state");
+                // AppState backs every Tauri command — a partial startup would
+                // only panic on the first state() call, so surface the real
+                // init error and let setup fail.
+                return Err(err.into());
             }
             if let Err(err) = tray::create_tray(app) {
                 tracing::error!(error = ?err, "failed to create tray icon");

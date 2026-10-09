@@ -37,6 +37,11 @@ pub fn init(app: &tauri::App) -> Result<()> {
         .app_data_dir()
         .map_err(|e| InternalError::Unknown(format!("app data dir: {e}")))?;
 
+    // Tauri resolves the app data dir but never creates it, and SQLite cannot
+    // create intermediate directories — the tree must exist before app.db is
+    // opened (first run, fresh install, or a changed bundle identifier).
+    let sessions_dir = prepare_storage_paths(&app_data_dir)?;
+
     // Tauri's resource dir is where externalBin sidecars land in production
     // installs. In dev mode this may differ, but resolve_executable falls
     // through to other candidates transparently.
@@ -46,10 +51,6 @@ pub fn init(app: &tauri::App) -> Result<()> {
     let conn = database::initialize(&db_path)
         .map_err(|e| InternalError::Storage(format!("open database: {e}")))?;
     let db = Arc::new(Mutex::new(conn));
-
-    let sessions_dir = app_data_dir.join("sessions");
-    std::fs::create_dir_all(&sessions_dir)
-        .map_err(|e| InternalError::Storage(format!("create sessions dir: {e}")))?;
 
     let path_policy = PathPolicy::new(app_data_dir.clone(), sessions_dir.clone());
 
@@ -121,6 +122,16 @@ pub fn init(app: &tauri::App) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Create the directories startup requires under the app data dir.
+fn prepare_storage_paths(app_data_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(app_data_dir)
+        .map_err(|e| InternalError::Storage(format!("create app data dir: {e}")))?;
+    let sessions_dir = app_data_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir)
+        .map_err(|e| InternalError::Storage(format!("create sessions dir: {e}")))?;
+    Ok(sessions_dir)
 }
 
 #[tauri::command]
@@ -1219,4 +1230,24 @@ pub fn get_recording_smart_zoom(
         }
     };
     Ok(manifest.smart_zoom)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The app data dir does not exist on first run or after a bundle
+    /// identifier change; storage prep must create the full tree before
+    /// SQLite opens app.db inside it.
+    #[test]
+    fn prepare_storage_paths_creates_app_data_and_sessions_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = temp.path().join("dev.prestigetech.recordforge");
+
+        let sessions_dir = prepare_storage_paths(&app_data_dir).expect("storage prep");
+
+        assert!(app_data_dir.is_dir());
+        assert_eq!(sessions_dir, app_data_dir.join("sessions"));
+        assert!(sessions_dir.is_dir());
+    }
 }

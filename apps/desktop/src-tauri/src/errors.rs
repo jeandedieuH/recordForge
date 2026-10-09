@@ -58,6 +58,9 @@ impl std::fmt::Display for AppError {
     }
 }
 
+// Lets AppError propagate through `Box<dyn Error>` boundaries like Tauri setup.
+impl std::error::Error for AppError {}
+
 impl ErrorCategory {
     pub fn as_str(&self) -> &'static str {
         match self {
