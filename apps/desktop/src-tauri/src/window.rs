@@ -124,6 +124,53 @@ impl FloatingWindow {
     }
 }
 
+/// Suppresses WebView2's built-in media permission dialog ("http://tauri.localhost
+/// wants to access the cameras") by answering camera/microphone requests in Rust.
+/// wry already auto-grants the same requests on macOS (WKPermissionDecision::Grant),
+/// so this keeps Windows consistent; every other permission kind keeps the default
+/// prompt. The OS-level camera privacy setting still applies above the webview.
+#[cfg(windows)]
+pub fn install_media_permission_autogrant<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+        COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    };
+    use webview2_com::PermissionRequestedEventHandler;
+
+    if let Err(error) = window.with_webview(|platform| unsafe {
+        let Ok(webview) = platform.controller().CoreWebView2() else {
+            tracing::warn!("CoreWebView2 unavailable; media permission prompt not suppressed");
+            return;
+        };
+        let handler = PermissionRequestedEventHandler::create(Box::new(|_, args| {
+            if let Some(args) = args {
+                let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+                args.PermissionKind(&mut kind)?;
+                if kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+                    || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
+                {
+                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+                }
+            }
+            Ok(())
+        }));
+        // Registration token is only needed to unsubscribe — the handler lives
+        // as long as the webview, so it can be discarded.
+        let mut token = 0i64;
+        if let Err(error) = webview.add_PermissionRequested(&handler, &mut token) {
+            tracing::warn!(?error, "failed to register media permission handler");
+        }
+    }) {
+        tracing::warn!(
+            ?error,
+            "with_webview failed; media permission prompt not suppressed"
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn install_media_permission_autogrant<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+
 /// Floating webcam preview window management module.
 pub struct WebcamPreviewWindow;
 
@@ -235,7 +282,8 @@ impl WebcamPreviewWindow {
         }
 
         match builder.build() {
-            Ok(_window) => {
+            Ok(window) => {
+                install_media_permission_autogrant(&window);
                 tracing::info!("webcam preview window created successfully");
                 Ok(())
             }

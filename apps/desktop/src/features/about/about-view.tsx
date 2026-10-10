@@ -151,7 +151,7 @@ export function AboutView({
                 className="size-10 object-contain select-none"
               />
               <span className="absolute -bottom-1 -right-1 flex size-4 items-center justify-center rounded-full bg-primary text-[9px] font-bold text-white shadow-sm">
-                1
+                2
               </span>
             </div>
 

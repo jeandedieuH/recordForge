@@ -12,7 +12,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   ToastViewport,
-  TooltipProvider,
   cn,
   useToast,
 } from "@recordforge/ui"
@@ -499,7 +498,7 @@ export function AppShell() {
   }
 
   return (
-    <TooltipProvider delayDuration={300}>
+    <>
       <div className="flex h-screen flex-col bg-background text-foreground font-sans antialiased">
         {editorRecordingId ? <EditorSession recordingId={editorRecordingId} /> : null}
         <Titlebar view={VIEW_TITLES[activeView]} onOpenRecord={() => setIsNewRecordingOpen(true)} />
@@ -726,6 +725,6 @@ export function AppShell() {
         </AlertDialog>
       </div>
       <ToastViewport />
-    </TooltipProvider>
+    </>
   )
 }

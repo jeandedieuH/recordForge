@@ -71,6 +71,11 @@ pub fn run() {
             // Frameless chrome: apply the Mica backdrop per the stored setting
             // (falls back to opaque on failure or when disabled).
             window_effects::apply_startup_effects(app);
+            // Answer camera/mic webview permission requests in Rust so the
+            // WebView2 "tauri.localhost" dialog never appears in the main window.
+            if let Some(main_window) = app.get_webview_window("main") {
+                window::install_media_permission_autogrant(&main_window);
+            }
             // Intermediates from exports killed mid-run outlive their guards;
             // sweep day-old leftovers off the temp drive in the background.
             std::thread::spawn(|| {

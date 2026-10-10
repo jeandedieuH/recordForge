@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
+import { TooltipProvider } from "@recordforge/ui"
 import { AppErrorBoundary } from "./components/error-boundary"
 import { CaptureBoundaryOverlay } from "./features/recorder/capture-boundary-overlay"
 import { CountdownWindow } from "./features/recorder/countdown-window"
@@ -95,31 +96,36 @@ function App() {
 
   return (
     <AppErrorBoundary>
-      {isCountdown ? (
-        <CountdownWindow />
-      ) : isBoundary ? (
-        <BoundaryWindow />
-      ) : isRegionPicker ? (
-        <RegionPickerWindow />
-      ) : isFloating ? (
-        <FloatingControls />
-      ) : isWebcamPreview ? (
-        <WebcamPreviewWindow />
-      ) : isTeleprompter ? (
-        <TeleprompterWindow />
-      ) : (
-        <Suspense
-          fallback={
-            <div
-              className="h-screen animate-pulse bg-background"
-              role="status"
-              aria-label="Loading application"
-            />
-          }
-        >
-          <AppShell />
-        </Suspense>
-      )}
+      {/* TooltipProvider lives at the root (not inside AppShell) so auxiliary
+          windows — e.g. TeleprompterWindow's IconButtons — can render
+          tooltip-wrapped primitives without the shell mounted. */}
+      <TooltipProvider delayDuration={300}>
+        {isCountdown ? (
+          <CountdownWindow />
+        ) : isBoundary ? (
+          <BoundaryWindow />
+        ) : isRegionPicker ? (
+          <RegionPickerWindow />
+        ) : isFloating ? (
+          <FloatingControls />
+        ) : isWebcamPreview ? (
+          <WebcamPreviewWindow />
+        ) : isTeleprompter ? (
+          <TeleprompterWindow />
+        ) : (
+          <Suspense
+            fallback={
+              <div
+                className="h-screen animate-pulse bg-background"
+                role="status"
+                aria-label="Loading application"
+              />
+            }
+          >
+            <AppShell />
+          </Suspense>
+        )}
+      </TooltipProvider>
     </AppErrorBoundary>
   )
 }

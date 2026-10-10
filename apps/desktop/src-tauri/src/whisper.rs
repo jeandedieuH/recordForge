@@ -235,6 +235,15 @@ pub async fn download_engine(
             EngineArchive::TarGz => extract_targz(&archive_path, &dir)?,
         }
         let _ = std::fs::remove_file(&archive_path);
+        // Fail loudly if keep_entry drifts from upstream asset names —
+        // otherwise we'd download a multi-hundred-MB model and still leave
+        // the engine unusable.
+        if !binary_path(&dir).is_file() {
+            return Err(InternalError::Media(
+                "engine archive did not contain the whisper-cli binary".into(),
+            )
+            .into());
+        }
         // Zip loses the unix exec bit (self-hosted macOS builds are zips);
         // tar extraction preserves it but the chmod is harmless either way.
         #[cfg(unix)]
@@ -553,5 +562,35 @@ mod tests {
         assert!(!keep_entry("whisper-bench"));
         assert!(!keep_entry("test-vad"));
         assert!(!keep_entry("libparakeet.so.1"));
+    }
+
+    /// Deflated zip mimicking the upstream `Release/` layout. Regresses the
+    /// engine-download failure where `zip` was compiled without a deflate
+    /// backend and `by_index` rejected every entry after the ~8 MB download.
+    const ENGINE_ZIP_FIXTURE_B64: &str = "UEsDBBQAAAAIADqoSl0lhKNWCgAAAAgAAAARAAAAUmVsZWFzZS9iZW5jaC5leGXLyy9RyE4tKAEAUEsDBBQAAAAIADqoSl3yCi6OEQAAAA8AAAAXAAAAUmVsZWFzZS93aGlzcGVyLWNsaS5leGVLS8xOVUjOyVRIysxLLKoEAFBLAwQUAAAACAA6qEpdB70V+xAAAAAOAAAAEAAAAFJlbGVhc2UvZ2dtbC5kbGxLS8xOVUjJyVFIqixJLQYAUEsBAhQAFAAAAAgAOqhKXSWEo1YKAAAACAAAABEAAAAAAAAAAAAAAIABAAAAAFJlbGVhc2UvYmVuY2guZXhlUEsBAhQAFAAAAAgAOqhKXfIKLo4RAAAADwAAABcAAAAAAAAAAAAAAIABOQAAAFJlbGVhc2Uvd2hpc3Blci1jbGkuZXhlUEsBAhQAFAAAAAgAOqhKXQe9FfsQAAAADgAAABAAAAAAAAAAAAAAAIABfwAAAFJlbGVhc2UvZ2dtbC5kbGxQSwUGAAAAAAMAAwDCAAAAvQAAAAAA";
+
+    #[test]
+    fn extract_zip_keeps_and_flattens_deflated_entries() {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(ENGINE_ZIP_FIXTURE_B64)
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("engine.zip");
+        std::fs::write(&zip_path, bytes).unwrap();
+        let dest = tmp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        extract_zip(&zip_path, &dest).unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("whisper-cli.exe")).unwrap(),
+            b"fake cli binary"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("ggml.dll")).unwrap(),
+            b"fake dll bytes"
+        );
+        assert!(!dest.join("bench.exe").exists());
     }
 }

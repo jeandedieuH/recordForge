@@ -50,7 +50,9 @@ ed25519-dalek = "2"
 machine-uid = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = { version = "0.3", default-features = false }
-zip = { version = "2", default-features = false }
+# `deflate` restores the decompressor — without it every engine zip (Windows
+# x64 upstream + self-hosted macOS/ARM64) fails extraction at the first entry.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # whisper.cpp ships the Linux engine as .tar.gz (macOS/Windows use .zip above).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
@@ -59,6 +61,9 @@ tract-onnx = "0.23.8"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"
+# Must stay on the same minor version wry/tauri resolve so PlatformWebview
+# COM types are identical — wry 0.55 pins webview2-com 0.38.
+webview2-com = "0.38"
 windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Performance", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Media", "Win32_Security_Credentials"] }
 
 [target.'cfg(not(windows))'.dependencies]
