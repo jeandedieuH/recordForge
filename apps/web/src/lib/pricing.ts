@@ -2,10 +2,11 @@
  * Single source for pricing copy used by the marketing pages and linked from
  * the desktop app's upgrade surfaces (PRO_CHECKOUT_URL points here).
  *
- * Polar checkout: replace CHECKOUT_URL with the static buy link once the
- * product is created in the Polar dashboard — the anchor below stays stable.
+ * Polar checkout: paste the generated Checkout Link from the Polar dashboard
+ * (Products → RecordForge Pro → Checkout Links). Polar generates IDs like
+ * `polar_cl_…` — `buy.polar.sh/<product-name>` is NOT a valid format and 404s.
  */
-export const CHECKOUT_URL = "https://buy.polar.sh/recordforge-pro"
+export const CHECKOUT_URL = "https://buy.polar.sh/polar_cl_ZrbOX8Isev0738LkzZkssAri6FHjoMGZu1Xau0hyFbF"
 
 /** Pro Lifetime is $39; the FOUNDER discount code pre-applies $10 off for the
  * first 30 days after launch. */
