@@ -1770,6 +1770,134 @@ mod tests {
     }
 
     #[test]
+    fn press_animation_scales_the_rendered_cursor_sprite() {
+        // Dense 8 ms stationary telemetry at (500, 400) with a left press at
+        // 1000..1090; the press spring shrinks the sprite to ~0.80 while held
+        // and overshoots to ~1.04 on release.
+        let mut times: Vec<u64> = (0..=3_000).step_by(8).collect();
+        times.push(1_090);
+        times.sort_unstable();
+        let events: Vec<cursor_engine::CursorEvent> = times
+            .into_iter()
+            .map(|t_ms| {
+                let (button_event, left) = if t_ms == 1_000 {
+                    ("left-down", true)
+                } else if t_ms == 1_090 {
+                    ("left-up", false)
+                } else if (1_000..1_090).contains(&t_ms) {
+                    ("left-held", true)
+                } else {
+                    ("none", false)
+                };
+                cursor_engine::CursorEvent {
+                    t_ms,
+                    x: 500.0,
+                    y: 400.0,
+                    visible: true,
+                    buttons: cursor_engine::CursorButtonState {
+                        left,
+                        ..Default::default()
+                    },
+                    button_event: Some(button_event.into()),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let telemetry = CursorTelemetryFile {
+            schema_version: 2,
+            asset_id: "cursor-events:recording".into(),
+            recording_id: "recording".into(),
+            source_width: 1920.0,
+            source_height: 1080.0,
+            sample_rate_hz: 120.0,
+            capture_bounds: Some(cursor_engine::CursorCaptureBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            }),
+            coordinate_transform: cursor_engine::CursorCoordinateTransform::default(),
+            topology: None,
+            shapes: Vec::new(),
+            click_window_ms: 350,
+            health: cursor_engine::CursorTelemetryHealth::Healthy,
+            event_count: events.len() as u64,
+            index: Vec::new(),
+            event_file: "cursor_events.bin".into(),
+            timebase: cursor_engine::CursorTelemetryTimebase::default(),
+            events,
+        };
+
+        let mut press_segments = segments();
+        press_segments[0].source_out_ms = 3_000;
+        press_segments[0].output_end_ms = 3_000;
+
+        let mut settings = CursorSettings::default();
+        settings.click_feedback = "none".into();
+        settings.shadow_enabled = false;
+        settings.smooth_movement = false;
+        settings.scale = 3.0;
+
+        let canvas = test_canvas(960, 540, 0);
+        let mut renderer = CursorRenderer::new(settings, telemetry, &press_segments, &canvas)
+            .expect("valid cursor renderer");
+
+        // Alpha coverage plus the bbox edge nearest the tip (hotspot): the
+        // arrow's tip corner must stay pinned while the sprite scales around
+        // it.
+        let alpha_metrics = |renderer: &mut CursorRenderer, output_ms: f64| -> (f64, u32, u32) {
+            let mut frame = vec![0u8; 960 * 540 * 4];
+            renderer.render_frame_at(output_ms, &mut frame);
+            let (mut area, mut min_x, mut min_y) = (0.0, u32::MAX, u32::MAX);
+            for py in 0..540u32 {
+                for px in 0..960u32 {
+                    if frame[(py * 960 + px) as usize * 4 + 3] > 0 {
+                        area += 1.0;
+                        min_x = min_x.min(px);
+                        min_y = min_y.min(py);
+                    }
+                }
+            }
+            (area, min_x, min_y)
+        };
+
+        // Reference area 10 ms before the press (scale 1.0).
+        let (baseline, base_min_x, base_min_y) = alpha_metrics(&mut renderer, 990.0);
+        assert!(baseline > 0.0);
+        // Held at the release edge: ~0.80 linear -> ~0.64 area.
+        let (pressed_area, pressed_min_x, pressed_min_y) = alpha_metrics(&mut renderer, 1_090.0);
+        let pressed = pressed_area / baseline;
+        assert!(
+            (0.55..=0.75).contains(&pressed),
+            "pressed area ratio {pressed}"
+        );
+        // Release overshoot peaks ~+147 ms after the press end at ~1.041.
+        let (rebound_area, rebound_min_x, rebound_min_y) = alpha_metrics(&mut renderer, 1_237.0);
+        let rebound = rebound_area / baseline;
+        assert!(rebound > 1.03, "rebound area ratio {rebound}");
+        // Long settled: identical raster to the reference frame.
+        let (settled_area, settled_min_x, settled_min_y) = alpha_metrics(&mut renderer, 1_900.0);
+        let settled = settled_area / baseline;
+        assert!(
+            (0.97..=1.03).contains(&settled),
+            "settled area ratio {settled}"
+        );
+        // The tip never wanders: the bbox edge at the hotspot stays within
+        // 1 px of the reference even while the sprite shrinks and overshoots
+        // (stroke extent scales sub-pixel).
+        for (name, min_x, min_y) in [
+            ("pressed", pressed_min_x, pressed_min_y),
+            ("rebound", rebound_min_x, rebound_min_y),
+            ("settled", settled_min_x, settled_min_y),
+        ] {
+            assert!(
+                min_x.abs_diff(base_min_x) <= 1 && min_y.abs_diff(base_min_y) <= 1,
+                "{name} tip anchor: bbox min ({min_x},{min_y}) vs ({base_min_x},{base_min_y})"
+            );
+        }
+    }
+
+    #[test]
     fn rasterized_cursor_uses_asset_hotspot_and_fill_color() {
         let mut settings = CursorSettings::default();
         settings.preset = "recorded-system".into();

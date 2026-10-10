@@ -519,7 +519,9 @@ function BasicCursorSettings({
         <div className="flex items-center justify-between">
           <div className="space-y-0.5">
             <p className="font-medium text-[11px]">Press animation</p>
-            <p className="text-[10px] text-muted-foreground">Micro-press and spring on click</p>
+            <p className="text-[10px] text-muted-foreground">
+              Presses while held, springs back on release
+            </p>
           </div>
           <Switch
             checked={settings.clickPressAnimation ?? true}

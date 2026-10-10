@@ -34,7 +34,7 @@ html[data-mica="true"] body {
   background-color: transparent;
 }
 
-/* Floating controls, boundary, countdown, region-picker & webcam-preview transparent canvas */
+/* Floating controls, boundary, countdown, region-picker, webcam-preview & teleprompter transparent canvas */
 html[data-floating="true"],
 html[data-floating="true"] body,
 html[data-floating="true"] #root,
@@ -49,10 +49,63 @@ html[data-region-picker="true"] body,
 html[data-region-picker="true"] #root,
 html[data-webcam-preview="true"],
 html[data-webcam-preview="true"] body,
-html[data-webcam-preview="true"] #root {
+html[data-webcam-preview="true"] #root,
+html[data-teleprompter="true"],
+html[data-teleprompter="true"] body,
+html[data-teleprompter="true"] #root {
   background: transparent !important;
   background-color: transparent !important;
   overflow: hidden !important;
+}
+
+/* Teleprompter: the prompt viewport is the only scroll container and its
+   scrollbar is fully hidden (wheel/keys still scroll it). */
+.teleprompter-viewport {
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 0.35) 0%,
+    rgb(0 0 0 / 1) var(--tp-reading-line, 35%),
+    rgb(0 0 0 / 1) 90%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 0.35) 0%,
+    rgb(0 0 0 / 1) var(--tp-reading-line, 35%),
+    rgb(0 0 0 / 1) 90%,
+    transparent 100%
+  );
+}
+.teleprompter-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+/* Prompt text: large, heavy, tightly tracked, non-selectable. */
+.teleprompter-text {
+  white-space: pre-wrap;
+  text-wrap: pretty;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: -0.015em;
+  user-select: none;
+}
+
+/* Edit mode keeps a real (but slim, trackless) scrollbar on the textarea. */
+.teleprompter-editor {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+.teleprompter-editor::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.teleprompter-editor::-webkit-scrollbar-track {
+  background: transparent;
+}
+.teleprompter-editor::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 3px;
 }
 
 /* Custom dark scrollbar styling matching RecordForge theme */

@@ -12,6 +12,12 @@ const WEBCAM_PREVIEW_WINDOW_HEIGHT: f64 = 220.0;
 const WEBCAM_PREVIEW_WINDOW_TOP_MARGIN: f64 = 28.0;
 const WEBCAM_PREVIEW_WINDOW_RIGHT_MARGIN: f64 = 28.0;
 
+const TELEPROMPTER_WINDOW_WIDTH: f64 = 640.0;
+const TELEPROMPTER_WINDOW_HEIGHT: f64 = 460.0;
+const TELEPROMPTER_WINDOW_MIN_WIDTH: f64 = 420.0;
+const TELEPROMPTER_WINDOW_MIN_HEIGHT: f64 = 300.0;
+const TELEPROMPTER_WINDOW_TOP_MARGIN: f64 = 24.0;
+
 /// Main application window lifecycle helpers used by the recorder.
 pub struct MainWindow;
 
@@ -624,26 +630,57 @@ impl TeleprompterWindow {
             if let Err(error) = window.set_content_protected(true) {
                 tracing::warn!(error = ?error, "protect teleprompter from capture failed");
             }
+            let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
             return Ok(());
         }
 
-        tauri::WebviewWindowBuilder::new(
+        // Frameless + transparent like the other auxiliary windows (ADR 009):
+        // the webview paints a single rounded card inside a transparent margin.
+        let mut builder = tauri::WebviewWindowBuilder::new(
             app,
             Self::LABEL,
             tauri::WebviewUrl::App("index.html".into()),
         )
         .initialization_script("window.__RECORD_FORGE_WINDOW_KIND = 'teleprompter';")
         .title("RecordForge Teleprompter")
-        .inner_size(560.0, 420.0)
-        .min_inner_size(360.0, 240.0)
+        .inner_size(TELEPROMPTER_WINDOW_WIDTH, TELEPROMPTER_WINDOW_HEIGHT)
+        .min_inner_size(
+            TELEPROMPTER_WINDOW_MIN_WIDTH,
+            TELEPROMPTER_WINDOW_MIN_HEIGHT,
+        )
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
         .always_on_top(true)
         .content_protected(true)
-        .resizable(true)
-        .build()
-        .map(|_| ())
-        .map_err(|error| {
+        .resizable(true);
+
+        // Top-center of the primary monitor so the reading line sits near the
+        // camera/screen content the speaker is looking at.
+        if let Ok(Some(monitor)) = app.primary_monitor() {
+            let size = monitor.size();
+            let position = monitor.position();
+            let scale = monitor.scale_factor();
+            let screen_w = size.width as f64 / scale;
+            let monitor_x = position.x as f64 / scale;
+            let monitor_y = position.y as f64 / scale;
+            let x = monitor_x + (screen_w - TELEPROMPTER_WINDOW_WIDTH) / 2.0;
+            let y = monitor_y + TELEPROMPTER_WINDOW_TOP_MARGIN;
+            tracing::info!(
+                screen_w,
+                x,
+                y,
+                scale,
+                "teleprompter window position calculated"
+            );
+            builder = builder.position(x, y);
+        } else {
+            tracing::warn!("no primary monitor detected for teleprompter positioning");
+        }
+
+        builder.build().map(|_| ()).map_err(|error| {
             InternalError::Unknown(format!("failed to create teleprompter window: {error:?}"))
                 .into()
         })

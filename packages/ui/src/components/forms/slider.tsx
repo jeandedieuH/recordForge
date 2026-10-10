@@ -77,9 +77,20 @@ interface SliderProps
     VariantProps<typeof sliderRangeVariants> {
   /** Optional tick marks at percentage points (0..100) */
   ticks?: number[]
+  /** Accessible name applied to each thumb (defaults to "Value"). */
+  thumbLabel?: string
 }
 
-function Slider({ className, size, variant, ticks, value, defaultValue, ...props }: SliderProps) {
+function Slider({
+  className,
+  size,
+  variant,
+  ticks,
+  thumbLabel = "Value",
+  value,
+  defaultValue,
+  ...props
+}: SliderProps) {
   const values = value ?? defaultValue ?? [0]
 
   return (
@@ -103,7 +114,7 @@ function Slider({ className, size, variant, ticks, value, defaultValue, ...props
       {values.map((_, index) => (
         <SliderPrimitive.Thumb
           key={index}
-          aria-label="Value"
+          aria-label={thumbLabel}
           className={cn(sliderThumbVariants({ size, variant }))}
         />
       ))}

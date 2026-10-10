@@ -199,6 +199,86 @@ describe("cursor engine cross-language parity", () => {
     }
   })
 
+  it("click press spring is identical between wasm and typescript", () => {
+    // Synthetic 120 Hz telemetry at (500, 400) covering a tap, a double
+    // click, a 1.5 s drag, a right click, and a press split by a telemetry
+    // gap (down 6000, silent until 7000, held through 7496, up at 7500).
+    const presses = [
+      { button: "left", downMs: 1_000, upMs: 1_090 },
+      { button: "left", downMs: 2_000, upMs: 2_070 },
+      { button: "left", downMs: 2_150, upMs: 2_220 },
+      { button: "left", downMs: 3_000, upMs: 4_500 },
+      { button: "right", downMs: 5_000, upMs: 5_090 },
+    ] as const
+    const times = new Set<number>()
+    for (let t = 0; t <= 8_000; t += 8) {
+      // The gap: no samples between 6008 and 7000.
+      if (t > 6_008 && t < 7_000) continue
+      times.add(t)
+    }
+    for (const press of presses) {
+      times.add(press.downMs)
+      times.add(press.upMs)
+    }
+    times.add(7_500)
+    const events = [...times]
+      .sort((left, right) => left - right)
+      .map((tMs) => {
+        let buttonEvent = "none"
+        for (const press of presses) {
+          if (tMs === press.downMs) buttonEvent = `${press.button}-down`
+          else if (tMs === press.upMs) buttonEvent = `${press.button}-up`
+          else if (tMs > press.downMs && tMs < press.upMs) buttonEvent = `${press.button}-held`
+        }
+        if (tMs === 6_000) buttonEvent = "left-down"
+        else if ((tMs > 6_000 && tMs <= 6_008) || (tMs >= 7_000 && tMs < 7_500)) {
+          buttonEvent = "left-held"
+        } else if (tMs === 7_500) buttonEvent = "left-up"
+        const heldLeft =
+          (tMs >= 6_000 && tMs < 7_500) ||
+          presses.some(
+            (press) => press.button === "left" && tMs >= press.downMs && tMs < press.upMs,
+          )
+        const heldRight = presses.some(
+          (press) => press.button === "right" && tMs >= press.downMs && tMs < press.upMs,
+        )
+        return {
+          tMs,
+          rawX: 500,
+          rawY: 400,
+          sourceX: 500,
+          sourceY: 400,
+          buttons: { left: heldLeft, right: heldRight, middle: false, x1: false, x2: false },
+          buttonEvent,
+          visible: true,
+          shapeId: "arrow",
+          shapeChanged: false,
+        }
+      })
+    const telemetry = normalizeCursorTelemetry({
+      recordingId: "parity-press",
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      sampleRateHz: 120,
+      events,
+    })
+    const tsEngine = createCursorEngine(telemetry)
+    const wasmEngine = createWasmEngine(telemetry)
+
+    const settingsVariants: CursorSettings[] = [
+      defaultCursorSettings,
+      { ...defaultCursorSettings, rightClickEnabled: false },
+      { ...defaultCursorSettings, clickPressAnimation: false },
+    ]
+    for (const settings of settingsVariants) {
+      for (let timeMs = 0; timeMs <= 8_000; timeMs += 5) {
+        const wasm = wasmEngine.evaluate(timeMs, settings).clickScale
+        const ts = tsEngine.evaluate(timeMs, settings).clickScale
+        expect(wasm, `clickScale at ${timeMs}ms`).toBeCloseTo(ts, 6)
+      }
+    }
+  })
+
   it("cubic motion-plan evaluation is identical between wasm and typescript", () => {
     const telemetry = loadFixture("cursor-v1-100dpi-10s.json")
     const tsEngine = createCursorEngine(telemetry)

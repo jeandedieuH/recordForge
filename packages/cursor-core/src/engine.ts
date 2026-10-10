@@ -102,6 +102,64 @@ const ADAPTIVE_SPEED_REF_PX_PER_SEC = 2000
 const SMOOTHING_REFERENCE_INTERVAL_MS = 1_000 / 60
 const IDLE_FADE_IN_MS = 150
 
+// Button-aware press model. Mirrors packages/cursor-engine/src/lib.rs.
+const PRESS_SCALE = 0.8 // cursor scale while an enabled button is held
+// Taps shorter than this are stretched so the press stays visible at video
+// frame rates.
+const PRESS_MIN_HOLD_MS = 90
+// Press-in spring (rad/s); near critical damping, no visible undershoot.
+const PRESS_IN_OMEGA = 70
+const PRESS_IN_ZETA = 0.92
+// Release spring (rad/s); under-damped, one soft overshoot peaking near 1.041.
+const PRESS_OUT_OMEGA = 24
+const PRESS_OUT_ZETA = 0.45
+// Gap after which the spring is back at rest (residual < 1e-4); also the
+// fast-path cutoff for frames far from any press.
+const PRESS_SETTLE_MS = 700
+// Cap on presses replayed into a single evaluation.
+const PRESS_MAX_CHAIN = 64
+const PRESS_SCALE_MIN = 0.5
+const PRESS_SCALE_MAX = 1.25
+
+interface PressInterval {
+  startMs: number
+  endMs: number
+}
+
+type PressPhase = "down" | "up" | "held" | "none"
+
+function pressPhase(buttonEvent: string): PressPhase {
+  if (buttonEvent === "down" || buttonEvent.endsWith("-down")) return "down"
+  if (buttonEvent === "up" || buttonEvent.endsWith("-up")) return "up"
+  if (buttonEvent === "held" || buttonEvent.endsWith("-held")) return "held"
+  return "none"
+}
+
+/**
+ * One closed-form step of an underdamped spring (zeta < 1, unit mass). `tau`
+ * is in seconds; `tau <= 0` returns the state unchanged so the value at a
+ * press edge is exact.
+ */
+function springStep(
+  x: number,
+  v: number,
+  target: number,
+  tau: number,
+  omega: number,
+  zeta: number,
+): [number, number] {
+  if (tau <= 0) return [x, v]
+  const e0 = x - target
+  const d = Math.exp(-zeta * omega * tau)
+  const wd = omega * Math.sqrt(1 - zeta * zeta)
+  const cos = Math.cos(wd * tau)
+  const sin = Math.sin(wd * tau)
+  return [
+    target + d * (e0 * cos + ((v + zeta * omega * e0) / wd) * sin),
+    d * (v * cos - ((omega * omega * e0 + zeta * omega * v) / wd) * sin),
+  ]
+}
+
 // Shared by the TS engine and the WASM wrapper: motion-plan evaluation is pure
 // math over an already-parsed plan, so both engines call the TypeScript mirror
 // and skip a WASM round-trip per seek.
@@ -389,6 +447,75 @@ export function createCursorEngine(
     }
   }
 
+  // Derive [down, up] press windows per button class. A `-held` sample implies
+  // an ongoing press, a `-up` or an ordinary sample closes it, and a segment
+  // break closes everything at the last event before the gap because the
+  // button state across it is unknown.
+  const pressButtons = ["left", "right", "middle"] as const
+  const pressClassIndex: Record<(typeof pressButtons)[number], number> = {
+    left: 0,
+    right: 1,
+    middle: 2,
+  }
+  const rawPresses: { button: (typeof pressButtons)[number]; startMs: number; endMs: number }[] = []
+  const openPresses: (number | null)[] = [null, null, null]
+  const closeOpenPresses = (endMs: number) => {
+    for (let slot = 0; slot < pressButtons.length; slot++) {
+      const startMs = openPresses[slot]
+      if (startMs !== null) {
+        rawPresses.push({ button: pressButtons[slot], startMs, endMs })
+        openPresses[slot] = null
+      }
+    }
+  }
+  for (let index = 0; index < count; index++) {
+    const event = prepared[index]
+    if (index > 0 && event.segmentId !== prepared[index - 1].segmentId) {
+      closeOpenPresses(prepared[index - 1].tMs)
+    }
+    const phase = pressPhase(event.buttonEvent)
+    const classIndex = pressClassIndex[event.clickButton]
+    if (phase === "down" || phase === "held") {
+      if (openPresses[classIndex] === null) openPresses[classIndex] = event.tMs
+    } else if (phase === "up") {
+      const startMs = openPresses[classIndex]
+      if (startMs !== null) {
+        rawPresses.push({ button: event.clickButton, startMs, endMs: event.tMs })
+        openPresses[classIndex] = null
+      }
+    } else {
+      closeOpenPresses(event.tMs)
+    }
+  }
+  closeOpenPresses(prepared[count - 1].tMs)
+
+  // Merge each settings mask's presses into sorted, non-overlapping intervals,
+  // stretching short taps to the minimum hold. Index = left | right << 1;
+  // middle presses are always included, matching the click-effect gating.
+  const pressIntervals: PressInterval[][] = [0, 1, 2, 3].map((mask) => {
+    const leftEnabled = (mask & 1) !== 0
+    const rightEnabled = (mask & 2) !== 0
+    const stretched = rawPresses
+      .filter((press) =>
+        press.button === "left" ? leftEnabled : press.button === "right" ? rightEnabled : true,
+      )
+      .map((press) => ({
+        startMs: press.startMs,
+        endMs: Math.max(press.endMs, press.startMs + PRESS_MIN_HOLD_MS),
+      }))
+      .sort((left, right) => left.startMs - right.startMs)
+    const intervals: PressInterval[] = []
+    for (const interval of stretched) {
+      const last = intervals[intervals.length - 1]
+      if (last && interval.startMs <= last.endMs) {
+        last.endMs = Math.max(last.endMs, interval.endMs)
+      } else {
+        intervals.push({ ...interval })
+      }
+    }
+    return intervals
+  })
+
   function findEventIndex(timeMs: number): number {
     if (timeMs <= times[0]) return 0
     if (timeMs >= times[count - 1]) return count - 1
@@ -602,45 +729,72 @@ export function createCursorEngine(
     return result.reverse()
   }
 
+  // Button-aware press model: a damped spring whose target is PRESS_SCALE
+  // while any enabled button is held and 1.0 otherwise. Evaluated in closed
+  // form per press interval, so position and velocity carry across presses
+  // (C1 continuity) and double clicks interrupt each other naturally — all
+  // without evaluation state. Off only when explicitly disabled; an absent
+  // flag follows the on-by-default contract of the Rust engine and the
+  // inspector.
   function calculateClickScale(timeMs: number, settings: CursorSettings): number {
-    if (!settings.clickPressAnimation) return 1.0
+    if (settings.clickPressAnimation === false) return 1.0
 
-    const PRESS_DURATION_MS = 220.0
-    const DOWN_DURATION_MS = 50.0
-    const REBOUND_DURATION_MS = 170.0
-    const MAX_DEPRESSION = 0.14
+    const mask = (settings.leftClickEnabled ? 1 : 0) | (settings.rightClickEnabled ? 2 : 0)
+    const intervals = pressIntervals[mask]
+    if (intervals.length === 0) return 1.0
 
+    // Last press that started at or before this time.
     let low = 0
-    let high = clicks.length
+    let high = intervals.length
     while (low < high) {
       const middle = low + Math.floor((high - low) / 2)
-      if (clicks[middle].tMs <= timeMs) low = middle + 1
+      if (intervals[middle].startMs <= timeMs) low = middle + 1
       else high = middle
     }
+    const k = low - 1
+    if (k < 0) return 1.0
+    // Well past the last press the spring is at rest; no replay needed.
+    if (timeMs - intervals[k].endMs >= PRESS_SETTLE_MS) return 1.0
 
-    let activeScale: number | null = null
-    for (let i = low - 1; i >= 0; i--) {
-      const click = clicks[i]
-      const elapsed = timeMs - click.tMs
-      if (elapsed > PRESS_DURATION_MS) break
-      if (elapsed < 0) continue
-
-      if (click.button === "left" && !settings.leftClickEnabled) continue
-      if (click.button === "right" && !settings.rightClickEnabled) continue
-
-      let scale: number
-      if (elapsed <= DOWN_DURATION_MS) {
-        const r = elapsed / DOWN_DURATION_MS
-        scale = 1.0 - MAX_DEPRESSION * Math.sin(r * (Math.PI / 2))
-      } else {
-        const u = (elapsed - DOWN_DURATION_MS) / REBOUND_DURATION_MS
-        scale = 1.0 - MAX_DEPRESSION * Math.pow(1.0 - u, 2) * Math.cos(u * Math.PI * 1.5)
-      }
-
-      activeScale = activeScale !== null ? Math.min(activeScale, scale) : scale
+    // Walk back to the first press in the chain of nearby presses; the spring
+    // is assumed at rest before it.
+    let j = k
+    while (
+      j > 0 &&
+      k - j < PRESS_MAX_CHAIN &&
+      intervals[j].startMs - intervals[j - 1].endMs < PRESS_SETTLE_MS
+    ) {
+      j--
     }
 
-    return activeScale ?? 1.0
+    let x = 1.0
+    let v = 0.0
+    for (let i = j; i <= k; i++) {
+      const interval = intervals[i]
+      const pressed = springStep(
+        x,
+        v,
+        PRESS_SCALE,
+        (Math.min(interval.endMs, timeMs) - interval.startMs) / 1000,
+        PRESS_IN_OMEGA,
+        PRESS_IN_ZETA,
+      )
+      x = pressed[0]
+      v = pressed[1]
+      if (timeMs <= interval.endMs) return clamp(x, PRESS_SCALE_MIN, PRESS_SCALE_MAX)
+      const releaseEnd = i < k ? intervals[i + 1].startMs : timeMs
+      const released = springStep(
+        x,
+        v,
+        1.0,
+        (releaseEnd - interval.endMs) / 1000,
+        PRESS_OUT_OMEGA,
+        PRESS_OUT_ZETA,
+      )
+      x = released[0]
+      v = released[1]
+    }
+    return clamp(x, PRESS_SCALE_MIN, PRESS_SCALE_MAX)
   }
 
   function applyClickMovement(
@@ -724,9 +878,10 @@ export function createCursorEngine(
     const visible = settings.enabled && event.visible && opacity > 0
     const clickScale = calculateClickScale(timeMs, settings)
 
-    const point = settings.clickPressAnimation
-      ? applyClickMovement(timeMs, settings, rawPoint)
-      : rawPoint
+    const point =
+      settings.clickPressAnimation !== false
+        ? applyClickMovement(timeMs, settings, rawPoint)
+        : rawPoint
 
     return {
       sourceTimeMs: timeMs,

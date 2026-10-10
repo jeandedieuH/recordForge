@@ -40,6 +40,13 @@
           // Ignore localStorage errors
         }
 
+        // The teleprompter renders a dark translucent card over the desktop —
+        // flag it and pin the dark theme regardless of the user's app theme.
+        if (params.get("teleprompter") === "1" || kind === "teleprompter") {
+          document.documentElement.dataset.teleprompter = "true"
+          document.documentElement.dataset.theme = "dark"
+        }
+
         // Prevent WebView2/browser from navigating away when files or text are dragged into the window
         window.addEventListener("dragover", function (e) {
           e.preventDefault()

@@ -117,6 +117,19 @@ impl CursorEvent {
         }
         CursorButton::Left
     }
+
+    fn press_phase(&self) -> PressPhase {
+        let be = self.button_event_str();
+        if be == "down" || be.ends_with("-down") {
+            PressPhase::Down
+        } else if be == "up" || be.ends_with("-up") {
+            PressPhase::Up
+        } else if be == "held" || be.ends_with("-held") {
+            PressPhase::Held
+        } else {
+            PressPhase::None
+        }
+    }
 }
 
 /// Independent button states with per-button edge detection.
@@ -730,6 +743,62 @@ type SmoothingCacheValue = (Vec<f64>, Vec<f64>);
 // eviction victim arbitrary and could churn a still-active segment.
 type SmoothingCache = RefCell<Vec<(SmoothingCacheKey, SmoothingCacheValue)>>;
 
+/// Cursor scale while an enabled button is held.
+const PRESS_SCALE: f64 = 0.80;
+/// Taps shorter than this are stretched so the press stays visible at video
+/// frame rates.
+const PRESS_MIN_HOLD_MS: f64 = 90.0;
+/// Press-in spring (rad/s); near critical damping so there is no visible
+/// undershoot on the way down.
+const PRESS_IN_OMEGA: f64 = 70.0;
+const PRESS_IN_ZETA: f64 = 0.92;
+/// Release spring (rad/s); under-damped so it produces one soft overshoot
+/// peaking near 1.041.
+const PRESS_OUT_OMEGA: f64 = 24.0;
+const PRESS_OUT_ZETA: f64 = 0.45;
+/// Gap after which the spring is back at rest (residual < 1e-4); also the
+/// fast-path cutoff for frames far from any press.
+const PRESS_SETTLE_MS: f64 = 700.0;
+/// Cap on presses replayed into a single evaluation so click storms stay cheap.
+const PRESS_MAX_CHAIN: usize = 64;
+const PRESS_SCALE_MIN: f64 = 0.5;
+const PRESS_SCALE_MAX: f64 = 1.25;
+
+/// Button state implied by one telemetry sample for the press model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PressPhase {
+    Down,
+    Up,
+    Held,
+    None,
+}
+
+/// `[start_ms, end_ms]` window during which the press spring's target is
+/// [`PRESS_SCALE`]; outside it the spring relaxes back to 1.
+#[derive(Debug, Clone, Copy)]
+struct PressInterval {
+    start_ms: f64,
+    end_ms: f64,
+}
+
+/// One closed-form step of an underdamped spring (zeta < 1, unit mass). `tau`
+/// is in seconds; `tau <= 0` returns the state unchanged so the value at a
+/// press edge is exact.
+fn spring_step(x: f64, v: f64, target: f64, tau: f64, omega: f64, zeta: f64) -> (f64, f64) {
+    if tau <= 0.0 {
+        return (x, v);
+    }
+    let e0 = x - target;
+    let d = (-zeta * omega * tau).exp();
+    let wd = omega * (1.0 - zeta * zeta).sqrt();
+    let cos = (wd * tau).cos();
+    let sin = (wd * tau).sin();
+    (
+        target + d * (e0 * cos + ((v + zeta * omega * e0) / wd) * sin),
+        d * (v * cos - ((omega * omega * e0 + zeta * omega * v) / wd) * sin),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct CursorEngine {
     telemetry: CursorTelemetryFile,
@@ -747,6 +816,11 @@ pub struct CursorEngine {
     /// Interior mutability keeps `evaluate` deterministic and seek-safe while
     /// avoiding an O(n) allocation for every exported frame.
     smoothing_cache: SmoothingCache,
+    /// Merged press intervals per (left, right) enabled mask; index is
+    /// `left | right << 1` and middle presses are always included, matching
+    /// the click-effect gating. Precomputed so `click_scale` stays a pure,
+    /// seek-safe function of time.
+    press_intervals: [Vec<PressInterval>; 4],
 }
 
 impl CursorEngine {
@@ -903,6 +977,92 @@ impl CursorEngine {
             shape_ids.push(event.shape_id.clone());
         }
 
+        // Derive [down, up] press windows per button class. A `-held` sample
+        // implies an ongoing press, a `-up` or an ordinary sample closes it,
+        // and a telemetry gap closes everything at the last event before the
+        // gap because the button state across it is unknown.
+        const PRESS_CLASSES: [CursorButton; 3] = [
+            CursorButton::Left,
+            CursorButton::Right,
+            CursorButton::Middle,
+        ];
+        let mut raw_presses: Vec<(CursorButton, f64, f64)> = Vec::new();
+        let mut open: [Option<f64>; 3] = [None; 3];
+        for (index, event) in telemetry.events.iter().enumerate() {
+            let t_ms = event.t_ms as f64;
+            if index > 0 && segment_start_index[index] == index {
+                let previous_ms = telemetry.events[index - 1].t_ms as f64;
+                for (slot, start) in open.iter_mut().enumerate() {
+                    if let Some(start_ms) = start.take() {
+                        raw_presses.push((PRESS_CLASSES[slot], start_ms, previous_ms));
+                    }
+                }
+            }
+            let class_index = match event.click_button() {
+                CursorButton::Left => 0,
+                CursorButton::Right => 1,
+                CursorButton::Middle => 2,
+            };
+            match event.press_phase() {
+                PressPhase::Down | PressPhase::Held => {
+                    if open[class_index].is_none() {
+                        open[class_index] = Some(t_ms);
+                    }
+                }
+                PressPhase::Up => {
+                    if let Some(start_ms) = open[class_index].take() {
+                        raw_presses.push((PRESS_CLASSES[class_index], start_ms, t_ms));
+                    }
+                }
+                PressPhase::None => {
+                    for (slot, start) in open.iter_mut().enumerate() {
+                        if let Some(start_ms) = start.take() {
+                            raw_presses.push((PRESS_CLASSES[slot], start_ms, t_ms));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(last) = telemetry.events.last() {
+            let last_ms = last.t_ms as f64;
+            for (slot, start) in open.iter_mut().enumerate() {
+                if let Some(start_ms) = start.take() {
+                    raw_presses.push((PRESS_CLASSES[slot], start_ms, last_ms));
+                }
+            }
+        }
+
+        // Merge each settings mask's presses into sorted, non-overlapping
+        // intervals, stretching short taps to the minimum hold.
+        let press_intervals: [Vec<PressInterval>; 4] = std::array::from_fn(|mask| {
+            let left_enabled = mask & 1 != 0;
+            let right_enabled = mask & 2 != 0;
+            let mut merged: Vec<PressInterval> = raw_presses
+                .iter()
+                .filter(|(button, _, _)| match button {
+                    CursorButton::Left => left_enabled,
+                    CursorButton::Right => right_enabled,
+                    CursorButton::Middle => true,
+                })
+                .map(|(_, start_ms, end_ms)| PressInterval {
+                    start_ms: *start_ms,
+                    end_ms: (*end_ms).max(*start_ms + PRESS_MIN_HOLD_MS),
+                })
+                .collect();
+            merged.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
+            let mut intervals: Vec<PressInterval> = Vec::with_capacity(merged.len());
+            for interval in merged {
+                if let Some(last) = intervals.last_mut() {
+                    if interval.start_ms <= last.end_ms {
+                        last.end_ms = last.end_ms.max(interval.end_ms);
+                        continue;
+                    }
+                }
+                intervals.push(interval);
+            }
+            intervals
+        });
+
         Ok(Self {
             telemetry,
             options,
@@ -914,6 +1074,7 @@ impl CursorEngine {
             shape_ids,
             shape_index_by_id,
             smoothing_cache: RefCell::new(Vec::new()),
+            press_intervals,
         })
     }
 
@@ -1339,61 +1500,74 @@ impl CursorEngine {
         result
     }
 
+    /// Button-aware press model: a damped spring whose target is
+    /// [`PRESS_SCALE`] while any enabled button is held and 1.0 otherwise.
+    /// Evaluated in closed form per press interval, so position and velocity
+    /// carry across presses (C1 continuity) and double clicks interrupt each
+    /// other naturally — all without evaluation state.
     fn calculate_click_scale(&self, time_ms: f64, settings: &CursorSettings) -> f64 {
         if !settings.click_press_animation {
             return 1.0;
         }
-
-        const PRESS_DURATION_MS: f64 = 220.0;
-        const DOWN_DURATION_MS: f64 = 50.0;
-        const REBOUND_DURATION_MS: f64 = 170.0;
-        const MAX_DEPRESSION: f64 = 0.14;
-
-        let mut low = 0usize;
-        let mut high = self.clicks.len();
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            if self.clicks[middle - 1].t_ms as f64 <= time_ms {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
+        let mask = usize::from(settings.left_click_enabled)
+            | (usize::from(settings.right_click_enabled) << 1);
+        let intervals = &self.press_intervals[mask];
+        if intervals.is_empty() {
+            return 1.0;
         }
 
-        let mut active_scale: Option<f64> = None;
-        for click in self.clicks[..low].iter().rev() {
-            let elapsed = time_ms - click.t_ms as f64;
-            if elapsed > PRESS_DURATION_MS {
-                break;
-            }
-            if elapsed < 0.0 {
-                continue;
-            }
-
-            let button_allowed = match click.button {
-                CursorButton::Left => settings.left_click_enabled,
-                CursorButton::Right => settings.right_click_enabled,
-                CursorButton::Middle => true,
-            };
-            if !button_allowed {
-                continue;
-            }
-
-            let scale = if elapsed <= DOWN_DURATION_MS {
-                let r = elapsed / DOWN_DURATION_MS;
-                1.0 - MAX_DEPRESSION * (r * std::f64::consts::FRAC_PI_2).sin()
-            } else {
-                let u = (elapsed - DOWN_DURATION_MS) / REBOUND_DURATION_MS;
-                1.0 - MAX_DEPRESSION * (1.0 - u).powi(2) * (u * std::f64::consts::PI * 1.5).cos()
-            };
-
-            active_scale = Some(match active_scale {
-                Some(current) => current.min(scale),
-                None => scale,
-            });
+        // Last press that started at or before this time.
+        let k = match intervals
+            .partition_point(|interval| interval.start_ms <= time_ms)
+            .checked_sub(1)
+        {
+            Some(k) => k,
+            None => return 1.0,
+        };
+        // Well past the last press the spring is at rest; no replay needed.
+        if time_ms - intervals[k].end_ms >= PRESS_SETTLE_MS {
+            return 1.0;
         }
 
-        active_scale.unwrap_or(1.0)
+        // Walk back to the first press in the chain of nearby presses; the
+        // spring is assumed at rest before it.
+        let mut j = k;
+        while j > 0
+            && k - j < PRESS_MAX_CHAIN
+            && intervals[j].start_ms - intervals[j - 1].end_ms < PRESS_SETTLE_MS
+        {
+            j -= 1;
+        }
+
+        let (mut x, mut v) = (1.0, 0.0);
+        for i in j..=k {
+            let interval = intervals[i];
+            (x, v) = spring_step(
+                x,
+                v,
+                PRESS_SCALE,
+                (time_ms.min(interval.end_ms) - interval.start_ms) / 1000.0,
+                PRESS_IN_OMEGA,
+                PRESS_IN_ZETA,
+            );
+            if time_ms <= interval.end_ms {
+                return x.clamp(PRESS_SCALE_MIN, PRESS_SCALE_MAX);
+            }
+            let release_end = if i < k {
+                intervals[i + 1].start_ms
+            } else {
+                time_ms
+            };
+            (x, v) = spring_step(
+                x,
+                v,
+                1.0,
+                (release_end - interval.end_ms) / 1000.0,
+                PRESS_OUT_OMEGA,
+                PRESS_OUT_ZETA,
+            );
+        }
+        x.clamp(PRESS_SCALE_MIN, PRESS_SCALE_MAX)
     }
 
     fn apply_click_movement(
@@ -1581,6 +1755,83 @@ mod tests {
         }
         .normalize()
     }
+
+    /// Dense stationary telemetry at (500, 400) on a 1920x1080 source sampled
+    /// every 8 ms (120 Hz), plus an event at every press edge. Each press is a
+    /// `(button, down_ms, up_ms)` tuple; samples between them carry
+    /// `{button}-held` and the matching `buttons` flag.
+    fn press_telemetry(presses: &[(&str, u64, u64)], duration_ms: u64) -> CursorTelemetryFile {
+        let mut times: Vec<u64> = (0..=duration_ms).step_by(8).collect();
+        for (_, down_ms, up_ms) in presses {
+            times.push(*down_ms);
+            times.push(*up_ms);
+        }
+        times.sort_unstable();
+        times.dedup();
+        let events = times
+            .into_iter()
+            .map(|t_ms| {
+                let mut button_event = "none".to_string();
+                let mut buttons = CursorButtonState::default();
+                for (button, down_ms, up_ms) in presses {
+                    if t_ms == *down_ms {
+                        button_event = format!("{button}-down");
+                    } else if t_ms == *up_ms {
+                        button_event = format!("{button}-up");
+                    } else if t_ms > *down_ms && t_ms < *up_ms {
+                        button_event = format!("{button}-held");
+                    }
+                    if t_ms >= *down_ms && t_ms < *up_ms {
+                        match *button {
+                            "left" => buttons.left = true,
+                            "right" => buttons.right = true,
+                            "middle" => buttons.middle = true,
+                            _ => {}
+                        }
+                    }
+                }
+                CursorEvent {
+                    t_ms,
+                    x: 500.0,
+                    y: 400.0,
+                    visible: true,
+                    buttons,
+                    button_event: Some(button_event),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let mut telemetry = make_telemetry(events);
+        telemetry.sample_rate_hz = 120.0;
+        telemetry
+    }
+
+    fn click_scale_at(engine: &CursorEngine, settings: &CursorSettings, time_ms: f64) -> f64 {
+        engine.evaluate(time_ms, settings).click_scale
+    }
+
+    fn assert_scale(engine: &CursorEngine, settings: &CursorSettings, time_ms: f64, expected: f64) {
+        let actual = click_scale_at(engine, settings, time_ms);
+        assert!(
+            (actual - expected).abs() <= 0.002,
+            "clickScale at {time_ms}ms: expected {expected}, got {actual}"
+        );
+    }
+
+    /// Oracle for the canonical tap (down 1000, up 1090), computed from the
+    /// closed-form spring reference implementation.
+    const TAP_ORACLE: &[(f64, f64)] = &[
+        (20.0, 0.9146),
+        (50.0, 0.8200),
+        (90.0, 0.8004),
+        (110.0, 0.8190),
+        (150.0, 0.9186),
+        (200.0, 1.0208),
+        (250.0, 1.0392),
+        (300.0, 1.0148),
+        (400.0, 0.9921),
+        (500.0, 1.0012),
+    ];
 
     #[test]
     fn cursor_size_factor_matches_typescript_model() {
@@ -1974,67 +2225,383 @@ mod tests {
     }
 
     #[test]
-    fn click_scale_micro_press_and_spring() {
-        let telemetry = make_telemetry(vec![
-            CursorEvent {
-                t_ms: 0,
-                x: 100.0,
-                y: 100.0,
-                visible: true,
-                ..Default::default()
-            },
-            CursorEvent {
-                t_ms: 100,
-                x: 100.0,
-                y: 100.0,
-                visible: true,
-                clicked: true,
-                button: Some("left".into()),
-                button_event: Some("left-down".into()),
-                ..Default::default()
-            },
-            CursorEvent {
-                t_ms: 600,
-                x: 100.0,
-                y: 100.0,
-                visible: true,
-                ..Default::default()
-            },
-        ]);
+    fn click_scale_spring_matches_tap_oracle() {
+        let telemetry = press_telemetry(&[("left", 1000, 1090)], 4000);
         let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
         let settings = CursorSettings::default();
 
-        // Before click
-        let frame_before = engine.evaluate(90.0, &settings);
-        assert!((frame_before.click_scale - 1.0).abs() < 0.000_1);
+        // Exactly 1.0 before and at the press edge.
+        assert_eq!(click_scale_at(&engine, &settings, 999.0), 1.0);
+        assert_eq!(click_scale_at(&engine, &settings, 1000.0), 1.0);
+        for (offset, expected) in TAP_ORACLE {
+            assert_scale(&engine, &settings, 1000.0 + offset, *expected);
+        }
 
-        // Exactly at click down
-        let frame_at = engine.evaluate(100.0, &settings);
-        assert!((frame_at.click_scale - 1.0).abs() < 0.000_1);
+        // One soft overshoot peaking near 1.041 (~+237ms); the press bottoms
+        // out at the held scale of 0.80.
+        let mut peak = 0.0f64;
+        let mut trough = f64::MAX;
+        for t in 0..=900 {
+            let scale = click_scale_at(&engine, &settings, 1000.0 + t as f64);
+            peak = peak.max(scale);
+            trough = trough.min(scale);
+        }
+        assert!((peak - 1.041).abs() <= 0.002, "peak {peak}");
+        assert!((0.7995..=0.8010).contains(&trough), "trough {trough}");
 
-        // Peak compression at 50ms (t = 150ms): ~0.86x
-        let frame_peak = engine.evaluate(150.0, &settings);
-        assert!((frame_peak.click_scale - 0.86).abs() < 0.001);
+        // Exactly settled one settle window after the release edge.
+        assert_eq!(click_scale_at(&engine, &settings, 1790.0), 1.0);
+        assert_eq!(click_scale_at(&engine, &settings, 2500.0), 1.0);
 
-        // Spring rebound overshoot around t = 245ms: > 1.0 (subtle bounce)
-        let frame_rebound = engine.evaluate(245.0, &settings);
-        assert!(frame_rebound.click_scale > 1.01 && frame_rebound.click_scale < 1.03);
-
-        // Settled at t = 320ms (220ms after click): 1.0
-        let frame_settled = engine.evaluate(320.0, &settings);
-        assert!((frame_settled.click_scale - 1.0).abs() < 0.001);
-
-        // Long after click
-        let frame_later = engine.evaluate(500.0, &settings);
-        assert!((frame_later.click_scale - 1.0).abs() < 0.000_1);
-
-        // When disabled, click_scale stays 1.0
-        let disabled_settings = CursorSettings {
+        // Explicitly disabled stays 1.0 at every sampled time.
+        let disabled = CursorSettings {
             click_press_animation: false,
             ..Default::default()
         };
-        let frame_disabled = engine.evaluate(150.0, &disabled_settings);
-        assert!((frame_disabled.click_scale - 1.0).abs() < 0.000_1);
+        for t in [999.0, 1000.0, 1050.0, 1150.0, 1250.0, 2000.0] {
+            assert_eq!(click_scale_at(&engine, &disabled, t), 1.0);
+        }
+    }
+
+    #[test]
+    fn click_scale_min_hold_stretches_short_taps() {
+        let settings = CursorSettings::default();
+        let canonical = CursorEngine::new(
+            press_telemetry(&[("left", 1000, 1090)], 4000),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        // A one-sample tap (8 ms hold) stretches to the minimum hold and
+        // produces the identical curve.
+        let stretched = CursorEngine::new(
+            press_telemetry(&[("left", 1000, 1008)], 4000),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        for offset in [0.0, 20.0, 50.0, 90.0, 150.0, 237.0, 400.0] {
+            assert_eq!(
+                click_scale_at(&canonical, &settings, 1000.0 + offset).to_bits(),
+                click_scale_at(&stretched, &settings, 1000.0 + offset).to_bits(),
+                "offset {offset}"
+            );
+        }
+
+        // A legacy single-sample press (`-down` then a plain sample 17 ms
+        // later) produces the same curve shifted to its own start.
+        let legacy = CursorEngine::new(
+            make_telemetry(vec![
+                CursorEvent {
+                    t_ms: 0,
+                    x: 500.0,
+                    y: 400.0,
+                    visible: true,
+                    ..Default::default()
+                },
+                CursorEvent {
+                    t_ms: 100,
+                    x: 500.0,
+                    y: 400.0,
+                    visible: true,
+                    clicked: true,
+                    button: Some("left".into()),
+                    button_event: Some("left-down".into()),
+                    ..Default::default()
+                },
+                CursorEvent {
+                    t_ms: 117,
+                    x: 500.0,
+                    y: 400.0,
+                    visible: true,
+                    ..Default::default()
+                },
+                CursorEvent {
+                    t_ms: 600,
+                    x: 500.0,
+                    y: 400.0,
+                    visible: true,
+                    ..Default::default()
+                },
+            ]),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        for (offset, expected) in TAP_ORACLE {
+            assert_scale(&legacy, &settings, 100.0 + offset, *expected);
+        }
+    }
+
+    #[test]
+    fn click_scale_double_click_composes() {
+        // Effective ends are stretched to 1090 and 1240 by the minimum hold.
+        let telemetry = press_telemetry(&[("left", 1000, 1070), ("left", 1150, 1220)], 4000);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        const DOUBLE_ORACLE: &[(f64, f64)] = &[
+            (100.0, 0.8051),
+            (120.0, 0.8395),
+            (140.0, 0.8913),
+            (149.0, 0.9159),
+            (155.0, 0.9225),
+            (170.0, 0.8821),
+            (200.0, 0.8157),
+            (230.0, 0.8014),
+            (300.0, 0.9188),
+            (400.0, 1.0392),
+        ];
+        for (offset, expected) in DOUBLE_ORACLE {
+            assert_scale(&engine, &settings, 1000.0 + offset, *expected);
+        }
+
+        // Position and velocity carry across the second press edge (C1).
+        let before = click_scale_at(&engine, &settings, 1149.99);
+        let after = click_scale_at(&engine, &settings, 1150.01);
+        assert!(
+            (before - after).abs() < 1e-3,
+            "discontinuity at the second press: {before} vs {after}"
+        );
+    }
+
+    #[test]
+    fn click_scale_holds_for_drag_and_releases() {
+        let telemetry = press_telemetry(&[("left", 1000, 2500)], 5000);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        // The spring stays pinned at the held scale for the whole drag.
+        for offset in [100.0, 500.0, 1000.0, 1499.0, 1500.0] {
+            let scale = click_scale_at(&engine, &settings, 1000.0 + offset);
+            assert!(
+                (scale - 0.8).abs() <= 0.001,
+                "held scale at +{offset}: {scale}"
+            );
+        }
+
+        const RELEASE_ORACLE: &[(f64, f64)] = &[
+            (1550.0, 0.8926),
+            (1600.0, 1.0080),
+            (1650.0, 1.0409),
+            (1700.0, 1.0201),
+            (1800.0, 0.9917),
+            (2000.0, 1.0007),
+        ];
+        for (offset, expected) in RELEASE_ORACLE {
+            assert_scale(&engine, &settings, 1000.0 + offset, *expected);
+        }
+        assert_eq!(click_scale_at(&engine, &settings, 4200.0), 1.0);
+    }
+
+    #[test]
+    fn click_scale_rest_between_distant_presses() {
+        let telemetry = press_telemetry(&[("left", 1000, 1090), ("left", 3000, 3090)], 4000);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        // Presses farther apart than the settle window start from rest, so
+        // the second click replays the canonical curve exactly.
+        let first = click_scale_at(&engine, &settings, 1050.0);
+        let second = click_scale_at(&engine, &settings, 3050.0);
+        assert!((first - 0.82).abs() <= 0.002, "canonical +50ms: {first}");
+        assert_eq!(first.to_bits(), second.to_bits());
+    }
+
+    #[test]
+    fn click_scale_respects_button_toggles() {
+        let settings = CursorSettings::default();
+
+        // Right presses follow rightClickEnabled.
+        let right = CursorEngine::new(
+            press_telemetry(&[("right", 1000, 1090)], 4000),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        let right_off = CursorSettings {
+            right_click_enabled: false,
+            ..Default::default()
+        };
+        for t in [1050.0, 1100.0, 1250.0, 1500.0] {
+            assert_eq!(click_scale_at(&right, &right_off, t), 1.0);
+        }
+        for (offset, expected) in TAP_ORACLE {
+            assert_scale(&right, &settings, 1000.0 + offset, *expected);
+        }
+
+        // Left presses follow leftClickEnabled.
+        let left = CursorEngine::new(
+            press_telemetry(&[("left", 1000, 1090)], 4000),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        let left_off = CursorSettings {
+            left_click_enabled: false,
+            ..Default::default()
+        };
+        for t in [1050.0, 1100.0, 1250.0, 1500.0] {
+            assert_eq!(click_scale_at(&left, &left_off, t), 1.0);
+        }
+
+        // Middle presses animate even when both toggles are off.
+        let middle = CursorEngine::new(
+            press_telemetry(&[("middle", 1000, 1090)], 4000),
+            CursorEngineOptions::default(),
+        )
+        .unwrap();
+        let both_off = CursorSettings {
+            left_click_enabled: false,
+            right_click_enabled: false,
+            ..Default::default()
+        };
+        for (offset, expected) in TAP_ORACLE {
+            assert_scale(&middle, &both_off, 1000.0 + offset, *expected);
+        }
+    }
+
+    #[test]
+    fn click_scale_merges_overlapping_buttons() {
+        // Overlapping left/right presses merge into one held interval.
+        let telemetry = press_telemetry(&[("left", 1000, 1300), ("right", 1100, 1200)], 4000);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        let held = click_scale_at(&engine, &settings, 1250.0);
+        assert!((held - 0.8).abs() <= 0.002, "merged hold at 1250: {held}");
+        // Release begins at the merged end (1300): +50 ms matches the drag
+        // release oracle.
+        assert_scale(&engine, &settings, 1350.0, 0.8926);
+    }
+
+    #[test]
+    fn click_scale_closes_presses_across_telemetry_gaps() {
+        // Dense samples through 1008 with a press at 1000, then a silent gap
+        // until 3000 where held samples resume until release at 3500.
+        let mut events = Vec::new();
+        for t in (0..=1008).step_by(8) {
+            let (button_event, left) = if t == 1000 {
+                ("left-down", true)
+            } else if t > 1000 {
+                ("left-held", true)
+            } else {
+                ("none", false)
+            };
+            events.push(CursorEvent {
+                t_ms: t,
+                x: 500.0,
+                y: 400.0,
+                visible: true,
+                buttons: CursorButtonState {
+                    left,
+                    ..Default::default()
+                },
+                button_event: Some(button_event.into()),
+                ..Default::default()
+            });
+        }
+        for t in (3000..3500).step_by(8) {
+            events.push(CursorEvent {
+                t_ms: t,
+                x: 500.0,
+                y: 400.0,
+                visible: true,
+                buttons: CursorButtonState {
+                    left: true,
+                    ..Default::default()
+                },
+                button_event: Some("left-held".into()),
+                ..Default::default()
+            });
+        }
+        events.push(CursorEvent {
+            t_ms: 3500,
+            x: 500.0,
+            y: 400.0,
+            visible: true,
+            button_event: Some("left-up".into()),
+            ..Default::default()
+        });
+        events.push(CursorEvent {
+            t_ms: 4000,
+            x: 500.0,
+            y: 400.0,
+            visible: true,
+            ..Default::default()
+        });
+        let mut telemetry = make_telemetry(events);
+        telemetry.sample_rate_hz = 120.0;
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        // The pre-gap press was closed at the last pre-gap sample (1008) and
+        // stretched to 1090, so by 2000 the spring is long settled.
+        assert_eq!(click_scale_at(&engine, &settings, 2000.0), 1.0);
+        // The held samples after the gap re-open the press.
+        let held = click_scale_at(&engine, &settings, 3200.0);
+        assert!((held - 0.8).abs() <= 0.002, "post-gap hold: {held}");
+        // A normal release follows the -up at 3500.
+        assert_scale(&engine, &settings, 3550.0, 0.8926);
+    }
+
+    #[test]
+    fn click_scale_is_seek_safe_and_stateless() {
+        let telemetry = press_telemetry(
+            &[
+                ("left", 1000, 1090),
+                ("right", 1400, 1600),
+                ("left", 2000, 3500),
+            ],
+            4000,
+        );
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        let times: Vec<f64> = (0..40).map(|i| 500.0 + i as f64 * 87.31).collect();
+        let expected: Vec<u64> = times
+            .iter()
+            .map(|t| click_scale_at(&engine, &settings, *t).to_bits())
+            .collect();
+
+        // Re-evaluating in reverse and in a shuffled order must return
+        // bit-identical values: evaluation carries no hidden state.
+        for i in (0..times.len()).rev() {
+            assert_eq!(
+                click_scale_at(&engine, &settings, times[i]).to_bits(),
+                expected[i],
+                "reversed t={}",
+                times[i]
+            );
+        }
+        let mut order: Vec<usize> = (0..times.len()).collect();
+        for i in (1..order.len()).rev() {
+            let swap = (i * 31 + 7) % (i + 1);
+            order.swap(i, swap);
+        }
+        for i in order {
+            assert_eq!(
+                click_scale_at(&engine, &settings, times[i]).to_bits(),
+                expected[i],
+                "shuffled t={}",
+                times[i]
+            );
+        }
+    }
+
+    #[test]
+    fn click_scale_handles_press_chains() {
+        // 300 rapid presses exercise the replay chain cap; evaluation stays
+        // finite and inside the output clamp.
+        let presses: Vec<(&str, u64, u64)> = (0..300u64)
+            .map(|i| ("left", i * 100, i * 100 + 40))
+            .collect();
+        let telemetry = press_telemetry(&presses, 31_000);
+        let engine = CursorEngine::new(telemetry, CursorEngineOptions::default()).unwrap();
+        let settings = CursorSettings::default();
+
+        for t in [5_000.0, 14_950.0, 29_950.0, 30_500.0] {
+            let scale = click_scale_at(&engine, &settings, t);
+            assert!(
+                scale.is_finite() && (PRESS_SCALE_MIN..=PRESS_SCALE_MAX).contains(&scale),
+                "chain evaluation at {t}: {scale}"
+            );
+        }
     }
 
     #[test]

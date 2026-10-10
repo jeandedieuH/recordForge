@@ -59,6 +59,7 @@ function App() {
 
   useEffect(() => {
     const root = document.documentElement
+    const previousTheme = root.dataset.theme
     if (isFloating) root.dataset.floating = "true"
     if (isBoundary) root.dataset.boundary = "true"
     if (isCountdown) root.dataset.countdown = "true"
@@ -67,6 +68,11 @@ function App() {
       root.dataset.webcamPreview = "true"
       root.setAttribute("data-webcam-preview", "true")
     }
+    if (isTeleprompter) {
+      root.dataset.teleprompter = "true"
+      // The prompter card is always dark, even for light-theme users.
+      root.dataset.theme = "dark"
+    }
     return () => {
       delete root.dataset.floating
       delete root.dataset.boundary
@@ -74,6 +80,11 @@ function App() {
       delete root.dataset.regionPicker
       delete root.dataset.webcamPreview
       root.removeAttribute("data-webcam-preview")
+      if (isTeleprompter) {
+        delete root.dataset.teleprompter
+        if (previousTheme === undefined) delete root.dataset.theme
+        else root.dataset.theme = previousTheme
+      }
     }
   }, [isBoundary, isCountdown, isFloating, isRegionPicker, isTeleprompter, isWebcamPreview])
 

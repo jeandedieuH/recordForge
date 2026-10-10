@@ -24,6 +24,10 @@ The countdown is a dynamically-created Tauri webview used while the main window 
 
 The main window uses Tauri's asset protocol to stream finalized recordings and generated derivatives into the HTML video element. The protocol is enabled only for `$APPDATA/sessions/**/*`, which contains the immutable recording originals and their preparation outputs. No arbitrary filesystem or shell permission is granted to the webview, and media outside the application sessions directory is not exposed.
 
+## Teleprompter Window Review
+
+The teleprompter is a dynamically created, frameless, always-on-top, content-protected webview (the same chrome pattern as the floating controls and webcam preview, ADR 009). It uses a separate `teleprompter` capability limited to `core:default`, `core:event:default`, and window close/minimize/start-dragging for its custom title bar; it receives no filesystem, shell, updater, dialog, credential, or window-creation permissions. Script text and display settings live only in the webview's `localStorage` on the user's device and are never sent over IPC, logged, or included in diagnostics. The Pro entitlement is still enforced in Rust (`open_teleprompter`), never by UI state.
+
 ## Signed GitHub Release Updater Review
 
 The main window receives `updater:default` so the React surface can check and download signed application updates. Auxiliary recording windows do not receive updater permissions. The official release configuration embeds only the updater public key and the public GitHub Releases endpoint; the private signing key exists only as a protected GitHub Actions secret.
