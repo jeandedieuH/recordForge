@@ -6,7 +6,8 @@
  * (Products → RecordForge Pro → Checkout Links). Polar generates IDs like
  * `polar_cl_…` — `buy.polar.sh/<product-name>` is NOT a valid format and 404s.
  */
-export const CHECKOUT_URL = "https://buy.polar.sh/polar_cl_ZrbOX8Isev0738LkzZkssAri6FHjoMGZu1Xau0hyFbF"
+export const CHECKOUT_URL =
+  "https://buy.polar.sh/polar_cl_ZrbOX8Isev0738LkzZkssAri6FHjoMGZu1Xau0hyFbF"
 
 /** Pro Lifetime is $39; the FOUNDER discount code pre-applies $10 off for the
  * first 30 days after launch. */
