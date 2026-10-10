@@ -46,7 +46,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out whisper.cpp
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ggml-org/whisper.cpp
           ref: ${{ inputs.whisper_ref }}
@@ -105,7 +105,7 @@ jobs:
           Compress-Archive -Path build\bin\Release\whisper-cli.exe, LICENSE -DestinationPath "$env:GITHUB_WORKSPACE/dist/whisper-bin-${{ matrix.asset }}.zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: whisper-bin-${{ matrix.asset }}
           path: dist/whisper-bin-${{ matrix.asset }}.zip
@@ -125,7 +125,7 @@ jobs:
           mv "saved_model_tflite_tfjs_tftrt_onnx_coreml/model_float32.onnx" selfie-segmentation-256.onnx
 
       - name: Publish to seg-model release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: seg-model-v1
           name: "Segmentation model v1 (virtual background)"
@@ -141,14 +141,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Collect artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: whisper-bin-*
           merge-multiple: true
           path: dist
 
       - name: Publish to whisper-engine release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: whisper-engine-${{ inputs.whisper_ref }}
           name: "Whisper engine ${{ inputs.whisper_ref }} (self-hosted builds)"
