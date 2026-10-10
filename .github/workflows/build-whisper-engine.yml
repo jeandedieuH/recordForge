@@ -39,10 +39,10 @@ jobs:
           # macOS x64 — macos-13 is the last Intel hosted runner.
           - asset: darwin-x64
             os: macos-13
-          # Windows ARM64 — MSVC cross-compiles ARM64 from x64 runners.
+          # Windows ARM64 — ggml's ARM backend rejects MSVC, so this
+          # cross-compiles with LLVM clang from an x64 runner instead.
           - asset: win-arm64
             os: windows-latest
-            cmake_generator_args: "-A ARM64"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out whisper.cpp
@@ -63,11 +63,23 @@ jobs:
             -DGGML_METAL_EMBED_LIBRARY=ON
           cmake --build build --config Release -j --target whisper-cli
 
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: choco install ninja
+
       - name: Build whisper-cli (Windows ARM64 cross-compile)
         if: runner.os == 'Windows'
         working-directory: whisper
+        shell: cmd
         run: |
-          cmake -B build ${{ matrix.cmake_generator_args }} -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF
+          rem Enter the MSVC x64->arm64 env so clang sees ARM64 headers/libs/linker,
+          rem then compile with LLVM (same recipe llama.cpp's release CI uses).
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvarsall.bat" amd64_arm64
+          cmake -B build -G "Ninja Multi-Config" ^
+            -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake ^
+            -D BUILD_SHARED_LIBS=OFF ^
+            -D GGML_NATIVE=OFF ^
+            -D GGML_OPENMP=OFF
           cmake --build build --config Release --target whisper-cli
 
       - name: Smoke test (macOS runners execute their own arch)
