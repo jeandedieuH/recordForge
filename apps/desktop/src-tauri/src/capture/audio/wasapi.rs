@@ -26,7 +26,8 @@ use super::wav::{append_silence_until, frames_for_duration, loopback_packet_star
 
 #[cfg(windows)]
 use wasapi::{
-    deinitialize, initialize_mta, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
+    deinitialize, initialize_mta, Device, DeviceEnumerator, Direction, SampleType, StreamMode,
+    WaveFormat,
 };
 
 #[cfg(any(windows, test))]
@@ -508,6 +509,33 @@ fn cross_platform_capture_worker(
     })
 }
 
+/// Resolve a persisted endpoint id to a live device by scanning the active
+/// device collection. `DeviceEnumerator::get_device` is avoided on purpose: in
+/// wasapi 0.23.0 it builds the `PCWSTR` from a temporary `HSTRING` that is
+/// dropped before `IMMDeviceEnumerator::GetDevice` runs, so the lookup reads
+/// freed memory and returns a dead endpoint object — `GetState` reports
+/// `NotPresent`, `GetDataFlow` reports `Render` for every device, and
+/// `Activate` fails with `E_FILE_NOT_FOUND`. Devices obtained from
+/// `IMMDeviceCollection` are fully usable, and matching by `get_id()` gives the
+/// same endpoint `GetDevice` was meant to open.
+#[cfg(windows)]
+fn resolve_endpoint_by_id(
+    enumerator: &DeviceEnumerator,
+    direction: &Direction,
+    device_id: &str,
+) -> std::result::Result<Option<Device>, String> {
+    let collection = enumerator
+        .get_device_collection(direction)
+        .map_err(|error| error.to_string())?;
+    for device_result in &collection {
+        let device = device_result.map_err(|error| error.to_string())?;
+        if device.get_id().map_err(|error| error.to_string())? == device_id {
+            return Ok(Some(device));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(windows)]
 fn capture_worker(
     options: WasapiCaptureOptions,
@@ -547,8 +575,17 @@ fn capture_worker_inner(
                 && device_id != "system-loopback"
                 && !device_id.trim().is_empty() =>
         {
-            match enumerator.get_device(device_id) {
-                Ok(dev) => Ok(dev),
+            match resolve_endpoint_by_id(&enumerator, &endpoint_direction, device_id) {
+                Ok(Some(dev)) => Ok(dev),
+                Ok(None) => {
+                    tracing::warn!(
+                        device_id,
+                        "saved WASAPI endpoint is no longer present; falling back to default device"
+                    );
+                    enumerator
+                        .get_default_device(&endpoint_direction)
+                        .map_err(|error| error.to_string())
+                }
                 Err(err) => {
                     tracing::warn!(
                         %err,
@@ -1210,5 +1247,46 @@ mod tests {
         assert!(payload[packet_offset + block_align..]
             .iter()
             .all(|byte| *byte == 0));
+    }
+
+    /// Live regression check for the persisted-device-selection bug: every
+    /// endpoint id emitted by enumeration must resolve through
+    /// `resolve_endpoint_by_id` into a device that actually activates an
+    /// audio client. wasapi 0.23.0's `DeviceEnumerator::get_device` returns
+    /// dead endpoint objects (GetState = NotPresent, Activate =
+    /// E_FILE_NOT_FOUND), which made saved microphone selections fall back to
+    /// the default device and dropped selected loopback endpoints entirely.
+    /// Run with:
+    ///   cargo test -j 1 resolve_endpoint_by_id -- --ignored --nocapture
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows desktop session with audio endpoints"]
+    fn resolve_endpoint_by_id_returns_activatable_devices() {
+        initialize_mta()
+            .ok()
+            .expect("initialize COM for endpoint resolution");
+        let enumerator = DeviceEnumerator::new().expect("create device enumerator");
+
+        for direction in [Direction::Capture, Direction::Render] {
+            let collection = enumerator
+                .get_device_collection(&direction)
+                .expect("enumerate endpoints");
+            let mut verified = 0usize;
+            for device_result in &collection {
+                let device = device_result.expect("read endpoint");
+                let id = device.get_id().expect("read endpoint id");
+                let resolved = resolve_endpoint_by_id(&enumerator, &direction, &id)
+                    .expect("resolve endpoint by id")
+                    .expect("enumerated endpoint id must resolve");
+                assert_eq!(resolved.get_id().expect("resolved endpoint id"), id);
+                assert_eq!(resolved.get_direction(), direction);
+                resolved
+                    .get_iaudioclient()
+                    .expect("resolved endpoint must activate an audio client");
+                verified += 1;
+            }
+            eprintln!("{direction:?}: verified {verified} activatable endpoints");
+        }
+        deinitialize();
     }
 }

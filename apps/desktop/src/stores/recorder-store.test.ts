@@ -408,6 +408,83 @@ describe("recorder-store preferences & fallback", () => {
     )
   })
 
+  it("restores persisted microphone and system audio selections into the next recording without toggling", async () => {
+    // Cold-start simulation: a previous session saved non-default endpoint ids
+    // (the shapes match real WASAPI endpoint ids persisted on Windows).
+    storageMap.set(
+      "recordforge:recordingPreferences",
+      JSON.stringify({
+        microphoneEnabled: true,
+        microphoneId: "{0.0.1.00000000}.{saved-mic-guid}",
+        microphoneName: "Microphone (NVIDIA Broadcast)",
+        systemAudioEnabled: true,
+        systemAudioId: "{0.0.0.00000000}.{saved-sys-guid}",
+        systemAudioName: "System Audio (WASAPI Loopback) - Headphones",
+      }),
+    )
+
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-persisted",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: true,
+      systemAudioActive: true,
+      webcamActive: false,
+      error: null,
+    }
+    const prepare = vi.spyOn(recorderApi, "prepareRecording").mockResolvedValue("session-persisted")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+    vi.spyOn(recorderApi, "listAudioDevices").mockResolvedValue([
+      { id: "{0.0.1.00000000}.{default-mic}", name: "Built-in Mic", kind: "microphone", isDefault: true },
+      {
+        id: "{0.0.1.00000000}.{saved-mic-guid}",
+        name: "Microphone (NVIDIA Broadcast)",
+        kind: "microphone",
+        isDefault: false,
+      },
+      {
+        id: "{0.0.0.00000000}.{saved-sys-guid}",
+        name: "System Audio (WASAPI Loopback) - Headphones",
+        kind: "system",
+        isDefault: true,
+      },
+    ])
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+    })
+
+    // loadAudioDevices is what the recording modal runs when it opens; no
+    // toggle or re-selection may be needed to recover the saved endpoints.
+    await useRecorderStore.getState().loadAudioDevices()
+    expect(useRecorderStore.getState().selectedMicrophoneId).toBe("{0.0.1.00000000}.{saved-mic-guid}")
+    expect(useRecorderStore.getState().selectedSystemAudioId).toBe("{0.0.0.00000000}.{saved-sys-guid}")
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        captureMicrophone: true,
+        microphoneDeviceId: "{0.0.1.00000000}.{saved-mic-guid}",
+        captureSystemAudio: true,
+        systemAudioDeviceId: "{0.0.0.00000000}.{saved-sys-guid}",
+      }),
+      3,
+    )
+  })
+
   it("tracks sourcesLoaded, profilesLoaded, and diagnosticsLoading / diagnosticsLoaded flags", async () => {
     vi.spyOn(recorderApi, "listCaptureSources").mockResolvedValue([
       {
