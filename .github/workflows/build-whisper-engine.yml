@@ -36,9 +36,10 @@ jobs:
           # macOS arm64 — macos-latest runners are Apple Silicon.
           - asset: darwin-arm64
             os: macos-latest
-          # macOS x64 — macos-13 is the last Intel hosted runner.
+          # macOS x64 — macos-15-intel is the last Intel hosted runner
+          # (macos-13 was retired; same label release-desktop.yml uses).
           - asset: darwin-x64
-            os: macos-13
+            os: macos-15-intel
           # Windows ARM64 — ggml's ARM backend rejects MSVC, so this
           # cross-compiles with LLVM clang from an x64 runner instead.
           - asset: win-arm64
