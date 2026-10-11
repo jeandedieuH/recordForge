@@ -293,4 +293,7 @@ pub struct AppState {
     /// License state: entitlements consulted by export validation, and the
     /// token store behind the licensing commands.
     pub license: Arc<crate::licensing::LicenseManager>,
+    /// Running transcription jobs — the busy gate and cancel channel for
+    /// `transcribe_audio`/`cancel_transcription`.
+    pub transcription: Arc<crate::transcript::TranscriptionRegistry>,
 }

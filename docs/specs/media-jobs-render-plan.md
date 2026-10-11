@@ -112,7 +112,7 @@ interface RenderPlan {
   gaps: Array<{ startMs: number; endMs: number }>
   audioTracks: RenderPlanAudio[]
   overlays: RenderPlanOverlay[]
-  captions: RenderPlanCaption[]
+  captions: RenderPlanCaption[]   // each cue may carry a px-resolved `layout` the ASS writer renders verbatim
   masks: RenderPlanMask[]
   zoomSegments: RenderPlanZoomSegment[]
   cursorEffects: RenderPlanCursorEffect[]
@@ -218,7 +218,7 @@ The render engine builds an FFmpeg complex filter graph from the render plan:
 3. **Concatenation**: `[v0][gap0][v1]concat=n=3:v=1:a=0[vout]`
 4. **Speed and audio**: `setpts=PTS/speed`, `atempo`, `amix`, `volume`, `afade`.
 5. **Webcam PiP**: independently resolved input, trim, speed, crop, shape, border, shadow, and `overlay=enable`.
-6. **Canvas/effects**: `pad`, zoom crop, privacy mask filters, and caption drawtext.
+6. **Canvas/effects**: `pad`, zoom crop, privacy mask filters, and caption burn-in — cues carry a px-resolved `CaptionLayout` written to ASS and rendered by libass (`subtitles` filter, Inter embedded; DirectWrite on Windows).
 7. **Cursor**: telemetry is resolved as a project asset and composited into RGBA frames in Rust.
 
 ### 5.3 Zoom and cursor camera model

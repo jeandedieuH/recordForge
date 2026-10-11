@@ -14,6 +14,7 @@ pub mod publish;
 pub mod shortcuts;
 pub mod state;
 pub mod storage;
+pub mod transcript;
 pub mod tray;
 pub mod validation;
 pub mod whisper;
@@ -174,7 +175,8 @@ pub fn run() {
             commands::captions::get_ai_captions_status,
             commands::captions::download_ai_captions_engine,
             commands::captions::delete_ai_captions_model,
-            commands::captions::transcribe_captions,
+            commands::captions::transcribe_audio,
+            commands::captions::cancel_transcription,
             commands::background::get_virtual_background_status,
             commands::background::download_virtual_background_model,
             commands::background::delete_virtual_background_model,

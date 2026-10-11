@@ -227,6 +227,10 @@ const SNAPSHOT_COMMANDS = new Set([
   "regenerate-zoom-suggestions",
   "trim-clip",
   "import-caption-cues",
+  "merge-caption-clips",
+  "replace-caption-text",
+  // Resync can drop cues whose audio was cut — snapshot before overwriting.
+  "resync-caption-track",
   "add-mask-clip",
 ])
 

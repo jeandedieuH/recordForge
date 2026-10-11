@@ -18,6 +18,11 @@ cargo clippy --fix
 # Test
 cargo test
 
+# Live capture check: records the screen region and the default microphone for
+# ~4 s and asserts audio/cursor data start with the video (needs an interactive
+# desktop session and a microphone; on Windows keep -j 1)
+cargo test -j 1 live_recording_audio_and_cursor_cover_the_screen_startup_window -- --ignored --nocapture
+
 # Build release
 cargo build --release
 ```

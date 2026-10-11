@@ -11,6 +11,7 @@ import type {
   CameraPlacementPreset,
   CaptionClip,
   CaptionCue,
+  CaptionDesign,
   CameraClip,
   CanvasAspectRatio,
   ClipTransform,
@@ -29,6 +30,7 @@ import type {
 } from "@recordforge/domain"
 import {
   buildCameraPresetTransform,
+  DEFAULT_CAPTION_DESIGN,
   defaultSmartZoomSettings,
   findClip,
   findTrack,
@@ -38,6 +40,27 @@ import {
   validateNoOverlap,
 } from "@recordforge/domain"
 import { canvasSizeForAspectRatio, clampZoomTarget, getManualZoomSegments } from "./composition"
+import { resolveCaptionDesign } from "./captions/caption-layout"
+import {
+  captionWords,
+  clampCaptionWordTiming,
+  keptCaptionWordIndices,
+  partitionCaptionWordTiming,
+  partitionCaptionWordTimingByIndex,
+  rangeCaptionWordTiming,
+  rangeCaptionWordTimingByIndex,
+  reflowCueText,
+  sliceCaptionText,
+  SPACELESS_CHAR,
+  splitCaptionText,
+} from "./captions/caption-text"
+import {
+  applyCueTiming,
+  captionSegmentationProfile,
+  collectAudioClipsForStream,
+  projectWordToClips,
+  type TimelineWord,
+} from "./captions/caption-transcript"
 import { getClipGroupId } from "./grouping"
 import { clipDurationFromSourceRange, timelineToSource } from "./time-mapping"
 import type {
@@ -64,11 +87,14 @@ import type {
   GroupClipsCommand,
   UngroupClipsCommand,
   ImportCaptionCuesCommand,
+  MergeCaptionClipsCommand,
   MoveClipCommand,
   MoveClipsCommand,
   MoveTrackCommand,
   RegenerateZoomSuggestionsCommand,
   ReorderTracksCommand,
+  ReplaceCaptionTextCommand,
+  ResyncCaptionTrackCommand,
   ResizeCursorRangeCommand,
   ResizeZoomSegmentCommand,
   RippleDeleteClipCommand,
@@ -156,6 +182,51 @@ function validateClipBoundaries(clip: TimelineClip): CommandResult<TimelineClip>
     }
   }
   return { ok: true, value: clip }
+}
+
+/** True when a caption clip carries AI provenance (`sourceWords`/`sourceStreamIndex`). */
+function hasCaptionProvenance(clip: CaptionClip): boolean {
+  return (clip.sourceWords?.length ?? 0) > 0 || clip.sourceStreamIndex != null
+}
+
+/**
+ * Finalize a caption piece's timing fields after a structural edit. `words`
+ * keeps the (possibly rebased) display-token timings; `sourceWords` keeps the
+ * ABSOLUTE container times index-filtered by the same token set — the two
+ * can never diverge in length because both slices come from one partition.
+ * A piece that loses provenance also drops `sourceStreamIndex` and its
+ * source range falls back to timeline base (matching manual cues); kept
+ * provenance re-anchors `sourceInMs`/`sourceOutMs` to the kept tokens'
+ * container span. Clips that never had provenance keep their computed range.
+ */
+function finalizeCaptionPiece(
+  piece: CaptionClip,
+  words: CaptionClip["words"] | undefined,
+  sourceWords: CaptionClip["sourceWords"] | undefined,
+  hadProvenance: boolean,
+): void {
+  const keptWords = words !== undefined && words.length > 0 ? words : undefined
+  const keptSource =
+    keptWords !== undefined && sourceWords !== undefined && sourceWords.length > 0
+      ? sourceWords
+      : undefined
+  if (keptWords === undefined) {
+    delete piece.words
+  } else {
+    piece.words = keptWords
+  }
+  if (keptSource === undefined) {
+    delete piece.sourceWords
+    delete piece.sourceStreamIndex
+    if (hadProvenance) {
+      piece.sourceInMs = piece.startMs
+      piece.sourceOutMs = piece.startMs + piece.durationMs
+    }
+    return
+  }
+  piece.sourceWords = keptSource
+  piece.sourceInMs = keptSource[0].startMs
+  piece.sourceOutMs = Math.max(keptSource[keptSource.length - 1].endMs, keptSource[0].startMs + 1)
 }
 
 function sortAndValidateTrack(
@@ -562,6 +633,102 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       const valid = validateCaptionCues(command.cues)
       return valid.ok ? { ok: true, value: undefined } : valid
     }
+    case "merge-caption-clips": {
+      const foundClips = command.clipIds.map((clipId) => findClip(state, clipId))
+      if (foundClips.some((found) => !found)) {
+        return { ok: false, error: editorError("clip_not_found", "Clip not found") }
+      }
+      const located = foundClips as NonNullable<(typeof foundClips)[number]>[]
+      const trackId = located[0].track.id
+      if (located.some((found) => found.track.id !== trackId)) {
+        return {
+          ok: false,
+          error: editorError("invalid_track", "Captions to merge must sit on one track"),
+        }
+      }
+      const track = located[0].track
+      if (track.kind !== "captions") {
+        return {
+          ok: false,
+          error: editorError("invalid_track", "Only caption clips can be merged"),
+        }
+      }
+      if (track.locked) {
+        return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+      }
+      if (located.some((found) => found.clip.kind !== "caption")) {
+        return {
+          ok: false,
+          error: editorError("invalid_clip", "Only caption clips can be merged"),
+        }
+      }
+      const starts = located.map((found) => found.clip.startMs)
+      const firstStart = Math.min(...starts)
+      const lastEnd = Math.max(...located.map((f) => f.clip.startMs + f.clip.durationMs))
+      // Adjacent = no caption clip outside the selection starts inside the
+      // merged span.
+      const intruder = track.clips.some(
+        (clip) =>
+          clip.kind === "caption" &&
+          !command.clipIds.includes(clip.id) &&
+          clip.startMs >= firstStart &&
+          clip.startMs < lastEnd,
+      )
+      if (intruder) {
+        return {
+          ok: false,
+          error: editorError("not_adjacent", "Captions must be adjacent to merge"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "replace-caption-text": {
+      const track = command.trackId
+        ? findTrack(state, command.trackId)
+        : state.tracks.find((candidate) => candidate.kind === "captions")
+      if (!track) {
+        return { ok: false, error: editorError("track_not_found", "Captions track not found") }
+      }
+      if (track.kind !== "captions") {
+        return {
+          ok: false,
+          error: editorError("invalid_track", "Only captions tracks support find & replace"),
+        }
+      }
+      if (track.locked) {
+        return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+      }
+      const { matches } = countCaptionTextMatches(track.clips, command)
+      if (matches === 0) {
+        return {
+          ok: false,
+          error: editorError("no_matches", `No captions match "${command.find}"`),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
+    case "resync-caption-track": {
+      const track = findTrack(state, command.trackId)
+      if (!track) {
+        return { ok: false, error: editorError("track_not_found", "Captions track not found") }
+      }
+      if (track.kind !== "captions") {
+        return {
+          ok: false,
+          error: editorError("invalid_track", "Only captions tracks can resync"),
+        }
+      }
+      if (track.locked) {
+        return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+      }
+      if (!track.clips.some((clip) => clip.kind === "caption" && clip.sourceWords?.length)) {
+        return {
+          ok: false,
+          error: editorError("nothing_to_resync", "No AI-generated captions to resync"),
+        }
+      }
+      return { ok: true, value: undefined }
+    }
     case "add-mask-clip": {
       const track = command.trackId
         ? findTrack(state, command.trackId)
@@ -815,6 +982,12 @@ export function applyCommand(
       return applyUpdateCaptionTrack(state, command)
     case "import-caption-cues":
       return applyImportCaptionCues(state, command)
+    case "merge-caption-clips":
+      return applyMergeCaptionClips(state, command)
+    case "replace-caption-text":
+      return applyReplaceCaptionText(state, command)
+    case "resync-caption-track":
+      return applyResyncCaptionTrack(state, command)
     case "add-mask-clip":
       return applyAddMaskClip(state, command)
     case "update-mask-clip":
@@ -1070,16 +1243,48 @@ function applyTrimClip(
     })
   }
 
+  const isSourceAnchoredCaption = clip.kind === "caption" && hasCaptionProvenance(clip)
+  // A container-anchored caption's source range is a provenance span, not a
+  // duration encoding: left trims carry the new edge explicitly in startMs
+  // (the far edge holds), while right trims keep working because the command
+  // encodes sourceOut as stored-sourceIn + timeline delta.
+  const durationMs =
+    isSourceAnchoredCaption && command.startMs !== undefined
+      ? Math.max(1, clip.startMs + clip.durationMs - command.startMs)
+      : Math.round(clipDurationFromSourceRange(command.sourceInMs, command.sourceOutMs, clip.speed))
   const nextClip: TimelineClip = {
     ...clip,
     ...(command.startMs === undefined ? {} : { startMs: command.startMs }),
     sourceInMs: command.sourceInMs,
     sourceOutMs: command.sourceOutMs,
-    durationMs: Math.round(
-      clipDurationFromSourceRange(command.sourceInMs, command.sourceOutMs, clip.speed),
-    ),
+    durationMs,
   }
-  const valid = validateClipBoundaries(nextClip)
+  // Caption clips keep the word timings still inside the trimmed window
+  // (rebased for a moved start); survivors that no longer cover the text
+  // simply fall back to proportional weighting in the layout engine.
+  if (clip.kind === "caption") {
+    const offsetMs = nextClip.startMs - clip.startMs
+    // The same index set decides which `words` (rebased) AND `sourceWords`
+    // (absolute, verbatim) survive the trimmed window.
+    const indices = keptCaptionWordIndices(clip.words, offsetMs, nextClip.durationMs)
+    const indexSet = indices ? new Set(indices) : null
+    finalizeCaptionPiece(
+      nextClip as CaptionClip,
+      indexSet ? clampCaptionWordTiming(clip.words, offsetMs, nextClip.durationMs) : undefined,
+      indexSet ? clip.sourceWords?.filter((_, i) => indexSet.has(i)) : undefined,
+      isSourceAnchoredCaption,
+    )
+  }
+  // The generic duration↔source-range invariant can't apply to a clip whose
+  // source fields hold a container-time provenance span.
+  const valid = isSourceAnchoredCaption
+    ? nextClip.durationMs > 0 && nextClip.sourceInMs < nextClip.sourceOutMs
+      ? ({ ok: true, value: nextClip } as const)
+      : {
+          ok: false as const,
+          error: editorError("invalid_clip", "Trimmed caption must keep a positive duration"),
+        }
+    : validateClipBoundaries(nextClip)
   if (!valid.ok) return valid
 
   const withClip = replaceClipInState(state, track.id, command.clipId, valid.value)
@@ -1123,6 +1328,11 @@ function applySplitClip(
     clip.kind === "text" ||
     clip.kind === "mask" ||
     clip.kind === "image"
+  // A container-anchored caption's source span only covers its words — a
+  // split inside the lead/tail padding would fail the media-range check, so
+  // the provisional fields below are placeholders: finalizeCaptionPiece
+  // re-anchors each half to its kept sourceWords (or timeline base).
+  const anchoredCaption = !isSynthetic && clip.kind === "caption" && hasCaptionProvenance(clip)
 
   let leftDuration: number
   let rightDuration: number
@@ -1139,6 +1349,13 @@ function applySplitClip(
     leftSourceOut = offsetMs
     rightSourceIn = 0
     rightSourceOut = rightDuration
+  } else if (anchoredCaption) {
+    leftDuration = command.splitTimeMs - clip.startMs
+    rightDuration = clip.durationMs - leftDuration
+    leftSourceIn = clip.sourceInMs
+    leftSourceOut = clip.sourceOutMs
+    rightSourceIn = clip.sourceInMs
+    rightSourceOut = clip.sourceOutMs
   } else {
     const mappedSplitSource = timelineToSource(clip, command.splitTimeMs)
     if (mappedSplitSource === null) {
@@ -1165,12 +1382,37 @@ function applySplitClip(
   const leftClipId = command.leftClipId ?? `${clip.id}:split:${command.splitTimeMs}:left`
   const rightClipId = command.rightClipId ?? `${clip.id}:split:${command.splitTimeMs}:right`
 
+  // Caption text splits at the word boundary nearest the cut so halves carry
+  // only their own words (single-word cues keep the full text on both).
+  const captionSplit =
+    clip.kind === "caption"
+      ? splitCaptionText(clip.text, (command.splitTimeMs - clip.startMs) / clip.durationMs)
+      : null
+  // Stored word timings partition by the same boundary index — an
+  // inconsistent partition drops rather than mis-times karaoke.
+  const captionWordParts =
+    clip.kind === "caption" && captionSplit
+      ? partitionCaptionWordTiming(
+          clip.words,
+          captionSplit[0],
+          captionSplit[1],
+          command.splitTimeMs - clip.startMs,
+        )
+      : undefined
+  // `sourceWords` shares the index boundary but is absolute container ms —
+  // sliced, never rebased.
+  const captionSourceParts =
+    clip.kind === "caption" && captionSplit
+      ? partitionCaptionWordTimingByIndex(clip.sourceWords, captionSplit[0], captionSplit[1])
+      : undefined
+
   const left: TimelineClip = {
     ...clip,
     id: leftClipId,
     durationMs: leftDuration,
     sourceInMs: leftSourceIn,
     sourceOutMs: leftSourceOut,
+    ...(captionSplit ? { text: captionSplit[0] } : {}),
   }
 
   const right: TimelineClip = {
@@ -1180,6 +1422,22 @@ function applySplitClip(
     durationMs: rightDuration,
     sourceInMs: rightSourceIn,
     sourceOutMs: rightSourceOut,
+    ...(captionSplit ? { text: captionSplit[1] } : {}),
+  }
+  if (clip.kind === "caption") {
+    const hadProvenance = hasCaptionProvenance(clip)
+    finalizeCaptionPiece(
+      left as CaptionClip,
+      captionWordParts?.left,
+      captionWordParts?.left !== undefined ? captionSourceParts?.left : undefined,
+      hadProvenance,
+    )
+    finalizeCaptionPiece(
+      right as CaptionClip,
+      captionWordParts?.right,
+      captionWordParts?.right !== undefined ? captionSourceParts?.right : undefined,
+      hadProvenance,
+    )
   }
 
   const newClips = track.clips.filter((c) => c.id !== command.clipId).concat(left, right)
@@ -1242,6 +1500,9 @@ function applySplitAllClips(
         clip.kind === "text" ||
         clip.kind === "mask" ||
         clip.kind === "image"
+      // Same anchored-caption handling as applySplitClip — the provisional
+      // source fields are placeholders re-anchored by finalizeCaptionPiece.
+      const anchoredCaption = !isSynthetic && clip.kind === "caption" && hasCaptionProvenance(clip)
 
       let leftDuration: number
       let rightDuration: number
@@ -1258,6 +1519,13 @@ function applySplitAllClips(
         leftSourceOut = offsetMs
         rightSourceIn = 0
         rightSourceOut = rightDuration
+      } else if (anchoredCaption) {
+        leftDuration = splitTimeMs - clip.startMs
+        rightDuration = clip.durationMs - leftDuration
+        leftSourceIn = clip.sourceInMs
+        leftSourceOut = clip.sourceOutMs
+        rightSourceIn = clip.sourceInMs
+        rightSourceOut = clip.sourceOutMs
       } else {
         const mappedSplitSource = timelineToSource(clip, splitTimeMs)
         if (mappedSplitSource === null) continue
@@ -1275,12 +1543,32 @@ function applySplitAllClips(
       const leftClipId = `${clip.id}:split:${splitTimeMs}:left`
       const rightClipId = `${clip.id}:split:${splitTimeMs}:right`
 
+      // Same caption-text split as applySplitClip — no duplicated cue text.
+      const captionSplit =
+        clip.kind === "caption"
+          ? splitCaptionText(clip.text, (splitTimeMs - clip.startMs) / clip.durationMs)
+          : null
+      const captionWordParts =
+        clip.kind === "caption" && captionSplit
+          ? partitionCaptionWordTiming(
+              clip.words,
+              captionSplit[0],
+              captionSplit[1],
+              splitTimeMs - clip.startMs,
+            )
+          : undefined
+      const captionSourceParts =
+        clip.kind === "caption" && captionSplit
+          ? partitionCaptionWordTimingByIndex(clip.sourceWords, captionSplit[0], captionSplit[1])
+          : undefined
+
       const left: TimelineClip = {
         ...clip,
         id: leftClipId,
         durationMs: leftDuration,
         sourceInMs: leftSourceIn,
         sourceOutMs: leftSourceOut,
+        ...(captionSplit ? { text: captionSplit[0] } : {}),
       }
 
       const right: TimelineClip = {
@@ -1290,6 +1578,22 @@ function applySplitAllClips(
         durationMs: rightDuration,
         sourceInMs: rightSourceIn,
         sourceOutMs: rightSourceOut,
+        ...(captionSplit ? { text: captionSplit[1] } : {}),
+      }
+      if (clip.kind === "caption") {
+        const hadProvenance = hasCaptionProvenance(clip)
+        finalizeCaptionPiece(
+          left as CaptionClip,
+          captionWordParts?.left,
+          captionWordParts?.left !== undefined ? captionSourceParts?.left : undefined,
+          hadProvenance,
+        )
+        finalizeCaptionPiece(
+          right as CaptionClip,
+          captionWordParts?.right,
+          captionWordParts?.right !== undefined ? captionSourceParts?.right : undefined,
+          hadProvenance,
+        )
       }
 
       updatedClips = updatedClips.filter((c) => c.id !== clip.id).concat(left, right)
@@ -1661,25 +1965,99 @@ function clipSegmentsAfterRange(
   const leftEndMs = Math.min(deleteStartMs, clipEndMs)
   const rightStartMs = Math.max(deleteEndMs, clip.startMs)
 
-  if (hasLeft && leftEndMs > clip.startMs) {
+  // Captions straddling the cut keep only the words on each kept side; a side
+  // whose slice is empty drops out, and a clip sliced on BOTH sides keeps the
+  // longer piece with the full text when neither slice has words.
+  const isCaption = clip.kind === "caption"
+  const leftFrac = hasLeft ? (leftEndMs - clip.startMs) / clip.durationMs : 0
+  const rightFrac = hasRight ? (clipEndMs - rightStartMs) / clip.durationMs : 0
+  const leftText = isCaption ? sliceCaptionText(clip.text, 0, leftFrac) : null
+  const rightText = isCaption ? sliceCaptionText(clip.text, 1 - rightFrac, 1) : null
+  const keepLeft = !isCaption || (leftText !== null && leftText !== "")
+  const keepRight = !isCaption || (rightText !== null && rightText !== "")
+  // Word timings partition by index per kept piece; overlapping indices or
+  // the full-text fallback drop the stored list on both sides. `sourceWords`
+  // shares the same index slice but keeps absolute container times verbatim.
+  const wordParts = isCaption
+    ? rangeCaptionWordTiming(
+        clip.words,
+        keepLeft ? leftText : null,
+        keepRight ? rightText : null,
+        clip.text,
+        rightStartMs - clip.startMs,
+      )
+    : undefined
+  const sourceParts = isCaption
+    ? rangeCaptionWordTimingByIndex(
+        clip.sourceWords,
+        keepLeft ? leftText : null,
+        keepRight ? rightText : null,
+        clip.text,
+      )
+    : undefined
+  const hadProvenance = isCaption && hasCaptionProvenance(clip)
+
+  if (hasLeft && leftEndMs > clip.startMs && keepLeft) {
     const leftDurationMs = leftEndMs - clip.startMs
-    segments.push({
+    const leftClip: TimelineClip = {
       ...clip,
       durationMs: Math.round(leftDurationMs),
       sourceOutMs: clip.sourceInMs + Math.round(leftDurationMs * clip.speed),
-    })
+      ...(isCaption ? { text: leftText ?? clip.text } : {}),
+    }
+    if (isCaption) {
+      finalizeCaptionPiece(
+        leftClip as CaptionClip,
+        wordParts?.left,
+        wordParts?.left !== undefined ? sourceParts?.left : undefined,
+        hadProvenance,
+      )
+    }
+    segments.push(leftClip)
   }
 
-  if (hasRight && clipEndMs > rightStartMs) {
+  if (hasRight && clipEndMs > rightStartMs && keepRight) {
     const rightDurationMs = clipEndMs - rightStartMs
     const nextStartMs = ripple ? deleteStartMs : rightStartMs
-    segments.push({
+    const rightClip: TimelineClip = {
       ...clip,
       id: hasLeft ? `${clip.id}:range:${deleteStartMs}:${deleteEndMs}:right` : clip.id,
       startMs: nextStartMs,
       durationMs: Math.round(rightDurationMs),
       sourceInMs: clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed),
-    })
+      ...(isCaption ? { text: rightText ?? clip.text } : {}),
+    }
+    if (isCaption) {
+      finalizeCaptionPiece(
+        rightClip as CaptionClip,
+        wordParts?.right,
+        wordParts?.right !== undefined ? sourceParts?.right : undefined,
+        hadProvenance,
+      )
+    }
+    segments.push(rightClip)
+  }
+
+  if (isCaption && segments.length === 0 && hasLeft && hasRight) {
+    // Both slices emptied — keep the longer piece with the original text.
+    // The text no longer matches stored timings — drop them.
+    const leftDur = leftEndMs - clip.startMs
+    const rightDur = clipEndMs - rightStartMs
+    const fallback: TimelineClip =
+      leftDur >= rightDur
+        ? {
+            ...clip,
+            durationMs: Math.round(leftDur),
+            sourceOutMs: clip.sourceInMs + Math.round(leftDur * clip.speed),
+          }
+        : {
+            ...clip,
+            startMs: ripple ? deleteStartMs : rightStartMs,
+            durationMs: Math.round(rightDur),
+            sourceInMs: clip.sourceInMs + Math.round((rightStartMs - clip.startMs) * clip.speed),
+          }
+    finalizeCaptionPiece(fallback as CaptionClip, undefined, undefined, hadProvenance)
+    segments.push(fallback)
   }
 
   return segments
@@ -2134,6 +2512,8 @@ function applyAddCaptionClip(
     solo: false,
     volume: 1,
     clips: [],
+    // New tracks carry the shared look; clips inherit it via style "default".
+    captionDesign: { ...DEFAULT_CAPTION_DESIGN },
   }
   const newClip: TimelineClip = {
     id: command.clipId ?? `caption:${track.id}:${command.startMs}:${command.text}`,
@@ -2146,8 +2526,9 @@ function applyAddCaptionClip(
     speed: 1,
     text: command.text,
     style: command.style ?? "default",
-    placement: command.placement ?? "bottom",
-    safeAreaMargin: command.safeAreaMargin ?? 48,
+    // placement/safeAreaMargin are per-clip overrides — only stored when set.
+    ...(command.placement === undefined ? {} : { placement: command.placement }),
+    ...(command.safeAreaMargin === undefined ? {} : { safeAreaMargin: command.safeAreaMargin }),
   }
   const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, newClip] }
   if (!existingTrack) {
@@ -2173,20 +2554,52 @@ function applyUpdateCaptionTrack(
       error: editorError("invalid_track", "Only captions tracks support caption styling"),
     }
   }
+
+  // Legacy style/placement mirror into the design so old callers and the new
+  // design API stay on one source of truth.
+  const designPatch: NonNullable<UpdateCaptionTrackCommand["design"]> = {
+    ...(command.design ?? {}),
+  }
+  if (command.style !== undefined) designPatch.preset = command.style
+  if (command.placement !== undefined) designPatch.placement = command.placement
+  const touchesDesign =
+    command.design !== undefined || command.style !== undefined || command.placement !== undefined
+
+  let captionDesign = track.captionDesign
+  if (touchesDesign) {
+    // Legacy tracks have no captionDesign — resolve the effective design first
+    // so a first edit migrates instead of wiping clip-inherited values.
+    const base = resolveCaptionDesign(track)
+    const merged: CaptionDesign = { ...base }
+    if (designPatch.preset !== undefined) merged.preset = designPatch.preset
+    if (designPatch.sizeScale !== undefined) merged.sizeScale = designPatch.sizeScale
+    if (designPatch.placement !== undefined) merged.placement = designPatch.placement
+    if (designPatch.offsetY !== undefined) merged.offsetY = designPatch.offsetY
+    if (designPatch.uppercase === null) delete merged.uppercase
+    else if (designPatch.uppercase !== undefined) merged.uppercase = designPatch.uppercase
+    if (designPatch.accentColor === null) delete merged.accentColor
+    else if (designPatch.accentColor !== undefined) merged.accentColor = designPatch.accentColor
+    captionDesign = merged
+  }
+
+  const resetStyle = designPatch.preset !== undefined
+  const resetPlacement = designPatch.placement !== undefined
   const nextTrack: TimelineTrack = {
     ...track,
-    clips: track.clips.map((clip) =>
-      clip.kind === "caption"
-        ? {
-            ...clip,
-            ...(command.style === undefined ? {} : { style: command.style }),
-            ...(command.placement === undefined ? {} : { placement: command.placement }),
-            ...(command.safeAreaMargin === undefined
-              ? {}
-              : { safeAreaMargin: command.safeAreaMargin }),
-          }
-        : clip,
-    ),
+    ...(touchesDesign ? { captionDesign } : {}),
+    clips: track.clips.map((clip) => {
+      if (clip.kind !== "caption") return clip
+      const next: CaptionClip = {
+        ...clip,
+        // A preset/placement set on the design makes per-clip style/placement
+        // overrides obsolete — reset them to inherit.
+        ...(resetStyle ? { style: "default" as const } : {}),
+        ...(resetPlacement ? { placement: undefined } : {}),
+        ...(command.safeAreaMargin === undefined ? {} : { safeAreaMargin: command.safeAreaMargin }),
+      }
+      if (resetPlacement) delete next.placement
+      return next
+    }),
   }
   return { ok: true, value: updateTrackInState(state, track.id, nextTrack) }
 }
@@ -2222,9 +2635,24 @@ function applyUpdateCaptionClip(
     ...found.clip,
     ...(command.text === undefined ? {} : { text: command.text }),
     ...(command.style === undefined ? {} : { style: command.style }),
-    ...(command.placement === undefined ? {} : { placement: command.placement }),
+    ...(command.placement === undefined || command.placement === null
+      ? {}
+      : { placement: command.placement }),
     ...(command.safeAreaMargin === undefined ? {} : { safeAreaMargin: command.safeAreaMargin }),
   }
+  // Text edits make stored word timings stale — drop them entirely along
+  // with the container-time provenance (an edited cue is no longer
+  // resyncable) and fall back to timeline-base source fields.
+  if (command.text !== undefined) {
+    delete next.words
+    delete next.sourceWords
+    delete next.sourceStreamIndex
+    next.sourceInMs = next.startMs
+    next.sourceOutMs = next.startMs + next.durationMs
+  }
+  // placement: null clears the per-clip override back to inherit — the same
+  // convention as design.accentColor: null on update-caption-track.
+  if (command.placement === null) delete next.placement
   return { ok: true, value: replaceClipInState(state, found.track.id, command.clipId, next) }
 }
 
@@ -2249,31 +2677,52 @@ function applyImportCaptionCues(
     solo: false,
     volume: 1,
     clips: [],
+    // The design is set once at track creation; it is the single look source.
+    captionDesign: { ...DEFAULT_CAPTION_DESIGN, ...command.design },
   }
   if (track.locked) {
     return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
   }
-  const existingIds = new Set(track.clips.map((clip) => clip.id))
+  // "replace" drops the track's existing caption clips — the cues' own overlap
+  // check (validateCaptionCues) is then the only guard, done as one undo step.
+  const replace = command.mode === "replace"
+  const keptClips = replace ? track.clips.filter((clip) => clip.kind !== "caption") : track.clips
+  const existingIds = new Set(keptClips.map((clip) => clip.id))
   const imported: CaptionClip[] = valid.value.map((cue, index) => {
     const baseId = `caption:${track.id}:${cue.id}:${cue.startMs}`
     const id = existingIds.has(baseId) ? `${baseId}:${index}` : baseId
     existingIds.add(id)
+    // Dual-base source fields: a cue carrying provenance anchors
+    // sourceIn/sourceOut to its CONTAINER span (the recording coordinates it
+    // was transcribed from — lets resync re-map it through the edited audio),
+    // while manual/SRT cues keep the cue-time timeline base and stay
+    // non-resyncable.
+    const anchored = cue.sourceWords !== undefined && cue.sourceWords.length > 0
     return {
       id,
       kind: "caption",
       assetId: track.id,
       startMs: cue.startMs,
       durationMs: cue.endMs - cue.startMs,
-      sourceInMs: cue.startMs,
-      sourceOutMs: cue.endMs,
+      sourceInMs: anchored ? cue.sourceWords![0].startMs : cue.startMs,
+      sourceOutMs: anchored ? cue.sourceWords![cue.sourceWords!.length - 1].endMs : cue.endMs,
       speed: 1,
       text: cue.text,
+      // Measured word timings ride the cue — both are relative to the same
+      // cue start, so they transfer verbatim.
+      ...(cue.words === undefined ? {} : { words: cue.words }),
+      // Container-time provenance transfers verbatim too — it is absolute,
+      // so it never needs rebasing.
+      ...(cue.sourceWords === undefined ? {} : { sourceWords: cue.sourceWords }),
+      ...(cue.sourceStreamIndex == null ? {} : { sourceStreamIndex: cue.sourceStreamIndex }),
       style: command.style ?? "default",
-      placement: command.placement ?? "bottom",
-      safeAreaMargin: command.safeAreaMargin ?? 48,
+      // Per-clip overrides are stored only when explicitly provided — clips
+      // inherit the track design otherwise.
+      ...(command.placement === undefined ? {} : { placement: command.placement }),
+      ...(command.safeAreaMargin === undefined ? {} : { safeAreaMargin: command.safeAreaMargin }),
     }
   })
-  const nextTrack: TimelineTrack = { ...track, clips: [...track.clips, ...imported] }
+  const nextTrack: TimelineTrack = { ...track, clips: [...keptClips, ...imported] }
   const trackResult = existingTrack
     ? sortAndValidateTrack(updateTrackInState(state, track.id, nextTrack), track.id)
     : { ok: true as const, value: nextTrack }
@@ -2282,6 +2731,274 @@ function applyImportCaptionCues(
     ? state.tracks.map((candidate) => (candidate.id === track.id ? trackResult.value : candidate))
     : [...state.tracks, trackResult.value]
   return { ok: true, value: { ...state, tracks, updatedAt: now() } }
+}
+
+function applyMergeCaptionClips(
+  state: TimelineState,
+  command: MergeCaptionClipsCommand,
+): CommandResult<TimelineState> {
+  const found = command.clipIds.map((clipId) => findClip(state, clipId))
+  if (found.some((entry) => !entry || entry.clip.kind !== "caption")) {
+    return { ok: false, error: editorError("clip_not_found", "Caption clip not found") }
+  }
+  const located = found as NonNullable<(typeof found)[number]>[]
+  const track = located[0].track
+  if (located.some((entry) => entry.track.id !== track.id) || track.kind !== "captions") {
+    return {
+      ok: false,
+      error: editorError("invalid_track", "Captions to merge must sit on one captions track"),
+    }
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const ordered = located
+    .map((entry) => entry.clip as CaptionClip)
+    .sort((a, b) => a.startMs - b.startMs)
+  const firstStart = ordered[0].startMs
+  const lastEnd = ordered[ordered.length - 1].startMs + ordered[ordered.length - 1].durationMs
+  const intruder = track.clips.some(
+    (clip) =>
+      clip.kind === "caption" &&
+      !command.clipIds.includes(clip.id) &&
+      clip.startMs >= firstStart &&
+      clip.startMs < lastEnd,
+  )
+  if (intruder) {
+    return {
+      ok: false,
+      error: editorError("not_adjacent", "Captions must be adjacent to merge"),
+    }
+  }
+  // Join cue texts; no space across a spaceless-script boundary.
+  const text = ordered
+    .map((clip) => clip.text)
+    .reduce((acc, piece) => {
+      if (acc === "") return piece
+      const leftChar = acc[acc.length - 1]
+      const rightChar = piece[0]
+      const spaceless = SPACELESS_CHAR.test(leftChar) || SPACELESS_CHAR.test(rightChar)
+      return acc + (spaceless ? "" : " ") + piece
+    })
+  // Measured timings concatenate rebased to the first clip's start — only
+  // when EVERY merged clip carries them; otherwise the joined text is
+  // untimed and the layout falls back to proportional weighting.
+  const mergedWords = ordered.every((clip) => clip.words !== undefined && clip.words.length > 0)
+    ? ordered.flatMap((clip) =>
+        (clip.words ?? []).map((w) => ({
+          text: w.text,
+          startMs: w.startMs + (clip.startMs - firstStart),
+          endMs: w.endMs + (clip.startMs - firstStart),
+        })),
+      )
+    : undefined
+  // Container-time provenance concatenates VERBATIM (absolute coordinates
+  // don't rebase) — only when every merged cue carries it AND shares one
+  // source stream. Mixing streams or a hand-edited clip drops resyncability.
+  const mergedSource =
+    ordered.every((clip) => (clip.sourceWords?.length ?? 0) > 0) &&
+    ordered.every((clip) => clip.sourceStreamIndex === ordered[0].sourceStreamIndex)
+      ? ordered.flatMap((clip) => clip.sourceWords!)
+      : undefined
+  const merged: CaptionClip = {
+    ...ordered[0],
+    durationMs: lastEnd - firstStart,
+    sourceOutMs: ordered[0].sourceInMs + (lastEnd - firstStart),
+    text,
+  }
+  finalizeCaptionPiece(
+    merged,
+    mergedWords,
+    mergedSource,
+    ordered.some((clip) => hasCaptionProvenance(clip)),
+  )
+  const ids = new Set(command.clipIds)
+  const clips = track.clips.filter((clip) => !ids.has(clip.id)).concat(merged)
+  const nextTrack: TimelineTrack = { ...track, clips }
+  const trackResult = sortAndValidateTrack(updateTrackInState(state, track.id, nextTrack), track.id)
+  if (!trackResult.ok) return trackResult
+  return { ok: true, value: updateTrackInState(state, track.id, trackResult.value) }
+}
+
+function captionTextRegex(options: {
+  find: string
+  matchCase: boolean
+  wholeWord: boolean
+}): RegExp {
+  const escaped = options.find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const source = options.wholeWord ? `(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])` : escaped
+  return new RegExp(source, options.matchCase ? "gu" : "giu")
+}
+
+/** Pure match counter — the UI calls this live while typing. */
+export function countCaptionTextMatches(
+  clips: TimelineClip[],
+  options: { find: string; matchCase: boolean; wholeWord: boolean },
+): { matches: number; cues: number } {
+  if (options.find === "") return { matches: 0, cues: 0 }
+  const regex = captionTextRegex(options)
+  let matches = 0
+  let cues = 0
+  for (const clip of clips) {
+    if (clip.kind !== "caption") continue
+    const count = clip.text.match(regex)?.length ?? 0
+    if (count > 0) {
+      matches += count
+      cues += 1
+    }
+  }
+  return { matches, cues }
+}
+
+function applyReplaceCaptionText(
+  state: TimelineState,
+  command: ReplaceCaptionTextCommand,
+): CommandResult<TimelineState> {
+  const track = command.trackId
+    ? findTrack(state, command.trackId)
+    : state.tracks.find((candidate) => candidate.kind === "captions")
+  if (!track || track.kind !== "captions") {
+    return { ok: false, error: editorError("track_not_found", "Captions track not found") }
+  }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  const regex = captionTextRegex(command)
+  let changed = false
+  const clips = track.clips.map((clip) => {
+    if (clip.kind !== "caption") return clip
+    const next = clip.text.replace(regex, command.replace)
+    // A clip whose text would go empty keeps its old text.
+    if (next === clip.text || next.trim() === "") return clip
+    changed = true
+    // The text changed — stored word timings and container-time provenance
+    // are stale, drop them and fall back to timeline-base source fields.
+    const edited: CaptionClip = { ...clip, text: next }
+    delete edited.words
+    delete edited.sourceWords
+    delete edited.sourceStreamIndex
+    edited.sourceInMs = edited.startMs
+    edited.sourceOutMs = edited.startMs + edited.durationMs
+    return edited
+  })
+  if (!changed) {
+    return { ok: false, error: editorError("no_matches", `No captions match "${command.find}"`) }
+  }
+  const nextTrack: TimelineTrack = { ...track, clips }
+  return { ok: true, value: updateTrackInState(state, track.id, nextTrack) }
+}
+
+/**
+ * Provenance-anchored re-alignment: replays every cue's `sourceWords`
+ * (absolute container ms) through the CURRENT audio coverage of the stream
+ * it was transcribed from, then rebuilds cue timing via the shared
+ * `applyCueTiming` pass. Audio moves re-time the cue, trims slice its token
+ * set, and cuts split one cue into contiguous runs — no whisper re-run.
+ * Manual/imported/edited cues carry no `sourceWords` and pass through
+ * untouched; a rebuilt piece that would overlap them drops instead (user
+ * content wins). One command ⇒ one undo step.
+ */
+function applyResyncCaptionTrack(
+  state: TimelineState,
+  command: ResyncCaptionTrackCommand,
+): CommandResult<TimelineState> {
+  const track = findTrack(state, command.trackId)
+  if (!track)
+    return { ok: false, error: editorError("track_not_found", "Captions track not found") }
+  if (track.locked) {
+    return { ok: false, error: editorError("track_locked", `Track "${track.name}" is locked`) }
+  }
+  if (track.kind !== "captions") {
+    return { ok: false, error: editorError("invalid_track", "Only captions tracks can resync") }
+  }
+
+  const profile = captionSegmentationProfile(state.canvas, resolveCaptionDesign(track))
+  const streamClips = new Map<number | null, AudioClip[]>()
+  const audioFor = (stream: number | null): AudioClip[] => {
+    let clips = streamClips.get(stream)
+    if (!clips) {
+      clips = collectAudioClipsForStream(state, state.recordingId, stream)
+      streamClips.set(stream, clips)
+    }
+    return clips
+  }
+
+  // Occupied timeline intervals — seeded with every NON-resyncable clip so
+  // user-authored content always wins collisions, then grown with each kept
+  // rebuilt piece so pathological piece-vs-piece overlap is also refused.
+  const occupied: { startMs: number; endMs: number }[] = []
+  for (const clip of track.clips) {
+    if (clip.kind !== "caption" || !(clip.sourceWords?.length ?? 0)) {
+      occupied.push({ startMs: clip.startMs, endMs: clip.startMs + clip.durationMs })
+    }
+  }
+  const collides = (startMs: number, endMs: number) =>
+    occupied.some((span) => startMs < span.endMs && endMs > span.startMs)
+
+  const clips: TimelineClip[] = []
+  for (const clip of track.clips) {
+    if (clip.kind !== "caption" || !(clip.sourceWords?.length ?? 0)) {
+      clips.push(clip)
+      continue
+    }
+    const audio = audioFor(clip.sourceStreamIndex ?? null)
+    // The original display tokens carry the spaceBefore flags the rebuilt
+    // text needs; `sourceWords` is index-aligned with them by construction.
+    const tokens = captionWords(reflowCueText(clip.text))
+    const mapped: TimelineWord[] = []
+    clip.sourceWords!.forEach((src, i) => {
+      for (const projection of projectWordToClips(src, audio)) {
+        mapped.push({
+          text: src.text,
+          startMs: projection.startMs,
+          endMs: projection.endMs,
+          spaceBefore: tokens[i]?.spaceBefore ?? (i > 0 && !SPACELESS_CHAR.test(src.text)),
+          srcStartMs: src.startMs,
+          srcEndMs: src.endMs,
+        })
+      }
+    })
+    mapped.sort((a, b) => a.startMs - b.startMs)
+
+    // A mid-cue cut leaves a mapped gap wider than a speech pause — split
+    // the cue into one piece per contiguous run.
+    const runs: TimelineWord[][] = []
+    for (const word of mapped) {
+      const run = runs[runs.length - 1]
+      if (run === undefined || word.startMs - run[run.length - 1].endMs > profile.hardPauseMs) {
+        runs.push([word])
+      } else {
+        run.push(word)
+      }
+    }
+    const cues = applyCueTiming(runs, profile)
+    cues.forEach((cue, i) => {
+      if (collides(cue.startMs, cue.endMs)) return
+      const piece: CaptionClip = {
+        ...clip,
+        id: i === 0 ? clip.id : `${clip.id}:resync:${i}`,
+        startMs: cue.startMs,
+        durationMs: cue.endMs - cue.startMs,
+        // Re-anchor the clip's source range to the surviving tokens' span.
+        sourceInMs: cue.sourceWords?.[0]?.startMs ?? clip.sourceInMs,
+        sourceOutMs: cue.sourceWords?.[cue.sourceWords.length - 1]?.endMs ?? clip.sourceOutMs,
+        text: cue.text,
+      }
+      if (cue.words === undefined) delete piece.words
+      else piece.words = cue.words
+      if (cue.sourceWords === undefined) delete piece.sourceWords
+      else piece.sourceWords = cue.sourceWords
+      occupied.push({ startMs: cue.startMs, endMs: cue.endMs })
+      clips.push(piece)
+    })
+    // A provenance clip whose words all lost coverage emits no pieces — the
+    // cue's audio was cut, so the cue is removed with it.
+  }
+
+  const nextTrack: TimelineTrack = { ...track, clips }
+  const trackResult = sortAndValidateTrack(updateTrackInState(state, track.id, nextTrack), track.id)
+  if (!trackResult.ok) return trackResult
+  return { ok: true, value: updateTrackInState(state, track.id, trackResult.value) }
 }
 
 function applyAddMaskClip(
@@ -3110,13 +3827,27 @@ function applyTrimTimelineEnds(
         const newEnd = Math.min(clipEnd, command.endMs)
         const sourceOffset = (newStart - clip.startMs) * clip.speed
         const sourceEndOffset = (clipEnd - newEnd) * clip.speed
-        return {
+        const next = {
           ...clip,
           startMs: newStart - command.startMs,
           durationMs: newEnd - newStart,
           sourceInMs: clip.sourceInMs + sourceOffset,
           sourceOutMs: clip.sourceOutMs - sourceEndOffset,
         } as TimelineClip
+        // Captions keep the words inside the trimmed window (rebased to the
+        // piece); container-time provenance shares the same index slice.
+        if (clip.kind === "caption") {
+          const offsetMs = newStart - clip.startMs
+          const indices = keptCaptionWordIndices(clip.words, offsetMs, next.durationMs)
+          const indexSet = indices ? new Set(indices) : null
+          finalizeCaptionPiece(
+            next as CaptionClip,
+            indexSet ? clampCaptionWordTiming(clip.words, offsetMs, next.durationMs) : undefined,
+            indexSet ? clip.sourceWords?.filter((_, i) => indexSet.has(i)) : undefined,
+            hasCaptionProvenance(clip),
+          )
+        }
+        return next
       })
       .filter((c): c is TimelineClip => c !== null)
     return { ...track, clips }
@@ -3701,7 +4432,10 @@ export function createAddCaptionClipCommand(
 
 export function createUpdateCaptionClipCommand(
   clipId: string,
-  update: Partial<Pick<CaptionClip, "text" | "style" | "placement" | "safeAreaMargin">>,
+  update: Partial<Pick<CaptionClip, "text" | "style" | "safeAreaMargin">> & {
+    // null clears the per-clip placement override back to inherit.
+    placement?: CaptionClip["placement"] | null
+  },
 ): CommandRecord {
   return {
     kind: "update-caption-clip",
@@ -3715,13 +4449,27 @@ export function createUpdateCaptionClipCommand(
 
 export function createUpdateCaptionTrackCommand(
   trackId: string,
-  update: Partial<Pick<CaptionClip, "style" | "placement" | "safeAreaMargin">>,
+  update: Partial<Pick<CaptionClip, "style" | "placement" | "safeAreaMargin">> & {
+    design?: UpdateCaptionTrackCommand["design"]
+  },
 ): CommandRecord {
+  // Continuous design controls coalesce into one undo step; discrete changes
+  // (preset, placement, uppercase, accent) stay separate.
+  const designKeys = update.design ? Object.keys(update.design) : []
+  const continuousOnly =
+    update.design !== undefined &&
+    update.style === undefined &&
+    update.placement === undefined &&
+    update.safeAreaMargin === undefined &&
+    designKeys.length > 0 &&
+    designKeys.every((key) => key === "sizeScale" || key === "offsetY")
   return {
     kind: "update-caption-track",
     name: "Restyle captions",
     trackId,
     ...update,
+    coalesce: continuousOnly,
+    coalesceKey: continuousOnly ? `caption-design:${trackId}` : undefined,
   }
 }
 
@@ -3730,6 +4478,8 @@ export function createImportCaptionCuesCommand(
   options: {
     trackId?: string
     trackName?: string
+    mode?: "append" | "replace"
+    design?: ImportCaptionCuesCommand["design"]
     style?: CaptionClip["style"]
     placement?: CaptionClip["placement"]
     safeAreaMargin?: number
@@ -3737,9 +4487,75 @@ export function createImportCaptionCuesCommand(
 ): CommandRecord {
   return {
     kind: "import-caption-cues",
-    name: "Import captions",
+    name: options.mode === "replace" ? "Replace captions" : "Import captions",
     ...options,
     cues,
+  }
+}
+
+export function createMergeCaptionClipsCommand(clipIds: string[]): CommandRecord {
+  return {
+    kind: "merge-caption-clips",
+    name: "Merge captions",
+    clipIds: [...clipIds],
+  }
+}
+
+export function createReplaceCaptionTextCommand(options: {
+  trackId?: string
+  find: string
+  replace: string
+  matchCase?: boolean
+  wholeWord?: boolean
+}): CommandRecord {
+  return {
+    kind: "replace-caption-text",
+    name: "Replace caption text",
+    trackId: options.trackId,
+    find: options.find,
+    replace: options.replace,
+    matchCase: options.matchCase ?? false,
+    wholeWord: options.wholeWord ?? false,
+  }
+}
+
+/**
+ * Re-time every AI caption on the track through the CURRENT audio coverage —
+ * replay each cue's container-time `sourceWords` instead of re-transcribing.
+ * Atomic: one command record, one undo step.
+ */
+export function createResyncCaptionsCommand(trackId: string): CommandRecord {
+  return {
+    kind: "resync-caption-track",
+    name: "Resync captions",
+    trackId,
+  }
+}
+
+/**
+ * Shift every caption clip on the track by deltaMs via a move-clips record.
+ * applyMoveClips adds the delta verbatim — there is no clamping inside the
+ * engine and validate rejects any clip landing below 0, so the delta is
+ * clamped to -minStart here. Returns null when nothing can move.
+ */
+export function createShiftCaptionsCommand(
+  track: TimelineTrack,
+  deltaMs: number,
+): CommandRecord | null {
+  const clipIds = track.clips.filter((clip) => clip.kind === "caption").map((clip) => clip.id)
+  if (clipIds.length === 0) return null
+  const minStart = Math.min(
+    ...track.clips.filter((clip) => clipIds.includes(clip.id)).map((clip) => clip.startMs),
+  )
+  const effective = Math.max(deltaMs, -minStart)
+  if (effective === 0) return null
+  return {
+    kind: "move-clips",
+    name: deltaMs < 0 ? "Shift captions earlier" : "Shift captions later",
+    clipIds,
+    deltaMs: Math.round(effective),
+    coalesce: true,
+    coalesceKey: `shift-captions:${track.id}`,
   }
 }
 

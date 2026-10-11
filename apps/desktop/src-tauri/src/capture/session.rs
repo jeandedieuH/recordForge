@@ -12,7 +12,7 @@ use super::manifest::{
     RecordingStats, RecordingWebcamFragment,
 };
 use super::media;
-use super::traits::AudioTrack;
+use super::traits::{AudioTrack, TimelineAnchor};
 
 /// Shared recorder state. Only one recording session can be active at a time.
 #[derive(Debug)]
@@ -57,6 +57,11 @@ struct ActiveSession {
     /// First timestamp owned by the active cursor segment. Keeping this boundary
     /// prevents startup alignment for a resumed segment from shifting history.
     cursor_segment_start_ms: u64,
+    /// How far ahead of the screen process spawn the cursor tracker and audio
+    /// workers started for the active segment. Their tracks are trimmed by
+    /// `head_trim + segment_startup_shift` at finalize so the extra coverage
+    /// disappears instead of surfacing as a leading dead zone.
+    segment_startup_shift: Duration,
     segment_index: u32,
     total_recorded_ms: u64,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -82,6 +87,17 @@ struct SegmentCaptures {
     /// The segment's timeline anchor — the keystroke sampler stamps events
     /// against the first segment's origin so badges land on video time.
     timeline_origin_instant: std::time::Instant,
+    /// Gap between the auxiliary captures' start and the screen process spawn.
+    /// Added to the tracks' head trim at finalize (see `SegmentTimeline`).
+    startup_shift: Duration,
+}
+
+/// Cursor and audio workers started together ahead of the screen process.
+/// Bundled so the start can run on a scoped thread without borrowing `Recorder`.
+#[derive(Debug)]
+struct AuxiliaryCaptures {
+    cursor_tracker: super::cursor_v2::CursorTrackerV2,
+    audio: Vec<ActiveAudioCapture>,
 }
 
 /// Build the manifest cursor descriptor in encoded-frame coordinates. The
@@ -212,6 +228,16 @@ impl SegmentTimeline {
     fn head_trim_ms(&self) -> u64 {
         self.head_trim.as_millis().min(u64::MAX as u128) as u64
     }
+
+    /// Timeline variant for the tracks that started `shift` before the screen
+    /// process spawn. Their extra leading coverage is removed by extending the
+    /// head trim; the video-derived segment duration is unchanged.
+    fn with_startup_shift(self, shift: Duration) -> Self {
+        Self {
+            head_trim: self.head_trim.saturating_add(shift),
+            duration: self.duration,
+        }
+    }
 }
 
 /// Largest plausible startup gap between process spawn and the first captured
@@ -279,6 +305,37 @@ fn compute_segment_timeline(
     SegmentTimeline {
         head_trim: Duration::from_millis(head_trim_ms),
         duration: Duration::from_millis(video_ms),
+    }
+}
+
+/// Best-effort cleanup after a segment start that failed before the screen
+/// capture came up: remove the per-segment WAVs the audio workers opened and
+/// drop the cursor events the abandoned attempt recorded (events before
+/// `start` belong to prior segments and are kept). Must run only after the
+/// workers are dropped — Windows cannot delete open files.
+fn discard_failed_segment_auxiliaries(work_dir: &Path, index: u32, cursor_time_offset_ms: u64) {
+    for file_name in [format!("mic_{index:03}.wav"), format!("sys_{index:03}.wav")] {
+        let path = work_dir.join(&file_name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "failed to remove audio track from a failed segment start"
+                );
+            }
+        }
+    }
+
+    let start = if index == 0 {
+        0
+    } else {
+        cursor_time_offset_ms.saturating_add(1)
+    };
+    if let Err(error) = super::cursor_v2::align_telemetry_segment(work_dir, start, 0, 0) {
+        tracing::warn!(%error, "failed to drop cursor events from a failed segment start");
     }
 }
 
@@ -435,6 +492,7 @@ impl Recorder {
             cursor_tracker: None,
             keystroke_sampler: None,
             cursor_segment_start_ms: 0,
+            segment_startup_shift: Duration::ZERO,
             segment_index: 0,
             total_recorded_ms: 0,
             started_at: None,
@@ -508,6 +566,7 @@ impl Recorder {
         session.webcam_preview_server = captures.webcam_preview_server;
         session.webcam_capture_failed |= captures.webcam_failed;
         session.cursor_tracker = Some(captures.cursor_tracker);
+        session.segment_startup_shift = captures.startup_shift;
         // Keystroke sampler starts on the first segment only — a resume keeps
         // the running sampler (timestamps stay on the session clock).
         if session.keystroke_sampler.is_none() && session.config.capture_keystrokes {
@@ -628,43 +687,89 @@ impl Recorder {
         // advertised mode.
         mode_attempts.push(None);
 
-        let mut last_error = None;
-        let mut screen = None;
-        let mut screen_encoder_index = 0usize;
-        let mut screen_backend_fallback = false;
-        'encoders: for (encoder_index, encoder) in encoder_candidates.iter().enumerate() {
-            for use_ddagrab in screen_backend_attempts(self.ddagrab_available) {
-                match FfmpegCapture::start(
-                    &ffmpeg,
-                    config,
-                    profile,
-                    encoder,
-                    &screen_output.to_string_lossy(),
-                    index,
-                    Some(Arc::clone(&manifest)),
-                    use_ddagrab,
-                ) {
-                    Ok(capture) => {
-                        screen = Some(capture);
-                        screen_encoder_index = encoder_index;
-                        screen_backend_fallback = !use_ddagrab && self.ddagrab_available;
-                        break 'encoders;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
+        // The cursor tracker and the WASAPI audio workers clock against the
+        // segment origin: they must be running before the screen process
+        // emits its first frame, or their tracks would show the startup window
+        // as leading silence and missing telemetry. They launch on a scoped
+        // thread so a slow or hung audio device can never delay the screen
+        // spawn below.
+        let aux_origin = TimelineAnchor::now();
+        let (screen, screen_encoder_index, screen_backend_fallback, last_error, aux_join) =
+            std::thread::scope(|scope| {
+                let aux_handle = scope.spawn(|| {
+                    Self::start_auxiliary_captures(
+                        config,
+                        profile,
+                        work_dir,
+                        index,
+                        recording_id,
+                        cursor_time_offset_ms,
+                        aux_origin,
+                    )
+                });
+
+                let mut last_error = None;
+                let mut screen = None;
+                let mut screen_encoder_index = 0usize;
+                let mut screen_backend_fallback = false;
+                'encoders: for (encoder_index, encoder) in encoder_candidates.iter().enumerate() {
+                    for use_ddagrab in screen_backend_attempts(self.ddagrab_available) {
+                        match FfmpegCapture::start(
+                            &ffmpeg,
+                            config,
+                            profile,
                             encoder,
+                            &screen_output.to_string_lossy(),
+                            index,
+                            Some(Arc::clone(&manifest)),
                             use_ddagrab,
-                            "screen capture attempt failed; trying next candidate"
-                        );
-                        last_error = Some(error);
+                        ) {
+                            Ok(capture) => {
+                                screen = Some(capture);
+                                screen_encoder_index = encoder_index;
+                                screen_backend_fallback = !use_ddagrab && self.ddagrab_available;
+                                break 'encoders;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    encoder,
+                                    use_ddagrab,
+                                    "screen capture attempt failed; trying next candidate"
+                                );
+                                last_error = Some(error);
+                            }
+                        }
                     }
                 }
+                (
+                    screen,
+                    screen_encoder_index,
+                    screen_backend_fallback,
+                    last_error,
+                    aux_handle.join(),
+                )
+            });
+
+        let aux = match aux_join {
+            Ok(aux) => aux,
+            Err(_) => {
+                // A panicked auxiliary startup cannot be aligned; any screen
+                // capture that did start is reaped by dropping it.
+                drop(screen);
+                return Err(crate::errors::InternalError::Capture(
+                    "auxiliary capture startup panicked".into(),
+                )
+                .into());
             }
-        }
+        };
         let mut screen = match screen {
             Some(screen) => screen,
             None => {
+                // The workers must be stopped before their files can be
+                // removed — Windows cannot delete open files.
+                drop(aux);
+                discard_failed_segment_auxiliaries(work_dir, index, cursor_time_offset_ms);
                 return Err(last_error.unwrap_or_else(|| {
                     crate::errors::InternalError::Capture("screen capture could not start".into())
                         .into()
@@ -685,74 +790,23 @@ impl Recorder {
             screen.set_fallback_reason(Some(reasons.join("+")));
         }
 
-        // Every auxiliary capture and the cursor tracker share the screen
-        // process origin. Starting the tracker before webcam initialization
-        // prevents a slow camera from creating a telemetry blind spot.
+        // The timeline anchor stays the screen process spawn (webcam offsets
+        // and the keystroke sampler are keyed to it). `startup_shift` measures
+        // how far ahead of the spawn the auxiliaries actually started; finalize
+        // adds it to their head trim so the early coverage is dropped rather
+        // than surfacing as dead air.
         let timeline_origin = screen.timeline_anchor();
-        let bounds = config.source.bounds;
-        let capture_bounds = super::cursor::CursorCaptureBounds {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width.max(1) as u32,
-            height: bounds.height.max(1) as u32,
-        };
-        let cursor_tracker = super::cursor_v2::CursorTrackerV2::start(
-            recording_id.to_string(),
-            work_dir.to_path_buf(),
-            capture_bounds,
-            profile.width.max(1) as u32,
-            profile.height.max(1) as u32,
-            timeline_origin.instant,
-            cursor_time_offset_ms,
-            super::cursor_v2::CursorCaptureMode::Full,
+        let startup_shift = timeline_origin
+            .instant
+            .saturating_duration_since(aux_origin.instant);
+        info!(
+            startup_shift_ms = startup_shift.as_millis().min(u64::MAX as u128) as u64,
+            "auxiliary captures started ahead of the screen process"
         );
-
-        let mut audio = Vec::new();
-        if config.capture_microphone {
-            let output_path = work_dir.join(format!("mic_{:03}.wav", index));
-            match super::audio::start_audio_track(
-                AudioCaptureKind::Microphone,
-                config.microphone_device_id.clone(),
-                output_path,
-                timeline_origin,
-            ) {
-                Ok(track) => {
-                    audio.push(ActiveAudioCapture {
-                        kind: AudioCaptureKind::Microphone,
-                        track,
-                    });
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "failed to start microphone capture; continuing recording without microphone"
-                    );
-                }
-            }
-        }
-
-        if config.capture_system_audio {
-            let output_path = work_dir.join(format!("sys_{:03}.wav", index));
-            match super::audio::start_audio_track(
-                AudioCaptureKind::SystemLoopback,
-                config.system_audio_device_id.clone(),
-                output_path,
-                timeline_origin,
-            ) {
-                Ok(track) => {
-                    audio.push(ActiveAudioCapture {
-                        kind: AudioCaptureKind::SystemLoopback,
-                        track,
-                    });
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "failed to start system audio capture; continuing recording without system audio"
-                    );
-                }
-            }
-        }
+        let AuxiliaryCaptures {
+            cursor_tracker,
+            audio,
+        } = aux;
 
         let mut webcam = None;
         let mut webcam_failed = false;
@@ -874,7 +928,92 @@ impl Recorder {
             webcam_failed,
             cursor_tracker,
             timeline_origin_instant: timeline_origin.instant,
+            startup_shift,
         })
+    }
+
+    /// Start the cursor tracker and the requested WASAPI audio workers on a
+    /// shared timeline origin. Called on a scoped thread from `start_segment`
+    /// so these captures run concurrently with — and therefore ahead of — the
+    /// screen process's startup window.
+    fn start_auxiliary_captures(
+        config: &RecordingConfig,
+        profile: &RecordingProfile,
+        work_dir: &Path,
+        index: u32,
+        recording_id: &str,
+        cursor_time_offset_ms: u64,
+        origin: TimelineAnchor,
+    ) -> AuxiliaryCaptures {
+        let bounds = config.source.bounds;
+        let capture_bounds = super::cursor::CursorCaptureBounds {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width.max(1) as u32,
+            height: bounds.height.max(1) as u32,
+        };
+        let cursor_tracker = super::cursor_v2::CursorTrackerV2::start(
+            recording_id.to_string(),
+            work_dir.to_path_buf(),
+            capture_bounds,
+            profile.width.max(1) as u32,
+            profile.height.max(1) as u32,
+            origin.instant,
+            cursor_time_offset_ms,
+            super::cursor_v2::CursorCaptureMode::Full,
+        );
+
+        let mut audio = Vec::new();
+        if config.capture_microphone {
+            let output_path = work_dir.join(format!("mic_{:03}.wav", index));
+            match super::audio::start_audio_track(
+                AudioCaptureKind::Microphone,
+                config.microphone_device_id.clone(),
+                output_path,
+                origin,
+            ) {
+                Ok(track) => {
+                    audio.push(ActiveAudioCapture {
+                        kind: AudioCaptureKind::Microphone,
+                        track,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to start microphone capture; continuing recording without microphone"
+                    );
+                }
+            }
+        }
+
+        if config.capture_system_audio {
+            let output_path = work_dir.join(format!("sys_{:03}.wav", index));
+            match super::audio::start_audio_track(
+                AudioCaptureKind::SystemLoopback,
+                config.system_audio_device_id.clone(),
+                output_path,
+                origin,
+            ) {
+                Ok(track) => {
+                    audio.push(ActiveAudioCapture {
+                        kind: AudioCaptureKind::SystemLoopback,
+                        track,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to start system audio capture; continuing recording without system audio"
+                    );
+                }
+            }
+        }
+
+        AuxiliaryCaptures {
+            cursor_tracker,
+            audio,
+        }
     }
 
     fn finalize_audio_tracks(
@@ -933,6 +1072,7 @@ impl Recorder {
             let bytes_written = if let Some(alignment) = alignment {
                 info!(
                     start_offset_ms = alignment.start_offset.as_millis() as u64,
+                    leading_silence_ms = alignment.leading_silence().as_millis() as u64,
                     source_duration_ms = alignment.source_duration.as_millis() as u64,
                     wall_duration_ms = alignment.wall_duration.as_millis() as u64,
                     drift_ms = alignment.drift_ms,
@@ -1240,6 +1380,10 @@ impl Recorder {
         };
 
         let timeline = self.segment_timeline(&screen, &stats);
+        // Audio and cursor tracks ran ahead of the screen process, so their
+        // head trim additionally covers that startup shift; the webcam keeps
+        // the screen-anchored timeline.
+        let track_timeline = timeline.with_startup_shift(session.segment_startup_shift);
         let mut stats = stats;
         stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
         self.stop_webcam_segment(
@@ -1253,12 +1397,16 @@ impl Recorder {
             &screen,
             &mut session.audio_captures,
             &session.profile,
-            timeline,
+            track_timeline,
         );
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
-            self.align_cursor_segment(&session.work_dir, session.cursor_segment_start_ms, timeline);
+            self.align_cursor_segment(
+                &session.work_dir,
+                session.cursor_segment_start_ms,
+                track_timeline,
+            );
         }
 
         let total = session.total_recorded_ms + stats.duration_ms;
@@ -1344,6 +1492,7 @@ impl Recorder {
         let bounds = session.config.source.bounds;
         session.cursor_segment_start_ms = session.total_recorded_ms.saturating_add(1);
         session.cursor_tracker = Some(captures.cursor_tracker);
+        session.segment_startup_shift = captures.startup_shift;
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
@@ -1483,6 +1632,10 @@ impl Recorder {
             head_trim: Duration::ZERO,
             duration: Duration::ZERO,
         };
+        // Audio and cursor tracks ran ahead of the screen process, so their
+        // head trim additionally covers that startup shift; without a live
+        // screen there is no shift to apply and this stays the zero timeline.
+        let mut track_timeline = timeline;
         let final_stats = if let Some(mut screen) = screen_capture {
             let screen_started_at = screen.started_at();
             let stats = match screen
@@ -1512,6 +1665,7 @@ impl Recorder {
                 }
             };
             timeline = self.segment_timeline(&screen, &stats);
+            track_timeline = timeline.with_startup_shift(session.segment_startup_shift);
             let mut stats = stats;
             stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
             self.stop_webcam_segment(
@@ -1525,7 +1679,7 @@ impl Recorder {
                 &screen,
                 &mut session.audio_captures,
                 &session.profile,
-                timeline,
+                track_timeline,
             );
             stats
         } else {
@@ -1543,7 +1697,11 @@ impl Recorder {
 
         if let Some(mut tracker) = session.cursor_tracker.take() {
             tracker.stop();
-            self.align_cursor_segment(&session.work_dir, session.cursor_segment_start_ms, timeline);
+            self.align_cursor_segment(
+                &session.work_dir,
+                session.cursor_segment_start_ms,
+                track_timeline,
+            );
         }
         // Session-level sampler: stop here (not on pause) so events span all
         // segments. Writes keystrokes.json into the work dir.
@@ -2199,6 +2357,83 @@ mod tests {
     }
 
     #[test]
+    fn segment_timeline_startup_shift_only_extends_the_head_trim() {
+        let timeline = SegmentTimeline {
+            head_trim: Duration::from_millis(270),
+            duration: Duration::from_millis(80_316),
+        };
+
+        let shifted = timeline.with_startup_shift(Duration::from_millis(600));
+        assert_eq!(shifted.head_trim, Duration::from_millis(870));
+        assert_eq!(shifted.duration, Duration::from_millis(80_316));
+
+        // A zero shift is the identity.
+        let unchanged = timeline.with_startup_shift(Duration::ZERO);
+        assert_eq!(unchanged.head_trim, Duration::from_millis(270));
+        assert_eq!(unchanged.duration, Duration::from_millis(80_316));
+
+        // An extreme shift saturates the head trim rather than panicking.
+        let saturated = timeline.with_startup_shift(Duration::MAX);
+        assert_eq!(saturated.head_trim, Duration::MAX);
+        assert_eq!(saturated.duration, Duration::from_millis(80_316));
+    }
+
+    #[test]
+    fn discarding_failed_segment_auxiliaries_removes_wavs_and_trailing_cursor_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("mic_001.wav"), b"mic").expect("write mic wav");
+        std::fs::write(dir.path().join("sys_001.wav"), b"sys").expect("write sys wav");
+
+        let event = |t_ms: u64| crate::capture::cursor_v2::CursorTelemetryEventV2 {
+            t_ms,
+            raw_x: 100,
+            raw_y: 200,
+            source_x: 100.0,
+            source_y: 200.0,
+            buttons: crate::capture::cursor_v2::CursorButtonState::default(),
+            button_event: "none".into(),
+            visible: true,
+            shape_id: "arrow".into(),
+            shape_changed: false,
+        };
+        let metadata = crate::capture::cursor_v2::CursorTelemetryMetadata::new(
+            "rec".into(),
+            1920,
+            1080,
+            crate::capture::cursor_v2::CursorCaptureBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        let telemetry = crate::capture::cursor_v2::CursorTelemetryFileV2 {
+            metadata,
+            events: vec![event(100), event(4_900), event(5_100), event(5_200)],
+        };
+        crate::capture::cursor_v2::write_v2_telemetry(dir.path(), &telemetry)
+            .expect("write telemetry");
+
+        // Segment 1 failed before the screen came up; events at 5_001ms on
+        // belong to the abandoned attempt and must be dropped.
+        discard_failed_segment_auxiliaries(dir.path(), 1, 5_000);
+
+        assert!(!dir.path().join("mic_001.wav").exists());
+        assert!(!dir.path().join("sys_001.wav").exists());
+        let remaining =
+            crate::capture::cursor_v2::read_v2_telemetry(dir.path()).expect("read telemetry");
+        let times: Vec<u64> = remaining.events.iter().map(|event| event.t_ms).collect();
+        assert_eq!(times, vec![100, 4_900]);
+
+        // Repeating the cleanup is a harmless no-op.
+        discard_failed_segment_auxiliaries(dir.path(), 1, 5_000);
+        let remaining =
+            crate::capture::cursor_v2::read_v2_telemetry(dir.path()).expect("read telemetry");
+        let times: Vec<u64> = remaining.events.iter().map(|event| event.t_ms).collect();
+        assert_eq!(times, vec![100, 4_900]);
+    }
+
+    #[test]
     fn screen_backend_attempts_order_dda_then_gdi() {
         assert_eq!(screen_backend_attempts(true), vec![true, false]);
         assert_eq!(screen_backend_attempts(false), vec![false]);
@@ -2484,6 +2719,7 @@ mod tests {
             cursor_tracker: None,
             keystroke_sampler: None,
             cursor_segment_start_ms: 0,
+            segment_startup_shift: Duration::ZERO,
             segment_index: 0,
             total_recorded_ms: 0,
             started_at: Some(chrono::Utc::now()),
@@ -2743,6 +2979,134 @@ mod tests {
             manifest.total_recorded_ms,
             video_ms
         );
+    }
+
+    #[test]
+    #[ignore = "requires an active desktop session and a microphone; records ~4 s"]
+    fn live_recording_audio_and_cursor_cover_the_screen_startup_window() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+
+        let microphone = crate::capture::audio::enumerate_audio_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .iter()
+                    .find(|device| !device.is_loopback && device.is_default)
+                    .or_else(|| devices.iter().find(|device| !device.is_loopback))
+                    .map(|device| device.id.clone())
+            });
+        let Some(microphone) = microphone else {
+            eprintln!("skipping: no input audio device available");
+            return;
+        };
+
+        let recorder = Recorder::new(ffmpeg.clone(), ffprobe, temp_dir.path().to_path_buf(), db);
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "region".into(),
+                id: "region-0".into(),
+                name: "Region".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 640,
+                    height: 360,
+                },
+            },
+            profile: "smooth-60fps".into(),
+            capture_microphone: true,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: Some(microphone),
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start recording");
+        std::thread::sleep(Duration::from_secs(4));
+        recorder.stop().expect("stop recording");
+
+        let work_dir = temp_dir.path().join(&session_id);
+
+        // Measure the digital-zero lead-in of the first audio stream: the
+        // worker should have been running since (before) the first video
+        // frame, so real signal must start near t=0.
+        let mut decode = crate::process::create_command(&ffmpeg);
+        decode
+            .arg("-v")
+            .arg("error")
+            .arg("-i")
+            .arg(work_dir.join("output.mp4"))
+            .args([
+                "-map", "0:a:0", "-f", "s16le", "-ac", "2", "-ar", "48000", "-",
+            ]);
+        let decoded = decode.output().expect("decode first audio stream");
+        if !decoded.status.success() || decoded.stdout.is_empty() {
+            eprintln!("skipping: final output has no audio stream");
+            return;
+        }
+        // s16le stereo = 4 bytes per frame at 48 kHz.
+        let audio_leading_silence_ms = match decoded
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .position(|frame| frame.iter().any(|byte| *byte != 0))
+        {
+            Some(frame_index) => frame_index as u64 * 1_000 / 48_000,
+            None => {
+                eprintln!("skipping: captured audio is entirely silent (muted device?)");
+                return;
+            }
+        };
+
+        // Index entry 0 anchors the first 1024-event chunk, so its tMs is the
+        // first recorded cursor event on the session timeline.
+        let first_cursor_event_ms = std::fs::read_to_string(work_dir.join("cursor_telemetry.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| value.get("index")?.get(0)?.get("tMs")?.as_u64());
+
+        let manifest =
+            RecordingManifest::read(work_dir.join("session.json")).expect("load session manifest");
+        let startup_ready_ms = manifest
+            .capture_diagnostics
+            .first()
+            .and_then(|segment| segment.screen.as_ref())
+            .and_then(|screen| screen.startup_ready_ms);
+
+        eprintln!(
+            "startup_ready_ms={startup_ready_ms:?} audio_leading_silence_ms={audio_leading_silence_ms} first_cursor_event_ms={first_cursor_event_ms:?}"
+        );
+
+        assert!(
+            audio_leading_silence_ms <= 400,
+            "audio starts with {audio_leading_silence_ms}ms of digital silence"
+        );
+        if let Some(first_cursor_event_ms) = first_cursor_event_ms {
+            assert!(
+                first_cursor_event_ms <= 400,
+                "first cursor event landed at {first_cursor_event_ms}ms"
+            );
+        }
     }
 
     #[test]

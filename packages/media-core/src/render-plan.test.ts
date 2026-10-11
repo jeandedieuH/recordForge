@@ -615,6 +615,178 @@ describe("render-plan", () => {
     if (plan.ok) expect(plan.value.captionMode).toBe("sidecar")
   })
 
+  function captionsTrack(clips: object[], captionDesign?: object) {
+    return {
+      id: "captions-track",
+      kind: "captions" as const,
+      name: "Captions",
+      muted: false,
+      locked: false,
+      solo: false,
+      volume: 1,
+      clips,
+      ...(captionDesign ? { captionDesign } : {}),
+    }
+  }
+
+  function captionClip(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "caption-1",
+      kind: "caption" as const,
+      assetId: "captions-track",
+      startMs: 0,
+      durationMs: 2_000,
+      sourceInMs: 0,
+      sourceOutMs: 2_000,
+      speed: 1,
+      text: "Hello there, general Kenobi",
+      style: "default",
+      ...overrides,
+    }
+  }
+
+  it("attaches a px-resolved layout resolved from the track design", () => {
+    const state = makeTimeline()
+    state.tracks.push(
+      captionsTrack([captionClip()], {
+        preset: "pop",
+        sizeScale: 1,
+        placement: "bottom",
+        offsetY: 0,
+      }) as never,
+    )
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const caption = plan.value.captions[0]
+    expect(caption.layout).toBeDefined()
+    const layout = caption.layout!
+    expect(layout.lookId).toBe("pop")
+    expect(layout.fontPx).toBe(46) // 1080 short edge × 0.0425
+    expect(layout.fontWeight).toBe(800)
+    // Uppercase pop look — the resolved text is already cased.
+    expect(layout.pages[0].lines[0].text).toBe("HELLO THERE, GENERAL KENOBI")
+    // Word-level highlight windows cover the page contiguously.
+    const words = layout.pages.flatMap((page) => page.lines.flatMap((line) => line.words))
+    expect(words.length).toBeGreaterThan(1)
+    expect(words[0].startMs).toBe(0)
+    expect(words[words.length - 1].endMs).toBe(2_000)
+    // Sidecar fields keep their existing semantics — the plan stays schema-clean.
+    expect(caption.text).toBe("Hello there, general Kenobi")
+    expect(renderPlanSchema.safeParse(plan.value).success).toBe(true)
+  })
+
+  it("carries stored clip word timings into the plan layout", () => {
+    const state = makeTimeline()
+    // "Hello there, general Kenobi" → four display tokens, matching count.
+    const stored = [
+      { text: "Hello", startMs: 50, endMs: 300 },
+      { text: "there,", startMs: 320, endMs: 700 },
+      { text: "general", startMs: 750, endMs: 1_100 },
+      { text: "Kenobi", startMs: 1_200, endMs: 1_900 },
+    ]
+    state.tracks.push(
+      captionsTrack([captionClip({ words: stored })], {
+        preset: "pop",
+        sizeScale: 1,
+        placement: "bottom",
+        offsetY: 0,
+      }) as never,
+    )
+    const plan = buildRenderPlan({ state, projectId: "project-1" })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const layout = plan.value.captions[0].layout!
+    const flat = layout.pages.flatMap((page) => page.lines.flatMap((line) => line.words))
+    expect(flat).toHaveLength(stored.length)
+    // Real windows honour the stored times (rebased to the clip start) —
+    // assert one boundary within rounding.
+    const third = flat[2]
+    expect(Math.abs(third.startMs - stored[2].startMs)).toBeLessThanOrEqual(1)
+    expect(Math.abs(third.endMs - stored[2].endMs)).toBeLessThanOrEqual(1)
+  })
+
+  it("windows caption layout pages and words through the export range", () => {
+    const state = makeTimeline()
+    // ~4s cue that paginates at 9:16 — pages get cut by the range window.
+    const longText = Array.from({ length: 60 }, (_, i) => `word${i}`).join(" ")
+    state.canvas = { ...state.canvas, width: 1080, height: 1920, aspectRatio: "9:16" }
+    state.tracks.push(
+      captionsTrack([
+        captionClip({ text: longText, durationMs: 20_000, sourceOutMs: 20_000 }),
+      ]) as never,
+    )
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      range: { startMs: 5_000, endMs: 15_000 },
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const caption = plan.value.captions[0]
+    expect(caption.startMs).toBe(0)
+    expect(caption.endMs).toBe(10_000)
+    const layout = caption.layout!
+    for (const page of layout.pages) {
+      expect(page.startMs).toBeGreaterThanOrEqual(0)
+      expect(page.endMs).toBeLessThanOrEqual(10_000)
+      for (const line of page.lines) {
+        for (const word of line.words) {
+          expect(word.startMs).toBeGreaterThanOrEqual(0)
+          expect(word.endMs).toBeLessThanOrEqual(10_000)
+        }
+      }
+    }
+    // Pages remain contiguous after clamping.
+    for (let i = 1; i < layout.pages.length; i++) {
+      expect(layout.pages[i].startMs).toBe(layout.pages[i - 1].endMs)
+    }
+  })
+
+  it("gives batch variants with another aspect ratio their own layout", () => {
+    const makeState = (aspectRatio: "16:9" | "9:16") => {
+      const state = makeTimeline()
+      state.canvas =
+        aspectRatio === "16:9"
+          ? { ...state.canvas, aspectRatio }
+          : { ...state.canvas, width: 1080, height: 1920, aspectRatio }
+      state.tracks.push(captionsTrack([captionClip()]) as never)
+      return state
+    }
+    const wide = buildRenderPlan({ state: makeState("16:9"), projectId: "p" })
+    const tall = buildRenderPlan({ state: makeState("9:16"), projectId: "p" })
+    expect(wide.ok && tall.ok).toBe(true)
+    if (!wide.ok || !tall.ok) return
+    expect(wide.value.captions[0].layout!.fontPx).toBe(46)
+    expect(tall.value.captions[0].layout!.fontPx).toBe(60)
+  })
+
+  it("keeps sidecar cue fields identical while carrying the layout", () => {
+    const state = makeTimeline()
+    state.tracks.push(
+      captionsTrack([
+        captionClip({ style: "boxed", placement: "top", safeAreaMargin: 90 }),
+      ]) as never,
+    )
+    const plan = buildRenderPlan({
+      state,
+      projectId: "project-1",
+      captionMode: "sidecar",
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    const caption = plan.value.captions[0]
+    expect(caption).toMatchObject({
+      text: "Hello there, general Kenobi",
+      startMs: 0,
+      endMs: 2_000,
+      style: "boxed",
+      placement: "top",
+      safeAreaMargin: 90,
+    })
+    expect(caption.layout).toBeDefined()
+  })
+
   it("rejects a missing project identity before building a render plan", () => {
     const plan = buildRenderPlan({ state: makeTimeline(), projectId: "" })
     expect(plan.ok).toBe(false)

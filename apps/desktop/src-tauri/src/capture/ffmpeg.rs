@@ -479,9 +479,12 @@ impl Drop for FfmpegCapture {
 /// Add machine-readable progress reporting shared by every capture process.
 /// `-progress pipe:2` interleaves `key=value` blocks into stderr (which we
 /// already drain), and `-nostats` suppresses the human-readable stats line so
-/// the progress stream is the single source of truth.
+/// the progress stream is the single source of truth. A short `-stats_period`
+/// bounds the latency of the "first progress block with frames" readiness
+/// check in `run()` — and therefore how long the countdown overlay's GO state
+/// lingers before the capture is confirmed live.
 fn add_progress_reporting(command: &mut Command) {
-    command.args(["-nostats", "-stats_period", "1", "-progress", "pipe:2"]);
+    command.args(["-nostats", "-stats_period", "0.2", "-progress", "pipe:2"]);
 }
 
 fn build_screen_command(

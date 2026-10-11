@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "recordforge-desktop"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3656,6 +3656,7 @@ dependencies = [
  "reqwest 0.12.28",
  "resvg",
  "rusqlite",
+ "rustybuzz",
  "serde",
  "serde_json",
  "sha2",

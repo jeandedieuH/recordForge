@@ -499,17 +499,6 @@ export function TimelineView({
       [],
     [timeline],
   )
-  const captionClips = useMemo(
-    () =>
-      timeline?.tracks
-        .filter((track) => track.kind === "captions" && !track.muted)
-        .flatMap((track) =>
-          track.clips.filter(
-            (clip): clip is Extract<TimelineClip, { kind: "caption" }> => clip.kind === "caption",
-          ),
-        ) ?? [],
-    [timeline],
-  )
   const annotationClips = useMemo(
     () =>
       timeline?.tracks
@@ -2282,13 +2271,7 @@ export function TimelineView({
                 />
               ) : null}
 
-              {captionClips.length > 0 ? (
-                <CaptionPreview
-                  clips={captionClips}
-                  playheadMs={view.playheadMs}
-                  canvasHeight={timeline.canvas.height}
-                />
-              ) : null}
+              <CaptionPreview timeline={timeline} playheadMs={view.playheadMs} />
 
               {mediaUrl &&
               !mediaError &&

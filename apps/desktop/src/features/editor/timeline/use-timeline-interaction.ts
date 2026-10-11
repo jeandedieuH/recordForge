@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import type {
   AppError,
-  CaptionClip,
   ClipTransform,
   ManualZoomSegment,
   MaskRect,
@@ -50,7 +49,7 @@ type InteractionDraft =
   | {
       kind: "caption"
       clipId: string
-      update: Partial<Pick<CaptionClip, "text" | "style" | "placement" | "safeAreaMargin">>
+      update: Parameters<typeof createUpdateCaptionClipCommand>[1]
     }
   | {
       kind: "zoom"
@@ -94,7 +93,7 @@ export interface TimelineInteraction {
   ) => void
   updateCaption: (
     clipId: string,
-    update: Partial<Pick<CaptionClip, "text" | "style" | "placement" | "safeAreaMargin">>,
+    update: Parameters<typeof createUpdateCaptionClipCommand>[1],
     options?: { phase?: "draft" | "commit" | "cancel" },
   ) => void
   updateZoomTarget: (

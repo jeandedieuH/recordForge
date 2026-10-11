@@ -444,6 +444,16 @@ pub struct AudioTimelineAlignment {
     pub drift_ms: i64,
 }
 
+impl AudioTimelineAlignment {
+    /// Digital zeros the muxed stream would begin with: how much of the
+    /// worker's first-packet offset survives the video head trim. Zero when
+    /// the worker was already running before the screen produced its first
+    /// frame; positive when the worker started late (inside the gap).
+    pub fn leading_silence(&self) -> Duration {
+        self.start_offset.saturating_sub(self.head_trim)
+    }
+}
+
 pub fn compute_audio_timeline_alignment(
     timing: AudioCaptureTiming,
     head_trim: Duration,
@@ -811,6 +821,46 @@ mod tests {
         assert_eq!(alignment.wall_duration, Duration::from_millis(10_100));
         assert!((alignment.pts_scale - 1.01).abs() < 0.000_001);
         assert_eq!(alignment.drift_ms, 100);
+    }
+
+    #[test]
+    fn leading_silence_reflects_when_the_audio_worker_started() {
+        let origin = 10_000_000_000;
+        // Captured audio covers 10s at 48 kHz with the last 10ms packet still
+        // counted in `captured_frames` (wall clock and samples agree).
+        let timing_at = |first_packet: u64| crate::capture::traits::AudioCaptureTiming {
+            sample_rate: 48_000,
+            synthetic_leading_frames: 0,
+            captured_frames: 480_000,
+            timeline_origin_qpc_100ns: origin,
+            first_packet_qpc_100ns: origin + first_packet,
+            last_packet_qpc_100ns: origin + first_packet + 99_900_000,
+            last_packet_frames: 480,
+            timestamp_errors: 0,
+            discontinuities: 0,
+        };
+
+        // Worker started 2_575ms into the origin window (the old behavior):
+        // with a zero head trim the whole startup gap stays as silence.
+        let late = compute_audio_timeline_alignment(
+            timing_at(25_750_000),
+            Duration::ZERO,
+            Duration::from_secs(10),
+        )
+        .expect("valid late-start alignment");
+        assert_eq!(late.start_offset, Duration::from_millis(2_575));
+        assert_eq!(late.leading_silence(), Duration::from_millis(2_575));
+
+        // Worker ran 120ms after the origin but the trim covers it (the new
+        // behavior): nothing silent survives at the front of the track.
+        let early = compute_audio_timeline_alignment(
+            timing_at(1_200_000),
+            Duration::from_millis(870),
+            Duration::from_secs(10),
+        )
+        .expect("valid early-start alignment");
+        assert_eq!(early.start_offset, Duration::from_millis(120));
+        assert_eq!(early.leading_silence(), Duration::ZERO);
     }
 
     #[test]

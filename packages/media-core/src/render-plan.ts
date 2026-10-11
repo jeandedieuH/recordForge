@@ -26,8 +26,11 @@ import type {
   TimelineState,
 } from "@recordforge/domain"
 import {
+  applyCaptionContinuity,
   buildFollowCursorMotionPlan,
   resolveCameraShots,
+  resolveCaptionLayout,
+  resolveClipDesign,
   timelineMarkersToChapters,
 } from "@recordforge/editor-core"
 import {
@@ -236,7 +239,7 @@ function toCaptions(
   range: ExportRange | undefined,
   durationMs: number,
 ): RenderPlanCaption[] {
-  return state.tracks
+  const captions = state.tracks
     .filter((track) => track.kind === "captions" && !track.muted)
     .flatMap((track) =>
       sortClips(track.clips)
@@ -250,6 +253,44 @@ function toCaptions(
           // of failing the whole export.
           const endMs = Math.min(window.endMs, durationMs)
           if (window.startMs >= endMs) return []
+
+          // The layout is computed on the UNWINDOWED clip against this plan's
+          // canvas (batch variants with another aspectRatio get their own
+          // layout), then every page/word window is mapped through the same
+          // export-range math as the cue itself.
+          const design = resolveClipDesign(track, clip)
+          const layout = resolveCaptionLayout({
+            text: clip.text,
+            startMs: clip.startMs,
+            endMs: clip.startMs + clip.durationMs,
+            // clip.words are already relative to clip.startMs — the layout
+            // input contract is the same base, so pass them verbatim.
+            words: clip.words,
+            design,
+            canvas: {
+              width: state.canvas.width,
+              height: state.canvas.height,
+              aspectRatio: state.canvas.aspectRatio,
+            },
+          })
+          const pages = layout.pages.flatMap((page) => {
+            const pageWindow = windowTimeRange(page.startMs, page.endMs, range)
+            if (!pageWindow) return []
+            const pageEndMs = Math.min(pageWindow.endMs, durationMs)
+            if (pageWindow.startMs >= pageEndMs) return []
+            const lines = page.lines.map((line) => ({
+              ...line,
+              words: line.words.flatMap((word) => {
+                const wordWindow = windowTimeRange(word.startMs, word.endMs, range)
+                if (!wordWindow) return []
+                const wordEndMs = Math.min(wordWindow.endMs, durationMs)
+                if (wordWindow.startMs >= wordEndMs) return []
+                return [{ ...word, startMs: wordWindow.startMs, endMs: wordEndMs }]
+              }),
+            }))
+            return [{ ...page, startMs: pageWindow.startMs, endMs: pageEndMs, lines }]
+          })
+          if (pages.length === 0) return []
           return [
             {
               id: clip.id,
@@ -259,11 +300,24 @@ function toCaptions(
               style: clip.style,
               placement: clip.placement ?? "bottom",
               safeAreaMargin: clip.safeAreaMargin ?? 48,
+              layout: { ...layout, pages },
             },
           ]
         }),
     )
     .sort((left, right) => left.startMs - right.startMs || left.id.localeCompare(right.id))
+
+  // Speech gaps ≤ the continuity threshold merge page animations across cue
+  // boundaries so captions don't blink between adjacent cues.
+  const sortedPages = captions
+    .flatMap((caption) => caption.layout?.pages ?? [])
+    .sort((a, b) => a.startMs - b.startMs)
+  applyCaptionContinuity(sortedPages).forEach((adjusted, i) => {
+    sortedPages[i].animateIn = adjusted.animateIn
+    sortedPages[i].animateOut = adjusted.animateOut
+  })
+
+  return captions
 }
 
 function toMasks(state: TimelineState, range: ExportRange | undefined): RenderPlanMask[] {

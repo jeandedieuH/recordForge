@@ -1,6 +1,6 @@
 [package]
 name = "recordforge-desktop"
-version = "2.0.2"
+version = "2.0.3"
 description = "Local-first screen recorder and lightweight editor"
 authors = ["prestige-tech & RecordForge contributors"]
 license = "GPL-3.0-or-later"
@@ -58,6 +58,9 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 tar = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 tract-onnx = "0.23.8"
+# Exact pin matching overlay-engine: the caption ASS writer measures text with
+# HarfBuzz so chip widths and line centers match the editor-core estimator.
+rustybuzz = "=0.20.1"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"

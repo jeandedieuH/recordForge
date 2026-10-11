@@ -109,6 +109,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         storage_manager,
         update_gate: Arc::new(crate::state::UpdateGate::default()),
         license: Arc::clone(&license),
+        transcription: Arc::new(crate::transcript::TranscriptionRegistry::default()),
     });
 
     // Background entitlement refresh — runs at most once per 30 days and a

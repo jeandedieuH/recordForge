@@ -1,36 +1,33 @@
 import { useEffect, useRef, useState } from "react"
 import { FileUp } from "lucide-react"
 import { z } from "zod"
-import type { CaptionPlacement, CaptionStylePreset } from "@recordforge/contracts"
 import {
   captionFormatFromFileName,
   createImportCaptionCuesCommand,
   parseCaptionText,
 } from "@recordforge/editor-core"
-import { cn, useToast } from "@recordforge/ui"
+import { ToggleGroup, ToggleGroupItem, cn, useToast } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { invokeValidated } from "../../../lib/ipc"
 
-interface CaptionImportPanelProps {
-  style: CaptionStylePreset
-  placement: CaptionPlacement
-}
-
 const CAPTION_PATH_PATTERN = /\.(srt|vtt)$/i
 
-export function CaptionImportPanel({ style, placement }: CaptionImportPanelProps) {
+type ImportMode = "append" | "replace"
+
+export function CaptionImportPanel() {
   const execute = useTimelineStore((state) => state.execute)
+  const captionTrack = useTimelineStore((state) =>
+    state.engine?.history.present.tracks.find((track) => track.kind === "captions"),
+  )
   const { toast } = useToast()
   const inputRef = useRef<HTMLInputElement>(null)
   const dropzoneRef = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState(false)
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle")
   const [message, setMessage] = useState<string | null>(null)
+  const [mode, setMode] = useState<ImportMode>("append")
 
-  // The Tauri drop listener is registered once; the ref keeps the latest
-  // look defaults visible inside its callback.
-  const defaultsRef = useRef({ style, placement })
-  defaultsRef.current = { style, placement }
+  const cueCount = captionTrack?.clips.filter((clip) => clip.kind === "caption").length ?? 0
 
   function importText(fileName: string, text: string) {
     const format = captionFormatFromFileName(fileName)
@@ -48,22 +45,25 @@ export function CaptionImportPanel({ style, placement }: CaptionImportPanelProps
         setMessage(result.error.message)
         return
       }
-      const applied = execute(
-        createImportCaptionCuesCommand(result.value.cues, {
-          style: defaultsRef.current.style,
-          placement: defaultsRef.current.placement,
-        }),
-      )
+      // New cues inherit the track design — no per-clip overrides.
+      const applied = execute(createImportCaptionCuesCommand(result.value.cues, { mode }))
       if (!applied) {
         setStatus("error")
-        setMessage("The captions could not be added — cues must not overlap existing ones.")
+        setMessage(
+          mode === "replace"
+            ? "The captions could not be replaced — unlock the captions track and try again."
+            : "The captions could not be added — cues must not overlap existing ones.",
+        )
         return
       }
       setStatus("idle")
       setMessage(null)
       toast({
         title: "Captions imported",
-        description: `${result.value.cues.length} cues added to the captions track.`,
+        description:
+          mode === "replace"
+            ? `${result.value.cues.length} cues imported — replaced ${cueCount} caption${cueCount === 1 ? "" : "s"}.`
+            : `${result.value.cues.length} cues added to the captions track.`,
         variant: "success",
       })
     } catch {
@@ -153,6 +153,24 @@ export function CaptionImportPanel({ style, placement }: CaptionImportPanelProps
         accept=".srt,.vtt,text/vtt,application/x-subrip"
         onChange={(event) => void handleFileChange(event)}
       />
+      {cueCount > 0 ? (
+        <ToggleGroup
+          type="single"
+          value={mode}
+          onValueChange={(value) => {
+            if (value) setMode(value as ImportMode)
+          }}
+          className="flex w-full rounded-md border border-border"
+          aria-label="Import mode"
+        >
+          <ToggleGroupItem value="append" className="flex-1 px-2 py-1 text-[11px]">
+            Add to existing
+          </ToggleGroupItem>
+          <ToggleGroupItem value="replace" className="flex-1 px-2 py-1 text-[11px]">
+            Replace all
+          </ToggleGroupItem>
+        </ToggleGroup>
+      ) : null}
       <div
         ref={dropzoneRef}
         role="button"

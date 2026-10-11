@@ -10,8 +10,10 @@ import {
 } from "./cursor"
 import { timelineSelectionSchema } from "./selection"
 import {
+  captionDesignSchema,
   captionPlacementSchema,
   captionStylePresetSchema,
+  captionWordTimingSchema,
   renderCaptionModeSchema,
 } from "./captions"
 import type { OverlayRenderPlan } from "./overlay"
@@ -256,6 +258,19 @@ export const captionClipSchema = timelineClipBaseSchema.extend({
   text: z.string().min(1),
   style: captionStylePresetSchema.default("default"),
   placement: captionPlacementSchema.optional(),
+  // Measured per-display-token timings (AI transcripts), RELATIVE to
+  // clip.startMs — relative storage means move-clips needs no changes.
+  // Absent → the layout engine falls back to proportional weighting.
+  words: z.array(captionWordTimingSchema).optional(),
+  // Container-time provenance for each display token (absolute ms in the
+  // recording asset). Present iff the cue is an unedited AI-derived caption;
+  // cleared together with `words` on text edits. Resync re-maps these
+  // through the current audio coverage instead of re-running whisper.
+  sourceWords: z.array(captionWordTimingSchema).optional(),
+  // Absolute ffprobe stream index the cue was transcribed from.
+  sourceStreamIndex: z.number().int().min(0).nullish(),
+  // Deprecated: kept for project-file compatibility; the caption layout
+  // engine derives margins from the aspect-ratio profile instead.
   safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
 })
 
@@ -602,6 +617,9 @@ export const timelineTrackSchema = z.object({
   solo: z.boolean().default(false),
   volume: z.number().min(0).max(2).default(1),
   clips: z.array(timelineClipSchema),
+  // Track-level caption look — only meaningful on kind "captions"; optional
+  // so projects saved before the caption overhaul load unchanged.
+  captionDesign: captionDesignSchema.optional(),
 })
 
 export type TimelineTrack = z.infer<typeof timelineTrackSchema>
@@ -891,14 +909,97 @@ export const renderPlanOverlaySchema = z.object({
 
 export type RenderPlanOverlay = z.infer<typeof renderPlanOverlaySchema>
 
+const captionLayoutHexSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/)
+
+// Px-resolved caption layout emitted by the editor-core layout engine —
+// fully self-contained so the Rust ASS writer never needs the look catalogue.
+// All pixel values are in output-canvas space; all times in output ms.
+export const renderPlanCaptionLayoutSchema = z.object({
+  lookId: captionStylePresetSchema,
+  fontPx: z.number().min(8).max(600),
+  lineHeightPx: z.number().min(8).max(900),
+  fontWeight: z.union([z.literal(600), z.literal(700), z.literal(800)]),
+  letterSpacingPx: z.number().min(-20).max(40),
+  textColor: captionLayoutHexSchema,
+  chip: z
+    .object({
+      color: captionLayoutHexSchema,
+      opacity: z.number().min(0).max(1),
+      radiusPx: z.number().min(0),
+      padXPx: z.number().min(0),
+      padYPx: z.number().min(0),
+    })
+    .nullable(),
+  outline: z
+    .object({
+      color: captionLayoutHexSchema,
+      opacity: z.number().min(0).max(1),
+      widthPx: z.number().min(0),
+    })
+    .nullable(),
+  shadow: z
+    .object({
+      color: captionLayoutHexSchema,
+      opacity: z.number().min(0).max(1),
+      blurPx: z.number().min(0),
+      offsetYPx: z.number(),
+    })
+    .nullable(),
+  highlight: z
+    .object({
+      mode: z.enum(["word", "focus"]),
+      activeColor: captionLayoutHexSchema,
+      inactiveOpacity: z.number().min(0).max(1),
+    })
+    .nullable(),
+  animation: z.object({
+    inMs: z.number().int().min(0),
+    outMs: z.number().int().min(0),
+    fromScale: z.number().min(0.5).max(1),
+  }),
+  pages: z
+    .array(
+      z.object({
+        startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
+        endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
+        animateIn: z.boolean(),
+        animateOut: z.boolean(),
+        lines: z.array(
+          z.object({
+            text: z.string().min(1),
+            // Word-level timing windows — populated only for highlight looks.
+            words: z.array(
+              z.object({
+                text: z.string().min(1),
+                startMs: z.number().int().min(0),
+                endMs: z.number().int().min(0),
+              }),
+            ),
+          }),
+        ),
+        // Text block center + height in canvas px; chip padding excluded.
+        block: z.object({
+          centerX: z.number(),
+          centerY: z.number(),
+          height: z.number(),
+        }),
+      }),
+    )
+    .min(1),
+})
+
+export type CaptionLayout = z.infer<typeof renderPlanCaptionLayoutSchema>
+
 export const renderPlanCaptionSchema = z.object({
   id: z.string(),
+  // Original cue timing/text — the SRT sidecar is unaffected by the layout.
   text: z.string().min(1),
   startMs: z.number().transform(Math.round).pipe(z.number().int().min(0)),
   endMs: z.number().transform(Math.round).pipe(z.number().int().positive()),
   style: captionStylePresetSchema.default("default"),
   placement: captionPlacementSchema.default("bottom"),
   safeAreaMargin: z.number().int().min(0).max(2_000).default(48),
+  layout: renderPlanCaptionLayoutSchema.optional(),
 })
 
 export type RenderPlanCaption = z.infer<typeof renderPlanCaptionSchema>

@@ -4,6 +4,7 @@ import {
   audioRoleSchema,
   audioVolumeKeyframeSchema,
   captionCueSchema,
+  captionDesignSchema,
   captionPlacementSchema,
   captionStylePresetSchema,
   clipTransformSchema,
@@ -294,7 +295,9 @@ export const updateCaptionClipCommandSchema = commandMetaSchema.extend({
   clipId: z.string(),
   text: z.string().min(1).optional(),
   style: captionStylePresetSchema.optional(),
-  placement: captionPlacementSchema.optional(),
+  // null clears a per-clip placement override back to inherit — the same
+  // convention `design.accentColor: null` uses on update-caption-track.
+  placement: captionPlacementSchema.nullable().optional(),
   safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
 })
 
@@ -308,6 +311,19 @@ export const updateCaptionTrackCommandSchema = commandMetaSchema.extend({
   style: captionStylePresetSchema.optional(),
   placement: captionPlacementSchema.optional(),
   safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
+  // Partial track design merged over the resolved current design. `uppercase`
+  // and `accentColor` also accept null = clear back to the look default.
+  design: captionDesignSchema
+    .partial()
+    .extend({
+      uppercase: z.boolean().nullable().optional(),
+      accentColor: z
+        .string()
+        .regex(/^#[0-9a-fA-F]{6}$/)
+        .nullable()
+        .optional(),
+    })
+    .optional(),
 })
 
 export type UpdateCaptionTrackCommand = z.infer<typeof updateCaptionTrackCommandSchema>
@@ -317,12 +333,44 @@ export const importCaptionCuesCommandSchema = commandMetaSchema.extend({
   trackId: z.string().optional(),
   trackName: z.string().min(1).optional(),
   cues: z.array(captionCueSchema).min(1),
+  mode: z.enum(["append", "replace"]).optional(),
+  design: captionDesignSchema.partial().optional(),
   style: captionStylePresetSchema.optional(),
   placement: captionPlacementSchema.optional(),
   safeAreaMargin: z.number().int().min(0).max(2_000).optional(),
 })
 
 export type ImportCaptionCuesCommand = z.infer<typeof importCaptionCuesCommandSchema>
+
+// Adjacent caption clips merged into one — keeps the first clip's id and
+// per-clip overrides, joins text with a single space.
+export const mergeCaptionClipsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("merge-caption-clips"),
+  clipIds: z.array(z.string()).min(2).max(50),
+})
+
+export type MergeCaptionClipsCommand = z.infer<typeof mergeCaptionClipsCommandSchema>
+
+// Find/replace over all caption clips of the (given or only) captions track.
+export const replaceCaptionTextCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("replace-caption-text"),
+  trackId: z.string().optional(),
+  find: z.string().min(1).max(200),
+  replace: z.string().max(200),
+  matchCase: z.boolean(),
+  wholeWord: z.boolean(),
+})
+
+export type ReplaceCaptionTextCommand = z.infer<typeof replaceCaptionTextCommandSchema>
+
+// Provenance-anchored re-alignment: re-times AI captions through the current
+// audio coverage without re-running whisper. Atomic — one undo step.
+export const resyncCaptionTrackCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("resync-caption-track"),
+  trackId: z.string(),
+})
+
+export type ResyncCaptionTrackCommand = z.infer<typeof resyncCaptionTrackCommandSchema>
 
 export const addMaskClipCommandSchema = commandMetaSchema.extend({
   kind: z.literal("add-mask-clip"),
@@ -625,6 +673,9 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   updateCaptionClipCommandSchema,
   updateCaptionTrackCommandSchema,
   importCaptionCuesCommandSchema,
+  mergeCaptionClipsCommandSchema,
+  replaceCaptionTextCommandSchema,
+  resyncCaptionTrackCommandSchema,
   addMaskClipCommandSchema,
   updateMaskClipCommandSchema,
   updateCanvasCommandSchema,
@@ -652,6 +703,18 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
 ])
 
 export type CommandRecord = z.infer<typeof commandRecordSchema>
+
+// Caption find/replace helpers shared by the command and the UI live counter.
+export interface CaptionTextReplaceOptions {
+  find: string
+  matchCase: boolean
+  wholeWord: boolean
+}
+
+export interface CaptionTextMatchCount {
+  matches: number
+  cues: number
+}
 
 // The previous closure-based command interface is being replaced by the
 // `CommandRecord` discriminated union. `TimelineCommand` remains as a

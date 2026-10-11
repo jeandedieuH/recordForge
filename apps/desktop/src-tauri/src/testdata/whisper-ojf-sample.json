@@ -1,0 +1,436 @@
+{
+  "systeminfo": "WHISPER : (trimmed)",
+  "model": {
+    "type": "base",
+    "multilingual": true,
+    "vocab": 51865
+  },
+  "params": {
+    "model": "<path>",
+    "language": "auto",
+    "translate": false
+  },
+  "result": {
+    "language": "en"
+  },
+  "transcription": [
+    {
+      "timestamps": {
+        "from": "00:00:00,000",
+        "to": "00:00:04,800"
+      },
+      "offsets": {
+        "from": 0,
+        "to": 4800
+      },
+      "text": " Welcome to Record Forge, The Easiest Way To Record Your Screen.",
+      "tokens": [
+        {
+          "text": "[_BEG_]",
+          "timestamps": {
+            "from": "00:00:00,000",
+            "to": "00:00:00,000"
+          },
+          "offsets": {
+            "from": 0,
+            "to": 0
+          },
+          "id": 50364,
+          "p": 0.960411,
+          "t_dtw": -1
+        },
+        {
+          "text": " Welcome",
+          "timestamps": {
+            "from": "00:00:00,120",
+            "to": "00:00:00,520"
+          },
+          "offsets": {
+            "from": 120,
+            "to": 520
+          },
+          "id": 4027,
+          "p": 0.926507,
+          "t_dtw": -1
+        },
+        {
+          "text": " to",
+          "timestamps": {
+            "from": "00:00:00,520",
+            "to": "00:00:00,670"
+          },
+          "offsets": {
+            "from": 520,
+            "to": 670
+          },
+          "id": 281,
+          "p": 0.996041,
+          "t_dtw": -1
+        },
+        {
+          "text": " Record",
+          "timestamps": {
+            "from": "00:00:00,670",
+            "to": "00:00:01,030"
+          },
+          "offsets": {
+            "from": 670,
+            "to": 1030
+          },
+          "id": 27401,
+          "p": 0.717076,
+          "t_dtw": -1
+        },
+        {
+          "text": " For",
+          "timestamps": {
+            "from": "00:00:01,150",
+            "to": "00:00:01,340"
+          },
+          "offsets": {
+            "from": 1150,
+            "to": 1340
+          },
+          "id": 1171,
+          "p": 0.723218,
+          "t_dtw": -1
+        },
+        {
+          "text": "ge",
+          "timestamps": {
+            "from": "00:00:01,340",
+            "to": "00:00:01,460"
+          },
+          "offsets": {
+            "from": 1340,
+            "to": 1460
+          },
+          "id": 432,
+          "p": 0.961135,
+          "t_dtw": -1
+        },
+        {
+          "text": ",",
+          "timestamps": {
+            "from": "00:00:01,640",
+            "to": "00:00:01,640"
+          },
+          "offsets": {
+            "from": 1640,
+            "to": 1640
+          },
+          "id": 11,
+          "p": 0.880335,
+          "t_dtw": -1
+        },
+        {
+          "text": " The",
+          "timestamps": {
+            "from": "00:00:01,860",
+            "to": "00:00:01,860"
+          },
+          "offsets": {
+            "from": 1860,
+            "to": 1860
+          },
+          "id": 440,
+          "p": 0.168866,
+          "t_dtw": -1
+        },
+        {
+          "text": " Eas",
+          "timestamps": {
+            "from": "00:00:01,930",
+            "to": "00:00:02,080"
+          },
+          "offsets": {
+            "from": 1930,
+            "to": 2080
+          },
+          "id": 46879,
+          "p": 0.77388,
+          "t_dtw": -1
+        },
+        {
+          "text": "iest",
+          "timestamps": {
+            "from": "00:00:02,080",
+            "to": "00:00:02,370"
+          },
+          "offsets": {
+            "from": 2080,
+            "to": 2370
+          },
+          "id": 6495,
+          "p": 0.997569,
+          "t_dtw": -1
+        },
+        {
+          "text": " Way",
+          "timestamps": {
+            "from": "00:00:02,380",
+            "to": "00:00:02,600"
+          },
+          "offsets": {
+            "from": 2380,
+            "to": 2600
+          },
+          "id": 9558,
+          "p": 0.949436,
+          "t_dtw": -1
+        },
+        {
+          "text": " To",
+          "timestamps": {
+            "from": "00:00:02,600",
+            "to": "00:00:02,720"
+          },
+          "offsets": {
+            "from": 2600,
+            "to": 2720
+          },
+          "id": 1407,
+          "p": 0.623408,
+          "t_dtw": -1
+        },
+        {
+          "text": " Record",
+          "timestamps": {
+            "from": "00:00:02,750",
+            "to": "00:00:03,200"
+          },
+          "offsets": {
+            "from": 2750,
+            "to": 3200
+          },
+          "id": 27401,
+          "p": 0.978653,
+          "t_dtw": -1
+        },
+        {
+          "text": " Your",
+          "timestamps": {
+            "from": "00:00:03,200",
+            "to": "00:00:03,500"
+          },
+          "offsets": {
+            "from": 3200,
+            "to": 3500
+          },
+          "id": 2260,
+          "p": 0.983145,
+          "t_dtw": -1
+        },
+        {
+          "text": " Screen",
+          "timestamps": {
+            "from": "00:00:03,500",
+            "to": "00:00:03,820"
+          },
+          "offsets": {
+            "from": 3500,
+            "to": 3820
+          },
+          "id": 25823,
+          "p": 0.965015,
+          "t_dtw": -1
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:04,770",
+            "to": "00:00:04,800"
+          },
+          "offsets": {
+            "from": 4770,
+            "to": 4800
+          },
+          "id": 13,
+          "p": 0.638309,
+          "t_dtw": -1
+        },
+        {
+          "text": "[_TT_240]",
+          "timestamps": {
+            "from": "00:00:04,800",
+            "to": "00:00:04,800"
+          },
+          "offsets": {
+            "from": 4800,
+            "to": 4800
+          },
+          "id": 50604,
+          "p": 0.0153883,
+          "t_dtw": -1
+        }
+      ]
+    },
+    {
+      "timestamps": {
+        "from": "00:00:04,800",
+        "to": "00:00:11,920"
+      },
+      "offsets": {
+        "from": 4800,
+        "to": 11920
+      },
+      "text": " In 2026, we shipped 42 new features.",
+      "tokens": [
+        {
+          "text": " In",
+          "timestamps": {
+            "from": "00:00:04,920",
+            "to": "00:00:05,130"
+          },
+          "offsets": {
+            "from": 4920,
+            "to": 5130
+          },
+          "id": 682,
+          "p": 0.969392,
+          "t_dtw": -1
+        },
+        {
+          "text": " 20",
+          "timestamps": {
+            "from": "00:00:05,190",
+            "to": "00:00:06,130"
+          },
+          "offsets": {
+            "from": 5190,
+            "to": 6130
+          },
+          "id": 945,
+          "p": 0.84158,
+          "t_dtw": -1
+        },
+        {
+          "text": "26",
+          "timestamps": {
+            "from": "00:00:06,130",
+            "to": "00:00:07,130"
+          },
+          "offsets": {
+            "from": 6130,
+            "to": 7130
+          },
+          "id": 10880,
+          "p": 0.967599,
+          "t_dtw": -1
+        },
+        {
+          "text": ",",
+          "timestamps": {
+            "from": "00:00:07,130",
+            "to": "00:00:07,460"
+          },
+          "offsets": {
+            "from": 7130,
+            "to": 7460
+          },
+          "id": 11,
+          "p": 0.97889,
+          "t_dtw": -1
+        },
+        {
+          "text": " we",
+          "timestamps": {
+            "from": "00:00:07,460",
+            "to": "00:00:07,750"
+          },
+          "offsets": {
+            "from": 7460,
+            "to": 7750
+          },
+          "id": 321,
+          "p": 0.671378,
+          "t_dtw": -1
+        },
+        {
+          "text": " shipped",
+          "timestamps": {
+            "from": "00:00:07,810",
+            "to": "00:00:08,620"
+          },
+          "offsets": {
+            "from": 7810,
+            "to": 8620
+          },
+          "id": 25312,
+          "p": 0.852326,
+          "t_dtw": -1
+        },
+        {
+          "text": " 42",
+          "timestamps": {
+            "from": "00:00:09,570",
+            "to": "00:00:09,960"
+          },
+          "offsets": {
+            "from": 9570,
+            "to": 9960
+          },
+          "id": 14034,
+          "p": 0.987619,
+          "t_dtw": -1
+        },
+        {
+          "text": " new",
+          "timestamps": {
+            "from": "00:00:09,960",
+            "to": "00:00:10,420"
+          },
+          "offsets": {
+            "from": 9960,
+            "to": 10420
+          },
+          "id": 777,
+          "p": 0.9751,
+          "t_dtw": -1
+        },
+        {
+          "text": " features",
+          "timestamps": {
+            "from": "00:00:10,450",
+            "to": "00:00:11,830"
+          },
+          "offsets": {
+            "from": 10450,
+            "to": 11830
+          },
+          "id": 4122,
+          "p": 0.994419,
+          "t_dtw": -1
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:11,920",
+            "to": "00:00:11,920"
+          },
+          "offsets": {
+            "from": 11920,
+            "to": 11920
+          },
+          "id": 13,
+          "p": 0.942982,
+          "t_dtw": -1
+        },
+        {
+          "text": "[_TT_596]",
+          "timestamps": {
+            "from": "00:00:11,920",
+            "to": "00:00:11,920"
+          },
+          "offsets": {
+            "from": 11920,
+            "to": 11920
+          },
+          "id": 50960,
+          "p": 0.123701,
+          "t_dtw": -1
+        }
+      ]
+    }
+  ]
+}

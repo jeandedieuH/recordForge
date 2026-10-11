@@ -1,12 +1,16 @@
 import { listen } from "@tauri-apps/api/event"
 import {
+  AI_CAPTIONS_PROGRESS_EVENT,
   AI_CAPTIONS_SETUP_EVENT,
+  aiCaptionsProgressSchema,
   aiCaptionsSetupProgressSchema,
   aiCaptionsStatusSchema,
-  captionCueSchema,
+  transcriptSchema,
+  type AiCaptionsProgress,
   type AiCaptionsSetupProgress,
   type AiCaptionsStatus,
-  type CaptionCue,
+  type TranscribeRequest,
+  type Transcript,
 } from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 
@@ -24,8 +28,24 @@ export function deleteAiCaptionsModel(model: string): Promise<void> {
   return invokeValidated("delete_ai_captions_model", { model })
 }
 
-export function transcribeCaptions(recordingId: string, model: string): Promise<CaptionCue[]> {
-  return invokeValidated("transcribe_captions", { recordingId, model }, captionCueSchema.array())
+// Word-level transcription — the newer engine path; times are in the
+// recording asset's container timeline so segmentation can map them onto
+// AudioClip ranges directly.
+export function transcribeAudio(request: TranscribeRequest): Promise<Transcript> {
+  return invokeValidated("transcribe_audio", { request }, transcriptSchema)
+}
+
+export function cancelTranscription(jobId: string): Promise<void> {
+  return invokeValidated("cancel_transcription", { jobId })
+}
+
+export function onAiCaptionsProgress(
+  callback: (progress: AiCaptionsProgress) => void,
+): Promise<() => void> {
+  return listen<unknown>(AI_CAPTIONS_PROGRESS_EVENT, (event) => {
+    const parsed = aiCaptionsProgressSchema.safeParse(event.payload)
+    if (parsed.success) callback(parsed.data)
+  })
 }
 
 export function onAiCaptionsSetupProgress(

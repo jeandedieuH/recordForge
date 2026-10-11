@@ -388,6 +388,12 @@ pub struct RenderPlanCaption {
     pub placement: String,
     #[serde(default = "default_caption_margin")]
     pub safe_area_margin: u64,
+    /// Px-resolved layout from the editor-core caption engine. When every
+    /// caption carries one, the dedicated ASS writer reproduces the preview
+    /// exactly; the legacy per-cue path ignores it. Skipped on serialize so
+    /// absent layouts never emit a zod-incompatible null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<captions::CaptionLayoutPlan>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
