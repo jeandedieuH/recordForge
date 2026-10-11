@@ -446,7 +446,12 @@ describe("recorder-store preferences & fallback", () => {
     const prepare = vi.spyOn(recorderApi, "prepareRecording").mockResolvedValue("session-persisted")
     vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
     vi.spyOn(recorderApi, "listAudioDevices").mockResolvedValue([
-      { id: "{0.0.1.00000000}.{default-mic}", name: "Built-in Mic", kind: "microphone", isDefault: true },
+      {
+        id: "{0.0.1.00000000}.{default-mic}",
+        name: "Built-in Mic",
+        kind: "microphone",
+        isDefault: true,
+      },
       {
         id: "{0.0.1.00000000}.{saved-mic-guid}",
         name: "Microphone (NVIDIA Broadcast)",
@@ -469,8 +474,12 @@ describe("recorder-store preferences & fallback", () => {
     // loadAudioDevices is what the recording modal runs when it opens; no
     // toggle or re-selection may be needed to recover the saved endpoints.
     await useRecorderStore.getState().loadAudioDevices()
-    expect(useRecorderStore.getState().selectedMicrophoneId).toBe("{0.0.1.00000000}.{saved-mic-guid}")
-    expect(useRecorderStore.getState().selectedSystemAudioId).toBe("{0.0.0.00000000}.{saved-sys-guid}")
+    expect(useRecorderStore.getState().selectedMicrophoneId).toBe(
+      "{0.0.1.00000000}.{saved-mic-guid}",
+    )
+    expect(useRecorderStore.getState().selectedSystemAudioId).toBe(
+      "{0.0.0.00000000}.{saved-sys-guid}",
+    )
 
     await useRecorderStore.getState().start()
 
