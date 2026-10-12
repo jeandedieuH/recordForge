@@ -299,6 +299,7 @@ impl WasapiCaptureSession {
         let stop_requested = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_requested);
         let level_bits = Arc::new(AtomicU32::new(0f32.to_bits()));
+        #[cfg(windows)]
         let worker_level = Arc::clone(&level_bits);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 

@@ -834,6 +834,8 @@ fn build_camera_command(
     // Input buffering scales with delivered frame size. `plan.output_*` is
     // the ceiling — the Adaptive fit never produces more pixels than this.
     let pixels = u64::from(plan.output_width) * u64::from(plan.output_height);
+    // `-rtbufsize` is a dshow-only option; only the Windows backend consumes it.
+    #[cfg(windows)]
     let rtbufsize = if pixels <= 1280 * 720 {
         "64M"
     } else if pixels <= 1920 * 1080 {
