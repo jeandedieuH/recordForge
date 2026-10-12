@@ -9,6 +9,13 @@ import {
 } from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 
+// Camera-only recordings store the webcam as the primary capture
+// (`source.kind === "camera"`). `?.` is defensive: rows written before the
+// `source` column existed arrive without it at runtime.
+export function isCameraRecording(recording: LibraryRecording | null | undefined): boolean {
+  return recording?.source?.kind === "camera"
+}
+
 export async function listRecordings(): Promise<LibraryRecording[]> {
   return invokeValidated("list_recordings", undefined, z.array(libraryRecordingSchema))
 }

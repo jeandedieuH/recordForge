@@ -1,9 +1,10 @@
 import { useState } from "react"
 import type { LibraryRecording, MediaMetadata, TimelineState } from "@recordforge/contracts"
-import { Monitor } from "lucide-react"
-import { EmptyState, Skeleton, Tabs, TabsList, TabsTrigger } from "@recordforge/ui"
+import { Monitor, Video } from "lucide-react"
+import { Badge, EmptyState, Skeleton, Tabs, TabsList, TabsTrigger } from "@recordforge/ui"
 import { DerivativeCard, DerivativeStatus } from "../components/derivative-status"
 import { ProjectAssetsPanel } from "./project-assets-panel"
+import { isCameraRecording } from "../../../lib/library"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import type {
   DerivativeResource,
@@ -136,6 +137,15 @@ export function MediaPanel({
           {recording ? (
             <div className="flex flex-col gap-2">
               <InfoRow label="Source" value={recording.name} />
+              {isCameraRecording(recording) ? (
+                <div className="flex items-center justify-between gap-3 text-xs">
+                  <span className="text-subtle-foreground">Type</span>
+                  <Badge variant="default" className="gap-1 text-[10px] uppercase">
+                    <Video className="size-3" aria-hidden />
+                    <span>Camera</span>
+                  </Badge>
+                </div>
+              ) : null}
               <InfoRow
                 label="Metadata"
                 value={

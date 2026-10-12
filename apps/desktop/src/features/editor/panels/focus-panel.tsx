@@ -15,6 +15,7 @@ import {
 } from "@recordforge/editor-core"
 import { Plus, ZoomIn } from "lucide-react"
 import { Badge, Button, EmptyState } from "@recordforge/ui"
+import { isCameraRecording } from "../../../lib/library"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { SmartZoomCard } from "./focus/smart-zoom-card"
 import { ReviewSuggestionsCard } from "./focus/review-suggestions-card"
@@ -37,6 +38,7 @@ export function FocusPanel() {
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
   const cursorEngine = useTimelineStore((state) => state.cursorEngine)
   const cursorTelemetryStatus = useTimelineStore((state) => state.cursorTelemetryStatus)
+  const isCamera = useTimelineStore((state) => isCameraRecording(state.recording))
 
   const playheadMs = view.playheadMs
   const segments = useMemo(() => (timeline ? getManualZoomSegments(timeline) : []), [timeline])
@@ -186,6 +188,7 @@ export function FocusPanel() {
         preset={preset}
         onPresetChange={onPresetChange}
         telemetryStatus={cursorTelemetryStatus}
+        isCameraRecording={isCamera}
         onReviewSuggestions={startReview}
         disabled={!timeline}
       />

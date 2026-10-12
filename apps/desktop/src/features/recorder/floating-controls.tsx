@@ -18,7 +18,7 @@ import {
   Volume2,
   X,
 } from "lucide-react"
-import { Button } from "@recordforge/ui"
+import { Button, IconButton } from "@recordforge/ui"
 import {
   hideFloatingControls,
   hideWebcamPreview,
@@ -29,27 +29,16 @@ import { isTauri } from "../../lib/settings"
 import { MODIFIER_NAME } from "../../lib/platform"
 import { toErrorMessage } from "../../lib/errors"
 import { useRecorderStore, useRecorderPolling } from "../../hooks/use-recorder"
+import { useAudioLevelEvents } from "./hud/use-audio-level-events"
+import { useHudWarnings } from "./hud/use-hud-warnings"
+import { hudSourceLabel } from "./hud/hud-eval"
+import { HudMicMeter } from "./hud/hud-mic-meter"
 
 function formatDuration(ms: number) {
   const seconds = Math.floor((ms / 1000) % 60)
   const minutes = Math.floor((ms / 1000 / 60) % 60)
   const hours = Math.floor(ms / 1000 / 60 / 60)
   return [hours, minutes, seconds].map((v) => v.toString().padStart(2, "0")).join(":")
-}
-
-function stateLabel(state: string | undefined) {
-  switch (state) {
-    case "recording":
-      return "Recording"
-    case "paused":
-      return "Paused"
-    case "finalizing":
-      return "Saving"
-    case "countdown":
-      return "Starting"
-    default:
-      return "Ready"
-  }
 }
 
 interface InputChipProps {
@@ -93,6 +82,9 @@ function InputChip({ icon, label, active, onClick, title }: InputChipProps) {
 // is in another app. The left grip and status area double as the drag region.
 export function FloatingControls() {
   useRecorderPolling()
+  // Feeds the live mic meter; mounted only in this window.
+  useAudioLevelEvents()
+  const { warning, dismiss: dismissWarning } = useHudWarnings()
 
   const {
     status,
@@ -157,7 +149,7 @@ export function FloatingControls() {
   const isFinalizing =
     pendingAction === "stop" || status?.state === "finalizing" || Boolean(finalizationProgress)
   const duration = status?.recordedMs ?? 0
-  const label = stateLabel(status?.state)
+  const sourceLabel = hudSourceLabel(status)
   const stageLabel = finalizationProgress?.stageLabel || "Assembling video…"
   const progressPercent = Math.max(8, Math.min(100, finalizationProgress?.percent ?? 15))
 
@@ -302,46 +294,77 @@ export function FloatingControls() {
             </div>
 
             <div data-tauri-drag-region className="min-w-0 flex-1">
-              <div
-                data-tauri-drag-region
-                className="flex items-center gap-2 text-[11px] font-semibold leading-none text-foreground"
-              >
-                <span>{label}</span>
-                <span className="text-subtle-foreground">·</span>
-                <span className="truncate font-normal text-muted-foreground">
-                  {status?.sourceName || "Screen capture"}
-                </span>
-                <span className="flex shrink-0 items-center gap-1">
-                  <InputChip
-                    active={!!status?.microphoneActive}
-                    label="microphone"
-                    icon={<Mic className="size-3" aria-hidden />}
-                  />
-                  <InputChip
-                    active={!!status?.systemAudioActive}
-                    label="system audio"
-                    icon={<Volume2 className="size-3" aria-hidden />}
-                  />
-                  {/* The camera chip always reports whether the camera is
-                      being recorded; it only toggles the preview window when a
-                      preview stream actually exists for this session. */}
-                  <InputChip
-                    active={!!status?.webcamActive}
-                    label="camera"
-                    icon={<Video className="size-3" aria-hidden />}
-                    onClick={
-                      status?.webcamPreviewUrl ? () => void handleToggleCameraPreview() : undefined
-                    }
-                    title={
-                      status?.webcamPreviewUrl
-                        ? cameraPreviewOpen
-                          ? "Camera preview is open (click to hide)"
-                          : "Click to show camera preview"
-                        : "Capturing camera (preview disabled)"
-                    }
-                  />
-                </span>
-              </div>
+              {warning ? (
+                /* Warnings take over the row-1 slot — the highest-priority
+                    message (mic silence > capture health) wins, amber,
+                    truncated with the full text in the tooltip. */
+                <div
+                  data-tauri-drag-region
+                  className="flex items-center gap-1.5 text-[11px] font-medium leading-none text-warning"
+                  role="status"
+                >
+                  <CircleAlert className="size-3 shrink-0" aria-hidden />
+                  <span className="truncate" title={warning.message}>
+                    {warning.message}
+                  </span>
+                  <IconButton
+                    label="Dismiss warning"
+                    onClick={dismissWarning}
+                    className="size-4 p-0 text-warning hover:bg-warning/15"
+                  >
+                    <X className="size-3" />
+                  </IconButton>
+                </div>
+              ) : (
+                <div
+                  data-tauri-drag-region
+                  className="flex items-center gap-2 text-[11px] font-semibold leading-none text-foreground"
+                >
+                  <span>{sourceLabel.state}</span>
+                  <span className="text-subtle-foreground">·</span>
+                  {sourceLabel.glyph === "video" ? (
+                    <Video className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                  ) : null}
+                  <span
+                    className="truncate font-normal text-muted-foreground"
+                    title={sourceLabel.name}
+                  >
+                    {sourceLabel.name}
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1">
+                    <InputChip
+                      active={!!status?.microphoneActive}
+                      label="microphone"
+                      icon={<Mic className="size-3" aria-hidden />}
+                    />
+                    <InputChip
+                      active={!!status?.systemAudioActive}
+                      label="system audio"
+                      icon={<Volume2 className="size-3" aria-hidden />}
+                    />
+                    {/* The camera chip always reports whether the camera is
+                        being recorded; it only toggles the preview window when a
+                        preview stream actually exists for this session. */}
+                    <InputChip
+                      active={!!status?.webcamActive}
+                      label="camera"
+                      icon={<Video className="size-3" aria-hidden />}
+                      onClick={
+                        status?.webcamPreviewUrl
+                          ? () => void handleToggleCameraPreview()
+                          : undefined
+                      }
+                      title={
+                        status?.webcamPreviewUrl
+                          ? cameraPreviewOpen
+                            ? "Self-view is open (click to hide)"
+                            : "Click to show self-view"
+                          : "Capturing camera (self-view off)"
+                      }
+                    />
+                  </span>
+                </div>
+              )}
               <div data-tauri-drag-region className="mt-1 flex items-baseline gap-2">
                 <span
                   className="tnum font-mono text-lg font-semibold leading-none tracking-tight text-foreground"
@@ -349,6 +372,7 @@ export function FloatingControls() {
                 >
                   {formatDuration(duration)}
                 </span>
+                <HudMicMeter visible={Boolean(status?.microphoneActive) && isRecording} />
                 {markers.length > 0 ? (
                   <span
                     className="flex items-center gap-1 rounded-md bg-overlay px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"

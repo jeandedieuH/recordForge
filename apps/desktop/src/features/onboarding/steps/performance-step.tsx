@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react"
 import { Check, Cpu, Sparkles, Zap } from "lucide-react"
 import { Badge, cn } from "@recordforge/ui"
-import type { RecordingConfig } from "@recordforge/contracts"
+import type { ScreenProfileId } from "@recordforge/contracts"
 import { useRecorderStore } from "../../../hooks/use-recorder"
 import { getDiagnosticsReport } from "../../../lib/recorder"
 import { isTauri } from "../../../lib/settings"
 
 interface ProfileOption {
-  id: RecordingConfig["profile"]
+  id: ScreenProfileId
   name: string
   resolution: string
   fps: string
@@ -113,7 +113,7 @@ export function PerformanceStep() {
     return encoders?.find((encoder) => encoder?.id === best)?.name ?? null
   }, [encoders])
 
-  const recommendedProfileId = useMemo<RecordingConfig["profile"]>(() => {
+  const recommendedProfileId = useMemo<ScreenProfileId>(() => {
     if (cores <= 2) return "low-impact"
     if (cores >= 8 && hardwareEncoder) return "smooth-60fps"
     if (cores >= 6) return "smooth-60fps"
@@ -127,7 +127,7 @@ export function PerformanceStep() {
     }
   }, [recommendedProfileId, setSelectedProfileId, savePreferences])
 
-  function handleSelectProfile(profileId: RecordingConfig["profile"]) {
+  function handleSelectProfile(profileId: ScreenProfileId) {
     setSelectedProfileId(profileId)
     void savePreferences({ profile: profileId })
   }

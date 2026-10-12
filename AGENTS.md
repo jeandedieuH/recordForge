@@ -45,7 +45,7 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 
 ## V1 Scope
 
-- Screen, window, and region recording on Windows, macOS, and Linux
+- Screen, window, region, and camera recording on Windows, macOS, and Linux
 - Microphone, system audio, and optional webcam
 - Global shortcuts, tray, floating controls
 - Local library and recovery

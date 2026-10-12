@@ -1,4 +1,4 @@
-import type { RecordingConfig } from "@recordforge/contracts"
+import type { ScreenProfileId } from "@recordforge/contracts"
 
 export type OnboardingStepId = "welcome" | "performance" | "devices" | "cursor" | "ready"
 
@@ -13,7 +13,7 @@ export interface HardwareDetectionResult {
   cores: number
   cpuName: string
   bestEncoderName: string | null
-  recommendedProfileId: RecordingConfig["profile"]
+  recommendedProfileId: ScreenProfileId
   isLowSpec: boolean
 }
 

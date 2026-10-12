@@ -28,7 +28,9 @@ use crate::errors::{InternalError, Result};
 use crate::jobs::JobManager;
 use crate::media;
 use crate::state::AppState;
-use crate::window::{BoundaryWindow, CountdownWindow, FloatingWindow, MainWindow};
+use crate::window::{
+    camera_countdown_bounds, BoundaryWindow, CountdownWindow, FloatingWindow, MainWindow,
+};
 
 /// Initialize the shared application state. Called once in `setup`.
 pub fn init(app: &tauri::App) -> Result<()> {
@@ -112,6 +114,33 @@ pub fn init(app: &tauri::App) -> Result<()> {
         transcription: Arc::new(crate::transcript::TranscriptionRegistry::default()),
     });
 
+    // One persistent audio-level emitter for the HUD meter — session-agnostic
+    // so global-shortcut/tray/quick-start recording paths all get levels,
+    // and it survives pause/resume. `audio_levels()` is `None` whenever a
+    // session is not actively Recording, which backs the loop off to a
+    // cheap 4 Hz idle poll.
+    if let Err(error) = std::thread::Builder::new()
+        .name("recordforge-audio-levels".into())
+        .spawn({
+            let app = app.handle().clone();
+            move || loop {
+                let state = app.state::<AppState>();
+                match state.recorder.audio_levels() {
+                    Some(levels) => {
+                        if let Err(error) = crate::events::emit_recorder_audio_level(&app, &levels)
+                        {
+                            tracing::warn!(error = ?error, "failed to emit recorder audio level");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(84));
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(250)),
+                }
+            }
+        })
+    {
+        tracing::warn!(error = %error, "failed to start audio level ticker");
+    }
+
     // Background entitlement refresh — runs at most once per 30 days and a
     // network failure never removes Pro (ADR 016).
     if license.refresh_due() {
@@ -159,6 +188,63 @@ pub fn list_builtin_profiles() -> Result<Vec<capture::config::RecordingProfile>>
     Ok(capture::config::builtin_profiles())
 }
 
+/// Free-space snapshot for the sessions volume, consumed by the camera
+/// recording setup UI. An unreadable stat is not an error — the UI degrades
+/// to "unknown" rather than a banner.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStorageInfo {
+    pub free_bytes: Option<u64>,
+}
+
+#[tauri::command]
+#[instrument]
+pub fn get_recording_storage_info(state: State<'_, AppState>) -> Result<RecordingStorageInfo> {
+    Ok(RecordingStorageInfo {
+        free_bytes: crate::media::disk::available_space(&state.sessions_dir).ok(),
+    })
+}
+
+/// Probe the camera's advertised modes and return a capture plan for each
+/// camera quality tier (one device listing → all four tiers). The dshow
+/// probe is ~3 s bounded and runs behind the capture work gate so it can
+/// never race an active recording or media job for the device.
+/// The device id is intentionally never logged (device identity policy).
+#[tauri::command]
+#[instrument(skip(state, device_id))]
+pub async fn plan_camera_tiers(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<capture::camera_plan::CameraCapturePlan>> {
+    if !capture::config::is_valid_camera_device_id(&device_id) {
+        return Err(InternalError::Capture("camera device id is invalid".into()).into());
+    }
+    // A busy gate means recording or media work owns the devices; report a
+    // friendly reason instead of the generic gate message.
+    let _permit = acquire_camera_probe_permit(&state.recorder.resource_gate())?;
+    let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
+    let modes = tauri::async_runtime::spawn_blocking(move || {
+        capture::webcam::probe_camera_modes(&ffmpeg, &device_id, 30.0)
+    })
+    .await
+    .map_err(|e| InternalError::Unknown(format!("camera mode probe worker failed: {e}")))?;
+    Ok(capture::camera_plan::plan_all_tiers(&modes))
+}
+
+/// Camera tier probing shares the capture work gate; a busy gate gets a
+/// camera-flavored error instead of the generic "media processing" message.
+/// Extracted so the busy-path error is unit-testable without an `AppState`.
+fn acquire_camera_probe_permit(
+    gate: &Arc<crate::state::CaptureWorkGate>,
+) -> Result<crate::state::CaptureWorkPermit> {
+    gate.try_acquire().map_err(|_| {
+        InternalError::Capture(
+            "Camera details are unavailable while a recording or media job is running.".into(),
+        )
+        .into()
+    })
+}
+
 /// Best-effort broadcast of the current recorder status to all windows.
 ///
 /// Used after transport actions so every UI surface (main window, floating
@@ -193,7 +279,12 @@ pub async fn start_recording(
         abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
-    if let Err(error) = start_prepared_session(&app, &state, &session_id, config.source.bounds) {
+    if let Err(error) = start_prepared_session(
+        &app,
+        &state,
+        &session_id,
+        recording_ui_bounds(&app, &config.source),
+    ) {
         abort_prepared_start(&app, &state, &session_id);
         return Err(error);
     }
@@ -224,8 +315,12 @@ pub async fn prepare_recording(
     }
 
     if countdown_seconds == 0 {
-        if let Err(error) = start_prepared_session(&app, &state, &session_id, config.source.bounds)
-        {
+        if let Err(error) = start_prepared_session(
+            &app,
+            &state,
+            &session_id,
+            recording_ui_bounds(&app, &config.source),
+        ) {
             abort_prepared_start(&app, &state, &session_id);
             return Err(error);
         }
@@ -234,7 +329,7 @@ pub async fn prepare_recording(
         &session_id,
         countdown_seconds,
         &config.source.name,
-        config.source.bounds,
+        recording_ui_bounds(&app, &config.source),
     ) {
         abort_prepared_start(&app, &state, &session_id);
         return Err(error);
@@ -252,7 +347,7 @@ pub async fn confirm_recording_start(
     state: State<'_, AppState>,
 ) -> Result<()> {
     let _update_operation = state.update_gate.acquire_operation()?;
-    let bounds = match quick_config_bounds(&state) {
+    let bounds = match quick_config_bounds(&app, &state) {
         Ok(bounds) => bounds,
         Err(error) => {
             abort_prepared_start(&app, &state, &session_id);
@@ -285,14 +380,31 @@ fn remember_quick_config(state: &AppState, config: RecordingConfig) {
     }
 }
 
-fn quick_config_bounds(state: &AppState) -> Result<crate::capture::source::Bounds> {
+/// The screen rectangle recording UI may position itself on. Camera sources
+/// resolve to the monitor under the cursor — their `source.bounds` describe
+/// an output budget and must never be treated as a screen rectangle.
+fn recording_ui_bounds(
+    app: &tauri::AppHandle,
+    source: &CaptureSource,
+) -> crate::capture::source::Bounds {
+    if source.kind == "camera" {
+        camera_countdown_bounds(app)
+    } else {
+        source.bounds
+    }
+}
+
+fn quick_config_bounds(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<crate::capture::source::Bounds> {
     let guard = state
         .quick_config
         .lock()
         .map_err(|_| InternalError::Capture("quick config mutex poisoned".into()))?;
     guard
         .as_ref()
-        .map(|config| config.source.bounds)
+        .map(|config| recording_ui_bounds(app, &config.source))
         .ok_or_else(|| InternalError::Capture("recording source is unavailable".into()).into())
 }
 
@@ -350,21 +462,38 @@ fn open_recording_windows(
     bounds: crate::capture::source::Bounds,
 ) -> Result<()> {
     FloatingWindow::open_or_focus(app)?;
-    if let Err(error) = BoundaryWindow::open_or_focus(app, bounds) {
-        cleanup_recording_windows(app);
-        return Err(error);
-    }
 
     let state = app.state::<AppState>();
-    let capture_webcam = state
+    let (capture_webcam, is_camera) = state
         .quick_config
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|c| c.capture_webcam))
-        .or_else(|| state.recorder.status().ok().map(|s| s.webcam_active))
-        .unwrap_or(false);
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|c| (c.capture_webcam, c.source.kind == "camera"))
+        })
+        .or_else(|| {
+            state
+                .recorder
+                .status()
+                .ok()
+                .map(|s| (s.webcam_active, s.source_kind == "camera"))
+        })
+        .unwrap_or((false, false));
 
-    if capture_webcam && state.recorder.status()?.webcam_preview_url.is_some() {
+    // Camera sources have no screen rectangle to outline — skip the boundary
+    // overlay entirely.
+    if !is_camera {
+        if let Err(error) = BoundaryWindow::open_or_focus(app, bounds) {
+            cleanup_recording_windows(app);
+            return Err(error);
+        }
+    }
+
+    // The preview window doubles as the camera HUD: for camera sources it
+    // shows the primary camera feed rather than the sidecar.
+    if (capture_webcam || is_camera) && state.recorder.status()?.webcam_preview_url.is_some() {
         if let Err(error) = crate::window::WebcamPreviewWindow::open_or_focus(app) {
             tracing::warn!(error = ?error, "failed to open webcam preview window; recording continues");
         }
@@ -1107,7 +1236,17 @@ pub async fn open_boundary_overlay(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<()> {
-    let bounds = quick_config_bounds(&state)?;
+    let is_camera = state
+        .quick_config
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|c| c.source.kind == "camera"))
+        .unwrap_or(false);
+    // Camera sources have no screen rectangle to outline.
+    if is_camera {
+        return Ok(());
+    }
+    let bounds = quick_config_bounds(&app, &state)?;
     BoundaryWindow::open_or_focus(&app, bounds)
 }
 
@@ -1250,5 +1389,75 @@ mod tests {
         assert!(app_data_dir.is_dir());
         assert_eq!(sessions_dir, app_data_dir.join("sessions"));
         assert!(sessions_dir.is_dir());
+    }
+
+    /// The profile list surfaced to the UI (and fed to the encoder
+    /// benchmark) is screen-only: camera tiers come from `camera_profiles()`
+    /// and the retired `camera-only` id stays in `legacy_profiles()`.
+    #[test]
+    fn list_builtin_profiles_returns_only_screen_profiles() {
+        let profiles = list_builtin_profiles().expect("profiles");
+        assert_eq!(profiles.len(), 7);
+        assert!(profiles
+            .iter()
+            .all(|p| !crate::capture::config::is_camera_profile(&p.id)));
+        assert!(!profiles.iter().any(|p| p.id == "camera-only"));
+    }
+
+    /// The post-probe core of `plan_camera_tiers`: one injected mode list
+    /// plans every camera tier, ordered by the tier table.
+    #[test]
+    fn plan_camera_tiers_plans_every_tier_from_injected_modes() {
+        let modes = vec![
+            crate::capture::webcam::CameraMode {
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+                pixel_format: Some("nv12".into()),
+                codec: None,
+            },
+            crate::capture::webcam::CameraMode {
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                pixel_format: Some("mjpeg".into()),
+                codec: None,
+            },
+        ];
+        let plans = capture::camera_plan::plan_all_tiers(&modes);
+        assert_eq!(plans.len(), 4);
+        assert_eq!(
+            plans
+                .iter()
+                .map(|p| p.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "camera-low",
+                "camera-balanced",
+                "camera-high",
+                "camera-ultra"
+            ]
+        );
+        // Every plan negotiated an input mode and stayed within the device.
+        for plan in &plans {
+            assert!(plan.input.is_some());
+            assert!(plan.output_width <= 1920);
+            assert!(plan.output_fps <= 30.0);
+        }
+    }
+
+    /// A held work gate — recording or media job — blocks the tier probe
+    /// with a camera-flavored error, not the generic gate message.
+    #[test]
+    fn camera_probe_busy_gate_reports_friendly_error() {
+        let gate = Arc::new(crate::state::CaptureWorkGate::default());
+        let _permit = gate.try_acquire().expect("first acquire");
+        let error = acquire_camera_probe_permit(&gate).expect_err("busy gate must fail");
+        assert!(
+            error.to_string().contains(
+                "Camera details are unavailable while a recording or media job is running"
+            ),
+            "{error}"
+        );
     }
 }

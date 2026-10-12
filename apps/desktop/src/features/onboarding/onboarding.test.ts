@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest"
-import type { RecordingConfig } from "@recordforge/contracts"
+import type { ScreenProfileId } from "@recordforge/contracts"
 import type { OnboardingStepId } from "./types"
 
-function getRecommendedProfile(
-  cores: number,
-  hasHardwareEncoder: boolean,
-): RecordingConfig["profile"] {
+function getRecommendedProfile(cores: number, hasHardwareEncoder: boolean): ScreenProfileId {
   if (cores <= 2) return "low-impact"
   if (cores >= 8 && hasHardwareEncoder) return "smooth-60fps"
   if (cores >= 6) return "smooth-60fps"

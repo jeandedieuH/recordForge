@@ -1,0 +1,50 @@
+[
+  {
+    "id": "camera-low",
+    "label": "Low Impact",
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "bpp": 0.12,
+    "minKbps": 1500,
+    "maxKbps": 6000,
+    "crf": 24,
+    "nominalKbps": 3318
+  },
+  {
+    "id": "camera-balanced",
+    "label": "Balanced",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "bpp": 0.11,
+    "minKbps": 2500,
+    "maxKbps": 12000,
+    "crf": 21,
+    "nominalKbps": 6843
+  },
+  {
+    "id": "camera-high",
+    "label": "High Quality",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "bpp": 0.19,
+    "minKbps": 4500,
+    "maxKbps": 20000,
+    "crf": 18,
+    "nominalKbps": 11820
+  },
+  {
+    "id": "camera-ultra",
+    "label": "Ultra",
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "bpp": 0.1,
+    "minKbps": 10000,
+    "maxKbps": 40000,
+    "crf": 19,
+    "nominalKbps": 24883
+  }
+]

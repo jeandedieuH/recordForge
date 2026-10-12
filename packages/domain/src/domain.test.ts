@@ -303,3 +303,116 @@ describe("domain", () => {
     expect(cameraClip?.sourceOutMs).toBe(10_000)
   })
 })
+
+describe("camera-source recordings", () => {
+  function makeCameraRecording(): LibraryRecording {
+    return {
+      ...makeRecording(),
+      name: "Camera ab12cd34",
+      profileName: "camera-balanced",
+      source: {
+        kind: "camera",
+        id: "Integrated Webcam",
+        name: "Integrated Webcam",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      },
+    }
+  }
+
+  function makeCameraMetadata(): MediaMetadata {
+    return {
+      recordingId: "recording-1",
+      path: "C:/recordforge/session-1/output.mp4",
+      durationMs: 10_000,
+      width: 1280,
+      height: 720,
+      fps: 30,
+      hasAudio: true,
+      streams: [
+        { index: 0, kind: "video", codec: "h264", durationMs: 10_000, width: 1280, height: 720 },
+        { index: 1, kind: "audio", codec: "aac", title: "Microphone", durationMs: 10_000 },
+      ],
+      format: { name: "mov,mp4,m4a,3gp,3g2,mj2" },
+      updatedAt: "2026-08-04T12:00:00.000Z",
+    }
+  }
+
+  it("names the primary track Camera and uses full-bleed canvas defaults", () => {
+    const timeline = createTimelineFromRecording(makeCameraRecording(), makeCameraMetadata())
+
+    expect(timeline.tracks[0]).toMatchObject({ kind: "screen", name: "Camera" })
+    expect(timeline.tracks.map((track) => track.kind)).toEqual(["screen", "audio"])
+    // No camera clip: the camera IS the primary video for camera-source
+    // recordings, and cursor tracks are only ever created from telemetry.
+    expect(timeline.tracks.some((track) => track.kind === "camera")).toBe(false)
+    expect(timeline.tracks.some((track) => track.kind === "cursor")).toBe(false)
+
+    expect(timeline.canvas.padding).toBe(0)
+    expect(timeline.canvas.borderRadius).toBe(0)
+    expect(timeline.canvas.shadow).toBe(false)
+    // The default background is kept — invisible at full bleed but still
+    // changeable by the user afterwards.
+    expect(timeline.canvas.background).toBe(
+      "linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #3b82f6 100%)",
+    )
+
+    const project = createProjectFromRecording(makeCameraRecording(), makeCameraMetadata())
+    expect(project.canvas.padding).toBe(0)
+    expect(project.canvas.borderRadius).toBe(0)
+    expect(project.tracks[0]).toMatchObject({ kind: "screen", name: "Camera" })
+  })
+
+  it("shifts audio clips right on a positive cameraSyncOffsetMs", () => {
+    const timeline = createTimelineFromRecording(
+      makeCameraRecording(),
+      makeCameraMetadata(),
+      undefined,
+      undefined,
+      { cameraSyncOffsetMs: 250 },
+    )
+    const audioClip = timeline.tracks.find((t) => t.kind === "audio")?.clips[0]
+    expect(audioClip).toBeDefined()
+    expect(audioClip?.startMs).toBe(250)
+    expect(audioClip?.sourceInMs).toBe(0)
+    expect(audioClip?.sourceOutMs).toBe(10_000)
+    expect(audioClip?.durationMs).toBe(10_000)
+  })
+
+  it("trims the audio source window on a negative cameraSyncOffsetMs", () => {
+    const timeline = createTimelineFromRecording(
+      makeCameraRecording(),
+      makeCameraMetadata(),
+      undefined,
+      undefined,
+      { cameraSyncOffsetMs: -200 },
+    )
+    const audioClip = timeline.tracks.find((t) => t.kind === "audio")?.clips[0]
+    expect(audioClip).toBeDefined()
+    expect(audioClip?.startMs).toBe(0)
+    expect(audioClip?.sourceInMs).toBe(200)
+    expect(audioClip?.sourceOutMs).toBe(10_200)
+  })
+
+  it("leaves screen-recording audio untouched by cameraSyncOffsetMs", () => {
+    const recording = { ...makeRecording(), webcamPath: "webcam.mp4", durationMs: 10_000 }
+    const metadata: MediaMetadata = {
+      ...makeCameraMetadata(),
+      hasAudio: true,
+      streams: [
+        { index: 0, kind: "video", codec: "h264", durationMs: 10_000 },
+        { index: 1, kind: "audio", codec: "aac", title: "Microphone", durationMs: 10_000 },
+      ],
+    }
+    const timeline = createTimelineFromRecording(recording, metadata, undefined, undefined, {
+      cameraSyncOffsetMs: 250,
+    })
+    const audioClip = timeline.tracks.find((t) => t.kind === "audio")?.clips[0]
+    // The offset still lands on the camera sidecar clip, not the audio.
+    expect(audioClip?.startMs).toBe(0)
+    expect(audioClip?.sourceInMs).toBe(0)
+    expect(audioClip?.sourceOutMs).toBe(10_000)
+    const cameraClip = timeline.tracks.find((t) => t.kind === "camera")?.clips[0]
+    expect(cameraClip?.startMs).toBe(250)
+    expect(timeline.canvas.padding).toBe(96)
+  })
+})

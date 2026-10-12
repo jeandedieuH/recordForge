@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{info, instrument};
 
+use super::camera_plan::{CameraCapturePlan, CameraFit};
 use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::manifest::{RecordingFragment, RecordingManifest, RecordingStats};
@@ -53,6 +54,11 @@ struct CaptureMeta {
     requested_fps: f64,
     camera_mode: Option<CameraMode>,
     preview_fps: Option<i32>,
+    /// Diagnostics slot: `true` records this capture under the segment's
+    /// `camera` entry (primary camera-mode recordings), `false` under
+    /// `screen`. The webcam sidecar leaves this false — its diagnostics are
+    /// attached explicitly by the session with `camera=true`.
+    camera: bool,
 }
 
 impl std::fmt::Debug for FfmpegCapture {
@@ -105,6 +111,7 @@ impl FfmpegCapture {
             requested_fps: profile.fps as f64,
             camera_mode: None,
             preview_fps: None,
+            camera: false,
         };
         match run(
             command,
@@ -138,6 +145,7 @@ impl FfmpegCapture {
                     requested_fps: profile.fps as f64,
                     camera_mode: None,
                     preview_fps: None,
+                    camera: false,
                 };
                 let mut capture = run(command, output, fragment_index, manifest, None, meta)?;
                 capture.set_fallback_reason(Some("gpu-startup-fallback".into()));
@@ -200,8 +208,48 @@ impl FfmpegCapture {
             requested_fps,
             camera_mode: mode.cloned(),
             preview_fps,
+            camera: false,
         };
         run(command, output, 0, manifest, broadcaster, meta)
+    }
+
+    /// Build and start a camera-primary FFmpeg capture (camera-only mode).
+    ///
+    /// The camera process occupies the PRIMARY capture slot: the fragment is
+    /// registered in the manifest at `fragment_index` (the way `seg_NNN.mp4`
+    /// is for screen captures) and diagnostics land under the segment's
+    /// camera entry via `meta.camera`. `plan.input` is the negotiated mode
+    /// (`None` = device defaults); `preview_fps` selects the MJPEG preview
+    /// rate (`None` = no preview output at all).
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(ffmpeg_path, output, device, plan, manifest, broadcaster))]
+    pub fn start_camera(
+        ffmpeg_path: &str,
+        device: &str,
+        plan: &CameraCapturePlan,
+        encoder: &str,
+        output: &str,
+        fragment_index: u32,
+        manifest: Option<Arc<Mutex<RecordingManifest>>>,
+        broadcaster: Option<super::preview_server::FrameBroadcaster>,
+        preview_fps: Option<i32>,
+        startup_timeout: Duration,
+    ) -> crate::errors::Result<Self> {
+        let preview_fps = broadcaster.as_ref().and(preview_fps);
+        let (command, backend) =
+            build_camera_command(ffmpeg_path, device, plan, encoder, output, preview_fps);
+        let meta = CaptureMeta {
+            startup_timeout,
+            encoder: encoder.to_string(),
+            backend: backend.to_string(),
+            // The plan's output rate IS the requested rate — the lock/planner
+            // already folded the negotiated mode's rate into it.
+            requested_fps: plan.output_fps,
+            camera_mode: plan.input.clone(),
+            preview_fps,
+            camera: true,
+        };
+        run(command, output, fragment_index, manifest, broadcaster, meta)
     }
 
     /// Elapsed milliseconds since this capture was started.
@@ -748,6 +796,224 @@ fn build_webcam_command(
 
     info!(encoder, backend, preview_fps, "built webcam ffmpeg command");
     (command, backend)
+}
+
+/// Build the FFmpeg command for a camera-primary capture (camera-only mode).
+///
+/// Same dshow/avfoundation/v4l2 input plumbing as `build_webcam_command`, but
+/// tuned for the primary recording: realtime input buffering scaled to the
+/// frame size (4K raw over USB3 needs far more slack than 720p MJPEG),
+/// explicit CFR at the plan's output rate, and the plan's exact output
+/// geometry selected by `plan.fit`. The sidecar builder stays untouched —
+/// sharing input-args code would churn its byte-identical argv for no
+/// benefit.
+fn build_camera_command(
+    ffmpeg_path: &str,
+    device: &str,
+    plan: &CameraCapturePlan,
+    encoder: &str,
+    output: &str,
+    preview_fps: Option<i32>,
+) -> (Command, &'static str) {
+    let enable_preview = preview_fps.is_some();
+    let mut command = crate::process::create_command(ffmpeg_path);
+    command
+        .stdin(Stdio::piped())
+        .stdout(if camera_pipes_stdout(enable_preview) {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stderr(Stdio::piped())
+        .arg("-y");
+    add_progress_reporting(&mut command);
+
+    #[cfg(windows)]
+    command.args(["-copyts", "-loglevel", "verbose"]);
+
+    // Input buffering scales with delivered frame size. `plan.output_*` is
+    // the ceiling — the Adaptive fit never produces more pixels than this.
+    let pixels = u64::from(plan.output_width) * u64::from(plan.output_height);
+    let rtbufsize = if pixels <= 1280 * 720 {
+        "64M"
+    } else if pixels <= 1920 * 1080 {
+        "150M"
+    } else {
+        "512M"
+    };
+    let queue_size = if pixels > 1920 * 1080 { "512" } else { "256" };
+
+    #[cfg(windows)]
+    let backend = {
+        // DirectShow on Windows — the camera device id is the friendly name
+        // used verbatim in `video=<id>`.
+        command.args([
+            "-f",
+            "dshow",
+            "-thread_queue_size",
+            queue_size,
+            "-rtbufsize",
+            rtbufsize,
+        ]);
+        // Negotiated mode pinning — same shape as the sidecar path; with no
+        // negotiated mode the device defaults are used as-is.
+        if let Some(mode) = plan.input.as_ref() {
+            command.args([
+                "-video_size",
+                &format!("{}x{}", mode.width, mode.height),
+                "-framerate",
+                &format!("{}", mode.fps),
+            ]);
+            if let Some(pixel_format) = mode.pixel_format.as_deref() {
+                command.args(["-pixel_format", pixel_format]);
+            } else if let Some(codec) = mode.codec.as_deref() {
+                command.args(["-vcodec", codec]);
+            }
+        }
+        command.args([
+            "-use_video_device_timestamps",
+            "1",
+            "-fflags",
+            "+genpts",
+            "-i",
+            &format!("video={}", device),
+        ]);
+        "dshow-camera"
+    };
+    #[cfg(target_os = "macos")]
+    let backend = {
+        command.args([
+            "-f",
+            "avfoundation",
+            "-thread_queue_size",
+            queue_size,
+            "-framerate",
+            &format!("{}", plan.output_fps),
+            "-i",
+            &format!("{}:none", device),
+        ]);
+        "avfoundation-camera"
+    };
+    #[cfg(target_os = "linux")]
+    let backend = {
+        command.args([
+            "-f",
+            "v4l2",
+            "-thread_queue_size",
+            queue_size,
+            "-framerate",
+            &format!("{}", plan.output_fps),
+            "-i",
+            device,
+        ]);
+        "v4l2-camera"
+    };
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    let backend = {
+        command.args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!(
+                "testsrc=size={}x{}:rate={}",
+                plan.output_width, plan.output_height, plan.output_fps
+            ),
+        ]);
+        "lavfi-testsrc"
+    };
+
+    // Fit the negotiated input onto the planned output frame. Native needs
+    // no scale; Adaptive is the device-defaults attempt where the real input
+    // size is unknown until frames arrive (min-clamp, never upscale).
+    let fit_filter = match plan.fit {
+        CameraFit::Native => None,
+        CameraFit::Scale => Some(format!("scale={}:{}", plan.output_width, plan.output_height)),
+        CameraFit::Letterbox => Some(format!(
+            "scale=w={}:h={}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black",
+            plan.output_width, plan.output_height, plan.output_width, plan.output_height
+        )),
+        CameraFit::Adaptive => Some(format!(
+            "scale=w='min(iw,{})':h='min(ih,{})':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            plan.output_width, plan.output_height
+        )),
+    };
+    let mut filters: Vec<String> = Vec::new();
+    #[cfg(windows)]
+    filters.push("setpts=PTS-STARTPTS".to_string());
+    if let Some(fit) = fit_filter {
+        filters.push(fit);
+    }
+    if filters.is_empty() {
+        // Keep the filter graph syntactically valid when nothing needs doing
+        // (native fit on non-Windows).
+        filters.push("null".to_string());
+    }
+    let chain = filters.join(",");
+    let filter = if let Some(preview_fps) = preview_fps {
+        format!(
+            "[0:v]{chain},split=2[vout][vprev];[vprev]fps={preview_fps},scale=480:-2[vprev_out]"
+        )
+    } else {
+        format!("[0:v]{chain}[vout]")
+    };
+    command
+        .args(["-filter_complex", &filter])
+        .args(["-map", "[vout]"]);
+
+    // Explicit CFR pins every emitted frame to the plan's cadence —
+    // fractional input rates (29.97) stay fractional instead of drifting to
+    // whatever vsync defaults would round to.
+    command
+        .args(["-fps_mode", "cfr"])
+        .args(["-r", &format!("{}", plan.output_fps)]);
+
+    super::camera_encode::add_camera_encoder_args(&mut command, plan, encoder);
+
+    #[cfg(windows)]
+    command.args([
+        // Same rationale as the sidecar: no B-frame reorder buffer, and emit
+        // pre-encode frame stats so camera clock correlation still works.
+        "-bf",
+        "0",
+        "-stats_enc_pre",
+        "pipe:2",
+        "-stats_enc_pre_fmt",
+        super::camera_timing::CAMERA_FRAME_STATS_FORMAT,
+    ]);
+
+    // Fragmented MP4 — partial chunks stay playable if the process dies.
+    command.args([
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration",
+        "2000000",
+        "-min_frag_duration",
+        "2000000",
+        output,
+    ]);
+
+    if enable_preview {
+        command.args([
+            "-map",
+            "[vprev_out]",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "-f",
+            "image2pipe",
+            "-",
+        ]);
+    }
+
+    (command, backend)
+}
+
+/// Whether the camera command pipes stdout. Only true when a preview output
+/// exists — with no MJPEG sink the stdout is a null device so an unread pipe
+/// can never stall the encode.
+fn camera_pipes_stdout(enable_preview: bool) -> bool {
+    enable_preview
 }
 
 /// Push the platform screen input arguments and return the backend name that
@@ -1319,6 +1585,10 @@ fn run(
                     .unwrap_or_default();
                 let reason = if super::webcam::is_device_busy_error(&captured) {
                     "Camera is already in use by another application. Close it and retry."
+                } else if captured.contains("Could not find video device")
+                    || captured.contains("Could not enumerate video devices")
+                {
+                    "The camera could not be found. Check that it is connected."
                 } else {
                     "Capture could not initialize this input mode or encoder."
                 };
@@ -1394,7 +1664,10 @@ fn run(
     }
 
     if let Some(manifest) = capture.manifest.clone() {
-        capture.attach_diagnostics(manifest, fragment_index, false);
+        // Diagnostics slot is per-capture: screen goes to `screen`, a
+        // camera-primary capture to `camera`. The webcam sidecar never
+        // reaches this line (it runs without a manifest).
+        capture.attach_diagnostics(manifest, fragment_index, meta.camera);
     }
     Ok(capture)
 }
@@ -1495,6 +1768,7 @@ mod tests {
                 requested_fps: 10.0,
                 camera_mode: None,
                 preview_fps: None,
+                camera: false,
             },
         )
         .expect("synthetic capture must produce an output frame");
@@ -1579,6 +1853,7 @@ mod tests {
                 requested_fps: 10.0,
                 camera_mode: None,
                 preview_fps: None,
+                camera: false,
             },
         )
         .expect("synthetic capture must produce an output frame");
@@ -1939,6 +2214,7 @@ mod tests {
                 requested_fps: 30.0,
                 camera_mode: None,
                 preview_fps: None,
+                camera: false,
             },
         )
         .expect("synthetic camera capture must reach readiness");
@@ -2037,6 +2313,7 @@ mod tests {
                 requested_fps: 30.0,
                 camera_mode: None,
                 preview_fps: Some(10),
+                camera: false,
             },
         )
         .expect("synthetic camera capture with preview must reach readiness");
@@ -2364,6 +2641,366 @@ mod tests {
 
         assert!(debug.contains("\"-pix_fmt\" \"yuv420p\""));
         assert!(!debug.contains("-hw_encoding"));
+    }
+
+    // ---------- camera-primary capture (camera-only mode) ----------
+
+    fn camera_test_plan(
+        fit: CameraFit,
+        out_w: u32,
+        out_h: u32,
+        fps: f64,
+        input: Option<CameraMode>,
+    ) -> CameraCapturePlan {
+        let target = (out_w as f64 * out_h as f64 * fps * 0.11 / 1000.0).round() as u32;
+        CameraCapturePlan {
+            profile_id: "camera-balanced".into(),
+            input,
+            output_width: out_w,
+            output_height: out_h,
+            output_fps: fps,
+            video_bitrate_kbps: target,
+            max_bitrate_kbps: target * 3 / 2,
+            buffer_kbps: target * 3 / 2,
+            crf: 21,
+            limited_by_camera: false,
+            fit,
+        }
+    }
+
+    fn camera_mode(
+        width: u32,
+        height: u32,
+        fps: f64,
+        pixel_format: Option<&str>,
+        codec: Option<&str>,
+    ) -> CameraMode {
+        CameraMode {
+            width,
+            height,
+            fps,
+            pixel_format: pixel_format.map(str::to_string),
+            codec: codec.map(str::to_string),
+        }
+    }
+
+    fn camera_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn filter_arg(args: &[String]) -> String {
+        args.iter()
+            .position(|arg| arg == "-filter_complex")
+            .and_then(|index| args.get(index + 1).cloned())
+            .expect("filter_complex present")
+    }
+
+    fn paired_arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1).map(String::as_str))
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_native_plan_skips_scale() {
+        let plan = camera_test_plan(
+            CameraFit::Native,
+            1920,
+            1080,
+            30.0,
+            Some(camera_mode(1920, 1080, 30.0, Some("nv12"), None)),
+        );
+        let (command, backend) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        let args = camera_args(&command);
+        assert_eq!(backend, "dshow-camera");
+        // Negotiated mode is pinned on the input.
+        assert_eq!(paired_arg(&args, "-video_size"), Some("1920x1080"));
+        assert_eq!(paired_arg(&args, "-framerate"), Some("30"));
+        assert_eq!(paired_arg(&args, "-pixel_format"), Some("nv12"));
+        let filter = filter_arg(&args);
+        assert_eq!(filter, "[0:v]setpts=PTS-STARTPTS[vout]");
+        assert!(!filter.contains("scale"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_fit_filters() {
+        let scaled = camera_test_plan(
+            CameraFit::Scale,
+            1440,
+            1080,
+            30.0,
+            Some(camera_mode(1600, 1200, 30.0, Some("yuyv422"), None)),
+        );
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &scaled, "libx264", "cam.mp4", None);
+        let filter = filter_arg(&camera_args(&command));
+        assert_eq!(filter, "[0:v]setpts=PTS-STARTPTS,scale=1440:1080[vout]");
+
+        let letterbox = camera_test_plan(CameraFit::Letterbox, 1440, 1080, 30.0, None);
+        let (command, _) = build_camera_command(
+            "ffmpeg",
+            "USB Camera",
+            &letterbox,
+            "libx264",
+            "cam.mp4",
+            None,
+        );
+        let filter = filter_arg(&camera_args(&command));
+        assert!(filter.contains("force_original_aspect_ratio=decrease"));
+        assert!(filter.contains("pad=1440:1080:(ow-iw)/2:(oh-ih)/2:color=black"));
+
+        let adaptive = camera_test_plan(CameraFit::Adaptive, 1920, 1080, 30.0, None);
+        let (command, _) = build_camera_command(
+            "ffmpeg",
+            "USB Camera",
+            &adaptive,
+            "libx264",
+            "cam.mp4",
+            None,
+        );
+        let filter = filter_arg(&camera_args(&command));
+        // Device-defaults attempt: clamp to the budget, never upscale.
+        assert!(filter.contains("min(iw,1920)"));
+        assert!(filter.contains("min(ih,1080)"));
+        assert!(filter.contains("force_divisible_by=2"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_preview_off_skips_split_and_stdout() {
+        let plan = camera_test_plan(CameraFit::Adaptive, 1920, 1080, 30.0, None);
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        let args = camera_args(&command);
+        let filter = filter_arg(&args);
+        assert!(!filter.contains("split"));
+        assert!(!args.iter().any(|arg| arg == "image2pipe"));
+        // No preview output → stdout is a null sink so nothing can block.
+        // (std::process::Command cannot be introspected for stdio config;
+        // assert on the gate the builder wires in.)
+        assert!(!camera_pipes_stdout(false));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_preview_on_splits_at_480_wide() {
+        let plan = camera_test_plan(CameraFit::Adaptive, 1920, 1080, 30.0, None);
+        let (command, _) = build_camera_command(
+            "ffmpeg",
+            "USB Camera",
+            &plan,
+            "libx264",
+            "cam.mp4",
+            Some(12),
+        );
+        let args = camera_args(&command);
+        let filter = filter_arg(&args);
+        assert!(filter.contains("split=2[vout][vprev]"));
+        assert!(filter.contains("[vprev]fps=12,scale=480:-2[vprev_out]"));
+        assert!(args.iter().any(|arg| arg == "image2pipe"));
+        assert!(args.iter().any(|arg| arg == "mjpeg"));
+        assert!(camera_pipes_stdout(true), "preview needs a piped stdout");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_scales_input_buffer_to_frame_size() {
+        for (w, h, expected) in [
+            (1280, 720, "64M"),
+            (1920, 1080, "150M"),
+            (3840, 2160, "512M"),
+        ] {
+            let plan = camera_test_plan(CameraFit::Adaptive, w, h, 30.0, None);
+            let (command, _) =
+                build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+            let args = camera_args(&command);
+            assert_eq!(paired_arg(&args, "-rtbufsize"), Some(expected), "{w}x{h}");
+        }
+        // >1080p also bumps the demux thread queue.
+        let plan = camera_test_plan(CameraFit::Adaptive, 3840, 2160, 30.0, None);
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        assert_eq!(
+            paired_arg(&camera_args(&command), "-thread_queue_size"),
+            Some("512")
+        );
+        let plan = camera_test_plan(CameraFit::Adaptive, 1920, 1080, 30.0, None);
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        assert_eq!(
+            paired_arg(&camera_args(&command), "-thread_queue_size"),
+            Some("256")
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_forces_cfr_and_output_rate() {
+        let plan = camera_test_plan(
+            CameraFit::Native,
+            1920,
+            1080,
+            29.97,
+            Some(camera_mode(1920, 1080, 29.97, Some("nv12"), None)),
+        );
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        let args = camera_args(&command);
+        // CFR + the exact fractional rate — never rounded to 30.
+        assert_eq!(paired_arg(&args, "-fps_mode"), Some("cfr"));
+        assert_eq!(paired_arg(&args, "-r"), Some("29.97"));
+        // Windows: no B-frame reorder + pre-encode frame stats for camera
+        // clock correlation, same as the sidecar path.
+        assert_eq!(paired_arg(&args, "-bf"), Some("0"));
+        assert!(args.iter().any(|arg| arg == "-stats_enc_pre"));
+        assert!(args.iter().any(|arg| arg.contains("frag_keyframe")));
+        assert_eq!(paired_arg(&args, "-frag_duration"), Some("2000000"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_encoder_args_drop_sidecar_tuning() {
+        let plan = camera_test_plan(
+            CameraFit::Adaptive,
+            1920,
+            1080,
+            30.0,
+            Some(camera_mode(1920, 1080, 30.0, None, Some("mjpeg"))),
+        );
+        // MJPEG negotiated mode pins -vcodec, not -pixel_format.
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "h264_nvenc", "cam.mp4", None);
+        let args = camera_args(&command);
+        assert_eq!(paired_arg(&args, "-vcodec"), Some("mjpeg"));
+        assert_eq!(paired_arg(&args, "-tune"), Some("hq"));
+        assert_eq!(paired_arg(&args, "-maxrate"), Some("10264k"));
+        assert_eq!(paired_arg(&args, "-bufsize"), Some("10264k"));
+        // The sidecar's realtime tuning must never leak into camera-primary.
+        assert!(!args.iter().any(|arg| arg == "zerolatency"));
+
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        let args = camera_args(&command);
+        assert!(!args.iter().any(|arg| arg == "zerolatency"));
+        assert_eq!(paired_arg(&args, "-crf"), Some("21"));
+        assert_eq!(paired_arg(&args, "-maxrate"), Some("10264k"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn synthetic_camera_capture_registers_fragment_and_camera_diagnostics() {
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        let directory = tempfile::tempdir().unwrap();
+        let work_dir = directory.path().join("session-work");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let output = work_dir.join("seg_000.mp4");
+
+        // The device-defaults (Adaptive) plan with no negotiated mode — the
+        // same shape `start_camera` builds, with the dshow input spliced for
+        // a paced lavfi source exactly like the webcam synthetic tests.
+        let plan = camera_test_plan(CameraFit::Adaptive, 1920, 1080, 30.0, None);
+        let (command, backend) = build_camera_command(
+            executable.to_str().unwrap(),
+            "Synthetic Camera",
+            &plan,
+            "libx264",
+            output.to_str().unwrap(),
+            None,
+        );
+        assert_eq!(backend, "dshow-camera");
+        let command = splice_lavfi_input(
+            &command,
+            "color=c=white:s=64x64:r=10:d=2,setpts=PTS+1000/TB",
+            false,
+        );
+
+        let manifest = Arc::new(Mutex::new(RecordingManifest::new(
+            "session-camera",
+            work_dir.to_string_lossy().to_string(),
+            CaptureSource {
+                kind: "camera".into(),
+                id: "camera-test".into(),
+                name: "Test".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            "camera-balanced",
+        )));
+
+        // Identical to what `start_camera` does after build_camera_command:
+        // the camera flag routes diagnostics to the segment's camera slot.
+        let mut capture = run(
+            command,
+            output.to_str().unwrap(),
+            0,
+            Some(Arc::clone(&manifest)),
+            None,
+            CaptureMeta {
+                startup_timeout: Duration::from_secs(8),
+                encoder: "libx264".into(),
+                backend: "dshow-camera".into(),
+                requested_fps: plan.output_fps,
+                camera_mode: plan.input.clone(),
+                preview_fps: None,
+                camera: true,
+            },
+        )
+        .expect("synthetic camera capture must reach readiness");
+        let live = capture.diagnostics();
+        capture
+            .stop()
+            .expect("synthetic camera capture stops cleanly");
+
+        let stored =
+            RecordingManifest::read(work_dir.join("session.json")).expect("manifest on disk");
+        // Primary-slot registration: the fragment is recorded at the index
+        // the session passed in, like seg_NNN.mp4 for screen captures.
+        let fragment = stored
+            .fragments
+            .iter()
+            .find(|fragment| fragment.index == 0)
+            .expect("camera fragment registered");
+        assert_eq!(fragment.file_name, "seg_000.mp4");
+
+        let camera = stored
+            .capture_diagnostics
+            .iter()
+            .find(|segment| segment.index == 0)
+            .and_then(|segment| segment.camera.as_ref())
+            .expect("camera diagnostics persisted under the camera slot");
+        assert_eq!(camera.encoder, "libx264");
+        assert_eq!(camera.backend, "dshow-camera");
+        assert_eq!(camera.process_id, live.process_id);
+        assert_eq!(camera.requested_fps, 30.0);
+        assert!(camera.requested_camera_mode.is_none());
+        assert!(camera.exited);
+
+        // The primary camera file is a real fragmented MP4.
+        let metadata = crate::media::probe::probe_media(
+            ffprobe.to_str().unwrap(),
+            &output,
+            "camera-primary-test",
+        )
+        .expect("ffprobe reads the camera output");
+        let video = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .expect("video stream present");
+        assert!(video.duration_ms.unwrap_or(0) > 500);
     }
 
     #[test]

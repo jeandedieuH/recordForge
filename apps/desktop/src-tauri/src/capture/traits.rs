@@ -76,6 +76,14 @@ pub trait AudioTrack: Debug + Send + Sync {
         None
     }
 
+    /// Peak amplitude (0..1) accumulated since the previous call, for live
+    /// level meters — reading drains the accumulator so successive polls
+    /// always see fresh signal. `None` on platforms/tracks without level
+    /// support — must never block or allocate on the UI poll path.
+    fn level(&self) -> Option<f32> {
+        None
+    }
+
     /// Align the finalized audio track to the video timeline duration with optional head trim.
     fn align_to_timeline(&self, head_trim: Duration, duration: Duration) -> Result<u64>;
 

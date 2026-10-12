@@ -2,6 +2,7 @@ import { create } from "zustand"
 import type {
   AudioDevice,
   BenchmarkReport,
+  CameraProfileId,
   CaptureSource,
   DiagnosticsReport,
   EncoderInfo,
@@ -12,10 +13,13 @@ import type {
   RecordingProfile,
   RecordingStatus,
   RecoveryScanResult,
+  ScreenProfileId,
   VideoDevice,
 } from "@recordforge/contracts"
 import {
+  cameraTierBudget,
   defaultRecordingPreferences,
+  reconcileCameraDevice,
   reconcileCaptureSource,
   reconcileMicrophone,
   reconcileProfile,
@@ -72,6 +76,25 @@ async function readStoredPreferences(): Promise<RecordingPreferences> {
   }
 }
 
+// First-use affordance for camera mode: a camera recording without a mic is
+// almost never what the user wants, so the first time Camera is chosen with
+// a never-configured mic (`microphoneId === null`) we enable the default
+// device. `microphoneId` survives a later disable, so a mic the user
+// deliberately turned off is never re-enabled.
+function autoEnableCameraMicOnce(get: () => RecorderStore) {
+  const state = get()
+  if (
+    state.selectedSourceType !== "camera" ||
+    !state.audioDevicesLoaded ||
+    state.preferences.microphoneId !== null ||
+    state.preferences.microphoneEnabled
+  ) {
+    return
+  }
+  if (!state.audioDevices.some((d) => d.kind === "microphone")) return
+  get().setMicrophoneEnabled(true)
+}
+
 interface RecorderStore {
   sources: CaptureSource[]
   sourcesLoaded: boolean
@@ -92,8 +115,13 @@ interface RecorderStore {
   diagnosticsLoaded: boolean
   markers: RecordingMarker[]
   selectedSource: CaptureSource | null
-  selectedSourceType: "screen" | "window" | "region"
-  selectedProfileId: RecordingConfig["profile"]
+  selectedSourceType: "screen" | "window" | "region" | "camera"
+  // Screen quality profile — camera-mode tiers live in preferences.cameraProfile.
+  selectedProfileId: ScreenProfileId
+  // Camera-mode device + tier (the camera IS the source; the overlay toggle
+  // stays on selectedWebcamId/webcamEnabled and is a separate concern).
+  selectedCameraId: string
+  selectedCameraProfileId: CameraProfileId
   selectedMicrophoneId: string
   selectedSystemAudioId: string
   selectedWebcamId: string
@@ -113,8 +141,10 @@ interface RecorderStore {
   loadPreferences: () => Promise<RecordingPreferences>
   savePreferences: (updates: Partial<RecordingPreferences>) => Promise<void>
   setSelectedSource: (source: CaptureSource | null) => void
-  setSelectedSourceType: (type: "screen" | "window" | "region") => void
-  setSelectedProfileId: (profile: RecordingConfig["profile"]) => void
+  setSelectedSourceType: (type: "screen" | "window" | "region" | "camera") => void
+  setSelectedProfileId: (profile: ScreenProfileId) => void
+  setSelectedCameraId: (id: string) => void
+  setSelectedCameraProfileId: (id: CameraProfileId) => void
   setSelectedMicrophoneId: (id: string) => void
   setMicrophoneEnabled: (enabled: boolean) => void
   setSelectedSystemAudioId: (id: string) => void
@@ -177,6 +207,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   selectedSource: null,
   selectedSourceType: "screen",
   selectedProfileId: "low-impact" as const,
+  selectedCameraId: "",
+  selectedCameraProfileId: "camera-balanced" as const,
   selectedMicrophoneId: "",
   selectedSystemAudioId: "",
   selectedWebcamId: "",
@@ -196,6 +228,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       preferencesLoaded: true,
       selectedSourceType: prefs.sourceType,
       selectedProfileId: prefs.profile,
+      selectedCameraProfileId: prefs.cameraProfile,
     })
     return prefs
   },
@@ -207,6 +240,7 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       preferences: next,
       selectedSourceType: next.sourceType,
       selectedProfileId: next.profile,
+      selectedCameraProfileId: next.cameraProfile,
     })
     try {
       await setSetting("recordingPreferences", JSON.stringify(next))
@@ -248,6 +282,27 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   setSelectedSourceType: (type) => {
     set({ selectedSourceType: type })
     void get().savePreferences({ sourceType: type })
+    if (type === "camera") autoEnableCameraMicOnce(get)
+  },
+
+  setSelectedCameraId: (id) => {
+    set({ selectedCameraId: id })
+    if (!id) return
+    // The camera-mode device and the screen-mode webcam overlay share the
+    // remembered physical camera — but touching this must never toggle the
+    // overlay on.
+    const cam = get()
+      .videoDevices.filter((d) => d.kind === "webcam")
+      .find((w) => w.id === id)
+    void get().savePreferences({
+      webcamId: id,
+      webcamName: cam?.name ?? get().preferences.webcamName,
+    })
+  },
+
+  setSelectedCameraProfileId: (id) => {
+    set({ selectedCameraProfileId: id })
+    void get().savePreferences({ cameraProfile: id })
   },
 
   setSelectedProfileId: (profile) => {
@@ -397,8 +452,11 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       set({
         sources,
         sourcesLoaded: true,
+        // Even in camera mode we still pick the reconciled display/window
+        // fallback so switching back to a screen mode works — but the mode
+        // itself stays "camera".
         selectedSource: reconciled.source,
-        selectedSourceType: reconciled.sourceType,
+        selectedSourceType: prefs.sourceType === "camera" ? "camera" : reconciled.sourceType,
         error: null,
       })
     } catch (error) {
@@ -423,6 +481,9 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         selectedSystemAudioId: sysReconciled.id,
         error: null,
       })
+      // Camera mode picked before devices were known — the one-time mic
+      // affordance fires now that enumeration settled.
+      autoEnableCameraMicOnce(get)
     } catch (error) {
       set({ error: toErrorMessage(error), audioDevicesLoaded: true })
     }
@@ -434,11 +495,15 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       const prefs = get().preferencesLoaded ? get().preferences : await get().loadPreferences()
       const webcams = devices.filter((d) => d.kind === "webcam")
       const camReconciled = reconcileWebcam(webcams, prefs)
+      // Camera-mode picks its device without the overlay's enable flag — a
+      // stored `webcamEnabled: false` must not veto the recording camera.
+      const cameraReconciled = reconcileCameraDevice(webcams, prefs)
 
       set({
         videoDevices: devices,
         videoDevicesLoaded: true,
         selectedWebcamId: camReconciled.id,
+        selectedCameraId: cameraReconciled.id,
         error: null,
       })
     } catch (error) {
@@ -539,28 +604,34 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         state = get()
       }
 
-      // Ensure video devices are loaded if webcam is requested
-      if (!state.videoDevicesLoaded && state.preferences.webcamEnabled) {
+      const cameraMode = state.selectedSourceType === "camera"
+
+      // Ensure video devices are loaded for camera mode or the webcam sidecar
+      if (!state.videoDevicesLoaded && (cameraMode || state.preferences.webcamEnabled)) {
         await get().loadVideoDevices()
         state = get()
       }
 
+      // Screen/window/region need a capture source; camera mode sources
+      // itself from the video-device list instead.
       let source = state.selectedSource
-      if (!source && state.sources.length > 0) {
-        const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
-        if (fallback) {
-          source = fallback
-          set({ selectedSource: fallback })
+      if (!cameraMode) {
+        if (!source && state.sources.length > 0) {
+          const fallback = state.sources.find((s) => s.kind === "display") || state.sources[0]
+          if (fallback) {
+            source = fallback
+            set({ selectedSource: fallback })
+          }
         }
-      }
 
-      if (!source) {
-        set({
-          error: state.error ?? "Select a capture source before recording",
-          isLoading: false,
-          pendingAction: null,
-        })
-        return
+        if (!source) {
+          set({
+            error: state.error ?? "Select a capture source before recording",
+            isLoading: false,
+            pendingAction: null,
+          })
+          return
+        }
       }
 
       let micId = state.selectedMicrophoneId
@@ -591,8 +662,10 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
         sysId = ""
       }
 
-      let camId = state.selectedWebcamId
-      if (state.preferences.webcamEnabled) {
+      // The screen-mode webcam SIDECAR — camera mode never starts one (the
+      // camera is the primary capture).
+      let camId = ""
+      if (!cameraMode && state.preferences.webcamEnabled) {
         if (!camId || camId === "default") {
           const cams = state.videoDevices.filter((d) => d.kind === "webcam")
           const rec = reconcileWebcam(cams, state.preferences)
@@ -601,47 +674,97 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
             set({ selectedWebcamId: camId })
           }
         }
-      } else {
-        camId = ""
       }
 
       // Capture toggles follow the user's preference — a transient device
       // enumeration miss must not silently disable a requested input.
       const micEnabled = state.preferences.microphoneEnabled
       const sysEnabled = state.preferences.systemAudioEnabled
-      const config: RecordingConfig = {
-        source,
-        profile: state.selectedProfileId,
-        captureMicrophone: micEnabled,
-        captureSystemAudio: sysEnabled,
-        captureWebcam: Boolean(camId),
-        webcamPreviewMode: state.preferences.webcamPreviewMode,
-        gpuScreenCapture: state.preferences.gpuScreenCapture,
-        // "default" lets the native side open the platform default endpoint
-        // when enumeration produced no matching device id this run.
-        microphoneDeviceId: micEnabled ? micId || "default" : undefined,
-        systemAudioDeviceId: sysEnabled ? sysId || "default" : undefined,
-        webcamDeviceId: camId || undefined,
-        smartZoomEnabled: state.preferences.smartZoomEnabled,
-        smartZoomPreset: state.preferences.smartZoomPreset,
-        captureKeystrokes: state.preferences.captureKeystrokes,
-      }
+      let config: RecordingConfig
+      if (cameraMode) {
+        const cams = state.videoDevices.filter((d) => d.kind === "webcam")
+        const cameraDeviceId = reconcileCameraDevice(cams, state.preferences).id
+        const cameraDevice = cameraDeviceId
+          ? (cams.find((d) => d.id === cameraDeviceId) ?? null)
+          : null
+        if (!cameraDevice) {
+          set({
+            error: "No camera found. Connect a camera and try again.",
+            isLoading: false,
+            pendingAction: null,
+          })
+          return
+        }
+        const budget = cameraTierBudget(state.preferences.cameraProfile)
+        config = {
+          source: {
+            kind: "camera",
+            id: cameraDevice.id,
+            name: cameraDevice.name,
+            // The bounds carry the tier budget only — the camera path never
+            // treats them as a screen rectangle.
+            bounds: { x: 0, y: 0, width: budget?.width ?? 1920, height: budget?.height ?? 1080 },
+          },
+          profile: state.preferences.cameraProfile,
+          captureMicrophone: micEnabled,
+          captureSystemAudio: sysEnabled,
+          captureWebcam: false,
+          webcamPreviewMode: state.preferences.cameraPreviewMode,
+          gpuScreenCapture: state.preferences.gpuScreenCapture,
+          microphoneDeviceId: micEnabled ? micId || "default" : undefined,
+          systemAudioDeviceId: sysEnabled ? sysId || "default" : undefined,
+          webcamDeviceId: undefined,
+          smartZoomEnabled: false,
+          smartZoomPreset: state.preferences.smartZoomPreset,
+          captureKeystrokes: false,
+        }
+        void get().savePreferences({
+          sourceType: "camera",
+          cameraProfile: state.preferences.cameraProfile,
+          microphoneEnabled: micEnabled,
+          microphoneId: micId || get().preferences.microphoneId,
+          systemAudioEnabled: sysEnabled,
+          systemAudioId: sysId || get().preferences.systemAudioId,
+          webcamId: cameraDevice.id,
+          webcamName: cameraDevice.name,
+          // Not set here — preserve the modal's keystroke-overlay toggle.
+          captureKeystrokes: get().preferences.captureKeystrokes,
+        })
+      } else {
+        config = {
+          source: source as CaptureSource,
+          profile: state.selectedProfileId,
+          captureMicrophone: micEnabled,
+          captureSystemAudio: sysEnabled,
+          captureWebcam: Boolean(camId),
+          webcamPreviewMode: state.preferences.webcamPreviewMode,
+          gpuScreenCapture: state.preferences.gpuScreenCapture,
+          // "default" lets the native side open the platform default endpoint
+          // when enumeration produced no matching device id this run.
+          microphoneDeviceId: micEnabled ? micId || "default" : undefined,
+          systemAudioDeviceId: sysEnabled ? sysId || "default" : undefined,
+          webcamDeviceId: camId || undefined,
+          smartZoomEnabled: state.preferences.smartZoomEnabled,
+          smartZoomPreset: state.preferences.smartZoomPreset,
+          captureKeystrokes: state.preferences.captureKeystrokes,
+        }
 
-      void get().savePreferences({
-        sourceType: source.kind === "display" ? "screen" : source.kind,
-        sourceId: source.id,
-        sourceName: source.name,
-        regionBounds: source.kind === "region" ? source.bounds : get().preferences.regionBounds,
-        profile: state.selectedProfileId,
-        microphoneEnabled: micEnabled,
-        microphoneId: micId || get().preferences.microphoneId,
-        systemAudioEnabled: sysEnabled,
-        systemAudioId: sysId || get().preferences.systemAudioId,
-        webcamEnabled: Boolean(camId),
-        webcamId: camId || get().preferences.webcamId,
-        // Not set here — preserve the modal's keystroke-overlay toggle.
-        captureKeystrokes: get().preferences.captureKeystrokes,
-      })
+        void get().savePreferences({
+          sourceType: source?.kind === "display" ? "screen" : source?.kind,
+          sourceId: source?.id,
+          sourceName: source?.name,
+          regionBounds: source?.kind === "region" ? source.bounds : get().preferences.regionBounds,
+          profile: state.selectedProfileId,
+          microphoneEnabled: micEnabled,
+          microphoneId: micId || get().preferences.microphoneId,
+          systemAudioEnabled: sysEnabled,
+          systemAudioId: sysId || get().preferences.systemAudioId,
+          webcamEnabled: Boolean(camId),
+          webcamId: camId || get().preferences.webcamId,
+          // Not set here — preserve the modal's keystroke-overlay toggle.
+          captureKeystrokes: get().preferences.captureKeystrokes,
+        })
+      }
 
       const configuredCountdown = isTauri()
         ? await getSetting("countdownSeconds").catch(() => null)

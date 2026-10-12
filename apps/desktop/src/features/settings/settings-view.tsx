@@ -16,8 +16,8 @@ import {
 } from "lucide-react"
 import type {
   CursorSettings,
-  RecordingConfig,
   RecordingSmartZoomPreset,
+  ScreenProfileId,
 } from "@recordforge/contracts"
 import { cursorSettingsSchema, defaultCursorSettings } from "@recordforge/contracts"
 import {
@@ -41,6 +41,7 @@ import { DiagnosticsPanel } from "./diagnostics-panel"
 import { CursorInspector } from "../editor/cursor"
 import { StorageSettings } from "./storage-settings"
 import { SmartZoomSettings } from "./smart-zoom-settings"
+import { CameraDefaultsCard } from "./camera-defaults-card"
 import { AboutView } from "../about"
 import { LicenseSettings } from "../licensing"
 
@@ -602,7 +603,7 @@ export function SettingsView({
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => setSelectedProfileId(p.id as RecordingConfig["profile"])}
+                  onClick={() => setSelectedProfileId(p.id as ScreenProfileId)}
                   className={`flex flex-col items-start gap-1.5 rounded-xl border p-4 text-left transition-all ${
                     selectedProfileId === p.id
                       ? "border-primary bg-primary/10 text-foreground"
@@ -656,6 +657,8 @@ export function SettingsView({
               </div>
             </div>
           </div>
+
+          <CameraDefaultsCard />
 
           {/* Camera Latency Calibration */}
           <div className="rounded-2xl border border-border bg-surface p-5 space-y-4">

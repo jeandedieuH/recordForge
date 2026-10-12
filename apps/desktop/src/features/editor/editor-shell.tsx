@@ -5,6 +5,7 @@ import {
   DEFAULT_ANNOTATION_DRAW_SETTINGS,
   type AnnotationDrawSettings,
 } from "./annotations/annotation-tools"
+import { isCameraRecording } from "../../lib/library"
 import { useTimelineStore } from "../../stores/timeline-store"
 import {
   useThumbnailManifest,
@@ -73,6 +74,10 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
   const view = useTimelineStore((state) => state.view)
   const project = useTimelineStore((state) => state.project)
+  // Camera recordings never produce cursor telemetry, so the Cursor task is
+  // hidden from the rail (a persisted "cursor" task still renders a
+  // not-applicable panel via ActivePanel).
+  const isCamera = useTimelineStore((state) => isCameraRecording(state.recording))
 
   const thumbnailResource = useThumbnailManifest(
     activeJob?.outputs?.thumbnailManifestPath ?? null,
@@ -159,6 +164,7 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
         <TaskRail
           activeTask={activeTask}
           onSelect={handleSelectTask}
+          hiddenTasks={isCamera ? ["cursor"] : undefined}
           onToggleInspector={() => setMobileInspectorOpen(true)}
           showInspectorToggle={isNarrow}
         />

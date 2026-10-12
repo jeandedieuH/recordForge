@@ -4,6 +4,7 @@ use std::time::Duration;
 use tracing::{error, info, instrument};
 
 use super::audio::AudioCaptureKind;
+use super::camera_plan::{CameraCapturePlan, CameraOutputLock};
 use super::config::{RecordingConfig, RecordingProfile};
 use super::disk;
 use super::ffmpeg::FfmpegCapture;
@@ -13,6 +14,7 @@ use super::manifest::{
 };
 use super::media;
 use super::traits::{AudioTrack, TimelineAnchor};
+use super::webcam::CameraMode;
 
 /// Shared recorder state. Only one recording session can be active at a time.
 #[derive(Debug)]
@@ -42,6 +44,9 @@ struct ActiveSession {
     config: RecordingConfig,
     profile: RecordingProfile,
     manifest: Arc<Mutex<RecordingManifest>>,
+    /// Primary capture: the screen process, or the camera process for camera
+    /// sources (the camera occupies the same slot so the segment/finalize
+    /// machinery treats it identically).
     screen_capture: Option<FfmpegCapture>,
     audio_captures: Vec<ActiveAudioCapture>,
     webcam_capture: Option<FfmpegCapture>,
@@ -50,6 +55,19 @@ struct ActiveSession {
     webcam_segments_started: usize,
     webcam_capture_failed: bool,
     cursor_tracker: Option<super::cursor_v2::CursorTrackerV2>,
+    /// Camera sessions only: advertised modes probed once before the first
+    /// segment's aux threads start (the dshow listing can take a few seconds).
+    /// `Some` caches even an empty result so resume never re-probes.
+    camera_modes: Option<Vec<CameraMode>>,
+    /// Locked output geometry/rate shared by every camera segment so the
+    /// fragments stay stream-copy-concat compatible. Derived when the first
+    /// segment stops, then applied to all later segments via `plan lock`.
+    camera_lock: Option<CameraOutputLock>,
+    /// Encoder that produced the previous camera segment; moved to the front
+    /// of the candidate list on resume so segment bitstreams stay compatible.
+    camera_encoder: Option<String>,
+    /// The camera plan that produced the active/most recent segment.
+    camera_plan: Option<CameraCapturePlan>,
     /// Session-long keystroke sampler (Pro keystroke overlay). Unlike the
     /// cursor tracker it is NOT restarted per segment — it timestamps against
     /// the first segment's origin for the whole session.
@@ -78,12 +96,20 @@ struct ActiveAudioCapture {
 
 #[derive(Debug)]
 struct SegmentCaptures {
+    /// Primary capture: the screen process, or the camera process for camera
+    /// sources.
     screen: FfmpegCapture,
     audio: Vec<ActiveAudioCapture>,
     webcam: Option<FfmpegCapture>,
     webcam_preview_server: Option<super::preview_server::WebcamPreviewServer>,
     webcam_failed: bool,
-    cursor_tracker: super::cursor_v2::CursorTrackerV2,
+    /// `None` for camera sources — camera mode records no cursor telemetry.
+    cursor_tracker: Option<super::cursor_v2::CursorTrackerV2>,
+    /// Camera sessions only: the plan/encoder combination that produced this
+    /// segment, retained so resume can lock geometry and prefer the same
+    /// encoder.
+    camera_plan: Option<CameraCapturePlan>,
+    camera_encoder: Option<String>,
     /// The segment's timeline anchor — the keystroke sampler stamps events
     /// against the first segment's origin so badges land on video time.
     timeline_origin_instant: std::time::Instant,
@@ -96,7 +122,8 @@ struct SegmentCaptures {
 /// Bundled so the start can run on a scoped thread without borrowing `Recorder`.
 #[derive(Debug)]
 struct AuxiliaryCaptures {
-    cursor_tracker: super::cursor_v2::CursorTrackerV2,
+    /// `None` for camera sources — camera mode records no cursor telemetry.
+    cursor_tracker: Option<super::cursor_v2::CursorTrackerV2>,
     audio: Vec<ActiveAudioCapture>,
 }
 
@@ -163,6 +190,82 @@ fn cursor_asset_metadata(
     })
 }
 
+/// Whether this config records camera-only (`source.kind == "camera"`): the
+/// camera process is the primary capture and no screen/cursor telemetry runs.
+fn is_camera_source(config: &RecordingConfig) -> bool {
+    config.source.kind == "camera"
+}
+
+/// Move the previous segment's winning encoder to the front of the candidate
+/// list so resumed camera segments encode with a compatible bitstream. A
+/// `preferred` id that is absent from the candidates leaves the order intact.
+/// Pure so the reordering stays unit-testable.
+fn prefer_encoder_first(candidates: &[String], preferred: Option<&str>) -> Vec<String> {
+    let mut ordered = candidates.to_vec();
+    if let Some(preferred) = preferred {
+        if let Some(index) = ordered.iter().position(|encoder| encoder == preferred) {
+            // Move the winner to the front without reordering the rest —
+            // `rotate_left` would scramble the remaining fallback order.
+            let winner = ordered.remove(index);
+            ordered.insert(0, winner);
+        }
+    }
+    ordered
+}
+
+/// Output geometry/rate shared by every camera segment of a session. Prefer
+/// the probed stream of the segment that just finished (the file is the
+/// truth); fall back to the winning plan's output geometry. `None` when
+/// neither is knowable — resume then re-plans from scratch.
+fn derive_camera_lock(
+    probed: Option<(u32, u32, f64)>,
+    plan: Option<&CameraCapturePlan>,
+) -> Option<CameraOutputLock> {
+    if let Some((width, height, fps)) = probed {
+        return Some(CameraOutputLock { width, height, fps });
+    }
+    plan.map(|plan| CameraOutputLock {
+        width: plan.output_width,
+        height: plan.output_height,
+        fps: plan.output_fps,
+    })
+}
+
+/// Camera segment timeline anchored to the MEASURED camera file origin.
+/// DirectShow sample/graph timestamps correlated back to the process spawn
+/// give the first sensor frame's offset; the audio tracks (started at the
+/// aux origin) drop that leading window. When the measurement is missing or
+/// implausible the duration-derived `base` timeline is kept unchanged.
+fn camera_segment_timeline(
+    base: SegmentTimeline,
+    measured_origin_ms: Option<u64>,
+) -> SegmentTimeline {
+    match measured_origin_ms {
+        Some(origin_ms) if origin_ms <= MAX_VIDEO_STARTUP_GAP_MS => SegmentTimeline {
+            head_trim: Duration::from_millis(origin_ms),
+            duration: base.duration,
+        },
+        _ => base,
+    }
+}
+
+/// Camera recordings refuse to start with less than 1 GiB free on the
+/// sessions volume. Screen sessions are intentionally NOT gated here — they
+/// keep their established finalize-time failure behavior.
+fn ensure_camera_disk_space(free_bytes: Option<u64>) -> crate::errors::Result<()> {
+    const MIN_FREE_BYTES: u64 = 1 << 30; // 1 GiB
+    if let Some(free) = free_bytes {
+        if free < MIN_FREE_BYTES {
+            return Err(crate::errors::InternalError::Capture(format!(
+                "Not enough free disk space to record ({:.1} GB free). Free up at least 1 GB and try again.",
+                free as f64 / (1u64 << 30) as f64
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Signed difference between two capture start instants, rounded to milliseconds.
 /// Positive when `a` is later than `b` (so the camera needs a leading gap).
 fn signed_start_offset_ms(a: std::time::Instant, b: std::time::Instant) -> i64 {
@@ -218,7 +321,7 @@ fn resolve_webcam_start_offset_ms(
 /// wall-clock stream is therefore aligned to the video at finalize time:
 /// `head_trim` is dropped from the front of each track and the timeline length
 /// becomes the video stream's actual duration.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct SegmentTimeline {
     head_trim: Duration,
     duration: Duration,
@@ -444,6 +547,19 @@ impl Recorder {
         // permit releases through RAII if preparation fails below.
         let resource_permit = self.resource_gate.try_acquire()?;
 
+        // Camera-only sessions get a minimum-free-space guard: a camera that
+        // fills the disk mid-recording would lose the whole take, so refuse
+        // early. When free space cannot be read the check is skipped rather
+        // than blocking recording on a stat failure.
+        if is_camera_source(&config) {
+            match crate::media::disk::available_space(&self.sessions_dir) {
+                Ok(free) => ensure_camera_disk_space(Some(free))?,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read free disk space for camera recording check")
+                }
+            }
+        }
+
         let profile = config.resolve_profile().ok_or_else(|| {
             crate::errors::InternalError::Capture(format!("unknown profile: {}", config.profile))
         })?;
@@ -490,6 +606,10 @@ impl Recorder {
             webcam_segments_started: 0,
             webcam_capture_failed: false,
             cursor_tracker: None,
+            camera_modes: None,
+            camera_lock: None,
+            camera_encoder: None,
+            camera_plan: None,
             keystroke_sampler: None,
             cursor_segment_start_ms: 0,
             segment_startup_shift: Duration::ZERO,
@@ -530,6 +650,20 @@ impl Recorder {
             .into());
         }
 
+        // Camera sessions probe the device's advertised modes ONCE, before
+        // any auxiliary thread starts — the dshow `-list_options` listing is
+        // 3 s bounded and must not run inside the segment's timeline origin.
+        // The result is cached (including an empty listing) and reused by
+        // every later segment of this session.
+        if is_camera_source(&session.config) && session.camera_modes.is_none() {
+            let ffmpeg = self.ffmpeg_path.to_string_lossy();
+            session.camera_modes = Some(super::webcam::probe_camera_modes(
+                &ffmpeg,
+                &session.config.source.id,
+                session.profile.fps as f64,
+            ));
+        }
+
         // Window targets are re-acquired at segment start so a window that
         // moved since enumeration is captured at its current position.
         refresh_window_source_bounds(session);
@@ -541,6 +675,9 @@ impl Recorder {
             Arc::clone(&session.manifest),
             &session.session_id,
             0,
+            session.camera_lock,
+            session.camera_modes.as_deref(),
+            session.camera_encoder.as_deref(),
         ) {
             Ok(captures) => captures,
             Err(error) => {
@@ -565,11 +702,17 @@ impl Recorder {
         session.webcam_capture = captures.webcam;
         session.webcam_preview_server = captures.webcam_preview_server;
         session.webcam_capture_failed |= captures.webcam_failed;
-        session.cursor_tracker = Some(captures.cursor_tracker);
+        session.cursor_tracker = captures.cursor_tracker;
+        session.camera_plan = captures.camera_plan;
+        session.camera_encoder = captures.camera_encoder;
         session.segment_startup_shift = captures.startup_shift;
         // Keystroke sampler starts on the first segment only — a resume keeps
-        // the running sampler (timestamps stay on the session clock).
-        if session.keystroke_sampler.is_none() && session.config.capture_keystrokes {
+        // the running sampler (timestamps stay on the session clock). Camera
+        // sessions never capture keystrokes.
+        if session.keystroke_sampler.is_none()
+            && session.config.capture_keystrokes
+            && !is_camera_source(&session.config)
+        {
             session.keystroke_sampler = Some(super::keystrokes::KeystrokeSampler::start(
                 session.work_dir.clone(),
                 captures.timeline_origin_instant,
@@ -581,12 +724,16 @@ impl Recorder {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            manifest.set_cursor_telemetry(cursor_asset_metadata(
-                &session.session_id,
-                bounds,
-                session.profile.width.max(1) as u32,
-                session.profile.height.max(1) as u32,
-            )?);
+            // Camera sessions record no cursor telemetry at all — the asset
+            // stays absent rather than describing an empty track.
+            if !is_camera_source(&session.config) {
+                manifest.set_cursor_telemetry(cursor_asset_metadata(
+                    &session.session_id,
+                    bounds,
+                    session.profile.width.max(1) as u32,
+                    session.profile.height.max(1) as u32,
+                )?);
+            }
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }
@@ -643,7 +790,24 @@ impl Recorder {
         manifest: Arc<Mutex<RecordingManifest>>,
         recording_id: &str,
         cursor_time_offset_ms: u64,
+        camera_lock: Option<CameraOutputLock>,
+        camera_modes: Option<&[CameraMode]>,
+        preferred_camera_encoder: Option<&str>,
     ) -> crate::errors::Result<SegmentCaptures> {
+        if is_camera_source(config) {
+            return self.start_camera_segment(
+                index,
+                work_dir,
+                config,
+                profile,
+                manifest,
+                recording_id,
+                cursor_time_offset_ms,
+                camera_lock,
+                camera_modes,
+                preferred_camera_encoder,
+            );
+        }
         let ffmpeg = self.ffmpeg_path.to_string_lossy();
         let screen_output = work_dir.join(format!("seg_{:03}.mp4", index));
         // Ordered fallback chain: for each detected encoder try the DDA
@@ -803,10 +967,13 @@ impl Recorder {
             startup_shift_ms = startup_shift.as_millis().min(u64::MAX as u128) as u64,
             "auxiliary captures started ahead of the screen process"
         );
+        // Screen sources always get a tracker — the Option only stays None
+        // for camera sessions, which take `start_camera_segment` instead.
         let AuxiliaryCaptures {
             cursor_tracker,
             audio,
         } = aux;
+        let cursor_tracker = cursor_tracker.expect("screen auxiliaries include the cursor tracker");
 
         let mut webcam = None;
         let mut webcam_failed = false;
@@ -926,7 +1093,215 @@ impl Recorder {
             webcam,
             webcam_preview_server,
             webcam_failed,
-            cursor_tracker,
+            cursor_tracker: Some(cursor_tracker),
+            camera_plan: None,
+            camera_encoder: None,
+            timeline_origin_instant: timeline_origin.instant,
+            startup_shift,
+        })
+    }
+
+    /// Camera-primary segment start: the camera FFmpeg process takes the slot
+    /// the screen process has in `SegmentCaptures.screen`. No screen input,
+    /// no webcam sidecar, no cursor tracker — only the optional WASAPI audio
+    /// workers run ahead of the capture like the screen path arranges.
+    ///
+    /// `modes` is the session's cached probe result (see `start_prepared`);
+    /// `lock` forces every resumed segment to the first segment's geometry so
+    /// the concatenated stream stays uniform.
+    #[allow(clippy::too_many_arguments)]
+    fn start_camera_segment(
+        &self,
+        index: u32,
+        work_dir: &std::path::Path,
+        config: &RecordingConfig,
+        profile: &RecordingProfile,
+        manifest: Arc<Mutex<RecordingManifest>>,
+        recording_id: &str,
+        cursor_time_offset_ms: u64,
+        lock: Option<CameraOutputLock>,
+        modes: Option<&[CameraMode]>,
+        preferred_encoder: Option<&str>,
+    ) -> crate::errors::Result<SegmentCaptures> {
+        let ffmpeg = self.ffmpeg_path.to_string_lossy();
+        let output = work_dir.join(format!("seg_{:03}.mp4", index));
+
+        // Ordered attempts: the planner's fitted modes first, the device-
+        // defaults fallback last. A lock from a previous segment forces
+        // identical output geometry/rate on every plan.
+        let plans = super::camera_plan::plan_camera_capture(profile, modes.unwrap_or(&[]), lock);
+        let encoder_candidates = prefer_encoder_first(
+            &super::encoder::recording_encoder_candidates(
+                &self.available_encoders,
+                &profile.encoder_priority,
+            ),
+            preferred_encoder,
+        );
+        info!(
+            plan_count = plans.len(),
+            candidates = ?encoder_candidates,
+            profile = %profile.id,
+            "camera capture encoder candidates"
+        );
+
+        let preview_fps = config.webcam_preview_mode.fps();
+        // A preview server is only spun up when the user asked for a preview;
+        // "off" produces no MJPEG output and no listener. Dropped on every
+        // failure path below (no server survives a failed start).
+        let preview_server = if preview_fps.is_some() {
+            super::preview_server::WebcamPreviewServer::start().ok()
+        } else {
+            None
+        };
+        let broadcaster = preview_server.as_ref().map(|s| s.broadcaster());
+        let preview_fps = preview_server.as_ref().and(preview_fps);
+
+        // Same aux shape as the screen path: the audio workers clock against
+        // the segment origin and launch on a scoped thread so a slow device
+        // cannot delay the camera spawn. No cursor tracker for camera sources.
+        let aux_origin = TimelineAnchor::now();
+        let (primary, winner, last_error, saw_busy, aux_join) = std::thread::scope(|scope| {
+            let aux_handle = scope.spawn(|| {
+                Self::start_auxiliary_captures(
+                    config,
+                    profile,
+                    work_dir,
+                    index,
+                    recording_id,
+                    cursor_time_offset_ms,
+                    aux_origin,
+                )
+            });
+
+            // Same overall startup budget as the webcam sidecar chain. A
+            // just-closed WebView2 preview can hold the camera device for a
+            // few hundred ms, so a device-busy failure earns extra retries
+            // before the next (plan, encoder) combination.
+            let startup_deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let mut primary = None;
+            let mut winner = None;
+            let mut last_error = None;
+            let mut saw_busy = false;
+            'plans: for (plan_index, plan) in plans.iter().enumerate() {
+                for encoder in &encoder_candidates {
+                    let mut busy_retries = 0u32;
+                    loop {
+                        let remaining =
+                            startup_deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            break 'plans;
+                        }
+                        match FfmpegCapture::start_camera(
+                            &ffmpeg,
+                            &config.source.id,
+                            plan,
+                            encoder,
+                            &output.to_string_lossy(),
+                            index,
+                            Some(Arc::clone(&manifest)),
+                            broadcaster.clone(),
+                            preview_fps,
+                            remaining.min(Duration::from_secs(8)),
+                        ) {
+                            Ok(mut capture) => {
+                                // Record why a non-primary combination won.
+                                // Codes are generic — never stderr text or
+                                // device names.
+                                let mut reasons = Vec::new();
+                                if plan.input.is_none() {
+                                    reasons.push("device-default-mode");
+                                } else if plan_index > 0 {
+                                    reasons.push("mode-fallback");
+                                }
+                                if encoder_candidates.first() != Some(encoder) {
+                                    reasons.push("encoder-fallback");
+                                }
+                                if !reasons.is_empty() {
+                                    capture.set_fallback_reason(Some(reasons.join("+")));
+                                }
+                                primary = Some(capture);
+                                winner = Some((plan.clone(), encoder.clone()));
+                                break 'plans;
+                            }
+                            Err(error) => {
+                                if super::webcam::is_device_busy_error(&error.to_string()) {
+                                    saw_busy = true;
+                                    if busy_retries < 3 {
+                                        busy_retries += 1;
+                                        std::thread::sleep(Duration::from_millis(300));
+                                        continue;
+                                    }
+                                }
+                                tracing::debug!(
+                                    error = %error,
+                                    encoder,
+                                    plan_index,
+                                    "camera capture attempt failed; trying next candidate"
+                                );
+                                last_error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            (primary, winner, last_error, saw_busy, aux_handle.join())
+        });
+
+        let aux = match aux_join {
+            Ok(aux) => aux,
+            Err(_) => {
+                drop(primary);
+                return Err(crate::errors::InternalError::Capture(
+                    "auxiliary capture startup panicked".into(),
+                )
+                .into());
+            }
+        };
+        let Some(primary) = primary else {
+            // The workers must be stopped before their files can be removed —
+            // Windows cannot delete open files.
+            drop(aux);
+            discard_failed_segment_auxiliaries(work_dir, index, cursor_time_offset_ms);
+            let message = if saw_busy {
+                "Camera is already in use by another application. Close it and retry."
+            } else {
+                "Could not start the camera. Check that it is connected, not used by another app, and that camera access is allowed."
+            };
+            if let Some(error) = last_error {
+                tracing::warn!(%error, "camera capture could not start");
+            }
+            return Err(crate::errors::InternalError::Capture(message.into()).into());
+        };
+
+        let timeline_origin = primary.timeline_anchor();
+        let startup_shift = timeline_origin
+            .instant
+            .saturating_duration_since(aux_origin.instant);
+        info!(
+            startup_shift_ms = startup_shift.as_millis().min(u64::MAX as u128) as u64,
+            "auxiliary captures started ahead of the camera process"
+        );
+        let AuxiliaryCaptures {
+            cursor_tracker: _,
+            audio,
+        } = aux;
+
+        let (camera_plan, camera_encoder) = match winner {
+            Some((plan, encoder)) => (Some(plan), Some(encoder)),
+            None => (None, None),
+        };
+        Ok(SegmentCaptures {
+            screen: primary,
+            audio,
+            webcam: None,
+            // The preview server doubles as the camera HUD feed — it lives in
+            // the same session slot the webcam sidecar uses.
+            webcam_preview_server: preview_server,
+            webcam_failed: false,
+            cursor_tracker: None,
+            camera_plan,
+            camera_encoder,
             timeline_origin_instant: timeline_origin.instant,
             startup_shift,
         })
@@ -945,23 +1320,29 @@ impl Recorder {
         cursor_time_offset_ms: u64,
         origin: TimelineAnchor,
     ) -> AuxiliaryCaptures {
-        let bounds = config.source.bounds;
-        let capture_bounds = super::cursor::CursorCaptureBounds {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width.max(1) as u32,
-            height: bounds.height.max(1) as u32,
+        // Camera sources record no cursor telemetry: the bounds describe an
+        // output budget, not a screen rectangle.
+        let cursor_tracker = if is_camera_source(config) {
+            None
+        } else {
+            let bounds = config.source.bounds;
+            let capture_bounds = super::cursor::CursorCaptureBounds {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width.max(1) as u32,
+                height: bounds.height.max(1) as u32,
+            };
+            Some(super::cursor_v2::CursorTrackerV2::start(
+                recording_id.to_string(),
+                work_dir.to_path_buf(),
+                capture_bounds,
+                profile.width.max(1) as u32,
+                profile.height.max(1) as u32,
+                origin.instant,
+                cursor_time_offset_ms,
+                super::cursor_v2::CursorCaptureMode::Full,
+            ))
         };
-        let cursor_tracker = super::cursor_v2::CursorTrackerV2::start(
-            recording_id.to_string(),
-            work_dir.to_path_buf(),
-            capture_bounds,
-            profile.width.max(1) as u32,
-            profile.height.max(1) as u32,
-            origin.instant,
-            cursor_time_offset_ms,
-            super::cursor_v2::CursorCaptureMode::Full,
-        );
 
         let mut audio = Vec::new();
         if config.capture_microphone {
@@ -1379,7 +1760,21 @@ impl Recorder {
             }
         };
 
-        let timeline = self.segment_timeline(&screen, &stats);
+        let mut timeline = self.segment_timeline(&screen, &stats);
+        if is_camera_source(&session.config) {
+            // Camera segments prefer the measured camera file origin (the
+            // first DirectShow sample's offset) over the duration-derived
+            // head trim — same alignment the webcam sidecar uses.
+            timeline = camera_segment_timeline(timeline, screen.camera_first_frame_offset_ms());
+            // Once the first segment's real geometry is known it locks every
+            // later segment so the concatenated stream stays uniform.
+            if session.camera_lock.is_none() {
+                session.camera_lock = derive_camera_lock(
+                    self.probe_video_geometry(screen.output_path()),
+                    session.camera_plan.as_ref(),
+                );
+            }
+        }
         // Audio and cursor tracks ran ahead of the screen process, so their
         // head trim additionally covers that startup shift; the webcam keeps
         // the screen-anchored timeline.
@@ -1478,6 +1873,9 @@ impl Recorder {
             Arc::clone(&session.manifest),
             &session.session_id,
             session.total_recorded_ms,
+            session.camera_lock,
+            session.camera_modes.as_deref(),
+            session.camera_encoder.as_deref(),
         )?;
 
         session.segment_index = next_index;
@@ -1491,18 +1889,22 @@ impl Recorder {
         session.webcam_capture_failed |= captures.webcam_failed;
         let bounds = session.config.source.bounds;
         session.cursor_segment_start_ms = session.total_recorded_ms.saturating_add(1);
-        session.cursor_tracker = Some(captures.cursor_tracker);
+        session.cursor_tracker = captures.cursor_tracker;
+        session.camera_plan = captures.camera_plan;
+        session.camera_encoder = captures.camera_encoder;
         session.segment_startup_shift = captures.startup_shift;
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
-            manifest.set_cursor_telemetry(cursor_asset_metadata(
-                &session.session_id,
-                bounds,
-                session.profile.width.max(1) as u32,
-                session.profile.height.max(1) as u32,
-            )?);
+            if !is_camera_source(&session.config) {
+                manifest.set_cursor_telemetry(cursor_asset_metadata(
+                    &session.session_id,
+                    bounds,
+                    session.profile.width.max(1) as u32,
+                    session.profile.height.max(1) as u32,
+                )?);
+            }
             manifest.set_state(RecorderState::Recording);
             manifest.write()?;
         }
@@ -1665,6 +2067,18 @@ impl Recorder {
                 }
             };
             timeline = self.segment_timeline(&screen, &stats);
+            if is_camera_source(&session.config) {
+                // Same measured-origin alignment as pause(): the last camera
+                // segment derives the lock too (kept for diagnostics; the
+                // session is dropped after finalization anyway).
+                timeline = camera_segment_timeline(timeline, screen.camera_first_frame_offset_ms());
+                if session.camera_lock.is_none() {
+                    session.camera_lock = derive_camera_lock(
+                        self.probe_video_geometry(screen.output_path()),
+                        session.camera_plan.as_ref(),
+                    );
+                }
+            }
             track_timeline = timeline.with_startup_shift(session.segment_startup_shift);
             let mut stats = stats;
             stats.duration_ms = timeline.duration.as_millis().min(u64::MAX as u128) as u64;
@@ -1881,6 +2295,27 @@ impl Recorder {
             .map_err(|_| crate::errors::InternalError::Storage("database mutex poisoned".into()))?;
         let recording =
             crate::database::library::insert_recording(&mut db, &manifest_clone, output_size)?;
+        // Camera library rows take their dimensions from the encoded output
+        // stream, not the profile — the profile only describes the tier's
+        // capture budget, and a camera that negotiated smaller must not be
+        // listed at a resolution it never produced.
+        if is_camera_source(&session.config) {
+            if let Some(stream) = metadata.streams.iter().find(|s| s.kind == "video") {
+                if let (Some(width), Some(height), Some(fps)) =
+                    (stream.width, stream.height, stream.fps)
+                {
+                    if let Err(error) = crate::database::library::update_recording_dimensions(
+                        &db,
+                        &recording.id,
+                        width,
+                        height,
+                        fps,
+                    ) {
+                        tracing::warn!(%error, "failed to persist camera recording dimensions");
+                    }
+                }
+            }
+        }
         metadata.recording_id = recording.id;
         crate::database::media::upsert_metadata(&db, &metadata)?;
         drop(db);
@@ -1942,6 +2377,27 @@ impl Recorder {
         crate::media::probe::probe_media(&self.ffprobe_path.to_string_lossy(), path, recording_id)
             .map(|metadata| metadata.streams.iter().any(|stream| stream.kind == "video"))
             .unwrap_or(false)
+    }
+
+    /// Probe the segment file's video stream geometry and rate — the
+    /// authoritative output dims used to lock every later camera segment
+    /// (the plan is only the budget; the file is what was actually encoded).
+    fn probe_video_geometry(&self, path: &Path) -> Option<(u32, u32, f64)> {
+        crate::media::probe::probe_media(
+            &self.ffprobe_path.to_string_lossy(),
+            path,
+            "camera-output-lock",
+        )
+        .ok()
+        .and_then(|metadata| {
+            let stream = metadata.streams.iter().find(|s| s.kind == "video")?;
+            match (stream.width, stream.height, stream.fps) {
+                (Some(w), Some(h), Some(fps)) if w > 0 && h > 0 && fps > 0.0 => {
+                    Some((w as u32, h as u32, fps))
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Probe the fragment's real video stream length and start timestamp. The probed
@@ -2090,10 +2546,13 @@ impl Recorder {
         };
         if let Some(session) = current.as_ref() {
             if let Some(capture) = session.screen_capture.as_ref() {
+                // The primary process reports under the CAMERA slot for
+                // camera sources, SCREEN otherwise — matching the slot the
+                // manifest diagnostics were attached into at startup.
                 super::metrics::upsert_capture_diagnostics(
                     &mut snapshot.segments,
                     session.segment_index,
-                    false,
+                    is_camera_source(&session.config),
                     capture.diagnostics(),
                 );
             }
@@ -2107,6 +2566,28 @@ impl Recorder {
             }
         }
         Some(snapshot)
+    }
+
+    /// Latest audio levels for the HUD meter, or `None` unless a session is
+    /// actively `Recording` (idle/countdown/paused all suppress the tick so
+    /// the UI never sees stale values). Reads each worker's peak-since-last-
+    /// read atomic — `try_lock` on both the session and its manifest keeps
+    /// the 12 Hz emit loop from queueing behind start/stop, and a `None`
+    /// result makes the loop back off instead of emitting empty payloads.
+    pub fn audio_levels(&self) -> Option<AudioLevels> {
+        let guard = self.current.try_lock().ok()?;
+        let session = guard.as_ref()?;
+        if session.manifest.try_lock().ok()?.state != RecorderState::Recording {
+            return None;
+        }
+        let mut levels = AudioLevels::default();
+        for capture in &session.audio_captures {
+            match capture.kind {
+                AudioCaptureKind::Microphone => levels.microphone = capture.track.level(),
+                AudioCaptureKind::SystemLoopback => levels.system_audio = capture.track.level(),
+            }
+        }
+        Some(levels)
     }
 
     /// Runtime status for the React UI.
@@ -2163,12 +2644,22 @@ impl Recorder {
             .map(|started_at| (chrono::Utc::now() - started_at).num_milliseconds().max(0) as u64)
             .unwrap_or(0);
 
+        let camera_source = is_camera_source(&session.config);
         // Liveness comes from the child process status itself, not the
         // stderr EOF flag — a stalled process can still hold the device.
-        let camera_live = session
-            .webcam_capture
-            .as_mut()
-            .is_some_and(|capture| capture.is_running());
+        // For camera sources the camera IS the primary capture and lives in
+        // the screen slot; there is no sidecar.
+        let camera_live = if camera_source {
+            session
+                .screen_capture
+                .as_mut()
+                .is_some_and(|capture| capture.is_running())
+        } else {
+            session
+                .webcam_capture
+                .as_mut()
+                .is_some_and(|capture| capture.is_running())
+        };
         let screen_live = session
             .screen_capture
             .as_mut()
@@ -2197,10 +2688,19 @@ impl Recorder {
             system_audio_active: system_audio_live,
             // Report the live camera process, not the request: a sidecar that
             // failed every start attempt (or died mid-recording) is not active
-            // even when the config asked for one.
+            // even when the config asked for one. For camera sources the
+            // primary camera process reports here so the HUD can bind to it.
             webcam_active: camera_live,
-            webcam_device_id: session.config.webcam_device_id.clone(),
-            webcam_device_name: session.config.webcam_device_id.clone(),
+            webcam_device_id: if camera_source {
+                Some(session.config.source.id.clone())
+            } else {
+                session.config.webcam_device_id.clone()
+            },
+            webcam_device_name: if camera_source {
+                Some(session.config.source.name.clone())
+            } else {
+                session.config.webcam_device_id.clone()
+            },
             webcam_preview_url: session
                 .webcam_preview_server
                 .as_ref()
@@ -2208,60 +2708,110 @@ impl Recorder {
             // Paused segments have no live capture; fall back to the stored
             // snapshot for THIS segment — never a prior segment's camera,
             // which may have belonged to a mode the resumed attempt no longer uses.
-            screen_diagnostics: session
-                .screen_capture
-                .as_ref()
-                .map(|capture| capture.diagnostics())
-                .or_else(|| {
-                    m.capture_diagnostics
-                        .iter()
-                        .find(|segment| segment.index == session.segment_index)
-                        .and_then(|segment| segment.screen.clone())
-                }),
-            camera_diagnostics: session
-                .webcam_capture
-                .as_ref()
-                .map(|capture| capture.diagnostics())
-                .or_else(|| {
-                    m.capture_diagnostics
-                        .iter()
-                        .find(|segment| segment.index == session.segment_index)
-                        .and_then(|segment| segment.camera.clone())
-                }),
+            // For camera sources the primary capture reports under `camera`
+            // (the manifest diagnostics were attached to that slot at startup).
+            screen_diagnostics: if camera_source {
+                None
+            } else {
+                session
+                    .screen_capture
+                    .as_ref()
+                    .map(|capture| capture.diagnostics())
+                    .or_else(|| {
+                        m.capture_diagnostics
+                            .iter()
+                            .find(|segment| segment.index == session.segment_index)
+                            .and_then(|segment| segment.screen.clone())
+                    })
+            },
+            camera_diagnostics: if camera_source {
+                session
+                    .screen_capture
+                    .as_ref()
+                    .map(|capture| capture.diagnostics())
+                    .or_else(|| {
+                        m.capture_diagnostics
+                            .iter()
+                            .find(|segment| segment.index == session.segment_index)
+                            .and_then(|segment| segment.camera.clone())
+                    })
+            } else {
+                session
+                    .webcam_capture
+                    .as_ref()
+                    .map(|capture| capture.diagnostics())
+                    .or_else(|| {
+                        m.capture_diagnostics
+                            .iter()
+                            .find(|segment| segment.index == session.segment_index)
+                            .and_then(|segment| segment.camera.clone())
+                    })
+            },
             error: if m.state == RecorderState::Recording {
-                // A requested capture that produced no live worker is a
-                // degradation the user must see — otherwise a track is lost
-                // silently while its toggle still reads "on".
-                let mut missing = Vec::new();
-                if session.config.capture_microphone && !microphone_live {
-                    missing.push("Microphone");
-                }
-                if session.config.capture_system_audio && !system_audio_live {
-                    missing.push("System audio");
-                }
-                if session.config.capture_webcam && !camera_live {
-                    missing.push("Camera");
-                }
-                if missing.is_empty() {
-                    None
+                if camera_source {
+                    // A camera session without its primary process is a dead
+                    // recording — say so explicitly instead of the generic
+                    // "unavailable" phrasing the screen path uses.
+                    let mut problems = Vec::new();
+                    if session.config.capture_microphone && !microphone_live {
+                        problems.push("Microphone capture is unavailable.".to_string());
+                    }
+                    if !screen_live {
+                        problems.push(
+                            "Camera stopped unexpectedly (disconnected or taken by another app). Your recording so far is kept - stop to save it."
+                                .to_string(),
+                        );
+                    }
+                    if problems.is_empty() {
+                        None
+                    } else {
+                        Some(problems.join(" "))
+                    }
                 } else {
-                    // Only claim the screen survives when a live screen
-                    // process is actually observable.
-                    Some(format!(
-                        "{} capture is unavailable{}.",
-                        missing.join(", "),
-                        if screen_live {
-                            "; screen recording continues"
-                        } else {
-                            ""
-                        }
-                    ))
+                    // A requested capture that produced no live worker is a
+                    // degradation the user must see — otherwise a track is
+                    // lost silently while its toggle still reads "on".
+                    let mut missing = Vec::new();
+                    if session.config.capture_microphone && !microphone_live {
+                        missing.push("Microphone");
+                    }
+                    if session.config.capture_system_audio && !system_audio_live {
+                        missing.push("System audio");
+                    }
+                    if session.config.capture_webcam && !camera_live {
+                        missing.push("Camera");
+                    }
+                    if missing.is_empty() {
+                        None
+                    } else {
+                        // Only claim the screen survives when a live screen
+                        // process is actually observable.
+                        Some(format!(
+                            "{} capture is unavailable{}.",
+                            missing.join(", "),
+                            if screen_live {
+                                "; screen recording continues"
+                            } else {
+                                ""
+                            }
+                        ))
+                    }
                 }
             } else {
                 None
             },
         })
     }
+}
+
+/// Live audio levels for the HUD meter — each track's peak amplitude
+/// accumulated since the previous read. `None` when a track is not
+/// captured or the platform does not report levels.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLevels {
+    pub microphone: Option<f32>,
+    pub system_audio: Option<f32>,
 }
 
 /// Compact status payload broadcast from the Rust recorder to the React UI.
@@ -2717,6 +3267,10 @@ mod tests {
             webcam_segments_started: 0,
             webcam_capture_failed: false,
             cursor_tracker: None,
+            camera_modes: None,
+            camera_lock: None,
+            camera_encoder: None,
+            camera_plan: None,
             keystroke_sampler: None,
             cursor_segment_start_ms: 0,
             segment_startup_shift: Duration::ZERO,
@@ -2769,6 +3323,285 @@ mod tests {
         let error = status.error.expect("microphone is still missing");
         assert!(error.contains("Microphone"), "{error}");
         assert!(!error.contains("System audio"), "{error}");
+    }
+
+    fn test_camera_config() -> RecordingConfig {
+        RecordingConfig {
+            source: CaptureSource {
+                kind: "camera".into(),
+                id: "cam-device-0".into(),
+                name: "Integrated Camera".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "camera-balanced".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
+        }
+    }
+
+    #[test]
+    fn camera_prepare_creates_countdown_manifest_and_cancel_cleans_up() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+
+        let session_id = recorder
+            .prepare(test_camera_config())
+            .expect("prepare camera session");
+        assert_eq!(
+            recorder.status().expect("status").state,
+            RecorderState::Countdown
+        );
+        let manifest =
+            RecordingManifest::read(temp_dir.path().join(&session_id).join("session.json"))
+                .expect("read prepared manifest");
+        assert_eq!(manifest.source.kind, "camera");
+        assert_eq!(manifest.profile_name, "camera-balanced");
+        assert!(
+            manifest.cursor_telemetry.is_none(),
+            "camera sessions must not declare cursor telemetry"
+        );
+
+        recorder
+            .cancel_prepared(&session_id)
+            .expect("cancel camera countdown");
+        assert_eq!(
+            recorder.status().expect("status").state,
+            RecorderState::Idle
+        );
+        assert!(!temp_dir.path().join(&session_id).exists());
+    }
+
+    #[test]
+    fn camera_status_maps_primary_capture_to_camera_fields() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+        let work_dir = temp_dir.path().join("session-1");
+        std::fs::create_dir_all(&work_dir).expect("create session work dir");
+
+        let mut config = test_camera_config();
+        config.capture_microphone = true;
+        config.microphone_device_id = Some("mic-1".into());
+        let mut session = test_session(&work_dir, config);
+        session
+            .manifest
+            .lock()
+            .expect("manifest")
+            .set_state(RecorderState::Recording);
+
+        let status = recorder
+            .status_from_session(&mut session)
+            .expect("read camera status");
+        assert_eq!(status.source_kind, "camera");
+        assert_eq!(status.source_name, "Integrated Camera");
+        // The primary camera process reports through the webcam slots so the
+        // HUD/preview bindings keep working unchanged.
+        assert!(!status.webcam_active);
+        assert_eq!(status.webcam_device_id.as_deref(), Some("cam-device-0"));
+        assert_eq!(
+            status.webcam_device_name.as_deref(),
+            Some("Integrated Camera")
+        );
+        assert!(status.screen_diagnostics.is_none());
+
+        let error = status.error.expect("dead session must report an error");
+        assert!(
+            error.contains("Microphone capture is unavailable."),
+            "{error}"
+        );
+        assert!(error.contains("Camera stopped unexpectedly"), "{error}");
+
+        session
+            .manifest
+            .lock()
+            .expect("manifest")
+            .set_state(RecorderState::Paused);
+        let status = recorder
+            .status_from_session(&mut session)
+            .expect("read paused status");
+        assert!(status.error.is_none(), "paused sessions report no error");
+    }
+
+    #[test]
+    fn camera_diagnostics_stay_under_camera_slot() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+        recorder
+            .prepare(test_camera_config())
+            .expect("prepare camera session");
+
+        // Seed the manifest the way `FfmpegCapture::run` does for camera
+        // captures (meta.camera = true → camera slot).
+        {
+            let guard = recorder.current.lock().expect("session lock");
+            let session = guard.as_ref().expect("session");
+            let mut manifest = session.manifest.lock().expect("manifest");
+            crate::capture::metrics::upsert_capture_diagnostics(
+                &mut manifest.capture_diagnostics,
+                0,
+                true,
+                crate::capture::metrics::CaptureDiagnostics {
+                    process_id: 1,
+                    encoder: "libx264".into(),
+                    backend: "dshow-camera".into(),
+                    requested_fps: 30.0,
+                    startup_ready_ms: Some(120),
+                    preview_fps: None,
+                    requested_camera_mode: None,
+                    fallback_reason: None,
+                    progress: crate::capture::metrics::CaptureProgress::default(),
+                    progress_age_ms: None,
+                    exited: false,
+                    camera_first_frame_offset_ms: Some(80),
+                    camera_timing_rejection: None,
+                },
+            );
+        }
+
+        let snapshot = recorder.capture_diagnostics().expect("diagnostics");
+        let segment = snapshot
+            .segments
+            .iter()
+            .find(|segment| segment.index == 0)
+            .expect("segment 0");
+        assert!(segment.camera.is_some(), "primary stays under camera slot");
+        assert!(segment.screen.is_none());
+    }
+
+    #[test]
+    fn prefer_encoder_first_moves_the_previous_winner_front() {
+        let candidates = vec![
+            "h264_nvenc".to_string(),
+            "h264_mf".to_string(),
+            "libx264".to_string(),
+        ];
+        assert_eq!(
+            prefer_encoder_first(&candidates, Some("h264_mf")),
+            vec!["h264_mf", "h264_nvenc", "libx264"]
+        );
+        // A preferred encoder that is no longer available keeps the order.
+        assert_eq!(
+            prefer_encoder_first(&candidates, Some("h264_amf")),
+            candidates
+        );
+        assert_eq!(prefer_encoder_first(&candidates, None), candidates);
+    }
+
+    #[test]
+    fn camera_segment_timeline_prefers_measured_origin() {
+        let base = SegmentTimeline {
+            head_trim: Duration::from_millis(600),
+            duration: Duration::from_millis(5_000),
+        };
+        // A plausible measured offset becomes the head trim; duration stays
+        // the probed video duration.
+        let timeline = camera_segment_timeline(base, Some(180));
+        assert_eq!(timeline.head_trim, Duration::from_millis(180));
+        assert_eq!(timeline.duration, Duration::from_millis(5_000));
+
+        // An implausible (above-cap) or missing measurement falls back to
+        // the duration-derived timeline unchanged.
+        let timeline = camera_segment_timeline(base, Some(MAX_VIDEO_STARTUP_GAP_MS + 1));
+        assert_eq!(timeline, base);
+        assert_eq!(camera_segment_timeline(base, None), base);
+    }
+
+    #[test]
+    fn derive_camera_lock_prefers_probed_geometry_then_plan() {
+        let plan = CameraCapturePlan {
+            profile_id: "camera-balanced".into(),
+            input: None,
+            output_width: 1920,
+            output_height: 1080,
+            output_fps: 30.0,
+            video_bitrate_kbps: 6_800,
+            max_bitrate_kbps: 10_200,
+            buffer_kbps: 10_200,
+            crf: 21,
+            fit: crate::capture::camera_plan::CameraFit::Native,
+            limited_by_camera: false,
+        };
+        // The probed file wins over the plan.
+        assert_eq!(
+            derive_camera_lock(Some((1280, 720, 30.0)), Some(&plan)),
+            Some(CameraOutputLock {
+                width: 1280,
+                height: 720,
+                fps: 30.0
+            })
+        );
+        // Without a probe the winning plan's output geometry is the lock.
+        assert_eq!(
+            derive_camera_lock(None, Some(&plan)),
+            Some(CameraOutputLock {
+                width: 1920,
+                height: 1080,
+                fps: 30.0
+            })
+        );
+        assert_eq!(derive_camera_lock(None, None), None);
+    }
+
+    #[test]
+    fn audio_levels_only_emit_while_recording() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+        // Idle: no session at all.
+        assert!(recorder.audio_levels().is_none());
+        // A prepared session is still in Countdown — no ticks.
+        recorder.prepare(test_config()).expect("prepare session");
+        assert!(recorder.audio_levels().is_none());
+
+        // Flip the session to Recording with a live (fake) audio track.
+        {
+            let guard = recorder.current.lock().expect("session lock");
+            let session = guard.as_ref().expect("session");
+            session
+                .manifest
+                .lock()
+                .expect("manifest")
+                .set_state(RecorderState::Recording);
+        }
+        assert!(
+            recorder.audio_levels().is_some(),
+            "a Recording session must emit levels"
+        );
+
+        // Paused suppresses the tick again — the UI must never see stale
+        // values after the meter should stop.
+        {
+            let guard = recorder.current.lock().expect("session lock");
+            let session = guard.as_ref().expect("session");
+            session
+                .manifest
+                .lock()
+                .expect("manifest")
+                .set_state(RecorderState::Paused);
+        }
+        assert!(recorder.audio_levels().is_none());
+    }
+
+    #[test]
+    fn ensure_camera_disk_space_gates_below_one_gib() {
+        assert!(ensure_camera_disk_space(Some(512 << 20)).is_err());
+        let error = ensure_camera_disk_space(Some(512 << 20)).unwrap_err();
+        assert!(error.to_string().contains("Not enough free disk space"));
+        assert!(ensure_camera_disk_space(Some(2 << 30)).is_ok());
+        // An unreadable stat never blocks a recording.
+        assert!(ensure_camera_disk_space(None).is_ok());
     }
 
     #[test]
@@ -3178,5 +4011,365 @@ mod tests {
             "webcam asset should be produced"
         );
         assert!(PathBuf::from(manifest.webcam_path.unwrap()).exists());
+    }
+
+    /// End-to-end camera-mode coverage on real hardware: the first
+    /// enumerated camera becomes the primary capture, the default mic joins
+    /// when present, and the output is a plain `output.mp4` with no
+    /// screen-recording side products.
+    #[test]
+    #[ignore = "requires a real camera and will activate it for ~4 s"]
+    fn camera_only_recording_captures_video_and_audio_when_available() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+
+        let device = enumerate_video_devices(&ffmpeg.to_string_lossy())
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|d| d.kind == "webcam"))
+            .map(|d| d.name);
+        let Some(device) = device else {
+            eprintln!("skipping: no camera found");
+            return;
+        };
+        let microphone = crate::capture::audio::enumerate_audio_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .iter()
+                    .find(|device| !device.is_loopback && device.is_default)
+                    .or_else(|| devices.iter().find(|device| !device.is_loopback))
+                    .map(|device| device.id.clone())
+            });
+        let microphone_enabled = microphone.is_some();
+
+        let recorder = Recorder::new(
+            ffmpeg.clone(),
+            ffprobe.clone(),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "camera".into(),
+                id: device,
+                name: "Camera".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "camera-balanced".into(),
+            capture_microphone: microphone_enabled,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: microphone,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare camera session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start camera recording");
+        std::thread::sleep(Duration::from_secs(4));
+        recorder.stop().expect("stop camera recording");
+
+        let session_dir = temp_dir.path().join(&session_id);
+        let output = session_dir.join("output.mp4");
+        assert!(output.exists(), "camera output must exist");
+
+        let metadata =
+            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), &output, "camera-test")
+                .expect("probe camera output");
+        let video = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .expect("video stream");
+        let (width, height, fps) = (
+            video.width.unwrap_or(0),
+            video.height.unwrap_or(0),
+            video.fps.unwrap_or(0.0),
+        );
+        eprintln!(
+            "camera output: {}x{} @ {:.2} fps, container {} kbps",
+            width,
+            height,
+            fps,
+            metadata.bitrate_kbps.unwrap_or(0.0)
+        );
+        assert!(width >= 640 && height >= 360, "resolution {width}x{height}");
+        assert!(
+            (25.0..=31.0).contains(&fps),
+            "frame rate {fps} outside 25-31"
+        );
+        if microphone_enabled {
+            assert!(
+                metadata.streams.iter().any(|stream| stream.kind == "audio"),
+                "microphone was enabled but no audio stream was muxed"
+            );
+        }
+
+        // Camera sessions must produce no screen-recording side products.
+        assert!(!session_dir.join("cursor_events.bin").exists());
+        assert!(!session_dir.join("cursor_telemetry.json").exists());
+        assert!(
+            !session_dir.join("output.mp4.webcam.mp4").exists()
+                && std::fs::read_dir(&session_dir)
+                    .expect("read session dir")
+                    .filter_map(|entry| entry.ok())
+                    .all(|entry| !entry.file_name().to_string_lossy().starts_with("webcam")),
+            "camera sessions must not produce webcam sidecar assets"
+        );
+
+        let manifest =
+            RecordingManifest::read(session_dir.join("session.json")).expect("read manifest");
+        assert_eq!(manifest.source.kind, "camera");
+        assert_eq!(manifest.state, RecorderState::Completed);
+        assert!(manifest.fragments.iter().any(|f| f.index == 0));
+        let diagnostics = manifest
+            .capture_diagnostics
+            .iter()
+            .find(|segment| segment.index == 0)
+            .expect("fragment 0 diagnostics");
+        assert!(
+            diagnostics.camera.is_some(),
+            "camera diagnostics must slot under camera"
+        );
+        assert!(diagnostics.screen.is_none());
+
+        // The library row carries the camera source and the probed geometry
+        // (overwritten from the tier budget at finalize).
+        let db = recorder.db.lock().expect("db");
+        let recordings = crate::database::library::list_recordings(&db).expect("list recordings");
+        let recording = recordings
+            .iter()
+            .find(|recording| recording.session_id == session_id)
+            .expect("camera library row");
+        assert_eq!(recording.source.kind, "camera");
+        assert_eq!(recording.width, width);
+        assert_eq!(recording.height, height);
+        assert_eq!(recording.fps, fps.round() as i32);
+    }
+
+    /// Pause/resume coverage: two camera segments must concatenate into one
+    /// `output.mp4` with identical geometry — the output lock derived at
+    /// pause forces the resumed segment to the first segment's resolution
+    /// and rate.
+    #[test]
+    #[ignore = "requires a real camera; records ~4 s across a pause"]
+    fn camera_recording_pause_resume_concatenates_matching_segments() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+        let device = enumerate_video_devices(&ffmpeg.to_string_lossy())
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|d| d.kind == "webcam"))
+            .map(|d| d.name);
+        let Some(device) = device else {
+            eprintln!("skipping: no camera found");
+            return;
+        };
+
+        let recorder = Recorder::new(
+            ffmpeg.clone(),
+            ffprobe.clone(),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "camera".into(),
+                id: device,
+                name: "Camera".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "camera-balanced".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare camera session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start camera recording");
+        std::thread::sleep(Duration::from_secs(2));
+        recorder.pause().expect("pause camera recording");
+        recorder.resume().expect("resume camera recording");
+        std::thread::sleep(Duration::from_secs(2));
+        recorder.stop().expect("stop camera recording");
+
+        let session_dir = temp_dir.path().join(&session_id);
+        let output = session_dir.join("output.mp4");
+        assert!(output.exists(), "concatenated output must exist");
+
+        // Both fragments must have produced identical output geometry — the
+        // lock makes the resumed segment stream-copy-concat compatible.
+        let segment_probe = |index: u32| {
+            let segment = session_dir.join(format!("seg_{index:03}.mp4"));
+            let metadata = crate::media::probe::probe_media(
+                &ffprobe.to_string_lossy(),
+                &segment,
+                "camera-seg",
+            )
+            .expect("probe segment");
+            let video = metadata
+                .streams
+                .iter()
+                .find(|stream| stream.kind == "video")
+                .expect("segment video stream");
+            (
+                video.width,
+                video.height,
+                video.fps,
+                video.duration_ms.or(Some(metadata.duration_ms)),
+            )
+        };
+        let (w0, h0, f0, d0) = segment_probe(0);
+        let (w1, h1, f1, d1) = segment_probe(1);
+        eprintln!("segment geometries: ({w0:?},{h0:?},{f0:?}) / ({w1:?},{h1:?},{f1:?})");
+        assert_eq!(
+            (w0, h0, f0),
+            (w1, h1, f1),
+            "resumed segment must match the first"
+        );
+
+        // The concatenated output covers both recorded stretches. Segments
+        // legitimately exceed the 2 s sleeps: `start_prepared`/`resume`
+        // return only once the camera produces frames, so each stream also
+        // contains its ~1 s sensor startup. Assert the output equals the sum
+        // of the segment video durations (within 15%) and matches the
+        // manifest's recorded total.
+        let segment_total_ms = d0.unwrap_or(0) + d1.unwrap_or(0);
+        let metadata =
+            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), &output, "camera-final")
+                .expect("probe output");
+        let duration_ms = metadata.duration_ms as f64;
+        eprintln!("camera output duration: {duration_ms}ms vs segments {segment_total_ms}ms");
+        assert!(
+            (duration_ms - segment_total_ms as f64).abs() <= segment_total_ms as f64 * 0.15 + 200.0,
+            "output {duration_ms}ms deviates from the {segment_total_ms}ms of captured video"
+        );
+        let manifest =
+            RecordingManifest::read(session_dir.join("session.json")).expect("read manifest");
+        assert!(
+            (manifest.total_recorded_ms as f64 - duration_ms).abs() <= 500.0,
+            "totalRecordedMs {} vs output {duration_ms}",
+            manifest.total_recorded_ms
+        );
+    }
+
+    /// THROWAWAY (M4 export measurement): records ~28 s of camera+mic into a
+    /// stable sessions dir so the export harness can measure a real
+    /// camera-only export. Delete after the measurement runs.
+    #[test]
+    #[ignore = "m4 export measurement: records ~28 s on a real camera"]
+    fn m4_export_capture_recording() {
+        let sessions_root = PathBuf::from(r"C:\temp\rf-m4-camera");
+        std::fs::create_dir_all(&sessions_root).expect("create sessions root");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        assert!(ffmpeg.exists() && ffprobe.exists(), "FFmpeg sidecars missing");
+
+        let device = enumerate_video_devices(&ffmpeg.to_string_lossy())
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|d| d.name == "Integrated Webcam"))
+            .or_else(|| {
+                enumerate_video_devices(&ffmpeg.to_string_lossy())
+                    .ok()
+                    .and_then(|devices| devices.into_iter().find(|d| d.kind == "webcam"))
+            })
+            .map(|d| d.name);
+        let Some(device) = device else {
+            panic!("no camera found");
+        };
+        let microphone = crate::capture::audio::enumerate_audio_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .iter()
+                    .find(|device| !device.is_loopback && device.is_default)
+                    .or_else(|| devices.iter().find(|device| !device.is_loopback))
+                    .map(|device| device.id.clone())
+            });
+        eprintln!("camera device: {device}; microphone: {microphone:?}");
+
+        let recorder = Recorder::new(ffmpeg, ffprobe, sessions_root.clone(), db);
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "camera".into(),
+                id: device,
+                name: "Camera".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "camera-balanced".into(),
+            capture_microphone: microphone.is_some(),
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: microphone,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
+        };
+        let session_id = recorder.prepare(config).expect("prepare camera session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start camera recording");
+        std::thread::sleep(Duration::from_secs(28));
+        recorder.stop().expect("stop camera recording");
+        let session_dir = sessions_root.join(&session_id);
+        assert!(session_dir.join("output.mp4").exists());
+        eprintln!("M4 camera session: {}", session_dir.display());
     }
 }

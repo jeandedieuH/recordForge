@@ -30,6 +30,16 @@ export const captureSourceSchema = z.discriminatedUnion("kind", [
     name: z.string(),
     bounds: boundsSchema,
   }),
+  // Camera-only recording source: `id` is the platform video device id (on
+  // Windows the DirectShow name used in `video=<id>`); `bounds` carries the
+  // chosen tier's output budget, which is informational rather than a screen
+  // rectangle.
+  z.object({
+    kind: z.literal("camera"),
+    id: z.string(),
+    name: z.string(),
+    bounds: boundsSchema,
+  }),
 ])
 
 export type CaptureSource = z.infer<typeof captureSourceSchema>
@@ -50,6 +60,56 @@ export const recordingProfileSchema = z.object({
 })
 
 export type RecordingProfile = z.infer<typeof recordingProfileSchema>
+
+// Screen-capture quality profile ids. `camera-only` is a legacy id kept
+// resolvable for old manifests, recoveries, and stored preferences — it is no
+// longer offered in the UI.
+export const screenProfileIdSchema = z.enum([
+  "low-impact",
+  "balanced",
+  "smooth-demo",
+  "high-quality",
+  "smooth-60fps",
+  "ultra-4k",
+  "ultra-4k-60",
+  "camera-only",
+])
+export type ScreenProfileId = z.infer<typeof screenProfileIdSchema>
+
+// Camera-only recording tiers. Mirrored by `camera_profiles()` on the Rust
+// side; these require a `kind: "camera"` capture source.
+export const cameraProfileIdSchema = z.enum([
+  "camera-low",
+  "camera-balanced",
+  "camera-high",
+  "camera-ultra",
+])
+export type CameraProfileId = z.infer<typeof cameraProfileIdSchema>
+
+export const defaultCameraProfileId: CameraProfileId = "camera-balanced"
+
+export interface CameraTier {
+  id: CameraProfileId
+  label: string
+  /** Output budget — capture never upscales past the negotiated mode. */
+  width: number
+  height: number
+  fps: number
+}
+
+// Camera quality tiers in UI order. Mirrored 1:1 by `camera_profiles()` on
+// the Rust side and pinned by `tooling/fixtures/camera-tiers.json` so the
+// two languages can never drift (see the parity tests in both packages).
+export const cameraTiers: readonly CameraTier[] = [
+  { id: "camera-low", label: "Low Impact", width: 1280, height: 720, fps: 30 },
+  { id: "camera-balanced", label: "Balanced", width: 1920, height: 1080, fps: 30 },
+  { id: "camera-high", label: "High Quality", width: 1920, height: 1080, fps: 30 },
+  { id: "camera-ultra", label: "Ultra", width: 3840, height: 2160, fps: 30 },
+]
+
+export function cameraTierBudget(id: CameraProfileId): CameraTier | undefined {
+  return cameraTiers.find((tier) => tier.id === id)
+}
 
 export const recordingSmartZoomPresetSchema = z.enum([
   "subtle",
@@ -143,18 +203,35 @@ export const sessionCaptureDiagnosticsSchema = z.object({
 export type CaptureDiagnostics = z.infer<typeof captureDiagnosticsSchema>
 export type SessionCaptureDiagnostics = z.infer<typeof sessionCaptureDiagnosticsSchema>
 
+// Concrete capture plan for a camera-only recording, produced by the Rust
+// planner (`capture::camera_plan`) after probing a device's advertised modes.
+// `input` is `null` when the device defaults are used (the last-resort
+// attempt, or platforms without mode negotiation).
+export const cameraCapturePlanSchema = z.object({
+  profileId: cameraProfileIdSchema,
+  input: cameraModeSchema.nullish(),
+  outputWidth: z.number().int().positive(),
+  outputHeight: z.number().int().positive(),
+  outputFps: z.number().positive(),
+  videoBitrateKbps: z.number().int().positive(),
+  maxBitrateKbps: z.number().int().positive(),
+  bufferKbps: z.number().int().positive(),
+  crf: z.number().int().min(0).max(51),
+  limitedByCamera: z.boolean(),
+})
+export type CameraCapturePlan = z.infer<typeof cameraCapturePlanSchema>
+
+// Free-space snapshot for the sessions volume, consumed by the camera
+// recording setup UI. `freeBytes` is `null` when the stat could not be read
+// (the UI degrades to "unknown" rather than an error).
+export const recordingStorageInfoSchema = z.object({
+  freeBytes: z.number().int().nonnegative().nullish(),
+})
+export type RecordingStorageInfo = z.infer<typeof recordingStorageInfoSchema>
+
 export const recordingConfigSchema = z.object({
   source: captureSourceSchema,
-  profile: z.enum([
-    "low-impact",
-    "balanced",
-    "smooth-demo",
-    "high-quality",
-    "smooth-60fps",
-    "ultra-4k",
-    "ultra-4k-60",
-    "camera-only",
-  ]),
+  profile: z.union([screenProfileIdSchema, cameraProfileIdSchema]),
   captureMicrophone: z.boolean(),
   captureSystemAudio: z.boolean(),
   captureWebcam: z.boolean(),
@@ -488,11 +565,18 @@ export type DiagnosticsReport = z.infer<typeof diagnosticsReportSchema>
 
 // Persisted user preferences and selections for the recording dialog.
 export const recordingPreferencesSchema = z.object({
-  sourceType: z.enum(["screen", "window", "region"]).default("screen"),
+  sourceType: z.enum(["screen", "window", "region", "camera"]).default("screen"),
   sourceId: z.string().nullable().default(null),
   sourceName: z.string().nullable().default(null),
   regionBounds: boundsSchema.nullable().default(null),
-  profile: recordingConfigSchema.shape.profile.default("low-impact"),
+  // Screen profile only — camera-mode recordings keep their tier in
+  // `cameraProfile`.
+  profile: screenProfileIdSchema.default("low-impact"),
+  cameraProfile: cameraProfileIdSchema.default("camera-balanced"),
+  cameraPreviewMode: webcamPreviewModeSchema.default("standard"),
+  // Mirror preview only; the recorded camera file is never mirrored.
+  cameraMirrorPreview: z.boolean().default(true),
+  cameraFramingGuide: z.boolean().default(false),
   smartZoomEnabled: z.boolean().default(false),
   smartZoomPreset: recordingSmartZoomPresetSchema.default("product-demo"),
   microphoneEnabled: z.boolean().default(false),
@@ -518,6 +602,10 @@ export const defaultRecordingPreferences: RecordingPreferences = {
   sourceName: null,
   regionBounds: null,
   profile: "low-impact",
+  cameraProfile: "camera-balanced",
+  cameraPreviewMode: "standard",
+  cameraMirrorPreview: true,
+  cameraFramingGuide: false,
   smartZoomEnabled: false,
   smartZoomPreset: "product-demo",
   microphoneEnabled: false,
@@ -622,10 +710,46 @@ export function reconcileWebcam(
   return { id: fallback?.id || "", enabled: Boolean(fallback) }
 }
 
+// Camera-mode device selection. Unlike `reconcileWebcam` there is no enable
+// flag — the camera IS the source, so a stored `webcamEnabled: false` must
+// not veto it. Returns the resolved device id ("" when no camera exists).
+export function reconcileCameraDevice(
+  availableCameras: VideoDevice[],
+  prefs: RecordingPreferences,
+): { id: string } {
+  if (availableCameras.length === 0) {
+    return { id: "" }
+  }
+
+  if (prefs.webcamId) {
+    const matchedById = availableCameras.find((w) => w.id === prefs.webcamId)
+    if (matchedById) return { id: matchedById.id }
+  }
+
+  if (prefs.webcamName) {
+    const matchedByName = availableCameras.find((w) => w.name === prefs.webcamName)
+    if (matchedByName) return { id: matchedByName.id }
+  }
+
+  const fallback = availableCameras.find((w) => w.isDefault) || availableCameras[0]
+  return { id: fallback?.id || "" }
+}
+
 export function reconcileCaptureSource(
   availableSources: CaptureSource[],
   prefs: RecordingPreferences,
 ): { source: CaptureSource | null; sourceType: "screen" | "window" | "region" } {
+  if (prefs.sourceType === "camera") {
+    // Camera mode reconciles its device through `reconcileCameraDevice`; a
+    // stored "camera" preference here just gets a sane screen fallback so the
+    // picker never opens empty.
+    const displaySources = availableSources.filter((s) => s.kind === "display")
+    return {
+      source: displaySources[0] || availableSources[0] || null,
+      sourceType: "screen",
+    }
+  }
+
   if (prefs.sourceType === "region") {
     if (prefs.regionBounds) {
       return {
@@ -681,10 +805,10 @@ export function reconcileCaptureSource(
 export function reconcileProfile(
   availableProfiles: RecordingProfile[],
   prefs: RecordingPreferences,
-): RecordingConfig["profile"] {
+): ScreenProfileId {
   if (availableProfiles.length === 0) return prefs.profile
   if (availableProfiles.some((p) => p.id === prefs.profile)) {
     return prefs.profile
   }
-  return (availableProfiles[0]?.id as RecordingConfig["profile"]) || "low-impact"
+  return (availableProfiles[0]?.id as ScreenProfileId) || "low-impact"
 }

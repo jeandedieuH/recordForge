@@ -214,14 +214,35 @@ function createAudioClip(
   stream: MediaStream | undefined,
   duration: number,
   streamIndex: number,
+  cameraSyncOffsetMs = 0,
 ): AudioClip | null {
   const roundedDuration = Math.round(duration)
-  const startMs = Math.round(Math.min(stream?.startMs ?? 0, roundedDuration))
-  const availableDuration = Math.round(stream?.durationMs ?? Math.max(0, roundedDuration - startMs))
+  const availableDuration = Math.round(
+    stream?.durationMs ??
+      Math.max(0, roundedDuration - Math.min(stream?.startMs ?? 0, roundedDuration)),
+  )
   const clipDuration = Math.round(
-    Math.min(Math.max(0, availableDuration), Math.max(0, roundedDuration - startMs)),
+    Math.min(
+      Math.max(0, availableDuration),
+      Math.max(0, roundedDuration - Math.min(stream?.startMs ?? 0, roundedDuration)),
+    ),
   )
   if (clipDuration <= 0) return null
+
+  // Camera-source recordings have no camera clip to carry the calibration
+  // offset — the video track is the fixed primary, so the same offset math
+  // shifts the audio instead. The capture-time semantics "positive = video
+  // delayed" therefore read as "audio delayed" here: a positive offset moves
+  // the audio start right on the timeline, a negative one trims the clip's
+  // source window. Screen recordings are untouched — their offset still lands
+  // on the camera sidecar clip below.
+  const rawOffset = Math.round(cameraSyncOffsetMs)
+  const startMs =
+    rawOffset === 0
+      ? Math.round(Math.min(stream?.startMs ?? 0, roundedDuration))
+      : Math.max(0, rawOffset)
+  const sourceInMs = rawOffset < 0 ? Math.min(clipDuration, Math.abs(rawOffset)) : 0
+  const sourceOutMs = rawOffset === 0 ? availableDuration : sourceInMs + clipDuration
 
   return {
     id: crypto.randomUUID(),
@@ -231,8 +252,8 @@ function createAudioClip(
     role: audioStreamRole(stream, streamIndex),
     startMs,
     durationMs: clipDuration,
-    sourceInMs: 0,
-    sourceOutMs: availableDuration,
+    sourceInMs,
+    sourceOutMs,
     speed: 1,
     volume: 1,
     fadeInMs: 0,
@@ -319,6 +340,12 @@ export function createTimelineFromRecording(
     options?.canvasPolicy === "free"
       ? freeCanvasSize(sourceWidth, sourceHeight)
       : { width: sourceWidth, height: sourceHeight }
+  // Camera-only recordings capture the webcam as the primary stream: no
+  // sidecar camera clip exists, the screen-kind track names itself "Camera",
+  // and the canvas defaults to full-bleed (talking head). `source` is
+  // defensive — legacy rows written before the field existed parse as
+  // screen captures.
+  const isCameraSource = recording.source?.kind === "camera"
   const cameraStreams = recording.webcamPath
     ? [standaloneWebcamStream(recording, metadata, duration)].filter(
         (stream): stream is MediaStream => Boolean(stream),
@@ -336,7 +363,9 @@ export function createTimelineFromRecording(
     speed: 1,
   }
 
-  const tracks: TimelineTrack[] = [makeTrack("screen", "Screen", [screenClip])]
+  const tracks: TimelineTrack[] = [
+    makeTrack("screen", isCameraSource ? "Camera" : "Screen", [screenClip]),
+  ]
   const audioStreams = metadata.streams.filter((stream) => stream.kind === "audio")
   const audioSources: Array<MediaStream | undefined> = audioStreams.length
     ? audioStreams
@@ -345,8 +374,11 @@ export function createTimelineFromRecording(
       : []
 
   // Each multiplexed capture stream gets its own aligned track and clip.
+  // On camera-source timelines the clips also carry the sync offset — there
+  // is no camera clip to absorb it.
+  const audioSyncOffsetMs = isCameraSource ? Math.round(options?.cameraSyncOffsetMs ?? 0) : 0
   audioSources.forEach((stream, index) => {
-    const clip = createAudioClip(recording.id, stream, duration, index)
+    const clip = createAudioClip(recording.id, stream, duration, index, audioSyncOffsetMs)
     if (clip) tracks.push(makeTrack("audio", audioStreamName(stream, index), [clip]))
   })
 
@@ -398,8 +430,11 @@ export function createTimelineFromRecording(
       height: canvasSize.height,
       fps: metadata.fps ? Math.round(metadata.fps) : recording.fps,
       background: DEFAULT_CANVAS_BACKGROUND,
-      padding: hasCamera ? 96 : 24,
-      borderRadius: hasCamera ? 0 : 24,
+      // Camera-source talking heads want full bleed: zero padding/radius and
+      // no shadow. The background default is kept — invisible at padding 0 but
+      // still user-changeable later.
+      padding: isCameraSource ? 0 : hasCamera ? 96 : 24,
+      borderRadius: hasCamera || isCameraSource ? 0 : 24,
       shadow: false,
       // New projects get DPI-consistent cursor defaults; existing projects
       // keep whatever settings were persisted (legacy model by default).

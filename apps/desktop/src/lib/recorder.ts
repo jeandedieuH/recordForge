@@ -2,6 +2,7 @@ import { z } from "zod"
 import {
   audioDeviceSchema,
   benchmarkReportSchema,
+  cameraCapturePlanSchema,
   captureSourceSchema,
   diagnosticsReportSchema,
   encoderInfoSchema,
@@ -13,11 +14,13 @@ import {
   recordingStatusSchema,
   recoveryScanResultSchema,
   recordingSmartZoomSchema,
+  recordingStorageInfoSchema,
   videoDeviceSchema,
 } from "@recordforge/contracts"
 import type {
   AudioDevice,
   BenchmarkReport,
+  CameraCapturePlan,
   CaptureSource,
   DiagnosticsReport,
   EncoderInfo,
@@ -28,6 +31,7 @@ import type {
   RecordingSmartZoom,
   RecordingStats,
   RecordingStatus,
+  RecordingStorageInfo,
   RecoveryScanResult,
   VideoDevice,
 } from "@recordforge/contracts"
@@ -47,6 +51,14 @@ export async function listVideoDevices(): Promise<VideoDevice[]> {
 
 export async function listBuiltinProfiles(): Promise<RecordingProfile[]> {
   return invokeValidated("list_builtin_profiles", undefined, z.array(recordingProfileSchema))
+}
+
+export async function planCameraTiers(deviceId: string): Promise<CameraCapturePlan[]> {
+  return invokeValidated("plan_camera_tiers", { deviceId }, z.array(cameraCapturePlanSchema))
+}
+
+export async function getRecordingStorageInfo(): Promise<RecordingStorageInfo> {
+  return invokeValidated("get_recording_storage_info", undefined, recordingStorageInfoSchema)
 }
 
 export async function getRecordingSmartZoom(

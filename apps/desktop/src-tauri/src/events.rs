@@ -1,7 +1,7 @@
 use tauri::Emitter;
 
 use crate::capture::manifest::RecordingMarker;
-use crate::capture::session::RecordingStatus;
+use crate::capture::session::{AudioLevels, RecordingStatus};
 use crate::database::media::MediaJob;
 use crate::errors::Result;
 
@@ -15,6 +15,7 @@ pub mod event_names {
     pub const RECORDER_MARKER: &str = "recorder-marker";
     pub const REQUEST_DISCARD_CONFIRMATION: &str = "request-discard-confirmation";
     pub const RECORDER_FINALIZATION_PROGRESS: &str = "recorder-finalization-progress";
+    pub const RECORDER_AUDIO_LEVEL: &str = "recorder-audio-level";
     pub const LICENSE_CHANGED: &str = "license-changed";
 }
 
@@ -78,6 +79,17 @@ pub fn emit_finalization_progress(
         .emit(event_names::RECORDER_FINALIZATION_PROGRESS, progress)
         .map_err(|e| {
             crate::errors::InternalError::Unknown(format!("emit finalization progress: {e}")).into()
+        })
+}
+
+/// Broadcast the live audio levels (`{ microphone, systemAudio }` peaks,
+/// `null` when unavailable) for the recording HUD meter. Emitted by the
+/// ~12 Hz ticker while the recorder state is `Recording`.
+pub fn emit_recorder_audio_level(handle: &tauri::AppHandle, levels: &AudioLevels) -> Result<()> {
+    handle
+        .emit(event_names::RECORDER_AUDIO_LEVEL, levels)
+        .map_err(|e| {
+            crate::errors::InternalError::Unknown(format!("emit recorder audio level: {e}")).into()
         })
 }
 

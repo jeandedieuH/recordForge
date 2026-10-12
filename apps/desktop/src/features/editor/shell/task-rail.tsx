@@ -48,6 +48,8 @@ export const EDITOR_TASKS: TaskDefinition[] = [
 interface TaskRailProps {
   activeTask: EditorTask
   onSelect: (task: EditorTask) => void
+  /** Tasks that do not apply to the open project (e.g. Cursor for camera recordings). */
+  hiddenTasks?: readonly EditorTask[]
   onToggleInspector?: () => void
   showInspectorToggle?: boolean
 }
@@ -55,6 +57,7 @@ interface TaskRailProps {
 export function TaskRail({
   activeTask,
   onSelect,
+  hiddenTasks,
   onToggleInspector,
   showInspectorToggle,
 }: TaskRailProps) {
@@ -105,7 +108,7 @@ export function TaskRail({
       aria-label="Editor tasks"
       aria-orientation="vertical"
     >
-      {EDITOR_TASKS.map((task) => {
+      {EDITOR_TASKS.filter((task) => !hiddenTasks?.includes(task.value)).map((task) => {
         const Icon = task.icon
         const isActive = activeTask === task.value
         return (

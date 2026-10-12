@@ -60,6 +60,11 @@ export function AppShell() {
   const [activeView, setActiveView] = useState<View>("library")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [isNewRecordingOpen, setIsNewRecordingOpen] = useState(false)
+  // Split-button choice for the next modal open ("screen" | "camera" |
+  // undefined = last-used mode); cleared when the modal closes.
+  const [newRecordingInitialSource, setNewRecordingInitialSource] = useState<
+    "screen" | "camera" | undefined
+  >(undefined)
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false)
   // Opened by the Rust `request-discard-confirmation` event (tray menu): the
   // destructive action itself runs only after the user confirms here.
@@ -501,7 +506,13 @@ export function AppShell() {
     <>
       <div className="flex h-screen flex-col bg-background text-foreground font-sans antialiased">
         {editorRecordingId ? <EditorSession recordingId={editorRecordingId} /> : null}
-        <Titlebar view={VIEW_TITLES[activeView]} onOpenRecord={() => setIsNewRecordingOpen(true)} />
+        <Titlebar
+          view={VIEW_TITLES[activeView]}
+          onOpenRecord={(source) => {
+            setNewRecordingInitialSource(source)
+            setIsNewRecordingOpen(true)
+          }}
+        />
 
         <div className="flex min-h-0 flex-1">
           {activeView === "editor" || activeView === "export" ? null : (
@@ -662,9 +673,13 @@ export function AppShell() {
         {/* New Recording Modal Overlay */}
         <NewRecordingModal
           open={isNewRecordingOpen}
-          onClose={() => setIsNewRecordingOpen(false)}
+          onClose={() => {
+            setIsNewRecordingOpen(false)
+            setNewRecordingInitialSource(undefined)
+          }}
           onStart={handleStartRecording}
           onNavigateToSettings={() => setActiveView("settings")}
+          initialSourceType={newRecordingInitialSource}
         />
 
         {/* Global licensing dialogs — Pro badges and the export gate share the

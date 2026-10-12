@@ -11,8 +11,10 @@ import {
   Scissors,
   Sparkles,
   Trash2,
+  Video,
 } from "lucide-react"
 import {
+  Badge,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -20,6 +22,7 @@ import {
 } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration } from "../../lib/format"
+import { isCameraRecording } from "../../lib/library"
 import { toAssetUrl } from "../editor/media/derivative-resources"
 
 interface LibraryItemCardProps {
@@ -171,7 +174,13 @@ export function LibraryItemCard({
         </div>
 
         {/* Status Badge Tag */}
-        <div className="mt-1 flex items-center">
+        <div className="mt-1 flex items-center gap-1.5">
+          {isCameraRecording(recording) ? (
+            <Badge variant="default" className="gap-1 text-[10px] uppercase tracking-wider">
+              <Video className="size-3" aria-hidden />
+              <span>Camera</span>
+            </Badge>
+          ) : null}
           {isUploaded ? (
             <div className="inline-flex items-center gap-1.5 rounded border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-mono font-semibold tracking-wider text-success uppercase">
               <CloudCheck className="size-3" />

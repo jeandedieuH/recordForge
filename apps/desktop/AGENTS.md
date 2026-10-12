@@ -4,6 +4,8 @@
 
 The desktop app contains the React UI and the Tauri Rust backend. Work here for UI features, Tauri commands, window/tray behavior, and native integrations.
 
+Recording sources cover screen, window, region, and camera-only (`source.kind === "camera"` — the webcam is the primary capture; see `docs/specs/spec-004-recording-modes.md`).
+
 ## Commands
 
 ```bash

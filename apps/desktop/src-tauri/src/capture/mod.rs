@@ -1,5 +1,7 @@
 pub mod audio;
 pub mod benchmark;
+mod camera_encode;
+pub mod camera_plan;
 pub(crate) mod camera_timing;
 pub mod config;
 pub mod cursor;

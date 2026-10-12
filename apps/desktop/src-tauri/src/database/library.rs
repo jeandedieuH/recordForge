@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::capture::config::builtin_profiles;
+use crate::capture::config::resolve_profile_by_id;
 use crate::capture::manifest::{RecordingManifest, RecordingMarker};
 use crate::capture::source::CaptureSource;
 use crate::errors::{InternalError, Result};
@@ -133,7 +133,13 @@ fn insert_recording_with_status(
     let id = uuid::Uuid::new_v4().to_string();
     let session_id = manifest.session_id.clone();
     let short = &session_id[..session_id.len().min(8)];
-    let name = format!("Recording {short}");
+    // Camera sessions get a camera-flavored default name so the library list
+    // distinguishes them from screen recordings at a glance.
+    let name = if manifest.source.kind == "camera" {
+        format!("Camera {short}")
+    } else {
+        format!("Recording {short}")
+    };
     let source_json = serde_json::to_string(&manifest.source)
         .map_err(|e| InternalError::Storage(format!("serialize source: {e}")))?;
     let markers_json = serde_json::to_string(&manifest.markers)
@@ -196,6 +202,26 @@ fn insert_recording_with_status(
         thumbnail_path: manifest.thumbnail_path.clone(),
         markers: manifest.markers.clone(),
     })
+}
+
+/// Overwrite a library row's dimensions with the probed output stream values.
+/// Camera recordings insert with the tier's profile budget first; the real
+/// negotiated geometry can be smaller, so the row is corrected after the
+/// output is probed. `fps` rounds to the integer the column stores (29.97 → 30).
+pub fn update_recording_dimensions(
+    conn: &Connection,
+    recording_id: &str,
+    width: i32,
+    height: i32,
+    fps: f64,
+) -> Result<()> {
+    let updated_at = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE recordings SET width = ?1, height = ?2, fps = ?3, updated_at = ?4 WHERE id = ?5",
+        params![width, height, fps.round() as i64, updated_at, recording_id],
+    )
+    .map_err(|e| InternalError::Storage(format!("update recording dimensions: {e}")))?;
+    Ok(())
 }
 
 /// Insert a new library record for a trimmed recording.
@@ -479,9 +505,79 @@ fn row_to_recording(row: &Row<'_>) -> std::result::Result<LibraryRecording, rusq
 }
 
 fn resolve_profile_dimensions(profile_name: &str) -> (i32, i32, i32) {
-    builtin_profiles()
-        .into_iter()
-        .find(|p| p.id == profile_name)
+    resolve_profile_by_id(profile_name)
         .map(|p| (p.width, p.height, p.fps))
         .unwrap_or((1920, 1080, 30))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::manifest::RecordingManifest;
+    use crate::capture::source::Bounds;
+
+    fn test_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        conn
+    }
+
+    fn camera_source() -> CaptureSource {
+        CaptureSource {
+            kind: "camera".into(),
+            id: "cam-0".into(),
+            name: "Integrated Camera".into(),
+            bounds: Bounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        }
+    }
+
+    #[test]
+    fn camera_recordings_default_to_camera_named_rows() {
+        let mut conn = test_conn();
+        let manifest = RecordingManifest::new(
+            "cam-session-1",
+            "/tmp/work",
+            camera_source(),
+            "camera-balanced",
+        );
+        let recording = insert_recording(&mut conn, &manifest, 1024).expect("insert");
+        assert!(recording.name.starts_with("Camera "), "{}", recording.name);
+        assert_eq!(recording.source.kind, "camera");
+
+        // Screen sources keep the original "Recording {short}" default.
+        let mut screen = camera_source();
+        screen.kind = "display".into();
+        let manifest =
+            RecordingManifest::new("screen-session-1", "/tmp/work", screen, "low-impact");
+        let recording = insert_recording(&mut conn, &manifest, 1024).expect("insert");
+        assert!(
+            recording.name.starts_with("Recording "),
+            "{}",
+            recording.name
+        );
+    }
+
+    #[test]
+    fn update_recording_dimensions_overwrites_row_values() {
+        let mut conn = test_conn();
+        let manifest = RecordingManifest::new(
+            "cam-session-2",
+            "/tmp/work",
+            camera_source(),
+            "camera-balanced",
+        );
+        let recording = insert_recording(&mut conn, &manifest, 1024).expect("insert");
+        // The insert seeds the tier budget (1080p/30); the probed output
+        // overwrites it with the negotiated geometry.
+        update_recording_dimensions(&conn, &recording.id, 1280, 720, 29.97).expect("update dims");
+        let updated = get_recording(&conn, &recording.id).expect("get recording");
+        assert_eq!(updated.width, 1280);
+        assert_eq!(updated.height, 720);
+        assert_eq!(updated.fps, 30, "29.97 rounds to the stored integer");
+    }
 }

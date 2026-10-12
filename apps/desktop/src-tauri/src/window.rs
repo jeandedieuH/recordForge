@@ -517,6 +517,21 @@ fn primary_monitor_bounds(app: &tauri::AppHandle) -> Option<Bounds> {
     })
 }
 
+/// Screen rectangle recording UI (countdown window) covers when the source
+/// is a camera: the monitor under the cursor on Windows, else the primary
+/// monitor. A camera source's `bounds` describe an output budget, never a
+/// display rectangle — they must not be used here.
+pub fn camera_countdown_bounds(app: &tauri::AppHandle) -> Bounds {
+    monitor_under_cursor()
+        .or_else(|| primary_monitor_bounds(app))
+        .unwrap_or(Bounds {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        })
+}
+
 /// Dedicated countdown window shown while the main application is minimized.
 pub struct CountdownWindow;
 impl CountdownWindow {

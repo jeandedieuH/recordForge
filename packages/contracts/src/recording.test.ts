@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest"
+import cameraTiersFixture from "../../../tooling/fixtures/camera-tiers.json"
 import {
   audioDeviceSchema,
   benchmarkReportSchema,
+  cameraCapturePlanSchema,
+  cameraTierBudget,
+  cameraTiers,
+  recordingStorageInfoSchema,
   captureDiagnosticsSchema,
   captureProgressSchema,
   captureSourceSchema,
@@ -10,6 +15,7 @@ import {
   encoderInfoSchema,
   exportOptionsSchema,
   libraryRecordingSchema,
+  reconcileCameraDevice,
   reconcileCaptureSource,
   reconcileMicrophone,
   reconcileProfile,
@@ -28,6 +34,7 @@ import {
   videoDeviceSchema,
   webcamPreviewModeSchema,
 } from "./recording"
+import type { CameraProfileId } from "./recording"
 import { mediaMetadataSchema } from "./media"
 
 describe("recording contracts", () => {
@@ -89,6 +96,158 @@ describe("recording contracts", () => {
     }
 
     expect(mediaMetadataSchema.parse(metadata)).toMatchObject(metadata)
+  })
+
+  it("validates a camera capture source", () => {
+    const source = {
+      kind: "camera" as const,
+      id: "USB Video Device",
+      name: "Integrated Webcam",
+      // Camera bounds carry the tier's output budget, not a screen rect.
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+
+    expect(captureSourceSchema.parse(source)).toEqual(source)
+  })
+
+  it("validates a camera source in manifest and library payloads", () => {
+    const cameraSource = {
+      kind: "camera" as const,
+      id: "cam-1",
+      name: "Studio Camera",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+
+    const manifest = recordingManifestSchema.parse({
+      version: 1,
+      sessionId: "session-camera",
+      state: "completed",
+      createdAt: "2026-08-02T12:00:00.000Z",
+      updatedAt: "2026-08-02T12:00:01.000Z",
+      source: cameraSource,
+      profileName: "camera-balanced",
+      workDir: "C:/temp/session-camera",
+      fragments: [],
+    })
+    expect(manifest.source.kind).toBe("camera")
+
+    const recording = libraryRecordingSchema.parse({
+      id: "rec-cam",
+      sessionId: "session-camera",
+      name: "Talking head",
+      createdAt: "2026-08-02T12:00:00.000Z",
+      updatedAt: "2026-08-02T12:00:01.000Z",
+      durationMs: 5000,
+      sizeBytes: 2048,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      status: "completed",
+      source: cameraSource,
+      profileName: "camera-balanced",
+      workDir: "C:/temp/session-camera",
+    })
+    expect(recording.source.kind).toBe("camera")
+  })
+
+  it("accepts each camera profile with a camera source", () => {
+    const source = {
+      kind: "camera" as const,
+      id: "cam-1",
+      name: "Studio Camera",
+      bounds: { x: 0, y: 0, width: 3840, height: 2160 },
+    }
+    for (const profile of [
+      "camera-low",
+      "camera-balanced",
+      "camera-high",
+      "camera-ultra",
+    ] as const) {
+      const parsed = recordingConfigSchema.parse({
+        source,
+        profile,
+        captureMicrophone: true,
+        captureSystemAudio: false,
+        captureWebcam: false,
+      })
+      expect(parsed.profile).toBe(profile)
+      expect(parsed.source.kind).toBe("camera")
+    }
+  })
+
+  it("still accepts the legacy camera-only id and screen profiles", () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-1",
+      name: "Main Display",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    for (const profile of ["camera-only", "balanced"] as const) {
+      const parsed = recordingConfigSchema.parse({
+        source,
+        profile,
+        captureMicrophone: false,
+        captureSystemAudio: false,
+        captureWebcam: false,
+      })
+      expect(parsed.profile).toBe(profile)
+    }
+  })
+
+  it("validates a camera capture plan", () => {
+    const plan = {
+      profileId: "camera-balanced" as const,
+      input: {
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        pixelFormat: "nv12",
+        codec: null,
+      },
+      outputWidth: 1920,
+      outputHeight: 1080,
+      outputFps: 30,
+      videoBitrateKbps: 6842,
+      maxBitrateKbps: 10263,
+      bufferKbps: 10263,
+      crf: 21,
+      limitedByCamera: false,
+    }
+    expect(cameraCapturePlanSchema.parse(plan)).toEqual(plan)
+
+    // The device-defaults attempt has no negotiated input mode.
+    const defaults = { ...plan, input: null }
+    expect(cameraCapturePlanSchema.parse(defaults).input).toBeNull()
+
+    // Camera plans must reference a camera tier, not a screen profile.
+    expect(() => cameraCapturePlanSchema.parse({ ...plan, profileId: "balanced" })).toThrow()
+  })
+
+  it("cameraTiers matches the shared camera-tiers fixture", () => {
+    // The fixture is the single source of truth for BOTH languages — the
+    // Rust parity test in `capture/config.rs` asserts the same fields
+    // against `camera_profiles()`/`camera_tier_spec()`.
+    expect(cameraTiers).toHaveLength(cameraTiersFixture.length)
+    for (const [index, tier] of cameraTiers.entries()) {
+      const fixture = cameraTiersFixture[index]
+      expect(tier.id).toBe(fixture.id)
+      expect(tier.label).toBe(fixture.label)
+      expect(tier.width).toBe(fixture.width)
+      expect(tier.height).toBe(fixture.height)
+      expect(tier.fps).toBe(fixture.fps)
+    }
+    expect(cameraTierBudget("camera-balanced")).toEqual(cameraTiers[1])
+    expect(cameraTierBudget("low-impact" as CameraProfileId)).toBeUndefined()
+  })
+
+  it("validates recording storage info", () => {
+    expect(recordingStorageInfoSchema.parse({ freeBytes: 12_884_901_888 })).toEqual({
+      freeBytes: 12_884_901_888,
+    })
+    // An unreadable stat degrades to null, not a parse failure.
+    expect(recordingStorageInfoSchema.parse({ freeBytes: null }).freeBytes).toBeNull()
+    expect(recordingStorageInfoSchema.parse({}).freeBytes).toBeUndefined()
+    expect(() => recordingStorageInfoSchema.parse({ freeBytes: -1 })).toThrow()
   })
 
   it("validates a display capture source", () => {
@@ -580,6 +739,112 @@ describe("recording contracts", () => {
         webcamId: "cam-external-4k",
       })
       expect(result).toEqual({ id: "cam-built-in", enabled: true })
+    })
+
+    it("parses stored preferences from before camera mode existed", () => {
+      // Old JSON has no camera keys and may carry the legacy "camera-only"
+      // screen profile id — it must parse with the new defaults filled in.
+      const parsed = recordingPreferencesSchema.parse({
+        sourceType: "screen",
+        profile: "camera-only",
+        microphoneEnabled: true,
+      })
+      expect(parsed.sourceType).toBe("screen")
+      expect(parsed.profile).toBe("camera-only")
+      expect(parsed.cameraProfile).toBe("camera-balanced")
+      expect(parsed.cameraPreviewMode).toBe("standard")
+      expect(parsed.cameraMirrorPreview).toBe(true)
+      expect(parsed.cameraFramingGuide).toBe(false)
+    })
+
+    it("round-trips camera-mode preferences", () => {
+      const parsed = recordingPreferencesSchema.parse({
+        ...defaultRecordingPreferences,
+        sourceType: "camera",
+        cameraProfile: "camera-ultra",
+        cameraPreviewMode: "off",
+        cameraMirrorPreview: false,
+        cameraFramingGuide: true,
+      })
+      expect(parsed.sourceType).toBe("camera")
+      expect(parsed.cameraProfile).toBe("camera-ultra")
+      expect(parsed.cameraPreviewMode).toBe("off")
+      expect(parsed.cameraMirrorPreview).toBe(false)
+      expect(parsed.cameraFramingGuide).toBe(true)
+      // The screen profile is untouched by camera tier selection.
+      expect(parsed.profile).toBe("low-impact")
+    })
+
+    it("falls back to a screen source for stored camera-mode preferences", () => {
+      const sources = [
+        {
+          kind: "display" as const,
+          id: "disp-1",
+          name: "Main Monitor",
+          bounds: { x: 0, y: 0, width: 2560, height: 1440 },
+        },
+      ]
+      const result = reconcileCaptureSource(sources, {
+        ...defaultRecordingPreferences,
+        sourceType: "camera",
+      })
+      expect(result.sourceType).toBe("screen")
+      expect(result.source?.kind).toBe("display")
+    })
+
+    describe("reconcileCameraDevice", () => {
+      const cams = [
+        { id: "cam-built-in", name: "HD Web Camera", kind: "webcam" as const, isDefault: true },
+        { id: "cam-usb", name: "USB Studio Cam", kind: "webcam" as const, isDefault: false },
+      ]
+
+      it("matches the stored device id", () => {
+        expect(
+          reconcileCameraDevice(cams, { ...defaultRecordingPreferences, webcamId: "cam-usb" }),
+        ).toEqual({ id: "cam-usb" })
+      })
+
+      it("matches the stored name when the id changed", () => {
+        const rekeyed = [
+          { ...cams[0], id: "cam-new-1" },
+          { ...cams[1], id: "cam-new-2" },
+        ]
+        expect(
+          reconcileCameraDevice(rekeyed, {
+            ...defaultRecordingPreferences,
+            webcamId: "cam-usb",
+            webcamName: "USB Studio Cam",
+          }),
+        ).toEqual({ id: "cam-new-2" })
+      })
+
+      it("prefers the default-flagged camera over list order", () => {
+        const reordered = [cams[1], cams[0]]
+        expect(reconcileCameraDevice(reordered, { ...defaultRecordingPreferences })).toEqual({
+          id: "cam-built-in",
+        })
+      })
+
+      it("falls back to the first camera when none is default", () => {
+        const noDefault = cams.map((cam) => ({ ...cam, isDefault: false }))
+        expect(reconcileCameraDevice(noDefault, { ...defaultRecordingPreferences })).toEqual({
+          id: "cam-built-in",
+        })
+      })
+
+      it("returns an empty id when no camera exists", () => {
+        expect(reconcileCameraDevice([], defaultRecordingPreferences)).toEqual({ id: "" })
+      })
+
+      it("ignores webcamEnabled=false — the camera is the source", () => {
+        expect(
+          reconcileCameraDevice(cams, {
+            ...defaultRecordingPreferences,
+            webcamEnabled: false,
+            webcamId: "cam-usb",
+          }),
+        ).toEqual({ id: "cam-usb" })
+      })
     })
 
     it("reconciles capture source for screen, window fallback, and custom region", () => {

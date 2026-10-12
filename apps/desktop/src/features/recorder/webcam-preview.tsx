@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Video, VideoOff } from "lucide-react"
 import { Skeleton } from "@recordforge/ui"
+import { matchDeviceLabel } from "./camera/device-match"
 
 interface WebcamPreviewProps {
   deviceName: string
@@ -39,7 +40,7 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
         // granted camera access to this origin before.
         const devices = await navigator.mediaDevices.enumerateDevices()
         const videoDevices = devices.filter((d) => d.kind === "videoinput")
-        let matched = videoDevices.find((d) => d.label && matchDeviceName(d.label, deviceName))
+        let matched = videoDevices.find((d) => d.label && matchDeviceLabel(d.label, deviceName))
 
         if (!matched) {
           // No labels yet, so request one-time permission to reveal them.
@@ -51,7 +52,9 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
 
           const labeledDevices = await navigator.mediaDevices.enumerateDevices()
           const labeledVideoDevices = labeledDevices.filter((d) => d.kind === "videoinput")
-          matched = labeledVideoDevices.find((d) => d.label && matchDeviceName(d.label, deviceName))
+          matched = labeledVideoDevices.find(
+            (d) => d.label && matchDeviceLabel(d.label, deviceName),
+          )
         }
 
         if (!matched) {
@@ -117,21 +120,4 @@ export function WebcamPreview({ deviceName }: WebcamPreviewProps) {
       )}
     </div>
   )
-}
-
-function matchDeviceName(label: string, requestedName: string): boolean {
-  if (!label || !requestedName) return false
-
-  const a = label.trim().toLowerCase()
-  const b = requestedName.trim().toLowerCase()
-
-  if (a === b) return true
-  if (a.includes(b) || b.includes(a)) return true
-
-  // DirectShow devices sometimes expose a trailing USB id in parentheses.
-  // Web browser labels may contain an extra "(046d:0825)" style suffix.
-  const aBase = a.replace(/\s*\([^)]*\)\s*$/, "").trim()
-  const bBase = b.replace(/\s*\([^)]*\)\s*$/, "").trim()
-
-  return aBase === bBase || aBase.includes(bBase) || bBase.includes(aBase)
 }

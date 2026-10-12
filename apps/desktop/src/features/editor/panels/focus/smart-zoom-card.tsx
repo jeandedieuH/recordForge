@@ -8,6 +8,8 @@ interface SmartZoomCardProps {
   preset: ZoomPreset
   onPresetChange: (preset: ZoomPreset) => void
   telemetryStatus: "loading" | "available" | "unavailable"
+  /** Camera-source recordings never carry cursor telemetry. */
+  isCameraRecording?: boolean
   onReviewSuggestions: () => void
   disabled?: boolean
 }
@@ -16,6 +18,7 @@ export const SmartZoomCard = memo(function SmartZoomCard({
   preset,
   onPresetChange,
   telemetryStatus,
+  isCameraRecording = false,
   onReviewSuggestions,
   disabled = false,
 }: SmartZoomCardProps) {
@@ -55,7 +58,11 @@ export const SmartZoomCard = memo(function SmartZoomCard({
           role="status"
         >
           <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-          <span>No cursor telemetry detected in recording</span>
+          <span>
+            {isCameraRecording
+              ? "Camera recordings have no cursor telemetry — Smart Zoom needs cursor data. Add manual zoom instead."
+              : "No cursor telemetry detected in recording"}
+          </span>
         </div>
       ) : null}
 

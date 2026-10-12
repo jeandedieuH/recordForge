@@ -137,6 +137,8 @@ pub fn run() {
             commands::recording::list_audio_devices,
             commands::recording::list_video_devices,
             commands::recording::list_builtin_profiles,
+            commands::recording::plan_camera_tiers,
+            commands::recording::get_recording_storage_info,
             commands::recording::start_recording,
             commands::recording::prepare_recording,
             commands::recording::confirm_recording_start,

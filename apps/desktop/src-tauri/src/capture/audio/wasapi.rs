@@ -11,7 +11,7 @@ use crate::errors::Result;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -267,6 +267,10 @@ pub struct WasapiCaptureSession {
     channels: u16,
     sample_format: WasapiSampleFormat,
     stop_requested: Arc<AtomicBool>,
+    /// Peak amplitude since the last `level()` read as `f32` bits, shared
+    /// with the UI meter. The worker `fetch_max`es per packet; the read
+    /// `swap`s it back to 0 — allocation-free and lock-free on both ends.
+    level_bits: Arc<AtomicU32>,
     worker: Option<JoinHandle<std::result::Result<WasapiWorkerResult, String>>>,
     timing: Option<AudioCaptureTiming>,
 }
@@ -294,6 +298,8 @@ impl WasapiCaptureSession {
         let sample_format = options.sample_format;
         let stop_requested = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop_requested);
+        let level_bits = Arc::new(AtomicU32::new(0f32.to_bits()));
+        let worker_level = Arc::clone(&level_bits);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 
         #[cfg(windows)]
@@ -305,7 +311,7 @@ impl WasapiCaptureSession {
                     WasapiCaptureKind::SystemLoopback => "system-loopback",
                 }
             ))
-            .spawn(move || capture_worker(options, worker_stop, ready_tx))
+            .spawn(move || capture_worker(options, worker_stop, ready_tx, worker_level))
             .map_err(|error| {
                 crate::errors::InternalError::Capture(format!(
                     "start WASAPI capture worker: {error}"
@@ -359,6 +365,7 @@ impl WasapiCaptureSession {
             channels,
             sample_format,
             stop_requested,
+            level_bits,
             worker: Some(worker),
             timing: None,
         })
@@ -438,6 +445,16 @@ impl super::super::traits::AudioTrack for WasapiCaptureSession {
 
     fn timing(&self) -> Option<AudioCaptureTiming> {
         self.timing()
+    }
+
+    fn level(&self) -> Option<f32> {
+        // Level metering is a WASAPI-only feature for now; the
+        // CoreAudio/Linux paths keep the trait's `None` default.
+        if cfg!(windows) {
+            Some(f32::from_bits(self.level_bits.swap(0, Ordering::Relaxed)))
+        } else {
+            None
+        }
     }
 
     fn align_to_timeline(&self, head_trim: Duration, duration: Duration) -> Result<u64> {
@@ -541,14 +558,40 @@ fn capture_worker(
     options: WasapiCaptureOptions,
     stop_requested: Arc<AtomicBool>,
     ready_tx: SyncSender<std::result::Result<Instant, String>>,
+    level_bits: Arc<AtomicU32>,
 ) -> std::result::Result<WasapiWorkerResult, String> {
     if let Err(error) = initialize_mta().ok() {
         return signal_start_error(&ready_tx, format!("initialize WASAPI COM: {error}"));
     }
 
-    let result = capture_worker_inner(options, stop_requested, ready_tx);
+    let result = capture_worker_inner(options, stop_requested, ready_tx, level_bits);
     deinitialize();
     result
+}
+
+/// Peak absolute amplitude of a PCM buffer normalized to 0..1 — the meter
+/// level reported for the most recent capture buffer. `chunks_exact` keeps
+/// the scan free of allocation and per-sample bounds checks.
+#[cfg(any(windows, test))]
+fn peak_amplitude(pcm: &[u8], format: AudioSampleFormat) -> f32 {
+    match format {
+        AudioSampleFormat::Pcm16 => pcm
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| i16::from_le_bytes(*bytes) as i32)
+            .map(i32::unsigned_abs)
+            .max()
+            .map(|peak| (peak as f32 / i16::MAX as f32).min(1.0))
+            .unwrap_or(0.0),
+        AudioSampleFormat::Float32 => pcm
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes).abs())
+            .fold(0.0f32, f32::max)
+            .min(1.0),
+    }
 }
 
 #[cfg(windows)]
@@ -556,6 +599,7 @@ fn capture_worker_inner(
     options: WasapiCaptureOptions,
     stop_requested: Arc<AtomicBool>,
     ready_tx: SyncSender<std::result::Result<Instant, String>>,
+    level_bits: Arc<AtomicU32>,
 ) -> std::result::Result<WasapiWorkerResult, String> {
     let enumerator = DeviceEnumerator::new().map_err(|error| error.to_string());
     let enumerator = match enumerator {
@@ -807,6 +851,16 @@ fn capture_worker_inner(
             if buffer_info.flags.silent {
                 packet[..payload_len].fill(0);
             }
+            // Meter level accumulates the peak ACROSS packets since the last
+            // read: the UI samples ~8x slower than packets arrive, so a
+            // last-packet store would drop ~90% of the signal and under-read.
+            // `fetch_max` on the f32 bits is exact — non-negative floats
+            // order identically as bits and `peak_amplitude` never yields
+            // NaN.
+            level_bits.fetch_max(
+                peak_amplitude(&packet[..payload_len], options.sample_format).to_bits(),
+                Ordering::Relaxed,
+            );
             if let Err(error) = file.write_all(&packet[..payload_len]) {
                 break 'capture Err(format!("write WASAPI audio packet: {error}"));
             }

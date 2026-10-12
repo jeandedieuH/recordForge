@@ -6,7 +6,7 @@ use super::audio::wav::{
     align_wav_to_duration, frames_to_duration, read_wav_format, snap_wav_to_whole_frames,
     WAV_HEADER_SIZE,
 };
-use super::config::builtin_profiles;
+use super::config::resolve_profile_by_id;
 use super::disk;
 
 use super::manifest::{RecorderState, RecordingManifest};
@@ -295,10 +295,10 @@ fn recover_webcam_asset(
         if manifest.webcam_fragments.is_empty() {
             return Ok(None);
         }
-        let Some(profile) = builtin_profiles()
-            .into_iter()
-            .find(|profile| profile.id == manifest.profile_name)
-        else {
+        // Resolve through the full table (screen + camera tiers + legacy) so
+        // sessions recorded under a retired id like `camera-only` still
+        // recover their sidecar.
+        let Some(profile) = resolve_profile_by_id(&manifest.profile_name) else {
             return Ok(None);
         };
         let mut segments = Vec::with_capacity(manifest.webcam_fragments.len());
@@ -552,9 +552,7 @@ fn mux_orphaned_segment_audio(
         });
     }
 
-    let (audio_codec, audio_bitrate) = builtin_profiles()
-        .into_iter()
-        .find(|profile| profile.id == manifest.profile_name)
+    let (audio_codec, audio_bitrate) = resolve_profile_by_id(&manifest.profile_name)
         .map(|p| (p.audio_codec, p.audio_bitrate_kbps))
         .unwrap_or_else(|| ("pcm_s16le".to_string(), 128));
 

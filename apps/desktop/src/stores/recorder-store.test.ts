@@ -39,6 +39,8 @@ describe("recorder-store preferences & fallback", () => {
       selectedSource: null,
       selectedSourceType: "screen",
       selectedProfileId: "low-impact",
+      selectedCameraId: "",
+      selectedCameraProfileId: "camera-balanced",
       selectedMicrophoneId: "",
       selectedSystemAudioId: "",
       selectedWebcamId: "",
@@ -48,6 +50,10 @@ describe("recorder-store preferences & fallback", () => {
         sourceName: null,
         regionBounds: null,
         profile: "low-impact",
+        cameraProfile: "camera-balanced",
+        cameraPreviewMode: "standard",
+        cameraMirrorPreview: true,
+        cameraFramingGuide: false,
         smartZoomEnabled: false,
         smartZoomPreset: "product-demo",
         microphoneEnabled: false,
@@ -489,6 +495,258 @@ describe("recorder-store preferences & fallback", () => {
         microphoneDeviceId: "{0.0.1.00000000}.{saved-mic-guid}",
         captureSystemAudio: true,
         systemAudioDeviceId: "{0.0.0.00000000}.{saved-sys-guid}",
+      }),
+      3,
+    )
+  })
+
+  it("builds a camera-mode config from the selected camera and tier", async () => {
+    const status: RecordingStatus = {
+      sessionId: "session-camera",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "camera",
+      sourceName: "Integrated Webcam",
+      microphoneActive: true,
+      systemAudioActive: false,
+      webcamActive: false,
+      error: null,
+    }
+    const prepare = vi.spyOn(recorderApi, "prepareRecording").mockResolvedValue("session-camera")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    useRecorderStore.setState({
+      selectedSourceType: "camera",
+      videoDevices: [{ id: "cam-1", name: "Integrated Webcam", kind: "webcam", isDefault: true }],
+      videoDevicesLoaded: true,
+      selectedCameraId: "cam-1",
+      selectedCameraProfileId: "camera-high",
+      audioDevices: [{ id: "mic-1", name: "Mic", kind: "microphone", isDefault: true }],
+      audioDevicesLoaded: true,
+      selectedMicrophoneId: "mic-1",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        sourceType: "camera",
+        cameraProfile: "camera-high",
+        cameraPreviewMode: "low",
+        microphoneEnabled: true,
+        microphoneId: "mic-1",
+        webcamEnabled: true,
+        webcamId: "cam-1",
+        // The screen-mode overlay toggle must NOT leak into a camera config.
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: {
+          kind: "camera",
+          id: "cam-1",
+          name: "Integrated Webcam",
+          bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        },
+        profile: "camera-high",
+        captureMicrophone: true,
+        microphoneDeviceId: "mic-1",
+        captureWebcam: false,
+        webcamDeviceId: undefined,
+        webcamPreviewMode: "low",
+        smartZoomEnabled: false,
+        captureKeystrokes: false,
+      }),
+      3,
+    )
+    expect(useRecorderStore.getState().preferences.sourceType).toBe("camera")
+  })
+
+  it("errors when no camera is available in camera mode", async () => {
+    const prepare = vi.spyOn(recorderApi, "prepareRecording")
+    useRecorderStore.setState({
+      selectedSourceType: "camera",
+      videoDevices: [],
+      videoDevicesLoaded: true,
+      audioDevicesLoaded: true,
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        sourceType: "camera",
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).not.toHaveBeenCalled()
+    expect(useRecorderStore.getState().error).toBe(
+      "No camera found. Connect a camera and try again.",
+    )
+    expect(useRecorderStore.getState().pendingAction).toBeNull()
+  })
+
+  it("auto-enables the default mic the first time camera mode is chosen", async () => {
+    // Camera selected before devices were enumerated: the affordance fires
+    // when loadAudioDevices settles.
+    useRecorderStore.setState({
+      selectedSourceType: "camera",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        sourceType: "camera",
+        microphoneEnabled: false,
+        microphoneId: null,
+      },
+    })
+    vi.spyOn(recorderApi, "listAudioDevices").mockResolvedValue([
+      { id: "mic-1", name: "Built-in Mic", kind: "microphone", isDefault: true },
+    ])
+
+    await useRecorderStore.getState().loadAudioDevices()
+
+    const state = useRecorderStore.getState()
+    expect(state.preferences.microphoneEnabled).toBe(true)
+    expect(state.preferences.microphoneId).toBe("mic-1")
+    expect(state.selectedMicrophoneId).toBe("mic-1")
+  })
+
+  it("never re-enables a mic the user configured then turned off", async () => {
+    vi.spyOn(recorderApi, "listAudioDevices").mockResolvedValue([
+      { id: "mic-1", name: "Built-in Mic", kind: "microphone", isDefault: true },
+    ])
+    useRecorderStore.setState({
+      audioDevices: [{ id: "mic-1", name: "Built-in Mic", kind: "microphone", isDefault: true }],
+      audioDevicesLoaded: true,
+      preferencesLoaded: true,
+    })
+
+    // Simulate: mic was configured once, then disabled — microphoneId is set.
+    useRecorderStore.setState({
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        microphoneEnabled: false,
+        microphoneId: "mic-1",
+        microphoneName: "Built-in Mic",
+      },
+    })
+
+    useRecorderStore.getState().setSelectedSourceType("camera")
+
+    expect(useRecorderStore.getState().preferences.microphoneEnabled).toBe(false)
+  })
+
+  it("setSelectedCameraId persists the device without touching the overlay toggle", async () => {
+    useRecorderStore.setState({
+      videoDevices: [{ id: "cam-1", name: "Integrated Webcam", kind: "webcam", isDefault: true }],
+      videoDevicesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        webcamEnabled: false,
+      },
+    })
+
+    useRecorderStore.getState().setSelectedCameraId("cam-1")
+
+    const prefs = useRecorderStore.getState().preferences
+    expect(prefs.webcamId).toBe("cam-1")
+    expect(prefs.webcamName).toBe("Integrated Webcam")
+    // Overlay stays OFF — the recording camera and the sidecar are separate.
+    expect(prefs.webcamEnabled).toBe(false)
+  })
+
+  it("loadSources keeps camera mode while still selecting a display fallback", async () => {
+    const display = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    vi.spyOn(recorderApi, "listCaptureSources").mockResolvedValue([display])
+    useRecorderStore.setState({
+      selectedSourceType: "camera",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        sourceType: "camera",
+      },
+    })
+
+    await useRecorderStore.getState().loadSources()
+
+    const state = useRecorderStore.getState()
+    expect(state.selectedSourceType).toBe("camera")
+    expect(state.selectedSource).toEqual(display)
+  })
+
+  it("loadVideoDevices reconciles the camera device separately from the overlay", async () => {
+    vi.spyOn(recorderApi, "listVideoDevices").mockResolvedValue([
+      { id: "cam-1", name: "Integrated Webcam", kind: "webcam", isDefault: true },
+      { id: "cam-2", name: "USB Camera", kind: "webcam", isDefault: false },
+    ])
+    useRecorderStore.setState({
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        webcamEnabled: false,
+        webcamId: "cam-2",
+      },
+    })
+
+    await useRecorderStore.getState().loadVideoDevices()
+
+    const state = useRecorderStore.getState()
+    // Camera mode remembers the stored device even with the overlay off...
+    expect(state.selectedCameraId).toBe("cam-2")
+    // ...while the overlay reconciler respects `webcamEnabled: false`.
+    expect(state.selectedWebcamId).toBe("")
+  })
+
+  it("screen-mode start stays unchanged with a camera-mode preference stored", async () => {
+    const source = {
+      kind: "display" as const,
+      id: "display-0",
+      name: "Display 1",
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    }
+    const status: RecordingStatus = {
+      sessionId: "session-screen",
+      state: "countdown",
+      startedAt: null,
+      stoppedAt: null,
+      durationMs: 0,
+      recordedMs: 0,
+      sourceKind: "display",
+      sourceName: "Display 1",
+      microphoneActive: false,
+      systemAudioActive: false,
+      webcamActive: false,
+      error: null,
+    }
+    const prepare = vi.spyOn(recorderApi, "prepareRecording").mockResolvedValue("session-screen")
+    vi.spyOn(recorderApi, "getRecordingStatus").mockResolvedValue(status)
+
+    useRecorderStore.setState({
+      sources: [source],
+      selectedSource: source,
+      selectedSourceType: "screen",
+      selectedCameraProfileId: "camera-ultra",
+      preferencesLoaded: true,
+      preferences: {
+        ...useRecorderStore.getState().preferences,
+        cameraProfile: "camera-ultra",
+      },
+    })
+
+    await useRecorderStore.getState().start()
+
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source,
+        profile: "low-impact",
+        captureWebcam: false,
       }),
       3,
     )

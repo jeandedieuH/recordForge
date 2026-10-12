@@ -10,6 +10,7 @@ import {
   Cloud,
 } from "lucide-react"
 import {
+  Badge,
   Button,
   DropdownMenu,
   DropdownMenuContent,
@@ -19,6 +20,7 @@ import {
 } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { formatDate, formatDuration, formatFileSize } from "../../lib/format"
+import { isCameraRecording } from "../../lib/library"
 import { toAssetUrl } from "../editor/media/derivative-resources"
 
 interface LibraryItemRowProps {
@@ -99,6 +101,12 @@ export function LibraryItemRow({
             <span className="shrink-0 rounded bg-overlay px-1.5 py-0.5 font-mono text-[10px] font-medium text-subtle-foreground">
               {formatDuration(recording.durationMs)}
             </span>
+            {isCameraRecording(recording) ? (
+              <Badge variant="default" className="shrink-0 gap-1 text-[10px] uppercase">
+                <Video className="size-3" aria-hidden />
+                <span>Camera</span>
+              </Badge>
+            ) : null}
           </div>
 
           <p className="mt-0.5 text-xs text-subtle-foreground truncate">

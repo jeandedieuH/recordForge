@@ -17,6 +17,8 @@ import { MediaPanel } from "../panels/media-panel"
 import { TitlesPanel } from "../panels/titles-panel"
 import { AnnotationsPanel } from "../panels/annotations-panel"
 import type { AnnotationDrawSettings } from "../annotations/annotation-tools"
+import { EmptyState } from "@recordforge/ui"
+import { isCameraRecording } from "../../../lib/library"
 import { FocusPanel } from "../panels/focus-panel"
 import { CursorPanel } from "../panels/cursor-panel"
 import { CaptionsPanel } from "../panels/captions-panel"
@@ -97,6 +99,19 @@ export function ActivePanel({
       case "focus":
         return <FocusPanel />
       case "cursor":
+        // The task is already hidden from the rail for camera recordings;
+        // this guard covers a "cursor" selection persisted from an earlier
+        // screen-recording session.
+        if (isCameraRecording(recording)) {
+          return (
+            <EmptyState
+              icon={MousePointer2}
+              title="No cursor data"
+              description="Camera recordings don't capture cursor telemetry, so there are no cursor effects to adjust. This panel is only useful for screen recordings."
+              className="m-3 border border-dashed border-border bg-surface-dim p-4"
+            />
+          )
+        }
         return <CursorPanel />
       case "captions":
         return <CaptionsPanel />
