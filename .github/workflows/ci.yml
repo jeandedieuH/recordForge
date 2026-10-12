@@ -82,7 +82,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev libdbus-1-dev libpipewire-0.3-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -135,7 +135,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev libdbus-1-dev libpipewire-0.3-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

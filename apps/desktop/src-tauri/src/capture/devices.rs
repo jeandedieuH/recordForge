@@ -187,6 +187,105 @@ pub fn parse_avfoundation_video_devices(text: &str) -> Vec<VideoDevice> {
     devices
 }
 
+/// An AVFoundation screen-capture device — a virtual display listed in the
+/// video section as `Capture screen N`, where N follows CG display order.
+#[derive(Debug, Clone)]
+pub struct AvFoundationScreenDevice {
+    /// Position in FFmpeg's avfoundation video-device list — accepted by
+    /// `-i` as the video-side device spec.
+    pub device_index: usize,
+    /// The N in `Capture screen N` — index into the CG display list.
+    pub display_index: usize,
+}
+
+/// List AVFoundation screen-capture devices on macOS via FFmpeg.
+#[cfg(target_os = "macos")]
+pub fn list_avfoundation_screen_devices(
+    ffmpeg_path: &str,
+) -> crate::errors::Result<Vec<AvFoundationScreenDevice>> {
+    let output = crate::process::create_command(ffmpeg_path)
+        .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .output()
+        .map_err(|e| {
+            crate::errors::InternalError::Media(format!("ffmpeg avfoundation list: {e}"))
+        })?;
+
+    let text = String::from_utf8_lossy(&output.stderr);
+    Ok(parse_avfoundation_screen_devices(&text))
+}
+
+/// Pure parser for the `Capture screen N` entries in the avfoundation video
+/// section. Separated for unit tests; shares the `[N] name` line format
+/// with [`parse_avfoundation_video_devices`].
+pub fn parse_avfoundation_screen_devices(text: &str) -> Vec<AvFoundationScreenDevice> {
+    let re =
+        Regex::new(r#"(?i)^\s*\[AVFoundation[^\]]*\]\s+\[(\d+)\]\s+capture\s+screen\s+(\d+)\s*$"#)
+            .expect("avfoundation screen regex is static and valid");
+
+    let mut in_video_section = false;
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("avfoundation video devices") {
+            in_video_section = true;
+            continue;
+        }
+        if lower.contains("avfoundation audio devices") {
+            in_video_section = false;
+            continue;
+        }
+        if in_video_section {
+            if let Some(caps) = re.captures(line) {
+                let device_index = caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok());
+                let display_index = caps.get(2).and_then(|m| m.as_str().parse::<usize>().ok());
+                if let (Some(device_index), Some(display_index)) = (device_index, display_index) {
+                    devices.push(AvFoundationScreenDevice {
+                        device_index,
+                        display_index,
+                    });
+                }
+            }
+        }
+    }
+    devices
+}
+
+/// Parse the `AVFoundation audio devices:` section into `(index, name)`
+/// pairs — the index is the `-i ":<index>"` audio-side device spec.
+pub fn parse_avfoundation_audio_devices(text: &str) -> Vec<(usize, String)> {
+    let re = Regex::new(r#"^\s*\[AVFoundation[^\]]*\]\s+\[(\d+)\]\s+(.+)$"#)
+        .expect("avfoundation audio regex is static and valid");
+
+    let mut in_audio_section = false;
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("avfoundation audio devices") {
+            in_audio_section = true;
+            continue;
+        }
+        if lower.contains("avfoundation video devices") {
+            in_audio_section = false;
+            continue;
+        }
+        if in_audio_section {
+            if let Some(caps) = re.captures(line) {
+                let index = caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok());
+                let name = caps
+                    .get(2)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default();
+                if let (Some(index), name) = (index, name) {
+                    if !name.is_empty() {
+                        devices.push((index, name));
+                    }
+                }
+            }
+        }
+    }
+    devices
+}
+
 /// List Video4Linux video capture devices on Linux.
 #[cfg(target_os = "linux")]
 fn list_v4l2_devices() -> Vec<VideoDevice> {
@@ -437,5 +536,28 @@ mod tests {
         assert_eq!(devices[1].id, "1");
         assert_eq!(devices[1].name, "OBS Virtual Camera");
         assert!(!devices[1].is_default);
+    }
+
+    #[test]
+    fn parses_avfoundation_screen_devices_with_indices() {
+        let screens = parse_avfoundation_screen_devices(FFMPEG_AVFOUNDATION_OUTPUT);
+        assert_eq!(screens.len(), 1);
+        assert_eq!(screens[0].device_index, 2);
+        assert_eq!(screens[0].display_index, 0);
+    }
+
+    #[test]
+    fn parses_avfoundation_audio_devices() {
+        let audio = parse_avfoundation_audio_devices(FFMPEG_AVFOUNDATION_OUTPUT);
+        assert_eq!(audio, vec![(0, "Built-in Microphone".to_string())]);
+    }
+
+    #[test]
+    fn screen_parser_handles_multiple_displays() {
+        let text = "[AVFoundation indev @ 0x1] AVFoundation video devices:\n[AVFoundation indev @ 0x1] [0] FaceTime HD Camera\n[AVFoundation indev @ 0x1] [1] Capture screen 0\n[AVFoundation indev @ 0x1] [2] Capture screen 1\n[AVFoundation indev @ 0x1] AVFoundation audio devices:\n";
+        let screens = parse_avfoundation_screen_devices(text);
+        assert_eq!(screens.len(), 2);
+        assert_eq!(screens[1].device_index, 2);
+        assert_eq!(screens[1].display_index, 1);
     }
 }

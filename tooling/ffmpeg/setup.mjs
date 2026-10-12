@@ -330,6 +330,53 @@ function verifyBinaries(targetTriple) {
       fatal(`${name} verification failed: ${err.message}`)
     }
   }
+
+  verifyPlatformCapabilities(targetTriple, config)
+}
+
+// The desktop capture pipeline depends on a specific set of FFmpeg capture
+// backends. Assert them on the pinned sidecar so a bad download or build that
+// dropped an indev is caught at setup time — not mid-recording.
+const REQUIRED_INDEVS = {
+  "x86_64-unknown-linux-gnu": ["x11grab", "v4l2", "pulse", "alsa"],
+}
+
+const REQUIRED_DEMUXERS = {
+  "x86_64-unknown-linux-gnu": ["lavfi"],
+}
+
+function verifyPlatformCapabilities(targetTriple, config) {
+  const indevs = REQUIRED_INDEVS[targetTriple] ?? []
+  const demuxers = REQUIRED_DEMUXERS[targetTriple] ?? []
+  if (!indevs.length && !demuxers.length) return
+
+  const ffmpegPath = join(BINARIES_DIR, `ffmpeg-${targetTriple}${config.ext}`)
+
+  if (indevs.length) {
+    const devices = execFileSync(ffmpegPath, ["-hide_banner", "-devices"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+    })
+    for (const indev of indevs) {
+      if (!devices.includes(` ${indev} `) && !devices.includes(` ${indev}\n`)) {
+        fatal(`ffmpeg sidecar is missing required Linux input device: ${indev}`)
+      }
+    }
+    log(`✓ indevs verified: ${indevs.join(", ")}`)
+  }
+
+  if (demuxers.length) {
+    const demuxList = execFileSync(ffmpegPath, ["-hide_banner", "-demuxers"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+    })
+    for (const demuxer of demuxers) {
+      if (!demuxList.includes(` ${demuxer} `) && !demuxList.includes(` ${demuxer}\n`)) {
+        fatal(`ffmpeg sidecar is missing required demuxer: ${demuxer}`)
+      }
+    }
+    log(`✓ demuxers verified: ${demuxers.join(", ")}`)
+  }
 }
 
 function writeStamp(targetTriple) {

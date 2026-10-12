@@ -3,7 +3,7 @@ import { ScrollText, Video } from "lucide-react"
 import { Button, Dialog, DialogContent, useToast } from "@recordforge/ui"
 import { openRegionPicker, openTeleprompter } from "../../lib/recorder"
 import { toErrorMessage } from "../../lib/errors"
-import { MODIFIER_NAME } from "../../lib/platform"
+import { isMac, MODIFIER_NAME } from "../../lib/platform"
 import { useRecorderStore } from "../../hooks/use-recorder"
 import { useLicenseStore } from "../../stores/license-store"
 import { ProBadge } from "../licensing/pro-badge"
@@ -13,6 +13,7 @@ import { AudioInputCards } from "./modal/audio-input-cards"
 import { WebcamOverlayCard } from "./modal/webcam-overlay-card"
 import { ScreenProcessingSection } from "./modal/screen-processing-section"
 import { CameraSourcePanel, type CameraStartBlocker } from "./camera/camera-source-panel"
+import { PermissionsBanner } from "./modal/permissions-banner"
 import { useRegionListener } from "./modal/use-region-listener"
 import { LOW_DISK_BYTES } from "./camera/camera-quality-picker"
 import { useCameraPreview } from "./camera/use-camera-preview"
@@ -48,12 +49,14 @@ export function NewRecordingModal({
     preferences,
     pendingAction,
     error,
+    permissions,
     setSelectedSource,
     setSelectedSourceType,
     loadSources,
     loadAudioDevices,
     loadVideoDevices,
     loadProfiles,
+    loadPermissions,
     clearError,
   } = useRecorderStore()
 
@@ -117,6 +120,7 @@ export function NewRecordingModal({
       loadAudioDevices(),
       loadVideoDevices(),
       loadProfiles(),
+      loadPermissions(),
     ]).then(() => {
       if (!cancelled && initialSourceType && !userPickedMode.current) {
         setSelectedSourceType(initialSourceType)
@@ -132,6 +136,7 @@ export function NewRecordingModal({
     loadAudioDevices,
     loadVideoDevices,
     loadProfiles,
+    loadPermissions,
     setSelectedSourceType,
   ])
 
@@ -190,9 +195,17 @@ export function NewRecordingModal({
       : startBlocker === "low-disk"
         ? "Free up disk space to start"
         : null
+  // macOS gate: a missing screen-recording grant makes ffmpeg fail deep in
+  // the capture path — block the start and let the banner explain why.
+  // `permissions === null` (report still loading) never blocks.
+  const screenPermissionBlocked =
+    isMac && !cameraMode && permissions != null && permissions.screenRecording !== "granted"
+  const screenBlockReason = screenPermissionBlocked
+    ? "Grant Screen Recording permission in System Settings to start"
+    : null
   const canStart = cameraMode
     ? !startBlocker && !isStarting
-    : Boolean(hasMatchingSource) && !isStarting
+    : Boolean(hasMatchingSource) && !isStarting && !screenPermissionBlocked
 
   function handleStartRecording() {
     if (!canStart) return
@@ -260,6 +273,7 @@ export function NewRecordingModal({
         {/* Modal Body — this area is the scroll container so the header and
             footer stay pinned when the window is shorter than the content. */}
         <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain p-6">
+          <PermissionsBanner cameraMode={cameraMode} />
           <SourceModeSwitcher value={selectedSourceType} onChange={handleSourceTypeChange} />
 
           {cameraMode ? (
@@ -315,7 +329,7 @@ export function NewRecordingModal({
               onClick={handleStartRecording}
               loading={isStarting}
               disabled={!canStart}
-              title={startBlockReason ?? undefined}
+              title={startBlockReason ?? screenBlockReason ?? undefined}
               className="flex items-center gap-3 rounded-lg bg-recording px-5 py-2 text-xs font-semibold text-white shadow-lg transition-all hover:bg-recording-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <span className="size-2 rounded-full bg-white motion-safe:animate-pulse" />

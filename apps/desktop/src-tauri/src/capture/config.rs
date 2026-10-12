@@ -212,8 +212,12 @@ impl RecordingConfig {
 
 /// Encoder preference shared by recording, export, and proxy jobs: use any
 /// detected hardware encoder before falling back to software x264.
+/// `h264_videotoolbox` leads the list — it is the only hardware encoder that
+/// ever probes available on macOS, and it is simply skipped by
+/// `recording_encoder_candidates` on platforms where detection fails.
 pub fn default_encoder_priority() -> Vec<String> {
     vec![
+        "h264_videotoolbox".into(),
         "h264_nvenc".into(),
         "h264_qsv".into(),
         "h264_amf".into(),

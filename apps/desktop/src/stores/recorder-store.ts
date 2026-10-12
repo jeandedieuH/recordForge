@@ -7,6 +7,7 @@ import type {
   DiagnosticsReport,
   EncoderInfo,
   FinalizationProgress,
+  PermissionKind,
   RecordingConfig,
   RecordingMarker,
   RecordingPreferences,
@@ -14,6 +15,7 @@ import type {
   RecordingStatus,
   RecoveryScanResult,
   ScreenProfileId,
+  SystemPermissionsReport,
   VideoDevice,
 } from "@recordforge/contracts"
 import {
@@ -33,13 +35,16 @@ import {
   discardRecording,
   getDiagnosticsReport,
   getRecordingStatus,
+  getSystemPermissions,
   insertMarker,
   listAudioDevices,
   listBuiltinProfiles,
   listCaptureSources,
   listVideoDevices,
+  openPrivacySettings,
   pauseRecording,
   recoverSession,
+  requestSystemPermission,
   resumeRecording,
   runBenchmark,
   scanRecoverySessions,
@@ -137,6 +142,9 @@ interface RecorderStore {
   completedRecordingId: string | null
   // Step-by-step progress during recording finalization.
   finalizationProgress: FinalizationProgress | null
+  // Truthful OS permission report (macOS TCC). `null` = not yet loaded.
+  permissions: SystemPermissionsReport | null
+  permissionsLoading: boolean
 
   loadPreferences: () => Promise<RecordingPreferences>
   savePreferences: (updates: Partial<RecordingPreferences>) => Promise<void>
@@ -176,6 +184,10 @@ interface RecorderStore {
   loadDiagnostics: () => Promise<void>
   refreshStatus: () => Promise<void>
   runBenchmark: () => Promise<void>
+  loadPermissions: () => Promise<void>
+  // Fire the OS prompt where supported, then refresh the report.
+  requestPermission: (kind: PermissionKind) => Promise<void>
+  openPrivacySettings: (pane: "screen" | "microphone" | "camera" | "accessibility") => Promise<void>
 
   start: () => Promise<void>
   pause: () => Promise<void>
@@ -220,6 +232,8 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
   saveMessage: null,
   completedRecordingId: null,
   finalizationProgress: null,
+  permissions: null,
+  permissionsLoading: false,
 
   loadPreferences: async () => {
     const prefs = await readStoredPreferences()
@@ -566,6 +580,38 @@ export const useRecorderStore = create<RecorderStore>((set, get) => ({
       set({ benchmark, isLoading: false, error: null })
     } catch (error) {
       set({ error: toErrorMessage(error), isLoading: false })
+    }
+  },
+
+  // Permission reads are cheap; refresh on every modal open and after the
+  // user returns from System Settings so the banner state stays truthful.
+  loadPermissions: async () => {
+    if (get().permissionsLoading) return
+    set({ permissionsLoading: true })
+    try {
+      const permissions = await getSystemPermissions()
+      set({ permissions, permissionsLoading: false })
+    } catch {
+      // A failed read must not block recording — the native preflight still
+      // gates the actual start.
+      set({ permissionsLoading: false })
+    }
+  },
+
+  requestPermission: async (kind) => {
+    try {
+      const permissions = await requestSystemPermission(kind)
+      set({ permissions })
+    } catch (error) {
+      set({ error: toErrorMessage(error) })
+    }
+  },
+
+  openPrivacySettings: async (pane) => {
+    try {
+      await openPrivacySettings(pane)
+    } catch (error) {
+      set({ error: toErrorMessage(error) })
     }
   },
 

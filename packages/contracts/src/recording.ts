@@ -44,6 +44,43 @@ export const captureSourceSchema = z.discriminatedUnion("kind", [
 
 export type CaptureSource = z.infer<typeof captureSourceSchema>
 
+// Normalized OS permission states mirroring the Rust `PermissionStatus` enum
+// (camelCase serde rename). Drives the macOS permission banner on the
+// recording modal; other platforms typically report all-granted.
+export const permissionStatusSchema = z.enum([
+  "granted",
+  "denied",
+  "notDetermined",
+  "restricted",
+  "unsupported",
+])
+
+export type PermissionStatus = z.infer<typeof permissionStatusSchema>
+
+export const permissionKindSchema = z.enum([
+  "screenRecording",
+  "microphone",
+  "camera",
+  "accessibility",
+])
+
+export type PermissionKind = z.infer<typeof permissionKindSchema>
+
+export const systemPermissionsReportSchema = z.object({
+  screenRecording: permissionStatusSchema,
+  microphone: permissionStatusSchema,
+  camera: permissionStatusSchema,
+  accessibility: permissionStatusSchema,
+})
+
+export type SystemPermissionsReport = z.infer<typeof systemPermissionsReportSchema>
+
+// `open_privacy_settings` pane anchors — kept as a union so the TS↔Rust
+// command boundary validates before invoking.
+export const privacyPaneSchema = z.enum(["screen", "microphone", "camera", "accessibility"])
+
+export type PrivacyPane = z.infer<typeof privacyPaneSchema>
+
 // Pre-defined recording profiles. These are tuned for low-end Windows 11
 // hardware and map to concrete FFmpeg/libx264/encoder settings in Rust.
 export const recordingProfileSchema = z.object({

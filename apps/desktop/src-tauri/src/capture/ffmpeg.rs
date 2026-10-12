@@ -15,6 +15,42 @@ use super::source::{Bounds, CaptureSource};
 use super::traits::TimelineAnchor;
 use super::webcam::CameraMode;
 
+/// Everything FFmpeg needs to describe a PipeWire-driven `rawvideo` input.
+/// Produced by `linux_pipewire::LinuxPipeWireCapture`; defined here (instead of
+/// in the Linux-only module) so `build_screen_command` stays platform-neutral.
+/// Populated only on Linux Wayland sessions.
+#[derive(Debug, Clone)]
+pub struct PipeWireVideoInput {
+    /// FFmpeg `-pixel_format` argument for the negotiated stream.
+    pub pixel_format: &'static str,
+    pub width: u32,
+    pub height: u32,
+    /// Stream-native frame rate — feeds `-framerate`; the filter chain
+    /// resamples to the profile's target fps afterwards.
+    pub framerate_num: u32,
+    pub framerate_den: u32,
+    /// Region crop in stream-local coordinates (Wayland region capture crops a
+    /// monitor stream); `None` captures the whole frame.
+    pub crop: Option<Bounds>,
+    /// Read end of the frame pipe; the ffmpeg child gets it dup'd onto fd 3.
+    pub read_fd: i32,
+}
+
+/// A pre-negotiated Linux Wayland capture handed to `FfmpegCapture::start`.
+/// Platform-neutral on purpose: on non-Linux systems it is always `Default`
+/// (`video_input: None`), so `start`'s signature stays uniform.
+///
+/// The session negotiates the portal BEFORE spawning the cursor/audio
+/// auxiliaries so the stream geometry is already published when the cursor
+/// tracker reads it (the PipeWire capture sets `wayland_stream_geometry`
+/// inside `start_if_wayland`).
+#[derive(Default)]
+pub struct LinuxCaptureBundle {
+    pub video_input: Option<PipeWireVideoInput>,
+    #[cfg(target_os = "linux")]
+    pub capture: Option<super::linux_pipewire::LinuxPipeWireCapture>,
+}
+
 /// Manages a running FFmpeg capture process.
 pub struct FfmpegCapture {
     child: Child,
@@ -43,6 +79,15 @@ pub struct FfmpegCapture {
     /// DirectShow sample/graph clock correlation, fed by the stderr reader.
     /// Populated only for `dshow-camera` captures; other backends stay empty.
     camera_timing: Arc<Mutex<super::camera_timing::CameraTimingState>>,
+    /// Wayland screen capture: the PipeWire consumer feeding fd 3. Held so the
+    /// stream's lifetime is bound to the capture's; `request_stop` shuts it
+    /// down before 'q' so FFmpeg drains cleanly.
+    #[cfg(target_os = "linux")]
+    linux_pipewire: Option<super::linux_pipewire::LinuxPipeWireCapture>,
+    /// ScreenCaptureKit stream feeding fd 3 — same lifetime contract as the
+    /// PipeWire producer above.
+    #[cfg(target_os = "macos")]
+    macos_sck: Option<super::macos_sck::MacosSckCapture>,
 }
 
 /// Metadata describing how a capture process was actually launched, recorded
@@ -85,7 +130,7 @@ impl FfmpegCapture {
     /// falls back to `gdigrab` so recording still works on builds without D3D11
     /// capture support.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(ffmpeg_path, config, profile, manifest, output))]
+    #[instrument(skip(ffmpeg_path, config, profile, manifest, output, linux_bundle))]
     pub fn start(
         ffmpeg_path: &str,
         config: &RecordingConfig,
@@ -95,7 +140,43 @@ impl FfmpegCapture {
         fragment_index: u32,
         manifest: Option<Arc<Mutex<RecordingManifest>>>,
         ddagrab_available: bool,
+        linux_bundle: &mut LinuxCaptureBundle,
     ) -> crate::errors::Result<Self> {
+        // Wayland: the session negotiated the portal + PipeWire path ahead of
+        // the auxiliaries. The capture object stays in the bundle until a
+        // child actually spawns — an encoder retry reuses the same producer.
+        let external_video_input = linux_bundle.video_input.as_ref();
+
+        // macOS: start the ScreenCaptureKit stream first so its fd-3
+        // `rawvideo` input can drive the command build; `None` (pre-13 OS,
+        // missing permission, empty shareable content) keeps the
+        // avfoundation fallback the branch below already handles.
+        #[cfg(target_os = "macos")]
+        let macos_capture =
+            match super::macos_sck::MacosSckCapture::start_if_available(&config.source, profile) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "ScreenCaptureKit startup failed; falling back to avfoundation"
+                    );
+                    None
+                }
+            };
+        #[cfg(target_os = "macos")]
+        let macos_video_input = macos_capture.as_ref().map(|c| c.video_input());
+
+        let external_video_input = {
+            #[cfg(target_os = "macos")]
+            {
+                external_video_input.or(macos_video_input.as_ref())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                external_video_input
+            }
+        };
+
         let (command, backend) = build_screen_command(
             ffmpeg_path,
             config,
@@ -103,6 +184,7 @@ impl FfmpegCapture {
             encoder,
             output,
             ddagrab_available,
+            external_video_input,
         );
         let meta = CaptureMeta {
             startup_timeout: STARTUP_FRAME_TIMEOUT,
@@ -121,7 +203,21 @@ impl FfmpegCapture {
             None,
             meta,
         ) {
-            Ok(capture) => Ok(capture),
+            Ok(capture) => {
+                #[cfg(target_os = "linux")]
+                let capture = {
+                    let mut capture = capture;
+                    capture.linux_pipewire = linux_bundle.capture.take();
+                    capture
+                };
+                #[cfg(target_os = "macos")]
+                let capture = {
+                    let mut capture = capture;
+                    capture.macos_sck = macos_capture;
+                    capture
+                };
+                Ok(capture)
+            }
             // The GPU-resident pipeline is an optimization, never a hard
             // requirement: if it fails to reach readiness, retry the same
             // encoder and ddagrab input with CPU processing. `run` already
@@ -137,6 +233,7 @@ impl FfmpegCapture {
                     encoder,
                     output,
                     ddagrab_available,
+                    external_video_input,
                 );
                 let meta = CaptureMeta {
                     startup_timeout: STARTUP_FRAME_TIMEOUT,
@@ -148,6 +245,10 @@ impl FfmpegCapture {
                     camera: false,
                 };
                 let mut capture = run(command, output, fragment_index, manifest, None, meta)?;
+                #[cfg(target_os = "linux")]
+                {
+                    capture.linux_pipewire = linux_bundle.capture.take();
+                }
                 capture.set_fallback_reason(Some("gpu-startup-fallback".into()));
                 Ok(capture)
             }
@@ -381,6 +482,17 @@ impl FfmpegCapture {
     /// quit instant, without blocking for process termination.
     pub fn request_stop(&mut self) -> Instant {
         let quit_at = Instant::now();
+        #[cfg(target_os = "linux")]
+        if let Some(mut pipewire) = self.linux_pipewire.take() {
+            // Stop producing frames first so FFmpeg can drain its pipeline
+            // and write a clean trailer instead of racing new input.
+            pipewire.stop();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(mut sck) = self.macos_sck.take() {
+            // Same drain ordering as PipeWire: producer first, then 'q'.
+            sck.stop();
+        }
         if let Some(stdin) = self.stdin.as_mut() {
             if let Err(e) = stdin.write_all(b"q\n") {
                 // A broken/closed pipe (Windows os error 232) here means FFmpeg
@@ -498,6 +610,14 @@ impl Drop for FfmpegCapture {
         // orphan holding the display/audio devices. If stop() already ran, the
         // child has exited and this is a fast no-op (try_wait returns the
         // cached exited status immediately).
+        #[cfg(target_os = "linux")]
+        if let Some(mut pipewire) = self.linux_pipewire.take() {
+            pipewire.stop();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(mut sck) = self.macos_sck.take() {
+            sck.stop();
+        }
         if let Some(stdin) = self.stdin.as_mut() {
             let _ = stdin.write_all(b"q\n");
             let _ = stdin.flush();
@@ -535,6 +655,7 @@ fn add_progress_reporting(command: &mut Command) {
     command.args(["-nostats", "-stats_period", "0.2", "-progress", "pipe:2"]);
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn build_screen_command(
     ffmpeg_path: &str,
     config: &RecordingConfig,
@@ -542,6 +663,7 @@ fn build_screen_command(
     encoder: &str,
     output: &str,
     ddagrab_available: bool,
+    external_video_input: Option<&PipeWireVideoInput>,
 ) -> (Command, &'static str) {
     let mut command = crate::process::create_command(ffmpeg_path);
     command
@@ -577,14 +699,27 @@ fn build_screen_command(
     // fragment is finalized. Keeping this FFmpeg process video-only prevents a
     // DirectShow audio failure from taking down the screen capture.
     let use_ddagrab = ddagrab_target.is_some();
-    let cpu_backend = add_screen_video_input(&mut command, &config.source, profile, ddagrab_target);
+    let (cpu_backend, screen_crop) = add_screen_video_input(
+        &mut command,
+        ffmpeg_path,
+        &config.source,
+        profile,
+        ddagrab_target,
+        external_video_input,
+    );
 
     // Prefer the GPU-resident pipeline when the whole chain qualifies;
     // otherwise keep the CPU `hwdownload` filter and report that backend.
     let (video_filter, backend) = match gpu_screen_filter(config, profile, encoder, use_ddagrab) {
         Some(filter) => (filter, "ddagrab-gpu"),
         None => (
-            build_video_filter(&config.source, profile, use_ddagrab),
+            build_video_filter(
+                &config.source,
+                profile,
+                use_ddagrab,
+                external_video_input,
+                screen_crop,
+            ),
             cpu_backend,
         ),
     };
@@ -1019,13 +1154,21 @@ fn camera_pipes_stdout(enable_preview: bool) -> bool {
 }
 
 /// Push the platform screen input arguments and return the backend name that
-/// was actually used, so diagnostics report the real capture path.
+/// was actually used plus an optional screen-space crop (region/window
+/// sources on backends that can only ingest whole displays — macOS today,
+/// matching the PipeWire `input.crop` mechanism on Linux).
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(unused_variables)
+)]
 fn add_screen_video_input(
     command: &mut Command,
+    ffmpeg_path: &str,
     source: &CaptureSource,
     profile: &RecordingProfile,
     ddagrab_target: Option<super::outputs::DxgiOutputEntry>,
-) -> &'static str {
+    external_video_input: Option<&PipeWireVideoInput>,
+) -> (&'static str, Option<Bounds>) {
     let bounds = source.bounds;
 
     if let Some(target) = ddagrab_target {
@@ -1041,7 +1184,7 @@ fn add_screen_video_input(
             profile.fps, target.output_idx, offset_x, offset_y, width, height
         );
         command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
-        "ddagrab-cpu"
+        ("ddagrab-cpu", None)
     } else if cfg!(windows)
         && (source.kind == "display" || source.kind == "window" || source.kind == "region")
     {
@@ -1069,11 +1212,57 @@ fn add_screen_video_input(
             "-i",
             "desktop",
         ]);
-        "gdigrab"
+        ("gdigrab", None)
     } else if cfg!(target_os = "macos")
         && (source.kind == "display" || source.kind == "window" || source.kind == "region")
     {
-        // macOS AVFoundation screen input
+        // ScreenCaptureKit: BGRA frames arrive packed on an OS pipe, consumed
+        // as `rawvideo` on fd 3 — the same contract as the PipeWire input
+        // below, so the rest of the pipeline is identical. The system cursor
+        // is excluded at the SCK level (`showsCursor: false`) so the overlay
+        // cursor stays the only pointer in the recording.
+        #[cfg(target_os = "macos")]
+        if let Some(input) = external_video_input {
+            use std::os::unix::process::CommandExt;
+            command.args([
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                input.pixel_format,
+                "-video_size",
+                &format!("{}x{}", input.width, input.height),
+                "-framerate",
+                &format!("{}/{}", input.framerate_num, input.framerate_den),
+                "-i",
+                "pipe:3",
+            ]);
+            let read_fd = input.read_fd;
+            // SAFETY: dup2 in the child after fork, before exec. fd 3 is free
+            // (stdio are 0/1/2) and dup2 clears CLOEXEC on the new fd.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::dup2(read_fd, 3) == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+            return ("screencapturekit", input.crop);
+        }
+        // macOS AVFoundation screen input. `Capture screen N` devices follow
+        // CG display order — resolve the display that owns the source so
+        // multi-monitor setups capture the right screen (the old
+        // `default:none` selected the default *camera*). Window/region
+        // sources crop the display-sized frame in the video filter, the same
+        // shape as the PipeWire path.
+        #[cfg(target_os = "macos")]
+        let (device_spec, crop) = {
+            let input = super::macos_native::resolve_screen_input(ffmpeg_path, source);
+            (input.device_spec, input.crop)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let (device_spec, crop) = ("default".to_string(), None);
         command.args([
             "-f",
             "avfoundation",
@@ -1084,15 +1273,52 @@ fn add_screen_video_input(
             "-framerate",
             &profile.fps.to_string(),
             "-i",
-            "default:none",
+            &format!("{device_spec}:none"),
         ]);
-        "avfoundation-screen"
+        ("avfoundation-screen", crop)
     } else if cfg!(target_os = "linux")
         && (source.kind == "display" || source.kind == "window" || source.kind == "region")
     {
-        // Linux X11 screen input
+        // Wayland: PipeWire frames arrive packed on an OS pipe. The child
+        // inherits the read end as fd 3 (`pre_exec` dup2) and reads it as a
+        // `rawvideo` input — FFmpeg sees an ordinary file descriptor, no
+        // libpipewire dependency inside the encoder process.
+        #[cfg(target_os = "linux")]
+        if let Some(input) = external_video_input {
+            use std::os::unix::process::CommandExt;
+            command.args([
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                input.pixel_format,
+                "-video_size",
+                &format!("{}x{}", input.width, input.height),
+                "-framerate",
+                &format!("{}/{}", input.framerate_num, input.framerate_den),
+                "-i",
+                "pipe:3",
+            ]);
+            let read_fd = input.read_fd;
+            // SAFETY: dup2 in the child after fork, before exec. fd 3 is free
+            // (stdio are 0/1/2) and dup2 clears CLOEXEC on the new fd.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::dup2(read_fd, 3) == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+            return ("pipewire-portal", None);
+        }
+        // Linux X11 screen input. Honour $DISPLAY: hardcoding :0 breaks on
+        // non-default X servers (nested sessions, XDMCP, Xwayland-only
+        // displays). Wayland sessions never reach this branch — they take the
+        // PipeWire input above.
         let w = bounds.width.max(2);
         let h = bounds.height.max(2);
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
         command.args([
             "-f",
             "x11grab",
@@ -1105,9 +1331,9 @@ fn add_screen_video_input(
             "-video_size",
             &format!("{}x{}", w, h),
             "-i",
-            &format!(":0.0+{},{}", bounds.x, bounds.y),
+            &format!("{display}+{},{}", bounds.x, bounds.y),
         ]);
-        "x11grab"
+        ("x11grab", None)
     } else {
         // Unknown source kinds still get a minimal input so FFmpeg does not
         // fail later in the filter graph with an obscure error.
@@ -1116,7 +1342,7 @@ fn add_screen_video_input(
             profile.width, profile.height, profile.fps
         );
         command.args(["-f", "lavfi", "-i", &fallback]);
-        "lavfi-testsrc"
+        ("lavfi-testsrc", None)
     }
 }
 
@@ -1184,21 +1410,46 @@ fn gpu_screen_filter(
     ))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn build_video_filter(
     source: &CaptureSource,
     profile: &RecordingProfile,
     use_ddagrab: bool,
+    external_video_input: Option<&PipeWireVideoInput>,
+    screen_crop: Option<Bounds>,
 ) -> String {
     let fit_filter = source
         .bounds
         .build_aspect_fit_filter(profile.width, profile.height);
+
+    #[cfg(target_os = "linux")]
+    if let Some(input) = external_video_input {
+        // PipeWire delivers monitor-sized frames at the negotiated stream rate:
+        // crop for region captures first, then normalize to a CFR stream.
+        let mut chain = String::new();
+        if let Some(crop) = input.crop {
+            chain.push_str(&format!(
+                "crop={}:{}:{}:{},",
+                crop.width, crop.height, crop.x, crop.y
+            ));
+        }
+        chain.push_str(&format!("fps={},", profile.fps));
+        return format!("[0:v]{chain}{fit_filter}[vout]");
+    }
+
+    // Backends that only ingest whole displays (avfoundation `Capture screen
+    // N`) crop to the source rect in the display's pixel space first — the
+    // same shape as the PipeWire chain above.
+    let crop_filter = screen_crop
+        .map(|c| format!("crop={}:{}:{}:{},", c.width, c.height, c.x, c.y))
+        .unwrap_or_default();
 
     if use_ddagrab {
         // ddagrab emits D3D11 hardware frames; download to system memory as
         // bgra before aspect-preserving scale and letterboxing (fixes P0.5).
         format!("[0:v]hwdownload,format=bgra,{fit_filter}[vout]")
     } else {
-        format!("[0:v]{fit_filter}[vout]")
+        format!("[0:v]{crop_filter}{fit_filter}[vout]")
     }
 }
 
@@ -1587,6 +1838,10 @@ fn run(
         camera_mode: meta.camera_mode,
         fallback_reason: None,
         camera_timing,
+        #[cfg(target_os = "linux")]
+        linux_pipewire: None,
+        #[cfg(target_os = "macos")]
+        macos_sck: None,
     };
 
     // Startup readiness: alive-and-producing-frames, not merely spawned.
@@ -1968,7 +2223,14 @@ mod tests {
         };
 
         let mut command = Command::new("ffmpeg");
-        add_screen_video_input(&mut command, &source, &test_profile(), Some(output));
+        add_screen_video_input(
+            &mut command,
+            "ffmpeg",
+            &source,
+            &test_profile(),
+            Some(output),
+            None,
+        );
         let debug = format!("{command:?}");
 
         // The capture rect must be translated into the output's own space.
@@ -1999,7 +2261,14 @@ mod tests {
         };
 
         let mut command = Command::new("ffmpeg");
-        add_screen_video_input(&mut command, &source, &test_profile(), Some(output));
+        add_screen_video_input(
+            &mut command,
+            "ffmpeg",
+            &source,
+            &test_profile(),
+            Some(output),
+            None,
+        );
         let debug = format!("{command:?}");
 
         assert!(debug.contains("output_idx=2"));
@@ -2012,7 +2281,7 @@ mod tests {
         let source = region_source(100, 200, 800, 600);
 
         let mut command = Command::new("ffmpeg");
-        add_screen_video_input(&mut command, &source, &test_profile(), None);
+        add_screen_video_input(&mut command, "ffmpeg", &source, &test_profile(), None, None);
         let debug = format!("{command:?}");
 
         assert!(debug.contains("\"gdigrab\""));
@@ -2042,10 +2311,10 @@ mod tests {
     #[test]
     fn ddagrab_filter_downloads_hardware_frames() {
         let source = region_source(0, 0, 800, 600);
-        let filter = build_video_filter(&source, &test_profile(), true);
+        let filter = build_video_filter(&source, &test_profile(), true, None, None);
         assert!(filter.starts_with("[0:v]hwdownload,format=bgra,"));
 
-        let gdigrab_filter = build_video_filter(&source, &test_profile(), false);
+        let gdigrab_filter = build_video_filter(&source, &test_profile(), false, None, None);
         assert!(gdigrab_filter.starts_with("[0:v]scale="));
     }
 
@@ -2123,8 +2392,9 @@ mod tests {
             smart_zoom_preset: "product-demo".into(),
             capture_keystrokes: false,
         };
-        let (screen_command, _) =
-            build_screen_command("ffmpeg", &config, &profile, "libx264", "seg.mp4", false);
+        let (screen_command, _) = build_screen_command(
+            "ffmpeg", &config, &profile, "libx264", "seg.mp4", false, None,
+        );
         let screen_args: Vec<String> = screen_command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -3098,6 +3368,7 @@ mod tests {
             "libx264",
             "seg.mp4",
             false,
+            None,
         );
         let debug = format!("{command:?}");
 

@@ -1,6 +1,6 @@
 [package]
 name = "recordforge-desktop"
-version = "2.0.5"
+version = "2.0.6"
 description = "Local-first screen recorder and lightweight editor"
 authors = ["prestige-tech & RecordForge contributors"]
 license = "GPL-3.0-or-later"
@@ -71,6 +71,27 @@ windows = { version = "0.60", features = ["Win32_Foundation", "Win32_Graphics_Dx
 
 [target.'cfg(not(windows))'.dependencies]
 keyring = { version = "3", default-features = false, features = ["apple-native", "sync-secret-service"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreGraphics/CoreFoundation give us real display + window enumeration and
+# the TCC preflight calls, without pulling the heavier objc2 ScreenCaptureKit
+# stack Phase 1 needs. Both are already in the lockfile via tao/wry.
+core-foundation = "0.10.1"
+core-graphics = "0.25.0"
+# Safe ScreenCaptureKit bindings (SCStream video + system audio, macOS 13+).
+screencapturekit = "11.0.0"
+# POSIX pipe/fcntl/dup2 for the fd-3 frame pipe into the FFmpeg child.
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Sync D-Bus client for the XDG ScreenCast portal (Wayland capture consent).
+# `dbus` is already resolved transitively via dbus-secret-service/keyring.
+dbus = "0.9"
+# PipeWire screen capture: compositor frames from the portal-granted remote
+# fd, packed and piped into FFmpeg. Needs libpipewire-0.3-dev at build time.
+pipewire = "0.10"
+libspa-sys = "0.10"
+libc = "0.2"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.10.1"

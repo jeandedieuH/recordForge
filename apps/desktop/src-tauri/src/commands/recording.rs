@@ -170,6 +170,52 @@ pub fn list_capture_sources() -> Result<Vec<CaptureSource>> {
     capture::enumerate_sources()
 }
 
+/// Truthful TCC/OS permission snapshot. On macOS this drives the recording
+/// modal's permission banner; on other platforms it reports the platform's
+/// own permission model (all-granted on Windows, portal-aware on Linux).
+#[tauri::command]
+#[instrument]
+pub fn get_system_permissions() -> Result<capture::SystemPermissionsReport> {
+    Ok(capture::check_system_permissions())
+}
+
+/// Fire the OS-level permission prompt where one exists (macOS screen
+/// recording and accessibility prompts), then return the refreshed report.
+/// Mic/camera have no prompt API the backend can use — deep-link to System
+/// Settings via `open_privacy_settings` for those.
+#[tauri::command]
+#[instrument]
+pub fn request_system_permission(
+    kind: capture::permissions::PermissionKind,
+) -> Result<capture::SystemPermissionsReport> {
+    capture::permissions::request_permission(kind);
+    Ok(capture::check_system_permissions())
+}
+
+/// Deep-link into System Settings → Privacy & Security so the user can grant
+/// a permission macOS only allows toggling there.
+#[tauri::command]
+#[instrument]
+pub fn open_privacy_settings(app: tauri::AppHandle, pane: String) -> Result<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let anchor = match pane.as_str() {
+        "screen" => "Privacy_ScreenCapture",
+        "microphone" => "Privacy_Microphone",
+        "camera" => "Privacy_Camera",
+        "accessibility" => "Privacy_Accessibility",
+        _ => {
+            return Err(InternalError::Unknown(format!("unknown privacy pane: {pane}")).into());
+        }
+    };
+    app.opener()
+        .open_url(
+            format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"),
+            Option::<&str>::None,
+        )
+        .map_err(|e| InternalError::Unknown(format!("open privacy settings: {e}")))?;
+    Ok(())
+}
+
 #[tauri::command]
 #[instrument]
 pub fn list_audio_devices(state: State<'_, AppState>) -> Result<Vec<AudioDevice>> {

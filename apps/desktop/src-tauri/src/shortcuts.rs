@@ -11,6 +11,18 @@ fn map_tauri_err(e: tauri::Error) -> InternalError {
     InternalError::Unknown(format!("{e:?}"))
 }
 
+// macOS conventions use ⌘ for system-level shortcuts — and the UI advertises
+// "⌘ ⇧ R" via the platform.ts modifier labels, so the registration must match.
+#[cfg(target_os = "macos")]
+const MODIFIER: Modifiers = Modifiers::META;
+#[cfg(not(target_os = "macos"))]
+const MODIFIER: Modifiers = Modifiers::CONTROL;
+
+#[cfg(target_os = "macos")]
+const ACCELERATORS: [&str; 3] = ["cmd+shift+r", "cmd+shift+p", "cmd+shift+m"];
+#[cfg(not(target_os = "macos"))]
+const ACCELERATORS: [&str; 3] = ["ctrl+shift+r", "ctrl+shift+p", "ctrl+shift+m"];
+
 /// Register global shortcuts for common recorder actions.
 pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
     app.handle()
@@ -18,15 +30,11 @@ pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        if shortcut.matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyR) {
+                        if shortcut.matches(MODIFIER | Modifiers::SHIFT, Code::KeyR) {
                             let _ = toggle_recording(app);
-                        } else if shortcut
-                            .matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyP)
-                        {
+                        } else if shortcut.matches(MODIFIER | Modifiers::SHIFT, Code::KeyP) {
                             let _ = toggle_pause_resume(app);
-                        } else if shortcut
-                            .matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyM)
-                        {
+                        } else if shortcut.matches(MODIFIER | Modifiers::SHIFT, Code::KeyM) {
                             let _ = insert_marker(app);
                         }
                     }
@@ -38,7 +46,7 @@ pub fn register_shortcuts(app: &tauri::App) -> Result<()> {
     // Register shortcuts individually so a conflict on one shortcut (e.g. key already registered
     // by another running application or instance) does not prevent other shortcuts or the app from working.
     let global_shortcut = app.global_shortcut();
-    for shortcut_str in ["ctrl+shift+r", "ctrl+shift+p", "ctrl+shift+m"] {
+    for shortcut_str in ACCELERATORS {
         match Shortcut::from_str(shortcut_str) {
             Ok(shortcut) => {
                 if let Err(err) = global_shortcut.register(shortcut) {

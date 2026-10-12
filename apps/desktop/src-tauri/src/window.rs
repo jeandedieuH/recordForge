@@ -500,7 +500,24 @@ fn monitor_under_cursor() -> Option<Bounds> {
     })
 }
 
-#[cfg(not(windows))]
+/// macOS: CGEvent cursor position (converted to physical pixels) matched
+/// against the CG display list — the same physical coordinate space Tauri's
+/// `Monitor` reports.
+#[cfg(target_os = "macos")]
+fn monitor_under_cursor() -> Option<Bounds> {
+    let (x, y) = crate::capture::macos_native::cursor_position_physical()?;
+    crate::capture::macos_native::enumerate_displays()
+        .iter()
+        .find(|d| {
+            x >= d.bounds.x
+                && x < d.bounds.x + d.bounds.width
+                && y >= d.bounds.y
+                && y < d.bounds.y + d.bounds.height
+        })
+        .map(|d| d.bounds)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn monitor_under_cursor() -> Option<Bounds> {
     None
 }

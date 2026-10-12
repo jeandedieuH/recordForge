@@ -1409,18 +1409,31 @@ fn capture_cursor_position() -> (i32, i32, bool) {
 
 #[cfg(target_os = "macos")]
 fn capture_cursor_position() -> (i32, i32, bool) {
-    // In native macOS, CGEventSource / NSEvent mouseLocation returns screen points.
-    // CoreGraphics displays are measured from top-left.
-    (0, 0, true)
+    // CGEvent.location arrives in Quartz point space (top-left origin);
+    // `cursor_position_physical` re-scales through the containing display so
+    // the result is global physical pixels like the Windows path.
+    let (x, y) = super::macos_native::cursor_position_physical().unwrap_or((0, 0));
+    (x, y, super::macos_native::cursor_visible())
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn capture_cursor_position() -> (i32, i32, bool) {
+    // Wayland: cursor arrives as SPA_META_Cursor stream metadata.
     if let Some(snapshot) = get_pipewire_cursor_metadata() {
         if snapshot.active {
             return (snapshot.x, snapshot.y, true);
         }
     }
+    // X11: the XFixes cursor image already carries the pointer's root
+    // coordinates, so one query covers position and shape.
+    if let Some((x, y)) = linux_x11_cursor_position() {
+        return (x, y, true);
+    }
+    (0, 0, true)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn capture_cursor_position() -> (i32, i32, bool) {
     (0, 0, true)
 }
 
@@ -1548,8 +1561,16 @@ fn capture_button_state() -> CursorButtonState {
 
 #[cfg(target_os = "macos")]
 fn capture_button_state() -> CursorButtonState {
-    // On macOS, CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft/Right/Center)
-    CursorButtonState::default()
+    // CGEventSourceButtonState(HIDSystemState, button) — button ordinals match
+    // CGMouseButton (0=left … 4=x2).
+    let (left, right, middle, x1, x2) = super::macos_native::mouse_button_state();
+    CursorButtonState {
+        left,
+        right,
+        middle,
+        x1,
+        x2,
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -1882,89 +1903,125 @@ fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
     linux_capture_x11_cursor_shape()
 }
 
+/// Shared dlopen handles for the X11+XFixes queries used by both the cursor
+/// position poll and the cursor shape lookup on Linux.
 #[cfg(target_os = "linux")]
-fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
-    use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
+mod linux_x11 {
+    use std::ffi::{c_char, c_int, c_ulong, c_void};
     use std::sync::OnceLock;
 
     #[repr(C)]
-    struct XFixesCursorImage {
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-        xhot: u16,
-        yhot: u16,
-        cursor_serial: c_ulong,
-        pixels: *mut c_ulong,
-        atom: c_ulong,
-        name: *const c_char,
+    pub struct XFixesCursorImage {
+        pub x: i16,
+        pub y: i16,
+        pub width: u16,
+        pub height: u16,
+        pub xhot: u16,
+        pub yhot: u16,
+        pub cursor_serial: c_ulong,
+        pub pixels: *mut c_ulong,
+        pub atom: c_ulong,
+        pub name: *const c_char,
     }
 
-    type FnXOpenDisplay = unsafe extern "C" fn(*const c_char) -> *mut c_void;
-    type FnXCloseDisplay = unsafe extern "C" fn(*mut c_void) -> c_int;
-    type FnXFree = unsafe extern "C" fn(*mut c_void) -> c_int;
-    type FnXFixesGetCursorImage = unsafe extern "C" fn(*mut c_void) -> *mut XFixesCursorImage;
+    pub type FnXOpenDisplay = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    pub type FnXCloseDisplay = unsafe extern "C" fn(*mut c_void) -> c_int;
+    pub type FnXFree = unsafe extern "C" fn(*mut c_void) -> c_int;
+    pub type FnXFixesGetCursorImage = unsafe extern "C" fn(*mut c_void) -> *mut XFixesCursorImage;
 
-    struct X11Functions {
-        open_display: FnXOpenDisplay,
-        close_display: FnXCloseDisplay,
-        free: FnXFree,
-        get_cursor_image: FnXFixesGetCursorImage,
+    pub struct X11Functions {
+        pub open_display: FnXOpenDisplay,
+        pub close_display: FnXCloseDisplay,
+        pub free: FnXFree,
+        pub get_cursor_image: FnXFixesGetCursorImage,
     }
 
-    static X11: OnceLock<Option<X11Functions>> = OnceLock::new();
-    let fns = X11.get_or_init(|| unsafe {
-        extern "C" {
-            fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-        }
-        const RTLD_LAZY: c_int = 1;
+    /// Lazily dlopen libX11/libXfixes and resolve the symbols we need. Returns
+    /// `None` on systems without X11 libraries (pure-Wayland minimal installs)
+    /// so callers degrade to the PipeWire metadata path.
+    pub fn handles() -> Option<&'static X11Functions> {
+        static X11: OnceLock<Option<X11Functions>> = OnceLock::new();
+        X11.get_or_init(|| unsafe {
+            extern "C" {
+                fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+                fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+            }
+            const RTLD_LAZY: c_int = 1;
 
-        let lib_x11 = dlopen(c"libX11.so.6".as_ptr(), RTLD_LAZY);
-        let lib_x11 = if lib_x11.is_null() {
-            dlopen(c"libX11.so".as_ptr(), RTLD_LAZY)
-        } else {
-            lib_x11
-        };
-        if lib_x11.is_null() {
-            return None;
-        }
+            let lib_x11 = dlopen(c"libX11.so.6".as_ptr(), RTLD_LAZY);
+            let lib_x11 = if lib_x11.is_null() {
+                dlopen(c"libX11.so".as_ptr(), RTLD_LAZY)
+            } else {
+                lib_x11
+            };
+            if lib_x11.is_null() {
+                return None;
+            }
 
-        let lib_xfixes = dlopen(c"libXfixes.so.3".as_ptr(), RTLD_LAZY);
-        let lib_xfixes = if lib_xfixes.is_null() {
-            dlopen(c"libXfixes.so".as_ptr(), RTLD_LAZY)
-        } else {
-            lib_xfixes
-        };
-        if lib_xfixes.is_null() {
-            return None;
-        }
+            let lib_xfixes = dlopen(c"libXfixes.so.3".as_ptr(), RTLD_LAZY);
+            let lib_xfixes = if lib_xfixes.is_null() {
+                dlopen(c"libXfixes.so".as_ptr(), RTLD_LAZY)
+            } else {
+                lib_xfixes
+            };
+            if lib_xfixes.is_null() {
+                return None;
+            }
 
-        let sym_open = dlsym(lib_x11, c"XOpenDisplay".as_ptr());
-        let sym_close = dlsym(lib_x11, c"XCloseDisplay".as_ptr());
-        let sym_free = dlsym(lib_x11, c"XFree".as_ptr());
-        let sym_get_cursor = dlsym(lib_xfixes, c"XFixesGetCursorImage".as_ptr());
+            let sym_open = dlsym(lib_x11, c"XOpenDisplay".as_ptr());
+            let sym_close = dlsym(lib_x11, c"XCloseDisplay".as_ptr());
+            let sym_free = dlsym(lib_x11, c"XFree".as_ptr());
+            let sym_get_cursor = dlsym(lib_xfixes, c"XFixesGetCursorImage".as_ptr());
 
-        if sym_open.is_null()
-            || sym_close.is_null()
-            || sym_free.is_null()
-            || sym_get_cursor.is_null()
-        {
-            return None;
-        }
+            if sym_open.is_null()
+                || sym_close.is_null()
+                || sym_free.is_null()
+                || sym_get_cursor.is_null()
+            {
+                return None;
+            }
 
-        Some(X11Functions {
-            open_display: std::mem::transmute::<*mut c_void, FnXOpenDisplay>(sym_open),
-            close_display: std::mem::transmute::<*mut c_void, FnXCloseDisplay>(sym_close),
-            free: std::mem::transmute::<*mut c_void, FnXFree>(sym_free),
-            get_cursor_image: std::mem::transmute::<*mut c_void, FnXFixesGetCursorImage>(
-                sym_get_cursor,
-            ),
+            Some(X11Functions {
+                open_display: std::mem::transmute::<*mut c_void, FnXOpenDisplay>(sym_open),
+                close_display: std::mem::transmute::<*mut c_void, FnXCloseDisplay>(sym_close),
+                free: std::mem::transmute::<*mut c_void, FnXFree>(sym_free),
+                get_cursor_image: std::mem::transmute::<*mut c_void, FnXFixesGetCursorImage>(
+                    sym_get_cursor,
+                ),
+            })
         })
-    });
+        .as_ref()
+    }
+}
 
-    let fns = fns.as_ref()?;
+/// Pointer position in root coordinates via `XFixesGetCursorImage` — the image
+/// struct carries the hotspot's screen position, so the same query that reads
+/// the shape also locates the pointer without an XQueryPointer round-trip.
+#[cfg(target_os = "linux")]
+fn linux_x11_cursor_position() -> Option<(i32, i32)> {
+    let fns = linux_x11::handles()?;
+    unsafe {
+        let display = (fns.open_display)(std::ptr::null());
+        if display.is_null() {
+            return None;
+        }
+        let img_ptr = (fns.get_cursor_image)(display);
+        if img_ptr.is_null() {
+            (fns.close_display)(display);
+            return None;
+        }
+        let (x, y) = ((*img_ptr).x as i32, (*img_ptr).y as i32);
+        (fns.free)(img_ptr.cast());
+        (fns.close_display)(display);
+        Some((x, y))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
+    use std::ffi::{c_void, CStr};
+
+    let fns = linux_x11::handles()?;
 
     unsafe {
         let display = (fns.open_display)(std::ptr::null());

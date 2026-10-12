@@ -75,11 +75,15 @@ pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
 /// Endpoint churn — device re-enumeration, exclusive-mode holds, and audio
 /// service restarts — makes startup fail transiently, so a brief bounded retry
 /// runs before the caller is told the track is unavailable.
+///
+/// `ffmpeg_path` is only consumed by the Linux backend, which uses FFmpeg as
+/// the capture engine; native backends ignore it.
 pub fn start_audio_track(
     kind: AudioCaptureKind,
     device_id: Option<String>,
     output_path: PathBuf,
     timeline_origin: TimelineAnchor,
+    ffmpeg_path: Option<PathBuf>,
 ) -> Result<Box<dyn AudioTrack>> {
     const ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
@@ -91,6 +95,7 @@ pub fn start_audio_track(
             device_id.clone(),
             output_path.clone(),
             timeline_origin,
+            ffmpeg_path.clone(),
         ) {
             Ok(track) => return Ok(track),
             Err(error) => {
@@ -110,11 +115,13 @@ pub fn start_audio_track(
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn start_audio_track_once(
     kind: AudioCaptureKind,
     device_id: Option<String>,
     output_path: PathBuf,
     timeline_origin: TimelineAnchor,
+    ffmpeg_path: Option<PathBuf>,
 ) -> Result<Box<dyn AudioTrack>> {
     #[cfg(windows)]
     {
@@ -148,6 +155,10 @@ fn start_audio_track_once(
                     .with_timeline_origin(timeline_origin.instant)
             }
         };
+        let options = match ffmpeg_path {
+            Some(path) => options.with_ffmpeg_path(path),
+            None => options,
+        };
         let session = coreaudio::CoreAudioCaptureSession::start(options)?;
         Ok(Box::new(session))
     }
@@ -163,6 +174,10 @@ fn start_audio_track_once(
                 linux::LinuxAudioOptions::system_monitor(device_id, output_path)
                     .with_timeline_origin(timeline_origin.instant)
             }
+        };
+        let options = match ffmpeg_path {
+            Some(path) => options.with_ffmpeg_path(path),
+            None => options,
         };
         let session = linux::LinuxAudioCaptureSession::start(options)?;
         Ok(Box::new(session))

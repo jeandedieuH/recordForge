@@ -33,20 +33,14 @@ pub fn select_engine(source: &CaptureSource, ddagrab_available: bool) -> Capture
     #[cfg(target_os = "macos")]
     {
         let _ = (source, ddagrab_available);
-        if super::screencapturekit::is_screencapturekit_available() {
-            CaptureEngineCapabilities {
-                ddagrab_available: false,
-                gdigrab_available: false,
-                selected_engine: CaptureEngineKind::ScreenCaptureKit,
-                reason: "Selected macOS ScreenCaptureKit for low-CPU hardware capture and independent window capture".into(),
-            }
-        } else {
-            CaptureEngineCapabilities {
-                ddagrab_available: false,
-                gdigrab_available: false,
-                selected_engine: CaptureEngineKind::Avfoundation,
-                reason: "ScreenCaptureKit unavailable; falling back to macOS AVFoundation screen capture".into(),
-            }
+        // The FFmpeg AVFoundation path is what actually captures today; the
+        // native ScreenCaptureKit stream is a Phase-1 item — report the real
+        // backend instead of claiming an engine the recorder never uses.
+        CaptureEngineCapabilities {
+            ddagrab_available: false,
+            gdigrab_available: false,
+            selected_engine: CaptureEngineKind::Avfoundation,
+            reason: "macOS AVFoundation `Capture screen N` capture via FFmpeg".into(),
         }
     }
 
@@ -107,7 +101,7 @@ mod tests {
 
         if cfg!(target_os = "macos") {
             let caps = select_engine(&source, false);
-            assert_eq!(caps.selected_engine, CaptureEngineKind::ScreenCaptureKit);
+            assert_eq!(caps.selected_engine, CaptureEngineKind::Avfoundation);
         } else {
             let caps = select_engine(&source, true);
             assert_eq!(caps.selected_engine, CaptureEngineKind::Ddagrab);
@@ -135,7 +129,7 @@ mod tests {
 
         let caps = select_engine(&source, true);
         if cfg!(target_os = "macos") {
-            assert_eq!(caps.selected_engine, CaptureEngineKind::ScreenCaptureKit);
+            assert_eq!(caps.selected_engine, CaptureEngineKind::Avfoundation);
         } else {
             assert_eq!(caps.selected_engine, CaptureEngineKind::Window);
         }

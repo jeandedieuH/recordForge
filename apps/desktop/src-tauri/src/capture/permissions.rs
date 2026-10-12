@@ -89,16 +89,84 @@ pub fn check_permission(kind: PermissionKind) -> PermissionStatus {
 
 #[cfg(target_os = "macos")]
 fn check_macos_permission(kind: PermissionKind) -> PermissionStatus {
-    // On macOS, ScreenCaptureKit and CoreGraphics enforce explicit TCC permissions.
+    use super::macos_native::{self, AvAuthorization, AvMediaKind};
     match kind {
         PermissionKind::ScreenRecording => {
-            // Check CGPreflightScreenCaptureAccess / ScreenCaptureKit access
-            PermissionStatus::Granted
+            if macos_native::screen_recording_granted() {
+                PermissionStatus::Granted
+            } else {
+                // Preflight cannot distinguish denied from not-determined;
+                // the prompt fires once on first capture/request either way.
+                PermissionStatus::Denied
+            }
         }
-        PermissionKind::Microphone => PermissionStatus::Granted,
-        PermissionKind::Camera => PermissionStatus::Granted,
-        PermissionKind::Accessibility => PermissionStatus::Granted,
+        PermissionKind::Microphone => {
+            av_authorization_to_status(macos_native::av_authorization_status(AvMediaKind::Audio))
+        }
+        PermissionKind::Camera => {
+            av_authorization_to_status(macos_native::av_authorization_status(AvMediaKind::Video))
+        }
+        PermissionKind::Accessibility => {
+            if macos_native::accessibility_trusted() {
+                PermissionStatus::Granted
+            } else {
+                PermissionStatus::Denied
+            }
+        }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn av_authorization_to_status(status: super::macos_native::AvAuthorization) -> PermissionStatus {
+    use super::macos_native::AvAuthorization;
+    match status {
+        AvAuthorization::Authorized => PermissionStatus::Granted,
+        AvAuthorization::Denied => PermissionStatus::Denied,
+        AvAuthorization::Restricted => PermissionStatus::Restricted,
+        AvAuthorization::NotDetermined => PermissionStatus::NotDetermined,
+        AvAuthorization::Unknown => PermissionStatus::Unsupported,
+    }
+}
+
+/// Ask the OS to grant the given permission where a direct request API
+/// exists. Screen recording and accessibility have prompt APIs; mic/camera
+/// request their prompt on first device open, so the UI should deep-link to
+/// System Settings for those instead.
+///
+/// Returns true when the permission is already (or newly) granted.
+pub fn request_permission(kind: PermissionKind) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use super::macos_native;
+        match kind {
+            PermissionKind::ScreenRecording => macos_native::request_screen_recording_access(),
+            PermissionKind::Accessibility => macos_native::request_accessibility_access(),
+            // +[AVCaptureDevice requestAccessForMediaType:completionHandler:]
+            // requires an ObjC block — the device-open path triggers the same
+            // prompt, so callers should deep-link to System Settings here.
+            PermissionKind::Microphone | PermissionKind::Camera => {
+                check_permission(kind) == PermissionStatus::Granted
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = kind;
+        check_permission(kind) == PermissionStatus::Granted
+    }
+}
+
+/// macOS preflight used by recorder startup: if the screen-recording grant is
+/// missing, fire the system request once (undetermined only), then re-check.
+/// `false` means the grant is absent — the capture would fail inside ffmpeg
+/// with an opaque avfoundation error, so callers should refuse the start.
+#[cfg(target_os = "macos")]
+pub fn ensure_screen_recording_permission() -> bool {
+    if super::macos_native::screen_recording_granted() {
+        return true;
+    }
+    let _ = super::macos_native::request_screen_recording_access();
+    super::macos_native::screen_recording_granted()
 }
 
 #[cfg(target_os = "linux")]

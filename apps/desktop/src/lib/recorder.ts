@@ -7,6 +7,8 @@ import {
   diagnosticsReportSchema,
   encoderInfoSchema,
   libraryRecordingSchema,
+  permissionKindSchema,
+  privacyPaneSchema,
   recordingConfigSchema,
   recordingMarkerSchema,
   recordingProfileSchema,
@@ -15,6 +17,7 @@ import {
   recoveryScanResultSchema,
   recordingSmartZoomSchema,
   recordingStorageInfoSchema,
+  systemPermissionsReportSchema,
   videoDeviceSchema,
 } from "@recordforge/contracts"
 import type {
@@ -25,6 +28,8 @@ import type {
   DiagnosticsReport,
   EncoderInfo,
   LibraryRecording,
+  PermissionKind,
+  PrivacyPane,
   RecordingConfig,
   RecordingMarker,
   RecordingProfile,
@@ -33,12 +38,37 @@ import type {
   RecordingStatus,
   RecordingStorageInfo,
   RecoveryScanResult,
+  SystemPermissionsReport,
   VideoDevice,
 } from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 
 export async function listCaptureSources(): Promise<CaptureSource[]> {
   return invokeValidated("list_capture_sources", undefined, z.array(captureSourceSchema))
+}
+
+// Truthful OS permission snapshot — the macOS recording modal renders the
+// missing-grant banner from this; other platforms report all-granted.
+export async function getSystemPermissions(): Promise<SystemPermissionsReport> {
+  return invokeValidated("get_system_permissions", undefined, systemPermissionsReportSchema)
+}
+
+// Fire the OS prompt where one exists, then re-read the report.
+export async function requestSystemPermission(
+  kind: PermissionKind,
+): Promise<SystemPermissionsReport> {
+  return invokeValidated(
+    "request_system_permission",
+    { kind: permissionKindSchema.parse(kind) },
+    systemPermissionsReportSchema,
+  )
+}
+
+// Deep-link to System Settings → Privacy & Security on macOS.
+export async function openPrivacySettings(pane: PrivacyPane): Promise<void> {
+  return invokeValidated<void>("open_privacy_settings", {
+    pane: privacyPaneSchema.parse(pane),
+  })
 }
 
 export async function listAudioDevices(): Promise<AudioDevice[]> {

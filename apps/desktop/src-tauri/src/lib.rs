@@ -134,6 +134,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             commands::recording::list_capture_sources,
+            commands::recording::get_system_permissions,
+            commands::recording::request_system_permission,
+            commands::recording::open_privacy_settings,
             commands::recording::list_audio_devices,
             commands::recording::list_video_devices,
             commands::recording::list_builtin_profiles,

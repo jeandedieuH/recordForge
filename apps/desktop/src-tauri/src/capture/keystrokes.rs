@@ -8,9 +8,10 @@
 //! - The file lives only inside the session's work dir — it is never uploaded.
 //! - Opt-in via `RecordingConfig.capture_keystrokes`.
 //!
-//! Platform support: Windows only in v1 (GetAsyncKeyState polling). macOS
-//! needs a CGEventTap (accessibility permission) and Linux an X11/Wayland
-//! input hook; both emit an empty event file until implemented.
+//! Platform support: Windows (GetAsyncKeyState polling) and macOS
+//! (CGEventTap on a dedicated run loop — needs Accessibility trust, else the
+//! tap silently fails to create and the event file stays empty). Linux still
+//! needs an X11/Wayland input hook and emits an empty event file.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -226,10 +227,20 @@ fn poll_keys(origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeystrokeEvent> {
     events
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn poll_keys(origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeystrokeEvent> {
+    // The tap runs until `stop` flips; without Accessibility trust it returns
+    // immediately with no events (logged inside `run_key_tap`).
+    super::macos_native::run_key_tap(origin, stop)
+        .into_iter()
+        .map(|(t_ms, label)| KeystrokeEvent { t_ms, label })
+        .collect()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn poll_keys(_origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeystrokeEvent> {
-    // Non-Windows platforms need an event-tap implementation; emit nothing
-    // until then rather than faking capture.
+    // Linux needs an X11/Wayland input hook; emit nothing until implemented
+    // rather than faking capture.
     while !stop.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }

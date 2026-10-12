@@ -52,6 +52,10 @@ pub fn create_tray(app: &tauri::App) -> Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon.clone())
+        // macOS template icon: black/alpha artwork the system recolors for
+        // the menu bar's light/dark appearance — required for a native look.
+        // The flag is ignored on Windows/Linux where icons render as-is.
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("RecordForge")
         .menu(&menu)
         // Left-click focuses the app instead of opening the menu (Windows

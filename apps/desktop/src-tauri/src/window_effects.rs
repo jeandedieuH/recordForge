@@ -14,7 +14,15 @@ pub fn mica_active() -> bool {
     MICA_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Apply or clear the Mica backdrop on the main window (Windows 11 only).
+/// The translucent backdrop effect for this platform: Mica on Windows 11,
+/// NSVisualEffectMaterial `Sidebar` (vibrancy) on macOS. The main window is
+/// `transparent: true` in tauri.conf, so both composites behind the webview.
+#[cfg(target_os = "macos")]
+const BACKDROP_EFFECT: Effect = Effect::Sidebar;
+#[cfg(not(target_os = "macos"))]
+const BACKDROP_EFFECT: Effect = Effect::Mica;
+
+/// Apply or clear the translucent backdrop on the main window.
 /// Returns whether the requested effect is now active.
 pub fn apply_mica(app: &tauri::AppHandle, enabled: bool) -> bool {
     let Some(window) = app.get_webview_window("main") else {
@@ -25,7 +33,7 @@ pub fn apply_mica(app: &tauri::AppHandle, enabled: bool) -> bool {
     let result = if enabled {
         window.set_effects(
             EffectsBuilder::new()
-                .effect(Effect::Mica)
+                .effect(BACKDROP_EFFECT)
                 .state(EffectState::Active)
                 .build(),
         )

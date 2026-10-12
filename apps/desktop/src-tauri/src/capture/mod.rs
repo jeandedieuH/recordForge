@@ -13,7 +13,13 @@ pub mod engine;
 pub mod fakes;
 pub mod ffmpeg;
 pub mod keystrokes;
+#[cfg(target_os = "linux")]
+pub mod linux_pipewire;
 pub mod linux_portal;
+#[cfg(target_os = "macos")]
+pub mod macos_native;
+#[cfg(target_os = "macos")]
+pub mod macos_sck;
 pub mod manifest;
 pub mod media;
 pub mod metrics;

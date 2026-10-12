@@ -505,6 +505,35 @@ impl Recorder {
     #[instrument(skip(self))]
     pub fn prepare(&self, config: RecordingConfig) -> crate::errors::Result<String> {
         config.validate()?;
+
+        // macOS: refuse to start when the TCC grant is definitely absent —
+        // otherwise ffmpeg fails inside avfoundation with an opaque error.
+        // `NotDetermined` passes through so the device-open can trigger the
+        // OS prompt; screen recording requests eagerly then re-checks.
+        #[cfg(target_os = "macos")]
+        {
+            use super::permissions::{check_permission, PermissionKind, PermissionStatus};
+            if is_camera_source(&config) {
+                if matches!(
+                    check_permission(PermissionKind::Camera),
+                    PermissionStatus::Denied | PermissionStatus::Restricted
+                ) {
+                    return Err(crate::errors::InternalError::Permissions(
+                        "Camera access is denied. Enable RecordForge in System Settings \
+                         → Privacy & Security → Camera."
+                            .into(),
+                    )
+                    .into());
+                }
+            } else if !super::permissions::ensure_screen_recording_permission() {
+                return Err(crate::errors::InternalError::Permissions(
+                    "macOS Screen Recording permission is required. Enable RecordForge in \
+                     System Settings → Privacy & Security → Screen Recording, then retry."
+                        .into(),
+                )
+                .into());
+            }
+        }
         let mut guard = self
             .current
             .lock()
@@ -851,6 +880,26 @@ impl Recorder {
         // advertised mode.
         mode_attempts.push(None);
 
+        // Wayland: negotiate the portal + PipeWire path on this thread BEFORE
+        // the auxiliaries spawn. Two reasons: the source-picker dialog is
+        // human-paced so it must not race the aux workers anyway, and the
+        // negotiated stream geometry has to be published before the cursor
+        // tracker snapshots its capture bounds. A failure here is loud —
+        // nothing silently records a black x11grab fallback on Wayland.
+        #[cfg(target_os = "linux")]
+        let mut linux_bundle = {
+            let capture = super::linux_pipewire::LinuxPipeWireCapture::start_if_wayland(
+                &config.source,
+                profile,
+            )?;
+            super::ffmpeg::LinuxCaptureBundle {
+                video_input: capture.as_ref().map(|c| c.video_input()),
+                capture,
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mut linux_bundle = super::ffmpeg::LinuxCaptureBundle::default();
+
         // The cursor tracker and the WASAPI audio workers clock against the
         // segment origin: they must be running before the screen process
         // emits its first frame, or their tracks would show the startup window
@@ -869,6 +918,7 @@ impl Recorder {
                         recording_id,
                         cursor_time_offset_ms,
                         aux_origin,
+                        &self.ffmpeg_path,
                     )
                 });
 
@@ -887,6 +937,7 @@ impl Recorder {
                             index,
                             Some(Arc::clone(&manifest)),
                             use_ddagrab,
+                            &mut linux_bundle,
                         ) {
                             Ok(capture) => {
                                 screen = Some(capture);
@@ -1170,6 +1221,7 @@ impl Recorder {
                     recording_id,
                     cursor_time_offset_ms,
                     aux_origin,
+                    &self.ffmpeg_path,
                 )
             });
 
@@ -1311,6 +1363,7 @@ impl Recorder {
     /// shared timeline origin. Called on a scoped thread from `start_segment`
     /// so these captures run concurrently with — and therefore ahead of — the
     /// screen process's startup window.
+    #[allow(clippy::too_many_arguments)]
     fn start_auxiliary_captures(
         config: &RecordingConfig,
         profile: &RecordingProfile,
@@ -1319,12 +1372,21 @@ impl Recorder {
         recording_id: &str,
         cursor_time_offset_ms: u64,
         origin: TimelineAnchor,
+        ffmpeg_path: &Path,
     ) -> AuxiliaryCaptures {
         // Camera sources record no cursor telemetry: the bounds describe an
         // output budget, not a screen rectangle.
         let cursor_tracker = if is_camera_source(config) {
             None
         } else {
+            // On Wayland the portal's granted stream geometry (which is already
+            // correct even when the source's placeholder bounds aren't) wins;
+            // falls back to the configured source bounds on X11 and non-portal
+            // captures.
+            #[cfg(target_os = "linux")]
+            let bounds =
+                super::linux_pipewire::wayland_stream_geometry().unwrap_or(config.source.bounds);
+            #[cfg(not(target_os = "linux"))]
             let bounds = config.source.bounds;
             let capture_bounds = super::cursor::CursorCaptureBounds {
                 x: bounds.x,
@@ -1352,6 +1414,7 @@ impl Recorder {
                 config.microphone_device_id.clone(),
                 output_path,
                 origin,
+                Some(ffmpeg_path.to_path_buf()),
             ) {
                 Ok(track) => {
                     audio.push(ActiveAudioCapture {
@@ -1375,6 +1438,7 @@ impl Recorder {
                 config.system_audio_device_id.clone(),
                 output_path,
                 origin,
+                Some(ffmpeg_path.to_path_buf()),
             ) {
                 Ok(track) => {
                     audio.push(ActiveAudioCapture {
