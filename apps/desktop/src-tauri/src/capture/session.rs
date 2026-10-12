@@ -4168,6 +4168,121 @@ mod tests {
         assert_eq!(recording.fps, fps.round() as i32);
     }
 
+    /// Media Foundation coverage: pins `h264_mf` through the real recorder so
+    /// the `empty_moov`-free mux flags are exercised end to end and the
+    /// resulting file provably parses (with `-hw_encoding 1` + `empty_moov`
+    /// the first sample was corrupt and ffprobe could not read the stream).
+    #[test]
+    #[ignore = "requires a real camera and a hardware Media Foundation encoder"]
+    fn camera_recording_mediafoundation_output_is_readable() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("create in-memory database");
+        crate::database::migrations::run_migrations(&mut conn).expect("run migrations");
+        let db = Arc::new(Mutex::new(conn));
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ffmpeg = manifest_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe");
+        let ffprobe = manifest_dir.join("binaries/ffprobe-x86_64-pc-windows-msvc.exe");
+        if !ffmpeg.exists() || !ffprobe.exists() {
+            eprintln!("skipping: real FFmpeg sidecar not found");
+            return;
+        }
+
+        let device = enumerate_video_devices(&ffmpeg.to_string_lossy())
+            .ok()
+            .and_then(|devices| devices.into_iter().find(|d| d.kind == "webcam"))
+            .map(|d| d.name);
+        let Some(device) = device else {
+            eprintln!("skipping: no camera found");
+            return;
+        };
+
+        let mut recorder = Recorder::new(
+            ffmpeg.clone(),
+            ffprobe.clone(),
+            temp_dir.path().to_path_buf(),
+            db,
+        );
+        if !recorder
+            .available_encoders()
+            .iter()
+            .any(|encoder| encoder == "h264_mf")
+        {
+            eprintln!("skipping: no hardware Media Foundation encoder detected");
+            return;
+        }
+        // Pin the pool so priority order cannot quietly pick nvenc/qsv —
+        // a silent fallback would leave the fix unexercised.
+        recorder.available_encoders = vec!["h264_mf".into()];
+
+        let config = RecordingConfig {
+            source: CaptureSource {
+                kind: "camera".into(),
+                id: device,
+                name: "Camera".into(),
+                bounds: Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            profile: "camera-balanced".into(),
+            capture_microphone: false,
+            capture_system_audio: false,
+            capture_webcam: false,
+            webcam_device_id: None,
+            microphone_device_id: None,
+            system_audio_device_id: None,
+            webcam_preview_mode: Default::default(),
+            gpu_screen_capture: true,
+            smart_zoom_enabled: false,
+            smart_zoom_preset: "product-demo".into(),
+            capture_keystrokes: false,
+        };
+
+        let session_id = recorder.prepare(config).expect("prepare camera session");
+        recorder
+            .start_prepared(&session_id)
+            .expect("start camera recording");
+        std::thread::sleep(Duration::from_secs(4));
+        recorder.stop().expect("stop camera recording");
+
+        let session_dir = temp_dir.path().join(&session_id);
+        let output = session_dir.join("output.mp4");
+        assert!(output.exists(), "camera output must exist");
+
+        // The MF segment is only readable because the mux flags drop
+        // `+empty_moov` for this encoder — and the manifest must show the MF
+        // path actually ran rather than silently falling back to libx264.
+        let metadata =
+            crate::media::probe::probe_media(&ffprobe.to_string_lossy(), &output, "camera-mf-test")
+                .expect("MF camera output must be probe-readable");
+        let video = metadata
+            .streams
+            .iter()
+            .find(|stream| stream.kind == "video")
+            .expect("video stream");
+        assert!(
+            video.width.unwrap_or(0) >= 640 && video.height.unwrap_or(0) >= 360,
+            "resolution {:?}x{:?}",
+            video.width,
+            video.height
+        );
+
+        let manifest =
+            RecordingManifest::read(session_dir.join("session.json")).expect("read manifest");
+        let diagnostics = manifest
+            .capture_diagnostics
+            .iter()
+            .find(|segment| segment.index == 0)
+            .expect("fragment 0 diagnostics");
+        assert_eq!(
+            diagnostics.camera.as_ref().map(|d| d.encoder.as_str()),
+            Some("h264_mf"),
+            "the MF path must have actually run, not fallen back"
+        );
+    }
+
     /// Pause/resume coverage: two camera segments must concatenate into one
     /// `output.mp4` with identical geometry — the output lock derived at
     /// pause forces the resumed segment to the first segment's resolution

@@ -80,11 +80,14 @@ pub(crate) fn add_camera_encoder_args(
         "h264_mf" => {
             // Verified on the pinned sidecar (FFmpeg 9.0.1): u_vbr accepts
             // -b:v as the VBR target and -maxrate/-bufsize ARE honored. Do
-            // NOT pass `-hw_encoding 1` here — with the mandatory fragmented
-            // MP4 flags (`+empty_moov`) the hw MFT delivers extradata only
-            // after the moov is written, producing a file ffprobe cannot
-            // read. Without the flag MF still prefers a hardware MFT and
-            // degrades to software rather than emitting a broken file.
+            // NOT pass `-hw_encoding 1` on this path: (a) with `+empty_moov`
+            // the hw MFT's format-change extradata lands after the moov is
+            // written and corrupts the stream — the mux side now drops
+            // `empty_moov` for h264_mf (see `segment_movflags` in ffmpeg.rs);
+            // (b) forced activation can stall past the 8s readiness window
+            // while a sleeping discrete GPU wakes (observed on a dual-MFT
+            // machine: NVIDIA + Intel). MF auto-selection still prefers a
+            // hardware MFT when one exists, without either failure mode.
             command.args([
                 "-rate_control",
                 "u_vbr",
@@ -214,8 +217,9 @@ mod tests {
     #[test]
     fn mediafoundation_uses_vbr_without_forced_hw() {
         let args = args("h264_mf");
-        // `-hw_encoding 1` + fragmented MP4 yields an unreadable file on this
-        // machine (no extradata before the empty moov) — see the match arm.
+        // `-hw_encoding 1` corrupts `+empty_moov` output and can stall MFT
+        // activation past the readiness window — auto-selection still picks
+        // hardware when available (see the match arm comment).
         assert!(!args.iter().any(|a| a == "-hw_encoding"));
         assert_eq!(paired(&args, "-pix_fmt"), Some("nv12"));
         assert_eq!(paired(&args, "-rate_control"), Some("u_vbr"));

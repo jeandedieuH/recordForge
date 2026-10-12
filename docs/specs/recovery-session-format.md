@@ -133,7 +133,7 @@ The manifest MUST be written on every state transition:
 - Marker added
 - Stats updated
 
-The active fragment is written with fragmented MP4 flags (`empty_moov`, `default_base_moof`, and keyframe fragmentation). Recovery therefore scans physical `seg_*.mp4` files in addition to manifest fragments, allowing an interrupted first segment to be offered for recovery when its container remains readable. Periodic segment rollover remains a follow-up for bounded-loss guarantees.
+The active fragment is written with fragmented MP4 flags (`empty_moov`, `default_base_moof`, and keyframe fragmentation; `empty_moov` is omitted for `h264_mf` — with `-hw_encoding 1` the hardware MFT's late format-change extradata corrupts the first sample once the empty moov is written, so that encoder lets the muxer delay the moov until real extradata exists). Recovery therefore scans physical `seg_*.mp4` files in addition to manifest fragments, allowing an interrupted first segment to be offered for recovery when its container remains readable. Periodic segment rollover remains a follow-up for bounded-loss guarantees.
 
 ---
 

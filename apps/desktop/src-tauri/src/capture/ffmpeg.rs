@@ -603,7 +603,7 @@ fn build_screen_command(
 
     command.args([
         "-movflags",
-        "+frag_keyframe+empty_moov+default_base_moof",
+        segment_movflags(encoder),
         "-frag_duration",
         "2000000",
         "-min_frag_duration",
@@ -772,7 +772,7 @@ fn build_webcam_command(
     ]);
     command.args([
         "-movflags",
-        "+frag_keyframe+empty_moov+default_base_moof",
+        segment_movflags(encoder),
         "-frag_duration",
         "2000000",
         "-min_frag_duration",
@@ -984,7 +984,7 @@ fn build_camera_command(
     // Fragmented MP4 — partial chunks stay playable if the process dies.
     command.args([
         "-movflags",
-        "+frag_keyframe+empty_moov+default_base_moof",
+        segment_movflags(encoder),
         "-frag_duration",
         "2000000",
         "-min_frag_duration",
@@ -1197,6 +1197,24 @@ fn build_video_filter(
         format!("[0:v]hwdownload,format=bgra,{fit_filter}[vout]")
     } else {
         format!("[0:v]{fit_filter}[vout]")
+    }
+}
+
+/// Fragmented-MP4 mux flags for a live capture segment.
+///
+/// `+empty_moov` is omitted for `h264_mf`: with `-hw_encoding 1` the hardware
+/// MFT reports a "stream format change" and delivers its extradata only after
+/// the empty moov is already written — the muxer then emits a corrupt first
+/// sample and ffprobe cannot read the file at all (verified on the pinned
+/// FFmpeg 9.0.1 sidecar). Without `empty_moov` the muxer waits for the first
+/// packet — and the real extradata — before writing the header moov.
+/// `+frag_keyframe` alone still flushes self-contained fragments, so a
+/// crashed capture remains recoverable. Other encoders keep `+empty_moov`.
+fn segment_movflags(encoder: &str) -> &'static str {
+    if encoder == "h264_mf" {
+        "+frag_keyframe+default_base_moof"
+    } else {
+        "+frag_keyframe+empty_moov+default_base_moof"
     }
 }
 
@@ -2641,6 +2659,57 @@ mod tests {
 
         assert!(debug.contains("\"-pix_fmt\" \"yuv420p\""));
         assert!(!debug.contains("-hw_encoding"));
+    }
+
+    #[test]
+    fn segment_movflags_drop_empty_moov_for_mediafoundation() {
+        // `-hw_encoding 1` + `+empty_moov` writes a corrupt first sample (the
+        // hw MFT's format-change extradata arrives after the empty moov —
+        // verified on the pinned 9.0.1 sidecar). Every other encoder keeps
+        // the streaming-friendly empty moov.
+        assert_eq!(
+            segment_movflags("h264_mf"),
+            "+frag_keyframe+default_base_moof"
+        );
+        assert_eq!(
+            segment_movflags("h264_nvenc"),
+            "+frag_keyframe+empty_moov+default_base_moof"
+        );
+        assert_eq!(
+            segment_movflags("libx264"),
+            "+frag_keyframe+empty_moov+default_base_moof"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn webcam_command_for_h264_mf_omits_empty_moov() {
+        let profile = test_profile();
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "h264_mf",
+            "cam.mp4",
+            None,
+            None,
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("\"-hw_encoding\" \"1\""));
+        assert!(debug.contains("\"+frag_keyframe+default_base_moof\""));
+        assert!(!debug.contains("empty_moov"));
+
+        // A non-MF encoder keeps the empty moov.
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "cam.mp4",
+            None,
+            None,
+        );
+        assert!(format!("{command:?}").contains("\"+frag_keyframe+empty_moov+default_base_moof\""));
     }
 
     // ---------- camera-primary capture (camera-only mode) ----------
