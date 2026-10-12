@@ -2031,25 +2031,36 @@ fn render_composition_window(
 
     // Plates are cached across the export's passes: the file is generated
     // once and the same path is reused as an input in every chunk pass.
-    let bg_key = format!(
-        "bg:{}:{}:{}:{}",
-        screen_x.round() as i64,
-        screen_y.round() as i64,
-        screen_w.round() as i64,
-        screen_h.round() as i64
+    let covers_canvas = background_plate_unneeded(
+        plan,
+        canvas,
+        (screen_x, screen_y, screen_w, screen_h),
+        is_side_by_side,
+        layout_varies,
     );
-    let bg_image_path = shared.plates.get_or_create(&bg_key, || {
-        Ok(prepare_canvas_background_plate(
-            canvas,
-            (screen_x, screen_y, screen_w, screen_h),
-            asset_paths,
-            resource_dir,
-        )
-        .map(|path| {
-            let owned = is_owned_bg_plate(&path);
-            (path, owned)
-        }))
-    })?;
+    let bg_image_path = if covers_canvas {
+        None
+    } else {
+        let bg_key = format!(
+            "bg:{}:{}:{}:{}",
+            screen_x.round() as i64,
+            screen_y.round() as i64,
+            screen_w.round() as i64,
+            screen_h.round() as i64
+        );
+        shared.plates.get_or_create(&bg_key, || {
+            Ok(prepare_canvas_background_plate(
+                canvas,
+                (screen_x, screen_y, screen_w, screen_h),
+                asset_paths,
+                resource_dir,
+            )
+            .map(|path| {
+                let owned = is_owned_bg_plate(&path);
+                (path, owned)
+            }))
+        })?
+    };
     // A baked canvas shadow tracks the video rect; when the rect moves with
     // the layout a second plate — composited only inside side-by-side
     // windows — keeps the shadow pinned to the smaller slot.
@@ -3677,6 +3688,34 @@ struct CameraJob {
 /// True when a background plate path is one of ours (temp-dir +
 /// `recordforge_bg_` name) rather than a user asset resolved into the plate —
 /// only owned files get a cleanup guard.
+/// True when the fitted screen rect covers the whole canvas for the entire
+/// render — the background plate can never be visible, so generating it
+/// (resvg rasterization, a PNG input, a looped plate stream, and a per-frame
+/// overlay blend) is pure overhead. Only safe when coverage is provably
+/// exact: letterboxed fits, mid-timeline gaps, side-by-side layout windows,
+/// rounded corners, shadows, and dim/blur can all still reveal the
+/// background, so each one vetoes the skip.
+fn background_plate_unneeded(
+    plan: &RenderPlan,
+    canvas: &cursor::RenderCanvas,
+    screen_rect: (f64, f64, f64, f64),
+    is_side_by_side: bool,
+    layout_varies: bool,
+) -> bool {
+    let (screen_x, screen_y, screen_w, screen_h) = screen_rect;
+    screen_x.abs() < 0.5
+        && screen_y.abs() < 0.5
+        && screen_w >= canvas.width as f64 - 0.5
+        && screen_h >= canvas.height as f64 - 0.5
+        && !is_side_by_side
+        && !layout_varies
+        && !canvas.shadow
+        && canvas.border_radius == 0
+        && canvas.background_dim.unwrap_or(0.0) <= 0.0
+        && canvas.background_blur.unwrap_or(0.0) <= 0.0
+        && plan.gaps.is_empty()
+}
+
 fn is_owned_bg_plate(path: &Path) -> bool {
     path.starts_with(std::env::temp_dir())
         && path
@@ -9005,6 +9044,75 @@ mod tests {
         assert_eq!(rect_sbs.2, 1458.0);
         assert_eq!(rect_sbs.3, 820.0);
         assert_eq!(rect_sbs.1, 130.0);
+    }
+
+    #[test]
+    fn background_plate_skips_only_for_provably_full_bleed_renders() {
+        // Camera-defaults render: 1280x720 source at padding 0 on a 1280x720
+        // canvas — the video covers every pixel, so even a gradient
+        // background plate is invisible.
+        let canvas = cursor::RenderCanvas {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            background: "linear-gradient(135deg, #10b981, #3b82f6)".into(),
+            ..Default::default()
+        };
+        let mut plan = valid_plan();
+        plan.gaps.clear();
+        assert!(background_plate_unneeded(
+            &plan,
+            &canvas,
+            (0.0, 0.0, 1280.0, 720.0),
+            false,
+            false,
+        ));
+
+        // Letterboxed fits leave background visible.
+        assert!(!background_plate_unneeded(
+            &plan,
+            &canvas,
+            (0.0, 10.0, 1280.0, 700.0),
+            false,
+            false,
+        ));
+        // Mid-timeline gaps reveal the background.
+        let mut gapped = plan.clone();
+        gapped.gaps.push(RenderPlanGap {
+            start_ms: 1_000,
+            end_ms: 2_000,
+        });
+        assert!(!background_plate_unneeded(
+            &gapped,
+            &canvas,
+            (0.0, 0.0, 1280.0, 720.0),
+            false,
+            false,
+        ));
+        // Rounded corners, shadows, dim/blur, and moving layouts can all
+        // expose background pixels even at a full-canvas rect.
+        for (radius, shadow, dim, sbs, varies) in [
+            (24, false, 0.0, false, false),
+            (0, true, 0.0, false, false),
+            (0, false, 0.2, false, false),
+            (0, false, 0.0, true, false),
+            (0, false, 0.0, false, true),
+        ] {
+            let mut cornered = canvas.clone();
+            cornered.border_radius = radius;
+            cornered.shadow = shadow;
+            cornered.background_dim = (dim > 0.0).then_some(dim);
+            assert!(
+                !background_plate_unneeded(
+                    &plan,
+                    &cornered,
+                    (0.0, 0.0, 1280.0, 720.0),
+                    sbs,
+                    varies,
+                ),
+                "radius={radius} shadow={shadow} dim={dim} sbs={sbs} varies={varies} must keep the plate"
+            );
+        }
     }
 
     /// Regression: deleting a middle camera piece must not leave a static

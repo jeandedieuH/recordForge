@@ -230,19 +230,20 @@ function createAudioClip(
   if (clipDuration <= 0) return null
 
   // Camera-source recordings have no camera clip to carry the calibration
-  // offset — the video track is the fixed primary, so the same offset math
-  // shifts the audio instead. The capture-time semantics "positive = video
-  // delayed" therefore read as "audio delayed" here: a positive offset moves
-  // the audio start right on the timeline, a negative one trims the clip's
-  // source window. Screen recordings are untouched — their offset still lands
-  // on the camera sidecar clip below.
+  // offset — the video track is the fixed primary, so the same correction is
+  // applied to the audio instead, mirrored. Settings semantics: positive =
+  // "delay the camera video" (fixes mouth-before-voice); with the video
+  // pinned, that correction advances the audio, so a positive offset trims
+  // the clip's source window and a negative one moves the clip start right.
+  // Screen recordings are untouched — their offset still lands on the camera
+  // sidecar clip below.
+  const baseStartMs = Math.round(Math.min(stream?.startMs ?? 0, roundedDuration))
   const rawOffset = Math.round(cameraSyncOffsetMs)
-  const startMs =
-    rawOffset === 0
-      ? Math.round(Math.min(stream?.startMs ?? 0, roundedDuration))
-      : Math.max(0, rawOffset)
-  const sourceInMs = rawOffset < 0 ? Math.min(clipDuration, Math.abs(rawOffset)) : 0
-  const sourceOutMs = rawOffset === 0 ? availableDuration : sourceInMs + clipDuration
+  const sourceInMs = rawOffset > 0 ? Math.min(clipDuration, rawOffset) : 0
+  const startMs = baseStartMs + Math.max(0, -rawOffset)
+  const effectiveDuration = Math.max(0, clipDuration - sourceInMs)
+  if (effectiveDuration <= 0) return null
+  const sourceOutMs = sourceInMs > 0 ? sourceInMs + effectiveDuration : availableDuration
 
   return {
     id: crypto.randomUUID(),
@@ -251,7 +252,7 @@ function createAudioClip(
     streamIndex: stream?.index,
     role: audioStreamRole(stream, streamIndex),
     startMs,
-    durationMs: clipDuration,
+    durationMs: effectiveDuration,
     sourceInMs,
     sourceOutMs,
     speed: 1,

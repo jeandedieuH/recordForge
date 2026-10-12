@@ -16,9 +16,9 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 | Package manager          | Bun                                                                                                               |
 | Monorepo                 | Turborepo + Bun workspaces                                                                                        |
 | Local database           | SQLite                                                                                                            |
-| Video processing         | FFmpeg + FFprobe (pinned multi-platform sidecars)                                                                  |
+| Video processing         | FFmpeg + FFprobe (pinned multi-platform sidecars)                                                                 |
 | Audio capture            | Native WASAPI (Windows), CoreAudio/ScreenCaptureKit (macOS), ALSA/PipeWire (Linux)                                |
-| Credential vault         | Windows Credential Manager, Apple Keychain (macOS), Secret Service (Linux) via `keyring`                         |
+| Credential vault         | Windows Credential Manager, Apple Keychain (macOS), Secret Service (Linux) via `keyring`                          |
 | Cursor SVG rasterization | `resvg` + `tiny-skia` in export                                                                                   |
 | State management         | Zustand                                                                                                           |
 | Validation               | Zod                                                                                                               |
@@ -26,7 +26,7 @@ RecordForge is a **local-first, low-end-friendly cross-platform desktop screen r
 | Icons                    | lucide-react (no emoji in product UI)                                                                             |
 | Font                     | Inter Variable for the shell; overlay bundle uses Inter, Source Serif 4, JetBrains Mono, and Outfit under OFL-1.1 |
 | License                  | GNU General Public License v3.0 (GPL-3.0-or-later), open core — see `LICENSING.md`                                |
-| Licensing                | Ed25519 offline tokens, `machine-uid` device binding, OS-vault license key (`src-tauri/src/licensing/`)            |
+| Licensing                | Ed25519 offline tokens, `machine-uid` device binding, OS-vault license key (`src-tauri/src/licensing/`)           |
 
 ## Repository Layout
 

@@ -25,12 +25,12 @@ are defined in `cameraTiers` (`packages/contracts/src/recording.ts`), mirrored
 1:1 by `camera_profiles()` in Rust and pinned by
 `tooling/fixtures/camera-tiers.json` so the two languages cannot drift.
 
-| Tier id           | Label        | Output budget | fps | Intent                              |
-| ----------------- | ------------ | ------------- | --- | ----------------------------------- |
-| `camera-low`      | Low Impact   | 1280×720      | 30  | Battery/low-end machines            |
-| `camera-balanced` | Balanced     | 1920×1080     | 30  | Default                             |
-| `camera-high`     | High Quality | 1920×1080     | 30  | Higher nominal bitrate              |
-| `camera-ultra`    | Ultra        | 3840×2160     | 30  | Devices that negotiate 4K           |
+| Tier id           | Label        | Output budget | fps | Intent                    |
+| ----------------- | ------------ | ------------- | --- | ------------------------- |
+| `camera-low`      | Low Impact   | 1280×720      | 30  | Battery/low-end machines  |
+| `camera-balanced` | Balanced     | 1920×1080     | 30  | Default                   |
+| `camera-high`     | High Quality | 1920×1080     | 30  | Higher nominal bitrate    |
+| `camera-ultra`    | Ultra        | 3840×2160     | 30  | Devices that negotiate 4K |
 
 Each tier carries an id, an output budget (never upscaled past the negotiated
 mode), a nominal bitrate set, and a usage intent. The tier's budget bounds
@@ -45,7 +45,7 @@ the encode; the negotiated camera mode fills it as far as the device allows
 the device's advertised modes (`webcam::probe_camera_modes`) into an ordered
 list of `CameraCapturePlan` attempts:
 
-- **Ranking** is by *fitted output* area, not input area — a USB2 raw
+- **Ranking** is by _fitted output_ area, not input area — a USB2 raw
   1080p@5 MJPEG-less mode loses to a 720p@30 mode because slideshow frame
   rates are unusable for primary capture (`fps_floor = min(target, 24)`).
 - **Fit modes** describe how input frames map to the output: `Native` (exact
@@ -60,7 +60,7 @@ list of `CameraCapturePlan` attempts:
   size/rate, resumed segments are forced to the same geometry so pause/resume
   fragments stay stream-copy-concat compatible.
 - `limitedByCamera` reports when the device cannot fill the tier budget on
-  both axes — a 4:3 output filling the budget height is *not* limited.
+  both axes — a 4:3 output filling the budget height is _not_ limited.
 
 The plan is surfaced to the UI via `plan_camera_tiers` and the contract
 `cameraCapturePlanSchema`.
@@ -105,7 +105,7 @@ The plan is surfaced to the UI via `plan_camera_tiers` and the contract
   `Recording <sessionId8>` (`database/library.rs`), for completed and
   recovered sessions alike.
 - **Dimensions.** The row first stores the tier budget, then is overwritten
-  with the *probed* output geometry at finalize — the negotiated mode can be
+  with the _probed_ output geometry at finalize — the negotiated mode can be
   smaller than the tier budget.
 - **Thumbnails.** `poster.jpg` is generated from `output.mp4` by the shared
   finalization path — camera recordings need no special handling.
@@ -142,11 +142,12 @@ The plan is surfaced to the UI via `plan_camera_tiers` and the contract
   bleed. The default background is kept (invisible at padding 0, still
   user-changeable).
 - `cameraSyncOffsetMs` applies to the **audio clips** (there is no camera
-  clip): `startMs = max(0, offset)`, `sourceInMs = min(clipDuration, |offset|)`
-  when negative, `sourceOutMs = sourceInMs + clipDuration`. The calibration
-  semantics "positive = video delayed" read as "audio delayed" when video is
-  the fixed primary. Screen recordings keep the offset on the camera sidecar
-  clip.
+  clip), mirrored from the sidecar formula: positive = "delay the camera
+  video" per the settings UI, and with the video pinned as primary that
+  correction advances the audio — `sourceInMs = min(clipDuration, offset)`
+  (and `durationMs` shrinks accordingly); a negative offset moves the clip
+  right, `startMs = baseStart + |offset|`. Screen recordings keep the offset
+  on the camera sidecar clip.
 - The **Cursor** task is hidden in the editor task rail; a persisted
   selection shows a not-applicable panel. The Smart Zoom card explains that
   camera recordings have no cursor telemetry; manual zoom still works

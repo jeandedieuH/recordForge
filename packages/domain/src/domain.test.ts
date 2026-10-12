@@ -362,7 +362,9 @@ describe("camera-source recordings", () => {
     expect(project.tracks[0]).toMatchObject({ kind: "screen", name: "Camera" })
   })
 
-  it("shifts audio clips right on a positive cameraSyncOffsetMs", () => {
+  // Positive = "delay the camera video" per the settings UI; with the video
+  // pinned as primary the mirrored fix advances the audio instead.
+  it("advances the audio source window on a positive cameraSyncOffsetMs", () => {
     const timeline = createTimelineFromRecording(
       makeCameraRecording(),
       makeCameraMetadata(),
@@ -372,13 +374,13 @@ describe("camera-source recordings", () => {
     )
     const audioClip = timeline.tracks.find((t) => t.kind === "audio")?.clips[0]
     expect(audioClip).toBeDefined()
-    expect(audioClip?.startMs).toBe(250)
-    expect(audioClip?.sourceInMs).toBe(0)
+    expect(audioClip?.startMs).toBe(0)
+    expect(audioClip?.sourceInMs).toBe(250)
     expect(audioClip?.sourceOutMs).toBe(10_000)
-    expect(audioClip?.durationMs).toBe(10_000)
+    expect(audioClip?.durationMs).toBe(9_750)
   })
 
-  it("trims the audio source window on a negative cameraSyncOffsetMs", () => {
+  it("shifts audio clips right on a negative cameraSyncOffsetMs", () => {
     const timeline = createTimelineFromRecording(
       makeCameraRecording(),
       makeCameraMetadata(),
@@ -388,9 +390,10 @@ describe("camera-source recordings", () => {
     )
     const audioClip = timeline.tracks.find((t) => t.kind === "audio")?.clips[0]
     expect(audioClip).toBeDefined()
-    expect(audioClip?.startMs).toBe(0)
-    expect(audioClip?.sourceInMs).toBe(200)
-    expect(audioClip?.sourceOutMs).toBe(10_200)
+    expect(audioClip?.startMs).toBe(200)
+    expect(audioClip?.sourceInMs).toBe(0)
+    expect(audioClip?.sourceOutMs).toBe(10_000)
+    expect(audioClip?.durationMs).toBe(10_000)
   })
 
   it("leaves screen-recording audio untouched by cameraSyncOffsetMs", () => {
