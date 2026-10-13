@@ -407,10 +407,8 @@ mod dbus_session {
             };
             let is_response = msg.msg_type() == dbus::MessageType::Signal
                 && msg.path().is_some_and(|p| p == *request_path)
-                && msg
-                    .interface()
-                    .is_some_and(|i| i.to_string() == REQUEST_IFACE)
-                && msg.member().is_some_and(|m| m.to_string() == "Response");
+                && msg.interface().is_some_and(|i| i == REQUEST_IFACE)
+                && msg.member().is_some_and(|m| m == "Response");
             if !is_response {
                 continue;
             }

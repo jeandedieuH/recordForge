@@ -550,11 +550,11 @@ fn cursor_snapshot(cursor: &MetaCursor, started: Instant) -> Option<PipeWireCurs
     };
     Some(PipeWireCursorSnapshot {
         active: true,
-        // SPA points are f32 — the cursor telemetry model is integer pixels.
-        x: pos.x as i32,
-        y: pos.y as i32,
-        hotspot_x: hotspot.x as i32,
-        hotspot_y: hotspot.y as i32,
+        // SPA cursor points are already integer pixels (spa_point is i32).
+        x: pos.x,
+        y: pos.y,
+        hotspot_x: hotspot.x,
+        hotspot_y: hotspot.y,
         width: w,
         height: h,
         shape_name: None,
