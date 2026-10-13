@@ -2986,6 +2986,7 @@ mod tests {
 
     // ---------- camera-primary capture (camera-only mode) ----------
 
+    #[cfg(windows)]
     fn camera_test_plan(
         fit: CameraFit,
         out_w: u32,
@@ -3009,6 +3010,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn camera_mode(
         width: u32,
         height: u32,
@@ -3025,6 +3027,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn camera_args(command: &Command) -> Vec<String> {
         command
             .get_args()
@@ -3032,6 +3035,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(windows)]
     fn filter_arg(args: &[String]) -> String {
         args.iter()
             .position(|arg| arg == "-filter_complex")
@@ -3039,6 +3043,7 @@ mod tests {
             .expect("filter_complex present")
     }
 
+    #[cfg(windows)]
     fn paired_arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         args.iter()
             .position(|arg| arg == flag)

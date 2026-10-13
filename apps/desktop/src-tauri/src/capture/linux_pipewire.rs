@@ -308,11 +308,11 @@ fn try_run_pipewire_loop(
     // Media properties classify us as a screen-capture sink. The `keys`
     // constants are LazyLock<&'static str>, hence the leading `*`.
     let props = pipewire::properties::properties! {
-        *keys::PW_KEY_MEDIA_TYPE, "Video",
-        *keys::PW_KEY_MEDIA_CATEGORY, "Capture",
-        *keys::PW_KEY_MEDIA_ROLE, "Screen",
-        *keys::PW_KEY_MEDIA_CLASS, "Video/Sink",
-        *keys::PW_KEY_APP_NAME, "RecordForge",
+        *keys::PW_KEY_MEDIA_TYPE => "Video",
+        *keys::PW_KEY_MEDIA_CATEGORY => "Capture",
+        *keys::PW_KEY_MEDIA_ROLE => "Screen",
+        *keys::PW_KEY_MEDIA_CLASS => "Video/Sink",
+        *keys::PW_KEY_APP_NAME => "RecordForge",
     };
     let stream = StreamBox::new(&core, "recordforge-screen-capture", props)
         .map_err(|e| format!("create pipewire stream: {e}"))?;

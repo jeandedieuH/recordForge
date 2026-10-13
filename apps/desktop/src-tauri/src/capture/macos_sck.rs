@@ -277,7 +277,7 @@ impl MacosSckCapture {
         }
         .map_err(|e| InternalError::Capture(format!("build SCK content filter: {e}")))?;
 
-        let frame_interval = CMTime::new(1, profile.fps.max(1) as i32);
+        let frame_interval = CMTime::new(1, profile.fps.max(1));
         let config = SCStreamConfiguration::new()
             .with_width(resolved.width)
             .with_height(resolved.height)
@@ -651,8 +651,10 @@ fn audio_list_to_s16le(list: &AudioBufferList, channels: usize) -> Vec<u8> {
     let read_f32 = |buffer: &AudioBuffer| -> Vec<f32> {
         buffer
             .data()
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect()
     };
 
@@ -694,9 +696,11 @@ fn audio_list_to_s16le(list: &AudioBufferList, channels: usize) -> Vec<u8> {
     }
     let frames = channels_data.iter().map(Vec::len).min().unwrap_or(0);
     let mut out = Vec::with_capacity(frames * channels * 2);
-    for frame in 0..frames {
-        for ch in 0..channels {
-            let s = channels_data[ch][frame].clamp(-1.0, 1.0);
+    // The first channel drives the frame index; every channel holds at least
+    // `frames` samples, so `channel_data[frame]` stays in bounds.
+    for (frame, _) in channels_data[0].iter().enumerate().take(frames) {
+        for channel_data in channels_data.iter().take(channels) {
+            let s = channel_data[frame].clamp(-1.0, 1.0);
             let sample = (s * 32767.0).round_ties_even() as i16;
             out.extend_from_slice(&sample.to_le_bytes());
         }

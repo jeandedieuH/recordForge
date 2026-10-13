@@ -108,6 +108,7 @@ pub trait CursorTelemetryAdapter: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::*;
 
     #[test]

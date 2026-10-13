@@ -30,9 +30,9 @@ use wasapi::{
     WaveFormat,
 };
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 const AUDIO_BUFFER_DURATION_HNS: i64 = 100_000;
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 const AUDIO_EVENT_TIMEOUT_MS: u32 = 100;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -573,7 +573,7 @@ fn capture_worker(
 /// Peak absolute amplitude of a PCM buffer normalized to 0..1 — the meter
 /// level reported for the most recent capture buffer. `chunks_exact` keeps
 /// the scan free of allocation and per-sample bounds checks.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn peak_amplitude(pcm: &[u8], format: AudioSampleFormat) -> f32 {
     match format {
         AudioSampleFormat::Pcm16 => pcm

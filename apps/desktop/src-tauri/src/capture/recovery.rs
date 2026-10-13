@@ -692,7 +692,9 @@ fn compute_recovery_head_trim(wav_duration: Duration, video_duration: Duration) 
 mod tests {
     use super::*;
     use crate::capture::source::{Bounds, CaptureSource};
+    #[cfg(windows)]
     use std::io::{Seek, SeekFrom, Write};
+    #[cfg(windows)]
     use std::path::PathBuf;
 
     fn completed_manifest(work_dir: &Path) {
@@ -766,12 +768,16 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     const MARKER_SAMPLE_RATE: u32 = 48_000;
     /// Loud-burst detection threshold for decoded marker audio.
+    #[cfg(windows)]
     const MARKER_AMPLITUDE: u16 = 15_000;
     /// Marker bursts are 480 samples (10 ms) of full-scale PCM.
+    #[cfg(windows)]
     const MARKER_FRAMES: usize = 480;
 
+    #[cfg(windows)]
     fn test_source() -> CaptureSource {
         CaptureSource {
             kind: "display".into(),
@@ -788,6 +794,7 @@ mod tests {
 
     /// Locate the pinned FFmpeg/FFprobe sidecars for generated-media tests,
     /// skipping the test when no binary is available.
+    #[cfg(windows)]
     fn locate_media_binaries() -> Option<(PathBuf, PathBuf)> {
         use std::process::Stdio;
 
@@ -818,6 +825,7 @@ mod tests {
     }
 
     /// Generate a 4-second 60 fps video-only MP4 segment.
+    #[cfg(windows)]
     fn generate_video_segment(ffmpeg: &Path, path: &Path) {
         let status = crate::process::create_command(ffmpeg.as_os_str())
             .args([
@@ -843,6 +851,7 @@ mod tests {
     /// Write a mono 16-bit 48 kHz WAV mirroring a crashed WASAPI worker: it
     /// starts with `synthetic_leading_ms` of startup silence, carries loud
     /// markers at the given real-capture positions, and spans `total_ms`.
+    #[cfg(windows)]
     fn write_marker_wav(path: &Path, synthetic_leading_ms: u64, total_ms: u64, marker_ms: &[u64]) {
         use crate::capture::audio::{finalize_wav, write_wav_header, AudioSampleFormat};
 
@@ -875,6 +884,7 @@ mod tests {
 
     /// Decode the first audio stream of `media` and return the marker centers
     /// (in ms) plus the total decoded duration (in ms).
+    #[cfg(windows)]
     fn decode_audio_markers(ffmpeg: &Path, media: &Path) -> (Vec<u64>, u64) {
         let decoded = crate::process::create_command(ffmpeg.as_os_str())
             .args(["-v", "error"])
@@ -915,6 +925,7 @@ mod tests {
         (markers, duration_ms)
     }
 
+    #[cfg(windows)]
     fn orphaned_wav_manifest(work_dir: &Path) -> RecordingManifest {
         RecordingManifest::new(
             "22222222-2222-4222-8222-222222222222",
