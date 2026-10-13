@@ -7584,8 +7584,11 @@ mod tests {
         std::fs::write(&logo, b"png").unwrap();
 
         // UI picks land project-relative → resolve inside the work dir.
+        // Compare canonical forms: tempfile paths may carry Windows 8.3 short
+        // names (e.g. RUNNER~1 on CI) that canonicalization expands.
         let resolved = resolve_brand_asset_path("brand/logo.png", &work_dir).unwrap();
-        assert_eq!(std::path::Path::new(&resolved), logo.as_path());
+        let expected = crate::path_policy::canonicalize_path(&logo).unwrap();
+        assert_eq!(std::path::Path::new(&resolved), expected.as_path());
 
         // Missing relative file degrades to absent.
         assert!(resolve_brand_asset_path("brand/missing.png", &work_dir).is_none());
