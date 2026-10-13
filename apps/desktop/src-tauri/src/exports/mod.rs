@@ -8373,8 +8373,8 @@ mod tests {
 
     #[test]
     fn pack_overlay_planes_fills_missing_side_with_transparency() {
-        let right = vec![7u8; 2 * 1 * 4];
-        let mut dst = vec![9u8; 4 * 1 * 4];
+        let right = vec![7u8; 2 * 4];
+        let mut dst = vec![9u8; 4 * 4];
         pack_overlay_planes(&mut dst, 2, 1, None, Some(&right));
         assert_eq!(dst, vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
     }
@@ -8612,7 +8612,7 @@ mod tests {
         engine
             .render_to_pixmap(1500, &mut pixmap)
             .expect("render overlay frame");
-        let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let has_content = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(
             has_content,
             "rendered frame contains active overlay content"
@@ -8744,7 +8744,7 @@ mod tests {
         engine
             .render_to_pixmap(1000, &mut pixmap)
             .expect("render image overlays");
-        let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let has_content = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(has_content, "rendered image overlay frame contains pixels");
     }
 
@@ -9254,7 +9254,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-sbs-gap",
@@ -10097,7 +10097,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-zoom-dense-project",
@@ -10216,7 +10216,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-gif-project",
@@ -10357,7 +10357,7 @@ mod tests {
             };
 
             let res = render_timeline_composition(
-                &*ffmpeg.to_string_lossy(),
+                &ffmpeg.to_string_lossy(),
                 &out_path,
                 &plan,
                 &plan.project_id,
@@ -10463,7 +10463,7 @@ mod tests {
             };
 
             let res = render_timeline_composition(
-                &*ffmpeg.to_string_lossy(),
+                &ffmpeg.to_string_lossy(),
                 &out_path,
                 &plan,
                 &plan.project_id,
@@ -10590,7 +10590,7 @@ mod tests {
             };
 
             let res = render_timeline_composition(
-                &*ffmpeg.to_string_lossy(),
+                &ffmpeg.to_string_lossy(),
                 &out_path,
                 &plan,
                 &plan.project_id,
@@ -10699,7 +10699,7 @@ mod tests {
             };
 
             let res = render_timeline_composition(
-                &*ffmpeg.to_string_lossy(),
+                &ffmpeg.to_string_lossy(),
                 &out_path,
                 &plan,
                 &plan.project_id,
@@ -10810,7 +10810,7 @@ mod tests {
             };
 
             let res = render_timeline_composition(
-                &*ffmpeg.to_string_lossy(),
+                &ffmpeg.to_string_lossy(),
                 &out_path,
                 &plan,
                 &plan.project_id,
@@ -10950,7 +10950,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-webp-project",
@@ -11079,7 +11079,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-gif-downscale",
@@ -11298,7 +11298,7 @@ mod tests {
             brand_cards: None,
         };
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-project-1",
@@ -11319,7 +11319,7 @@ mod tests {
         let mut plan_with_missing_stream = plan.clone();
         plan_with_missing_stream.segments[0].stream_index = Some(99);
         let missing_stream_error = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &temp_dir.join("test_out_missing_stream.mp4"),
             &plan_with_missing_stream,
             "test-project-1",
@@ -11344,7 +11344,7 @@ mod tests {
             .segments[0]
             .stream_index = Some(99);
         let missing_audio_stream_error = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &temp_dir.join("test_out_missing_audio_stream.mp4"),
             &plan_with_missing_audio_stream,
             "test-project-1",
@@ -11365,7 +11365,7 @@ mod tests {
         plan_with_invalid_overlay.overlay_render_plan =
             Some(serde_json::json!({ "invalid": true }));
         let invalid_overlay_error = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &temp_dir.join("test_out_invalid_overlay.mp4"),
             &plan_with_invalid_overlay,
             "test-project-1",
@@ -11387,7 +11387,7 @@ mod tests {
         plan_with_empty_video_packets.segments[0].source_out_ms = 3_000;
         let out_with_empty_video_packets = temp_dir.join("test_out_empty_video_packets.mp4");
         let res_with_empty_video_packets = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_with_empty_video_packets,
             &plan_with_empty_video_packets,
             "test-project-1",
@@ -11452,7 +11452,7 @@ mod tests {
         plan_video_only.audio = None;
         let out_video_only = temp_dir.join("test_out_video_only.mp4");
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_video_only,
             &plan_video_only,
             "test-project-1",
@@ -11483,7 +11483,7 @@ mod tests {
         });
         let out_fallback = temp_dir.join("test_out_fallback.mp4");
         let _res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_fallback,
             &plan_fallback,
             "test-project-1",
@@ -11536,7 +11536,7 @@ mod tests {
         });
         let out_bg = temp_dir.join("test_out_image_bg.mp4");
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_bg,
             &plan_bg,
             "test-project-1",
@@ -11569,7 +11569,7 @@ mod tests {
         }
         let out_contain = temp_dir.join("test_out_image_bg_contain.mp4");
         let res_contain = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_contain,
             &plan_contain,
             "test-project-1",
@@ -11810,7 +11810,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-layering",
@@ -12072,7 +12072,7 @@ mod tests {
         engine
             .render_to_pixmap(100, &mut pixmap)
             .expect("render image overlays");
-        let has_content = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+        let has_content = pixmap.data().as_chunks::<4>().0.iter().any(|p| p[3] > 0);
         assert!(has_content, "rendered image overlay frame contains pixels");
     }
 
@@ -12222,7 +12222,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-webcam-project",
@@ -12448,7 +12448,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-webcam-full-project",
@@ -12645,7 +12645,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             "test-mask-export-project",
@@ -12856,7 +12856,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             &plan.project_id,
@@ -13037,7 +13037,7 @@ mod tests {
         };
 
         let res = render_timeline_composition(
-            &*ffmpeg.to_string_lossy(),
+            &ffmpeg.to_string_lossy(),
             &out_path,
             &plan,
             &plan.project_id,

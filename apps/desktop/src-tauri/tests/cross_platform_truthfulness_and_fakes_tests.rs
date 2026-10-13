@@ -142,7 +142,7 @@ fn test_manifest_platform_and_backend_metadata_persistence() {
     manifest.write().expect("write manifest");
 
     let loaded =
-        RecordingManifest::read(&manifest.manifest_path()).expect("read persisted manifest");
+        RecordingManifest::read(manifest.manifest_path()).expect("read persisted manifest");
 
     assert_eq!(loaded.session_id, "session-test-platform-123");
     assert!(loaded.platform.is_some());

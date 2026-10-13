@@ -532,7 +532,9 @@ mod tests {
         paint_status_badge(&mut rgba, 16, 16, amber);
         // Radius clamps to >= 2, so the corner region must contain badge pixels.
         assert!(
-            rgba.chunks_exact(4)
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
                 .any(|px| px[0] == amber[0] && px[1] == amber[1] && px[2] == amber[2]),
             "expected at least one fully-covered amber pixel"
         );

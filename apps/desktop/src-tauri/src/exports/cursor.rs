@@ -1766,7 +1766,7 @@ mod tests {
         .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
         renderer.render_frame_at(100.0, &mut frame);
-        assert!(frame.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(frame.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0));
     }
 
     #[test]
@@ -1832,11 +1832,13 @@ mod tests {
         press_segments[0].source_out_ms = 3_000;
         press_segments[0].output_end_ms = 3_000;
 
-        let mut settings = CursorSettings::default();
-        settings.click_feedback = "none".into();
-        settings.shadow_enabled = false;
-        settings.smooth_movement = false;
-        settings.scale = 3.0;
+        let settings = CursorSettings {
+            click_feedback: "none".into(),
+            shadow_enabled: false,
+            smooth_movement: false,
+            scale: 3.0,
+            ..Default::default()
+        };
 
         let canvas = test_canvas(960, 540, 0);
         let mut renderer = CursorRenderer::new(settings, telemetry, &press_segments, &canvas)
@@ -1899,12 +1901,14 @@ mod tests {
 
     #[test]
     fn rasterized_cursor_uses_asset_hotspot_and_fill_color() {
-        let mut settings = CursorSettings::default();
-        settings.preset = "recorded-system".into();
-        settings.fill_color = "#ff0000".into();
-        settings.stroke_color = "#ffffff".into();
-        settings.shadow_enabled = false;
-        settings.scale = 2.0;
+        let settings = CursorSettings {
+            preset: "recorded-system".into(),
+            fill_color: "#ff0000".into(),
+            stroke_color: "#ffffff".into(),
+            shadow_enabled: false,
+            scale: 2.0,
+            ..Default::default()
+        };
 
         let mut renderer = CursorRenderer::new(
             settings,
@@ -1934,10 +1938,12 @@ mod tests {
 
     #[test]
     fn spotlight_click_effect_draws_a_radial_glow_beyond_the_core() {
-        let mut settings = CursorSettings::default();
-        settings.click_feedback = "spotlight".into();
-        settings.click_color = "#00ff00".into();
-        settings.click_size = 40.0;
+        let settings = CursorSettings {
+            click_feedback: "spotlight".into(),
+            click_color: "#00ff00".into(),
+            click_size: 40.0,
+            ..Default::default()
+        };
 
         let mut renderer = CursorRenderer::new(
             settings,
@@ -2015,7 +2021,7 @@ mod tests {
         .expect("valid cursor renderer");
         let mut frame = vec![0; 100 * 100 * 4];
         renderer.render_frame_at(100.0, &mut frame);
-        assert!(frame.chunks_exact(4).all(|pixel| pixel[3] == 0));
+        assert!(frame.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0));
     }
 
     #[test]
@@ -2380,7 +2386,7 @@ mod tests {
                 vec![0; fixture.canvas.width as usize * fixture.canvas.height as usize * 4];
             renderer.render_frame_at(golden.time_ms, &mut frame);
             assert!(
-                frame.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                frame.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0),
                 "fractional golden frame at {}ms should contain cursor pixels",
                 golden.time_ms
             );
@@ -2500,8 +2506,10 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let mut settings = CursorSettings::default();
-        settings.shape_mode = "optimized".into();
+        let settings = CursorSettings {
+            shape_mode: "optimized".into(),
+            ..Default::default()
+        };
 
         let mut renderer =
             CursorRenderer::new(settings, telemetry, &segments(), &test_canvas(100, 100, 0))
@@ -2638,7 +2646,9 @@ mod tests {
 
         // Coverage at pixel centers yields fractional alpha at the ring edges.
         let fractional = frame
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] > 10 && p[3] < 240)
             .count();
         assert!(
@@ -2677,7 +2687,9 @@ mod tests {
         assert!(frame[index + 3] > 100, "dim pixel should be mostly opaque");
         // Feather band pixels carry partial alpha.
         let feathered = frame
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] > 10 && p[3] < 100)
             .count();
         assert!(

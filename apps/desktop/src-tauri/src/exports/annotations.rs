@@ -749,7 +749,7 @@ pub fn build_text_preset_svg(
 
         // Accent strip for accent-bar preset
         if text.backdrop_style == "accent-bar" {
-            let bar_w = (padding_x / 2.0).max(3.0).min(8.0);
+            let bar_w = (padding_x / 2.0).clamp(3.0, 8.0);
             backdrop_markup.push_str(&format!(
                 r##"<rect x="{x}" y="{y}" width="{bar_w}" height="{h}" rx="2" ry="2" fill="{accent}"/>"##,
                 x = text.x,

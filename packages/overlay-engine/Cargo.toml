@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Prestige Tech"]
 description = "Canonical overlay evaluation engine for preview and export"
 license = "GPL-3.0-or-later"
-rust-version = "1.97.1"
+rust-version = "1.99.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
