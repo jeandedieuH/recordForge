@@ -18,10 +18,7 @@ interface MissingGrant {
 
 // Picks the single most relevant missing grant for the active mode — one
 // banner, not a pile of overlapping warnings.
-function missingGrant(
-  cameraMode: boolean,
-  p: SystemPermissionsReport,
-): MissingGrant | null {
+function missingGrant(cameraMode: boolean, p: SystemPermissionsReport): MissingGrant | null {
   if (!cameraMode && p.screenRecording !== "granted") {
     return {
       pane: "screen",

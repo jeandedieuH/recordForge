@@ -740,7 +740,7 @@ fn macos_key_name(keycode: i64) -> Option<&'static str> {
         0x32 => "`",
         0x21 => "[",
         0x2A => "\\",
-        0x22 => "]",
+        0x1E => "]",
         0x27 => "'",
         _ => return None,
     })

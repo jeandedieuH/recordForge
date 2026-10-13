@@ -7,7 +7,8 @@
  *   - Windows (x86_64-pc-windows-msvc) via GyanD GitHub release essentials
  *   - macOS Apple Silicon (aarch64-apple-darwin) via Martin Riedl builds
  *   - macOS Intel (x86_64-apple-darwin) via Martin Riedl builds
- *   - Linux (x86_64-unknown-linux-gnu) via Martin Riedl builds
+ *   - Linux (x86_64-unknown-linux-gnu) via BtbN FFmpeg-Builds (Martin Riedl's
+ *     Linux builds ship no capture indevs — no x11grab/v4l2/pulse)
  *
  * Pinned version: FFmpeg 9.0.1
  *
@@ -110,22 +111,16 @@ const TARGET_CONFIGS = {
     ext: "",
     sources: [
       {
-        label: "ffmpeg",
-        provides: ["ffmpeg"],
+        label: "btbn-ffmpeg",
+        provides: ["ffmpeg", "ffprobe"],
+        // Immutable pin: BtbN's retained monthly autobuild snapshot whose n9.0
+        // release-branch tip was 9.0.1 + 11 maintenance commits. The `latest`
+        // fallback floats within the n9.0 line but keeps the indev guarantee.
         versionedUrl:
-          "https://ffmpeg.martin-riedl.de/download/linux/amd64/1787074600_9.0.1/ffmpeg.zip",
-        fallbackUrl: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
-        archiveType: "zip",
-        fallbackArchiveType: "tar.xz",
-      },
-      {
-        label: "ffprobe",
-        provides: ["ffprobe"],
-        versionedUrl:
-          "https://ffmpeg.martin-riedl.de/download/linux/amd64/1787074600_9.0.1/ffprobe.zip",
-        fallbackUrl: "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
-        archiveType: "zip",
-        fallbackArchiveType: "tar.xz",
+          "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0.tar.xz",
+        fallbackUrl:
+          "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz",
+        archiveType: "tar.xz",
       },
     ],
   },
@@ -338,7 +333,14 @@ function verifyBinaries(targetTriple) {
 // backends. Assert them on the pinned sidecar so a bad download or build that
 // dropped an indev is caught at setup time — not mid-recording.
 const REQUIRED_INDEVS = {
-  "x86_64-unknown-linux-gnu": ["x11grab", "v4l2", "pulse", "alsa"],
+  "x86_64-unknown-linux-gnu": ["x11grab", "v4l2", "pulse"],
+}
+
+// No off-the-shelf static Linux build ships libasound, so `alsa` is
+// warn-only: at capture time the backend falls back to a system ffmpeg on
+// pure-ALSA hosts (resolve_capture_input in capture/audio/linux.rs).
+const OPTIONAL_INDEVS = {
+  "x86_64-unknown-linux-gnu": ["alsa"],
 }
 
 const REQUIRED_DEMUXERS = {
@@ -347,22 +349,40 @@ const REQUIRED_DEMUXERS = {
 
 function verifyPlatformCapabilities(targetTriple, config) {
   const indevs = REQUIRED_INDEVS[targetTriple] ?? []
+  const optional = OPTIONAL_INDEVS[targetTriple] ?? []
   const demuxers = REQUIRED_DEMUXERS[targetTriple] ?? []
-  if (!indevs.length && !demuxers.length) return
+  if (!indevs.length && !optional.length && !demuxers.length) return
 
   const ffmpegPath = join(BINARIES_DIR, `ffmpeg-${targetTriple}${config.ext}`)
 
-  if (indevs.length) {
+  // FFmpeg prints comma-joined aliases (e.g. "video4linux2,v4l2"), so match
+  // whole whitespace-separated tokens, not naive substrings.
+  const listsName = (list, name) =>
+    list
+      .split("\n")
+      .some((line) =>
+        line
+          .trim()
+          .split(/\s+/)
+          .some((tok) => tok.split(",").includes(name)),
+      )
+
+  if (indevs.length || optional.length) {
     const devices = execFileSync(ffmpegPath, ["-hide_banner", "-devices"], {
       encoding: "utf-8",
       timeout: 10_000,
     })
     for (const indev of indevs) {
-      if (!devices.includes(` ${indev} `) && !devices.includes(` ${indev}\n`)) {
+      if (!listsName(devices, indev)) {
         fatal(`ffmpeg sidecar is missing required Linux input device: ${indev}`)
       }
     }
     log(`✓ indevs verified: ${indevs.join(", ")}`)
+    for (const indev of optional) {
+      if (!listsName(devices, indev)) {
+        warn(`ffmpeg sidecar lacks optional Linux input device: ${indev}`)
+      }
+    }
   }
 
   if (demuxers.length) {
@@ -371,7 +391,7 @@ function verifyPlatformCapabilities(targetTriple, config) {
       timeout: 10_000,
     })
     for (const demuxer of demuxers) {
-      if (!demuxList.includes(` ${demuxer} `) && !demuxList.includes(` ${demuxer}\n`)) {
+      if (!listsName(demuxList, demuxer)) {
         fatal(`ffmpeg sidecar is missing required demuxer: ${demuxer}`)
       }
     }

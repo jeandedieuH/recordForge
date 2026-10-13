@@ -67,23 +67,36 @@ pub fn is_admin_kid(kid: &str) -> bool {
 }
 
 fn verification_keys() -> Vec<(String, VerifyingKey)> {
-    let mut keys: Vec<(String, VerifyingKey)> = PRODUCTION_KEYS
+    PRODUCTION_KEYS
         .iter()
         .chain(ADMIN_KEYS.iter())
         .filter_map(|(kid, raw)| decode_key(raw).map(|key| (kid.to_string(), key)))
-        .collect();
-    // Dev key accepted only in debug builds so release binaries can never be
-    // unlocked by a self-signed token.
-    #[cfg(debug_assertions)]
-    {
-        if let Ok(raw) = std::env::var(DEV_PUBLIC_KEY_ENV) {
-            match decode_key(&raw) {
-                Some(key) => keys.push(("dev".to_string(), key)),
-                None => tracing::warn!("{DEV_PUBLIC_KEY_ENV} is not a valid Ed25519 public key"),
-            }
+        // Dev key accepted only in debug builds so release binaries can never
+        // be unlocked by a self-signed token.
+        .chain(dev_key_entry())
+        .collect()
+}
+
+/// The dev keyring entry — `Some` only in debug builds when
+/// [`DEV_PUBLIC_KEY_ENV`] carries a valid Ed25519 public key.
+#[cfg(debug_assertions)]
+fn dev_key_entry() -> Option<(String, VerifyingKey)> {
+    let Ok(raw) = std::env::var(DEV_PUBLIC_KEY_ENV) else {
+        return None;
+    };
+    match decode_key(&raw) {
+        Some(key) => Some(("dev".to_string(), key)),
+        None => {
+            tracing::warn!("{DEV_PUBLIC_KEY_ENV} is not a valid Ed25519 public key");
+            None
         }
     }
-    keys
+}
+
+/// Release builds carry no dev key.
+#[cfg(not(debug_assertions))]
+fn dev_key_entry() -> Option<(String, VerifyingKey)> {
+    None
 }
 
 /// Verify `token` for `device_hash` against the build's keyring; returns the

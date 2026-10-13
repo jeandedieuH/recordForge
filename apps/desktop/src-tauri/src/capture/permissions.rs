@@ -89,7 +89,7 @@ pub fn check_permission(kind: PermissionKind) -> PermissionStatus {
 
 #[cfg(target_os = "macos")]
 fn check_macos_permission(kind: PermissionKind) -> PermissionStatus {
-    use super::macos_native::{self, AvAuthorization, AvMediaKind};
+    use super::macos_native::{self, AvMediaKind};
     match kind {
         PermissionKind::ScreenRecording => {
             if macos_native::screen_recording_granted() {

@@ -489,7 +489,7 @@ impl SckAudioCapture {
             .map_err(|e| InternalError::Capture(format!("create SCK audio stream: {e}")))?;
         stream
             .add_output_handler(
-                move |sample, _of_type| {
+                move |sample: CMSampleBuffer, _of_type| {
                     if let Ok(list) = sample.audio_buffer_list() {
                         let pcm = audio_list_to_s16le(&list, DEFAULT_CHANNELS as usize);
                         if !pcm.is_empty() {

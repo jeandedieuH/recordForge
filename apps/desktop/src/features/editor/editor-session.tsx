@@ -85,7 +85,22 @@ export function EditorSession({ recordingId }: EditorSessionProps) {
             return
           }
           allowCloseAfterFlush = true
-          await getCurrentWindow().destroy()
+          // close() — not destroy(): destroy() bypasses CloseRequested, which
+          // skips the Rust minimize-to-tray handler and permanently tears the
+          // window down, leaving the tray icon unable to reopen the app.
+          const appWindow = getCurrentWindow()
+          await appWindow.close()
+          // When minimize-to-tray converted the close into a hide, this
+          // webview is still alive: re-arm the guard so the next real close
+          // flushes dirty state again. If the window was actually destroyed
+          // the webview is gone and this probe never resolves.
+          try {
+            await appWindow.isVisible()
+            allowCloseAfterFlush = false
+            isFlushing = false
+          } catch {
+            // Window destroyed — nothing left to re-arm.
+          }
         } catch {
           isFlushing = false
         }

@@ -31,7 +31,11 @@ impl MainWindow {
         Ok(())
     }
 
-    pub fn restore(app: &tauri::AppHandle) -> Result<()> {
+    /// Restore and focus the main window, recreating it if it was destroyed
+    /// while the process stayed alive — auxiliary windows (floating toolbar,
+    /// webcam preview, teleprompter) keep the event loop running after a real
+    /// close, and the tray must still be able to bring the app back.
+    pub fn show_or_recreate(app: &tauri::AppHandle) -> Result<()> {
         if let Some(window) = app.get_webview_window("main") {
             window
                 .show()
@@ -42,7 +46,30 @@ impl MainWindow {
             window
                 .set_focus()
                 .map_err(|error| InternalError::Unknown(format!("focus main window: {error}")))?;
+            return Ok(());
         }
+
+        // Mirror the `main` window block in tauri.conf.json — keep both in
+        // sync when the shell window config changes.
+        let window = tauri::WebviewWindowBuilder::new(
+            app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("RecordForge")
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(960.0, 600.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(true)
+        // The shell reveals itself once React mounts (same as startup),
+        // so stay hidden to avoid a transparent flash.
+        .visible(false)
+        .build()
+        .map_err(|error| InternalError::Unknown(format!("recreate main window: {error:?}")))?;
+
+        install_media_permission_autogrant(&window);
+        crate::window_effects::apply_stored_effects(app);
         Ok(())
     }
 }

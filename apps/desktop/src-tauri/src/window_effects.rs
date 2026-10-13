@@ -59,6 +59,12 @@ pub fn apply_mica(app: &tauri::AppHandle, enabled: bool) -> bool {
 /// Defaults to enabled; the stored "false" value (or a preflight low-end GPU
 /// flag written by diagnostics) takes the opaque path.
 pub fn apply_startup_effects(app: &tauri::App) {
+    apply_stored_effects(app.handle());
+}
+
+/// Same read-and-apply as `apply_startup_effects`, for callers that only have
+/// an `AppHandle` (e.g. the tray recreating a destroyed main window).
+pub fn apply_stored_effects(app: &tauri::AppHandle) {
     let enabled = app
         .try_state::<AppState>()
         .and_then(|state| {
@@ -71,5 +77,5 @@ pub fn apply_startup_effects(app: &tauri::App) {
         .map(|value| value != "false")
         .unwrap_or(true);
 
-    apply_mica(app.handle(), enabled);
+    apply_mica(app, enabled);
 }

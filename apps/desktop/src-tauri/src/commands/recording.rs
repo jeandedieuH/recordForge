@@ -459,7 +459,7 @@ fn abort_prepared_start(app: &tauri::AppHandle, state: &AppState, session_id: &s
         tracing::debug!(error = ?error, "prepared recording was already past cancellation");
     }
     cleanup_recording_windows(app);
-    if let Err(error) = MainWindow::restore(app) {
+    if let Err(error) = MainWindow::show_or_recreate(app) {
         tracing::error!(error = ?error, "failed to restore main window after recording startup failure");
     }
     emit_current_status(app, state);
@@ -472,7 +472,7 @@ fn cancel_prepared_recording(
 ) -> Result<()> {
     let cancel_result = cancel_prepared_session(state, session_id);
     cleanup_recording_windows(app);
-    let restore_result = MainWindow::restore(app);
+    let restore_result = MainWindow::show_or_recreate(app);
     emit_current_status(app, state);
 
     match cancel_result {
@@ -591,7 +591,7 @@ fn stop_after_window_failure(app: &tauri::AppHandle) {
         tracing::warn!(error = ?error, "failed to stop recording after control window failure");
     }
     cleanup_recording_windows(app);
-    if let Err(error) = MainWindow::restore(app) {
+    if let Err(error) = MainWindow::show_or_recreate(app) {
         tracing::error!(error = ?error, "failed to restore main window after control window failure");
     }
     emit_current_status(app, &state);
@@ -642,7 +642,7 @@ pub async fn stop_recording(
         BoundaryWindow::hide(&app);
         CountdownWindow::hide(&app);
         crate::window::WebcamPreviewWindow::hide(&app);
-        if let Err(error) = MainWindow::restore(&app) {
+        if let Err(error) = MainWindow::show_or_recreate(&app) {
             tracing::error!(error = ?error, "failed to restore main window after cancel");
         }
         emit_current_status(&app, &state);
@@ -688,7 +688,7 @@ pub async fn stop_recording(
         }
     }
     FloatingWindow::hide(&app);
-    if let Err(error) = MainWindow::restore(&app) {
+    if let Err(error) = MainWindow::show_or_recreate(&app) {
         tracing::error!(error = ?error, "failed to restore main window after stop");
     }
     emit_current_status(&app, &state);
@@ -752,7 +752,7 @@ pub async fn discard_recording(app: tauri::AppHandle, state: State<'_, AppState>
     }
 
     FloatingWindow::hide(&app);
-    if let Err(error) = MainWindow::restore(&app) {
+    if let Err(error) = MainWindow::show_or_recreate(&app) {
         tracing::error!(error = ?error, "failed to restore main window after discard");
     }
     emit_current_status(&app, &state);
@@ -1206,7 +1206,7 @@ pub fn cancel_region_picker(app: tauri::AppHandle) -> Result<()> {
 #[tauri::command]
 #[instrument]
 pub fn show_main_window(app: tauri::AppHandle) -> Result<()> {
-    MainWindow::restore(&app)
+    MainWindow::show_or_recreate(&app)
 }
 
 /// Hide the floating transport controls window.

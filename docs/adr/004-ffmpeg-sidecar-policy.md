@@ -18,9 +18,9 @@ A tooling script (`tooling/ffmpeg/setup.mjs`) downloads pinned static builds and
 
 - Windows x86_64: GyanD GitHub release essentials (GPLv3, includes x264/x265).
 - macOS arm64 and x64: Martin Riedl release builds (primary) with evermeet.cx release zip fallback.
-- Linux x86_64: Martin Riedl release builds (primary) with johnvansickle.com static release fallback.
+- Linux x86_64: BtbN FFmpeg-Builds, pinned to a retained monthly autobuild snapshot (n9.0.1 + release-branch commits), with the floating `n9.0-latest` asset as fallback. Martin Riedl and johnvansickle static builds ship no capture indevs (x11grab/v4l2/pulse), so they cannot serve the Linux recorder.
 
-The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` and any pinned Martin Riedl build IDs in the setup script, then re-run.
+The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` and the pinned Martin Riedl build IDs / BtbN autobuild tag in the setup script, then re-run.
 
 ### Bundling
 
@@ -48,5 +48,5 @@ The Rust `resolve_executable` function checks:
 ## Alternatives Considered
 
 - Direct Rust FFmpeg bindings: complex, risky license-wise, harder to update.
-- BtbN nightly builds: less stable than gyan.dev release builds.
+- BtbN nightly builds: less stable than gyan.dev release builds — used only for Linux, where no alternative static build ships the required capture indevs; the pin targets a retained monthly snapshot, not a daily build.
 - LGPL builds: would lose x264/x265 software encoders that the recorder relies on.

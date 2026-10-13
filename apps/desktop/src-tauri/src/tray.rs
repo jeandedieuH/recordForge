@@ -70,10 +70,8 @@ pub fn create_tray(app: &tauri::App) -> Result<()> {
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
+                if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
+                    tracing::warn!(error = ?error, "tray click could not restore main window");
                 }
             }
         })
@@ -320,10 +318,8 @@ fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
     // Menu events arrive on the main thread, but recorder transport actions
     match event.id().as_ref() {
         "show" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
+            if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
+                tracing::warn!(error = ?error, "tray show could not restore main window");
             }
         }
         "hide" => {
@@ -357,10 +353,21 @@ fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
             // Destructive: never executed from the tray directly. Restore the
             // main window and let its confirmation dialog make the decision.
             if recorder_is_active(app) {
-                if let Err(error) = crate::window::MainWindow::restore(app) {
+                let window_was_missing = app.get_webview_window("main").is_none();
+                if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
                     tracing::warn!(error = ?error, "tray discard could not restore main window");
                 }
-                if let Err(error) = crate::events::emit_request_discard_confirmation(app) {
+                if window_was_missing {
+                    // A recreated webview has no JS listeners yet; defer the
+                    // emit until React has mounted or the request is lost.
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        if let Err(error) = crate::events::emit_request_discard_confirmation(&app) {
+                            tracing::warn!(error = ?error, "tray discard request could not be delivered");
+                        }
+                    });
+                } else if let Err(error) = crate::events::emit_request_discard_confirmation(app) {
                     tracing::warn!(error = ?error, "tray discard request could not be delivered");
                 }
             }
@@ -431,9 +438,8 @@ fn start_or_focus(state: &tauri::State<AppState>, app: &tauri::AppHandle) -> Res
             tracing::warn!(error = ?error, "tray start could not minimize main window");
         }
         crate::commands::recording::open_recording_windows_async(app, bounds);
-    } else if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
+    } else if let Err(error) = crate::window::MainWindow::show_or_recreate(app) {
+        tracing::warn!(error = ?error, "tray start could not restore main window");
     }
     Ok(())
 }

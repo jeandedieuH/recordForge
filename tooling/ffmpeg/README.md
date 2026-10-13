@@ -38,7 +38,7 @@ node tooling/ffmpeg/setup.mjs
 | Windows x86_64              | GyanD GitHub release essentials  | gyan.dev release essentials      |
 | macOS Apple Silicon (arm64) | ffmpeg.martin-riedl.de (release) | evermeet.cx release zip          |
 | macOS Intel (x64)           | ffmpeg.martin-riedl.de (release) | evermeet.cx release zip          |
-| Linux x86_64                | ffmpeg.martin-riedl.de (release) | johnvansickle.com static release |
+| Linux x86_64                | BtbN FFmpeg-Builds (pinned)      | BtbN n9.0 latest autobuild       |
 
 ## Upgrading FFmpeg
 
@@ -51,5 +51,10 @@ version changes.
 - The `binaries/` directory is **git-ignored**. Every developer and CI machine
   must run this script after a fresh clone.
 - The pinned build includes x264, x265, and the other codecs the recorder needs.
-- The script requires `unzip` on macOS/Linux and PowerShell on Windows; the Linux
-  fallback also requires `tar` with xz support.
+- The script requires `unzip` on macOS and PowerShell on Windows; the Linux
+  source is a `tar.xz` archive and requires `tar` with xz support.
+- The Linux build comes from BtbN's static builds rather than Martin Riedl
+  because the capture pipeline needs indevs (`x11grab`, `v4l2`, `pulse`) that
+  the Martin Riedl Linux build does not ship. `alsa` is warn-only — no static
+  build ships libasound, and the recorder falls back to a system ffmpeg on
+  pure-ALSA hosts.
