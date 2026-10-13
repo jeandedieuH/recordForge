@@ -1157,10 +1157,9 @@ fn camera_pipes_stdout(enable_preview: bool) -> bool {
 /// was actually used plus an optional screen-space crop (region/window
 /// sources on backends that can only ingest whole displays — macOS today,
 /// matching the PipeWire `input.crop` mechanism on Linux).
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "macos")),
-    allow(unused_variables)
-)]
+// `ffmpeg_path` is only consumed by the macOS branch (AVFoundation device
+// resolution); on Linux/Windows it's dead weight, so silence the lint there.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn add_screen_video_input(
     command: &mut Command,
     ffmpeg_path: &str,

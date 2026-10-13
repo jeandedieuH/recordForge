@@ -164,8 +164,7 @@ impl PortalSessionNegotiator {
             let source_type = s
                 .get("source_type")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .unwrap_or(1);
+                .map_or(1, |v| v as u32);
 
             let size = s.get("size").and_then(|v| {
                 let w = v.get(0)?.as_u64()? as u32;
@@ -213,9 +212,7 @@ pub fn is_wayland_session() -> bool {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             return true;
         }
-        std::env::var("XDG_SESSION_TYPE")
-            .map(|v| v.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false)
+        std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -395,22 +392,25 @@ mod dbus_session {
             }
             // blocking_pop drains already-queued messages first, then blocks;
             // unrelated signals are discarded and the wait resumes.
-            let Some(msg) = conn
+            let msg = match conn
                 .channel()
                 .blocking_pop_message(remaining.min(Duration::from_secs(30)))
-            else {
-                continue;
+            {
+                Ok(Some(msg)) => msg,
+                Ok(None) => continue,
+                Err(e) => {
+                    return Err(InternalError::Capture(format!(
+                        "portal {what}: D-Bus error while waiting for a response: {e}"
+                    ))
+                    .into());
+                }
             };
             let is_response = msg.msg_type() == dbus::MessageType::Signal
-                && msg.path().map(|p| p == *request_path).unwrap_or(false)
+                && msg.path().is_some_and(|p| p == *request_path)
                 && msg
                     .interface()
-                    .map(|i| i.to_string() == REQUEST_IFACE)
-                    .unwrap_or(false)
-                && msg
-                    .member()
-                    .map(|m| m.to_string() == "Response")
-                    .unwrap_or(false);
+                    .is_some_and(|i| i.to_string() == REQUEST_IFACE)
+                && msg.member().is_some_and(|m| m.to_string() == "Response");
             if !is_response {
                 continue;
             }
@@ -452,7 +452,7 @@ mod dbus_session {
                     continue;
                 }
             }
-            pending_key = item.as_str().map(|s| s.to_string());
+            pending_key = item.as_str().map(str::to_string);
         }
         map
     }

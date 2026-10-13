@@ -25,8 +25,11 @@ use pipewire::spa::buffer::meta::MetaCursor;
 use pipewire::spa::param::format::FormatProperties;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pipewire::spa::param::ParamType;
-use pipewire::spa::pod::{ChoiceValue, Object, Pod, PodSerializer, Property, Value};
-use pipewire::spa::utils::{Choice, ChoiceEnum, Direction, Fraction, Id, Rectangle, SpaTypes};
+use pipewire::spa::pod::serialize::PodSerializer;
+use pipewire::spa::pod::{ChoiceValue, Object, Pod, Property, Value};
+use pipewire::spa::utils::{
+    Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes,
+};
 use pipewire::stream::{StreamBox, StreamFlags, StreamState};
 use tracing::{debug, info, warn};
 
@@ -160,8 +163,8 @@ impl LinuxPipeWireCapture {
         // Region capture crops the monitor stream down to the picked rect
         // (translated into stream-local coordinates and clamped/even-aligned).
         if source.kind == "region" {
-            let stream_x = stream_info.position.map(|p| p.0).unwrap_or(0);
-            let stream_y = stream_info.position.map(|p| p.1).unwrap_or(0);
+            let stream_x = stream_info.position.map_or(0, |p| p.0);
+            let stream_y = stream_info.position.map_or(0, |p| p.1);
             input.crop = compute_region_crop(
                 source.bounds,
                 (stream_x, stream_y),
@@ -308,11 +311,11 @@ fn try_run_pipewire_loop(
     // Media properties classify us as a screen-capture sink. The `keys`
     // constants are LazyLock<&'static str>, hence the leading `*`.
     let props = pipewire::properties::properties! {
-        *keys::PW_KEY_MEDIA_TYPE => "Video",
-        *keys::PW_KEY_MEDIA_CATEGORY => "Capture",
-        *keys::PW_KEY_MEDIA_ROLE => "Screen",
-        *keys::PW_KEY_MEDIA_CLASS => "Video/Sink",
-        *keys::PW_KEY_APP_NAME => "RecordForge",
+        *keys::MEDIA_TYPE => "Video",
+        *keys::MEDIA_CATEGORY => "Capture",
+        *keys::MEDIA_ROLE => "Screen",
+        *keys::MEDIA_CLASS => "Video/Sink",
+        *keys::APP_NAME => "RecordForge",
     };
     let stream = StreamBox::new(&core, "recordforge-screen-capture", props)
         .map_err(|e| format!("create pipewire stream: {e}"))?;
@@ -364,7 +367,7 @@ fn try_run_pipewire_loop(
             // Allocate stream buffers: memfd or plain memory, sizes generous
             // enough that the compositor needn't renegotiate.
             let buffers_bytes = build_buffers_pod(&input);
-            if let Ok(pod) = Pod::from_bytes(&buffers_bytes) {
+            if let Some(pod) = Pod::from_bytes(&buffers_bytes) {
                 let mut params: [&Pod; 1] = [pod];
                 let _ = stream.update_params(&mut params);
             }
@@ -406,8 +409,8 @@ fn try_run_pipewire_loop(
     // Offer the formats we can consume. BGRx/RGBx are what compositors prefer;
     // BGRA/RGBA and 24-bit fallbacks cover the rest.
     let format_bytes = build_enum_format_pod(target_fps);
-    let format_pod =
-        Pod::from_bytes(&format_bytes).map_err(|e| format!("build format pod: {e:?}"))?;
+    let format_pod = Pod::from_bytes(&format_bytes)
+        .ok_or_else(|| "build format pod: malformed pod bytes".to_string())?;
     let mut params = [format_pod];
 
     stream
@@ -454,7 +457,7 @@ fn video_input_from_format(info: &VideoInfoRaw) -> Option<PipeWireVideoInput> {
     }
     let rate = info.framerate();
     let (num, den) = if rate.num > 0 && rate.denom > 0 {
-        (rate.num as u32, rate.denom as u32)
+        (rate.num, rate.denom)
     } else {
         (30, 1)
     };
@@ -599,19 +602,20 @@ fn build_enum_format_pod(target_fps: i32) -> Vec<u8> {
         height: 16384,
     };
     let fr = Fraction {
-        num: target_fps,
+        // spa_fraction fields are u32; fall back to 30 rather than wrap a bad fps.
+        num: u32::try_from(target_fps).unwrap_or(30),
         denom: 1,
     };
     let fr_min = Fraction { num: 1, denom: 1 };
     let fr_max = Fraction { num: 240, denom: 1 };
 
     let formats: [u32; 6] = [
-        VideoFormat::BGRx.as_raw() as u32,
-        VideoFormat::RGBx.as_raw() as u32,
-        VideoFormat::BGRA.as_raw() as u32,
-        VideoFormat::RGBA.as_raw() as u32,
-        VideoFormat::BGR.as_raw() as u32,
-        VideoFormat::RGB.as_raw() as u32,
+        VideoFormat::BGRx.as_raw(),
+        VideoFormat::RGBx.as_raw(),
+        VideoFormat::BGRA.as_raw(),
+        VideoFormat::RGBA.as_raw(),
+        VideoFormat::BGR.as_raw(),
+        VideoFormat::RGB.as_raw(),
     ];
 
     let format_obj = Object {
@@ -620,34 +624,43 @@ fn build_enum_format_pod(target_fps: i32) -> Vec<u8> {
         properties: vec![
             Property::new(
                 FormatProperties::MediaType.as_raw(),
-                Value::Id(Id(spa::param::format::MediaType::Video.as_raw() as u32)),
+                Value::Id(Id(spa::param::format::MediaType::Video.as_raw())),
             ),
             Property::new(
                 FormatProperties::MediaSubtype.as_raw(),
-                Value::Id(Id(spa::param::format::MediaSubtype::Raw.as_raw() as u32)),
+                Value::Id(Id(spa::param::format::MediaSubtype::Raw.as_raw())),
             ),
             Property::new(
                 FormatProperties::VideoFormat.as_raw(),
-                Value::Choice(ChoiceValue::Id(Choice(ChoiceEnum::Enum {
-                    default: Id(formats[0]),
-                    alternatives: formats[1..].iter().map(|f| Id(*f)).collect(),
-                }))),
+                Value::Choice(ChoiceValue::Id(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Enum {
+                        default: Id(formats[0]),
+                        alternatives: formats[1..].iter().map(|f| Id(*f)).collect(),
+                    },
+                ))),
             ),
             Property::new(
                 FormatProperties::VideoSize.as_raw(),
-                Value::Choice(ChoiceValue::Rectangle(Choice(ChoiceEnum::Range {
-                    default: r,
-                    min: r_min,
-                    max: r_max,
-                }))),
+                Value::Choice(ChoiceValue::Rectangle(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: r,
+                        min: r_min,
+                        max: r_max,
+                    },
+                ))),
             ),
             Property::new(
                 FormatProperties::VideoFramerate.as_raw(),
-                Value::Choice(ChoiceValue::Fraction(Choice(ChoiceEnum::Range {
-                    default: fr,
-                    min: fr_min,
-                    max: fr_max,
-                }))),
+                Value::Choice(ChoiceValue::Fraction(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: fr,
+                        min: fr_min,
+                        max: fr_max,
+                    },
+                ))),
             ),
         ],
     };
@@ -676,36 +689,48 @@ fn build_buffers_pod(input: &PipeWireVideoInput) -> Vec<u8> {
         id: ParamType::Buffers.as_raw(),
         properties: vec![
             Property::new(
-                sys::SPA_PARAM_BUFFERS_buffers as u32,
-                Value::Choice(ChoiceValue::Int(Choice(ChoiceEnum::Range {
-                    default: 4,
-                    min: 2,
-                    max: 8,
-                }))),
+                sys::SPA_PARAM_BUFFERS_buffers,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: 4,
+                        min: 2,
+                        max: 8,
+                    },
+                ))),
             ),
-            Property::new(sys::SPA_PARAM_BUFFERS_blocks as u32, Value::Int(1)),
+            Property::new(sys::SPA_PARAM_BUFFERS_blocks, Value::Int(1)),
             Property::new(
-                sys::SPA_PARAM_BUFFERS_size as u32,
-                Value::Choice(ChoiceValue::Int(Choice(ChoiceEnum::Range {
-                    default: size as i32,
-                    min: 4096,
-                    max: i32::MAX,
-                }))),
-            ),
-            Property::new(
-                sys::SPA_PARAM_BUFFERS_stride as u32,
-                Value::Choice(ChoiceValue::Int(Choice(ChoiceEnum::Range {
-                    default: stride as i32,
-                    min: 0,
-                    max: i32::MAX,
-                }))),
+                sys::SPA_PARAM_BUFFERS_size,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: size as i32,
+                        min: 4096,
+                        max: i32::MAX,
+                    },
+                ))),
             ),
             Property::new(
-                sys::SPA_PARAM_BUFFERS_dataType as u32,
-                Value::Choice(ChoiceValue::Int(Choice(ChoiceEnum::Flags {
-                    default: (1 << sys::SPA_DATA_MemFd) | (1 << sys::SPA_DATA_MemPtr),
-                    flags: vec![1 << sys::SPA_DATA_MemFd, 1 << sys::SPA_DATA_MemPtr],
-                }))),
+                sys::SPA_PARAM_BUFFERS_stride,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: stride as i32,
+                        min: 0,
+                        max: i32::MAX,
+                    },
+                ))),
+            ),
+            Property::new(
+                sys::SPA_PARAM_BUFFERS_dataType,
+                Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Flags {
+                        default: (1 << sys::SPA_DATA_MemFd) | (1 << sys::SPA_DATA_MemPtr),
+                        flags: vec![1 << sys::SPA_DATA_MemFd, 1 << sys::SPA_DATA_MemPtr],
+                    },
+                ))),
             ),
         ],
     };
@@ -769,7 +794,7 @@ mod tests {
     fn format_pod_serializes() {
         let bytes = build_enum_format_pod(60);
         assert!(!bytes.is_empty());
-        assert!(Pod::from_bytes(&bytes).is_ok());
+        assert!(Pod::from_bytes(&bytes).is_some());
     }
 
     #[test]
@@ -785,6 +810,6 @@ mod tests {
         };
         let bytes = build_buffers_pod(&input);
         assert!(!bytes.is_empty());
-        assert!(Pod::from_bytes(&bytes).is_ok());
+        assert!(Pod::from_bytes(&bytes).is_some());
     }
 }
