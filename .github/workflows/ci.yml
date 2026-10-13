@@ -76,6 +76,21 @@ jobs:
         with:
           components: clippy
 
+      # screencapturekit 11 → apple-metal 0.10's Swift bridge references
+      # macOS-26-only Metal symbols (MTLTensor*). `if #available` is a runtime
+      # check, so the code must still compile against the macOS 26 SDK —
+      # macos-15 runners default to Xcode 16.4 even though Xcode 26 is
+      # installed. Select the newest Xcode 26 so every image works.
+      - name: Select Xcode 26
+        if: runner.os == 'macOS'
+        run: |
+          XCODE="$(ls -dv /Applications/Xcode_26*.app 2>/dev/null | tail -1)"
+          [ -n "$XCODE" ] || { echo "No Xcode 26 found under /Applications — runner image lacks the macOS 26 SDK"; exit 1; }
+          echo "Using $XCODE (was: $(xcode-select -p))"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
+
       - name: Install dependencies
         run: bun install
 
@@ -133,6 +148,17 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # See native-check: apple-metal 0.10's Swift bridge needs the macOS 26 SDK.
+      - name: Select Xcode 26
+        if: runner.os == 'macOS'
+        run: |
+          XCODE="$(ls -dv /Applications/Xcode_26*.app 2>/dev/null | tail -1)"
+          [ -n "$XCODE" ] || { echo "No Xcode 26 found under /Applications — runner image lacks the macOS 26 SDK"; exit 1; }
+          echo "Using $XCODE (was: $(xcode-select -p))"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
+
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked
 
@@ -185,6 +211,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
+      # See native-check: apple-metal 0.10's Swift bridge needs the macOS 26 SDK.
+      - name: Select Xcode 26
+        if: runner.os == 'macOS'
+        run: |
+          XCODE="$(ls -dv /Applications/Xcode_26*.app 2>/dev/null | tail -1)"
+          [ -n "$XCODE" ] || { echo "No Xcode 26 found under /Applications — runner image lacks the macOS 26 SDK"; exit 1; }
+          echo "Using $XCODE (was: $(xcode-select -p))"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked

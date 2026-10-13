@@ -29,7 +29,7 @@ RecordForge is a local-first, low-overhead desktop application for Windows, macO
 - **System Build Tools:**
   - Windows: Visual Studio C++ Build Tools with Windows SDK
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
-  - Linux: GTK/WebKit development packages (`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev`)
+  - Linux: GTK/WebKit, audio, D-Bus, and PipeWire development packages (`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev libdbus-1-dev libpipewire-0.3-dev`)
 
 ### 2. Initial Setup
 

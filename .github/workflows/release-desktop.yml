@@ -39,7 +39,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev libdbus-1-dev libpipewire-0.3-dev
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -55,6 +55,21 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri -> target
+
+      # screencapturekit 11 → apple-metal 0.10's Swift bridge references
+      # macOS-26-only Metal symbols (MTLTensor*), so the crate must compile
+      # against the macOS 26 SDK. macos-15 runners (including macos-15-intel)
+      # default to Xcode 16.4 even though Xcode 26 is installed — select the
+      # newest Xcode 26 so both images build the bridge.
+      - name: Select Xcode 26
+        if: runner.os == 'macOS'
+        run: |
+          XCODE="$(ls -dv /Applications/Xcode_26*.app 2>/dev/null | tail -1)"
+          [ -n "$XCODE" ] || { echo "No Xcode 26 found under /Applications — runner image lacks the macOS 26 SDK"; exit 1; }
+          echo "Using $XCODE (was: $(xcode-select -p))"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked
@@ -88,6 +103,82 @@ jobs:
           cargo fmt --check
           cargo clippy -- -D warnings
 
+      # macOS bundles are currently shipped UNSIGNED. tauri-bundler treats a
+      # present-but-empty APPLE_CERTIFICATE as "sign me": it decodes to a
+      # 0-byte .p12 and `security import` dies ~25 min into the build with
+      # "SecKeychainItemImport: One or more parameters passed to a function
+      # were not valid". This step therefore only forwards the APPLE_* vars
+      # (via GITHUB_ENV) when signing is explicitly enabled AND the secrets
+      # are populated — and it rehearses the exact `security import` first so
+      # a bad .p12 fails in seconds with real diagnostics.
+      #
+      # To enable Developer ID signing + notarization: provision the
+      # APPLE_CERTIFICATE* / APPLE_SIGNING_IDENTITY / APPLE_API_* secrets in
+      # repo settings, then set MACOS_SIGNING_ENABLED to "true" below.
+      - name: Validate Apple signing certificate
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGNING_ENABLED: "false"
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+        run: |
+          set -euo pipefail
+
+          if [ "$MACOS_SIGNING_ENABLED" != "true" ]; then
+            echo "::notice::macOS signing disabled (MACOS_SIGNING_ENABLED=false) — the macOS bundle will be unsigned."
+            exit 0
+          fi
+
+          cert_b64="$(printf '%s' "$APPLE_CERTIFICATE" | tr -d '[:space:]')"
+          if [ -z "$cert_b64" ]; then
+            echo "::error::MACOS_SIGNING_ENABLED=true but APPLE_CERTIFICATE is empty — configure the Apple signing secrets (APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_API_*) in repo settings, or set MACOS_SIGNING_ENABLED=false."
+            exit 1
+          fi
+
+          cert_path="$RUNNER_TEMP/apple-signing.p12"
+          probe_keychain="$RUNNER_TEMP/probe-signing.keychain-db"
+          trap 'rm -f "$cert_path"; security delete-keychain "$probe_keychain" 2>/dev/null || true' EXIT
+          printf '%s' "$cert_b64" | base64 -d > "$cert_path"
+          if [ ! -s "$cert_path" ]; then
+            echo "::error::APPLE_CERTIFICATE is not valid base64 — decoded .p12 is empty."
+            exit 1
+          fi
+
+          # Rehearse the exact import tauri-bundler performs, into a throwaway
+          # keychain, so a bad payload fails in seconds with real diagnostics.
+          security create-keychain -p "probe" "$probe_keychain"
+          security unlock-keychain -p "probe" "$probe_keychain"
+          if ! security import "$cert_path" -k "$probe_keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productbuild; then
+            echo "::error::'security import' rejected APPLE_CERTIFICATE. Check: (1) the secret is a base64 .p12 containing cert AND private key, not a .cer/.pem; (2) APPLE_CERTIFICATE_PASSWORD matches the export password; (3) if it was exported with openssl 3.x defaults (PBES2/AES), re-export with 'openssl pkcs12 -export -legacy' — macOS security import rejects modern algorithms."
+            exit 1
+          fi
+
+          # A cert-only .p12 imports fine but yields no signing identity —
+          # tauri-bundler then fails with "failed to resolve signing identity".
+          identities="$(security find-identity -v -p codesigning "$probe_keychain" || true)"
+          echo "$identities"
+          if ! printf '%s' "$identities" | grep -qE '[1-9][0-9]* valid identities found'; then
+            echo "::error::APPLE_CERTIFICATE contains no valid codesigning identity — re-export the .p12 including the private key (Keychain Access: select cert + key together), or renew the certificate if it has expired."
+            exit 1
+          fi
+
+          openssl pkcs12 -in "$cert_path" -clcerts -nokeys -passin "pass:$APPLE_CERTIFICATE_PASSWORD" \
+            | openssl x509 -noout -subject -enddate || true
+
+          {
+            echo "APPLE_CERTIFICATE=$cert_b64"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_KEY_PATH=$APPLE_API_KEY_PATH"
+          } >> "$GITHUB_ENV"
+
       - name: Build and publish GitHub Release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -100,18 +191,13 @@ jobs:
           # License server base URL (https://<deployment>.convex.site) — compiled
           # in via option_env!. A repo variable, not a secret, so forks build Free.
           RECORD_FORGE_LICENSE_SERVER_URL: ${{ vars.RECORD_FORGE_LICENSE_SERVER_URL }}
-          # Apple Developer ID signing + notarization (macOS runners only —
-          # tauri-action skips these everywhere else, so forks and the
-          # Windows/Linux legs keep working when the secrets are absent).
-          # APPLE_CERTIFICATE: base64-encoded .p12 Developer ID Application cert
-          # APPLE_SIGNING_IDENTITY: "Developer ID Application: <Name> (<TEAMID>)"
-          # APPLE_API_*: App Store Connect API key for notarytool submission
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          # Apple Developer ID signing + notarization env vars
+          # (APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+          # APPLE_SIGNING_IDENTITY, APPLE_API_*) are injected into GITHUB_ENV by
+          # the "Validate Apple signing certificate" step above — only on macOS
+          # and only when MACOS_SIGNING_ENABLED=true. They must NOT be declared
+          # here: a missing secret would inject an empty-but-set
+          # APPLE_CERTIFICATE, which tauri-bundler still tries to import.
         with:
           projectPath: apps/desktop
           tauriScript: bun tauri

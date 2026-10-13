@@ -88,7 +88,7 @@ recordForge/
 5. **System Dependencies:**
    - **Windows:** Visual Studio C++ Build Tools (with Windows SDK)
    - **macOS:** Xcode Command Line Tools (`xcode-select --install`)
-   - **Linux:** WebKit2GTK, AppIndicator, and ALSA dev libraries (`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev`)
+   - **Linux:** WebKit2GTK, AppIndicator, ALSA/PulseAudio, D-Bus, and PipeWire dev libraries (`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libpulse-dev libdbus-1-dev libpipewire-0.3-dev`)
 
 ### 1. Clone & Install Dependencies
 
