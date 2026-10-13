@@ -211,3 +211,8 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadUpdaterSignatures: true
+          # Retries tauri build, the release lookup (getOrCreateRelease), each
+          # asset upload, and latest.json upload — transient api.github.com
+          # connect timeouts otherwise fail the leg after a ~40min build.
+          # retryAttempts=N means N extra attempts with 1-10s sleeps between.
+          retryAttempts: 3

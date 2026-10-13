@@ -221,6 +221,8 @@ function fakeProject(recordingId: string): recordForgeProject {
         blurSigma: 20,
         replaceColor: "#0f172a",
       },
+      formats: [],
+      instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
     },
   } as recordForgeProject
 }

@@ -59,6 +59,8 @@ function createMockProject(): recordForgeProject {
         blurSigma: 20,
         replaceColor: "#0f172a",
       },
+      formats: [],
+      instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
     },
   }
 }
@@ -116,6 +118,8 @@ describe("TimelineStore Export Settings Actions", () => {
             blurSigma: 20,
             replaceColor: "#0f172a",
           },
+          formats: [],
+          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
       },
     })
@@ -180,6 +184,8 @@ describe("TimelineStore Export Settings Actions", () => {
             blurSigma: 20,
             replaceColor: "#0f172a",
           },
+          formats: [],
+          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
       },
     })
@@ -245,6 +251,8 @@ describe("TimelineStore Export Settings Actions", () => {
             blurSigma: 20,
             replaceColor: "#0f172a",
           },
+          formats: [],
+          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
       },
     })
@@ -309,6 +317,8 @@ describe("TimelineStore Export Settings Actions", () => {
             blurSigma: 20,
             replaceColor: "#0f172a",
           },
+          formats: [],
+          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
       },
     })
@@ -320,5 +330,80 @@ describe("TimelineStore Export Settings Actions", () => {
     expect(updated?.exportSettings.preset).toBe("selected-range")
     expect(updated?.exportSettings.container).toBe("webp")
     expect(updated?.exportSettings.codec).toBe("webp")
+  })
+})
+
+// Persistence contract: every export-setting setter must write into
+// `project.exportSettings` (the durable object that save_project round-trips
+// through Rust). A setter that writes session-local state regresses into
+// "the toggle does not persist" — see the ProjectExportSettings fix in
+// src-tauri/src/projects/mod.rs.
+describe("Export settings persistence contract", () => {
+  it("setExportFormats stores multi-format batch picks in the project", () => {
+    useTimelineStore.setState({ project: createMockProject() })
+
+    useTimelineStore.getState().setExportFormats(["16:9", "9:16"])
+
+    const updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.formats).toEqual(["16:9", "9:16"])
+  })
+
+  it("setExportFormats dedupes and does not churn on identical input", () => {
+    const project = createMockProject()
+    useTimelineStore.setState({ project })
+
+    useTimelineStore.getState().setExportFormats(["9:16", "9:16", "1:1"])
+    expect(useTimelineStore.getState().project?.exportSettings.formats).toEqual([
+      "9:16",
+      "1:1",
+    ])
+
+    const revision = useTimelineStore.getState().projectRevision
+    useTimelineStore.getState().setExportFormats(["9:16", "1:1"])
+    expect(useTimelineStore.getState().projectRevision).toBe(revision)
+  })
+
+  it("setInstantShare stores enabled/target/expiry in the project", () => {
+    useTimelineStore.setState({ project: createMockProject() })
+
+    useTimelineStore.getState().setInstantShare({
+      enabled: true,
+      target: "s3-profile-1",
+      expiresInDays: 90,
+    })
+
+    const updated = useTimelineStore.getState().project
+    expect(updated?.exportSettings.instantShare).toEqual({
+      enabled: true,
+      target: "s3-profile-1",
+      expiresInDays: 90,
+    })
+  })
+
+  it("premium setters write into project.exportSettings for autosave", () => {
+    useTimelineStore.setState({ project: createMockProject() })
+
+    useTimelineStore.getState().setBrandWatermark({
+      enabled: true,
+      logoPath: "brand/logo.png",
+      position: "top-left",
+      scalePercent: 12,
+      opacity: 0.6,
+    })
+    useTimelineStore.getState().setKeystrokeOverlay(true)
+    useTimelineStore.getState().setReframeMode("cursor-follow")
+    useTimelineStore.getState().setWebcamBackground({
+      enabled: true,
+      mode: "replace",
+      blurSigma: 30,
+      replaceColor: "#112233",
+    })
+
+    const settings = useTimelineStore.getState().project?.exportSettings
+    expect(settings?.brandWatermark.enabled).toBe(true)
+    expect(settings?.brandWatermark.logoPath).toBe("brand/logo.png")
+    expect(settings?.keystrokeOverlay.enabled).toBe(true)
+    expect(settings?.reframeMode).toBe("cursor-follow")
+    expect(settings?.webcamBackground.enabled).toBe(true)
   })
 })

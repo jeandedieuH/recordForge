@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { X } from "lucide-react"
 import type { BrandCards, BrandWatermark } from "@recordforge/contracts"
@@ -13,9 +14,13 @@ import {
   SelectValue,
   Slider,
   Switch,
+  useToast,
 } from "@recordforge/ui"
 import { ProBadge } from "../licensing/pro-badge"
 import { useLicenseStore } from "../../stores/license-store"
+import { useTimelineStore } from "../../stores/timeline-store"
+import { copyBrandAsset } from "../../lib/assets"
+import { toErrorMessage } from "../../lib/errors"
 
 interface BrandWatermarkCardProps {
   watermark: BrandWatermark
@@ -53,6 +58,9 @@ export function BrandWatermarkCard({
 }: BrandWatermarkCardProps) {
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
+  const recordingId = useTimelineStore((state) => state.recording?.id)
+  const { toast } = useToast()
+  const [isImporting, setIsImporting] = useState(false)
 
   function gate(): boolean {
     if (isPro) return false
@@ -60,27 +68,49 @@ export function BrandWatermarkCard({
     return true
   }
 
-  async function handlePickLogo() {
-    if (gate()) return
+  // Picks are copied into the project's brand/ dir so the stored path is
+  // project-relative — a moved or deleted source can no longer silently
+  // strip the logo/font out of future exports.
+  async function importBrandAsset(kind: "logo" | "font", title: string): Promise<string | null> {
     const selected = await open({
       multiple: false,
-      title: "Select watermark logo",
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      title,
+      filters: [
+        kind === "logo"
+          ? { name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "bmp"] }
+          : { name: "Fonts", extensions: ["ttf", "otf", "ttc"] },
+      ],
     })
-    if (typeof selected === "string") {
-      onChange({ ...watermark, logoPath: selected, enabled: true })
+    if (typeof selected !== "string") return null
+    if (!recordingId) return null
+    setIsImporting(true)
+    try {
+      return await copyBrandAsset(recordingId, selected, kind)
+    } catch (error) {
+      toast({
+        title: `Could not import ${kind}`,
+        description: toErrorMessage(error),
+        variant: "error",
+      })
+      return null
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
+  async function handlePickLogo() {
+    if (gate()) return
+    const storedPath = await importBrandAsset("logo", "Select watermark logo")
+    if (storedPath) {
+      onChange({ ...watermark, logoPath: storedPath, enabled: true })
     }
   }
 
   async function handlePickFont() {
     if (gate()) return
-    const selected = await open({
-      multiple: false,
-      title: "Select brand font",
-      filters: [{ name: "Fonts", extensions: ["ttf", "otf", "ttc"] }],
-    })
-    if (typeof selected === "string") {
-      onCardsChange({ ...cards, fontPath: selected })
+    const storedPath = await importBrandAsset("font", "Select brand font")
+    if (storedPath) {
+      onCardsChange({ ...cards, fontPath: storedPath })
     }
   }
 
@@ -106,7 +136,12 @@ export function BrandWatermarkCard({
       {watermark.enabled ? (
         <div className="flex flex-col gap-4 border-t border-border p-5 text-xs text-subtle-foreground">
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={handlePickLogo} disabled={disabled}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handlePickLogo}
+              disabled={disabled || isImporting}
+            >
               {watermark.logoPath ? "Change logo" : "Choose logo"}
             </Button>
             {watermark.logoPath ? (
@@ -295,7 +330,12 @@ export function BrandWatermarkCard({
             </label>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={handlePickFont} disabled={disabled}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handlePickFont}
+              disabled={disabled || isImporting}
+            >
               {cards.fontPath ? "Change font" : "Choose font"}
             </Button>
             {cards.fontPath ? (

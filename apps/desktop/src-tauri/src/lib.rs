@@ -216,6 +216,7 @@ pub fn run() {
             commands::assets::delete_asset,
             commands::assets::relink_asset,
             commands::assets::probe_asset,
+            commands::assets::copy_brand_asset,
             commands::assets::start_derivative_job,
             commands::exports::export_timeline,
             commands::exports::retry_export,

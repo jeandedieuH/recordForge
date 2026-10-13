@@ -80,6 +80,19 @@ fn licensing_error(code: &str, message: impl Into<String>) -> AppError {
     AppError::new(ErrorCategory::Licensing, code, message.into())
 }
 
+/// The optional captions sidecar degrades to "no captions" when the expected
+/// file was never written (e.g. sidecar mode on a timeline with no cues) —
+/// failing the whole finished upload over a missing extra is the wrong trade.
+fn resolve_share_captions(raw: Option<&str>) -> Option<PathBuf> {
+    raw.and_then(|path| {
+        crate::path_policy::canonicalize_path(std::path::Path::new(path))
+            .map_err(|error| {
+                warn!(path = %path, error = %error, "share captions sidecar is unavailable; continuing without it");
+            })
+            .ok()
+    })
+}
+
 /// Upload `path` as a hosted share link. Pro-gated: Free callers get
 /// `pro_feature_required` with `instant-share` so the UI can route to the
 /// upgrade dialog. The local export is never touched.
@@ -132,18 +145,7 @@ pub async fn share_export(
         )
     })?;
     let bytes = metadata.len();
-    let captions = args
-        .captions_path
-        .as_deref()
-        .map(|raw| {
-            crate::path_policy::canonicalize_path(std::path::Path::new(raw)).map_err(|error| {
-                licensing_error(
-                    "share_captions_invalid",
-                    format!("captions path is invalid: {error}"),
-                )
-            })
-        })
-        .transpose()?;
+    let captions = resolve_share_captions(args.captions_path.as_deref());
 
     // Reserve the share + presigned plan.
     let client = LicenseClient::new();
@@ -452,14 +454,7 @@ pub async fn share_to_profile(
         .map_err(|error| licensing_error("share_upload_failed", error.to_string()))?;
 
     // 2. Captions (optional) — .srt exports convert to VTT for the web.
-    let captions = args
-        .captions_path
-        .as_deref()
-        .map(|raw| {
-            crate::path_policy::canonicalize_path(std::path::Path::new(raw))
-                .map_err(|error| licensing_error("share_captions_invalid", format!("{error}")))
-        })
-        .transpose()?;
+    let captions = resolve_share_captions(args.captions_path.as_deref());
     let staging_dir = std::env::temp_dir().join(format!("recordforge-share-{slug}"));
     let mut staged: Vec<PathBuf> = Vec::new();
     let cleanup = |staged: &[PathBuf], dir: &std::path::Path| {
@@ -613,5 +608,21 @@ mod tests {
         assert!(!html.contains("%%HAS_CAPTIONS%%"));
         assert!(!html.contains("%%ALLOW_DOWNLOAD%%"));
         assert!(!html.contains("{{TITLE}}"));
+    }
+
+    #[test]
+    fn missing_captions_sidecar_degrades_to_none_instead_of_failing() {
+        // Sidecar mode on a timeline with no cues produces no .srt — the share
+        // must still upload without captions rather than erroring out.
+        assert!(resolve_share_captions(Some("definitely/missing/export.srt")).is_none());
+        assert!(resolve_share_captions(None).is_none());
+
+        let temp = tempfile::tempdir().unwrap();
+        let srt = temp.path().join("captions.srt");
+        std::fs::write(&srt, b"1\n00:00:01,000 --> 00:00:02,000\nhi\n").unwrap();
+        assert_eq!(
+            resolve_share_captions(Some(&srt.to_string_lossy())),
+            Some(crate::path_policy::canonicalize_path(&srt).unwrap())
+        );
     }
 }

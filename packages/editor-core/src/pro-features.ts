@@ -71,6 +71,7 @@ export function analyzeProFeatureUsage(
     keystrokeOverlay?: { enabled: boolean }
     reframeMode?: string
     webcamBackground?: WebcamBackground
+    formats?: string[]
   },
 ): ProUsageAnalysis {
   const features: ProFeatureUsage[] = []
@@ -85,7 +86,10 @@ export function analyzeProFeatureUsage(
 
   const nonStandardRatio =
     !canvasIsSixteenNine(timeline.canvas) ||
-    (settings?.preset ? NON_STANDARD_PRESETS.has(settings.preset) : false)
+    (settings?.preset ? NON_STANDARD_PRESETS.has(settings.preset) : false) ||
+    // A persisted multi-format batch renders alternate canvases — each
+    // non-16:9 alternate is a custom-aspect export job in Rust.
+    (settings?.formats?.some((format) => format !== "16:9") ?? false)
   if (nonStandardRatio) {
     push("custom-aspect-ratio", 1, `${timeline.canvas.width}×${timeline.canvas.height} canvas`)
   }

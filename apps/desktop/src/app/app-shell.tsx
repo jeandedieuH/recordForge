@@ -115,8 +115,9 @@ export function AppShell() {
   const setWebcamBackground = useTimelineStore((state) => state.setWebcamBackground)
   const setKeystrokeOverlay = useTimelineStore((state) => state.setKeystrokeOverlay)
   const setReframeMode = useTimelineStore((state) => state.setReframeMode)
-  const exportFormats = useTimelineStore((state) => state.exportFormats)
+  const exportFormats = useTimelineStore((state) => state.project?.exportSettings.formats)
   const setExportFormats = useTimelineStore((state) => state.setExportFormats)
+  const setInstantShare = useTimelineStore((state) => state.setInstantShare)
   const timelineMarkers = useTimelineStore((state) => state.engine?.history.present.markers)
   const setExportContainer = useTimelineStore((state) => state.setExportContainer)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
@@ -411,8 +412,13 @@ export function AppShell() {
       chapterMode,
       audioMastering: exportSettings.audioMastering,
       brandWatermark: exportSettings.brandWatermark,
+      brandCards: exportSettings.brandCards,
       keystrokeOverlay: exportSettings.keystrokeOverlay,
       reframeMode: exportSettings.reframeMode,
+      webcamBackground: exportSettings.webcamBackground,
+      // Alternate-format jobs mirror timeline-store.export: animation
+      // containers collapse to the primary canvas.
+      formats: isAnimation ? [] : exportSettings.formats,
     })
   }
 
@@ -451,10 +457,8 @@ export function AppShell() {
       if (!outputPath) return
       // Phase 1: the export path flushes and freezes a durable project revision
       // before building the render plan, so it never exports unsaved edits.
-      await timelineExport(outputPath, {
-        stripProFeatures,
-        formats: useTimelineStore.getState().exportFormats,
-      })
+      // Formats come from the persisted export settings inside export().
+      await timelineExport(outputPath, { stripProFeatures })
     } catch (error) {
       useTimelineStore.setState({ error: toErrorMessage(error) })
     }
@@ -613,6 +617,7 @@ export function AppShell() {
                   onReframeModeChange={setReframeMode}
                   formats={exportFormats}
                   onFormatsChange={setExportFormats}
+                  onInstantShareChange={setInstantShare}
                   markers={timelineMarkers}
                   onContainerChange={setExportContainer}
                   onPresetChange={setExportPreset}

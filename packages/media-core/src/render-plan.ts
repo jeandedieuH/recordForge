@@ -1139,6 +1139,8 @@ export function freeExportSettings(settings: ProjectExportSettings): ProjectExpo
     reframeMode: "fit",
     // Virtual background is Pro — camera feeds composite untouched.
     webcamBackground: { ...settings.webcamBackground, enabled: false },
+    // Multi-format alternates are Pro — Free exports the primary canvas only.
+    formats: [],
   }
 }
 

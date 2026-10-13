@@ -120,48 +120,18 @@ fn default_derivative_version() -> u32 {
     1
 }
 
-/// Export settings persisted with the project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectExportSettings {
-    #[serde(default = "default_export_preset")]
-    pub preset: String,
-    #[serde(default = "default_export_codec")]
-    pub codec: String,
-    #[serde(default = "default_export_container")]
-    pub container: String,
-    #[serde(default = "default_caption_mode")]
-    pub caption_mode: String,
-    #[serde(default)]
-    pub range: Option<crate::exports::ExportRange>,
-}
-
-impl Default for ProjectExportSettings {
-    fn default() -> Self {
-        Self {
-            preset: default_export_preset(),
-            codec: default_export_codec(),
-            container: default_export_container(),
-            caption_mode: default_caption_mode(),
-            range: None,
-        }
-    }
-}
-
-fn default_export_preset() -> String {
-    "default-mp4".to_string()
-}
-
-fn default_export_codec() -> String {
-    "h264".to_string()
-}
-
-fn default_export_container() -> String {
-    "mp4".to_string()
-}
-
-fn default_caption_mode() -> String {
-    "burn-in".to_string()
+/// Default export settings for a brand-new project file. The durable field
+/// itself is an opaque JSON passthrough — export settings are owned by the
+/// TypeScript contracts (zod defaults hydrate anything missing), so typing
+/// them again in Rust only drifts and silently strips newer fields on every
+/// save/load round-trip.
+fn default_export_settings() -> Value {
+    serde_json::json!({
+        "preset": "default-mp4",
+        "codec": "h264",
+        "container": "mp4",
+        "captionMode": "burn-in",
+    })
 }
 
 /// Durable, versioned project file.
@@ -181,8 +151,8 @@ pub struct ProjectFile {
     pub zoom_segments: Value,
     #[serde(default = "empty_json_object")]
     pub smart_zoom_settings: Value,
-    #[serde(default)]
-    pub export_settings: ProjectExportSettings,
+    #[serde(default = "default_export_settings")]
+    pub export_settings: Value,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -773,7 +743,7 @@ pub fn create_project(
         markers: Value::Array(vec![]),
         zoom_segments: Value::Array(vec![]),
         smart_zoom_settings: empty_json_object(),
-        export_settings: ProjectExportSettings::default(),
+        export_settings: default_export_settings(),
         created_at: now.clone(),
         updated_at: now,
         checksum: String::new(),
@@ -999,7 +969,7 @@ mod tests {
             markers: Value::Null,
             zoom_segments: Value::Null,
             smart_zoom_settings: Value::Null,
-            export_settings: ProjectExportSettings::default(),
+            export_settings: default_export_settings(),
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
             checksum: String::new(),
@@ -1150,8 +1120,73 @@ mod tests {
 
         let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
         assert_eq!(loaded.project.checksum, "");
-        assert_eq!(loaded.project.export_settings.preset, "default-mp4");
+        assert_eq!(
+            loaded
+                .project
+                .export_settings
+                .get("preset")
+                .and_then(Value::as_str),
+            Some("default-mp4")
+        );
         assert_eq!(loaded.project.assets[0].kind, None);
         assert_eq!(loaded.project.assets[0].derivative_version, 1);
+    }
+
+    /// Premium export settings (watermark, brand cards, mastering, share,
+    /// formats, …) are owned by the TS schema and must round-trip verbatim —
+    /// this is the regression for the struct-typed `export_settings` that
+    /// silently stripped every field it did not declare on save.
+    #[test]
+    fn export_settings_round_trip_preserves_unknown_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let (recording, metadata) = make_test_recording(&project_dir);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("output.mp4"), b"fake").unwrap();
+
+        let mut project = create_project(&recording, &metadata, None, &project_dir).unwrap();
+        project.export_settings = serde_json::json!({
+            "preset": "high-quality",
+            "codec": "hevc",
+            "container": "mp4",
+            "captionMode": "sidecar",
+            "chapterMode": "both",
+            "encoder": "software",
+            "range": { "startMs": 0, "endMs": 12000 },
+            "audioMastering": { "denoise": true, "loudnessTarget": -16 },
+            "brandWatermark": {
+                "enabled": true,
+                "logoPath": "brand/logo.png",
+                "position": "top-right",
+                "scalePercent": 12,
+                "opacity": 0.7,
+            },
+            "brandCards": {
+                "enabled": true,
+                "introMs": 1500,
+                "outroMs": 2000,
+                "title": "Demo",
+                "subtitle": null,
+                "background": "#111111",
+                "textColor": "#eeeeee",
+                "fontPath": "brand/font.ttf",
+            },
+            "keystrokeOverlay": { "enabled": true },
+            "reframeMode": "cursor-follow",
+            "webcamBackground": {
+                "enabled": true,
+                "mode": "replace",
+                "blurSigma": 24,
+                "replaceColor": "#123456",
+            },
+            "formats": ["16:9", "9:16"],
+            "instantShare": { "enabled": true, "target": "hosted", "expiresInDays": 30 },
+            "futureField": { "not": "invented yet" },
+        });
+        let saved = save_project(&project, &project_dir).unwrap();
+
+        let loaded = load_project(&project_dir, &policy()).unwrap().unwrap();
+        assert_eq!(loaded.project.export_settings, project.export_settings);
+        assert_eq!(saved.export_settings, project.export_settings);
     }
 }

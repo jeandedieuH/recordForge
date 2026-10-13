@@ -93,6 +93,9 @@ export function VirtualBackgroundCard({
       </div>
       {background.enabled ? (
         <div className="flex flex-col gap-4 border-t border-border p-5 text-xs text-subtle-foreground">
+          {modelReady === null ? (
+            <span className="text-muted-foreground">Checking segmentation model…</span>
+          ) : null}
           {modelReady === false ? (
             <div className="flex items-center gap-2">
               <Button

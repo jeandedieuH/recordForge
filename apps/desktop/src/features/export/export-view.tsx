@@ -8,6 +8,7 @@ import type {
   ExportEncoderPreference,
   ExportPreset,
   ExportRange,
+  InstantShareSettings,
   MediaJob,
   ProjectExportSettings,
   ReframeMode,
@@ -76,6 +77,9 @@ interface ExportViewProps {
   // Batch-export format selection; empty = current canvas only.
   formats?: CanvasAspectRatio[]
   onFormatsChange?: (formats: CanvasAspectRatio[]) => void
+  // Instant Share (Pro): upload-on-export preferences persisted per project.
+  // The optional link password is session-only and never enters this object.
+  onInstantShareChange?: (share: InstantShareSettings) => void
   markers?: TimelineMarker[]
   onContainerChange?: (container: "mp4" | "gif" | "webp") => void
   onPresetChange?: (preset: ExportPreset) => void
@@ -324,6 +328,7 @@ export function ExportView({
   onReframeModeChange,
   formats = [],
   onFormatsChange,
+  onInstantShareChange,
   markers = [],
   onContainerChange,
   onPresetChange,
@@ -356,14 +361,29 @@ export function ExportView({
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const { toast } = useToast()
   // Instant Share — MP4-only Pro feature (docs/specs/instant-share.md).
-  // `shareTarget` is "hosted" or the id of an S3 storage profile (BYO bucket).
-  const [shareEnabled, setShareEnabled] = useState(false)
-  const [shareTarget, setShareTarget] = useState("hosted")
+  // `target` is "hosted" or the id of an S3 storage profile (BYO bucket);
+  // enabled/target/expiry persist per project. The password stays
+  // session-only — secrets never enter the durable project file.
+  const share = exportSettings?.instantShare ?? {
+    enabled: false,
+    target: "hosted",
+    expiresInDays: 30,
+  }
+  const shareEnabled = share.enabled
+  const shareTarget = share.target
+  const shareExpiryDays = share.expiresInDays
   const [shareState, setShareState] = useState<"idle" | "uploading" | "done" | "failed">("idle")
-  // Pro Cloud extras — password + custom expiry for the hosted viewer.
   const [sharePassword, setSharePassword] = useState("")
-  const [shareExpiryDays, setShareExpiryDays] = useState("30")
-  const sharedRef = useRef<string | null>(null)
+  // Dedupe on the job id — the same output path can be re-exported and must
+  // re-share. `mountedAt` prevents a persisted `enabled` flag from spending
+  // a hosted link on a job that finished before this view opened; explicitly
+  // re-arming the toggle skips that guard.
+  const sharedJobRef = useRef<string | null>(null)
+  const mountedAtRef = useRef(Date.now())
+  const armedManuallyRef = useRef(false)
+  const updateShare = (patch: Partial<InstantShareSettings>) => {
+    onInstantShareChange?.({ ...share, ...patch })
+  }
   const s3Profiles = useStorageStore((state) => state.profiles).filter((p) => p.kind === "s3")
   const fetchProfiles = useStorageStore((state) => state.fetchProfiles)
 
@@ -440,14 +460,24 @@ export function ExportView({
   const exportPercent = Math.min(100, Math.max(0, Math.round((exportJob?.progress ?? 0) * 100)))
 
   // Instant Share: when the export lands with the toggle on, upload the MP4
-  // and copy the viewer link. Runs once per output path; a failed share never
+  // and copy the viewer link. Runs once per export job; a failed share never
   // touches the local export.
   const outputPath = exportJob?.outputs?.outputPath
   useEffect(() => {
     if (!shareEnabled || !isPro || isAnimation) return
     if (exportJob?.status !== "completed" || !outputPath) return
-    if (sharedRef.current === outputPath) return
-    sharedRef.current = outputPath
+    if (sharedJobRef.current === exportJob.id) return
+    // `enabled` persists across sessions — a job that completed before this
+    // view opened must not auto-upload a stale export. Explicitly re-arming
+    // the toggle skips this guard so "off → on" still retries an older job.
+    const completedAt = exportJob.completedAt ? Date.parse(exportJob.completedAt) : null
+    const completedBeforeMount =
+      completedAt === null || Number.isNaN(completedAt) || completedAt < mountedAtRef.current
+    if (!armedManuallyRef.current && completedBeforeMount) {
+      sharedJobRef.current = exportJob.id
+      return
+    }
+    sharedJobRef.current = exportJob.id
     setShareState("uploading")
     const wantsCaptions = captionMode === "sidecar"
     const shareArgs = {
@@ -464,8 +494,7 @@ export function ExportView({
       // Hosted-only extras — BYO-bucket targets ignore these (their player
       // page can't enforce passwords or expiry server-side).
       password: shareTarget === "hosted" && sharePassword ? sharePassword : undefined,
-      expiresInDays:
-        shareTarget === "hosted" ? Number.parseInt(shareExpiryDays, 10) || 30 : undefined,
+      expiresInDays: shareTarget === "hosted" ? shareExpiryDays : undefined,
     }
     // "hosted" goes through recordforge-cloud; anything else is an S3 profile
     // id for the bring-your-own-bucket player page.
@@ -493,6 +522,8 @@ export function ExportView({
     isPro,
     isAnimation,
     exportJob?.status,
+    exportJob?.id,
+    exportJob?.completedAt,
     outputPath,
     captionMode,
     projectName,
@@ -1254,13 +1285,15 @@ export function ExportView({
                   checked={shareEnabled}
                   disabled={isRunning}
                   onCheckedChange={(next) => {
-                    // Free users get the upgrade dialog instead of the toggle —
-                    // same discoverability pattern as the Pro presets above.
-                    if (!isPro) {
+                    // Enabling is Pro-gated (opens the upgrade dialog like the
+                    // other Pro switches), but a persisted-on share can always
+                    // be turned off — off must never be gated.
+                    if (next && !isPro) {
                       openUpgradeDialog(["instant-share"])
                       return
                     }
-                    setShareEnabled(next)
+                    if (next) armedManuallyRef.current = true
+                    updateShare({ enabled: next })
                   }}
                   aria-label="Upload this export as a share link"
                 />
@@ -1270,7 +1303,7 @@ export function ExportView({
                   <span>Share destination</span>
                   <Select
                     value={shareTarget}
-                    onValueChange={setShareTarget}
+                    onValueChange={(target) => updateShare({ target })}
                     disabled={isRunning || !isPro}
                   >
                     <SelectTrigger className="h-8 w-full" aria-label="Share destination">
@@ -1283,6 +1316,15 @@ export function ExportView({
                           My bucket — {profile.name}
                         </SelectItem>
                       ))}
+                      {/* A persisted target whose S3 profile was deleted must
+                          stay visible so the user can pick a valid one — an
+                          empty select would otherwise look like "hosted". */}
+                      {shareTarget !== "hosted" &&
+                      !s3Profiles.some((profile) => profile.id === shareTarget) ? (
+                        <SelectItem value={shareTarget} disabled>
+                          Unavailable bucket profile
+                        </SelectItem>
+                      ) : null}
                     </SelectContent>
                   </Select>
                 </label>
@@ -1303,8 +1345,8 @@ export function ExportView({
                     <label className="flex w-32 flex-col gap-1.5">
                       <span>Expires</span>
                       <Select
-                        value={shareExpiryDays}
-                        onValueChange={setShareExpiryDays}
+                        value={String(shareExpiryDays)}
+                        onValueChange={(days) => updateShare({ expiresInDays: Number(days) })}
                         disabled={isRunning || !isPro}
                       >
                         <SelectTrigger className="h-8 w-full" aria-label="Link expiry">

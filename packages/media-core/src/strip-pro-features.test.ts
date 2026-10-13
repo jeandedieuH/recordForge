@@ -4,6 +4,7 @@ import {
   defaultCursorSettings,
   textClipSchema,
   type AnnotationClip,
+  type CanvasAspectRatio,
   type TextClip,
   type TimelineClip,
   type TimelineState,
@@ -195,6 +196,10 @@ describe("freeExportSettings", () => {
       blurSigma: 20,
       replaceColor: "#0f172a",
     },
+    // `as const` would freeze this into a readonly tuple — cast to the
+    // mutable array type ProjectExportSettings declares.
+    formats: ["16:9", "9:16"] as CanvasAspectRatio[],
+    instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
   } as const
 
   it("downgrades ultra presets and disables chapter output", () => {
@@ -210,6 +215,10 @@ describe("freeExportSettings", () => {
     expect(freeExportSettings({ ...base, preset: "vertical" }).preset).toBe("balanced")
     expect(freeExportSettings({ ...base, preset: "square" }).preset).toBe("balanced")
     expect(freeExportSettings({ ...base, preset: "fast-share" }).preset).toBe("fast-share")
+  })
+
+  it("clears multi-format alternates — Free exports the primary canvas only", () => {
+    expect(freeExportSettings({ ...base }).formats).toEqual([])
   })
 })
 

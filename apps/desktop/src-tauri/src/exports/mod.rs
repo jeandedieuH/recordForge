@@ -692,6 +692,24 @@ impl BrandWatermark {
     }
 }
 
+/// Resolve a stored brand-asset path to an absolute path under the project
+/// work dir. UI picks land in `brand/` as project-relative paths; absolute
+/// paths (legacy projects, hand-edited files) pass through untouched. A
+/// relative path that escapes the work dir is rejected — treated as absent.
+fn resolve_brand_asset_path(raw: &str, work_dir: &Path) -> Option<String> {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return path.is_file().then(|| raw.to_string());
+    }
+    let candidate = crate::path_policy::canonicalize_path(&work_dir.join(path)).ok()?;
+    let work = crate::path_policy::canonicalize_path(work_dir).ok()?;
+    if !candidate.starts_with(&work) {
+        warn!(path = %raw, "brand asset path escapes the project directory; ignoring");
+        return None;
+    }
+    Some(candidate.to_string_lossy().to_string())
+}
+
 /// Studio Audio (Pro): mastering filters applied to the final mixed track.
 /// `denoise` is FFmpeg's frequency-domain `afftdn` tuned for speech noise
 /// floors; `loudness_target` runs one-pass `loudnorm` at the chosen LUFS
@@ -887,7 +905,7 @@ pub fn run_render_plan(
     project_id: &str,
     output_path: &Path,
     mut plan: RenderPlan,
-    settings: ExportSettings,
+    mut settings: ExportSettings,
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -924,6 +942,22 @@ pub fn run_render_plan(
             "project identity does not match the export request".into(),
         )
         .into());
+    }
+    // Brand files picked through the UI are copied into the project's `brand/`
+    // dir and stored project-relative; legacy absolute picks still resolve
+    // directly. Missing or escaping paths degrade to "no file" downstream —
+    // the same don't-fail rule `active_logo`/`resolved_font` already apply.
+    if let Some(watermark) = settings.brand_watermark.as_mut() {
+        watermark.logo_path = watermark
+            .logo_path
+            .take()
+            .and_then(|path| resolve_brand_asset_path(&path, &work_dir));
+    }
+    if let Some(cards) = settings.brand_cards.as_mut() {
+        cards.font_path = cards
+            .font_path
+            .take()
+            .and_then(|path| resolve_brand_asset_path(&path, &work_dir));
     }
     // Keystroke overlay events live in the work dir — attach post-plan so the
     // frontend never touches the session filesystem. Only when enabled: a
@@ -7540,6 +7574,36 @@ fn emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brand_asset_resolution_honors_relative_absolute_and_escaping_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path().join("project");
+        std::fs::create_dir_all(work_dir.join("brand")).unwrap();
+        let logo = work_dir.join("brand/logo.png");
+        std::fs::write(&logo, b"png").unwrap();
+
+        // UI picks land project-relative → resolve inside the work dir.
+        let resolved = resolve_brand_asset_path("brand/logo.png", &work_dir).unwrap();
+        assert_eq!(std::path::Path::new(&resolved), logo.as_path());
+
+        // Missing relative file degrades to absent.
+        assert!(resolve_brand_asset_path("brand/missing.png", &work_dir).is_none());
+
+        // Traversal out of the project dir is rejected, not followed.
+        std::fs::write(temp.path().join("outside.png"), b"png").unwrap();
+        assert!(resolve_brand_asset_path("../outside.png", &work_dir).is_none());
+
+        // Absolute paths pass through only while the file exists.
+        let external = temp.path().join("external.png");
+        std::fs::write(&external, b"png").unwrap();
+        let raw = external.to_string_lossy().to_string();
+        assert_eq!(
+            resolve_brand_asset_path(&raw, &work_dir).as_deref(),
+            Some(raw.as_str())
+        );
+        assert!(resolve_brand_asset_path("C:\\definitely\\missing\\logo.png", &work_dir).is_none());
+    }
 
     #[test]
     fn is_pipe_closed_matches_broken_pipe_errors() {

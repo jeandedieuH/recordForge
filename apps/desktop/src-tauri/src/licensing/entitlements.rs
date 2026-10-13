@@ -110,11 +110,14 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
         push(STUDIO_AUDIO);
     }
 
+    // The watermark gate mirrors the TS check (`enabled && logoPath`) — a
+    // filesystem stat here would disagree with the UI: picked logos live at
+    // project-relative paths that only resolve inside `run_render_plan`, so
+    // gating on file existence would let a configured watermark slip past.
     if settings
         .brand_watermark
         .as_ref()
-        .and_then(|watermark| watermark.active_logo())
-        .is_some()
+        .is_some_and(|watermark| watermark.enabled && watermark.logo_path.is_some())
         || settings
             .brand_cards
             .as_ref()
@@ -534,6 +537,37 @@ mod tests {
         settings.audio_mastering = Some(crate::exports::AudioMastering {
             denoise: false,
             loudness_target: None,
+        });
+        assert!(required_pro_features(&plan, &settings).is_empty());
+    }
+
+    #[test]
+    fn enabled_watermark_flags_brand_kit_even_for_project_relative_logos() {
+        // Picked logos are stored as `brand/logo.png` — only resolvable inside
+        // run_render_plan. The gate must judge by configuration, not by a
+        // filesystem stat that cannot see the project dir.
+        let plan = plan_with_canvas(1920, 1080);
+        let mut settings = mp4_settings("balanced");
+        settings.brand_watermark = Some(crate::exports::BrandWatermark {
+            enabled: true,
+            logo_path: Some("brand/logo.png".to_string()),
+            position: "bottom-right".to_string(),
+            scale_percent: 8.0,
+            opacity: 0.85,
+        });
+        assert_eq!(required_pro_features(&plan, &settings), vec![BRAND_KIT]);
+
+        // Disabled or logo-less watermark config stays Free.
+        settings.brand_watermark = Some(crate::exports::BrandWatermark {
+            enabled: true,
+            logo_path: None,
+            ..settings.brand_watermark.clone().unwrap()
+        });
+        assert!(required_pro_features(&plan, &settings).is_empty());
+        settings.brand_watermark = Some(crate::exports::BrandWatermark {
+            enabled: false,
+            logo_path: Some("brand/logo.png".to_string()),
+            ..settings.brand_watermark.clone().unwrap()
         });
         assert!(required_pro_features(&plan, &settings).is_empty());
     }

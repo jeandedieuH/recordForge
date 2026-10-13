@@ -7,6 +7,7 @@ import {
   type ExportEncoderPreference,
   type ExportPreset,
   type ExportRange,
+  type InstantShareSettings,
   type LibraryRecording,
   type ReframeMode,
   type MediaJob,
@@ -147,9 +148,12 @@ interface TimelineStore {
   setKeystrokeOverlay: (enabled: boolean) => void
   setReframeMode: (mode: ReframeMode) => void
   // Multi-format batch export (Pro): canvas aspects selected in the export
-  // view; empty means "current canvas only".
-  exportFormats: CanvasAspectRatio[]
+  // view are persisted in project.exportSettings.formats; empty means
+  // "current canvas only".
   setExportFormats: (formats: CanvasAspectRatio[]) => void
+  // Instant Share (Pro): hosted/BYO-bucket upload preferences, persisted
+  // per project. The optional link password is deliberately session-only.
+  setInstantShare: (share: InstantShareSettings) => void
   setExportContainer: (container: "mp4" | "gif" | "webp") => void
   setExportPreset: (preset: ExportPreset) => void
   setExportCodec: (codec: "h264" | "hevc" | "gif" | "webp") => void
@@ -1143,9 +1147,39 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
-  exportFormats: [],
   setExportFormats: (formats) => {
-    set({ exportFormats: [...new Set(formats)] })
+    const project = get().project
+    if (!project) return
+    const next = [...new Set(formats)]
+    const current = project.exportSettings.formats
+    if (current.length === next.length && current.every((format, i) => format === next[i])) {
+      return
+    }
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, formats: next },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setInstantShare: (share) => {
+    const project = get().project
+    if (!project) return
+    const current = project.exportSettings.instantShare
+    if (
+      current.enabled === share.enabled &&
+      current.target === share.target &&
+      current.expiresInDays === share.expiresInDays
+    ) {
+      return
+    }
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, instantShare: share },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
   },
 
   setExportContainer: (container) => {
@@ -1382,16 +1416,27 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     // Multi-format batch export (Pro): each requested canvas aspect becomes
     // an independent durable job. The primary format keeps the user's chosen
     // output path; alternates get a format tag (`name-vertical.mp4`).
+    // Formats only apply to MP4 batch exports — animation containers ignore
+    // them. A strip-to-Free export collapses to the primary canvas so a
+    // persisted Pro selection can never reach an alternate job's entitlement
+    // check.
     const canvas = engine.history.present.canvas
     const currentAspect: CanvasAspectRatio = canvas.aspectRatio ?? "16:9"
-    const requested = options?.formats?.length ? [...new Set(options.formats)] : [currentAspect]
+    const persisted = effectiveExportSettings.formats ?? []
+    const requested: CanvasAspectRatio[] =
+      isAnimation || strip
+        ? [currentAspect]
+        : options?.formats?.length
+          ? [...new Set(options.formats)]
+          : persisted.length
+            ? [...new Set(persisted)]
+            : [currentAspect]
     // The current aspect exports first so an entitlement failure on an
     // alternate never orphans the primary job.
     const formats = requested.includes(currentAspect)
       ? [currentAspect, ...requested.filter((format) => format !== currentAspect)]
       : requested
 
-    let firstJob: Awaited<ReturnType<typeof exportTimeline>> | null = null
     for (const [index, format] of formats.entries()) {
       const variantState = {
         ...engine.history.present,
@@ -1423,13 +1468,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           plan: plan.value,
           settings: finalSettings,
         })
-        firstJob ??= job
+        // Surface the primary job immediately so progress stays visible even
+        // if an alternate format fails to start afterwards.
+        if (index === 0) {
+          set({ activeExportJob: job })
+        }
       } catch (err) {
         set({ error: toErrorMessage(err) })
         return
       }
     }
-    set({ activeExportJob: firstJob })
   },
 
   // Phase 1: bump the project revision, keep the editor store in sync, and

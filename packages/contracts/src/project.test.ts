@@ -227,6 +227,8 @@ describe("project contract", () => {
         blurSigma: 20,
         replaceColor: "#0f172a",
       },
+      formats: [],
+      instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
     })
 
     expect(projectExportSettingsSchema.parse({ preset: "smooth-60fps" }).preset).toBe(
@@ -291,6 +293,8 @@ describe("project contract", () => {
         blurSigma: 20,
         replaceColor: "#0f172a",
       },
+      formats: [],
+      instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
     })
     expect(
       projectExportSettingsSchema.parse({
@@ -332,6 +336,8 @@ describe("project contract", () => {
         blurSigma: 20,
         replaceColor: "#0f172a",
       },
+      formats: [],
+      instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
     })
   })
 

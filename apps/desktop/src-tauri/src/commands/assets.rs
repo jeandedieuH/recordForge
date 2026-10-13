@@ -339,6 +339,92 @@ pub fn delete_asset(request: AssetDeleteRequest, state: State<'_, AppState>) -> 
     Ok(())
 }
 
+/// Brand Kit (Pro): copy a picked logo/font into the project's `brand/` dir
+/// so the stored path is project-relative and survives the source file being
+/// moved or deleted. Returns the project-relative path for export settings.
+/// Not a media asset — it is settings-owned, so it stays out of the registry.
+#[tauri::command]
+#[instrument(skip(state))]
+pub fn copy_brand_asset(
+    recording_id: String,
+    source_path: String,
+    kind: String,
+    state: State<'_, AppState>,
+) -> Result<String> {
+    const BRAND_ASSET_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    let _update_operation = state.update_gate.acquire_operation()?;
+    let allowed: &[&str] = match kind.as_str() {
+        // FFmpeg has no native SVG decoder — raster formats only.
+        "logo" => &["png", "jpg", "jpeg", "webp", "bmp"],
+        // drawtext `fontfile` — TrueType/OpenType (collections pick face 0).
+        "font" => &["ttf", "otf", "ttc"],
+        _ => {
+            return Err(
+                InternalError::Project("brand asset kind must be logo or font".into()).into(),
+            );
+        }
+    };
+
+    let recording = get_recording_for_state(&state, &recording_id)?;
+    let project_dir = PathBuf::from(&recording.work_dir);
+    // Brand assets are settings-owned; copying into a project-less session
+    // would orphan files under work_dir that nothing can reference.
+    if load_project(&project_dir, &state.path_policy)?.is_none() {
+        return Err(InternalError::Project(format!(
+            "no project found for recording {recording_id}"
+        ))
+        .into());
+    }
+    let source = state
+        .path_policy
+        .validate_import_source_path(Path::new(&source_path))?;
+    let extension = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !allowed.contains(&extension.as_str()) {
+        return Err(
+            InternalError::Project(format!("unsupported {kind} file type: {extension}")).into(),
+        );
+    }
+    let bytes = std::fs::metadata(&source)
+        .map_err(|e| InternalError::Storage(format!("read brand asset source: {e}")))?
+        .len();
+    if bytes > BRAND_ASSET_MAX_BYTES {
+        return Err(InternalError::Project(format!(
+            "{kind} file is too large ({} MB max)",
+            BRAND_ASSET_MAX_BYTES / 1024 / 1024
+        ))
+        .into());
+    }
+
+    let brand_dir = project_dir.join("brand");
+    std::fs::create_dir_all(&brand_dir)
+        .map_err(|e| InternalError::Storage(format!("create brand dir: {e}")))?;
+
+    // One slot per kind — remove the previous pick even across extensions so
+    // stale `logo.png` cannot shadow a newly picked `logo.webp`.
+    if let Ok(entries) = std::fs::read_dir(&brand_dir) {
+        for entry in entries.flatten() {
+            let is_slot = entry
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem == kind);
+            if is_slot {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let destination = brand_dir.join(format!("{kind}.{extension}"));
+    std::fs::copy(&source, &destination)
+        .map_err(|e| InternalError::Storage(format!("copy brand asset: {e}")))?;
+    Ok(format!("brand/{kind}.{extension}"))
+}
+
 /// Relink a missing asset to a newly selected source and restart derivatives.
 #[tauri::command]
 #[instrument(skip(request, state))]

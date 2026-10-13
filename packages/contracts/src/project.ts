@@ -3,6 +3,7 @@ import { cursorDpiScaleSchema, cursorTelemetryTimebaseSchema } from "./cursor"
 import { boundsSchema } from "./recording"
 import { mediaKindSchema, projectAssetImportStrategySchema, projectAssetRoleSchema } from "./media"
 import {
+  canvasAspectRatioSchema,
   manualZoomSegmentSchema,
   smartZoomSettingsSchema,
   timelineCanvasSchema,
@@ -186,8 +187,28 @@ export const projectAssetSchema = z.object({
 
 export type ProjectAsset = z.infer<typeof projectAssetSchema>
 
-// Export settings persisted with the project.
-export const projectExportSettingsSchema = exportSettingsSchema
+// Instant Share (Pro) preferences persisted per project. `target` is
+// "hosted" or an S3 storage-profile id; the optional share password is
+// session-scoped by design — secrets never enter the project file.
+export const instantShareSettingsSchema = z.object({
+  enabled: z.boolean().default(false),
+  target: z.string().min(1).default("hosted"),
+  expiresInDays: z.number().int().min(1).max(365).default(30),
+})
+export type InstantShareSettings = z.infer<typeof instantShareSettingsSchema>
+
+// Export settings persisted with the project. This is the durable superset
+// of `exportSettingsSchema` — `formats` and `instantShare` drive the export
+// UI/batch orchestration but are not render-job settings, so they stay out
+// of the `export_timeline` contract (its schema strips unknown keys anyway).
+export const projectExportSettingsSchema = exportSettingsSchema.extend({
+  formats: z.array(canvasAspectRatioSchema).default([]),
+  instantShare: instantShareSettingsSchema.default({
+    enabled: false,
+    target: "hosted",
+    expiresInDays: 30,
+  }),
+})
 
 export type ProjectExportSettings = z.infer<typeof projectExportSettingsSchema>
 

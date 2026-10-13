@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { SquarePlay } from "lucide-react"
 import {
@@ -55,15 +55,22 @@ export function YouTubePublishCard({
   const [state, setState] = useState<PublishState>("idle")
   const [progress, setProgress] = useState(0)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  // User-initiated cancel — the in-flight publish rejects with an error that
+  // must reset to idle, not surface a "publish failed" toast.
+  const cancelledRef = useRef(false)
 
   const outputPath = exportJob?.status === "completed" ? exportJob.outputs.outputPath : null
   const captionsPath = exportJob?.status === "completed" ? exportJob.outputs.captionsPath : null
 
   useEffect(() => {
-    void youtubeConnectionStatus().then((status) => {
-      setConnected(status.connected)
-      setAccountLabel(status.accountLabel)
-    })
+    void youtubeConnectionStatus()
+      .then((status) => {
+        setConnected(status.connected)
+        setAccountLabel(status.accountLabel)
+      })
+      // A vault/status read failure degrades to "not connected" — the Connect
+      // button remains the recovery path rather than a stuck card.
+      .catch(() => setConnected(false))
   }, [])
 
   // YouTube parses "0:00 Chapter title" lines in the description into video
@@ -118,6 +125,7 @@ export function YouTubePublishCard({
 
   async function handlePublish() {
     if (!outputPath) return
+    cancelledRef.current = false
     setState("uploading")
     setProgress(0)
     setVideoUrl(null)
@@ -136,6 +144,10 @@ export function YouTubePublishCard({
       setState("done")
       toast({ title: "Published to YouTube", description: result.url })
     } catch (error) {
+      if (cancelledRef.current) {
+        setState("idle")
+        return
+      }
       setState("failed")
       toast({
         title: "YouTube publish failed",
@@ -143,6 +155,11 @@ export function YouTubePublishCard({
         variant: "warning",
       })
     }
+  }
+
+  function handleCancel() {
+    cancelledRef.current = true
+    void cancelYouTubePublish()
   }
 
   if (!outputPath) return null
@@ -160,10 +177,12 @@ export function YouTubePublishCard({
             type="button"
             className="text-xs text-subtle-foreground underline-offset-2 hover:underline"
             onClick={() => {
-              void disconnectYouTube().then(() => {
-                setConnected(false)
-                setAccountLabel(null)
-              })
+              void disconnectYouTube()
+                .then(() => {
+                  setConnected(false)
+                  setAccountLabel(null)
+                })
+                .catch(() => undefined)
             }}
           >
             Disconnect
@@ -256,7 +275,7 @@ export function YouTubePublishCard({
                   <button
                     type="button"
                     className="underline-offset-2 hover:underline"
-                    onClick={() => void cancelYouTubePublish()}
+                    onClick={handleCancel}
                   >
                     Cancel
                   </button>
