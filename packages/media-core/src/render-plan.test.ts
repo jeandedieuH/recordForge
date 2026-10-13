@@ -1769,6 +1769,8 @@ describe("render-plan", () => {
         encoder: "auto",
         captionMode: "burn-in",
         chapterMode: "none",
+        formats: [],
+        instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         audioMastering: { denoise: false, loudnessTarget: null },
         brandWatermark: {
           enabled: false,
@@ -1816,6 +1818,8 @@ describe("render-plan", () => {
         encoder: "auto",
         captionMode: "burn-in",
         chapterMode: "embed",
+        formats: [],
+        instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         audioMastering: { denoise: false, loudnessTarget: null },
         brandWatermark: {
           enabled: false,

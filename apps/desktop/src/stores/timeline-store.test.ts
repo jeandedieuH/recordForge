@@ -353,10 +353,7 @@ describe("Export settings persistence contract", () => {
     useTimelineStore.setState({ project })
 
     useTimelineStore.getState().setExportFormats(["9:16", "9:16", "1:1"])
-    expect(useTimelineStore.getState().project?.exportSettings.formats).toEqual([
-      "9:16",
-      "1:1",
-    ])
+    expect(useTimelineStore.getState().project?.exportSettings.formats).toEqual(["9:16", "1:1"])
 
     const revision = useTimelineStore.getState().projectRevision
     useTimelineStore.getState().setExportFormats(["9:16", "1:1"])
