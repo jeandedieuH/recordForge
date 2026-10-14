@@ -211,8 +211,8 @@ export function BrandWatermarkCard({
           </div>
           {logoMissing ? (
             <span className="font-medium text-warning">
-              The logo file is missing from the project — exports will render without a
-              watermark until you pick it again.
+              The logo file is missing from the project — exports will render without a watermark
+              until you pick it again.
             </span>
           ) : null}
 
