@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { open } from "@tauri-apps/plugin-dialog"
 import { X } from "lucide-react"
 import type { BrandCards, BrandWatermark } from "@recordforge/contracts"
@@ -19,13 +19,15 @@ import {
 import { ProBadge } from "../licensing/pro-badge"
 import { useLicenseStore } from "../../stores/license-store"
 import { useTimelineStore } from "../../stores/timeline-store"
-import { copyBrandAsset } from "../../lib/assets"
+import { brandAssetExists, copyBrandAsset } from "../../lib/assets"
 import { toErrorMessage } from "../../lib/errors"
 
 interface BrandWatermarkCardProps {
   watermark: BrandWatermark
   cards: BrandCards
   disabled?: boolean
+  /** GIF/WebP exports never render intro/outro cards (mp4-only concat mux). */
+  isAnimation?: boolean
   onChange: (watermark: BrandWatermark) => void
   onCardsChange: (cards: BrandCards) => void
 }
@@ -53,6 +55,7 @@ export function BrandWatermarkCard({
   watermark,
   cards,
   disabled,
+  isAnimation,
   onChange,
   onCardsChange,
 }: BrandWatermarkCardProps) {
@@ -61,6 +64,49 @@ export function BrandWatermarkCard({
   const recordingId = useTimelineStore((state) => state.recording?.id)
   const { toast } = useToast()
   const [isImporting, setIsImporting] = useState(false)
+  const [logoMissing, setLogoMissing] = useState(false)
+  const [fontMissing, setFontMissing] = useState(false)
+
+  // A persisted brand/ path can go missing when the project dir is cleaned
+  // externally — the export silently degrades, so the UI probes and warns.
+  // A failed check never nags: nothing was verified, nothing to claim.
+  useEffect(() => {
+    const path = watermark.logoPath
+    if (!path || !recordingId) {
+      setLogoMissing(false)
+      return
+    }
+    let cancelled = false
+    brandAssetExists(recordingId, path)
+      .then((exists) => {
+        if (!cancelled) setLogoMissing(!exists)
+      })
+      .catch(() => {
+        if (!cancelled) setLogoMissing(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [watermark.logoPath, recordingId])
+
+  useEffect(() => {
+    const path = cards.fontPath
+    if (!path || !recordingId) {
+      setFontMissing(false)
+      return
+    }
+    let cancelled = false
+    brandAssetExists(recordingId, path)
+      .then((exists) => {
+        if (!cancelled) setFontMissing(!exists)
+      })
+      .catch(() => {
+        if (!cancelled) setFontMissing(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [cards.fontPath, recordingId])
 
   function gate(): boolean {
     if (isPro) return false
@@ -163,6 +209,12 @@ export function BrandWatermarkCard({
               <span>PNG, JPG, or WebP with transparency works best.</span>
             )}
           </div>
+          {logoMissing ? (
+            <span className="font-medium text-warning">
+              The logo file is missing from the project — exports will render without a
+              watermark until you pick it again.
+            </span>
+          ) : null}
 
           <label className="flex flex-col gap-1.5">
             <span className="text-foreground">Position</span>
@@ -245,6 +297,12 @@ export function BrandWatermarkCard({
       </div>
       {cards.enabled ? (
         <div className="flex flex-col gap-4 border-t border-border p-5 text-xs text-subtle-foreground">
+          {isAnimation ? (
+            <span className="font-medium text-warning">
+              Intro and outro cards are only rendered in MP4 exports — the current GIF/WebP
+              container skips them.
+            </span>
+          ) : null}
           <label className="flex flex-col gap-1.5">
             <span className="text-foreground">Title</span>
             <Input
@@ -354,6 +412,11 @@ export function BrandWatermarkCard({
               <span>Defaults to Inter; the picked logo appears on the cards too.</span>
             )}
           </div>
+          {fontMissing ? (
+            <span className="font-medium text-warning">
+              The brand font file is missing — cards will use the default font.
+            </span>
+          ) : null}
           {cardsEnabled ? null : (
             <span className="font-medium text-warning">
               Set an intro or outro duration for the cards to render.

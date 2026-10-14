@@ -1148,6 +1148,7 @@ export function ExportView({
             <BrandWatermarkCard
               watermark={exportSettings.brandWatermark}
               cards={exportSettings.brandCards}
+              isAnimation={isAnimation}
               onCardsChange={(cards) => onBrandCardsChange?.(cards)}
               disabled={isRunning}
               onChange={(watermark) => onBrandWatermarkChange?.(watermark)}

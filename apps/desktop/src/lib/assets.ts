@@ -158,3 +158,11 @@ export function copyBrandAsset(
 ): Promise<string> {
   return invokeValidated("copy_brand_asset", { recordingId, sourcePath, kind }, z.string())
 }
+
+/**
+ * Report whether a stored brand path still resolves to a file — the renderer
+ * silently skips a missing logo/font, so the UI warns instead of degrading.
+ */
+export function brandAssetExists(recordingId: string, path: string): Promise<boolean> {
+  return invokeValidated("brand_asset_exists", { recordingId, path }, z.boolean())
+}

@@ -425,6 +425,22 @@ pub fn copy_brand_asset(
     Ok(format!("brand/{kind}.{extension}"))
 }
 
+/// Brand Kit: report whether a stored brand path (project-relative or
+/// absolute) resolves to a real file. The render pipeline degrades a missing
+/// path to "no file" without failing, so the UI checks explicitly — otherwise
+/// a deleted `brand/logo.png` would silently drop the watermark forever.
+#[tauri::command]
+#[instrument(skip(state))]
+pub fn brand_asset_exists(
+    recording_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<bool> {
+    let recording = get_recording_for_state(&state, &recording_id)?;
+    let work_dir = PathBuf::from(&recording.work_dir);
+    Ok(crate::exports::resolve_brand_asset_path(&path, &work_dir).is_some())
+}
+
 /// Relink a missing asset to a newly selected source and restart derivatives.
 #[tauri::command]
 #[instrument(skip(request, state))]

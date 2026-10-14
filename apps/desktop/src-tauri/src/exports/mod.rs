@@ -696,7 +696,7 @@ impl BrandWatermark {
 /// work dir. UI picks land in `brand/` as project-relative paths; absolute
 /// paths (legacy projects, hand-edited files) pass through untouched. A
 /// relative path that escapes the work dir is rejected — treated as absent.
-fn resolve_brand_asset_path(raw: &str, work_dir: &Path) -> Option<String> {
+pub(crate) fn resolve_brand_asset_path(raw: &str, work_dir: &Path) -> Option<String> {
     let path = Path::new(raw);
     if path.is_absolute() {
         return path.is_file().then(|| raw.to_string());
