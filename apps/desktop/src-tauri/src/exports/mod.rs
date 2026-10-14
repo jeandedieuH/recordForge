@@ -1137,9 +1137,11 @@ pub fn run_render_plan(
     // A hardware encoder can fail to initialize even after a passing probe
     // (driver capabilities differ by resolution and pixel format), so retry
     // once on software instead of failing the export outright. Cancelled jobs
-    // propagate unchanged.
-    let outcome = match composition {
-        Ok(outcome) => outcome,
+    // propagate unchanged. `render_encoder` tracks which encoder produced the
+    // partial — brand cards must encode with it or the `-c copy` concat
+    // splices mismatched codec parameters.
+    let (outcome, render_encoder) = match composition {
+        Ok(outcome) => (outcome, encoder),
         Err(error) => {
             if cancel.load(std::sync::atomic::Ordering::Relaxed)
                 || encoder == encoding::ExportEncoder::Software
@@ -1159,20 +1161,23 @@ pub fn run_render_plan(
                 error
             );
             update_progress(&db, app, job_id, 0.05, "rendering", Some(&retry_detail))?;
-            render_timeline_composition_shared(
-                &ffmpeg,
-                &partial_path,
-                &plan,
-                project_id,
-                &asset_paths,
-                &settings,
+            (
+                render_timeline_composition_shared(
+                    &ffmpeg,
+                    &partial_path,
+                    &plan,
+                    project_id,
+                    &asset_paths,
+                    &settings,
+                    encoding::ExportEncoder::Software,
+                    cancel.clone(),
+                    &progress_reporter,
+                    resource_dir.as_deref(),
+                    &shared,
+                    output_cap,
+                )?,
                 encoding::ExportEncoder::Software,
-                cancel.clone(),
-                &progress_reporter,
-                resource_dir.as_deref(),
-                &shared,
-                output_cap,
-            )?
+            )
         }
     };
 
@@ -1182,9 +1187,16 @@ pub fn run_render_plan(
     }
 
     // Brand cards (Pro): rendered segments concat-muxed around the finished
-    // partial; the added duration feeds the output validation below.
+    // partial; the added duration feeds the output validation below. MP4
+    // exports only — GIF/WebP partials aren't mp4 streams, so muxing mp4 card
+    // segments around them would produce garbage or fail outright.
+    let is_animation_export = settings.container != "mp4"
+        || settings.preset.starts_with("gif-")
+        || settings.preset.starts_with("webp-");
+    let mut intro_shift_ms = 0u64;
     if let Some(cards) = settings.brand_cards.as_ref() {
-        if cards.card_durations().is_some() {
+        if !is_animation_export && cards.card_durations().is_some() {
+            intro_shift_ms = cards.card_durations().map(|(intro, _)| intro).unwrap_or(0);
             let (canvas_width, canvas_height, canvas_fps) = plan
                 .canvas
                 .as_ref()
@@ -1218,7 +1230,7 @@ pub fn run_render_plan(
                 project_id,
                 &plan.chapters,
                 &settings,
-                encoder,
+                render_encoder,
                 &cancel,
             )?;
             plan.duration_ms = plan.duration_ms.saturating_add(added_ms);
@@ -1247,7 +1259,22 @@ pub fn run_render_plan(
             "chapters",
             Some("writing chapter sidecar"),
         )?;
-        let sidecar_content = generate_youtube_chapters(&plan.chapters);
+        // The intro card prepends seconds of video, so the sidecar must shift
+        // just like the embedded chapters `apply_brand_cards` rewrites.
+        let sidecar_content = if intro_shift_ms > 0 {
+            let shifted: Vec<RenderPlanChapter> = plan
+                .chapters
+                .iter()
+                .map(|chapter| RenderPlanChapter {
+                    start_ms: chapter.start_ms.saturating_add(intro_shift_ms),
+                    end_ms: chapter.end_ms.saturating_add(intro_shift_ms),
+                    ..chapter.clone()
+                })
+                .collect();
+            generate_youtube_chapters(&shifted)
+        } else {
+            generate_youtube_chapters(&plan.chapters)
+        };
         let sidecar_path = partial_path.with_extension("chapters.txt");
         std::fs::write(&sidecar_path, sidecar_content.as_bytes())
             .map_err(|err| InternalError::Storage(format!("write chapter sidecar: {err}")))?;
@@ -3138,8 +3165,12 @@ fn render_composition_window(
             "[{logo_index}:v]scale={logo_width}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={:.2},loop=loop=-1:size=1:start=0,setsar=1[brandlogo]",
             watermark.opacity
         ));
+        // The optional fragments all end in a comma, so the chain must still
+        // terminate on a real filter — a bare `[brandbase]` (or `[prev]
+        // [brandbase]` when every fragment is empty) parses as a filterless
+        // chain and fails with FFmpeg's "No such filter: ''".
         filters.push(format!(
-            "[{current_label}]{reanchor}{frame_cap}{output_scale}[brandbase]"
+            "[{current_label}]{reanchor}{frame_cap}{output_scale}null[brandbase]"
         ));
         filters.push(format!(
             "[brandbase][brandlogo]overlay=x={x_expr}:y={y_expr}:eof_action=repeat:format=auto[brandout]"
@@ -5487,8 +5518,16 @@ fn ffmpeg_failure_detail(stderr: &[u8]) -> Option<String> {
         })
         .collect::<Vec<_>>();
 
-    if let Some(&last_meaningful) = meaningful_lines.last() {
-        return Some(last_meaningful.chars().take(300).collect());
+    // FFmpeg prints the actionable line right before its errno-style summary —
+    // e.g. "[AVFilterGraph] No such filter: 'x'" then "Error : Filter not
+    // found" — so surface the last two lines; the tail alone hides the cause.
+    let detail = match meaningful_lines.as_slice() {
+        [.., prev, last] => format!("{prev} | {last}"),
+        [last] => (*last).clone(),
+        [] => String::new(),
+    };
+    if !detail.is_empty() {
+        return Some(detail.chars().take(300).collect());
     }
 
     lines.last().map(|line| line.chars().take(300).collect())
@@ -7630,13 +7669,20 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_failure_detail_returns_last_redacted_line() {
-        let stderr = b"first line\n[mpeg4] something broke\n";
+    fn ffmpeg_failure_detail_surfaces_the_parser_line_before_the_summary() {
+        // FFmpeg's last line is an errno-style summary ("Error : Filter not
+        // found"); the actionable line sits right before it.
+        let stderr = b"[AVFilterGraph] No such filter: 'bogus'\nError : Filter not found\n";
         assert_eq!(
             ffmpeg_failure_detail(stderr).as_deref(),
-            Some("[mpeg4] something broke")
+            Some("[AVFilterGraph] No such filter: 'bogus' | Error : Filter not found")
         );
         assert_eq!(ffmpeg_failure_detail(b"\n \n"), None);
+        let single = b"only one line\n";
+        assert_eq!(
+            ffmpeg_failure_detail(single).as_deref(),
+            Some("only one line")
+        );
     }
 
     #[test]
@@ -10310,6 +10356,146 @@ mod tests {
             "validate gif failed: {:?}",
             validation.err()
         );
+    }
+
+    /// The watermark branch must terminate its chain with a real filter —
+    /// `[prev][brandbase]` (or `…,[brandbase]` after an optional fragment) is a
+    /// filterless chain FFmpeg rejects with "No such filter: ''".
+    #[test]
+    fn test_render_timeline_composition_brand_watermark_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-watermark-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let logo_path = temp_dir.join("logo.png");
+        let out_path = temp_dir.join("out.mp4");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x32:d=0.1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&logo_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate logo png");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        let plan = RenderPlan {
+            reframe: None,
+            project_id: "test-watermark-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "none".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            keystrokes: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "software".into(),
+            container: "mp4".into(),
+            caption_mode: "none".into(),
+            chapter_mode: "none".into(),
+            range: None,
+            audio_mastering: None,
+            brand_watermark: Some(BrandWatermark {
+                enabled: true,
+                logo_path: Some(logo_path.to_string_lossy().to_string()),
+                position: "bottom-right".into(),
+                scale_percent: 8.0,
+                opacity: 0.85,
+            }),
+            keystroke_overlay: None,
+            brand_cards: None,
+        };
+
+        let res = render_timeline_composition(
+            &ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-watermark-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "watermarked render failed: {:?}", res.err());
+        assert!(out_path.is_file(), "watermarked export should exist");
     }
 
     #[test]

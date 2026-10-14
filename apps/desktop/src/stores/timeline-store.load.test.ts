@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type {
   CursorTelemetryFile,
   LibraryRecording,
+  MediaMetadata,
   recordForgeProject,
 } from "@recordforge/contracts"
 import { defaultCursorSettings } from "@recordforge/contracts"
 import type { CursorEngine } from "@recordforge/cursor-core"
+import { createEngine } from "@recordforge/editor-core"
+import { createTimelineFromRecording } from "@recordforge/domain"
 import { useTimelineStore } from "./timeline-store"
 
 // Hoisted spies shared by the module mocks below.
@@ -331,5 +334,134 @@ describe("timeline-store cursor engine lifecycle", () => {
 
     expect(engine.dispose).toHaveBeenCalledTimes(1)
     expect(useTimelineStore.getState().cursorEngine).toBeNull()
+  })
+})
+
+function fakeMetadata(recording: LibraryRecording): MediaMetadata {
+  return {
+    recordingId: recording.id,
+    path: recording.outputPath ?? "",
+    durationMs: recording.durationMs,
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    hasAudio: true,
+    videoCodec: "h264",
+    audioCodec: "aac",
+    streams: [
+      {
+        index: 0,
+        kind: "video",
+        codec: "h264",
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        durationMs: recording.durationMs,
+      },
+      {
+        index: 1,
+        kind: "audio",
+        codec: "aac",
+        sampleRate: 48000,
+        channels: 2,
+        channelLayout: "stereo",
+        durationMs: recording.durationMs,
+      },
+    ],
+    format: { name: "mov,mp4,m4a,3gp,3g2,mj2", durationMs: recording.durationMs },
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+describe("timeline-store batch export", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.saveProject.mockImplementation(async (project: recordForgeProject) => project)
+    mocks.exportTimeline.mockImplementation(async (options: { outputPath: string }) => ({
+      id: `job-${options.outputPath}`,
+      kind: "export",
+      status: "pending",
+    }))
+  })
+
+  it("submits one export job per selected format, each with its own canvas and output path", async () => {
+    const recording = fakeRecording("rec-1")
+    const project = fakeProject("rec-1")
+    project.exportSettings.formats = ["16:9", "9:16", "1:1"]
+    const timeline = createTimelineFromRecording(
+      recording,
+      fakeMetadata(recording),
+      project.name,
+      project.id,
+    )
+
+    useTimelineStore.setState({
+      project,
+      recording,
+      engine: createEngine(timeline),
+      missingAssets: [],
+      activeExportJob: null,
+      cursorTelemetry: null,
+      cursorEngine: null,
+      error: null,
+      savePromise: null,
+    })
+
+    await useTimelineStore.getState().export("D:/out/demo.mp4")
+
+    expect(mocks.exportTimeline).toHaveBeenCalledTimes(3)
+    const outputs = mocks.exportTimeline.mock.calls.map(([options]) => options.outputPath)
+    expect(outputs).toEqual([
+      "D:/out/demo.mp4",
+      "D:/out/demo-vertical.mp4",
+      "D:/out/demo-square.mp4",
+    ])
+    const canvases = mocks.exportTimeline.mock.calls.map(
+      ([options]) =>
+        [
+          options.plan.canvas?.width,
+          options.plan.canvas?.height,
+          options.plan.canvas?.aspectRatio,
+        ] as const,
+    )
+    expect(canvases).toEqual([
+      [1920, 1080, "16:9"],
+      [1080, 1920, "9:16"],
+      [1080, 1080, "1:1"],
+    ])
+    expect(useTimelineStore.getState().error).toBeNull()
+    expect(useTimelineStore.getState().activeExportJob?.id).toBe("job-D:/out/demo.mp4")
+  })
+
+  it("collapses to the canvas ratio for animation containers even with a persisted selection", async () => {
+    const recording = fakeRecording("rec-1")
+    const project = fakeProject("rec-1")
+    project.exportSettings.container = "gif"
+    project.exportSettings.codec = "gif"
+    project.exportSettings.formats = ["16:9", "9:16"]
+    const timeline = createTimelineFromRecording(
+      recording,
+      fakeMetadata(recording),
+      project.name,
+      project.id,
+    )
+
+    useTimelineStore.setState({
+      project,
+      recording,
+      engine: createEngine(timeline),
+      missingAssets: [],
+      activeExportJob: null,
+      cursorTelemetry: null,
+      cursorEngine: null,
+      error: null,
+      savePromise: null,
+    })
+
+    await useTimelineStore.getState().export("D:/out/demo.gif")
+
+    expect(mocks.exportTimeline).toHaveBeenCalledTimes(1)
+    expect(mocks.exportTimeline.mock.calls[0][0].outputPath).toBe("D:/out/demo.gif")
+    expect(mocks.exportTimeline.mock.calls[0][0].plan.canvas?.aspectRatio).toBe("16:9")
   })
 })

@@ -89,6 +89,32 @@ pub struct ExportRequest {
     pub settings: ExportSettings,
 }
 
+/// The normalized destination a persisted export request targets. Dedupe
+/// compares request destinations so a running export to path A must not
+/// swallow a new export to path B — multi-format batches submit one job per
+/// canvas variant, each with its own suffixed output path.
+fn export_request_output(options: &serde_json::Value) -> Option<&str> {
+    options.get("outputPath").and_then(|value| value.as_str())
+}
+
+/// Find an in-flight export job targeting `output_path`, if any.
+fn active_export_for_output<'a>(
+    jobs: impl IntoIterator<Item = &'a crate::database::media::MediaJob>,
+    exclude_job_id: Option<&str>,
+    output_path: &str,
+) -> Option<&'a crate::database::media::MediaJob> {
+    jobs.into_iter().find(|job| {
+        Some(job.id.as_str()) != exclude_job_id
+            && job.kind == crate::database::media::MediaJobKind::Export
+            && matches!(
+                job.status,
+                crate::database::media::MediaJobStatus::Pending
+                    | crate::database::media::MediaJobStatus::Running
+            )
+            && export_request_output(&job.options) == Some(output_path)
+    })
+}
+
 fn expected_export_extension(settings: &ExportSettings) -> &'static str {
     if settings.container == "gif" || settings.preset.starts_with("gif-") {
         "gif"
@@ -334,18 +360,13 @@ impl JobManager {
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
         let project = crate::database::projects::get_project(&conn, &request.project_id)?
             .ok_or_else(|| InternalError::Project("export project was not found".into()))?;
-        let active = media_db::list_jobs(&conn, &project.recording_id)?
-            .into_iter()
-            .find(|job| {
-                job.kind == MediaJobKind::Export
-                    && matches!(
-                        job.status,
-                        crate::database::media::MediaJobStatus::Pending
-                            | crate::database::media::MediaJobStatus::Running
-                    )
-            });
+        // Dedupe on the normalized destination, not "any running export": a
+        // batch export issues one job per canvas aspect, each with a distinct
+        // suffixed output path, and the gate serializes their encode work.
+        let active = media_db::list_jobs(&conn, &project.recording_id)?;
+        let active = active_export_for_output(&active, None, &destination.to_string_lossy());
         if let Some(active) = active {
-            return Ok(active);
+            return Ok(active.clone());
         }
 
         let mut request = request;
@@ -392,19 +413,16 @@ impl JobManager {
         {
             return Ok(existing);
         }
-        if let Some(active) = media_db::list_jobs(&conn, &existing.recording_id)?
-            .into_iter()
-            .find(|job| {
-                job.id != existing.id
-                    && job.kind == MediaJobKind::Export
-                    && matches!(
-                        job.status,
-                        crate::database::media::MediaJobStatus::Pending
-                            | crate::database::media::MediaJobStatus::Running
-                    )
-            })
+        // Same destination-scoped dedupe as start_export: a sibling batch job
+        // running to another output must not suppress this retry, but a fresh
+        // export already targeting the same file supersedes it.
+        let retried_output = export_request_output(&existing.options).map(str::to_owned);
+        let active = media_db::list_jobs(&conn, &existing.recording_id)?;
+        if let Some(active) = retried_output
+            .as_deref()
+            .and_then(|output| active_export_for_output(&active, Some(&existing.id), output))
         {
-            return Ok(active);
+            return Ok(active.clone());
         }
         let request: ExportRequest =
             serde_json::from_value(existing.options.clone()).map_err(|error| {
@@ -1742,5 +1760,60 @@ fn safe_asset_directory_name(asset_id: &str) -> String {
         "asset".into()
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::media::{MediaJob, MediaJobKind, MediaJobOutputs, MediaJobStatus};
+
+    fn export_job(id: &str, status: MediaJobStatus, output_path: &str) -> MediaJob {
+        MediaJob {
+            id: id.into(),
+            recording_id: "rec-1".into(),
+            kind: MediaJobKind::Export,
+            status,
+            progress: 0.0,
+            stage: "rendering".into(),
+            message: None,
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            started_at: None,
+            completed_at: None,
+            outputs: MediaJobOutputs::default(),
+            options: serde_json::json!({
+                "projectId": "proj-1",
+                "outputPath": output_path,
+                "plan": {},
+                "settings": {}
+            }),
+            attempts: 0,
+        }
+    }
+
+    #[test]
+    fn export_dedupe_is_scoped_to_the_output_path() {
+        let jobs = vec![
+            export_job("job-16x9", MediaJobStatus::Running, "/out/rec.mp4"),
+            export_job("job-9x16", MediaJobStatus::Pending, "/out/rec-vertical.mp4"),
+            export_job("job-done", MediaJobStatus::Completed, "/out/rec-square.mp4"),
+        ];
+
+        // Same destination while its job is in flight → dedupe to that job.
+        let found = active_export_for_output(&jobs, None, "/out/rec-vertical.mp4");
+        assert_eq!(found.map(|job| job.id.as_str()), Some("job-9x16"));
+        let found = active_export_for_output(&jobs, None, "/out/rec.mp4");
+        assert_eq!(found.map(|job| job.id.as_str()), Some("job-16x9"));
+
+        // A different destination is a distinct export, never deduped away.
+        assert!(active_export_for_output(&jobs, None, "/out/rec-4x5.mp4").is_none());
+        // Finished jobs never block a re-export to their destination.
+        assert!(active_export_for_output(&jobs, None, "/out/rec-square.mp4").is_none());
+        // Retry excludes the job being retried from its own dedupe lookup.
+        assert!(
+            active_export_for_output(&jobs, Some("job-9x16"), "/out/rec-vertical.mp4").is_none()
+        );
     }
 }

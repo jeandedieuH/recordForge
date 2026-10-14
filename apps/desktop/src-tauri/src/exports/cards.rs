@@ -13,6 +13,7 @@ use crate::exports::{
     escape_concat_path, generate_ffmetadata, hvc1_tag_args, run_export_ffmpeg, seconds,
     ExportSettings, RenderPlanChapter,
 };
+use tracing::warn;
 
 pub const MAX_CARD_MS: u64 = 10_000;
 
@@ -297,8 +298,14 @@ pub fn apply_brand_cards(
 
     // The card's silent track must share the main stream's sample rate and
     // layout — a mid-stream param change under `-c copy` fails the remux.
+    // A failed probe falls back to the 48 kHz stereo our own AAC pipeline
+    // emits; omitting the track entirely would break the concat on every
+    // audio-bearing export.
     let audio = if has_audio {
-        probe_audio_layout(ffprobe_path, partial_path)
+        probe_audio_layout(ffprobe_path, partial_path).or_else(|| {
+            warn!("brand cards: audio probe failed; assuming 48kHz stereo");
+            Some((48_000, "stereo"))
+        })
     } else {
         None
     };
@@ -324,9 +331,13 @@ pub fn apply_brand_cards(
         entries.push(intro_path);
     }
     // Move the finished partial aside — the concat output takes its name.
+    // `rename` fails across volumes (temp dir vs. an output on another drive),
+    // so copy and delete the source instead.
     let main_path = work_dir.join("main.mp4");
-    std::fs::rename(partial_path, &main_path)
+    std::fs::copy(partial_path, &main_path)
         .map_err(|e| InternalError::Storage(format!("stage main for card mux: {e}")))?;
+    std::fs::remove_file(partial_path)
+        .map_err(|e| InternalError::Storage(format!("clear staged export: {e}")))?;
     entries.push(main_path);
     if outro_ms > 0 {
         let outro_path = work_dir.join("outro.mp4");
