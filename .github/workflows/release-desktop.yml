@@ -179,6 +179,30 @@ jobs:
             echo "APPLE_API_KEY_PATH=$APPLE_API_KEY_PATH"
           } >> "$GITHUB_ENV"
 
+      # Human-written notes live in apps/desktop/release-notes/<version>.md
+      # and must be committed before tagging. tauri-action uses releaseBody
+      # for BOTH the GitHub Release body (prepended to the auto-generated
+      # "What's Changed" section) and the `notes` field of the updater's
+      # latest.json shown in the in-app update dialog — so this single file
+      # is the source for what users read on both surfaces.
+      - name: Resolve release notes
+        id: release-notes
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          NOTES_FILE="apps/desktop/release-notes/$VERSION.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "Using release notes from $NOTES_FILE"
+            {
+              echo "body<<RELEASE_BODY_EOF"
+              cat "$NOTES_FILE"
+              echo "RELEASE_BODY_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No release notes at $NOTES_FILE — falling back to the generic release body."
+            echo "body=See the source tag and signed assets included in this release." >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and publish GitHub Release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -204,7 +228,7 @@ jobs:
           args: ${{ matrix.args }}
           tagName: app-v__VERSION__
           releaseName: RecordForge v__VERSION__
-          releaseBody: See the source tag and signed assets included in this release.
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true

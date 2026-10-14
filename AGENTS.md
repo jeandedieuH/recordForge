@@ -150,6 +150,8 @@ cargo build --release --features export-harness --bin export_harness
 
 Official desktop releases are published by `.github/workflows/release-desktop.yml` from `app-v*` tags. The workflow builds signed NSIS/MSI artifacts and uploads `latest.json` to the GitHub Release.
 
+Write `apps/desktop/release-notes/<version>.md` **before** pushing an `app-v*` tag — the workflow injects it into both the GitHub Release body (above the auto-generated "What's Changed") and the updater `latest.json` `notes` shown in the in-app update dialog. Missing file → generic fallback body + workflow warning.
+
 Release builds embed the Google Drive OAuth client secret via `RECORD_FORGE_GOOGLE_DRIVE_CLIENT_SECRET` (a GitHub Actions secret consumed by `option_env!` at compile time). Google's token endpoint requires the secret even for "Desktop app" OAuth clients; it is an app credential, not a user credential. Dev builds resolve it at runtime from `apps/desktop/.env` or the process environment.
 
 ## Security Rules
