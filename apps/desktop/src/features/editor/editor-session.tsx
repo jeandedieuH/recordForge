@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isTauri } from "../../lib/settings"
 import { useEditorStore } from "../../stores/editor-store"
 import { useTimelineStore } from "../../stores/timeline-store"
+import { useUpdaterStore } from "../../stores/updater-store"
 
 interface EditorSessionProps {
   recordingId: string
@@ -65,6 +66,11 @@ export function EditorSession({ recordingId }: EditorSessionProps) {
     getCurrentWindow()
       .onCloseRequested(async (event) => {
         if (allowCloseAfterFlush) return
+
+        // Never veto a close while an update install is underway — the spawned
+        // installer expects the process to exit, not to be blocked by the
+        // editor's dirty-save guard.
+        if (useUpdaterStore.getState().status === "installing") return
 
         const { isDirty, saveStatus } = useEditorStore.getState()
         const { project } = useTimelineStore.getState()

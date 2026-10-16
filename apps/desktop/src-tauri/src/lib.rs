@@ -107,22 +107,37 @@ pub fn run() {
                 if window.label() == "main" {
                     let app = window.app_handle();
                     let state = app.state::<state::AppState>();
-                    let minimize_to_tray = state
-                        .db
-                        .lock()
-                        .ok()
-                        .and_then(|db| {
-                            crate::database::settings::get_setting(&db, "minimizeToTray")
-                                .ok()
-                                .flatten()
-                                .or_else(|| {
-                                    crate::database::settings::get_setting(&db, "startMinimized")
+
+                    // While an update install is pending a close must be real:
+                    // the spawned installer expects the process to exit, and
+                    // hiding to the tray would keep the exe running and stall
+                    // or fail the install.
+                    let installing_update = state
+                        .update_gate
+                        .snapshot()
+                        .map(|snapshot| snapshot.installing)
+                        .unwrap_or(false);
+
+                    let minimize_to_tray = !installing_update
+                        && state
+                            .db
+                            .lock()
+                            .ok()
+                            .and_then(|db| {
+                                crate::database::settings::get_setting(&db, "minimizeToTray")
+                                    .ok()
+                                    .flatten()
+                                    .or_else(|| {
+                                        crate::database::settings::get_setting(
+                                            &db,
+                                            "startMinimized",
+                                        )
                                         .ok()
                                         .flatten()
-                                })
-                        })
-                        .map(|val| val == "true")
-                        .unwrap_or(false);
+                                    })
+                            })
+                            .map(|val| val == "true")
+                            .unwrap_or(false);
 
                     if minimize_to_tray {
                         api.prevent_close();
