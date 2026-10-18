@@ -54,6 +54,7 @@ cargo build --release
 - `tauri-plugin-dialog` is used for save/export dialogs.
 - `tauri-plugin-updater` verifies signed official GitHub Release artifacts; its installer is guarded by `UpdateGate`.
 - `wasapi` provides native Windows microphone and render-loopback capture.
+- `pipewire`/`libspa-sys` provide Wayland screen capture on Linux. `libspa` is patched to a vendored copy at `vendor/libspa/` via `[patch.crates-io]` so the crate also compiles against PipeWire < 1.0 headers (e.g. Ubuntu 22.04); see `vendor/libspa/README-vendored.md` before bumping `pipewire`/`libspa`.
 - These are initialized in `src/lib.rs` and gated by `capabilities/default.json`.
 
 ## Module Rules

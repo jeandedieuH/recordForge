@@ -99,6 +99,16 @@ tauri-plugin-updater = "2.13.3"
 [dev-dependencies]
 tempfile = "3"
 
+# Vendored fork of upstream libspa 0.10.1 that also compiles against PipeWire
+# < 1.0 headers (e.g. Ubuntu 22.04's libpipewire-0.3-dev 0.3.48): upstream
+# unconditionally uses `spa_video_info_raw.flags` and calls
+# `spa_meta_first`/`spa_meta_region_is_valid`, which are plain #define macros
+# on those headers and invisible to bindgen. The vendored crate detects the
+# header generation in its build script and falls back to a C compat shim —
+# see vendor/libspa/README-vendored.md. libspa-sys and pipewire stay stock.
+[patch.crates-io]
+libspa = { path = "../../../vendor/libspa" }
+
 [profile.release]
 strip = true
 lto = true
