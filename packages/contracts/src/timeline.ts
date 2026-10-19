@@ -720,12 +720,32 @@ export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
 
 /** Studio Audio mastering options applied to the final mixed audio (Pro). */
 export const audioMasteringSchema = z.object({
-  // FFmpeg afftdn — frequency-domain denoise tuned for speech noise floors.
+  // Adaptive wavelet denoise; the recording gain does not set a fixed floor.
   denoise: z.boolean().default(false),
+  // Maximum noise attenuation in dB (3..24). Only applies while denoise is on;
+  // missing on older projects → the balanced 12 dB default.
+  noiseReductionDb: z.number().min(3).max(24).default(12),
   // Integrated loudness target in LUFS (loudnorm). null = normalization off.
   loudnessTarget: z.number().min(-30).max(-5).nullable().default(null),
 })
 export type AudioMastering = z.infer<typeof audioMasteringSchema>
+
+/**
+ * Keystroke badge overlay (Pro): modifier-combo badges captured during
+ * recording, composited near an edge of the frame at export. The display
+ * fields are optional so legacy `{ enabled }` fixtures keep their defaults.
+ */
+export const keystrokeOverlaySchema = z.object({
+  enabled: z.boolean().default(false),
+  // How long each badge stays visible once shown.
+  durationMs: z.number().int().min(400).max(5000).default(1400),
+  position: z
+    .enum(["bottom-center", "bottom-left", "bottom-right", "top-center"])
+    .default("bottom-center"),
+  // Badge size as a percent of the default (3% of output height).
+  scalePercent: z.number().min(50).max(150).default(100),
+})
+export type KeystrokeOverlay = z.infer<typeof keystrokeOverlaySchema>
 
 /** Brand Kit watermark: a logo composited over every frame at export (Pro). */
 export const brandWatermarkSchema = z.object({
@@ -809,7 +829,11 @@ export const exportSettingsSchema = z.object({
   captionMode: renderCaptionModeSchema.default("burn-in"),
   chapterMode: renderChapterModeSchema.default("embed"),
   range: exportRangeSchema.nullish(),
-  audioMastering: audioMasteringSchema.default({ denoise: false, loudnessTarget: null }),
+  audioMastering: audioMasteringSchema.default({
+    denoise: false,
+    noiseReductionDb: 12,
+    loudnessTarget: null,
+  }),
   brandWatermark: brandWatermarkSchema.default({
     enabled: false,
     logoPath: null,
@@ -818,7 +842,12 @@ export const exportSettingsSchema = z.object({
     opacity: 0.85,
   }),
   // Keystroke overlay (Pro) — modifier-combo badges captured during recording.
-  keystrokeOverlay: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+  keystrokeOverlay: keystrokeOverlaySchema.default({
+    enabled: false,
+    durationMs: 1400,
+    position: "bottom-center",
+    scalePercent: 100,
+  }),
   reframeMode: reframeModeSchema.default("fit"),
   brandCards: brandCardsSchema.default({
     enabled: false,
@@ -1356,6 +1385,17 @@ export const exportTimelineOptionsSchema = z
     outputPath: z.string().min(1),
     plan: renderPlanSchema,
     settings: exportSettingsSchema,
+    // The project title frozen at admission — persisted so publishing reads
+    // it instead of a mutable project name.
+    projectName: z.string().min(1).max(120).optional(),
+    // Optional multi-format batch identity — one export per aspect variant.
+    batch: z
+      .object({
+        id: z.string().min(1),
+        aspectRatio: z.string().min(1),
+        isPrimary: z.boolean(),
+      })
+      .optional(),
   })
   .superRefine((value, context) => {
     if (value.plan.projectId !== value.projectId) {
@@ -1376,6 +1416,28 @@ export const exportTimelineOptionsSchema = z
   })
 
 export type ExportTimelineOptions = z.infer<typeof exportTimelineOptionsSchema>
+
+// Processed-preview request: same plan/settings surface as export but no
+// output path — the backend derives the destination inside the recording's
+// own work dir. The `preview` flag never crosses IPC; preview is a
+// dedicated command so real exports can't smuggle it in.
+export const previewTimelineOptionsSchema = z
+  .object({
+    projectId: z.string().min(1),
+    plan: renderPlanSchema,
+    settings: exportSettingsSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.plan.projectId !== value.projectId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["plan", "projectId"],
+        message: "Render plan project must match preview project",
+      })
+    }
+  })
+
+export type PreviewTimelineOptions = z.infer<typeof previewTimelineOptionsSchema>
 
 // Update shape for track controls.
 export const trackUpdateSchema = z.object({

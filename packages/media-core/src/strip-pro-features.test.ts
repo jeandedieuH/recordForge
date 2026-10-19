@@ -170,7 +170,7 @@ describe("freeExportSettings", () => {
     container: "mp4",
     captionMode: "burn-in",
     chapterMode: "embed",
-    audioMastering: { denoise: true, loudnessTarget: -16 },
+    audioMastering: { denoise: true, noiseReductionDb: 12, loudnessTarget: -16 },
     brandWatermark: {
       enabled: false,
       logoPath: null,
@@ -188,7 +188,12 @@ describe("freeExportSettings", () => {
       textColor: "#f8fafc",
       fontPath: null,
     },
-    keystrokeOverlay: { enabled: false },
+    keystrokeOverlay: {
+      enabled: false,
+      durationMs: 1400,
+      position: "bottom-center" as const,
+      scalePercent: 100,
+    },
     reframeMode: "fit",
     webcamBackground: {
       enabled: false,
@@ -208,7 +213,11 @@ describe("freeExportSettings", () => {
     expect(settings.chapterMode).toBe("none")
     expect(settings.codec).toBe("h264")
     // Studio Audio is Pro — mastering gets neutralized for Free exports.
-    expect(settings.audioMastering).toEqual({ denoise: false, loudnessTarget: null })
+    expect(settings.audioMastering).toEqual({
+      denoise: false,
+      noiseReductionDb: 12,
+      loudnessTarget: null,
+    })
   })
 
   it("neutralizes ratio presets but leaves others untouched", () => {

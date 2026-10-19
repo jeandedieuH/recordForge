@@ -3,11 +3,17 @@ import { createUpdateClipAudioCommand, createUpdateTrackCommand } from "@recordf
 import { Volume2 } from "lucide-react"
 import { NumberInputField, Skeleton, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { useLicenseStore } from "../../../stores/license-store"
 import { SmartCutCard } from "./smart-cut-card"
+import { StudioAudioControls } from "../finishing/studio-audio-controls"
 
 export function AudioPanel() {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const isLoading = useTimelineStore((state) => state.isLoading)
+  const audioMastering = useTimelineStore((state) => state.project?.exportSettings.audioMastering)
+  const setAudioMastering = useTimelineStore((state) => state.setAudioMastering)
+  const isPro = useLicenseStore((state) => state.status.tier === "pro")
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
 
   const tracks = timeline?.tracks.filter((track) => track.kind === "audio") ?? []
 
@@ -73,6 +79,20 @@ export function AudioPanel() {
         ) : (
           <p className="text-[11px] text-subtle-foreground">No timeline loaded.</p>
         )}
+      </div>
+
+      {/* Studio Audio — the same controls the Finishing panel renders; both
+          write project.exportSettings.audioMastering. */}
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <span className="text-xs font-semibold text-foreground">Studio Audio</span>
+        <div className="rounded-lg border border-border bg-surface-dim p-3 text-xs text-subtle-foreground">
+          <StudioAudioControls
+            mastering={audioMastering}
+            isPro={isPro}
+            onChange={setAudioMastering}
+            onUpgradeRequest={openUpgradeDialog}
+          />
+        </div>
       </div>
 
       <div className="border-t border-border pt-3">

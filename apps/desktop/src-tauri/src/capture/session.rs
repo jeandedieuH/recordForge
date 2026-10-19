@@ -68,10 +68,13 @@ struct ActiveSession {
     camera_encoder: Option<String>,
     /// The camera plan that produced the active/most recent segment.
     camera_plan: Option<CameraCapturePlan>,
-    /// Session-long keystroke sampler (Pro keystroke overlay). Unlike the
-    /// cursor tracker it is NOT restarted per segment — it timestamps against
-    /// the first segment's origin for the whole session.
+    /// Per-segment keystroke sampler (Pro keystroke overlay). Like the cursor
+    /// tracker it is stopped at each segment boundary and restarted on resume
+    /// so presses during pauses/finalization never make it into the file.
     keystroke_sampler: Option<super::keystrokes::KeystrokeSampler>,
+    /// Session-time offset where the active segment's keystroke events start —
+    /// `total_recorded_ms` captured at segment start, the base for rebase.
+    keystroke_segment_start_ms: u64,
     /// First timestamp owned by the active cursor segment. Keeping this boundary
     /// prevents startup alignment for a resumed segment from shifting history.
     cursor_segment_start_ms: u64,
@@ -640,6 +643,7 @@ impl Recorder {
             camera_encoder: None,
             camera_plan: None,
             keystroke_sampler: None,
+            keystroke_segment_start_ms: 0,
             cursor_segment_start_ms: 0,
             segment_startup_shift: Duration::ZERO,
             segment_index: 0,
@@ -735,15 +739,15 @@ impl Recorder {
         session.camera_plan = captures.camera_plan;
         session.camera_encoder = captures.camera_encoder;
         session.segment_startup_shift = captures.startup_shift;
-        // Keystroke sampler starts on the first segment only — a resume keeps
-        // the running sampler (timestamps stay on the session clock). Camera
-        // sessions never capture keystrokes.
+        // Keystroke sampler starts with the first segment — one sampler per
+        // segment so presses during pause/finalization never reach the file.
+        // Camera sessions never capture keystrokes.
         if session.keystroke_sampler.is_none()
             && session.config.capture_keystrokes
             && !is_camera_source(&session.config)
         {
+            session.keystroke_segment_start_ms = session.total_recorded_ms;
             session.keystroke_sampler = Some(super::keystrokes::KeystrokeSampler::start(
-                session.work_dir.clone(),
                 captures.timeline_origin_instant,
             ));
         }
@@ -1808,8 +1812,10 @@ impl Recorder {
                 if let Some(mut tracker) = session.cursor_tracker.take() {
                     tracker.stop();
                 }
+                // A failed segment contributes no keystrokes — stop the
+                // sampler and drop its events.
                 if let Some(sampler) = session.keystroke_sampler.take() {
-                    sampler.stop();
+                    let _ = sampler.stop();
                 }
                 if let Ok(mut manifest) = session.manifest.lock() {
                     manifest.set_state(RecorderState::Failed);
@@ -1867,6 +1873,7 @@ impl Recorder {
                 track_timeline,
             );
         }
+        self.finalize_keystroke_segment(session, track_timeline);
 
         let total = session.total_recorded_ms + stats.duration_ms;
         session.total_recorded_ms = total;
@@ -1957,6 +1964,14 @@ impl Recorder {
         session.camera_plan = captures.camera_plan;
         session.camera_encoder = captures.camera_encoder;
         session.segment_startup_shift = captures.startup_shift;
+        // Resume starts a fresh per-segment keystroke sampler — the previous
+        // segment's events were already finalized and appended at pause.
+        if session.config.capture_keystrokes && !is_camera_source(&session.config) {
+            session.keystroke_segment_start_ms = session.total_recorded_ms;
+            session.keystroke_sampler = Some(super::keystrokes::KeystrokeSampler::start(
+                captures.timeline_origin_instant,
+            ));
+        }
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
@@ -2013,7 +2028,7 @@ impl Recorder {
             tracker.stop();
         }
         if let Some(sampler) = session.keystroke_sampler.take() {
-            sampler.stop();
+            let _ = sampler.stop();
         }
 
         match std::fs::remove_dir_all(&work_dir) {
@@ -2118,6 +2133,9 @@ impl Recorder {
                             tracing::warn!(error = %error, "failed to stop webcam sidecar during stop error");
                         }
                     }
+                    if let Some(sampler) = session.keystroke_sampler.take() {
+                        let _ = sampler.stop();
+                    }
                     if let Ok(mut manifest) = session.manifest.lock() {
                         manifest.set_state(RecorderState::Failed);
                         if let Err(write_error) = manifest.write() {
@@ -2181,11 +2199,9 @@ impl Recorder {
                 track_timeline,
             );
         }
-        // Session-level sampler: stop here (not on pause) so events span all
-        // segments. Writes keystrokes.json into the work dir.
-        if let Some(sampler) = session.keystroke_sampler.take() {
-            sampler.stop();
-        }
+        // The final segment's keystrokes are rebased onto the session
+        // timeline and appended to keystrokes.json.
+        self.finalize_keystroke_segment(&mut session, track_timeline);
 
         session.total_recorded_ms += final_stats.duration_ms;
         let finalize_result = self.finalize_session(&mut session, final_stats, &progress);
@@ -2535,6 +2551,26 @@ impl Recorder {
         ) {
             tracing::warn!(%error, segment_start_ms, head_trim_ms, duration_ms, "failed to align cursor telemetry to video timeline");
         }
+    }
+
+    /// Stop the active segment's keystroke sampler and append its events —
+    /// rebased through the same track timeline (head trim + segment offset)
+    /// the cursor alignment applies — to `keystrokes.json` in the work dir.
+    fn finalize_keystroke_segment(
+        &self,
+        session: &mut ActiveSession,
+        track_timeline: SegmentTimeline,
+    ) {
+        let Some(sampler) = session.keystroke_sampler.take() else {
+            return;
+        };
+        let rebased = super::keystrokes::rebase_segment_events(
+            sampler.stop(),
+            session.keystroke_segment_start_ms,
+            track_timeline.head_trim_ms(),
+            track_timeline.duration.as_millis().min(u64::MAX as u128) as u64,
+        );
+        super::keystrokes::append_events(&session.work_dir, rebased);
     }
 
     /// Insert a marker at the current playback position.
@@ -3336,6 +3372,7 @@ mod tests {
             camera_encoder: None,
             camera_plan: None,
             keystroke_sampler: None,
+            keystroke_segment_start_ms: 0,
             cursor_segment_start_ms: 0,
             segment_startup_shift: Duration::ZERO,
             segment_index: 0,

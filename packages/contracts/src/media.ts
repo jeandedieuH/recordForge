@@ -163,7 +163,37 @@ export const mediaVideoTrackOutputSchema = z.object({
 
 export type MediaVideoTrackOutput = z.infer<typeof mediaVideoTrackOutputSchema>
 
-// Output files produced by a prepare job.
+// Delivery manifest — frozen publishable facts about the finished output.
+// fileVersion is a size/mtime concurrency stamp, not a content hash.
+export const exportArtifactInfoSchema = z.object({
+  version: z.number().int(),
+  exportJobId: z.string(),
+  title: z.string(),
+  fileName: z.string(),
+  durationMs: z.number().int().min(0),
+  width: z.number().int().min(1),
+  height: z.number().int().min(1),
+  fps: z.number(),
+  bytes: z.number().min(0),
+  fileVersion: z.string(),
+  captionsVersion: z.string().nullish(),
+  chapters: z.array(z.object({ t: z.number(), label: z.string() })).default([]),
+  // True when the manifest was backfilled from the present file — the
+  // original bytes were never verified.
+  legacy: z.boolean().default(false),
+})
+export type ExportArtifactInfo = z.infer<typeof exportArtifactInfoSchema>
+
+// Optional multi-format batch identity — surfaced so the UI can group and
+// report a batch's per-format outcomes.
+export const exportBatchMetadataSchema = z.object({
+  id: z.string(),
+  aspectRatio: z.string(),
+  isPrimary: z.boolean(),
+})
+export type ExportBatchMetadata = z.infer<typeof exportBatchMetadataSchema>
+
+// Output files produced by a prepare job (and the export job's video).
 export const mediaJobOutputsSchema = z.object({
   prepareVersion: z.number().int().min(0).default(0),
   assetId: z.string().nullish(),
@@ -178,6 +208,10 @@ export const mediaJobOutputsSchema = z.object({
   videoTracks: z.array(mediaVideoTrackOutputSchema).default([]),
   outputPath: z.string().nullish(),
   captionsPath: z.string().nullish(),
+  // Frozen delivery manifest captured right after the output was published —
+  // the facts Instant Share/YouTube publish with. Absent on jobs that
+  // predate delivery capture (inspected on demand via get_export_artifact).
+  artifact: exportArtifactInfoSchema.nullish(),
 })
 
 export type MediaJobOutputs = z.infer<typeof mediaJobOutputsSchema>
@@ -197,6 +231,15 @@ export const mediaJobSchema = z.object({
   startedAt: z.string().datetime({ offset: true }).nullish(),
   completedAt: z.string().datetime({ offset: true }).nullish(),
   outputs: mediaJobOutputsSchema.default(() => mediaJobOutputsSchema.parse({})),
+  // True for processed-preview exports — the row stays kind:"export" for DB
+  // compatibility while the UI routes it to the preview dialog instead of
+  // the export progress surface.
+  preview: z.boolean().default(false),
+  // Retry counter used for version-aware event merging. Optional so rows
+  // persisted before the field was serialized still parse.
+  attempts: z.number().int().nonnegative().optional(),
+  // Multi-format batch grouping — surfaced from the persisted request.
+  batch: exportBatchMetadataSchema.nullish(),
 })
 
 export type MediaJob = z.infer<typeof mediaJobSchema>
@@ -267,10 +310,39 @@ export const preparedMediaSchema = z.object({
 
 export type PreparedMedia = z.infer<typeof preparedMediaSchema>
 
-// A silence range detected by `detect_silences` (Smart Cut — Pro). Both
-// bounds are timeline-relative milliseconds on the source media.
+// A silence range detected by Smart Cut (Pro). Bounds are milliseconds —
+// source-media coordinates for `detect_silences`, output-timeline
+// coordinates for `detect_timeline_silences` (what a ripple-delete cuts).
 export const silenceRangeSchema = z.object({
   startMs: z.number().int().min(0),
   endMs: z.number().int().min(0),
 })
 export type SilenceRange = z.infer<typeof silenceRangeSchema>
+
+// Result of a timeline Smart Cut scan (Pro): the proposed ranges plus the
+// RMS calibration context. `thresholdDb` is the applied dB RMS floor —
+// calibrated when `calibration` is "adaptive", supplied when "manual".
+// `noiseFloorDb` is the measured p20 RMS of the scan, when windows exist.
+export const silenceScanResultSchema = z.object({
+  ranges: z.array(silenceRangeSchema),
+  thresholdDb: z.number(),
+  noiseFloorDb: z.number().nullable(),
+  calibration: z.enum(["adaptive", "manual"]),
+})
+export type SilenceScanResult = z.infer<typeof silenceScanResultSchema>
+
+// Keystroke badge events captured during recording (modifier combos only —
+// no typed text). `supported` is false on platforms without a capture hook
+// so the recorder toggle can stay honest instead of silently producing
+// nothing.
+export const keystrokeEventSchema = z.object({
+  tMs: z.number().int().min(0),
+  label: z.string().min(1).max(64),
+})
+export type KeystrokeEvent = z.infer<typeof keystrokeEventSchema>
+
+export const keystrokeEventsResponseSchema = z.object({
+  supported: z.boolean(),
+  events: z.array(keystrokeEventSchema),
+})
+export type KeystrokeEventsResponse = z.infer<typeof keystrokeEventsResponseSchema>

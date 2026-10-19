@@ -1659,7 +1659,7 @@ describe("render-plan", () => {
         container: "mp4",
         captionMode: "burn-in",
         chapterMode: "embed",
-        audioMastering: { denoise: false, loudnessTarget: null },
+        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
         brandWatermark: {
           enabled: false,
           logoPath: null,
@@ -1677,7 +1677,12 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: {
+          enabled: false,
+          durationMs: 1400,
+          position: "bottom-center" as const,
+          scalePercent: 100,
+        },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,
@@ -1771,7 +1776,7 @@ describe("render-plan", () => {
         chapterMode: "none",
         formats: [],
         instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
-        audioMastering: { denoise: false, loudnessTarget: null },
+        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
         brandWatermark: {
           enabled: false,
           logoPath: null,
@@ -1789,7 +1794,12 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: {
+          enabled: false,
+          durationMs: 1400,
+          position: "bottom-center" as const,
+          scalePercent: 100,
+        },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,
@@ -1820,7 +1830,7 @@ describe("render-plan", () => {
         chapterMode: "embed",
         formats: [],
         instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
-        audioMastering: { denoise: false, loudnessTarget: null },
+        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
         brandWatermark: {
           enabled: false,
           logoPath: null,
@@ -1838,7 +1848,12 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: {
+          enabled: false,
+          durationMs: 1400,
+          position: "bottom-center" as const,
+          scalePercent: 100,
+        },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,
@@ -1921,7 +1936,7 @@ describe("render-plan", () => {
         container: "mp4",
         captionMode: "burn-in",
         chapterMode: "embed",
-        audioMastering: { denoise: false, loudnessTarget: null },
+        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
         brandWatermark: {
           enabled: false,
           logoPath: null,
@@ -1939,7 +1954,12 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: {
+          enabled: false,
+          durationMs: 1400,
+          position: "bottom-center" as const,
+          scalePercent: 100,
+        },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,

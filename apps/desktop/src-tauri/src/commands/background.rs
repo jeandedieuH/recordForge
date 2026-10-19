@@ -34,7 +34,14 @@ pub async fn download_virtual_background_model(
     if !state.license.entitlements().pro_enabled {
         return Err(virtual_background_pro_required());
     }
+    let _update_operation = state.update_gate.acquire_operation()?;
+    // Single-flight: concurrent controller instances queue here and the
+    // second one exits immediately once the first wrote the model.
+    let _provision = state.model_provision.lock().await;
     let dir = state.path_policy.app_data_dir().to_path_buf();
+    if background::model_path(&dir).exists() {
+        return Ok(());
+    }
     let app_handle = app.clone();
     background::ensure_model(&dir, move |downloaded, total| {
         let _ = tauri::Emitter::emit(

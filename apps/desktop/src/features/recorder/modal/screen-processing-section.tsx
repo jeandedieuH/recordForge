@@ -3,6 +3,7 @@ import { Switch } from "@recordforge/ui"
 import { useRecorderStore } from "../../../hooks/use-recorder"
 import { useLicenseStore } from "../../../stores/license-store"
 import { ProBadge } from "../../licensing/pro-badge"
+import { isLinux } from "../../../lib/platform"
 
 // GPU screen processing / Smart Zoom / Keystroke overlay — screen modes
 // only; camera mode never captures keystrokes or cursor telemetry.
@@ -10,6 +11,9 @@ export function ScreenProcessingSection() {
   const { preferences, savePreferences } = useRecorderStore()
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
+  // Keystroke capture has no Linux input hook yet — keep the toggle honest
+  // instead of silently recording nothing.
+  const keystrokesSupported = !isLinux
 
   return (
     <div className="flex flex-col gap-4 md:col-span-2">
@@ -74,14 +78,17 @@ export function ScreenProcessingSection() {
                   {!isPro ? <ProBadge /> : null}
                 </div>
                 <p className="mt-0.5 truncate text-xs text-subtle-foreground">
-                  {preferences.captureKeystrokes
-                    ? "Shortcuts like Ctrl+C will appear as on-screen badges."
-                    : "Show shortcut badges in the exported video."}
+                  {!keystrokesSupported
+                    ? "Keystroke capture is available on Windows and macOS only."
+                    : preferences.captureKeystrokes
+                      ? "Shortcuts like Ctrl+C will appear as on-screen badges."
+                      : "Show shortcut badges in the exported video."}
                 </p>
               </div>
             </div>
             <Switch
-              checked={preferences.captureKeystrokes}
+              checked={keystrokesSupported && preferences.captureKeystrokes}
+              disabled={!keystrokesSupported}
               aria-label="Capture keystroke overlay"
               onCheckedChange={(checked) => {
                 if (checked && !isPro) {

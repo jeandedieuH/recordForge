@@ -99,6 +99,15 @@ pub fn start_audio_track(
         ) {
             Ok(track) => return Ok(track),
             Err(error) => {
+                // Do not retry non-transient failures (denied TCC permission
+                // or a host with zero audio input endpoints).
+                let non_transient = error.code == "permission_denied"
+                    || error
+                        .message
+                        .contains("No usable microphone input device is available");
+                if non_transient {
+                    return Err(error);
+                }
                 if attempt < ATTEMPTS {
                     std::thread::sleep(RETRY_DELAY);
                 }

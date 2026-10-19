@@ -140,16 +140,16 @@ export function analyzeProFeatureUsage(
     )
   }
 
-  // Virtual background only does real work when a camera clip is on the
-  // timeline — the same condition the Rust gate uses.
-  const hasCamera = timeline.tracks.some(
-    (track) => !track.muted && track.clips.some((clip) => clip.kind === "camera"),
-  )
-  if (hasCamera && settings?.webcamBackground?.enabled) {
+  // Virtual background gates on the ACTIVE SETTING, not on timeline camera
+  // clips — the Rust entitlement gate uses `is_active()` (enabled && mode is
+  // blur|replace) because primary-camera recordings composite the person
+  // onto a backdrop with no camera overlay at all.
+  const background = settings?.webcamBackground
+  if (background?.enabled && (background.mode === "blur" || background.mode === "replace")) {
     push(
       "virtual-background",
       1,
-      settings.webcamBackground.mode === "replace" ? "background replacement" : "background blur",
+      background.mode === "replace" ? "background replacement" : "background blur",
     )
   }
 

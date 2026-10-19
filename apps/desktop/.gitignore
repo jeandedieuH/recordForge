@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Isolated dev-only smoke harness (mocked IPC, synthetic media)
+dev-harness/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

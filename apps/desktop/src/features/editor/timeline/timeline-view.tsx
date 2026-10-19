@@ -106,6 +106,7 @@ import { ResizableHandle } from "../shell/resizable-handle"
 import { useResizableDimension } from "../shell/use-resizable-dimension"
 import { VideoCanvasControls } from "../canvas/video-canvas-controls"
 import { CanvasToolbarOverlay } from "../canvas/canvas-toolbar-overlay"
+import { KeystrokeBadgeOverlay } from "../canvas/keystroke-badge-overlay"
 
 interface TimelineViewProps {
   recordingId: string
@@ -1696,7 +1697,9 @@ export function TimelineView({
   const handleTimelineKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement | null
-      if (target?.closest("input, textarea, select, button")) return
+      // Media elements own their keys too — Space/arrows inside the preview
+      // <video> must not toggle editor playback or move the playhead.
+      if (target?.closest("input, textarea, select, button, video, audio")) return
       const key = event.key.toLowerCase()
       const hasModifier = event.ctrlKey || event.metaKey
 
@@ -2273,6 +2276,16 @@ export function TimelineView({
 
               <CaptionPreview timeline={timeline} playheadMs={view.playheadMs} />
 
+              {/* Keystroke badge preview — same source→output mapping and
+                  frame geometry as the export drawtext badges. Scaled from
+                  the full rendered canvas, not the fitted video box. */}
+              {mediaUrl && videoBounds ? (
+                <KeystrokeBadgeOverlay
+                  canvasHeight={timeline.canvas.height * videoBounds.scale}
+                  designHeight={timeline.canvas.height}
+                />
+              ) : null}
+
               {mediaUrl &&
               !mediaError &&
               videoBounds &&
@@ -2376,7 +2389,7 @@ export function TimelineView({
             />
 
             {/* Media status badge */}
-            <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full border border-border/80 bg-background/80 px-2.5 py-1 text-[10px] text-muted-foreground backdrop-blur shadow-e1">
+            <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full border border-border/80 bg-background/80 px-2.5 py-1 text-ui-micro text-muted-foreground backdrop-blur shadow-e1">
               <span
                 className={cn(
                   "size-1.5 rounded-full",

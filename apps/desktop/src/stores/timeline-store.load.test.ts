@@ -173,6 +173,7 @@ function fakeProject(recordingId: string): recordForgeProject {
       borderRadius: 0,
       shadow: false,
       cursorSettings: defaultCursorSettings,
+      aspectRatio: "16:9" as const,
     },
     assets: [],
     // A zoom track is already present so projectToTimeline does not trigger
@@ -198,7 +199,7 @@ function fakeProject(recordingId: string): recordForgeProject {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "embed",
-      audioMastering: { denoise: false, loudnessTarget: null },
+      audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
       brandWatermark: {
         enabled: false,
         logoPath: null,
@@ -216,7 +217,12 @@ function fakeProject(recordingId: string): recordForgeProject {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: {
+        enabled: false,
+        durationMs: 1400,
+        position: "bottom-center",
+        scalePercent: 100,
+      },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,

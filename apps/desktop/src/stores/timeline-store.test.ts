@@ -33,7 +33,7 @@ function createMockProject(): recordForgeProject {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "embed",
-      audioMastering: { denoise: false, loudnessTarget: null },
+      audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
       brandWatermark: {
         enabled: false,
         logoPath: null,
@@ -51,7 +51,12 @@ function createMockProject(): recordForgeProject {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: {
+        enabled: false,
+        durationMs: 1400,
+        position: "bottom-center",
+        scalePercent: 100,
+      },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,
@@ -92,7 +97,7 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
+          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
           brandWatermark: {
             enabled: false,
             logoPath: null,
@@ -110,7 +115,12 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: {
+            enabled: false,
+            durationMs: 1400,
+            position: "bottom-center",
+            scalePercent: 100,
+          },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -158,7 +168,7 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
+          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
           brandWatermark: {
             enabled: false,
             logoPath: null,
@@ -176,7 +186,12 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: {
+            enabled: false,
+            durationMs: 1400,
+            position: "bottom-center",
+            scalePercent: 100,
+          },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -225,7 +240,7 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
+          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
           brandWatermark: {
             enabled: false,
             logoPath: null,
@@ -243,7 +258,12 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: {
+            enabled: false,
+            durationMs: 1400,
+            position: "bottom-center",
+            scalePercent: 100,
+          },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -291,7 +311,7 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
+          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
           brandWatermark: {
             enabled: false,
             logoPath: null,
@@ -309,7 +329,12 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: {
+            enabled: false,
+            durationMs: 1400,
+            position: "bottom-center",
+            scalePercent: 100,
+          },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -402,5 +427,29 @@ describe("Export settings persistence contract", () => {
     expect(settings?.keystrokeOverlay.enabled).toBe(true)
     expect(settings?.reframeMode).toBe("cursor-follow")
     expect(settings?.webcamBackground.enabled).toBe(true)
+  })
+})
+
+describe("setAudioMastering", () => {
+  it("a strength-only edit (12→6 dB) is not swallowed by the equality check", () => {
+    useTimelineStore.setState({ project: createMockProject(), projectRevision: 5 })
+    const base = { denoise: true, noiseReductionDb: 12, loudnessTarget: null }
+    useTimelineStore.getState().setAudioMastering(base)
+    const revisionAfterEnable = useTimelineStore.getState().projectRevision
+    expect(revisionAfterEnable).toBeGreaterThan(5)
+
+    useTimelineStore.getState().setAudioMastering({ ...base, noiseReductionDb: 6 })
+    const updated = useTimelineStore.getState().project?.exportSettings.audioMastering
+    expect(updated?.noiseReductionDb).toBe(6)
+    expect(useTimelineStore.getState().projectRevision).toBeGreaterThan(revisionAfterEnable)
+  })
+
+  it("a fully identical mastering object is an exact no-op", () => {
+    useTimelineStore.setState({ project: createMockProject(), projectRevision: 9 })
+    const mastering = { denoise: false, noiseReductionDb: 12, loudnessTarget: null }
+    useTimelineStore.getState().setAudioMastering(mastering)
+    const revision = useTimelineStore.getState().projectRevision
+    useTimelineStore.getState().setAudioMastering({ ...mastering })
+    expect(useTimelineStore.getState().projectRevision).toBe(revision)
   })
 })

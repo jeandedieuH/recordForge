@@ -33,6 +33,7 @@ import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
 import { useTimelineStore } from "../stores/timeline-store"
 import { useLicenseStore } from "../stores/license-store"
+import { usePublicationStore } from "../stores/publication-store"
 import { useRecorderStore } from "../hooks/use-recorder"
 import { useUpdaterStore } from "../stores/updater-store"
 import { ViewErrorBoundary } from "../components/error-boundary"
@@ -174,6 +175,15 @@ export function AppShell() {
     void useLicenseStore.getState().load()
     void useLicenseStore.getState().startListening()
     return () => useLicenseStore.getState().stopListening()
+  }, [])
+
+  // Publication jobs (share/YouTube) — the single listener fans out to the
+  // drawer, delivery cards, and toasts; refresh catches up after reloads.
+  useEffect(() => {
+    if (!isTauri()) return
+    void usePublicationStore.getState().startListening()
+    void usePublicationStore.getState().refresh()
+    return () => usePublicationStore.getState().stopListening()
   }, [])
 
   // Scan for interrupted sessions once at startup so a force-quit recording is

@@ -9,6 +9,7 @@ import {
   Shapes,
   Type,
   Volume2,
+  WandSparkles,
   ZoomIn,
 } from "lucide-react"
 import type { EditorTask } from "./task-rail"
@@ -25,6 +26,7 @@ import { CaptionsPanel } from "../panels/captions-panel"
 import { LayoutPanel } from "../panels/layout-panel"
 import { AudioPanel } from "../panels/audio-panel"
 import { PrivacyPanel } from "../panels/privacy-panel"
+import { FinishingPanel } from "../finishing/finishing-panel"
 import { ExportPanel } from "../panels/export-panel"
 import type {
   DerivativeResource,
@@ -43,6 +45,7 @@ export const TASK_ICONS: Record<EditorTask, LucideIcon> = {
   layout: LayoutTemplate,
   audio: Volume2,
   privacy: EyeOff,
+  finish: WandSparkles,
   export: FileOutput,
 }
 
@@ -121,6 +124,8 @@ export function ActivePanel({
         return <AudioPanel />
       case "privacy":
         return <PrivacyPanel />
+      case "finish":
+        return <FinishingPanel />
       case "export":
         return <ExportPanel onOpenExport={onOpenExport} />
       default:

@@ -341,4 +341,67 @@ describe("smart per-ratio layout on aspect ratio switch", () => {
     expect(cameraClipOf(present).transform.preset).toBe("vertical-pip")
     expect(cameraClipOf(present).transform.x).toBe(1656)
   })
+
+  it("honors explicit width/height instead of re-deriving tier defaults", () => {
+    // 1280x720 base: the export variant seam asks for an exact 720x1280
+    // frame — the resolution-tier normalization (min 1080) must not grow it.
+    const state = makeState(false)
+    state.canvas.width = 1280
+    state.canvas.height = 720
+    const result = executeCommand(
+      createEngine(state),
+      createUpdateCanvasCommand({ aspectRatio: "9:16", width: 720, height: 1280 }),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.history.present.canvas).toMatchObject({
+      aspectRatio: "9:16",
+      width: 720,
+      height: 1280,
+    })
+  })
+
+  it("keeps legacy tier normalization for aspect-only commands", () => {
+    const result = executeCommand(
+      createEngine(makeState()),
+      createUpdateCanvasCommand({ aspectRatio: "9:16" }),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // No explicit dimensions → the 1080p resolution tier still applies.
+    expect(result.value.history.present.canvas).toMatchObject({
+      aspectRatio: "9:16",
+      width: 1080,
+      height: 1920,
+    })
+  })
+
+  it("an unrelated canvas edit preserves bespoke dimensions", () => {
+    // A custom 1400x900 frame labeled 16:9: changing the background must not
+    // silently resize it through the tier table.
+    const state = makeState(false)
+    state.canvas.width = 1400
+    state.canvas.height = 900
+    const result = executeCommand(
+      createEngine(state),
+      createUpdateCanvasCommand({ background: "#102030" }),
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.history.present.canvas).toMatchObject({
+      width: 1400,
+      height: 900,
+      background: "#102030",
+    })
+  })
+
+  it("rejects an unsupported runtime aspect ratio", () => {
+    const result = executeCommand(
+      createEngine(makeState(false)),
+      createUpdateCanvasCommand({ aspectRatio: "4:3" as never }),
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error.code).toBe("invalid_canvas")
+  })
 })

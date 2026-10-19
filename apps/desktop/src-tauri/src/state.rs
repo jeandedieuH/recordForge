@@ -296,4 +296,14 @@ pub struct AppState {
     /// Running transcription jobs — the busy gate and cancel channel for
     /// `transcribe_audio`/`cancel_transcription`.
     pub transcription: Arc<crate::transcript::TranscriptionRegistry>,
+    /// In-flight Smart Cut scans — one per recording, each carrying a cancel
+    /// flag plus the ffmpeg child handle for `cancel_smart_cut`.
+    pub(crate) smart_cut: Arc<crate::exports::audio_analysis::SmartCutRegistry>,
+    /// Serializes segmentation-model provisioning — every controller
+    /// instance queues behind the one in-flight download so two concurrent
+    /// UI triggers can never race a partial model file.
+    pub(crate) model_provision: tauri::async_runtime::Mutex<()>,
+    /// Publication operations (Instant Share / BYO / YouTube) — the single
+    /// ownership row every provider worker updates.
+    pub publication_registry: Arc<crate::publish::jobs::PublicationRegistry>,
 }

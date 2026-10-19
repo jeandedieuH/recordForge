@@ -1,14 +1,20 @@
 import { listen } from "@tauri-apps/api/event"
 import {
   diskSpaceEstimateSchema,
+  keystrokeEventsResponseSchema,
   mediaJobSchema,
   mediaMetadataSchema,
+  renderPlanSchema,
   silenceRangeSchema,
+  silenceScanResultSchema,
   type DiskSpaceEstimate,
+  type KeystrokeEventsResponse,
   type MediaJob,
   type MediaMetadata,
   type PrepareMediaOptions,
+  type RenderPlan,
   type SilenceRange,
+  type SilenceScanResult,
 } from "@recordforge/contracts"
 import { invokeValidated } from "./ipc"
 
@@ -91,6 +97,45 @@ export async function detectSilences(
     },
     silenceRangeSchema.array(),
   )
+}
+
+// Smart Cut (Pro): analyze the CURRENT edited timeline's mixed audio through
+// the export audio graph — trims, moves, speed changes, mutes, and imported
+// audio are all honored. Returned ranges are output-timeline milliseconds,
+// the same coordinates a ripple-delete command consumes. `thresholdDb` left
+// null selects the adaptive RMS calibration; a number is the manual floor.
+export async function detectTimelineSilences(
+  recordingId: string,
+  scanId: string,
+  options: { plan: RenderPlan; thresholdDb?: number | null; minDurationMs?: number },
+): Promise<SilenceScanResult> {
+  // Validate the plan client-side so malformed editor state fails before IPC.
+  const plan = renderPlanSchema.parse(options.plan)
+  return invokeValidated(
+    "detect_timeline_silences",
+    {
+      recordingId,
+      scanId,
+      plan,
+      thresholdDb: options.thresholdDb ?? null,
+      minDurationMs: options.minDurationMs,
+    },
+    silenceScanResultSchema,
+  )
+}
+
+// Stop an in-flight Smart Cut scan identified by its per-run scan id; a
+// no-op when that run is no longer registered, so unmount/edit cleanup can
+// call it unconditionally without touching a newer run's job.
+export async function cancelSmartCut(recordingId: string, scanId: string): Promise<void> {
+  return invokeValidated<void>("cancel_smart_cut", { recordingId, scanId })
+}
+
+// Keystroke badge events saved with the recording — source-media
+// timestamps and safe canonical labels ("Ctrl+C"). `supported` reports
+// platform capability (Windows/macOS only).
+export async function getKeystrokeEvents(recordingId: string): Promise<KeystrokeEventsResponse> {
+  return invokeValidated("get_keystroke_events", { recordingId }, keystrokeEventsResponseSchema)
 }
 
 export function onMediaJobUpdate(callback: (job: MediaJob) => void): Promise<() => void> {

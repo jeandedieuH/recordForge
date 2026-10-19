@@ -201,7 +201,7 @@ describe("project contract", () => {
       container: "mp4",
       captionMode: "burn-in",
       chapterMode: "embed",
-      audioMastering: { denoise: false, loudnessTarget: null },
+      audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
       brandWatermark: {
         enabled: false,
         logoPath: null,
@@ -219,7 +219,12 @@ describe("project contract", () => {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: {
+        enabled: false,
+        durationMs: 1400,
+        position: "bottom-center",
+        scalePercent: 100,
+      },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,
@@ -267,7 +272,7 @@ describe("project contract", () => {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "none",
-      audioMastering: { denoise: false, loudnessTarget: null },
+      audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
       brandWatermark: {
         enabled: false,
         logoPath: null,
@@ -285,7 +290,12 @@ describe("project contract", () => {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: {
+        enabled: false,
+        durationMs: 1400,
+        position: "bottom-center",
+        scalePercent: 100,
+      },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,
@@ -310,7 +320,7 @@ describe("project contract", () => {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "none",
-      audioMastering: { denoise: false, loudnessTarget: null },
+      audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
       brandWatermark: {
         enabled: false,
         logoPath: null,
@@ -328,7 +338,12 @@ describe("project contract", () => {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: {
+        enabled: false,
+        durationMs: 1400,
+        position: "bottom-center",
+        scalePercent: 100,
+      },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,

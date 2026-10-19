@@ -11,8 +11,11 @@ import {
   type LibraryRecording,
   type ReframeMode,
   type MediaJob,
+  type RenderPlan,
   type CursorTelemetryFile,
   type MediaMetadata,
+  type KeystrokeEvent,
+  type KeystrokeOverlay,
   type recordForgeProject,
   type TimelineViewState,
 } from "@recordforge/contracts"
@@ -42,7 +45,6 @@ import {
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan, freeExportSettings } from "@recordforge/media-core"
-import { canvasDimensionsForAspect } from "@recordforge/domain"
 import {
   getProjectAssetPaths,
   relinkAsset as relinkAssetRequest,
@@ -61,17 +63,26 @@ import { toErrorMessage } from "../lib/errors"
 import { getSetting, isTauri } from "../lib/settings"
 import {
   cancelMediaJob,
+  getKeystrokeEvents,
   getMediaJob,
   getMediaMetadata,
   listMediaJobs,
-  onMediaJobUpdate,
   prepareRecordingMedia,
   requestPreviewProxy,
 } from "../lib/media"
-import { exportTimeline, retryExport as retryExportRequest, revealExport } from "../lib/timeline"
+import {
+  exportTimeline,
+  previewTimeline,
+  retryExport as retryExportRequest,
+  revealExport,
+} from "../lib/timeline"
 import { useLicenseStore } from "./license-store"
+import { useJobsStore } from "./jobs-store"
 import { notifyExportFinished } from "../lib/export-notifications"
 import { useEditorStore } from "./editor-store"
+import { toast } from "@recordforge/ui"
+import { buildExportVariant } from "../features/export/build-export-variant"
+import { collectCameraSources } from "../features/editor/camera/camera-sources"
 
 interface TimelineStore {
   engine: CommandEngine | null
@@ -101,6 +112,27 @@ interface TimelineStore {
   // True once a proxy generation request was sent for this recording so
   // repeat performance-mode selections do not spawn duplicate transcodes.
   previewProxyRequested: boolean
+  // Processed preview (options.preview export jobs route here, never into
+  // activeExportJob / Instant Share / YouTube). `processedPreviewRevision`
+  // is the projectRevision the job was built against — a higher live
+  // revision means the preview is stale.
+  processedPreviewJob: MediaJob | null
+  processedPreviewRevision: number | null
+  processedPreviewAspect: CanvasAspectRatio | null
+  isPreviewSubmitting: boolean
+  // Submission-level failure — the dialog shows it instead of the global
+  // error slot so a failed request never leaves an unexplained empty state.
+  previewSubmissionError: string | null
+  // Monotonic request id owning the submission flag + a flag a cancel sets
+  // so a not-yet-admitted job is cancelled as soon as it lands.
+  previewRequestToken: number
+  previewCancelRequested: boolean
+  // Captured keystroke events driving the canvas badge preview; loaded
+  // once per recording, cleared on session switch.
+  keystrokeEvents: KeystrokeEvent[]
+  keystrokeEventsStatus: "idle" | "loading" | "loaded" | "error"
+  keystrokeEventsError: string | null
+  keystrokeEventsSupported: boolean
   // Pending autosave timer; cleared when a save runs or the editor closes.
   autosaveTimeout: ReturnType<typeof setTimeout> | null
   // Phase 1: revision-aware save coordinator. projectRevision is a logical
@@ -109,6 +141,10 @@ interface TimelineStore {
   // revision that still needs to be persisted. savePromise is the in-flight
   // save() call so concurrent flushers can wait instead of double-writing.
   projectRevision: number
+  // Monotonic session token — bumped on every load/close so async ops from
+  // an older session (including switch-away-and-back to the same recording)
+  // can never write into the current one.
+  sessionGeneration: number
   savingRevision: number | null
   pendingSaveRevision: number | null
   savePromise: Promise<void> | null
@@ -145,12 +181,18 @@ interface TimelineStore {
   setBrandWatermark: (watermark: BrandWatermark) => void
   setBrandCards: (cards: BrandCards) => void
   setWebcamBackground: (background: WebcamBackground) => void
-  setKeystrokeOverlay: (enabled: boolean) => void
+  // Keystroke badge settings — a boolean toggles `enabled` (legacy callers)
+  // while an object updates hold duration / position / scale, preserving the
+  // other persisted fields.
+  setKeystrokeOverlay: (update: boolean | Partial<KeystrokeOverlay>) => void
   setReframeMode: (mode: ReframeMode) => void
   // Multi-format batch export (Pro): canvas aspects selected in the export
   // view are persisted in project.exportSettings.formats; empty means
   // "current canvas only".
   setExportFormats: (formats: CanvasAspectRatio[]) => void
+  // The most recent multi-format batch — job ids + destinations per format;
+  // statuses are read live from the jobs store.
+  exportBatch: ExportBatch | null
   // Instant Share (Pro): hosted/BYO-bucket upload preferences, persisted
   // per project. The optional link password is deliberately session-only.
   setInstantShare: (share: InstantShareSettings) => void
@@ -162,6 +204,15 @@ interface TimelineStore {
   cancelExport: () => Promise<void>
   retryExport: () => Promise<void>
   revealExport: () => Promise<void>
+  // Processed preview: save → build the real render plan → run the native
+  // export pipeline into a job-owned preview file. Reuses a completed
+  // preview for the unchanged revision+aspect.
+  requestProcessedPreview: (input?: {
+    aspectRatio?: CanvasAspectRatio
+    force?: boolean
+  }) => Promise<void>
+  cancelProcessedPreview: () => Promise<void>
+  loadKeystrokeEvents: () => Promise<void>
   setSelection: (selection: TimelineSelection | null) => void
 
   // Phase 2: set or clear the transient draft timeline and any validation error.
@@ -198,6 +249,23 @@ interface TimelineStore {
 }
 
 const AUTOSAVE_DELAY_MS = 2000
+
+// One admitted output of a multi-format batch — the publication surface and
+// batch summary read receipts from the persisted request identity, while
+// live status comes from the jobs store.
+export interface ExportBatchReceipt {
+  jobId: string
+  path: string
+  aspectRatio: string
+  isPrimary: boolean
+}
+
+export interface ExportBatch {
+  id: string
+  receipts: ExportBatchReceipt[]
+  // The all-terminal summary fires exactly once per batch.
+  summaryEmitted: boolean
+}
 
 // Output-path tags for batch-export alternates (`name-vertical.mp4`).
 const EXPORT_FORMAT_TAGS: Record<CanvasAspectRatio, string> = {
@@ -351,6 +419,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   isLoading: false,
   error: null,
   activeExportJob: null,
+  exportBatch: null,
   missingAssets: [],
   assetPaths: {},
   draftTimeline: null,
@@ -358,8 +427,20 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   isListening: false,
   unlisten: null,
   previewProxyRequested: false,
+  processedPreviewJob: null,
+  processedPreviewRevision: null,
+  processedPreviewAspect: null,
+  isPreviewSubmitting: false,
+  previewSubmissionError: null,
+  previewRequestToken: 0,
+  previewCancelRequested: false,
+  keystrokeEvents: [],
+  keystrokeEventsStatus: "idle",
+  keystrokeEventsError: null,
+  keystrokeEventsSupported: false,
   autosaveTimeout: null,
   projectRevision: 0,
+  sessionGeneration: 0,
   savingRevision: null,
   pendingSaveRevision: null,
   savePromise: null,
@@ -369,7 +450,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     // Release the previous session's cursor engine before dropping it; the
     // WASM wrapper owns heap memory that GC alone does not reclaim promptly.
     get().cursorEngine?.dispose?.()
-    set({
+    set((state) => ({
       isLoading: true,
       error: null,
       engine: null,
@@ -381,18 +462,34 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       cursorTelemetryStatus: "loading",
       activeJob: null,
       activeExportJob: null,
+      exportBatch: null,
       missingAssets: [],
       assetPaths: {},
       draftTimeline: null,
       draftError: null,
       previewProxyRequested: false,
+      processedPreviewJob: null,
+      processedPreviewRevision: null,
+      processedPreviewAspect: null,
+      isPreviewSubmitting: false,
+      previewSubmissionError: null,
+      previewCancelRequested: false,
+      keystrokeEvents: [],
+      keystrokeEventsStatus: "idle",
+      keystrokeEventsError: null,
+      keystrokeEventsSupported: false,
       projectRevision: 0,
+      sessionGeneration: state.sessionGeneration + 1,
       savingRevision: null,
       pendingSaveRevision: null,
       savePromise: null,
       snapshotPending: false,
       autosaveTimeout: null,
-    })
+    }))
+    // Ownership: everything below this await boundary must only install
+    // while this is still the active session — a late load-B completion can
+    // never overwrite load-A's project/recording/engine.
+    const generationAtLoad = get().sessionGeneration
     try {
       const recordings = await listRecordings()
       const recording = recordings.find((r) => r.id === recordingId)
@@ -452,6 +549,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       let project: recordForgeProject
       let missingAssets: string[] = []
       let didMigrateCursorTrack = false
+      let isNewProject = false
       const storedPreferences = recordingPreferencesRaw
         ? (() => {
             try {
@@ -480,6 +578,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         project = loaded.project
         missingAssets = loaded.missingAssets
       } else {
+        isNewProject = true
         const cameraSyncOffsetMs = storedPreferences?.cameraSyncOffsetMs ?? 0
         const canvasPolicy = useLicenseStore.getState().status.tier === "pro" ? "source" : "free"
         project = createProjectFromRecording(
@@ -535,6 +634,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         ? createCursorEngine(initialCursorTelemetry)
         : null
 
+      // Stale load: a newer session owns the stores — drop this result
+      // entirely (native handles are already released by GC/dispose paths).
+      if (get().sessionGeneration !== generationAtLoad) {
+        cursorEngine?.dispose?.()
+        return
+      }
+
       // Keep the editor store in sync for UI surfaces (save status, missing assets).
       useEditorStore.getState().open(recordingId, project)
       useEditorStore.getState().setMissingAssets(missingAssets)
@@ -549,6 +655,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         cursorTelemetryStatus: initialCursorTelemetry ? "available" : "unavailable",
         activeJob,
         activeExportJob: null,
+        exportBatch: null,
         missingAssets,
         assetPaths,
         view: {
@@ -573,6 +680,31 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         savePromise: null,
         snapshotPending: false,
       })
+      // Fire-and-forget: captured keystroke badges for the canvas preview.
+      // A NEW project defaults the overlay on when events exist — a
+      // persisted enabled/disabled choice on an existing project is never
+      // overridden. Saved events replay even when capture is unsupported
+      // (Linux imports), so `supported` doesn't gate the auto-enable.
+      const overlayAtLoad = project.exportSettings.keystrokeOverlay
+      void get()
+        .loadKeystrokeEvents()
+        .then(() => {
+          const current = get().project?.exportSettings.keystrokeOverlay
+          if (
+            isNewProject &&
+            get().sessionGeneration === generationAtLoad &&
+            get().recording?.id === recordingId &&
+            get().keystrokeEvents.length > 0 &&
+            // An explicit toggle while the events were still loading wins —
+            // only setKeystrokeOverlay mints a new overlay object, so an
+            // unchanged reference means the user hasn't touched it (an off→
+            // on→off flip still fails this check; a stale save is a safe
+            // conservative skip).
+            current === overlayAtLoad
+          ) {
+            get().setKeystrokeOverlay(true)
+          }
+        })
       if (didMigrateCursorTrack) {
         // A migration changed the durable project shape; bump to revision 1 and
         // schedule an autosave so the upgraded shape is not lost on close.
@@ -599,7 +731,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           })
       }
     } catch (err) {
-      set({ error: toErrorMessage(err), isLoading: false })
+      if (get().sessionGeneration === generationAtLoad) {
+        set({ error: toErrorMessage(err), isLoading: false })
+      }
     }
   },
 
@@ -607,23 +741,42 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     if (get().isListening) return
     set({ isListening: true })
 
-    const unlisten = await onMediaJobUpdate((job) => {
+    // Job events fan out from the single jobs-store subscription — this
+    // store must not open a second native listener.
+    await useJobsStore.getState().startListening()
+    const unlisten = useJobsStore.getState().subscribeJobEvents((job) => {
       const recording = get().recording
       if (job.recordingId !== recording?.id) return
 
       const updates: Partial<TimelineStore> = {}
 
-      // Track export jobs for the editor's export progress UI.
+      // Track export jobs for the editor's export progress UI. Preview jobs
+      // (options.preview) route to the dedicated preview slot only — they
+      // must never touch activeExportJob, Instant Share, YouTube, or the
+      // finished-export notification.
       if (job.kind === "export") {
-        const previousJob = get().activeExportJob
-        updates.activeExportJob = job
+        if (job.preview === true) {
+          // Only the explicitly owned preview job follows its events. An old
+          // preview from a previous visit must NOT adopt an empty slot — it
+          // would show with a null builtRevision and look current.
+          const owned = get().processedPreviewJob
+          if (owned?.id === job.id) {
+            updates.processedPreviewJob = job
+          }
+        } else {
+          // activeExportJob is pinned to the admitted primary export —
+          // batch-alternate or stale export events must not adopt the slot.
+          const previousJob = get().activeExportJob
+          if (previousJob?.id === job.id) {
+            updates.activeExportJob = job
 
-        if (
-          previousJob &&
-          (previousJob.status === "running" || previousJob.status === "pending") &&
-          job.status === "completed"
-        ) {
-          void notifyExportFinished(job, recording?.name)
+            if (
+              (previousJob.status === "running" || previousJob.status === "pending") &&
+              job.status === "completed"
+            ) {
+              void notifyExportFinished(job, recording?.name)
+            }
+          }
         }
       }
 
@@ -648,6 +801,27 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           job.status === "completed" || job.status === "failed" || job.status === "cancelled"
         if (finished) {
           updates.previewProxyRequested = false
+        }
+      }
+
+      // Multi-format batch: one summary toast when every receipt job has
+      // reached a terminal state — per-job UI already tracks each output.
+      const batch = get().exportBatch
+      if (batch && !batch.summaryEmitted && batch.receipts.some((r) => r.jobId === job.id)) {
+        const jobs = useJobsStore.getState()
+        const statuses = batch.receipts.map((r) => jobs.jobById(r.jobId)?.status)
+        const terminal = (status: string | undefined) =>
+          status === "completed" || status === "failed" || status === "cancelled"
+        if (statuses.every(terminal)) {
+          updates.exportBatch = { ...batch, summaryEmitted: true }
+          const done = statuses.filter((s) => s === "completed").length
+          toast({
+            title:
+              done === statuses.length
+                ? `Batch export finished — all ${statuses.length} formats`
+                : `Batch export finished — ${done} of ${statuses.length} formats completed`,
+            variant: done === statuses.length ? "default" : "warning",
+          })
         }
       }
 
@@ -801,10 +975,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     // latest revision and wait for the in-flight save before deciding whether
     // another one is needed.
     if (state.savePromise) {
+      const generationAtCall = state.sessionGeneration
       if (state.projectRevision > (state.savingRevision ?? -1)) {
         set({ pendingSaveRevision: state.projectRevision })
       }
       return state.savePromise.then(() => {
+        // The wait belongs to the session that queued it — a queued caller
+        // from an OLD session must not start a save on the new one.
+        if (get().sessionGeneration !== generationAtCall) return undefined
         if (get().pendingSaveRevision) {
           return get().save()
         }
@@ -820,18 +998,26 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     // lets edits that race the save set a pending revision instead of starting
     // a second write, and lets close/export guards wait on this promise.
     const deferred = createDeferred<void>()
+    const generationAtSave = get().sessionGeneration
     set({ savePromise: deferred.promise })
 
     const run = async () => {
+      // This save owns only its captured generation+promise — a newer
+      // session may write its own project file while our already-issued
+      // native write completes safely; it may NOT touch the new store.
+      const sameSession = () => get().sessionGeneration === generationAtSave
+      const ownsSession = () => sameSession() && get().savePromise === deferred.promise
       const { project, projectRevision, snapshotPending, recording } = get()
       if (!project) return
 
-      set({
-        savingRevision: projectRevision,
-        pendingSaveRevision: null,
-        autosaveTimeout: null,
-      })
-      useEditorStore.getState().setSaveStatus("saving")
+      if (ownsSession()) {
+        set({
+          savingRevision: projectRevision,
+          pendingSaveRevision: null,
+          autosaveTimeout: null,
+        })
+        useEditorStore.getState().setSaveStatus("saving")
+      }
       try {
         // Phase 1: destructive commands get a snapshot before the new version
         // overwrites the project file, sequencing the backup with the commit.
@@ -842,21 +1028,29 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
             // A failed snapshot should not block saving the current edit, but
             // it should not clear the pending flag either.
           }
-          set({ snapshotPending: false })
+          if (ownsSession()) set({ snapshotPending: false })
         }
         const saved = await saveProject(project)
-        get().commitSaveResult(saved, projectRevision)
+        if (ownsSession()) get().commitSaveResult(saved, projectRevision)
       } catch (err) {
         // The error is already recorded in the store. Resolve the promise so
         // callers can read saveStatus; autosave/timeout callers are not left with
         // an unhandled rejection.
-        get().handleSaveError(err, projectRevision)
+        if (ownsSession()) get().handleSaveError(err, projectRevision)
       } finally {
-        set({ savePromise: null })
+        // Promise-identity guard: an old save's finally can never clear a
+        // newer session's pending savePromise.
+        if (get().savePromise === deferred.promise) {
+          set({ savePromise: null })
+        }
       }
 
       // Phase 1: if edits arrived during the save and the save did not error,
       // immediately start the next save so pending edits are not left behind.
+      // The drain check reads SESSION identity only — our own promise slot is
+      // already released in `finally`, and a same-session follow-up save is
+      // still this session's responsibility.
+      if (!sameSession()) return
       const { pendingSaveRevision } = get()
       const { saveStatus } = useEditorStore.getState()
       if (pendingSaveRevision && saveStatus !== "error") {
@@ -1078,9 +1272,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const project = get().project
     if (!project) return
     const current = project.exportSettings.audioMastering
+    // Compare the whole mastered shape — a strength-only edit (12→6 dB) must
+    // not be treated as a no-op.
     if (
       current?.denoise === mastering.denoise &&
-      current?.loudnessTarget === mastering.loudnessTarget
+      current?.loudnessTarget === mastering.loudnessTarget &&
+      (current?.noiseReductionDb ?? 12) === (mastering.noiseReductionDb ?? 12)
     ) {
       return
     }
@@ -1125,12 +1322,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
-  setKeystrokeOverlay: (enabled) => {
+  setKeystrokeOverlay: (update) => {
     const project = get().project
     if (!project) return
+    const current = project.exportSettings.keystrokeOverlay
+    const next =
+      typeof update === "boolean" ? { ...current, enabled: update } : { ...current, ...update }
     const nextProject = {
       ...project,
-      exportSettings: { ...project.exportSettings, keystrokeOverlay: { enabled } },
+      exportSettings: { ...project.exportSettings, keystrokeOverlay: next },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)
@@ -1314,11 +1514,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   retryExport: async () => {
     const job = get().activeExportJob
     if (!job || !["failed", "cancelled"].includes(job.status)) return
+    const generation = get().sessionGeneration
     try {
       const retried = await retryExportRequest(job.id)
-      set({ activeExportJob: retried, error: null })
+      // The retried job stays owned by the session that requested it — a
+      // session switch mid-retry must not stamp it onto the new export slot.
+      if (get().sessionGeneration === generation) {
+        set({ activeExportJob: retried, error: null })
+      }
     } catch (err) {
-      set({ error: toErrorMessage(err) })
+      if (get().sessionGeneration === generation) {
+        set({ error: toErrorMessage(err) })
+      }
     }
   },
 
@@ -1329,6 +1536,185 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       await revealExport(job.id)
     } catch (err) {
       set({ error: toErrorMessage(err) })
+    }
+  },
+
+  requestProcessedPreview: async (options) => {
+    const generation = get().sessionGeneration
+    const { engine, recording, project } = get()
+    if (!engine || !recording || !project || get().isPreviewSubmitting) return
+
+    const aspect: CanvasAspectRatio =
+      options?.aspectRatio ?? engine.history.present.canvas.aspectRatio ?? "16:9"
+
+    // Reuse a completed preview for the unchanged revision+aspect — the
+    // dialog shows it again instead of re-rendering identical content.
+    // An explicit Rebuild (force) always renders a fresh pass.
+    const existing = get().processedPreviewJob
+    if (
+      !options?.force &&
+      existing &&
+      existing.status === "completed" &&
+      get().processedPreviewRevision === get().projectRevision &&
+      get().processedPreviewAspect === aspect
+    ) {
+      return
+    }
+
+    if (get().missingAssets.length > 0) {
+      set({
+        previewSubmissionError:
+          "Cannot preview while assets are missing. Relink or restore them first.",
+      })
+      return
+    }
+
+    // The token owns isPreviewSubmitting: a superseded request's finally
+    // cannot clear a newer request's flag.
+    const requestToken = get().previewRequestToken + 1
+    set({
+      isPreviewSubmitting: true,
+      previewRequestToken: requestToken,
+      previewCancelRequested: false,
+      previewSubmissionError: null,
+    })
+    const alive = () =>
+      get().sessionGeneration === generation && get().previewRequestToken === requestToken
+    try {
+      // Same save-first rule as export: the preview renders the persisted
+      // plan, not a half-saved edit state.
+      await get().save()
+      if (useEditorStore.getState().saveStatus === "error") {
+        if (alive()) {
+          set({ previewSubmissionError: "Cannot preview while the project cannot be saved." })
+        }
+        return
+      }
+      if (!alive()) return
+      const currentProject = get().project
+      const currentEngine = get().engine
+      const currentRecording = get().recording
+      if (!currentProject || !currentEngine || currentRecording?.id !== recording.id) return
+
+      // The revision bound to this preview is the one current when the
+      // plan is frozen — anything after is an unbuilt edit.
+      const frozenRevision = get().projectRevision
+
+      // Alternate aspects reflow through the shared variant seam; the
+      // editor's own canvas is never touched.
+      const variant = buildExportVariant({
+        state: currentEngine.history.present,
+        aspect,
+        cameraSources: collectCameraSources(currentEngine.history.present, {
+          project: currentProject,
+          metadata: get().metadata,
+          activeJob: get().activeJob,
+          recording: currentRecording,
+        }),
+      })
+      if (!variant.ok) {
+        set({ previewSubmissionError: variant.error.message })
+        return
+      }
+
+      // Preview renders MP4/h264 at up to 720p — native coerces the same
+      // way; mirroring it here keeps the request contract truthful for
+      // animation-container projects.
+      const previewSettings = {
+        ...currentProject.exportSettings,
+        container: "mp4" as const,
+        codec: "h264" as const,
+        chapterMode: "none" as const,
+      }
+      const plan = buildRenderPlan({
+        state: variant.value,
+        projectId: currentProject.id,
+        settings: previewSettings,
+        captionMode: previewSettings.captionMode,
+        chapterMode: previewSettings.chapterMode,
+        assets: currentProject.assets,
+        cursorTelemetry: get().cursorTelemetry,
+        cursorEngine: get().cursorEngine,
+      })
+      if (!plan.ok) {
+        set({ previewSubmissionError: plan.error.message })
+        return
+      }
+      const job = await previewTimeline({
+        projectId: currentProject.id,
+        plan: plan.value,
+        settings: previewSettings,
+      })
+      // Obsolete/cancelled admission: the native job still starts — cancel
+      // it instead of stamping a preview onto a dead request.
+      if (!alive()) {
+        void cancelMediaJob(job.id).catch(() => {})
+        return
+      }
+      // The pending admission snapshot can resolve AFTER running/completed
+      // events already landed in the jobs cache — prefer the newer object.
+      const admitted = useJobsStore.getState().jobById(job.id) ?? job
+      set({
+        processedPreviewJob: admitted,
+        processedPreviewRevision: frozenRevision,
+        processedPreviewAspect: aspect,
+        error: null,
+      })
+      // Cancel requested while this request was mid-admission.
+      if (get().previewCancelRequested) {
+        set({ previewCancelRequested: false })
+        void cancelMediaJob(admitted.id).catch(() => {})
+      }
+    } catch (err) {
+      if (alive()) set({ previewSubmissionError: toErrorMessage(err) })
+    } finally {
+      if (get().previewRequestToken === requestToken) {
+        set({ isPreviewSubmitting: false })
+      }
+    }
+  },
+
+  cancelProcessedPreview: async () => {
+    const generation = get().sessionGeneration
+    // Flag mid-admission requests so the job is cancelled the moment it lands.
+    if (get().isPreviewSubmitting) {
+      set({ previewCancelRequested: true })
+    }
+    const job = get().processedPreviewJob
+    if (!job || !["pending", "running"].includes(job.status)) return
+    try {
+      await cancelMediaJob(job.id)
+    } catch (err) {
+      if (get().sessionGeneration === generation) {
+        set({ previewSubmissionError: toErrorMessage(err) })
+      }
+    }
+  },
+
+  loadKeystrokeEvents: async () => {
+    const generation = get().sessionGeneration
+    const recording = get().recording
+    if (!recording || !isTauri()) return
+    if (get().keystrokeEventsStatus === "loading") return
+    set({ keystrokeEventsStatus: "loading", keystrokeEventsError: null })
+    try {
+      const response = await getKeystrokeEvents(recording.id)
+      // A session switch during the await drops the late result — the
+      // generation check also catches switch-away-and-back to the same
+      // recording.
+      if (get().sessionGeneration !== generation) return
+      set({
+        keystrokeEvents: response.events,
+        keystrokeEventsSupported: response.supported,
+        keystrokeEventsStatus: "loaded",
+        keystrokeEventsError: null,
+      })
+    } catch (error) {
+      if (get().sessionGeneration !== generation) return
+      set({
+        keystrokeEventsStatus: "error",
+        keystrokeEventsError: toErrorMessage(error),
+      })
     }
   },
 
@@ -1346,6 +1732,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   export: async (outputPath, options) => {
+    const generation = get().sessionGeneration
     const { engine, recording, project } = get()
     if (!engine || !recording || !project) return
 
@@ -1362,19 +1749,27 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     try {
       await get().save()
       if (useEditorStore.getState().saveStatus === "error") {
-        set({
-          error:
-            "Cannot export while the project cannot be saved. Fix the save error and try again.",
-        })
+        // Late errors must not land on a newer session's store.
+        if (get().sessionGeneration === generation) {
+          set({
+            error:
+              "Cannot export while the project cannot be saved. Fix the save error and try again.",
+          })
+        }
         return
       }
     } catch (err) {
-      set({ error: toErrorMessage(err) })
+      if (get().sessionGeneration === generation) {
+        set({ error: toErrorMessage(err) })
+      }
       return
     }
+    if (get().sessionGeneration !== generation) return
 
     const currentProject = get().project
-    if (!currentProject) return
+    const currentEngine = get().engine
+    const currentRecording = get().recording
+    if (!currentProject || !currentEngine || currentRecording?.id !== recording.id) return
 
     const isGif =
       currentProject.exportSettings.container === "gif" ||
@@ -1420,8 +1815,21 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     // them. A strip-to-Free export collapses to the primary canvas so a
     // persisted Pro selection can never reach an alternate job's entitlement
     // check.
-    const canvas = engine.history.present.canvas
+    //
+    // One frozen snapshot feeds the whole batch: the engine, camera sources,
+    // and cursor inputs are captured once after save — live edits between
+    // admissions can never mix revisions into a single batch.
+    const frozenState = currentEngine.history.present
+    const canvas = frozenState.canvas
     const currentAspect: CanvasAspectRatio = canvas.aspectRatio ?? "16:9"
+    const frozenCameraSources = collectCameraSources(frozenState, {
+      project: currentProject,
+      metadata: get().metadata,
+      activeJob: get().activeJob,
+      recording: currentRecording,
+    })
+    const frozenCursorTelemetry = get().cursorTelemetry
+    const frozenCursorEngine = get().cursorEngine
     const persisted = effectiveExportSettings.formats ?? []
     const requested: CanvasAspectRatio[] =
       isAnimation || strip
@@ -1437,44 +1845,116 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       ? [currentAspect, ...requested.filter((format) => format !== currentAspect)]
       : requested
 
+    // Aspect-locked presets only validate on their own canvas shape — an
+    // incompatible alternate falls back to the neutral "balanced" preset
+    // instead of failing native validation. Range/codec/quality survive.
+    const presetIsAspectLocked = (preset: string, aspect: CanvasAspectRatio) =>
+      (preset === "vertical" && aspect !== "9:16") || (preset === "square" && aspect !== "1:1")
+
+    // Preflight the WHOLE batch before any IPC: a failed variant, plan, or
+    // path must leave zero admitted jobs behind.
+    interface PreparedVariant {
+      format: CanvasAspectRatio
+      outputPath: string
+      plan: RenderPlan
+      settings: typeof finalSettings
+    }
+    const prepared: PreparedVariant[] = []
     for (const [index, format] of formats.entries()) {
-      const variantState = {
-        ...engine.history.present,
-        canvas: {
-          ...canvas,
-          ...canvasDimensionsForAspect(canvas, format),
-          aspectRatio: format,
-        },
+      const variant = buildExportVariant({
+        state: frozenState,
+        aspect: format,
+        cameraSources: frozenCameraSources,
+      })
+      if (!variant.ok) {
+        set({ error: variant.error.message })
+        return
       }
+      const variantSettings = presetIsAspectLocked(finalSettings.preset, format)
+        ? { ...finalSettings, preset: "balanced" as const }
+        : finalSettings
       const plan = buildRenderPlan({
-        state: variantState,
+        state: variant.value,
         projectId: currentProject.id,
-        settings: finalSettings,
-        captionMode: finalSettings.captionMode,
-        chapterMode: finalSettings.chapterMode,
+        settings: variantSettings,
+        captionMode: variantSettings.captionMode,
+        chapterMode: variantSettings.chapterMode,
         assets: currentProject.assets,
-        cursorTelemetry: get().cursorTelemetry,
-        cursorEngine: get().cursorEngine,
+        cursorTelemetry: frozenCursorTelemetry,
+        cursorEngine: frozenCursorEngine,
         stripProFeatures: strip,
       })
       if (!plan.ok) {
         set({ error: plan.error.message })
         return
       }
+      prepared.push({
+        format,
+        outputPath: index === 0 ? outputPath : suffixExportPath(outputPath, format),
+        // Stamp the target format on the plan canvas (copy — never mutate the
+        // frozen state): a project canvas may omit aspectRatio entirely.
+        plan: {
+          ...plan.value,
+          canvas: { ...plan.value.canvas, aspectRatio: format },
+        },
+        settings: variantSettings,
+      })
+    }
+
+    // One batch id per export start — native dedupe/persistence keys every
+    // admission to the same group.
+    const batchId = formats.length > 1 ? crypto.randomUUID() : null
+    const batchReceipts: ExportBatchReceipt[] = []
+
+    // Admit sequentially — current first. A session switch mid-batch stops
+    // further admissions while jobs already running stay visible in the
+    // drawer; a late error never lands on another project's store.
+    for (const [index, variant] of prepared.entries()) {
+      if (get().sessionGeneration !== generation) return
       try {
         const job = await exportTimeline({
           projectId: currentProject.id,
-          outputPath: index === 0 ? outputPath : suffixExportPath(outputPath, format),
-          plan: plan.value,
-          settings: finalSettings,
+          outputPath: variant.outputPath,
+          plan: variant.plan,
+          settings: variant.settings,
+          // The project title is frozen at admission — publishing reads the
+          // persisted request, never the mutable project name.
+          projectName: currentProject.name,
+          batch: batchId
+            ? { id: batchId, aspectRatio: variant.format, isPrimary: index === 0 }
+            : undefined,
         })
+        // The admission resolved across a session switch — the native job
+        // stays running (visible in the jobs drawer) but never stamps onto
+        // the new session's export slot.
+        if (get().sessionGeneration !== generation) return
+        if (batchId) {
+          batchReceipts.push({
+            jobId: job.id,
+            path: variant.outputPath,
+            aspectRatio: variant.format,
+            isPrimary: index === 0,
+          })
+          set({
+            exportBatch: {
+              id: batchId,
+              receipts: [...batchReceipts],
+              summaryEmitted: false,
+            },
+          })
+        }
         // Surface the primary job immediately so progress stays visible even
-        // if an alternate format fails to start afterwards.
+        // if an alternate format fails to start afterwards. The pending
+        // admission snapshot can resolve after progress events — prefer the
+        // newer cached object.
         if (index === 0) {
-          set({ activeExportJob: job })
+          const admitted = useJobsStore.getState().jobById(job.id) ?? job
+          set({ activeExportJob: admitted })
         }
       } catch (err) {
-        set({ error: toErrorMessage(err) })
+        if (get().sessionGeneration === generation) {
+          set({ error: toErrorMessage(err) })
+        }
         return
       }
     }
@@ -1536,6 +2016,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   // caller can keep the session open.
   closeSession: async () => {
     const { autosaveTimeout, savePromise } = get()
+    const generationAtClose = get().sessionGeneration
     if (autosaveTimeout) {
       window.clearTimeout(autosaveTimeout)
     }
@@ -1552,6 +2033,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       }
     }
 
+    // A stale close must not reset a session that started while the flush
+    // was pending — only the session that issued this close may reset. The
+    // returning caller also has no permission to leave the NEW project, so
+    // a stale close answers false rather than a vacuous success.
+    if (get().sessionGeneration !== generationAtClose) return false
+
     get().resetSession()
     return true
   },
@@ -1565,7 +2052,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     }
     cursorEngine?.dispose?.()
     get().stopListening()
-    set({
+    set((state) => ({
       engine: null,
       view: {
         zoom: 50,
@@ -1589,6 +2076,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       cursorTelemetryStatus: "unavailable",
       activeJob: null,
       activeExportJob: null,
+      exportBatch: null,
       missingAssets: [],
       assetPaths: {},
       isLoading: false,
@@ -1596,13 +2084,24 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       isListening: false,
       unlisten: null,
       previewProxyRequested: false,
+      processedPreviewJob: null,
+      processedPreviewRevision: null,
+      processedPreviewAspect: null,
+      isPreviewSubmitting: false,
+      previewSubmissionError: null,
+      previewCancelRequested: false,
+      keystrokeEvents: [],
+      keystrokeEventsStatus: "idle",
+      keystrokeEventsError: null,
+      keystrokeEventsSupported: false,
       autosaveTimeout: null,
       projectRevision: 0,
+      sessionGeneration: state.sessionGeneration + 1,
       savingRevision: null,
       pendingSaveRevision: null,
       savePromise: null,
       snapshotPending: false,
-    })
+    }))
     useEditorStore.getState().close()
   },
 

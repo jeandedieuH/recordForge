@@ -142,28 +142,27 @@ fn enumerate_macos_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
     // Real microphone list: the avfoundation audio section of
     // `ffmpeg -list_devices` (CoreAudio HAL enumeration without a HAL FFI
     // dependency). The `-i ":<index>"` spec opens the device later, so the
-    // index doubles as the device id.
+    // index doubles as the device id. Macs with no physical or virtual input
+    // device (headless VMs, Mac mini/Studio without a mic, docked clamshell
+    // setups) legitimately yield zero non-loopback entries.
     match crate::media::resolve_executable("ffmpeg")
         .and_then(|path| list_avfoundation_audio_devices(&path.to_string_lossy()))
     {
         Ok(inputs) => {
-            for (index, name) in inputs {
+            for (pos, (index, name)) in inputs.into_iter().enumerate() {
                 devices.push(AudioDeviceInfo {
                     id: index.to_string(),
                     name,
-                    is_default: index == 0,
+                    is_default: pos == 0,
                     is_loopback: false,
                 });
             }
         }
         Err(error) => {
-            tracing::warn!(error = ?error, "avfoundation audio enumeration failed; using synthetic default");
-            devices.push(AudioDeviceInfo {
-                id: "default".into(),
-                name: "Default Microphone".into(),
-                is_default: true,
-                is_loopback: false,
-            });
+            tracing::warn!(
+                error = ?error,
+                "avfoundation audio enumeration failed; reporting system loopback only"
+            );
         }
     }
 
@@ -180,6 +179,68 @@ fn enumerate_macos_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
         "enumerated macOS CoreAudio audio devices"
     );
     Ok(devices)
+}
+
+/// Resolve a requested microphone identifier (`None`, `"default"`, an
+/// AVFoundation audio index like `"0"`, or a device display name) against the
+/// enumerated `(index, name)` AVFoundation audio inputs.
+///
+/// Returns the AVFoundation audio device index string to pass after `none:` in
+/// `-f avfoundation -i none:<index>`, or `None` when the host has no audio
+/// input devices at all. When a previously saved device ID/name is no longer
+/// connected, falls back to the first available input (matching the Windows
+/// WASAPI endpoint fallback).
+#[cfg(any(target_os = "macos", test))]
+fn resolve_avfoundation_mic_device(
+    inputs: &[(usize, String)],
+    requested: Option<&str>,
+) -> Option<String> {
+    let (first_index, _) = inputs.first()?;
+    let Some(raw) = requested
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "default")
+    else {
+        return Some(first_index.to_string());
+    };
+    if let Some((index, _)) = inputs.iter().find(|(index, _)| index.to_string() == raw) {
+        return Some(index.to_string());
+    }
+    if let Some((index, _)) = inputs
+        .iter()
+        .find(|(_, name)| name == raw || name.eq_ignore_ascii_case(raw))
+    {
+        return Some(index.to_string());
+    }
+    tracing::warn!(
+        requested = raw,
+        fallback_index = *first_index,
+        "requested macOS microphone is no longer present; falling back to default input"
+    );
+    Some(first_index.to_string())
+}
+
+/// Map FFmpeg avfoundation stderr into a structured, redacted error without
+/// leaking raw pointer addresses or file paths.
+#[cfg(any(target_os = "macos", test))]
+fn classify_macos_mic_startup_error(stderr: &str) -> crate::errors::InternalError {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("not authorized") {
+        crate::errors::InternalError::Permissions(
+            "Microphone access is denied. Enable RecordForge in System Settings → Privacy & Security → Microphone."
+                .into(),
+        )
+    } else if lower.contains("audio device not found")
+        || lower.contains("no such file or directory")
+        || lower.contains("input/output error")
+    {
+        crate::errors::InternalError::Capture(
+            "No usable microphone input device is available on this Mac.".into(),
+        )
+    } else {
+        crate::errors::InternalError::Capture(
+            "Microphone capture could not start on the selected audio input device.".into(),
+        )
+    }
 }
 
 /// Parse `ffmpeg -f avfoundation -list_devices true -i ""` audio section.
@@ -375,6 +436,20 @@ impl CoreAudioCaptureSession {
     fn start_mic_capture(options: AudioCaptureOptions) -> Result<Self> {
         use std::process::Stdio;
 
+        if matches!(
+            super::super::macos_native::av_authorization_status(
+                super::super::macos_native::AvMediaKind::Audio,
+            ),
+            super::super::macos_native::AvAuthorization::Denied
+                | super::super::macos_native::AvAuthorization::Restricted
+        ) {
+            return Err(crate::errors::InternalError::Permissions(
+                "Microphone access is denied. Enable RecordForge in System Settings → Privacy & Security → Microphone."
+                    .into(),
+            )
+            .into());
+        }
+
         let ffmpeg = options
             .ffmpeg_path
             .clone()
@@ -385,9 +460,19 @@ impl CoreAudioCaptureSession {
                 )
             })?;
 
-        // `none` disables the video side of the avfoundation spec; the audio
-        // side accepts the avfoundation audio index or a device name.
-        let device = options.device_id.as_deref().unwrap_or("default");
+        // Resolve the requested device against the live AVFoundation audio
+        // input list before creating the WAV or spawning FFmpeg. Headless and
+        // docked Macs without an audio input endpoint fail fast with a clean
+        // message instead of spawning `none:default` and surfacing raw FFmpeg
+        // I/O errors.
+        let inputs = list_avfoundation_audio_devices(&ffmpeg.to_string_lossy())?;
+        let Some(device) = resolve_avfoundation_mic_device(&inputs, options.device_id.as_deref())
+        else {
+            return Err(crate::errors::InternalError::Capture(
+                "No usable microphone input device is available on this Mac.".into(),
+            )
+            .into());
+        };
         let device_spec = format!("none:{device}");
 
         let started_at = Instant::now();
@@ -532,11 +617,13 @@ impl CoreAudioCaptureSession {
                 return Ok(());
             }
             if let Ok(Some(status)) = capture.child.try_wait() {
-                return Err(crate::errors::InternalError::Capture(format!(
-                    "ffmpeg mic capture exited during startup ({status}): {}",
-                    capture.stderr_tail_text()
-                ))
-                .into());
+                let tail = capture.stderr_tail_text();
+                tracing::warn!(
+                    exit_status = %status,
+                    stderr = %tail,
+                    "ffmpeg mic capture exited during startup"
+                );
+                return Err(classify_macos_mic_startup_error(&tail).into());
             }
             if self.stop_requested.load(Ordering::Acquire) {
                 return Err(crate::errors::InternalError::Capture(
@@ -551,8 +638,16 @@ impl CoreAudioCaptureSession {
             .as_ref()
             .map(|c| c.stderr_tail_text())
             .unwrap_or_default();
+        tracing::warn!(
+            timeout = ?STARTUP_DATA_TIMEOUT,
+            stderr = %tail,
+            "microphone produced no data within startup window"
+        );
+        if !tail.is_empty() {
+            return Err(classify_macos_mic_startup_error(&tail).into());
+        }
         Err(crate::errors::InternalError::Capture(format!(
-            "microphone produced no data within {STARTUP_DATA_TIMEOUT:?} — check the device and macOS Microphone permission ({tail})"
+            "microphone produced no data within {STARTUP_DATA_TIMEOUT:?} — check the device and macOS Microphone permission"
         ))
         .into())
     }
@@ -937,8 +1032,74 @@ mod tests {
     fn test_coreaudio_device_enumeration() {
         let devices = enumerate_coreaudio_devices().expect("enumerate coreaudio devices");
         assert!(!devices.is_empty());
-        assert!(devices.iter().any(|d| !d.is_loopback));
+        // System loopback (ScreenCaptureKit) is always advertised; non-loopback
+        // microphone entries are present only when the host has audio input
+        // hardware (headless Mac VMs legitimately have zero).
         assert!(devices.iter().any(|d| d.is_loopback));
+        #[cfg(not(target_os = "macos"))]
+        assert!(devices.iter().any(|d| !d.is_loopback));
+        let mics: Vec<_> = devices.iter().filter(|d| !d.is_loopback).collect();
+        if !mics.is_empty() {
+            assert_eq!(mics.iter().filter(|d| d.is_default).count(), 1);
+            assert!(mics.iter().all(|d| !d.id.is_empty() && !d.name.is_empty()));
+        }
+    }
+
+    #[test]
+    fn test_resolve_avfoundation_mic_device() {
+        // No input hardware (headless/VM or docked Mac without mic) → None.
+        assert_eq!(resolve_avfoundation_mic_device(&[], None), None);
+        assert_eq!(resolve_avfoundation_mic_device(&[], Some("default")), None);
+        assert_eq!(resolve_avfoundation_mic_device(&[], Some("0")), None);
+
+        let inputs = vec![
+            (0usize, "MacBook Pro Microphone".to_string()),
+            (2usize, "Blue Yeti".to_string()),
+        ];
+        // Unspecified or "default" resolves to the first enumerated input index.
+        assert_eq!(
+            resolve_avfoundation_mic_device(&inputs, None),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            resolve_avfoundation_mic_device(&inputs, Some("default")),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            resolve_avfoundation_mic_device(&inputs, Some("  ")),
+            Some("0".to_string())
+        );
+        // Exact index or case-insensitive name match selects that endpoint.
+        assert_eq!(
+            resolve_avfoundation_mic_device(&inputs, Some("2")),
+            Some("2".to_string())
+        );
+        assert_eq!(
+            resolve_avfoundation_mic_device(&inputs, Some("blue yeti")),
+            Some("2".to_string())
+        );
+        // Disconnected/stale device ID falls back to the first available input.
+        assert_eq!(
+            resolve_avfoundation_mic_device(&inputs, Some("99")),
+            Some("0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_classify_macos_mic_startup_error() {
+        let missing = classify_macos_mic_startup_error(
+            "[AVFoundation indev @ 0x600001] Audio device not found\nError opening input: Input/output error",
+        );
+        assert!(
+            matches!(missing, crate::errors::InternalError::Capture(ref msg) if msg.contains("No usable microphone input device")),
+            "unexpected error: {missing:?}"
+        );
+
+        let denied = classify_macos_mic_startup_error("AVFoundation: not authorized for audio");
+        assert!(
+            matches!(denied, crate::errors::InternalError::Permissions(_)),
+            "unexpected error: {denied:?}"
+        );
     }
 
     #[test]
@@ -947,7 +1108,50 @@ mod tests {
         let output_path = temp_dir.path().join("coreaudio_test.wav");
         let options = AudioCaptureOptions::microphone(None, output_path.clone());
 
-        let mut session = CoreAudioCaptureSession::start(options).expect("start session");
+        let devices = enumerate_coreaudio_devices().expect("enumerate coreaudio devices");
+        let has_mic = devices.iter().any(|d| !d.is_loopback);
+        if !has_mic {
+            // Host has no audio input hardware: starting mic capture must
+            // fail cleanly without leaving an unfinalized WAV behind, while
+            // the underlying WAV worker lifecycle remains functional.
+            let err = CoreAudioCaptureSession::start(options)
+                .expect_err("mic capture must fail cleanly when no input device exists");
+            assert!(
+                err.message.contains("No usable microphone input device"),
+                "unexpected error message: {}",
+                err.message
+            );
+            assert!(!output_path.exists());
+
+            let worker_stop = Arc::new(AtomicBool::new(false));
+            let worker_stop_clone = Arc::clone(&worker_stop);
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+            let worker_options = AudioCaptureOptions::microphone(None, output_path.clone());
+            let handle = thread::spawn(move || {
+                run_coreaudio_worker(worker_options, worker_stop_clone, ready_tx)
+            });
+            ready_rx
+                .recv_timeout(STARTUP_TIMEOUT)
+                .expect("worker ready signal")
+                .expect("worker started");
+            thread::sleep(Duration::from_millis(50));
+            worker_stop.store(true, Ordering::Release);
+            let written = handle.join().expect("join worker").expect("worker result");
+            assert!(written > WAV_HEADER_SIZE);
+            assert!(output_path.is_file());
+            return;
+        }
+
+        let mut session = match CoreAudioCaptureSession::start(options) {
+            Ok(session) => session,
+            Err(error) => {
+                // Headless macOS runners without TCC Microphone authorization
+                // cannot open the hardware input; abort_capture must clean up.
+                eprintln!("skipping live CoreAudio mic start/stop: {error}");
+                assert!(!output_path.exists());
+                return;
+            }
+        };
         assert_eq!(session.output_path(), output_path.as_path());
 
         thread::sleep(Duration::from_millis(50));

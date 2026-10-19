@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { WebcamBackground } from "@recordforge/contracts"
 import {
   Button,
@@ -8,6 +8,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Skeleton,
   Slider,
   Switch,
 } from "@recordforge/ui"
@@ -19,10 +20,14 @@ import {
 import { ProBadge } from "../licensing/pro-badge"
 import { useLicenseStore } from "../../stores/license-store"
 import { useToast } from "@recordforge/ui"
+import { createVirtualBackgroundController } from "./virtual-background-controller"
 
 interface VirtualBackgroundCardProps {
   background: WebcamBackground
   disabled?: boolean
+  // False when the project has no camera source at all — show an honest
+  // empty state instead of a dead enabled switch.
+  hasCamera?: boolean
   onChange: (background: WebcamBackground) => void
 }
 
@@ -31,42 +36,42 @@ const MODEL_LABEL = "0.5 MB model"
 export function VirtualBackgroundCard({
   background,
   disabled,
+  hasCamera = true,
   onChange,
 }: VirtualBackgroundCardProps) {
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const { toast } = useToast()
   const [modelReady, setModelReady] = useState<boolean | null>(null)
-  const [downloadRatio, setDownloadRatio] = useState<number | null>(null)
+  // Distinguish "model missing" (offer download) from "status check failed"
+  // (offer retry) — a failed probe must not pretend the model is absent.
+  const [statusError, setStatusError] = useState<string | null>(null)
+  // null = idle; "indeterminate" while the native side reports no byte total.
+  const [downloadRatio, setDownloadRatio] = useState<number | "indeterminate" | null>(null)
+
+  // Async ownership lives in the controller — the card only binds its
+  // hooks to state (double-click, stale probes, and unmount races are
+  // unit-tested there).
+  const controllerRef = useRef<ReturnType<typeof createVirtualBackgroundController> | null>(null)
+  if (controllerRef.current === null) {
+    controllerRef.current = createVirtualBackgroundController({
+      getStatus: getVirtualBackgroundStatus,
+      download: downloadVirtualBackgroundModel,
+      onProgress: onVirtualBackgroundDownloadProgress,
+      toast,
+      hooks: {
+        modelReady: setModelReady,
+        statusError: setStatusError,
+        downloadRatio: setDownloadRatio,
+      },
+    })
+  }
+  const controller = controllerRef.current
 
   useEffect(() => {
-    getVirtualBackgroundStatus()
-      .then((status) => setModelReady(status.modelReady))
-      .catch(() => setModelReady(false))
-  }, [])
-
-  async function handleDownload() {
-    if (downloadRatio != null) return
-    setDownloadRatio(0)
-    const unlisten = await onVirtualBackgroundDownloadProgress((progress) => {
-      setDownloadRatio(
-        progress.totalBytes > 0 ? progress.downloadedBytes / progress.totalBytes : null,
-      )
-    })
-    try {
-      await downloadVirtualBackgroundModel()
-      setModelReady(true)
-    } catch (error) {
-      toast({
-        kind: "error",
-        title: "Model download failed",
-        description: error instanceof Error ? error.message : "Could not download the model.",
-      } as Parameters<typeof toast>[0])
-    } finally {
-      unlisten()
-      setDownloadRatio(null)
-    }
-  }
+    controller.mount()
+    return () => controller.unmount()
+  }, [controller])
 
   function gate(): boolean {
     if (isPro) return false
@@ -86,25 +91,53 @@ export function VirtualBackgroundCard({
           disabled={disabled}
           aria-label="Virtual background"
           onCheckedChange={(enabled) => {
-            if (enabled && gate()) return
+            // Turning ON needs a camera source; turning an already-enabled
+            // setting OFF must always work — a persisted blur from a removed
+            // camera can't be a Pro trap the user can't escape.
+            if (!enabled) {
+              onChange({ ...background, enabled })
+              return
+            }
+            if (!hasCamera || gate()) return
             onChange({ ...background, enabled })
           }}
         />
       </div>
-      {background.enabled ? (
+      {!hasCamera ? (
+        <p className="border-t border-border px-5 py-3 text-xs text-subtle-foreground">
+          No webcam in this project — add a camera recording to replace or blur its background.
+        </p>
+      ) : background.enabled ? (
         <div className="flex flex-col gap-4 border-t border-border p-5 text-xs text-subtle-foreground">
-          {modelReady === null ? (
-            <span className="text-muted-foreground">Checking segmentation model…</span>
+          {modelReady === null && statusError === null ? (
+            <Skeleton className="h-4 w-2/3 rounded" />
+          ) : null}
+          {statusError !== null ? (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => controller.retryStatus()}
+                disabled={disabled}
+              >
+                Retry
+              </Button>
+              <span className="flex-1">Couldn't check the segmentation model — {statusError}</span>
+            </div>
           ) : null}
           {modelReady === false ? (
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleDownload}
+                onClick={() => void controller.startDownload()}
                 disabled={disabled || downloadRatio != null}
               >
-                {downloadRatio == null ? `Download model (${MODEL_LABEL})` : "Downloading…"}
+                {downloadRatio == null
+                  ? `Download model (${MODEL_LABEL})`
+                  : downloadRatio === "indeterminate"
+                    ? "Downloading…"
+                    : `Downloading… ${Math.round(downloadRatio * 100)}%`}
               </Button>
               <span className="flex-1">
                 On-device person segmentation — required once, never uploaded.
@@ -156,8 +189,8 @@ export function VirtualBackgroundCard({
             </label>
           )}
           <span>
-            Applies at export — the camera feed is cut out and composited on the backdrop. Preview
-            shows the unprocessed webcam.
+            Applies at export — the camera feed is cut out and composited on the backdrop. The
+            canvas shows the unprocessed webcam; use Preview finished video to audition the effect.
           </span>
         </div>
       ) : null}

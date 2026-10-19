@@ -13,9 +13,11 @@
 
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pipewire::context::ContextBox;
 use pipewire::keys;
@@ -50,6 +52,14 @@ const FORMAT_NEGOTIATION_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// steady-state capture overhead at ~24 MiB.
 const FRAME_QUEUE_DEPTH: usize = 3;
 
+/// How long `run_frame_writer` waits per `poll(2)` slice when the OS pipe
+/// buffer is full.
+const FRAME_PIPE_POLL_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Maximum time `run_frame_writer` spends finishing an in-flight frame after
+/// `stop` is signaled while an active reader is draining the pipe.
+const FRAME_PIPE_STOP_DRAIN_BUDGET: Duration = Duration::from_millis(200);
+
 /// Message that asks the PipeWire main loop to quit (cross-thread control).
 #[derive(Debug)]
 struct Terminate;
@@ -64,9 +74,11 @@ pub use super::ffmpeg::PipeWireVideoInput;
 /// compositor's recording indicator.
 pub struct LinuxPipeWireCapture {
     input: PipeWireVideoInput,
-    /// Read end is handed to ffmpeg via dup2; keep alive until the child
-    /// inherits it — Drop closes it which also signals EOF on the pipe.
-    _read_fd: OwnedFd,
+    /// Read end is handed to ffmpeg via dup2; kept alive until `stop()` (or
+    /// `Drop`) closes it so an unspawned or exited child leaves zero open
+    /// readers and wakes the writer immediately.
+    read_fd: Option<OwnedFd>,
+    writer_stop: Arc<AtomicBool>,
     stop_tx: pipewire::channel::Sender<Terminate>,
     pw_thread: Option<JoinHandle<()>>,
     writer_thread: Option<JoinHandle<()>>,
@@ -120,10 +132,12 @@ impl LinuxPipeWireCapture {
         let (format_tx, format_rx) = mpsc::channel::<PipeWireVideoInput>();
         let (stop_tx, stop_rx) = pipewire::channel::channel::<Terminate>();
         let (error_tx, error_rx) = mpsc::channel::<String>();
+        let writer_stop = Arc::new(AtomicBool::new(false));
+        let writer_stop_thread = Arc::clone(&writer_stop);
 
         let writer_thread = std::thread::Builder::new()
             .name("rf-pw-writer".into())
-            .spawn(move || run_frame_writer(frame_rx, write_fd))
+            .spawn(move || run_frame_writer(frame_rx, write_fd, writer_stop_thread))
             .map_err(|e| InternalError::Capture(format!("spawn pipewire writer: {e}")))?;
 
         let node_id = stream_info.pipewire_node_id;
@@ -145,6 +159,8 @@ impl LinuxPipeWireCapture {
                 input
             }
             Err(_) => {
+                writer_stop.store(true, Ordering::Release);
+                drop(read_fd);
                 let _ = stop_tx.send(Terminate);
                 let error = error_rx
                     .recv_timeout(std::time::Duration::from_millis(1500))
@@ -192,7 +208,8 @@ impl LinuxPipeWireCapture {
 
         Ok(Self {
             input,
-            _read_fd: read_fd,
+            read_fd: Some(read_fd),
+            writer_stop,
             stop_tx,
             pw_thread: Some(pw_thread),
             writer_thread: Some(writer_thread),
@@ -206,6 +223,8 @@ impl LinuxPipeWireCapture {
 
     /// Stop the PipeWire loop and join the workers. Idempotent.
     pub fn stop(&mut self) {
+        self.writer_stop.store(true, Ordering::Release);
+        drop(self.read_fd.take());
         let _ = self.stop_tx.send(Terminate);
         if let Some(t) = self.pw_thread.take() {
             let _ = t.join();
@@ -256,17 +275,96 @@ fn create_frame_pipe() -> Result<(OwnedFd, OwnedFd)> {
         ))
         .into());
     }
+    unsafe {
+        let flags = libc::fcntl(fds[1], libc::F_GETFL);
+        if flags != -1 {
+            libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-/// Writer end of the frame pipe: blocks on `recv`, writes packed frames to the
-/// fd. Exits when the channel closes (pw loop stopped) or the pipe dies
-/// (ffmpeg exited).
-fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd) {
+enum PipePoll {
+    Writable,
+    TimedOut,
+    Closed,
+}
+
+fn poll_pipe_writable(fd: RawFd, timeout: Duration) -> PipePoll {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: `pfd` is a valid stack struct and `fd` remains open for the call.
+    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if rc < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            return PipePoll::TimedOut;
+        }
+        return PipePoll::Closed;
+    }
+    if rc == 0 {
+        return PipePoll::TimedOut;
+    }
+    if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
+        return PipePoll::Closed;
+    }
+    if (pfd.revents & libc::POLLOUT) != 0 {
+        PipePoll::Writable
+    } else {
+        PipePoll::TimedOut
+    }
+}
+
+fn write_frame(file: &mut std::fs::File, mut bytes: &[u8], stop: &AtomicBool) -> bool {
+    let fd = file.as_raw_fd();
+    let mut stop_deadline: Option<Instant> = None;
+    while !bytes.is_empty() {
+        if stop.load(Ordering::Acquire) {
+            let deadline =
+                *stop_deadline.get_or_insert_with(|| Instant::now() + FRAME_PIPE_STOP_DRAIN_BUDGET);
+            if Instant::now() >= deadline {
+                return false;
+            }
+        }
+        match file.write(bytes) {
+            Ok(0) => return false,
+            Ok(n) => bytes = &bytes[n..],
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                match poll_pipe_writable(fd, FRAME_PIPE_POLL_TIMEOUT) {
+                    PipePoll::Writable => continue,
+                    PipePoll::Closed => return false,
+                    PipePoll::TimedOut => {
+                        if stop.load(Ordering::Acquire) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Writer end of the frame pipe: non-blocking write with bounded poll slices.
+/// Exits on `stop`, channel close (pw loop stopped), or pipe death/stall.
+fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd, stop: Arc<AtomicBool>) {
     let mut file = std::fs::File::from(write_fd);
-    while let Ok(frame) = rx.recv() {
-        if file.write_all(&frame.0).is_err() {
-            // EPIPE — ffmpeg is gone; nothing left to do.
+    loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let frame = match rx.recv_timeout(FRAME_PIPE_POLL_TIMEOUT) {
+            Ok(frame) => frame,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if !write_frame(&mut file, &frame.0, &stop) {
             break;
         }
     }

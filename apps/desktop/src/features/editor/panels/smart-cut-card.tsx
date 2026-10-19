@@ -1,177 +1,240 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Scissors } from "lucide-react"
-import { createRippleDeleteRangesCommand } from "@recordforge/editor-core"
-import type { SilenceRange } from "@recordforge/contracts"
+import type { SmartCutRange } from "@recordforge/editor-core"
 import {
   Button,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Skeleton,
   useToast,
 } from "@recordforge/ui"
-import { useLicenseStore } from "../../../stores/license-store"
+import { buildRenderPlan } from "@recordforge/media-core"
+import { cancelSmartCut, detectTimelineSilences } from "../../../lib/media"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { ProBadge } from "../../licensing/pro-badge"
-import { detectSilences } from "../../../lib/media"
-import { formatDuration } from "../../../lib/format"
+import { useEditorStore } from "../../../stores/editor-store"
+import { useLicenseStore } from "../../../stores/license-store"
+import { SmartCutScanControls } from "./smart-cut-controls"
+import { SmartCutReview } from "./smart-cut-review"
+import { createSmartCutSession, type SmartCutSession } from "./smart-cut-scan"
+import type { SmartCutResult, SmartCutScanConfig } from "./smart-cut-model"
 
-const THRESHOLD_OPTIONS = [
-  { value: "-30", label: "Quiet speech (−30 dB)" },
-  { value: "-35", label: "Balanced (−35 dB)" },
-  { value: "-40", label: "Only true silence (−40 dB)" },
-] as const
-
-const MIN_DURATION_OPTIONS = [
-  { value: "300", label: "0.3 s+" },
-  { value: "500", label: "0.5 s+" },
-  { value: "1000", label: "1 s+" },
-] as const
-
-function formatClock(ms: number): string {
-  const totalSeconds = Math.round(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`
-}
+// Scan → Review → Apply for Smart Cut. Analysis runs natively over the edited
+// timeline's mixed audio (the export audio graph), so detected pauses are
+// already in output-timeline coordinates — the same ms values a ripple-delete
+// consumes. All run ownership lives in createSmartCutSession; this component
+// only binds it to React state.
 
 export function SmartCutCard() {
-  const recording = useTimelineStore((state) => state.recording)
-  const execute = useTimelineStore((state) => state.execute)
-  const isPro = useLicenseStore((state) => state.status.tier === "pro")
-  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const { toast } = useToast()
+  const tier = useLicenseStore((state) => state.status.tier)
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
+  const isPro = tier === "pro"
+  const recording = useTimelineStore((state) => state.recording)
+  const present = useTimelineStore((state) => state.engine?.history.present)
+  // Revision-only edits (finishing settings, captions) bump this without
+  // touching `present` — subscribed so they still invalidate results.
+  const projectRevision = useTimelineStore((state) => state.projectRevision)
 
-  const [thresholdDb, setThresholdDb] = useState<string>("-35")
-  const [minDurationMs, setMinDurationMs] = useState<string>("500")
-  const [isScanning, setIsScanning] = useState(false)
+  // null selects the adaptive RMS calibration (the recommended default).
+  const [thresholdDb, setThresholdDb] = useState<number | null>(null)
+  const [minDurationMs, setMinDurationMs] = useState(500)
+  const [paddingMs, setPaddingMs] = useState(120)
+  const [phase, setPhase] = useState<"idle" | "scanning" | "review" | "error">("idle")
   const [scanError, setScanError] = useState<string | null>(null)
-  const [ranges, setRanges] = useState<SilenceRange[] | null>(null)
+  const [result, setResult] = useState<SmartCutResult | null>(null)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
 
-  const removedMs = ranges?.reduce((total, range) => total + (range.endMs - range.startMs), 0) ?? 0
+  const config: SmartCutScanConfig = { thresholdDb, minDurationMs, paddingMs }
 
-  async function handleScan() {
-    if (!isPro) {
-      openUpgradeDialog(["smart-cut"])
-      return
-    }
-    if (!recording) return
-    setIsScanning(true)
-    setScanError(null)
-    try {
-      const found = await detectSilences(recording.id, {
-        thresholdDb: Number(thresholdDb),
-        minDurationMs: Number(minDurationMs),
-      })
-      // Merge ranges that would collide after earlier cuts shift the tail —
-      // the command merges internally too, but the list shows what will go.
-      setRanges(found.filter((range) => range.endMs > range.startMs))
-    } catch {
-      setScanError("The silence scan failed — try again.")
-      setRanges(null)
-    } finally {
-      setIsScanning(false)
-    }
+  const sessionRef = useRef<SmartCutSession | null>(null)
+  if (sessionRef.current === null) {
+    sessionRef.current = createSmartCutSession({
+      getState: () => {
+        const store = useTimelineStore.getState()
+        return {
+          engine: store.engine,
+          project: store.project,
+          recording: store.recording,
+          projectRevision: store.projectRevision,
+        }
+      },
+      getTier: () => useLicenseStore.getState().status.tier,
+      saveFailed: () => useEditorStore.getState().saveStatus === "error",
+      save: () => useTimelineStore.getState().save(),
+      execute: (command) => useTimelineStore.getState().execute(command),
+      buildPlan: ({ state, projectId, settings, assets }) =>
+        buildRenderPlan({
+          state,
+          projectId,
+          settings,
+          captionMode: "none",
+          chapterMode: "none",
+          assets,
+        }),
+      detect: (recordingId, scanId, plan, thresholdDb, minDurationMs) =>
+        detectTimelineSilences(recordingId, scanId, { plan, thresholdDb, minDurationMs }),
+      cancel: (recordingId, scanId) => cancelSmartCut(recordingId, scanId),
+      openUpgrade: (features) => openUpgradeDialog(features),
+      audition: {
+        pause: () => useTimelineStore.getState().pause(),
+        play: () => useTimelineStore.getState().play(),
+        seek: (ms) => useTimelineStore.getState().seek(ms),
+        subscribePlayhead: (listener) =>
+          useTimelineStore.subscribe((state) => listener(state.view.playheadMs)),
+      },
+      newScanId: () => crypto.randomUUID(),
+      hooks: {
+        phase: setPhase,
+        scanError: setScanError,
+        result: setResult,
+        selected: setSelected,
+        toast: (t) => toast(t),
+      },
+    })
   }
+  const session = sessionRef.current
 
-  function handleApply() {
-    if (!ranges || ranges.length === 0) return
-    const ok = execute(createRippleDeleteRangesCommand(ranges))
-    if (ok) {
-      toast({
-        title: "Smart Cut applied",
-        description: `Removed ${ranges.length} silence${ranges.length === 1 ? "" : "s"} (${formatDuration(removedMs)}).`,
-      })
-      setRanges(null)
-    } else {
-      toast({
-        title: "Could not apply Smart Cut",
-        description: "The timeline may have changed since the scan.",
-        variant: "error",
-      })
-    }
-  }
+  // Mount lifecycle: setup re-arms the session so a StrictMode
+  // setup→cleanup→setup cycle can't leave it permanently dead; cleanup
+  // invalidates only the run owned at cleanup time.
+  useEffect(() => {
+    session.mount()
+    return () => session.unmount()
+  }, [session])
+
+  // Edits, recording/session changes, or scan-control changes cancel native
+  // work promptly and invalidate both result and active run. Seeking is view
+  // state and does not appear here.
+  useEffect(() => {
+    session.checkInvalidation(config, result)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    session,
+    present,
+    recording?.id,
+    projectRevision,
+    thresholdDb,
+    minDurationMs,
+    paddingMs,
+    result,
+  ])
+
+  const canScan = Boolean(recording && present) && phase !== "scanning"
+  const canApply = isPro && Boolean(result && selected.size > 0)
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface p-3">
-      <div className="flex items-center justify-between">
-        <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
-          <Scissors className="size-3.5 text-primary" aria-hidden />
-          Smart Cut
-          {!isPro ? <ProBadge /> : null}
-        </span>
-      </div>
-      <p className="text-[11px] leading-relaxed text-subtle-foreground">
-        Detect silent pauses and remove them across every track in one undoable step.
-      </p>
-
-      <div className="grid grid-cols-2 gap-2">
-        <Select value={thresholdDb} onValueChange={setThresholdDb}>
-          <SelectTrigger className="h-8" aria-label="Silence threshold">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {THRESHOLD_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={minDurationMs} onValueChange={setMinDurationMs}>
-          <SelectTrigger className="h-8" aria-label="Minimum silence duration">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {MIN_DURATION_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      {scanError ? (
-        <p className="text-[11px] font-medium text-destructive" role="alert">
-          {scanError}
-        </p>
-      ) : null}
-
-      {ranges !== null ? (
-        ranges.length === 0 ? (
-          <p className="text-[11px] text-subtle-foreground">
-            No silences found — try a lower threshold or shorter duration.
-          </p>
-        ) : (
-          <div className="flex flex-col gap-2">
-            <div className="max-h-32 overflow-y-auto rounded border border-border/60 bg-surface-dim p-2">
-              <ul className="flex flex-col gap-1 text-[11px] text-subtle-foreground">
-                {ranges.map((range) => (
-                  <li
-                    key={`${range.startMs}-${range.endMs}`}
-                    className="flex justify-between font-mono"
-                  >
-                    <span>
-                      {formatClock(range.startMs)} → {formatClock(range.endMs)}
-                    </span>
-                    <span>{formatDuration(range.endMs - range.startMs)}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <Button size="sm" onClick={handleApply}>
-              Remove {ranges.length} silence{ranges.length === 1 ? "" : "s"} · saves{" "}
-              {formatDuration(removedMs)}
-            </Button>
+    <Card className="border-none bg-surface-dim/80">
+      <CardHeader className="px-3 pt-3 pb-2">
+        <div className="flex items-center gap-2">
+          <Scissors className="size-4 text-subtle-foreground" aria-hidden />
+          <div className="flex-1">
+            <CardTitle className="text-xs">Smart Cut</CardTitle>
+            <CardDescription className="text-ui-caption">
+              Scan the edited timeline for silent pauses and remove them in one pass.
+            </CardDescription>
           </div>
-        )
-      ) : null}
+        </div>
+      </CardHeader>
+      <CardContent className="px-3 pb-3">
+        <div className="flex flex-col gap-2.5">
+          <SmartCutScanControls
+            thresholdDb={thresholdDb}
+            minDurationMs={minDurationMs}
+            paddingMs={paddingMs}
+            onThresholdDbChange={setThresholdDb}
+            onMinDurationMsChange={setMinDurationMs}
+            onPaddingMsChange={setPaddingMs}
+          />
 
-      <Button variant="outline" size="sm" onClick={handleScan} disabled={isScanning || !recording}>
-        {isScanning ? "Scanning…" : "Scan for silences"}
-      </Button>
-    </div>
+          {phase === "scanning" ? (
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-8 flex-1 rounded" />
+              <Button variant="outline" size="sm" onClick={() => session.cancelScan()}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void session.scan(config)}
+              disabled={!canScan}
+            >
+              Scan for pauses
+            </Button>
+          )}
+
+          {phase === "error" ? (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-ui-caption text-error">
+                {scanError ?? "The scan failed — try again."}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void session.scan(config)}
+                disabled={!canScan}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : null}
+
+          {phase === "review" && result ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-ui-micro text-subtle-foreground">
+                {result.calibration === "adaptive"
+                  ? `Calibrated to this recording — pauses at or below ${result.thresholdDb.toFixed(1)} dB RMS${result.noiseFloorDb !== null ? ` (measured floor ${result.noiseFloorDb.toFixed(1)} dB)` : ""}.`
+                  : `Manual sensitivity — pauses at or below ${result.thresholdDb.toFixed(1)} dB RMS.`}
+              </p>
+              {result.ranges.length === 0 ? (
+                <p className="text-ui-caption text-subtle-foreground">
+                  {result.wholeTimeline
+                    ? "No safe cuts: the detected pauses cover the entire timeline — removing them would delete the project."
+                    : "No silent pauses found at this sensitivity. Try a higher dB RMS setting or a shorter minimum pause."}
+                </p>
+              ) : (
+                <SmartCutReview
+                  result={result}
+                  ranges={result.ranges}
+                  selected={selected}
+                  onToggle={(index: number, checked: boolean) => {
+                    setSelected((previous) => {
+                      const next = new Set(previous)
+                      if (checked) next.add(index)
+                      else next.delete(index)
+                      return next
+                    })
+                  }}
+                  onSelectAll={() => setSelected(new Set(result.ranges.map((_, i) => i)))}
+                  onDeselectAll={() => setSelected(new Set())}
+                  onPreview={(range: SmartCutRange) => session.previewPause(range, result)}
+                />
+              )}
+              {result.ranges.length > 0 ? (
+                <div className="flex flex-col gap-1.5">
+                  <Button
+                    size="sm"
+                    onClick={() => session.apply(result, selected, config)}
+                    disabled={!canApply}
+                    title={isPro ? undefined : "Requires Pro"}
+                  >
+                    Remove selected pauses
+                  </Button>
+                  <p className="text-ui-micro text-subtle-foreground">
+                    {isPro
+                      ? "Applied as a single edit — one undo step restores everything."
+                      : "Smart Cut requires Pro."}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </CardContent>
+    </Card>
   )
 }

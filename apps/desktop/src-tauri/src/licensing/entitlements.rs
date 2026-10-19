@@ -141,17 +141,13 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
         push(AUTO_REFRAME);
     }
 
-    // Only real work counts — an enabled flag with no camera overlay never
-    // spawns a mask, so it never gates either.
-    let camera_in_plan = plan
-        .overlays
-        .iter()
-        .any(|overlay| overlay.visible && overlay.output_end_ms > overlay.output_start_ms);
-    if camera_in_plan
-        && settings
-            .webcam_background
-            .as_ref()
-            .is_some_and(|bg| bg.is_active())
+    // Gate on the active setting rather than plan contents: primary-camera
+    // recordings composite the person onto a background too (no overlay), so
+    // an enabled+active webcam background is real Pro work either way.
+    if settings
+        .webcam_background
+        .as_ref()
+        .is_some_and(|bg| bg.is_active())
     {
         push(VIRTUAL_BACKGROUND);
     }
@@ -523,12 +519,14 @@ mod tests {
         // Denoise OR a loudness target is enough to trip the gate.
         settings.audio_mastering = Some(crate::exports::AudioMastering {
             denoise: true,
+            noise_reduction_db: None,
             loudness_target: None,
         });
         assert_eq!(required_pro_features(&plan, &settings), vec![STUDIO_AUDIO]);
 
         settings.audio_mastering = Some(crate::exports::AudioMastering {
             denoise: false,
+            noise_reduction_db: None,
             loudness_target: Some(-16.0),
         });
         assert_eq!(required_pro_features(&plan, &settings), vec![STUDIO_AUDIO]);
@@ -536,6 +534,7 @@ mod tests {
         // Defaults stay Free.
         settings.audio_mastering = Some(crate::exports::AudioMastering {
             denoise: false,
+            noise_reduction_db: None,
             loudness_target: None,
         });
         assert!(required_pro_features(&plan, &settings).is_empty());

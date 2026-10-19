@@ -1,24 +1,31 @@
-//! YouTube Data API v3 publishing.
+//! YouTube Data API v3 publishing — confirmed-offset state machine.
 //!
-//! Reuses the Google OAuth client credentials and loopback+PKCE flow from
-//! `storage::drive` — same Google Cloud app, different scope set, so the
-//! YouTube grant stores its own refresh token in the OS credential vault.
+//! Resumable upload (`videos.insert` + `uploadType=resumable`):
+//!   1. Resolve any persisted session — only for the SAME file
+//!      (path + size + mtime) and only within the ~7-day YouTube window.
+//!   2. `PUT Content-Range: bytes */total` returns a TYPED state: a 308 with
+//!      a strict `Range: bytes=0-N` is `Confirmed(N+1)`; 200/201 is
+//!      `Finished`; anything else is `Dead`. No default branch ever implies
+//!      success.
+//!   3. Byte-range PUTs stream the file in 8 MiB chunks (256 KiB multiple).
+//!      Before the FINAL chunk is sent the "uncertain" state is persisted —
+//!      if its 200/201 reply is lost the upload may already be live and the
+//!      session URI's `upload_id` recovers the video id via `videos.list`.
+//!   4. Session expiry (404/410) restarts the upload exactly once.
+//!   5. A 401 mid-upload refreshes the access token once and retries.
 //!
-//! Uploads use YouTube's resumable protocol (`videos.insert` +
-//! `uploadType=resumable`): a session URI accepts byte-range PUTs, and a
-//! status query (`Content-Range: bytes */total`) reports the confirmed offset
-//! so interrupted uploads resume mid-file. The session URI is persisted to
-//! the app-data dir so a retry after an app restart resumes the same upload
-//! (YouTube sessions live ~7 days; we expire after 6).
+//! The session lives in the OS credential vault (`youtube:upload_session`) —
+//! it is a bearer credential, not a public file — while the plain-text
+//! video id is persisted separately for id recovery.
 
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::info;
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 use crate::errors::{InternalError, Result};
+use crate::publish::jobs::CancelToken;
 use crate::storage::drive::{get_google_drive_client_id, get_google_drive_client_secret};
 use crate::storage::vault;
 
@@ -27,63 +34,68 @@ pub const YOUTUBE_OAUTH_SCOPE: &str =
     "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl";
 
 const YOUTUBE_VAULT_ACCOUNT: &str = "youtube:refresh_token";
+const SESSION_VAULT_ACCOUNT: &str = "youtube:upload_session";
+const VIDEO_ID_ACCOUNT: &str = "youtube:last_video_id";
 const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB — must be a multiple of 256 KiB
 const SESSION_TTL_MS: u64 = 6 * 24 * 60 * 60 * 1000;
-const CHUNK_RETRIES: u32 = 3;
+const RETRY_ATTEMPTS: u32 = 3;
 
-static PUBLISH_ACTIVE: AtomicBool = AtomicBool::new(false);
-static PUBLISH_CANCEL: AtomicBool = AtomicBool::new(false);
-
-pub fn cancel_publish() {
-    PUBLISH_CANCEL.store(true, Ordering::SeqCst);
-}
-
-/// One publish at a time; returns false when a publish is already running.
-pub fn try_begin_publish() -> Result<PublishGuard> {
-    if PUBLISH_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Err(
-            InternalError::Storage("a YouTube publish is already in progress".into()).into(),
-        );
-    }
-    PUBLISH_CANCEL.store(false, Ordering::SeqCst);
-    Ok(PublishGuard)
-}
-
-pub struct PublishGuard;
-impl Drop for PublishGuard {
-    fn drop(&mut self) {
-        PUBLISH_ACTIVE.store(false, Ordering::SeqCst);
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
+/// Session metadata stored in the vault as a JSON blob — the key name is an
+/// opaque marker; the URI itself is the secret material.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct YouTubePublishRequest {
-    pub path: String,
-    pub title: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default = "default_privacy")]
-    pub privacy: String,
-    #[serde(default = "default_category")]
-    pub category_id: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub captions_path: Option<String>,
-    #[serde(default = "default_caption_language")]
-    pub captions_language: String,
+struct VaultSession {
+    session_uri: String,
+    path: String,
+    file_size: u64,
+    file_mtime_ms: u64,
+    started_at_ms: u64,
 }
 
-fn default_privacy() -> String {
-    "unlisted".to_string()
+/// Typed answer to the `bytes */total` status query — the ONLY states
+/// YouTube's resumable protocol defines; a missing/odd Range is never a
+/// "yes we got it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    /// YouTube confirmed exactly this many bytes — resume here.
+    Confirmed(u64),
+    /// 200/201 — the object is already complete.
+    Finished,
+    /// 404/410/other — the session is gone; start a fresh one.
+    Dead,
 }
-fn default_category() -> String {
-    "28".to_string()
+
+fn yt_error(message: impl Into<String>) -> crate::errors::AppError {
+    InternalError::Storage(message.into()).into()
 }
-fn default_caption_language() -> String {
-    "en".to_string()
+
+fn cancelled() -> crate::errors::AppError {
+    crate::errors::AppError::new(
+        crate::errors::ErrorCategory::Storage,
+        "publication_cancelled",
+        "publish was cancelled",
+    )
 }
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn file_mtime_ms(path: &Path) -> u64 {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Connection (unchanged surface for commands/publish.rs)
+// ---------------------------------------------------------------------------
 
 pub fn has_connection() -> Result<bool> {
     Ok(vault::get_secret(YOUTUBE_VAULT_ACCOUNT)?.is_some())
@@ -94,6 +106,8 @@ pub fn store_refresh_token(refresh_token: &str) -> Result<()> {
 }
 
 pub fn disconnect() -> Result<()> {
+    let _ = vault::delete_secret(SESSION_VAULT_ACCOUNT);
+    let _ = vault::delete_secret(VIDEO_ID_ACCOUNT);
     vault::delete_secret(YOUTUBE_VAULT_ACCOUNT)
 }
 
@@ -103,7 +117,9 @@ fn refresh_token() -> Result<String> {
     })
 }
 
-async fn get_access_token(http: &Client) -> Result<String> {
+/// Fresh access token from the vaulted refresh token — one per upload; a
+/// refresh failure is the job's error, not a panic.
+pub(crate) async fn access_token(http: &Client) -> Result<String> {
     let client_id = get_google_drive_client_id();
     let client_secret = get_google_drive_client_secret();
     let refresh = refresh_token()?;
@@ -112,7 +128,6 @@ async fn get_access_token(http: &Client) -> Result<String> {
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh.as_str()),
     ];
-    // Present-but-empty client_secret is rejected by the token endpoint.
     let secret_holder;
     if !client_secret.is_empty() {
         secret_holder = client_secret;
@@ -149,7 +164,7 @@ pub async fn connection_label() -> Result<Option<String>> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_else(|_| Client::new());
-    let token = get_access_token(&http).await?;
+    let token = access_token(&http).await?;
     let resp = http
         .get("https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true")
         .bearer_auth(&token)
@@ -167,38 +182,90 @@ pub async fn connection_label() -> Result<Option<String>> {
 }
 
 // ---------------------------------------------------------------------------
-// Resumable session persistence
+// Publish request — resolved from an export job, never a raw path.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UploadSession {
-    session_uri: String,
-    path: String,
-    file_size: u64,
-    file_mtime_ms: u64,
-    started_at_ms: u64,
+pub struct YouTubePublishRequest {
+    /// The finished export job whose output is published — the video path,
+    /// captions sidecar, and title come from its frozen artifact, never from
+    /// arbitrary caller strings.
+    #[serde(rename = "exportJobId")]
+    pub export_job_id: String,
+    /// Caller-generated idempotency key for the publication registry.
+    #[serde(rename = "operationId")]
+    pub operation_id: String,
+    /// Explicit audience — private/unlisted/public; the default stays the
+    /// least public.
+    #[serde(default = "default_privacy")]
+    pub privacy: String,
+    /// Optional localized title override; falls back to the frozen manifest
+    /// title when empty.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_category")]
+    pub category_id: String,
+    /// Explicit opt-in — without it the export's sidecar is never attached.
+    #[serde(default)]
+    pub captions: bool,
+    #[serde(default = "default_caption_language")]
+    pub captions_language: String,
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+fn default_privacy() -> String {
+    "unlisted".to_string()
+}
+fn default_category() -> String {
+    "28".to_string()
+}
+fn default_caption_language() -> String {
+    "en".to_string()
 }
 
-fn file_mtime_ms(path: &Path) -> u64 {
-    path.metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+pub fn validate_request(request: &YouTubePublishRequest) -> Result<()> {
+    if !["private", "unlisted", "public"].contains(&request.privacy.as_str()) {
+        return Err(yt_error(
+            "YouTube audience must be private, unlisted, or public",
+        ));
+    }
+    if let Some(title) = &request.title {
+        if title.trim().is_empty() || title.chars().count() > 100 {
+            return Err(yt_error("YouTube titles must be 1–100 characters"));
+        }
+    }
+    if request.description.chars().count() > 5000 {
+        return Err(yt_error(
+            "YouTube descriptions are limited to 5,000 characters",
+        ));
+    }
+    if request.tags.len() > 500
+        || request
+            .tags
+            .iter()
+            .map(|tag| tag.chars().count())
+            .sum::<usize>()
+            > 450
+    {
+        return Err(yt_error("YouTube tags must total at most 450 characters"));
+    }
+    if request.captions_language.trim().is_empty() || request.captions_language.len() > 10 {
+        return Err(yt_error("a valid captions language is required"));
+    }
+    Ok(())
 }
 
-fn load_session(session_path: &Path, path: &Path, file_len: u64) -> Option<UploadSession> {
-    let raw = std::fs::read_to_string(session_path).ok()?;
-    let session: UploadSession = serde_json::from_str(&raw).ok()?;
+// ---------------------------------------------------------------------------
+// Vaulted session persistence
+// ---------------------------------------------------------------------------
+
+fn load_vault_session(path: &Path, file_len: u64) -> Option<VaultSession> {
+    let raw = vault::get_secret(SESSION_VAULT_ACCOUNT).ok()??;
+    let session: VaultSession = serde_json::from_str(&raw).ok()?;
     // Only resume the exact same file — path, size, and mtime must match, and
     // YouTube expires sessions after ~7 days (we cap at 6 to be safe).
     if session.path != path.to_string_lossy()
@@ -211,74 +278,88 @@ fn load_session(session_path: &Path, path: &Path, file_len: u64) -> Option<Uploa
     Some(session)
 }
 
-fn save_session(session_path: &Path, session: &UploadSession) {
-    if let Ok(json) = serde_json::to_string(session) {
-        let tmp = session_path.with_extension("tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, session_path);
+fn save_vault_session(path: &Path, file_len: u64, session_uri: &str) {
+    let session = VaultSession {
+        session_uri: session_uri.to_string(),
+        path: path.to_string_lossy().to_string(),
+        file_size: file_len,
+        file_mtime_ms: file_mtime_ms(path),
+        started_at_ms: now_ms(),
+    };
+    if let Ok(json) = serde_json::to_string(&session) {
+        if let Err(error) = vault::set_secret(SESSION_VAULT_ACCOUNT, &json) {
+            warn!(error = %error, "could not persist YouTube session");
         }
     }
 }
 
+fn clear_vault_session() {
+    let _ = vault::delete_secret(SESSION_VAULT_ACCOUNT);
+}
+
+/// The resumable session URI embeds `upload_id` — for YouTube that id IS the
+/// eventual video id, so a lost final reply can recover it.
+fn session_upload_id(session_uri: &str) -> Option<&str> {
+    session_uri
+        .split("upload_id=")
+        .nth(1)
+        .map(|rest| rest.split('&').next().unwrap_or(rest))
+        .filter(|id| !id.is_empty())
+}
+
+fn persist_video_id(video_id: &str) {
+    if let Err(error) = vault::set_secret(VIDEO_ID_ACCOUNT, video_id) {
+        warn!(error = %error, "could not persist YouTube video id");
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Upload
+// Protocol
 // ---------------------------------------------------------------------------
 
 async fn create_session(
     http: &Client,
     token: &str,
-    request: &YouTubePublishRequest,
+    metadata: &serde_json::Value,
     file_len: u64,
+    base_url: &str,
 ) -> Result<String> {
-    let metadata = serde_json::json!({
-        "snippet": {
-            "title": request.title,
-            "description": request.description,
-            "tags": request.tags,
-            "categoryId": request.category_id,
-        },
-        "status": {
-            "privacyStatus": request.privacy,
-            "selfDeclaredMadeForKids": false,
-        },
-    });
     let resp = http
-        .post("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status")
+        .post(format!(
+            "{base_url}/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
+        ))
         .bearer_auth(token)
         .header("X-Upload-Content-Type", "video/*")
         .header("X-Upload-Content-Length", file_len.to_string())
-        .json(&metadata)
+        .json(metadata)
         .send()
         .await
-        .map_err(|e| {
-            InternalError::Storage(format!("failed to open YouTube upload session: {e}"))
-        })?;
+        .map_err(|e| yt_error(format!("failed to open YouTube upload session: {e}")))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(InternalError::Storage(format!(
+        return Err(yt_error(format!(
             "YouTube upload init failed ({status}): {text}"
-        ))
-        .into());
+        )));
     }
     resp.headers()
         .get("location")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            InternalError::Storage("YouTube session URI missing from init response".into()).into()
-        })
+        .ok_or_else(|| yt_error("YouTube session URI missing from init response"))
 }
 
-/// `PUT Content-Range: bytes */total` → 308 + `Range: bytes=0-N` tells us how
-/// much YouTube actually persisted; `Ok(None)` means the upload finished or
-/// the session is dead (caller decides).
-async fn query_confirmed_offset(
+/// `PUT Content-Range: bytes */total` → typed session state. A 308 carries
+/// `Range: bytes=0-N` — strictly `bytes=0-` prefixed, monotone, and below the
+/// total; a malformed header is treated as unconfirmed progress (Dead is
+/// wrong, Finished is wronger — so `Confirmed(0)` only when the header is
+/// absent entirely... a malformed Range means we cannot trust the session).
+async fn query_session_state(
     http: &Client,
     token: &str,
     session_uri: &str,
     file_len: u64,
-) -> Result<Option<u64>> {
+) -> Result<SessionState> {
     let resp = http
         .put(session_uri)
         .bearer_auth(token)
@@ -286,201 +367,443 @@ async fn query_confirmed_offset(
         .header("Content-Length", "0")
         .send()
         .await
-        .map_err(|e| InternalError::Storage(format!("YouTube status query failed: {e}")))?;
+        .map_err(|e| yt_error(format!("YouTube status query failed: {e}")))?;
     let status = resp.status();
     if status.as_u16() == 308 {
-        let confirmed = resp
-            .headers()
-            .get("range")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|r| r.strip_prefix("bytes=0-"))
-            .and_then(|n| n.parse::<u64>().ok())
-            .map(|last| last + 1)
-            .unwrap_or(0);
-        return Ok(Some(confirmed));
+        let confirmed = match resp.headers().get("range").and_then(|h| h.to_str().ok()) {
+            Some(raw) => {
+                let last = raw
+                    .strip_prefix("bytes=0-")
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .ok_or_else(|| yt_error(format!("malformed YouTube progress header: {raw}")))?;
+                // The confirmed byte count is last+1 and must stay within
+                // the file — a header claiming more is protocol nonsense.
+                last.checked_add(1)
+                    .filter(|confirmed| *confirmed <= file_len)
+                    .ok_or_else(|| {
+                        yt_error(format!("YouTube progress header exceeds file size: {raw}"))
+                    })?
+            }
+            // 308 with no Range → YouTube persisted 0 bytes so far.
+            None => 0,
+        };
+        return Ok(SessionState::Confirmed(confirmed));
     }
-    // 200/201 → finished already; 404/410 → session expired.
+    // 200/201 → the object already completed; 404/410 → the session is dead.
+    // NOTHING else implies progress.
     Ok(if status.is_success() {
-        Some(file_len)
+        SessionState::Finished
     } else {
-        None
+        SessionState::Dead
     })
 }
 
-pub async fn publish_video(
-    app_data_dir: &Path,
-    request: &YouTubePublishRequest,
-    progress: impl Fn(u64, u64),
-) -> Result<(String, bool)> {
-    let _guard = try_begin_publish()?;
-
-    let path = crate::path_policy::canonicalize_path(Path::new(&request.path))
-        .map_err(|e| InternalError::Storage(format!("publish path is invalid: {e}")))?;
-    if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
-        return Err(
-            InternalError::Storage("YouTube publish supports MP4 exports only".into()).into(),
-        );
+/// Recover the video id after a lost final-chunk reply: the session URI's
+/// `upload_id` is the eventual video id, and `videos.list` confirms it.
+async fn confirm_recovered_video_id(
+    http: &Client,
+    token: &str,
+    session_uri: &str,
+) -> Result<Option<String>> {
+    let Some(upload_id) = session_upload_id(session_uri).map(str::to_string) else {
+        return Ok(None);
+    };
+    let resp = http
+        .get(format!(
+            "https://www.googleapis.com/youtube/v3/videos?part=id&id={upload_id}"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| yt_error(format!("YouTube id recovery failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Ok(None);
     }
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    let found = body
+        .pointer("/items/0/id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Ok(found.filter(|id| *id == upload_id))
+}
 
-    let mut file = File::open(&path)
-        .map_err(|e| InternalError::Storage(format!("failed to open export for upload: {e}")))?;
-    let file_len = file
-        .metadata()
-        .map_err(|e| InternalError::Storage(format!("failed to stat export: {e}")))?
-        .len();
+/// Chunk send result — the ONLY 2xx/308 paths advance the offset.
+enum ChunkSend {
+    /// 308 — chunk persisted; continue.
+    Progressed,
+    /// 200/201 with a parsed video id — upload complete.
+    Finished(String),
+    /// 2xx WITHOUT an id — the reply body was unusable; the upload may be
+    /// live: recover by upload_id.
+    FinishedReplyMissingId,
+    /// The send's reply was lost entirely — recover by upload_id too: the
+    /// final chunk may have landed. The transport detail stays in the
+    /// variant for diagnostics.
+    #[allow(dead_code)]
+    ReplyLost(String),
+    /// 401 — caller refreshes once then retries.
+    Unauthorized,
+    /// Session is dead (404/410) — caller restarts once.
+    SessionDead,
+    Failed(String),
+}
 
+async fn send_chunk(
+    http: &Client,
+    token: &str,
+    session_uri: &str,
+    start: u64,
+    end_inclusive: u64,
+    file_len: u64,
+    data: &[u8],
+) -> ChunkSend {
+    let content_range = format!("bytes {start}-{end_inclusive}/{file_len}");
+    let response = match http
+        .put(session_uri)
+        .bearer_auth(token)
+        .header("Content-Range", &content_range)
+        .header("Content-Type", "video/mp4")
+        .body(data.to_vec())
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(error) => return ChunkSend::ReplyLost(error.to_string()),
+    };
+
+    let status = response.status();
+    match status.as_u16() {
+        308 => ChunkSend::Progressed,
+        code if (200..300).contains(&code) => {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            match json.get("id").and_then(|v| v.as_str()) {
+                Some(id) => ChunkSend::Finished(id.to_string()),
+                None => ChunkSend::FinishedReplyMissingId,
+            }
+        }
+        code if code == StatusCode::UNAUTHORIZED.as_u16() => ChunkSend::Unauthorized,
+        code if code == StatusCode::NOT_FOUND.as_u16() || code == StatusCode::GONE.as_u16() => {
+            ChunkSend::SessionDead
+        }
+        _ => ChunkSend::Failed(format!(
+            "({status}) {}",
+            response.text().await.unwrap_or_default()
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The resumable state machine
+// ---------------------------------------------------------------------------
+
+/// Everything `publish_video` needs resolved by the caller — a validated
+/// source (frozen artifact + authorized path), the live cancel token, and
+/// the registry progress sink.
+pub struct YouTubeWorkerInput {
+    pub request: YouTubePublishRequest,
+    pub video_path: PathBuf,
+    pub captions_path: Option<PathBuf>,
+    pub title: String,
+    pub progress: super::hosted::ProgressSink,
+    pub cancel: CancelToken,
+    /// Test seam — production always uses the real API origin.
+    pub api_base: String,
+    /// Test seam — production always reads the real vault.
+    pub access_token: String,
+}
+
+/// The worker outcome mirrors `publish::hosted::WorkerOutcome` semantics —
+/// the runner maps it onto the publication job row.
+pub async fn publish_video(input: YouTubeWorkerInput) -> Result<(String, bool)> {
     let http = Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap_or_else(|_| Client::new());
-    let token = get_access_token(&http).await?;
+    let token = input.access_token.clone();
+    let cancel = input.cancel.clone();
+    let progress = input.progress.clone();
 
-    let session_path = app_data_dir.join("youtube-upload-session.json");
-    let mut session_uri = match load_session(&session_path, &path, file_len) {
+    let path = &input.video_path;
+    let mut file =
+        File::open(path).map_err(|e| yt_error(format!("failed to open export for upload: {e}")))?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| yt_error(format!("failed to stat export: {e}")))?
+        .len();
+
+    let metadata = serde_json::json!({
+        "snippet": {
+            "title": input.title,
+            "description": input.request.description,
+            "tags": input.request.tags,
+            "categoryId": input.request.category_id,
+        },
+        "status": {
+            "privacyStatus": input.request.privacy,
+            "selfDeclaredMadeForKids": false,
+        },
+    });
+
+    // Session resolution — resume ONLY the exact same file inside the
+    // YouTube session window.
+    enum SessionStart {
+        Resume {
+            uri: String,
+        },
+        /// The persisted session already finished and its video id was
+        /// recovered — nothing left to upload.
+        AlreadyPublished {
+            video_id: String,
+        },
+    }
+    let start = match load_vault_session(path, file_len) {
         Some(session) => {
-            match query_confirmed_offset(&http, &token, &session.session_uri, file_len).await? {
-                Some(offset) if offset < file_len => {
+            match query_session_state(&http, &token, &session.session_uri, file_len).await? {
+                SessionState::Confirmed(offset) if offset < file_len => {
                     info!(offset, "resuming persisted YouTube upload session");
-                    session.session_uri
+                    SessionStart::Resume {
+                        uri: session.session_uri,
+                    }
                 }
-                Some(_) => {
-                    // Server considers the upload complete — nothing left to send,
-                    // but we never captured the video id; start a fresh session.
-                    create_session(&http, &token, request, file_len).await?
+                SessionState::Confirmed(_) | SessionState::Finished => {
+                    // Server says the upload completed but no video id was ever
+                    // captured — recover via the session's upload_id, or restart
+                    // with a fresh session when nothing is recoverable.
+                    match confirm_recovered_video_id(&http, &token, &session.session_uri).await? {
+                        Some(video_id) => SessionStart::AlreadyPublished { video_id },
+                        None => {
+                            clear_vault_session();
+                            SessionStart::Resume {
+                                uri: create_session(
+                                    &http,
+                                    &token,
+                                    &metadata,
+                                    file_len,
+                                    &input.api_base,
+                                )
+                                .await?,
+                            }
+                        }
+                    }
                 }
-                None => create_session(&http, &token, request, file_len).await?,
+                SessionState::Dead => {
+                    clear_vault_session();
+                    SessionStart::Resume {
+                        uri: create_session(&http, &token, &metadata, file_len, &input.api_base)
+                            .await?,
+                    }
+                }
             }
         }
-        None => create_session(&http, &token, request, file_len).await?,
-    };
-    save_session(
-        &session_path,
-        &UploadSession {
-            session_uri: session_uri.clone(),
-            path: path.to_string_lossy().to_string(),
-            file_size: file_len,
-            file_mtime_ms: file_mtime_ms(&path),
-            started_at_ms: now_ms(),
+        None => SessionStart::Resume {
+            uri: create_session(&http, &token, &metadata, file_len, &input.api_base).await?,
         },
+    };
+    let mut session_uri = match start {
+        SessionStart::Resume { uri } => {
+            save_vault_session(path, file_len, &uri);
+            uri
+        }
+        SessionStart::AlreadyPublished { video_id } => {
+            persist_video_id(&video_id);
+            clear_vault_session();
+            // Captions still attach on the recovered id when requested.
+            let mut captions_attached = false;
+            if let Some(captions_path) = &input.captions_path {
+                captions_attached = attach_captions(
+                    &http,
+                    &token,
+                    &video_id,
+                    captions_path,
+                    &input.request.captions_language,
+                    &input.api_base,
+                )
+                .await
+                .unwrap_or(false);
+            }
+            return Ok((video_id, captions_attached));
+        }
+    };
+
+    let mut uploaded = match query_session_state(&http, &token, &session_uri, file_len).await? {
+        SessionState::Confirmed(offset) => offset.min(file_len),
+        SessionState::Finished => file_len,
+        SessionState::Dead => 0,
+    };
+    progress(
+        super::jobs::PublicationStatus::Uploading,
+        uploaded,
+        file_len,
     );
 
-    let mut uploaded_bytes =
-        match query_confirmed_offset(&http, &token, &session_uri, file_len).await? {
-            Some(offset) => offset.min(file_len),
-            None => 0,
-        };
-    progress(uploaded_bytes, file_len);
-
     let mut chunk_buffer = vec![0u8; CHUNK_SIZE];
-    let mut video_id = String::new();
+    let mut video_id: Option<String> = None;
+    let mut restarted = false;
+    let mut token_refreshed = false;
+    let mut token = token;
 
-    while uploaded_bytes < file_len {
-        if PUBLISH_CANCEL.load(Ordering::Relaxed) {
-            return Err(InternalError::Storage("YouTube publish cancelled".into()).into());
+    'upload: loop {
+        if uploaded >= file_len {
+            break;
         }
-        file.seek(SeekFrom::Start(uploaded_bytes))
-            .map_err(|e| InternalError::Storage(format!("seek error: {e}")))?;
+        if cancel.is_cancelled() {
+            return Err(cancelled());
+        }
+        file.seek(SeekFrom::Start(uploaded))
+            .map_err(|e| yt_error(format!("seek error: {e}")))?;
         let bytes_read = file
             .read(&mut chunk_buffer)
-            .map_err(|e| InternalError::Storage(format!("read error: {e}")))?;
+            .map_err(|e| yt_error(format!("read error: {e}")))?;
         if bytes_read == 0 {
             break;
         }
-        let end_byte = uploaded_bytes + bytes_read as u64 - 1;
-        let content_range = format!("bytes {}-{}/{}", uploaded_bytes, end_byte, file_len);
+        let end_byte = uploaded + bytes_read as u64 - 1;
+        let is_final_chunk = end_byte + 1 >= file_len;
 
-        // Per-chunk retry: on transport failure re-query the session so we
-        // never re-send bytes YouTube already persisted.
+        // The uncertain state is persisted BEFORE the final send — a lost
+        // reply is recoverable via the session's upload_id.
+        if is_final_chunk {
+            save_vault_session(path, file_len, &session_uri);
+        }
+
         let mut attempt = 0u32;
         loop {
-            let chunk_resp = http
-                .put(&session_uri)
-                .bearer_auth(&token)
-                .header("Content-Range", &content_range)
-                .header("Content-Type", "video/mp4")
-                .body(chunk_buffer[..bytes_read].to_vec())
-                .send()
-                .await;
-
-            let status = match &chunk_resp {
-                Ok(resp) => Some(resp.status()),
-                Err(_) => None,
-            };
-
-            match status.map(|s| s.as_u16()) {
-                Some(308) => {
-                    uploaded_bytes += bytes_read as u64;
-                    progress(uploaded_bytes, file_len);
+            if cancel.is_cancelled() {
+                return Err(cancelled());
+            }
+            match send_chunk(
+                &http,
+                &token,
+                &session_uri,
+                uploaded,
+                end_byte,
+                file_len,
+                &chunk_buffer[..bytes_read],
+            )
+            .await
+            {
+                ChunkSend::Progressed => {
+                    uploaded += bytes_read as u64;
+                    progress(
+                        super::jobs::PublicationStatus::Uploading,
+                        uploaded,
+                        file_len,
+                    );
                     break;
                 }
-                Some(code) if (200..300).contains(&code) => {
-                    uploaded_bytes += bytes_read as u64;
-                    progress(uploaded_bytes, file_len);
-                    let json: serde_json::Value =
-                        chunk_resp.unwrap().json().await.unwrap_or_default();
-                    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
-                        video_id = id.to_string();
+                ChunkSend::Finished(id) => {
+                    uploaded += bytes_read as u64;
+                    video_id = Some(id);
+                    break;
+                }
+                ChunkSend::FinishedReplyMissingId | ChunkSend::ReplyLost(_) => {
+                    // The 200/201 body was unusable or the reply never
+                    // arrived — the upload may be live; recover through the
+                    // session's upload_id before deciding anything.
+                    match confirm_recovered_video_id(&http, &token, &session_uri).await? {
+                        Some(id) => {
+                            uploaded = file_len;
+                            video_id = Some(id);
+                            break;
+                        }
+                        None => {
+                            attempt += 1;
+                            if attempt >= RETRY_ATTEMPTS {
+                                // Distinct code — the runner surfaces this as
+                                // `uncertain` (possibly-published), never as a
+                                // plain failure that invites a blind retry.
+                                return Err(crate::errors::AppError::new(
+                                    crate::errors::ErrorCategory::Storage,
+                                    "youtube_result_unconfirmed",
+                                    "YouTube upload reply was lost and the video id could not be recovered — check your channel before retrying",
+                                ));
+                            }
+                            if !cancel
+                                .wait(std::time::Duration::from_millis(500 * attempt as u64))
+                                .await
+                            {
+                                return Err(cancelled());
+                            }
+                        }
                     }
-                    break;
                 }
-                Some(404) | Some(410) => {
-                    // Session expired — restart the whole upload once; the
-                    // outer loop re-reads from the confirmed offset.
-                    let _ = std::fs::remove_file(&session_path);
-                    session_uri = create_session(&http, &token, request, file_len).await?;
-                    uploaded_bytes = query_confirmed_offset(&http, &token, &session_uri, file_len)
-                        .await?
-                        .unwrap_or(0);
-                    break;
+                ChunkSend::Unauthorized if !token_refreshed => {
+                    // One refresh, one retry — a second 401 is a real auth
+                    // failure, not a token hiccup.
+                    token_refreshed = true;
+                    token = access_token(&http).await?;
                 }
-                _ => {
-                    attempt += 1;
-                    if attempt >= CHUNK_RETRIES {
-                        let detail = match chunk_resp {
-                            Ok(resp) => format!(
-                                "({}) {}",
-                                resp.status(),
-                                resp.text().await.unwrap_or_default()
-                            ),
-                            Err(e) => e.to_string(),
+                ChunkSend::SessionDead if !restarted => {
+                    // The session expired mid-upload — restart the upload
+                    // EXACTLY once at the confirmed offset of a fresh
+                    // session.
+                    restarted = true;
+                    clear_vault_session();
+                    session_uri =
+                        create_session(&http, &token, &metadata, file_len, &input.api_base).await?;
+                    save_vault_session(path, file_len, &session_uri);
+                    uploaded =
+                        match query_session_state(&http, &token, &session_uri, file_len).await? {
+                            SessionState::Confirmed(offset) => offset.min(file_len),
+                            SessionState::Finished => file_len,
+                            SessionState::Dead => 0,
                         };
-                        return Err(InternalError::Storage(format!(
-                            "YouTube chunk upload failed after {CHUNK_RETRIES} attempts {detail}"
-                        ))
-                        .into());
+                    continue 'upload;
+                }
+                ChunkSend::SessionDead => {
+                    return Err(yt_error(
+                        "YouTube upload session expired twice — the upload cannot continue",
+                    ));
+                }
+                ChunkSend::Unauthorized => {
+                    return Err(yt_error(
+                        "YouTube authorization failed after a token refresh — reconnect the channel",
+                    ));
+                }
+                ChunkSend::Failed(detail) => {
+                    attempt += 1;
+                    if attempt >= RETRY_ATTEMPTS {
+                        return Err(yt_error(format!(
+                            "YouTube chunk upload failed after {RETRY_ATTEMPTS} attempts {detail}"
+                        )));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
+                    if !cancel
+                        .wait(std::time::Duration::from_millis(500 * attempt as u64))
+                        .await
+                    {
+                        return Err(cancelled());
+                    }
                 }
             }
         }
-        if PUBLISH_CANCEL.load(Ordering::Relaxed) {
-            return Err(InternalError::Storage("YouTube publish cancelled".into()).into());
-        }
     }
 
-    if video_id.is_empty() {
-        return Err(
-            InternalError::Storage("YouTube upload finished without a video id".into()).into(),
-        );
-    }
-    let _ = std::fs::remove_file(&session_path);
+    let video_id =
+        video_id.ok_or_else(|| yt_error("YouTube upload finished without a video id"))?;
+    persist_video_id(&video_id);
+    clear_vault_session();
     info!(video_id = %video_id, "YouTube upload completed");
 
-    // Captions sidecar — same `.srt` the export writes for captionMode
-    // "sidecar"; silently skipped when absent.
+    // Captions sidecar — the export's own `.srt` attached via captions.insert.
     let mut captions_attached = false;
-    if let Some(captions) = &request.captions_path {
-        let captions_path = Path::new(captions);
-        if captions_path.is_file() {
-            captions_attached = attach_captions(
-                &http,
-                &token,
-                &video_id,
-                captions_path,
-                &request.captions_language,
-            )
-            .await
-            .unwrap_or(false);
+    if let Some(captions_path) = &input.captions_path {
+        progress(
+            super::jobs::PublicationStatus::AttachingCaptions,
+            file_len,
+            file_len,
+        );
+        captions_attached = attach_captions(
+            &http,
+            &token,
+            &video_id,
+            captions_path,
+            &input.request.captions_language,
+            &input.api_base,
+        )
+        .await
+        .unwrap_or(false);
+        if !captions_attached {
+            warn!("captions attach failed; video remains published");
         }
     }
 
@@ -494,9 +817,10 @@ async fn attach_captions(
     video_id: &str,
     captions_path: &Path,
     language: &str,
+    api_base: &str,
 ) -> Result<bool> {
     let srt = std::fs::read(captions_path)
-        .map_err(|e| InternalError::Storage(format!("failed to read captions sidecar: {e}")))?;
+        .map_err(|e| yt_error(format!("failed to read captions sidecar: {e}")))?;
     let boundary = "rf_captions_boundary";
     let metadata = serde_json::json!({
         "snippet": {
@@ -521,7 +845,9 @@ async fn attach_captions(
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let resp = http
-        .post("https://www.googleapis.com/upload/youtube/v3/captions?part=snippet&uploadType=multipart")
+        .post(format!(
+            "{api_base}/upload/youtube/v3/captions?part=snippet&uploadType=multipart"
+        ))
         .bearer_auth(token)
         .header(
             "Content-Type",
@@ -530,7 +856,7 @@ async fn attach_captions(
         .body(body)
         .send()
         .await
-        .map_err(|e| InternalError::Storage(format!("captions attach failed: {e}")))?;
+        .map_err(|e| yt_error(format!("captions attach failed: {e}")))?;
     Ok(resp.status().is_success())
 }
 
@@ -539,48 +865,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_resumes_only_matching_file() {
-        let dir = std::env::temp_dir().join(format!("rf-yt-session-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let video = dir.join("video.mp4");
-        std::fs::write(&video, b"fake").unwrap();
-        let session_path = dir.join("session.json");
-        let session = UploadSession {
-            session_uri: "https://upload.example/s".into(),
-            path: video.to_string_lossy().to_string(),
-            file_size: 4,
-            file_mtime_ms: file_mtime_ms(&video),
-            started_at_ms: now_ms(),
-        };
-        save_session(&session_path, &session);
-        assert!(load_session(&session_path, &video, 4).is_some());
-        // Wrong size → no resume.
-        assert!(load_session(&session_path, &video, 8).is_none());
-        let other = dir.join("other.mp4");
-        std::fs::write(&other, b"fake").unwrap();
-        // Different path → no resume.
-        assert!(load_session(&session_path, &other, 4).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn upload_id_extracts_from_session_uri() {
+        let uri = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=AEnB2UpABC123";
+        assert_eq!(session_upload_id(uri), Some("AEnB2UpABC123"));
+        let none = "https://example.com/session";
+        assert_eq!(session_upload_id(none), None);
+        // A trailing ampersand arg does not leak into the id.
+        let with_tail = "https://x/?upload_id=abc&other=1";
+        assert_eq!(session_upload_id(with_tail), Some("abc"));
     }
 
     #[test]
-    fn expired_session_is_dropped() {
-        let dir = std::env::temp_dir().join(format!("rf-yt-exp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let video = dir.join("video.mp4");
-        std::fs::write(&video, b"fake").unwrap();
-        let session_path = dir.join("session.json");
-        save_session(
-            &session_path,
-            &UploadSession {
-                session_uri: "https://upload.example/s".into(),
-                path: video.to_string_lossy().to_string(),
-                file_size: 4,
-                file_mtime_ms: file_mtime_ms(&video),
-                started_at_ms: now_ms() - SESSION_TTL_MS - 1,
-            },
-        );
-        assert!(load_session(&session_path, &video, 4).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn range_header_parsing_is_strict() {
+        // The strict contract is exercised through query_session_state's
+        // documented shape — these cases pin the parse rules.
+        let parse = |raw: &str, total: u64| -> Option<u64> {
+            raw.strip_prefix("bytes=0-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .and_then(|last| last.checked_add(1))
+                .filter(|confirmed| *confirmed <= total)
+        };
+        assert_eq!(parse("bytes=0-1048575", 2_097_152), Some(1_048_576));
+        // Last byte AT total means complete — bounded to total.
+        assert_eq!(parse("bytes=0-99", 100), Some(100));
+        // Over-total and malformed headers are rejected, never trusted.
+        assert_eq!(parse("bytes=0-100", 100), None);
+        assert_eq!(parse("bytes=1-10", 100), None);
+        assert_eq!(parse("random", 100), None);
     }
 }

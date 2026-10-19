@@ -24,6 +24,7 @@ pub(crate) enum ConnectorPath {
     },
 }
 
+#[cfg_attr(not(feature = "native-render"), allow(dead_code))]
 impl ConnectorPath {
     pub(crate) fn start(&self) -> (f32, f32) {
         match *self {
