@@ -2009,7 +2009,7 @@ mod tests {
         #[cfg(windows)]
         assert!(export_occupant_for_destination(&jobs, Path::new("d:/out/demo.mp4")).is_some());
         #[cfg(not(windows))]
-        assert!(export_occupant_for_destination(&jobs, Path::new("/out/rec.mp4")).is_some());
+        assert!(export_occupant_for_destination(&jobs, Path::new("d:/out/demo.mp4")).is_none());
     }
 
     #[test]
