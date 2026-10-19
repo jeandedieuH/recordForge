@@ -41,6 +41,10 @@ pub fn label_is_safe(label: &str) -> bool {
 
 /// Held modifiers at a physical key edge. `alt_gr` is the Windows-specific
 /// right-Alt+Ctrl synthesis — real left-Ctrl+left-Alt shortcuts still pass.
+/// Only the Windows and macOS samplers construct this; the Linux stub emits
+/// no events, so gate it (and `combo_is_allowed`) to keep the Linux build
+/// dead-code-clean while tests still exercise the policy.
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ModifierState {
     pub ctrl: bool,
@@ -65,6 +69,7 @@ pub(crate) struct ModifierState {
 /// - Ctrl/Command/Win combos are real shortcuts; Alt or Shift with
 ///   non-printable keys (navigation, function keys, Enter/Esc/Tab) are
 ///   shortcuts too (Alt+Tab, Shift+Tab, Ctrl+Alt+Del).
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn combo_is_allowed(mods: ModifierState, key_is_printable: bool) -> bool {
     if !(mods.ctrl || mods.alt || mods.shift || mods.win) {
         return false;

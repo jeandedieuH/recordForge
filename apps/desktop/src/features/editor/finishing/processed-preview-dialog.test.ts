@@ -4,11 +4,7 @@
 // especially the dead-end where an old playback error suppressed a rebuilt
 // player's mount.
 import { describe, expect, it } from "vitest"
-import {
-  computePreviewView,
-  mediaErrorApplies,
-  type MediaError,
-} from "./processed-preview-dialog"
+import { computePreviewView, mediaErrorApplies, type MediaError } from "./processed-preview-dialog"
 
 const err = (overrides: Partial<MediaError> = {}): MediaError => ({
   jobId: "job-1",
@@ -97,13 +93,11 @@ describe("computePreviewView", () => {
     expect(computePreviewView({ ...base, job: { status: "failed" }, hasOutput: false })).toBe(
       "job-error",
     )
-    expect(
-      computePreviewView({ ...base, job: { status: "cancelled" }, hasOutput: false }),
-    ).toBe("job-error")
+    expect(computePreviewView({ ...base, job: { status: "cancelled" }, hasOutput: false })).toBe(
+      "job-error",
+    )
     expect(computePreviewView({ ...base, job: null, hasOutput: false })).toBe("empty")
     // Completed status but nothing to play — surface empty, not a broken player.
-    expect(
-      computePreviewView({ ...base, job: completedJob, hasOutput: false }),
-    ).toBe("empty")
+    expect(computePreviewView({ ...base, job: completedJob, hasOutput: false })).toBe("empty")
   })
 })
