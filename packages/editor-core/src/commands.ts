@@ -3345,7 +3345,10 @@ function applyUpdateCanvas(
     if (canvasSizeForAspectRatio(targetAspectRatio, nextCanvas) === undefined) {
       return {
         ok: false,
-        error: editorError("invalid_canvas", `Unsupported canvas aspect ratio: ${targetAspectRatio}`),
+        error: editorError(
+          "invalid_canvas",
+          `Unsupported canvas aspect ratio: ${targetAspectRatio}`,
+        ),
       }
     }
   }
