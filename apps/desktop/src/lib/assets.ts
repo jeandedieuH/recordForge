@@ -19,7 +19,6 @@ import {
   type MediaMetadata,
 } from "@recordforge/contracts"
 import { convertFileSrc } from "@tauri-apps/api/core"
-import { z } from "zod"
 import { invokeValidated } from "./ipc"
 import { isTauri } from "./settings"
 
@@ -143,26 +142,4 @@ export function startAssetDerivativeJob(request: AssetDerivativeJobRequest): Pro
 
 export function getProjectAssetPaths(recordingId: string): Promise<ProjectAssetPathMap> {
   return invokeValidated("get_project_asset_paths", { recordingId }, projectAssetPathMapSchema)
-}
-
-/**
- * Brand Kit (Pro): copy a picked logo/font into the project's `brand/` dir.
- * Returns the project-relative path that export settings store — the render
- * resolves it against the work dir, so the pick survives the source file
- * being moved or deleted.
- */
-export function copyBrandAsset(
-  recordingId: string,
-  sourcePath: string,
-  kind: "logo" | "font",
-): Promise<string> {
-  return invokeValidated("copy_brand_asset", { recordingId, sourcePath, kind }, z.string())
-}
-
-/**
- * Report whether a stored brand path still resolves to a file — the renderer
- * silently skips a missing logo/font, so the UI warns instead of degrading.
- */
-export function brandAssetExists(recordingId: string, path: string): Promise<boolean> {
-  return invokeValidated("brand_asset_exists", { recordingId, path }, z.boolean())
 }

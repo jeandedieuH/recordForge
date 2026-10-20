@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, ErrorCategory, Result};
 
-use super::{ExportSettings, RenderPlan};
+use super::RenderPlan;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,7 +46,6 @@ pub struct CaptureArtifactInput<'a> {
     pub captions_path: Option<&'a Path>,
     pub ffprobe_path: &'a Path,
     pub plan: &'a RenderPlan,
-    pub settings: &'a ExportSettings,
     pub legacy: bool,
 }
 
@@ -186,23 +185,15 @@ pub fn capture_export_artifact(input: CaptureArtifactInput<'_>) -> Result<Export
         "embed" | "both" => {
             embedded_chapters(input.ffprobe_path, input.output_path, probed.duration_ms)?
         }
-        "sidecar" => {
-            let intro = input
-                .settings
-                .brand_cards
-                .as_ref()
-                .and_then(|cards| cards.card_durations())
-                .map_or(0, |(intro, _)| intro);
-            input
-                .plan
-                .chapters
-                .iter()
-                .map(|chapter| DeliveryChapter {
-                    t: chapter.start_ms.saturating_add(intro),
-                    label: chapter.title.clone(),
-                })
-                .collect()
-        }
+        "sidecar" => input
+            .plan
+            .chapters
+            .iter()
+            .map(|chapter| DeliveryChapter {
+                t: chapter.start_ms,
+                label: chapter.title.clone(),
+            })
+            .collect(),
         "none" => Vec::new(),
         _ => return Err(measurement_error("The exported chapter mode is invalid.")),
     };

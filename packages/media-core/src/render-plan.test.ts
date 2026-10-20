@@ -1659,24 +1659,6 @@ describe("render-plan", () => {
         container: "mp4",
         captionMode: "burn-in",
         chapterMode: "embed",
-        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-        brandWatermark: {
-          enabled: false,
-          logoPath: null,
-          position: "bottom-right",
-          scalePercent: 8,
-          opacity: 0.85,
-        },
-        brandCards: {
-          enabled: false,
-          introMs: 0,
-          outroMs: 0,
-          title: null,
-          subtitle: null,
-          background: "#0f172a",
-          textColor: "#f8fafc",
-          fontPath: null,
-        },
         keystrokeOverlay: {
           enabled: false,
           durationMs: 1400,
@@ -1684,12 +1666,6 @@ describe("render-plan", () => {
           scalePercent: 100,
         },
         reframeMode: "fit",
-        webcamBackground: {
-          enabled: false,
-          mode: "blur" as const,
-          blurSigma: 20,
-          replaceColor: "#0f172a",
-        },
       },
     })
     expect(validatedExport.plan.durationMs).toBe(plan.durationMs)
@@ -1776,24 +1752,6 @@ describe("render-plan", () => {
         chapterMode: "none",
         formats: [],
         instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
-        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-        brandWatermark: {
-          enabled: false,
-          logoPath: null,
-          position: "bottom-right",
-          scalePercent: 8,
-          opacity: 0.85,
-        },
-        brandCards: {
-          enabled: false,
-          introMs: 0,
-          outroMs: 0,
-          title: null,
-          subtitle: null,
-          background: "#0f172a",
-          textColor: "#f8fafc",
-          fontPath: null,
-        },
         keystrokeOverlay: {
           enabled: false,
           durationMs: 1400,
@@ -1801,12 +1759,6 @@ describe("render-plan", () => {
           scalePercent: 100,
         },
         reframeMode: "fit",
-        webcamBackground: {
-          enabled: false,
-          mode: "blur" as const,
-          blurSigma: 20,
-          replaceColor: "#0f172a",
-        },
       },
     })
     expect(plan.ok).toBe(true)
@@ -1830,24 +1782,6 @@ describe("render-plan", () => {
         chapterMode: "embed",
         formats: [],
         instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
-        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-        brandWatermark: {
-          enabled: false,
-          logoPath: null,
-          position: "bottom-right",
-          scalePercent: 8,
-          opacity: 0.85,
-        },
-        brandCards: {
-          enabled: false,
-          introMs: 0,
-          outroMs: 0,
-          title: null,
-          subtitle: null,
-          background: "#0f172a",
-          textColor: "#f8fafc",
-          fontPath: null,
-        },
         keystrokeOverlay: {
           enabled: false,
           durationMs: 1400,
@@ -1855,12 +1789,6 @@ describe("render-plan", () => {
           scalePercent: 100,
         },
         reframeMode: "fit",
-        webcamBackground: {
-          enabled: false,
-          mode: "blur" as const,
-          blurSigma: 20,
-          replaceColor: "#0f172a",
-        },
       },
     })
     expect(plan.ok).toBe(true)
@@ -1936,24 +1864,6 @@ describe("render-plan", () => {
         container: "mp4",
         captionMode: "burn-in",
         chapterMode: "embed",
-        audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-        brandWatermark: {
-          enabled: false,
-          logoPath: null,
-          position: "bottom-right",
-          scalePercent: 8,
-          opacity: 0.85,
-        },
-        brandCards: {
-          enabled: false,
-          introMs: 0,
-          outroMs: 0,
-          title: null,
-          subtitle: null,
-          background: "#0f172a",
-          textColor: "#f8fafc",
-          fontPath: null,
-        },
         keystrokeOverlay: {
           enabled: false,
           durationMs: 1400,
@@ -1961,12 +1871,6 @@ describe("render-plan", () => {
           scalePercent: 100,
         },
         reframeMode: "fit",
-        webcamBackground: {
-          enabled: false,
-          mode: "blur" as const,
-          blurSigma: 20,
-          replaceColor: "#0f172a",
-        },
       },
     })
     expect(validatedExport.success).toBe(true)

@@ -17,10 +17,8 @@ use tiny_skia::{
 
 mod annotations;
 pub(crate) mod audio_analysis;
-pub(crate) mod background;
 mod camera;
 mod captions;
-mod cards;
 mod cursor;
 // Lead-authored delivery measurement module — production jobs persist the
 // artifact manifest into `outputs.artifact`; the harness exercises it too.
@@ -29,7 +27,6 @@ mod encoding;
 mod keystrokes;
 
 pub(crate) use captions::srt_to_vtt;
-pub(crate) use cards::{apply_brand_cards, BrandCards};
 
 pub(crate) use camera::build_zoompan_expressions;
 use camera::{build_reframe_crop, reframe_content_aspect, reframe_source_dims};
@@ -258,8 +255,6 @@ impl PlateCache {
 pub(crate) struct CompositionShared {
     probe: ProbeCache,
     plates: PlateCache,
-    /// asset_id → pre-rendered segmentation mask video (virtual background).
-    masks: std::collections::HashMap<String, std::path::PathBuf>,
     /// Asset ids of the original primary capture (project role `screen`).
     /// Keystroke badges only map events through segments sourcing these —
     /// inserted b-roll must never replay the original capture's keystrokes.
@@ -271,7 +266,6 @@ impl CompositionShared {
         Self {
             probe: ProbeCache::new(ffprobe_path),
             plates: PlateCache::new(),
-            masks: std::collections::HashMap::new(),
             keystroke_asset_ids: std::collections::HashSet::new(),
         }
     }
@@ -639,17 +633,9 @@ pub struct ExportSettings {
     #[serde(default)]
     pub range: Option<ExportRange>,
     #[serde(default)]
-    pub audio_mastering: Option<AudioMastering>,
-    #[serde(default)]
-    pub brand_watermark: Option<BrandWatermark>,
-    #[serde(default)]
     pub keystroke_overlay: Option<KeystrokeOverlay>,
     #[serde(default)]
     pub reframe_mode: Option<String>,
-    #[serde(default)]
-    pub brand_cards: Option<BrandCards>,
-    #[serde(default)]
-    pub webcam_background: Option<background::WebcamBackground>,
 }
 
 /// Keystroke overlay (Pro): modifier-combo badges captured during recording.
@@ -695,272 +681,6 @@ impl KeystrokeOverlay {
             }
             _ => Self::DEFAULT_POSITION,
         }
-    }
-}
-
-/// Brand Kit (Pro): a logo watermark composited over the final raster. The
-/// overlay runs after the output-cap scale so `scale_percent` always measures
-/// against delivered pixels.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BrandWatermark {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub logo_path: Option<String>,
-    #[serde(default = "default_watermark_position")]
-    pub position: String,
-    #[serde(default = "default_watermark_scale")]
-    pub scale_percent: f64,
-    #[serde(default = "default_watermark_opacity")]
-    pub opacity: f64,
-}
-
-fn default_watermark_position() -> String {
-    "bottom-right".into()
-}
-fn default_watermark_scale() -> f64 {
-    8.0
-}
-fn default_watermark_opacity() -> f64 {
-    0.85
-}
-
-impl BrandWatermark {
-    /// Active only when enabled AND the logo file still exists — a moved or
-    /// deleted logo degrades to no watermark rather than failing the export.
-    /// The filesystem stat runs once per render pass, not per frame.
-    pub fn active_logo(&self) -> Option<&str> {
-        let path = self.logo_path.as_deref()?;
-        if self.enabled && std::path::Path::new(path).is_file() {
-            Some(path)
-        } else {
-            None
-        }
-    }
-}
-
-/// Resolve a stored brand-asset path to an absolute path under the project
-/// work dir. UI picks land in `brand/` as project-relative paths; absolute
-/// paths (legacy projects, hand-edited files) pass through untouched. A
-/// relative path that escapes the work dir is rejected — treated as absent.
-pub(crate) fn resolve_brand_asset_path(raw: &str, work_dir: &Path) -> Option<String> {
-    let path = Path::new(raw);
-    if path.is_absolute() {
-        return path.is_file().then(|| raw.to_string());
-    }
-    let candidate = crate::path_policy::canonicalize_path(&work_dir.join(path)).ok()?;
-    let work = crate::path_policy::canonicalize_path(work_dir).ok()?;
-    if !candidate.starts_with(&work) {
-        warn!(path = %raw, "brand asset path escapes the project directory; ignoring");
-        return None;
-    }
-    Some(candidate.to_string_lossy().to_string())
-}
-
-/// Studio Audio (Pro): mastering filters applied to the final mixed track.
-/// `denoise` uses adaptive wavelet profiling without a fixed recording-gain
-/// threshold; `loudness_target` runs a two-pass `loudnorm` — an audio-only
-/// measurement over the exact mix, then a linear apply — because dynamic
-/// one-pass normalization converges loosely on short clips (−12.6 LUFS
-/// measured against a −14 target on the recipe fixture). The measure pass
-/// decodes audio only, so it is cheap next to video encode.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AudioMastering {
-    #[serde(default)]
-    pub denoise: bool,
-    // Maximum noise attenuation in dB (contract bounds 3..=24). `None` on
-    // settings that predate the field keeps the balanced 12 dB default.
-    #[serde(default)]
-    pub noise_reduction_db: Option<f64>,
-    #[serde(default)]
-    pub loudness_target: Option<f64>,
-}
-
-/// `measured_*` values parsed from a loudnorm pass-1 `print_format=json`
-/// run — the input stats the linear apply pass needs to hit its target.
-#[derive(Debug, Clone, Copy)]
-pub struct LoudnormMeasures {
-    pub input_i: f64,
-    pub input_tp: f64,
-    pub input_lra: f64,
-    pub input_thresh: f64,
-    pub target_offset: f64,
-}
-
-/// loudnorm prints its stats block as the LAST JSON object on stderr.
-pub fn parse_loudnorm_summary(stderr: &str) -> Option<LoudnormMeasures> {
-    let open = stderr.rfind('{')?;
-    let close = stderr.rfind('}')?;
-    if close <= open {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(&stderr[open..=close]).ok()?;
-    let num = |key: &str| value.get(key)?.as_str()?.parse::<f64>().ok();
-    Some(LoudnormMeasures {
-        input_i: num("input_i")?,
-        input_tp: num("input_tp")?,
-        input_lra: num("input_lra")?,
-        input_thresh: num("input_thresh")?,
-        target_offset: num("target_offset")?,
-    })
-}
-
-impl AudioMastering {
-    /// Denoise-only part of the mastering chain. The retained dry fraction
-    /// bounds attenuation at the requested dB amount; adaptive profiling
-    /// avoids treating a quiet microphone as all noise.
-    pub fn denoise_suffix(&self) -> String {
-        if !self.denoise {
-            return String::new();
-        }
-        let nr = self.noise_reduction_db.unwrap_or(12.0).clamp(3.0, 24.0);
-        let percent = 100.0 * (1.0 - 10.0_f64.powf(-nr / 20.0));
-        format!(",afwtdn=percent={percent:.6}:adaptive=1")
-    }
-
-    /// Dynamic one-pass suffix — the degradation path when the measurement
-    /// pass cannot run (e.g. ffmpeg spawn failure). Never fails an export.
-    pub fn filter_suffix(&self) -> String {
-        let mut suffix = self.denoise_suffix();
-        if let Some(target) = self.loudness_target {
-            // TP=-1.5 true-peak ceiling matches YouTube/podcast delivery.
-            suffix.push_str(&format!(",loudnorm=I={target}:TP=-1.5:LRA=11"));
-        }
-        suffix
-    }
-
-    /// The measurement-pass suffix: the SAME mix the renderer builds
-    /// (denoise included — it changes measured loudness) with loudnorm in
-    /// `print_format=json` so the stats land on stderr.
-    fn measure_suffix(&self) -> String {
-        let mut suffix = self.denoise_suffix();
-        if let Some(target) = self.loudness_target {
-            suffix.push_str(&format!(
-                ",loudnorm=I={target}:TP=-1.5:LRA=11:print_format=json"
-            ));
-        }
-        suffix
-    }
-
-    /// The render suffix: linear two-pass loudnorm with `measured_*` when the
-    /// measurement pass succeeded — dynamic one-pass when it did not.
-    fn apply_suffix(&self, measured: Option<&LoudnormMeasures>) -> String {
-        let mut suffix = self.denoise_suffix();
-        if let Some(target) = self.loudness_target {
-            suffix.push_str(&match measured {
-                Some(m) => format!(
-                    ",loudnorm=I={target}:TP=-1.5:LRA=11:linear=true:measured_I={}:measured_LRA={}:measured_TP={}:measured_thresh={}:offset={}",
-                    m.input_i, m.input_lra, m.input_tp, m.input_thresh, m.target_offset
-                ),
-                None => format!(",loudnorm=I={target}:TP=-1.5:LRA=11"),
-            });
-        }
-        suffix
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.denoise || self.loudness_target.is_some()
-    }
-}
-
-#[cfg(test)]
-mod audio_mastering_tests {
-    use super::{parse_loudnorm_summary, AudioMastering, LoudnormMeasures};
-
-    #[test]
-    fn adaptive_audio_mastering_maps_the_reduction_budget() {
-        for (db, percent) in [(6.0, "49.881277"), (12.0, "74.881136"), (18.0, "87.410746")] {
-            let mastering = AudioMastering {
-                denoise: true,
-                noise_reduction_db: Some(db),
-                loudness_target: None,
-            };
-            assert_eq!(
-                mastering.filter_suffix(),
-                format!(",afwtdn=percent={percent}:adaptive=1")
-            );
-        }
-    }
-
-    #[test]
-    fn adaptive_audio_mastering_defaults_and_bounds_are_stable() {
-        for (db, percent) in [
-            (None, "74.881136"),
-            (Some(0.0), "29.205422"),
-            (Some(100.0), "93.690427"),
-        ] {
-            assert_eq!(
-                AudioMastering {
-                    denoise: true,
-                    noise_reduction_db: db,
-                    loudness_target: None,
-                }
-                .filter_suffix(),
-                format!(",afwtdn=percent={percent}:adaptive=1")
-            );
-        }
-    }
-
-    #[test]
-    fn adaptive_audio_mastering_does_not_change_disabled_audio() {
-        let mut mastering = AudioMastering {
-            denoise: false,
-            noise_reduction_db: Some(18.0),
-            loudness_target: None,
-        };
-        assert_eq!(mastering.filter_suffix(), "");
-        mastering.loudness_target = Some(-14.0);
-        assert_eq!(mastering.filter_suffix(), ",loudnorm=I=-14:TP=-1.5:LRA=11");
-    }
-
-    #[test]
-    fn measure_and_apply_suffixes_form_the_two_pass_pair() {
-        let mastering = AudioMastering {
-            denoise: true,
-            noise_reduction_db: Some(12.0),
-            loudness_target: Some(-14.0),
-        };
-        // The measure graph is the render graph minus the apply args —
-        // denoise stays identical so measured loudness matches the render.
-        assert!(mastering
-            .measure_suffix()
-            .contains("afwtdn=percent=74.881136:adaptive=1"));
-        assert!(mastering
-            .measure_suffix()
-            .contains("loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json"));
-        let applied = mastering.apply_suffix(Some(&LoudnormMeasures {
-            input_i: -25.5,
-            input_tp: -4.2,
-            input_lra: 7.1,
-            input_thresh: -36.0,
-            target_offset: 11.5,
-        }));
-        assert!(applied.contains("linear=true"));
-        assert!(applied.contains("measured_I=-25.5"));
-        assert!(applied.contains("offset=11.5"));
-        // Measurement failure keeps the dynamic fallback shape.
-        assert_eq!(mastering.apply_suffix(None), mastering.filter_suffix());
-    }
-
-    #[test]
-    fn loudnorm_summary_parses_the_last_json_block() {
-        let stderr = r#"[Parsed_loudnorm_0 @ 0x0] junk line
-{
-  "input_i" : "-25.50",
-  "input_tp" : "-4.20",
-  "input_lra" : "7.10",
-  "input_thresh" : "-36.00",
-  "output_i" : "-14.00",
-  "target_offset" : "11.50"
-}
-"#;
-        let m = parse_loudnorm_summary(stderr).expect("summary parses");
-        assert_eq!(m.input_i, -25.5);
-        assert_eq!(m.target_offset, 11.5);
-        assert!(parse_loudnorm_summary("no json here").is_none());
-        assert!(parse_loudnorm_summary("{}").is_none());
     }
 }
 
@@ -1114,7 +834,7 @@ pub fn run_render_plan(
     project_id: &str,
     output_path: &Path,
     mut plan: RenderPlan,
-    mut settings: ExportSettings,
+    settings: ExportSettings,
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -1134,17 +854,14 @@ pub fn run_render_plan(
         return Err(InternalError::Media("export cancelled".into()).into());
     }
 
-    let (work_dir, primary_is_camera) = {
+    let work_dir = {
         let conn = db
             .lock()
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
         let project = crate::database::projects::get_project(&conn, project_id)?
             .ok_or_else(|| InternalError::Project("export project was not found".into()))?;
         let recording = get_recording(&conn, &project.recording_id)?;
-        (
-            PathBuf::from(recording.work_dir),
-            recording.source.kind == "camera",
-        )
+        PathBuf::from(recording.work_dir)
     };
     let policy = crate::path_policy::PathPolicy::new(work_dir.clone(), work_dir.clone());
     let loaded = crate::projects::load_project(&work_dir, &policy)?
@@ -1154,22 +871,6 @@ pub fn run_render_plan(
             "project identity does not match the export request".into(),
         )
         .into());
-    }
-    // Brand files picked through the UI are copied into the project's `brand/`
-    // dir and stored project-relative; legacy absolute picks still resolve
-    // directly. Missing or escaping paths degrade to "no file" downstream —
-    // the same don't-fail rule `active_logo`/`resolved_font` already apply.
-    if let Some(watermark) = settings.brand_watermark.as_mut() {
-        watermark.logo_path = watermark
-            .logo_path
-            .take()
-            .and_then(|path| resolve_brand_asset_path(&path, &work_dir));
-    }
-    if let Some(cards) = settings.brand_cards.as_mut() {
-        cards.font_path = cards
-            .font_path
-            .take()
-            .and_then(|path| resolve_brand_asset_path(&path, &work_dir));
     }
     // Keystroke overlay events live in the work dir — attach post-plan so the
     // frontend never touches the session filesystem. Only when enabled: a
@@ -1279,84 +980,6 @@ pub fn run_render_plan(
         .map(|asset| asset.id.clone())
         .collect();
 
-    // Virtual background: pre-render one segmentation mask per camera asset
-    // before any pass runs — the masks feed the graph as regular inputs and
-    // are shared across chunks. The model is provisioned by the UI beforehand
-    // (download-on-demand), matching the whisper engine's contract.
-    let mut _mask_dir_guard: Option<TempExportDir> = None;
-    // Assets needing a segmentation mask: visible camera overlays always;
-    // for camera-only recordings the primary screen assets too — they are
-    // the webcam feed (imported b-roll and ordinary screen captures are
-    // never marked camera).
-    let mut mask_asset_ids: std::collections::BTreeSet<&str> = plan
-        .overlays
-        .iter()
-        .filter(|overlay| overlay.visible && overlay.output_end_ms > overlay.output_start_ms)
-        .map(|overlay| overlay.asset_id.as_str())
-        .collect();
-    if primary_is_camera {
-        mask_asset_ids.extend(
-            loaded
-                .project
-                .assets
-                .iter()
-                .filter(|asset| asset.role == crate::projects::ProjectAssetRole::Screen)
-                .map(|asset| asset.id.as_str()),
-        );
-    }
-    if settings
-        .webcam_background
-        .as_ref()
-        .is_some_and(|bg| bg.is_active())
-        && !mask_asset_ids.is_empty()
-    {
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| InternalError::Storage(format!("resolve app data dir: {e}")))?;
-        let model = background::model_path(&app_data_dir);
-        if !model.exists() {
-            return Err(InternalError::Media(
-                "virtual background model is not downloaded yet".into(),
-            )
-            .into());
-        }
-        let mask_dir = std::env::temp_dir().join(format!(
-            "recordforge_masks_{}_{}",
-            project_id,
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&mask_dir)
-            .map_err(|e| InternalError::Storage(format!("create mask dir: {e}")))?;
-        _mask_dir_guard = Some(TempExportDir(mask_dir.clone()));
-        let asset_ids = mask_asset_ids;
-        for asset_id in asset_ids {
-            let Some(source) = asset_paths.get(asset_id) else {
-                continue;
-            };
-            update_progress(
-                &db,
-                app,
-                job_id,
-                0.05,
-                "rendering",
-                Some("segmenting camera background"),
-            )?;
-            let mask_path = mask_dir.join(format!("mask-{asset_id}.mp4"));
-            let reporter = &progress_reporter;
-            background::generate_mask(
-                ffmpeg_path,
-                ffprobe_path,
-                &model,
-                source,
-                &mask_path,
-                &cancel,
-                &|ratio| reporter(ratio * 0.02),
-            )?;
-            shared.masks.insert(asset_id.to_string(), mask_path);
-        }
-    }
-
     let composition = render_timeline_composition_shared(
         &ffmpeg,
         &partial_path,
@@ -1374,10 +997,8 @@ pub fn run_render_plan(
     // A hardware encoder can fail to initialize even after a passing probe
     // (driver capabilities differ by resolution and pixel format), so retry
     // once on software instead of failing the export outright. Cancelled jobs
-    // propagate unchanged. `render_encoder` tracks which encoder produced the
-    // partial — brand cards must encode with it or the `-c copy` concat
-    // splices mismatched codec parameters.
-    let (outcome, render_encoder) = match composition {
+    // propagate unchanged.
+    let (outcome, _render_encoder) = match composition {
         Ok(outcome) => (outcome, encoder),
         Err(error) => {
             if cancel.load(std::sync::atomic::Ordering::Relaxed)
@@ -1424,57 +1045,6 @@ pub fn run_render_plan(
         return Err(InternalError::Media("export cancelled".into()).into());
     }
 
-    // Brand cards (Pro): rendered segments concat-muxed around the finished
-    // partial; the added duration feeds the output validation below. MP4
-    // exports only — GIF/WebP partials aren't mp4 streams, so muxing mp4 card
-    // segments around them would produce garbage or fail outright.
-    let is_animation_export = settings.container != "mp4"
-        || settings.preset.starts_with("gif-")
-        || settings.preset.starts_with("webp-");
-    let mut intro_shift_ms = 0u64;
-    if let Some(cards) = settings.brand_cards.as_ref() {
-        if !is_animation_export && cards.card_durations().is_some() {
-            intro_shift_ms = cards.card_durations().map(|(intro, _)| intro).unwrap_or(0);
-            let (canvas_width, canvas_height, canvas_fps) = plan
-                .canvas
-                .as_ref()
-                .map(|canvas| {
-                    let (w, h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
-                    (w, h, canvas.fps)
-                })
-                .unwrap_or((1920, 1080, 30));
-            update_progress(
-                &db,
-                app,
-                job_id,
-                0.96,
-                "brand",
-                Some("rendering brand cards"),
-            )?;
-            let added_ms = apply_brand_cards(
-                std::path::Path::new(&ffmpeg),
-                ffprobe_path,
-                &partial_path,
-                cards,
-                settings
-                    .brand_watermark
-                    .as_ref()
-                    .and_then(|watermark| watermark.active_logo())
-                    .map(std::path::Path::new),
-                canvas_width,
-                canvas_height,
-                canvas_fps.max(1),
-                outcome.has_audio,
-                project_id,
-                &plan.chapters,
-                &settings,
-                render_encoder,
-                &cancel,
-            )?;
-            plan.duration_ms = plan.duration_ms.saturating_add(added_ms);
-        }
-    }
-
     if plan.caption_mode == "sidecar" {
         update_progress(
             &db,
@@ -1484,22 +1054,7 @@ pub fn run_render_plan(
             "captions",
             Some("writing caption sidecar"),
         )?;
-        // The intro card prepends seconds of video — the sidecar must shift
-        // the same `intro_shift_ms` chapters already apply, otherwise burned
-        // and sidecar captions drift apart by the card duration.
-        let sidecar_captions = if intro_shift_ms > 0 {
-            plan.captions
-                .iter()
-                .map(|caption| RenderPlanCaption {
-                    start_ms: caption.start_ms.saturating_add(intro_shift_ms),
-                    end_ms: caption.end_ms.saturating_add(intro_shift_ms),
-                    ..caption.clone()
-                })
-                .collect::<Vec<_>>()
-        } else {
-            plan.captions.clone()
-        };
-        write_caption_sidecar(&partial_path, &sidecar_captions)?;
+        write_caption_sidecar(&partial_path, &plan.captions)?;
     }
 
     if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty()
@@ -1512,22 +1067,7 @@ pub fn run_render_plan(
             "chapters",
             Some("writing chapter sidecar"),
         )?;
-        // The intro card prepends seconds of video, so the sidecar must shift
-        // just like the embedded chapters `apply_brand_cards` rewrites.
-        let sidecar_content = if intro_shift_ms > 0 {
-            let shifted: Vec<RenderPlanChapter> = plan
-                .chapters
-                .iter()
-                .map(|chapter| RenderPlanChapter {
-                    start_ms: chapter.start_ms.saturating_add(intro_shift_ms),
-                    end_ms: chapter.end_ms.saturating_add(intro_shift_ms),
-                    ..chapter.clone()
-                })
-                .collect();
-            generate_youtube_chapters(&shifted)
-        } else {
-            generate_youtube_chapters(&plan.chapters)
-        };
+        let sidecar_content = generate_youtube_chapters(&plan.chapters);
         let sidecar_path = partial_path.with_extension("chapters.txt");
         std::fs::write(&sidecar_path, sidecar_content.as_bytes())
             .map_err(|err| InternalError::Storage(format!("write chapter sidecar: {err}")))?;
@@ -1586,18 +1126,14 @@ pub struct ExportHarnessSpec {
     /// can exercise the same downscale path licensed exports use.
     #[serde(default)]
     pub output_cap: Option<ExportOutputCap>,
-    /// Full finish pass: brand cards, sidecars, atomic publish, and the
-    /// delivery metadata artifact — the same order production jobs follow.
+    /// Full finish pass: sidecars, atomic publish, and the delivery
+    /// metadata artifact — the same order production jobs follow.
     #[serde(default)]
     pub finish: bool,
     /// Asset ids of the original primary capture — fills the shared
     /// keystroke mapping gate (production derives it from project roles).
     #[serde(default)]
     pub keystroke_asset_ids: Vec<String>,
-    /// asset_id → pre-rendered segmentation mask — explicit dev input, no
-    /// model provisioning on this path.
-    #[serde(default)]
-    pub mask_paths: HashMap<String, PathBuf>,
 }
 
 /// Render a JSON `ExportHarnessSpec` through the real export path.
@@ -1629,7 +1165,6 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
     // persisted project — no model download on this path.
     let mut shared = CompositionShared::new(Some(Path::new(&spec.ffprobe_path)));
     shared.keystroke_asset_ids = spec.keystroke_asset_ids.iter().cloned().collect();
-    shared.masks = spec.mask_paths.clone();
 
     // finish renders through the same OWNED staging dir production uses;
     // composition-only specs keep the historical direct-to-output write.
@@ -1711,9 +1246,7 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
         return 0;
     }
 
-    if let Err(error) =
-        finish_harness_export(&spec, &render_target, &output_path, &outcome, &cancel)
-    {
+    if let Err(error) = finish_harness_export(&spec, &render_target, &output_path, &outcome) {
         eprintln!("export_harness: finish failed: {error}");
         return 1;
     }
@@ -1721,99 +1254,26 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
 }
 
 /// The finish=true path: same production helpers in the same order as
-/// `run_render_plan` — brand cards, intro-shifted sidecars, final-duration
-/// validation, atomic publish, VTT companion, and the artifact metadata.
+/// `run_render_plan` — sidecars, final-duration validation, atomic publish,
+/// VTT companion, and the artifact metadata.
 #[cfg(feature = "export-harness")]
 fn finish_harness_export(
     spec: &ExportHarnessSpec,
     partial_path: &Path,
     output_path: &Path,
     outcome: &RenderOutcome,
-    cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-    let ffmpeg_path = Path::new(&spec.ffmpeg_path);
     let ffprobe_path = Path::new(&spec.ffprobe_path);
     let settings = &spec.settings;
-    // The cloned plan absorbs card-added duration — the spec input stays
-    // untouched like production's request record.
-    let mut plan = spec.plan.clone();
-
-    // Brand cards wrap the rendered MP4 — animation containers aren't mp4
-    // streams and keep the composition-only output, same as production.
-    let is_animation_export = settings.container != "mp4"
-        || settings.preset.starts_with("gif-")
-        || settings.preset.starts_with("webp-");
-    let mut intro_shift_ms = 0u64;
-    if let Some(cards) = settings.brand_cards.as_ref() {
-        if !is_animation_export && cards.card_durations().is_some() {
-            intro_shift_ms = cards.card_durations().map(|(intro, _)| intro).unwrap_or(0);
-            let (canvas_width, canvas_height, canvas_fps) = plan
-                .canvas
-                .as_ref()
-                .map(|canvas| {
-                    let (w, h) =
-                        capped_output_dimensions(canvas.width, canvas.height, spec.output_cap);
-                    (w, h, canvas.fps)
-                })
-                .unwrap_or((1920, 1080, 30));
-            let added_ms = apply_brand_cards(
-                ffmpeg_path,
-                ffprobe_path,
-                partial_path,
-                cards,
-                settings
-                    .brand_watermark
-                    .as_ref()
-                    .and_then(|watermark| watermark.active_logo())
-                    .map(std::path::Path::new),
-                canvas_width,
-                canvas_height,
-                canvas_fps.max(1),
-                outcome.has_audio,
-                &plan.project_id,
-                &plan.chapters,
-                settings,
-                encoding::ExportEncoder::Software,
-                cancel,
-            )?;
-            plan.duration_ms = plan.duration_ms.saturating_add(added_ms);
-        }
-    }
+    let plan = spec.plan.clone();
 
     if plan.caption_mode == "sidecar" {
-        // The intro card prepends video — the sidecar must shift by the
-        // same `intro_shift_ms` the embedded chapters already took.
-        let sidecar_captions = if intro_shift_ms > 0 {
-            plan.captions
-                .iter()
-                .map(|caption| RenderPlanCaption {
-                    start_ms: caption.start_ms.saturating_add(intro_shift_ms),
-                    end_ms: caption.end_ms.saturating_add(intro_shift_ms),
-                    ..caption.clone()
-                })
-                .collect::<Vec<_>>()
-        } else {
-            plan.captions.clone()
-        };
-        write_caption_sidecar(partial_path, &sidecar_captions)?;
+        write_caption_sidecar(partial_path, &plan.captions)?;
     }
 
     if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty()
     {
-        let sidecar_content = if intro_shift_ms > 0 {
-            let shifted: Vec<RenderPlanChapter> = plan
-                .chapters
-                .iter()
-                .map(|chapter| RenderPlanChapter {
-                    start_ms: chapter.start_ms.saturating_add(intro_shift_ms),
-                    end_ms: chapter.end_ms.saturating_add(intro_shift_ms),
-                    ..chapter.clone()
-                })
-                .collect();
-            generate_youtube_chapters(&shifted)
-        } else {
-            generate_youtube_chapters(&plan.chapters)
-        };
+        let sidecar_content = generate_youtube_chapters(&plan.chapters);
         let sidecar_path = partial_path.with_extension("chapters.txt");
         std::fs::write(&sidecar_path, sidecar_content.as_bytes())
             .map_err(|err| InternalError::Storage(format!("write chapter sidecar: {err}")))?;
@@ -1860,7 +1320,6 @@ fn finish_harness_export(
             captions_path: captions_path.as_deref(),
             ffprobe_path,
             plan: &plan,
-            settings,
             legacy: false,
         })?;
     let artifact_path = output_path.with_file_name(format!(
@@ -2188,38 +1647,6 @@ impl CompositionPass {
     }
 }
 
-/// Virtual background person-composite shared by camera overlays and
-/// primary-camera screen segments: `raw` is cut by the segmentation `mask`
-/// (alphamerge) and layered over a blurred or solid-color backdrop. Returns
-/// the composited label to continue the source chain from.
-fn append_virtual_background_composite(
-    filters: &mut Vec<String>,
-    raw_label: &str,
-    mask_label: &str,
-    tag: &str,
-    bg: &background::WebcamBackground,
-) -> String {
-    let fg_label = format!("vb_fg{tag}");
-    let back_label = format!("vb_back{tag}");
-    let comp_label = format!("vb_comp{tag}");
-    let backdrop = if bg.mode == "replace" {
-        // drawbox t=fill covers the frame without a lavfi input.
-        format!(
-            "drawbox=x=0:y=0:w=iw:h=ih:color={}:t=fill",
-            cards::sanitize_color(&bg.replace_color, "#0f172a")
-        )
-    } else {
-        format!("gblur=sigma={:.1}", bg.blur_sigma.clamp(2.0, 80.0))
-    };
-    filters.push(format!(
-        "[{raw_label}]split=2[vb_a{tag}][vb_b{tag}];\
-         [vb_a{tag}][{mask_label}]alphamerge[{fg_label}];\
-         [vb_b{tag}]{backdrop}[{back_label}];\
-         [{back_label}][{fg_label}]overlay=0:0[{comp_label}]"
-    ));
-    comp_label
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_composition_window(
     ffmpeg_path: &str,
@@ -2443,17 +1870,11 @@ fn render_composition_window(
     let mut input_indices: HashMap<String, usize> = HashMap::new();
     // overlay index → (clamp, input index, input seek) for the camera loop.
     let mut camera_inputs: HashMap<usize, (CameraClamp, usize, f64)> = HashMap::new();
-    // overlay index → input index of the segmentation mask (virtual bg).
-    let mut mask_inputs: HashMap<usize, usize> = HashMap::new();
-    // Primary-camera virtual background: mask inputs for screen segments,
-    // keyed by planned-window index (seeked) or asset id (legacy layout).
-    let mut window_mask_inputs: HashMap<usize, usize> = HashMap::new();
-    let mut screen_mask_inputs: HashMap<String, usize> = HashMap::new();
     // window index in `planned.inputs` → input_specs index.
     let mut window_input_indices: Vec<usize> = Vec::new();
     match &seek_plan {
         Some(planned) => {
-            for (window_index, window) in planned.inputs.iter().enumerate() {
+            for window in planned.inputs.iter() {
                 let path = asset_paths.get(&window.asset_id).cloned().ok_or_else(|| {
                     InternalError::Media("render plan references an unknown asset".into())
                 })?;
@@ -2465,18 +1886,6 @@ fn render_composition_window(
                     duration_s: Some(window.end_s - window.seek_s + SEEK_TAIL_MARGIN_S),
                     hwaccel: hwaccel_inputs,
                 });
-                // The mask is frame-aligned to the source, so it rides the
-                // same input seek — the in-graph trim then lands identical.
-                if let Some(mask_path) = shared.masks.get(&window.asset_id) {
-                    window_mask_inputs.insert(window_index, input_specs.len());
-                    input_specs.push(InputSpec {
-                        key: format!("screenmask:{}:{}", window.asset_id, window_index),
-                        path: mask_path.clone(),
-                        seek_s: Some(window.seek_s),
-                        duration_s: Some(window.end_s - window.seek_s + SEEK_TAIL_MARGIN_S),
-                        hwaccel: false,
-                    });
-                }
             }
             for job in &camera_jobs {
                 let overlay = &plan.overlays[job.overlay_index];
@@ -2492,18 +1901,6 @@ fn render_composition_window(
                     duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
                     hwaccel: hwaccel_inputs,
                 });
-                // Virtual background: the mask rides the same window clamp —
-                // it's frame-aligned to the camera source.
-                if let Some(mask_path) = shared.masks.get(&overlay.asset_id) {
-                    mask_inputs.insert(job.overlay_index, input_specs.len());
-                    input_specs.push(InputSpec {
-                        key: format!("mask:{}:{}", overlay.asset_id, job.overlay_index),
-                        path: mask_path.clone(),
-                        seek_s: Some(seek_s),
-                        duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
-                        hwaccel: false,
-                    });
-                }
             }
             if pass.include_audio {
                 // Audio chains read asset-level (unseeked) inputs — atrim
@@ -2545,18 +1942,6 @@ fn render_composition_window(
                     duration_s: None,
                     hwaccel: hwaccel_inputs,
                 });
-                // Legacy full-range inputs carry the mask unseeked too — the
-                // in-graph trim applies the same absolute source offsets.
-                if let Some(mask_path) = shared.masks.get(asset_id) {
-                    screen_mask_inputs.insert(asset_id.clone(), input_specs.len());
-                    input_specs.push(InputSpec {
-                        key: format!("screenmask:{}", asset_id),
-                        path: mask_path.clone(),
-                        seek_s: None,
-                        duration_s: None,
-                        hwaccel: false,
-                    });
-                }
             }
             for job in &camera_jobs {
                 let overlay = &plan.overlays[job.overlay_index];
@@ -2571,16 +1956,6 @@ fn render_composition_window(
                     src_out_s: overlay.source_out_ms as f64 / 1000.0,
                 };
                 camera_inputs.insert(job.overlay_index, (clamp, input_index, 0.0));
-                if let Some(mask_path) = shared.masks.get(&overlay.asset_id) {
-                    mask_inputs.insert(job.overlay_index, input_specs.len());
-                    input_specs.push(InputSpec {
-                        key: format!("mask:{}:{}", overlay.asset_id, job.overlay_index),
-                        path: mask_path.clone(),
-                        seek_s: None,
-                        duration_s: None,
-                        hwaccel: false,
-                    });
-                }
             }
         }
     }
@@ -2921,44 +2296,6 @@ fn render_composition_window(
             filter.push_str(&format!(",setpts=PTS/{:.6}", speed));
         }
         let segment_duration = fmt_secs((clamped_end - clamped_start) / 1000.0);
-        // Virtual background on primary-camera sources: composite the person
-        // BEFORE reframe/scale/zoom so the mask follows the exact source
-        // crop/geometry. The mask input rides the same seek and mirrors the
-        // same trim/speed mapping, staying frame-aligned to the source.
-        let screen_mask_input = match &seek_plan {
-            Some(planned) => window_mask_inputs
-                .get(&planned.assignment[job.request_index])
-                .copied(),
-            None => screen_mask_inputs.get(&segment.asset_id).copied(),
-        };
-        if let Some(mask_idx) = screen_mask_input {
-            let raw_label = format!("screen_vb_raw{index}");
-            filter.push_str(&format!("[{raw_label}]"));
-            filters.push(std::mem::take(&mut filter));
-            let mask_label = format!("screen_vb_mask{index}");
-            let mask_speed = if (speed - 1.0).abs() > f64::EPSILON {
-                format!(",setpts=PTS/{:.6}", speed)
-            } else {
-                String::new()
-            };
-            filters.push(format!(
-                "[{mask_idx}:v:0]trim=start={}:end={},setpts=PTS-STARTPTS{phase}{mask_speed},format=gray,tpad=stop_mode=clone:stop_duration={segment_duration},trim=duration={segment_duration},setpts=PTS-STARTPTS[{mask_label}]",
-                fmt_secs(source_in_s),
-                fmt_secs(source_out_s),
-            ));
-            let bg_spec = settings.webcam_background.clone().unwrap_or_default();
-            let comp_label = append_virtual_background_composite(
-                &mut filters,
-                &raw_label,
-                &mask_label,
-                &format!("screen{index}"),
-                &bg_spec,
-            );
-            // The shared continuation below always appends ",<filter>" — a
-            // bare `[comp_label],scale` would parse as an EMPTY filter.
-            // `null` keeps the chain valid and passes frames unchanged.
-            filter = format!("[{comp_label}]null");
-        }
         // Auto-reframe crop runs in source space before the fit-to-rect scale;
         // `t` here is already output-relative to this segment, so keyframes
         // are shifted by the segment's output start.
@@ -3413,29 +2750,9 @@ fn render_composition_window(
             canvas.fps
         ));
 
-        // 3. Virtual background: cut the person out via the segmentation
-        // mask and composite over a blurred or filled backdrop. Runs before
-        // the shape mask so circle/rounded crops keep working.
-        let camera_stream_label = if let Some(&mask_idx) = mask_inputs.get(&index) {
-            let raw_label = format!("camera_vb_raw{index}");
-            camera_filter.push_str(&format!("[{raw_label}]"));
-            filters.push(camera_filter);
-            camera_filter = String::new();
-            // Mask chain: same source-clock trim + geometry, gray out.
-            let bg_mask_label = format!("camera_vb_mask{index}");
-            filters.push(format!(
-                "[{mask_idx}:v:0]{time_ops}{geometry_ops},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={overlay_duration},trim=duration={overlay_duration},setpts=PTS-STARTPTS,format=gray[{bg_mask_label}]",
-                canvas.fps
-            ));
-            let bg_spec = settings.webcam_background.clone().unwrap_or_default();
-            append_virtual_background_composite(
-                &mut filters,
-                &raw_label,
-                &bg_mask_label,
-                &format!("cam{index}"),
-                &bg_spec,
-            )
-        } else {
+        // 3. Continue the camera chain through a stable label — the shape
+        // mask and downstream filters keep working off one input pad.
+        let camera_stream_label = {
             let label = format!("camera_vb_skip{index}");
             camera_filter.push_str(&format!("[{label}]"));
             filters.push(camera_filter);
@@ -3658,54 +2975,16 @@ fn render_composition_window(
     } else {
         String::new()
     };
-    // Brand Kit watermark: a still logo overlaid on the final raster, after
-    // the output-cap scale so scale_percent measures delivered pixels. The
-    // logo input loops forever (still frame) and overlay `eof_action=repeat`
-    // pins it — same trick as the camera border chain.
-    let watermark = settings.brand_watermark.as_ref();
-    if let Some(logo_path) = watermark.and_then(|w| w.active_logo()) {
-        let watermark = watermark.expect("active_logo implies watermark");
-        let logo_index = input_specs.len();
-        input_specs.push(InputSpec {
-            key: "brand:logo".to_string(),
-            path: std::path::PathBuf::from(logo_path),
-            seek_s: None,
-            duration_s: None,
-            hwaccel: false,
-        });
-        let logo_width =
-            ((out_w as f64 * watermark.scale_percent / 100.0).round() as u32).max(2) & !1;
-        let margin = ((out_w as f64 * 0.02).round() as u32).max(16);
-        let (x_expr, y_expr) = match watermark.position.as_str() {
-            "top-left" => (format!("{margin}"), format!("{margin}")),
-            "top-right" => (format!("W-w-{margin}"), format!("{margin}")),
-            "bottom-left" => (format!("{margin}"), format!("H-h-{margin}")),
-            _ => (format!("W-w-{margin}"), format!("H-h-{margin}")),
-        };
-        filters.push(format!(
-            "[{logo_index}:v]scale={logo_width}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={:.2},loop=loop=-1:size=1:start=0,setsar=1[brandlogo]",
-            watermark.opacity
-        ));
-        // The optional fragments all end in a comma, so the chain must still
-        // terminate on a real filter — a bare `[brandbase]` (or `[prev]
-        // [brandbase]` when every fragment is empty) parses as a filterless
-        // chain and fails with FFmpeg's "No such filter: ''".
-        filters.push(format!(
-            "[{current_label}]{reanchor}{frame_cap}{output_scale}null[brandbase]"
-        ));
-        filters.push(format!(
-            "[brandbase][brandlogo]overlay=x={x_expr}:y={y_expr}:eof_action=repeat:format=auto[brandout]"
-        ));
-        current_label = "brandout".to_string();
-    } else {
-        filters.push(format!(
-            "[{current_label}]{reanchor}{frame_cap}{output_scale}null[postscale]"
-        ));
-        current_label = "postscale".to_string();
-    }
+    // The optional fragments all end in a comma, so the chain must still
+    // terminate on a real filter — a bare label would parse as a filterless
+    // chain and fail with FFmpeg's "No such filter: ''".
+    filters.push(format!(
+        "[{current_label}]{reanchor}{frame_cap}{output_scale}null[postscale]"
+    ));
+    current_label = "postscale".to_string();
 
     // Keystroke overlay (Pro): modifier-combo badges drawn on the final
-    // raster — above the watermark — gated to each event's display window.
+    // raster — gated to each event's display window.
     // Events are source-time stamps; `build_badge_windows` maps them through
     // the plan's primary segments so trims/moves/speeds land correctly, and
     // the chunk bounds clip+rebase each badge for this window's raster.
@@ -3756,28 +3035,11 @@ fn render_composition_window(
     let is_webp = settings.container == "webp" || settings.preset.starts_with("webp-");
     // Chunk passes render video-only: the mux stage splices in one continuous
     // audio render so no AAC priming discontinuity ever reaches a seam.
-    // The mastering suffix resolves BEFORE the graph is built — a loudness
-    // target triggers the audio-only measurement pass here.
-    let mastering_suffix = if pass.include_audio && !is_gif && !is_webp {
-        resolve_mastering_suffix(
-            settings,
-            ffmpeg_path,
-            plan,
-            project_id,
-            asset_paths,
-            &shared.probe,
-            duration_ms,
-            &cancel,
-        )?
-    } else {
-        String::new()
-    };
     let has_audio = pass.include_audio
         && !is_gif
         && !is_webp
         && append_audio_graph(
             &mut filters,
-            &mastering_suffix,
             plan,
             project_id,
             &input_indices,
@@ -3980,164 +3242,12 @@ fn render_composition_window(
 }
 
 /// Append the audio graph — per-segment `atrim`/speed/volume chains padded to
-/// Runs the audio-only loudnorm pass-1 over `audio_inputs`: the SAME filter
-/// graph the render will mix (denoise included) with loudnorm in
-/// `print_format=json`, captured from stderr. Cancellation kills the child
-/// the same way the render passes do.
-fn measure_loudness(
-    ffmpeg_path: &str,
-    audio_inputs: &[(String, PathBuf)],
-    filters: &[String],
-    project_id: &str,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<Option<LoudnormMeasures>> {
-    let scratch =
-        std::env::temp_dir().join(format!("rf-loudness-{project_id}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&scratch)
-        .map_err(|error| InternalError::Storage(format!("create loudness dir: {error}")))?;
-    let _scratch_guard = TempExportDir(scratch.clone());
-    let filter_path = scratch.join("measure.txt");
-    std::fs::write(&filter_path, filters.join(";\n"))
-        .map_err(|error| InternalError::Storage(format!("write loudness filters: {error}")))?;
-
-    let mut command = crate::process::create_command(ffmpeg_path);
-    command
-        .arg("-nostdin")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("info")
-        .arg("-threads")
-        .arg("2");
-    for (_, path) in audio_inputs {
-        command.arg("-i").arg(path);
-    }
-    command
-        .arg("-/filter_complex")
-        .arg(&filter_path)
-        .args(["-map", "[aout]", "-vn", "-sn", "-dn", "-f", "null", "-"]);
-    command.stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| InternalError::Media(format!("start loudness measure: {error}")))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| InternalError::Media("loudness measure stderr unavailable".into()))?;
-
-    std::thread::scope(|scope| -> Result<Option<LoudnormMeasures>> {
-        let diagnostics = scope.spawn(move || {
-            use std::io::Read;
-            let mut collected = Vec::new();
-            let mut reader = std::io::BufReader::new(stderr);
-            let _ = reader.read_to_end(&mut collected);
-            collected
-        });
-        loop {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(InternalError::Media("export cancelled".into()).into());
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let stderr_bytes = diagnostics.join().unwrap_or_default();
-                    let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
-                    if !status.success() {
-                        let detail = stderr_text
-                            .lines()
-                            .rev()
-                            .find(|line| !line.trim().is_empty())
-                            .unwrap_or("no diagnostic output");
-                        return Err(InternalError::Media(format!(
-                            "loudness measure failed: {}",
-                            redact_paths(detail)
-                        ))
-                        .into());
-                    }
-                    return Ok(parse_loudnorm_summary(&stderr_text));
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(InternalError::Media(format!(
-                        "wait for loudness measure: {error}"
-                    ))
-                    .into());
-                }
-            }
-        }
-    })
-}
-
-/// Resolves the mastering chain for the render: two-pass loudnorm when a
-/// loudness target is set (audio-only measure pass over the exact mix, then
-/// linear apply), the plain dynamic suffix otherwise. Measurement failure
-/// degrades to dynamic loudnorm — it never fails the export.
-#[allow(clippy::too_many_arguments)]
-fn resolve_mastering_suffix(
-    settings: &ExportSettings,
-    ffmpeg_path: &str,
-    plan: &RenderPlan,
-    project_id: &str,
-    asset_paths: &HashMap<String, PathBuf>,
-    probe: &ProbeCache,
-    duration_ms: u64,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<String> {
-    let Some(mastering) = settings.audio_mastering.as_ref() else {
-        return Ok(String::new());
-    };
-    if mastering.loudness_target.is_none() {
-        return Ok(mastering.filter_suffix());
-    }
-    // The measure graph references `[i:a]` labels by input index, so it needs
-    // its own audio-only input list — never the composition's mixed list.
-    let audio_inputs = collect_input_assets(plan, asset_paths)?;
-    if audio_inputs.is_empty() {
-        return Ok(mastering.filter_suffix());
-    }
-    let audio_only_indices: HashMap<String, usize> = audio_inputs
-        .iter()
-        .enumerate()
-        .map(|(index, (asset_id, _))| (asset_id.clone(), index))
-        .collect();
-    let mut probe_filters = Vec::new();
-    let has_audio = append_audio_graph(
-        &mut probe_filters,
-        &mastering.measure_suffix(),
-        plan,
-        project_id,
-        &audio_only_indices,
-        asset_paths,
-        probe,
-        duration_ms,
-        cancel,
-    )?;
-    if !has_audio {
-        return Ok(mastering.filter_suffix());
-    }
-    let measured = measure_loudness(
-        ffmpeg_path,
-        &audio_inputs,
-        &probe_filters,
-        project_id,
-        cancel,
-    )
-    .unwrap_or_else(|error| {
-        warn!(%error, "loudness measurement failed; using dynamic loudnorm");
-        None
-    });
-    Ok(mastering.apply_suffix(measured.as_ref()))
-}
-
 /// the full export duration and mixed into `[aout]` — to `filters`. Returns
 /// whether `[aout]` was emitted. Called by the standalone pass directly and,
 /// for chunked exports, by the dedicated audio render in `render_timeline_chunked`.
 #[allow(clippy::too_many_arguments)]
 fn append_audio_graph(
     filters: &mut Vec<String>,
-    mastering_suffix: &str,
     plan: &RenderPlan,
     project_id: &str,
     input_indices: &HashMap<String, usize>,
@@ -4252,18 +3362,16 @@ fn append_audio_graph(
     if audio_labels.len() == 1 {
         let label = "aout";
         filters.push(format!(
-            "{}atrim=duration={}{}[{label}]",
+            "{}atrim=duration={}[{label}]",
             audio_labels[0],
             seconds(duration_ms),
-            mastering_suffix,
         ));
     } else if !audio_labels.is_empty() {
         filters.push(format!(
-            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}{}[aout]",
+            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
             audio_labels.join(""),
             audio_labels.len(),
             seconds(duration_ms),
-            mastering_suffix,
         ));
     }
     Ok(!audio_labels.is_empty())
@@ -4677,22 +3785,9 @@ fn render_timeline_chunked(
         .enumerate()
         .map(|(index, (asset_id, _))| (asset_id.clone(), index))
         .collect();
-    // Two-pass loudness resolves here — the measurement runs once over the
-    // full mix before the single audio render, never per chunk.
-    let mastering_suffix = resolve_mastering_suffix(
-        settings,
-        ffmpeg_path,
-        plan,
-        project_id,
-        asset_paths,
-        &shared.probe,
-        plan.duration_ms.max(1),
-        &cancel,
-    )?;
     let mut audio_filters = Vec::new();
     let has_audio = append_audio_graph(
         &mut audio_filters,
-        &mastering_suffix,
         plan,
         project_id,
         &audio_input_indices,
@@ -6055,17 +5150,6 @@ pub(crate) fn validate_export_settings(settings: &ExportSettings, plan: &RenderP
         return Err(
             InternalError::Media("square export requires a square project canvas".into()).into(),
         );
-    }
-    if let Some(db) = settings
-        .audio_mastering
-        .as_ref()
-        .and_then(|mastering| mastering.noise_reduction_db)
-    {
-        if !db.is_finite() || !(3.0..=24.0).contains(&db) {
-            return Err(
-                InternalError::Media("noise reduction must be between 3 and 24 dB".into()).into(),
-            );
-        }
     }
     Ok(())
 }
@@ -8443,39 +7527,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn brand_asset_resolution_honors_relative_absolute_and_escaping_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let work_dir = temp.path().join("project");
-        std::fs::create_dir_all(work_dir.join("brand")).unwrap();
-        let logo = work_dir.join("brand/logo.png");
-        std::fs::write(&logo, b"png").unwrap();
-
-        // UI picks land project-relative → resolve inside the work dir.
-        // Compare canonical forms: tempfile paths may carry Windows 8.3 short
-        // names (e.g. RUNNER~1 on CI) that canonicalization expands.
-        let resolved = resolve_brand_asset_path("brand/logo.png", &work_dir).unwrap();
-        let expected = crate::path_policy::canonicalize_path(&logo).unwrap();
-        assert_eq!(std::path::Path::new(&resolved), expected.as_path());
-
-        // Missing relative file degrades to absent.
-        assert!(resolve_brand_asset_path("brand/missing.png", &work_dir).is_none());
-
-        // Traversal out of the project dir is rejected, not followed.
-        std::fs::write(temp.path().join("outside.png"), b"png").unwrap();
-        assert!(resolve_brand_asset_path("../outside.png", &work_dir).is_none());
-
-        // Absolute paths pass through only while the file exists.
-        let external = temp.path().join("external.png");
-        std::fs::write(&external, b"png").unwrap();
-        let raw = external.to_string_lossy().to_string();
-        assert_eq!(
-            resolve_brand_asset_path(&raw, &work_dir).as_deref(),
-            Some(raw.as_str())
-        );
-        assert!(resolve_brand_asset_path("C:\\definitely\\missing\\logo.png", &work_dir).is_none());
-    }
-
-    #[test]
     fn is_pipe_closed_matches_broken_pipe_errors() {
         assert!(is_pipe_closed(&std::io::Error::from_raw_os_error(109)));
         assert!(is_pipe_closed(&std::io::Error::from_raw_os_error(232)));
@@ -8715,7 +7766,6 @@ mod tests {
     fn hvc1_tag_applies_only_to_hevc() {
         let hevc = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "hevc".into(),
             encoder: "software".into(),
@@ -8723,15 +7773,11 @@ mod tests {
             caption_mode: "none".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert_eq!(hvc1_tag_args(&hevc), &["-tag:v", "hvc1"]);
         let h264 = ExportSettings {
             codec: "h264".into(),
-            brand_watermark: None,
             keystroke_overlay: None,
             ..hevc
         };
@@ -9384,7 +8430,6 @@ mod tests {
         for preset in ["smooth-60fps", "ultra-4k", "ultra-4k-60"] {
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: preset.into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9392,16 +8437,12 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "embed".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &plan).is_ok());
         }
         let settings_4k = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "ultra-4k".into(),
             codec: "h264".into(),
             encoder: "software".into(),
@@ -9409,10 +8450,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert_eq!(audio_bitrate(&settings_4k), "192k");
     }
@@ -9422,7 +8460,6 @@ mod tests {
         let plan = valid_plan();
         let mut settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "default-mp4".into(),
             codec: "h264".into(),
             encoder: "nvenc".into(),
@@ -9430,10 +8467,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &plan).is_err());
         settings.encoder = "auto".into();
@@ -10345,7 +9379,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10353,10 +9386,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -10621,7 +9651,6 @@ mod tests {
             p.chapter_mode = mode.into();
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: "default-mp4".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -10629,10 +9658,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: mode.into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -10641,7 +9667,6 @@ mod tests {
         p.chapter_mode = "embed".into();
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "default-mp4".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10649,10 +9674,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "invalid_mode".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_err());
     }
@@ -10665,7 +9687,6 @@ mod tests {
             p.chapter_mode = "none".into();
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: preset.into(),
                 codec: "gif".into(),
                 encoder: "auto".into(),
@@ -10673,10 +9694,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -10686,7 +9704,6 @@ mod tests {
         p.chapter_mode = "none".into();
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -10694,10 +9711,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -10706,7 +9720,6 @@ mod tests {
         p_sidecar.chapter_mode = "sidecar".into();
         let settings_sidecar = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -10714,10 +9727,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -10735,7 +9745,6 @@ mod tests {
             p.chapter_mode = "none".into();
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: preset.into(),
                 codec: "webp".into(),
                 encoder: "auto".into(),
@@ -10743,10 +9752,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -10756,7 +9762,6 @@ mod tests {
         p.chapter_mode = "none".into();
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -10764,10 +9769,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -10776,7 +9778,6 @@ mod tests {
         p_sidecar.chapter_mode = "sidecar".into();
         let settings_sidecar = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -10784,10 +9785,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -10798,7 +9796,6 @@ mod tests {
         plan.chapter_mode = "none".into();
         let gif_settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -10806,10 +9803,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         plan.duration_ms = 60_000;
         assert!(validate_export_settings(&gif_settings, &plan).is_ok());
@@ -10818,7 +9812,6 @@ mod tests {
         // The cap only applies to GIF — a long mp4 is unaffected.
         let mp4_settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10826,10 +9819,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         plan.duration_ms = 120_000;
         plan.chapter_mode = "embed".into();
@@ -10842,7 +9832,6 @@ mod tests {
         plan.duration_ms = 60_000;
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10850,10 +9839,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         // 1920*1080*30 * 0.01 bpp * 60 s / 8 + 128k/8 * 60 s.
         let expected = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0 + 128_000.0 / 8.0 * 60.0) as u64;
@@ -10862,9 +9848,7 @@ mod tests {
         let gif_settings = ExportSettings {
             preset: "gif-balanced".into(),
             container: "gif".into(),
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
             ..settings
         };
         let video_only = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0) as u64;
@@ -11188,7 +10172,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11196,10 +10179,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11307,7 +10287,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -11315,10 +10294,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11349,146 +10325,6 @@ mod tests {
             "validate gif failed: {:?}",
             validation.err()
         );
-    }
-
-    /// The watermark branch must terminate its chain with a real filter —
-    /// `[prev][brandbase]` (or `…,[brandbase]` after an optional fragment) is a
-    /// filterless chain FFmpeg rejects with "No such filter: ''".
-    #[test]
-    fn test_render_timeline_composition_brand_watermark_end_to_end() {
-        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let ffprobe = match crate::media::resolve_executable("ffprobe") {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("rf-test-watermark-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let screen_path = temp_dir.join("screen.mp4");
-        let logo_path = temp_dir.join("logo.png");
-        let out_path = temp_dir.join("out.mp4");
-
-        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=320x240:rate=10",
-                "-t",
-                "1",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&screen_path)
-            .status()
-            .unwrap();
-        assert!(status.success(), "generate screen test video");
-        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=red:s=64x32:d=0.1",
-                "-frames:v",
-                "1",
-            ])
-            .arg(&logo_path)
-            .status()
-            .unwrap();
-        assert!(status.success(), "generate logo png");
-
-        let mut asset_paths = HashMap::new();
-        asset_paths.insert("asset-screen".to_string(), screen_path);
-
-        let plan = RenderPlan {
-            reframe: None,
-            project_id: "test-watermark-project".into(),
-            duration_ms: 1000,
-            segments: vec![RenderSegment {
-                asset_id: "asset-screen".into(),
-                stream_index: Some(0),
-                volume: None,
-                fade_in_ms: None,
-                fade_out_ms: None,
-                volume_keyframes: None,
-                audio_filter: None,
-                speed: 1.0,
-                source_in_ms: 0,
-                source_out_ms: 1000,
-                output_start_ms: 0,
-                output_end_ms: 1000,
-                source_width: Some(320),
-                source_height: Some(240),
-            }],
-            gaps: Vec::new(),
-            overlays: Vec::new(),
-            captions: Vec::new(),
-            caption_mode: "none".into(),
-            chapters: Vec::new(),
-            chapter_mode: "none".into(),
-            masks: Vec::new(),
-            zoom_segments: Vec::new(),
-            cursor_effects: Vec::new(),
-            overlay_render_plan: None,
-            canvas: Some(cursor::RenderCanvas {
-                width: 320,
-                height: 240,
-                fps: 10,
-                ..Default::default()
-            }),
-            audio: None,
-            audio_tracks: None,
-            annotations: Vec::new(),
-            texts: Vec::new(),
-            images: Vec::new(),
-            keystrokes: Vec::new(),
-        };
-
-        let settings = ExportSettings {
-            reframe_mode: None,
-            webcam_background: None,
-            preset: "balanced".into(),
-            codec: "h264".into(),
-            encoder: "software".into(),
-            container: "mp4".into(),
-            caption_mode: "none".into(),
-            chapter_mode: "none".into(),
-            range: None,
-            audio_mastering: None,
-            brand_watermark: Some(BrandWatermark {
-                enabled: true,
-                logo_path: Some(logo_path.to_string_lossy().to_string()),
-                position: "bottom-right".into(),
-                scale_percent: 8.0,
-                opacity: 0.85,
-            }),
-            keystroke_overlay: None,
-            brand_cards: None,
-        };
-
-        let res = render_timeline_composition(
-            &ffmpeg.to_string_lossy(),
-            &out_path,
-            &plan,
-            "test-watermark-project",
-            &asset_paths,
-            &settings,
-            encoding::ExportEncoder::Software,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            &|_| {},
-            None,
-            Some(&ffprobe),
-        );
-        assert!(res.is_ok(), "watermarked render failed: {:?}", res.err());
-        assert!(out_path.is_file(), "watermarked export should exist");
     }
 
     #[test]
@@ -11588,7 +10424,6 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -11596,10 +10431,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -11694,7 +10526,6 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -11702,10 +10533,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -11821,7 +10649,6 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -11829,10 +10656,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -11930,7 +10754,6 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -11938,10 +10761,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -12041,7 +10861,6 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
-                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -12049,10 +10868,7 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
-                audio_mastering: None,
-                brand_watermark: None,
                 keystroke_overlay: None,
-                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -12181,7 +10997,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -12189,10 +11004,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12310,7 +11122,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "gif-fast".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -12318,10 +11129,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12530,7 +11338,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -12538,10 +11345,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
         let res = render_timeline_composition(
             &ffmpeg.to_string_lossy(),
@@ -13041,7 +11845,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -13049,10 +11852,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -13453,7 +12253,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -13461,10 +12260,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -13679,7 +12475,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -13687,10 +12482,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -13876,7 +12668,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -13884,10 +12675,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -14087,7 +12875,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -14095,10 +12882,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -14268,7 +13052,6 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -14276,10 +13059,7 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
             keystroke_overlay: None,
-            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -14318,169 +13098,6 @@ mod tests {
             "Center of camera overlay at 0.5s should show camera video (red), but got RGBA: {:?}",
             pixel
         );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    /// Synthetic-mask primary-camera compositing: injects a pre-rendered
-    /// mask video directly into `shared.masks` (the model-driven
-    /// `generate_mask` path is exercised separately), then renders through
-    /// real FFmpeg for BOTH input layouts —
-    ///   seeked: the mask rides the same `-ss` window input as the source;
-    ///   legacy: >MAX_SEEK_INPUTS windows force the unseeked per-asset layout.
-    /// Covers a trimmed+speed-mapped source so the mask trim/speed mirror is
-    /// exercised, not just the happy 1× path.
-    #[test]
-    fn test_render_timeline_composition_virtual_background_primary_camera() {
-        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let ffprobe = match crate::media::resolve_executable("ffprobe") {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("rf-test-vb-primary-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let camera_path = temp_dir.join("camera.mp4");
-        let mask_path = temp_dir.join("mask.mp4");
-        // Red source + white mask (fully opaque) at identical dims/duration —
-        // alphamerge then sees a mask for every source frame.
-        for (path, filter) in [
-            (&camera_path, "color=c=red:s=320x240:r=10"),
-            (&mask_path, "color=c=white:s=320x240:r=10"),
-        ] {
-            let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
-                .args([
-                    "-y", "-f", "lavfi", "-i", filter, "-t", "12", "-c:v", "libx264",
-                ])
-                .arg(path)
-                .status()
-                .unwrap();
-            assert!(status.success(), "failed to generate {filter}");
-        }
-
-        let settings = ExportSettings {
-            reframe_mode: None,
-            webcam_background: Some(background::WebcamBackground {
-                enabled: true,
-                mode: "blur".into(),
-                blur_sigma: 20.0,
-                replace_color: "#0f172a".into(),
-            }),
-            preset: "balanced".into(),
-            codec: "h264".into(),
-            encoder: "auto".into(),
-            container: "mp4".into(),
-            caption_mode: "none".into(),
-            chapter_mode: "none".into(),
-            range: None,
-            audio_mastering: None,
-            brand_watermark: None,
-            keystroke_overlay: None,
-            brand_cards: None,
-        };
-        let canvas = Some(cursor::RenderCanvas {
-            width: 320,
-            height: 240,
-            fps: 10,
-            ..Default::default()
-        });
-        let segment = |source_in_ms: u64,
-                       source_out_ms: u64,
-                       speed: f64,
-                       output_start_ms: u64,
-                       output_end_ms: u64| RenderSegment {
-            asset_id: format!("asset-cam"),
-            stream_index: Some(0),
-            volume: None,
-            fade_in_ms: None,
-            fade_out_ms: None,
-            volume_keyframes: None,
-            audio_filter: None,
-            speed,
-            source_in_ms,
-            source_out_ms,
-            output_start_ms,
-            output_end_ms,
-            source_width: Some(320),
-            source_height: Some(240),
-        };
-        let render = |segments: Vec<RenderSegment>, name: &str| {
-            let mut asset_paths = HashMap::new();
-            asset_paths.insert("asset-cam".to_string(), camera_path.clone());
-            let plan = RenderPlan {
-                reframe: None,
-                project_id: format!("test-vb-{name}"),
-                duration_ms: segments
-                    .iter()
-                    .map(|segment| segment.output_end_ms)
-                    .max()
-                    .unwrap_or(0),
-                segments,
-                gaps: Vec::new(),
-                overlays: Vec::new(),
-                captions: Vec::new(),
-                caption_mode: "none".into(),
-                chapters: Vec::new(),
-                chapter_mode: "none".into(),
-                masks: Vec::new(),
-                zoom_segments: Vec::new(),
-                cursor_effects: Vec::new(),
-                overlay_render_plan: None,
-                canvas: canvas.clone(),
-                audio: None,
-                audio_tracks: None,
-                annotations: Vec::new(),
-                texts: Vec::new(),
-                images: Vec::new(),
-                keystrokes: Vec::new(),
-            };
-            let mut shared = CompositionShared::new(Some(&ffprobe));
-            // The test seam for the model-generated mask — same map
-            // `run_render_plan` fills after `background::generate_mask`.
-            shared
-                .masks
-                .insert("asset-cam".to_string(), mask_path.clone());
-            let out_path = temp_dir.join(format!("out-{name}.mp4"));
-            let res = render_timeline_composition_shared(
-                &ffmpeg.to_string_lossy(),
-                &out_path,
-                &plan,
-                "test-vb",
-                &asset_paths,
-                &settings,
-                encoding::ExportEncoder::Software,
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                &|_| {},
-                None,
-                &shared,
-                None,
-            );
-            assert!(res.is_ok(), "{name} render failed: {:?}", res.err());
-            assert!(out_path.is_file(), "{name} output video exists");
-        };
-
-        // Seeked layout: one trim+speed segment → the mask rides the same
-        // -ss/-t window input and mirrors the source trim/speed mapping.
-        render(vec![segment(2000, 4000, 2.0, 0, 1000)], "seeked");
-
-        // Legacy layout: 25 non-coalescing windows (decreasing source_in)
-        // exceed MAX_SEEK_INPUTS → unseeked per-asset inputs + screen mask.
-        let mut legacy_segments = Vec::new();
-        for i in 0..25u64 {
-            let source_in_ms = 10_000 - i * 300; // strictly decreasing → new window each time
-            legacy_segments.push(segment(
-                source_in_ms,
-                source_in_ms + 200,
-                1.0,
-                i * 200,
-                i * 200 + 200,
-            ));
-        }
-        render(legacy_segments, "legacy");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

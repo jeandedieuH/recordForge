@@ -132,7 +132,6 @@ pub fn resolve_export_source(
                 captions_path: captions_path.as_deref(),
                 ffprobe_path,
                 plan: &request.plan,
-                settings: &request.settings,
                 legacy: true,
             })?
         }

@@ -170,24 +170,6 @@ describe("freeExportSettings", () => {
     container: "mp4",
     captionMode: "burn-in",
     chapterMode: "embed",
-    audioMastering: { denoise: true, noiseReductionDb: 12, loudnessTarget: -16 },
-    brandWatermark: {
-      enabled: false,
-      logoPath: null,
-      position: "bottom-right",
-      scalePercent: 8,
-      opacity: 0.85,
-    },
-    brandCards: {
-      enabled: false,
-      introMs: 0,
-      outroMs: 0,
-      title: null,
-      subtitle: null,
-      background: "#0f172a",
-      textColor: "#f8fafc",
-      fontPath: null,
-    },
     keystrokeOverlay: {
       enabled: false,
       durationMs: 1400,
@@ -195,12 +177,6 @@ describe("freeExportSettings", () => {
       scalePercent: 100,
     },
     reframeMode: "fit",
-    webcamBackground: {
-      enabled: false,
-      mode: "blur" as const,
-      blurSigma: 20,
-      replaceColor: "#0f172a",
-    },
     // `as const` would freeze this into a readonly tuple — cast to the
     // mutable array type ProjectExportSettings declares.
     formats: ["16:9", "9:16"] as CanvasAspectRatio[],
@@ -212,12 +188,6 @@ describe("freeExportSettings", () => {
     expect(settings.preset).toBe("high-quality")
     expect(settings.chapterMode).toBe("none")
     expect(settings.codec).toBe("h264")
-    // Studio Audio is Pro — mastering gets neutralized for Free exports.
-    expect(settings.audioMastering).toEqual({
-      denoise: false,
-      noiseReductionDb: 12,
-      loudnessTarget: null,
-    })
   })
 
   it("neutralizes ratio presets but leaves others untouched", () => {

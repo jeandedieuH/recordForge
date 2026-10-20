@@ -176,12 +176,12 @@ describe("smartCutDetectionSettings", () => {
     const settings = {
       preset: "selected-range",
       range: { startMs: 0, endMs: 1_000 },
-      audioMastering: { denoise: true },
+      keystrokeOverlay: { enabled: true },
     } as ProjectExportSettings
     const detection = smartCutDetectionSettings(settings)
     expect(detection.preset).toBe("default-mp4")
     expect(detection.range).toBeUndefined()
-    expect(detection.audioMastering).toEqual({ denoise: true })
+    expect(detection.keystrokeOverlay.enabled).toBe(true)
   })
 
   it("keeps other presets untouched while dropping any range", () => {

@@ -718,18 +718,6 @@ export const renderPlanChapterSchema = z.object({
 })
 export type RenderPlanChapter = z.infer<typeof renderPlanChapterSchema>
 
-/** Studio Audio mastering options applied to the final mixed audio (Pro). */
-export const audioMasteringSchema = z.object({
-  // Adaptive wavelet denoise; the recording gain does not set a fixed floor.
-  denoise: z.boolean().default(false),
-  // Maximum noise attenuation in dB (3..24). Only applies while denoise is on;
-  // missing on older projects → the balanced 12 dB default.
-  noiseReductionDb: z.number().min(3).max(24).default(12),
-  // Integrated loudness target in LUFS (loudnorm). null = normalization off.
-  loudnessTarget: z.number().min(-30).max(-5).nullable().default(null),
-})
-export type AudioMastering = z.infer<typeof audioMasteringSchema>
-
 /**
  * Keystroke badge overlay (Pro): modifier-combo badges captured during
  * recording, composited near an edge of the frame at export. The display
@@ -747,38 +735,6 @@ export const keystrokeOverlaySchema = z.object({
 })
 export type KeystrokeOverlay = z.infer<typeof keystrokeOverlaySchema>
 
-/** Brand Kit watermark: a logo composited over every frame at export (Pro). */
-export const brandWatermarkSchema = z.object({
-  enabled: z.boolean().default(false),
-  // Absolute path to a PNG/JPG logo; the picker copies it into app data.
-  logoPath: z.string().nullable().default(null),
-  position: z
-    .enum(["top-left", "top-right", "bottom-left", "bottom-right"])
-    .default("bottom-right"),
-  // Width as a percent of output width; height keeps aspect.
-  scalePercent: z.number().min(2).max(30).default(8),
-  opacity: z.number().min(0.1).max(1).default(0.85),
-})
-export type BrandWatermark = z.infer<typeof brandWatermarkSchema>
-
-/**
- * Brand Kit intro/outro cards (Pro): solid-color cards with brand text +
- * logo rendered as real video segments at the head/tail of the export.
- * The font/logo pickers copy files into app data — absolute paths only.
- */
-export const brandCardsSchema = z.object({
-  enabled: z.boolean().default(false),
-  // 0 disables each side independently.
-  introMs: z.number().int().min(0).max(10_000).default(0),
-  outroMs: z.number().int().min(0).max(10_000).default(0),
-  title: z.string().max(120).nullable().default(null),
-  subtitle: z.string().max(200).nullable().default(null),
-  background: z.string().default("#0f172a"),
-  textColor: z.string().default("#f8fafc"),
-  fontPath: z.string().nullable().default(null),
-})
-export type BrandCards = z.infer<typeof brandCardsSchema>
-
 /**
  * Auto-reframe (Pro): how a non-matching canvas aspect handles the screen
  * source. `fit` = letterbox into the content area (legacy behavior), `fill` =
@@ -788,20 +744,6 @@ export type BrandCards = z.infer<typeof brandCardsSchema>
  */
 export const reframeModeSchema = z.enum(["fit", "fill", "cursor-follow"])
 export type ReframeMode = z.infer<typeof reframeModeSchema>
-
-/**
- * Virtual background (Pro): on-device person segmentation cuts the webcam
- * feed out of its backdrop — `blur` re-composites it over a blurred copy,
- * `replace` over a solid brand color. The model is downloaded on demand;
- * the mask video is pre-rendered per camera asset at export.
- */
-export const webcamBackgroundSchema = z.object({
-  enabled: z.boolean().default(false),
-  mode: z.enum(["blur", "replace"]).default("blur"),
-  blurSigma: z.number().min(2).max(80).default(20),
-  replaceColor: z.string().default("#0f172a"),
-})
-export type WebcamBackground = z.infer<typeof webcamBackgroundSchema>
 
 export const renderPlanReframeKeyframeSchema = z.object({
   // Output-timeline timestamp of this pan keyframe.
@@ -829,18 +771,6 @@ export const exportSettingsSchema = z.object({
   captionMode: renderCaptionModeSchema.default("burn-in"),
   chapterMode: renderChapterModeSchema.default("embed"),
   range: exportRangeSchema.nullish(),
-  audioMastering: audioMasteringSchema.default({
-    denoise: false,
-    noiseReductionDb: 12,
-    loudnessTarget: null,
-  }),
-  brandWatermark: brandWatermarkSchema.default({
-    enabled: false,
-    logoPath: null,
-    position: "bottom-right",
-    scalePercent: 8,
-    opacity: 0.85,
-  }),
   // Keystroke overlay (Pro) — modifier-combo badges captured during recording.
   keystrokeOverlay: keystrokeOverlaySchema.default({
     enabled: false,
@@ -849,22 +779,6 @@ export const exportSettingsSchema = z.object({
     scalePercent: 100,
   }),
   reframeMode: reframeModeSchema.default("fit"),
-  brandCards: brandCardsSchema.default({
-    enabled: false,
-    introMs: 0,
-    outroMs: 0,
-    title: null,
-    subtitle: null,
-    background: "#0f172a",
-    textColor: "#f8fafc",
-    fontPath: null,
-  }),
-  webcamBackground: webcamBackgroundSchema.default({
-    enabled: false,
-    mode: "blur",
-    blurSigma: 20,
-    replaceColor: "#0f172a",
-  }),
 })
 export type ExportSettings = z.infer<typeof exportSettingsSchema>
 

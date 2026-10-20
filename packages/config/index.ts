@@ -2,5 +2,5 @@
 // This file is intentionally minimal; configuration lives in JSON/JS files next to this package.
 
 export const APP_NAME = "RecordForge"
-export const APP_VERSION = "2.1.2"
+export const APP_VERSION = "2.1.3"
 export const APP_VERSION_LABEL = "2.0"

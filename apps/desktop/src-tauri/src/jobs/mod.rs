@@ -908,7 +908,6 @@ impl ExportWorker {
                             captions_path: captions_path.as_deref().map(Path::new),
                             ffprobe_path: &self.ffprobe_path,
                             plan: &self.request.plan,
-                            settings: &self.request.settings,
                             legacy: false,
                         },
                     ) {

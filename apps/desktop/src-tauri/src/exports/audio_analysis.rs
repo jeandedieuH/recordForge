@@ -602,11 +602,8 @@ pub(crate) fn analyze_timeline_silences(
     let probe = ProbeCache::new(ffprobe_path);
 
     let mut filters = Vec::new();
-    // No mastering chain during analysis — loudness polish must not shift the
-    // silence floor the user asked to measure.
     let has_audio = append_audio_graph(
         &mut filters,
-        "",
         &analysis_plan,
         &plan.project_id,
         &input_indices,

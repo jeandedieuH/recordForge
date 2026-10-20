@@ -18,15 +18,12 @@ pub const PRO_FEATURE_KEYS: &[&str] = &[
     "premium-titles",
     "annotations",
     "instant-share",
-    "studio-audio",
     "smart-cut",
-    "brand-kit",
     "ai-captions",
     "teleprompter",
     "keystroke-overlay",
     "auto-reframe",
     "youtube-publish",
-    "virtual-background",
 ];
 
 const HIGH_RES_EXPORT: &str = "high-res-export";
@@ -34,11 +31,8 @@ const CUSTOM_ASPECT: &str = "custom-aspect-ratio";
 const CHAPTERS: &str = "chapters";
 const PREMIUM_TITLES: &str = "premium-titles";
 const ANNOTATIONS: &str = "annotations";
-const STUDIO_AUDIO: &str = "studio-audio";
-const BRAND_KIT: &str = "brand-kit";
 const KEYSTROKE_OVERLAY: &str = "keystroke-overlay";
 const AUTO_REFRAME: &str = "auto-reframe";
-const VIRTUAL_BACKGROUND: &str = "virtual-background";
 
 /// Free canvases must measure 16:9 on their actual pixel dimensions,
 /// allowing ±0.5% for rounding on odd source sizes.
@@ -100,33 +94,6 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
         push(ANNOTATIONS);
     }
 
-    // Studio Audio is an export settings flag, not timeline content — the
-    // gate triggers only when mastering is actually engaged.
-    if settings
-        .audio_mastering
-        .as_ref()
-        .is_some_and(|mastering| mastering.denoise || mastering.loudness_target.is_some())
-    {
-        push(STUDIO_AUDIO);
-    }
-
-    // The watermark gate mirrors the TS check (`enabled && logoPath`) — a
-    // filesystem stat here would disagree with the UI: picked logos live at
-    // project-relative paths that only resolve inside `run_render_plan`, so
-    // gating on file existence would let a configured watermark slip past.
-    if settings
-        .brand_watermark
-        .as_ref()
-        .is_some_and(|watermark| watermark.enabled && watermark.logo_path.is_some())
-        || settings
-            .brand_cards
-            .as_ref()
-            .and_then(|cards| cards.card_durations())
-            .is_some()
-    {
-        push(BRAND_KIT);
-    }
-
     if settings
         .keystroke_overlay
         .as_ref()
@@ -139,17 +106,6 @@ pub fn required_pro_features(plan: &RenderPlan, settings: &ExportSettings) -> Ve
     // because `freeExportSettings` forces `reframeMode: "fit"`.
     if plan.reframe.is_some() {
         push(AUTO_REFRAME);
-    }
-
-    // Gate on the active setting rather than plan contents: primary-camera
-    // recordings composite the person onto a background too (no overlay), so
-    // an enabled+active webcam background is real Pro work either way.
-    if settings
-        .webcam_background
-        .as_ref()
-        .is_some_and(|bg| bg.is_active())
-    {
-        push(VIRTUAL_BACKGROUND);
     }
 
     features
@@ -301,7 +257,6 @@ mod tests {
     fn mp4_settings(preset: &str) -> ExportSettings {
         ExportSettings {
             reframe_mode: None,
-            webcam_background: None,
             preset: preset.to_string(),
             codec: "h264".to_string(),
             encoder: "auto".to_string(),
@@ -309,9 +264,6 @@ mod tests {
             caption_mode: "burn-in".to_string(),
             chapter_mode: "none".to_string(),
             range: None,
-            audio_mastering: None,
-            brand_watermark: None,
-            brand_cards: None,
             keystroke_overlay: None,
         }
     }
@@ -510,65 +462,6 @@ mod tests {
             enforce_export_entitlements(&plan, &settings, Entitlements { pro_enabled: true })
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn studio_audio_mastering_requires_pro() {
-        let plan = plan_with_canvas(1920, 1080);
-        let mut settings = mp4_settings("balanced");
-        // Denoise OR a loudness target is enough to trip the gate.
-        settings.audio_mastering = Some(crate::exports::AudioMastering {
-            denoise: true,
-            noise_reduction_db: None,
-            loudness_target: None,
-        });
-        assert_eq!(required_pro_features(&plan, &settings), vec![STUDIO_AUDIO]);
-
-        settings.audio_mastering = Some(crate::exports::AudioMastering {
-            denoise: false,
-            noise_reduction_db: None,
-            loudness_target: Some(-16.0),
-        });
-        assert_eq!(required_pro_features(&plan, &settings), vec![STUDIO_AUDIO]);
-
-        // Defaults stay Free.
-        settings.audio_mastering = Some(crate::exports::AudioMastering {
-            denoise: false,
-            noise_reduction_db: None,
-            loudness_target: None,
-        });
-        assert!(required_pro_features(&plan, &settings).is_empty());
-    }
-
-    #[test]
-    fn enabled_watermark_flags_brand_kit_even_for_project_relative_logos() {
-        // Picked logos are stored as `brand/logo.png` — only resolvable inside
-        // run_render_plan. The gate must judge by configuration, not by a
-        // filesystem stat that cannot see the project dir.
-        let plan = plan_with_canvas(1920, 1080);
-        let mut settings = mp4_settings("balanced");
-        settings.brand_watermark = Some(crate::exports::BrandWatermark {
-            enabled: true,
-            logo_path: Some("brand/logo.png".to_string()),
-            position: "bottom-right".to_string(),
-            scale_percent: 8.0,
-            opacity: 0.85,
-        });
-        assert_eq!(required_pro_features(&plan, &settings), vec![BRAND_KIT]);
-
-        // Disabled or logo-less watermark config stays Free.
-        settings.brand_watermark = Some(crate::exports::BrandWatermark {
-            enabled: true,
-            logo_path: None,
-            ..settings.brand_watermark.clone().unwrap()
-        });
-        assert!(required_pro_features(&plan, &settings).is_empty());
-        settings.brand_watermark = Some(crate::exports::BrandWatermark {
-            enabled: false,
-            logo_path: Some("brand/logo.png".to_string()),
-            ..settings.brand_watermark.clone().unwrap()
-        });
-        assert!(required_pro_features(&plan, &settings).is_empty());
     }
 
     #[test]

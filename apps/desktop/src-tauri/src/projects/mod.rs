@@ -1132,10 +1132,11 @@ mod tests {
         assert_eq!(loaded.project.assets[0].derivative_version, 1);
     }
 
-    /// Premium export settings (watermark, brand cards, mastering, share,
-    /// formats, …) are owned by the TS schema and must round-trip verbatim —
-    /// this is the regression for the struct-typed `export_settings` that
-    /// silently stripped every field it did not declare on save.
+    /// Export settings — including retired fields from older project files
+    /// (the removed audioMastering/brandWatermark/brandCards/webcamBackground
+    /// below) — are owned by the TS schema and must round-trip verbatim. This
+    /// is the regression for the struct-typed `export_settings` that silently
+    /// stripped every field it did not declare on save.
     #[test]
     fn export_settings_round_trip_preserves_unknown_fields() {
         let temp = tempfile::tempdir().unwrap();

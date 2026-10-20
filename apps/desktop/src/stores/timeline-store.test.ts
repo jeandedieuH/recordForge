@@ -33,24 +33,6 @@ function createMockProject(): recordForgeProject {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "embed",
-      audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-      brandWatermark: {
-        enabled: false,
-        logoPath: null,
-        position: "bottom-right",
-        scalePercent: 8,
-        opacity: 0.85,
-      },
-      brandCards: {
-        enabled: false,
-        introMs: 0,
-        outroMs: 0,
-        title: null,
-        subtitle: null,
-        background: "#0f172a",
-        textColor: "#f8fafc",
-        fontPath: null,
-      },
       keystrokeOverlay: {
         enabled: false,
         durationMs: 1400,
@@ -58,12 +40,6 @@ function createMockProject(): recordForgeProject {
         scalePercent: 100,
       },
       reframeMode: "fit",
-      webcamBackground: {
-        enabled: false,
-        mode: "blur" as const,
-        blurSigma: 20,
-        replaceColor: "#0f172a",
-      },
       formats: [],
       instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
     },
@@ -97,24 +73,6 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
           keystrokeOverlay: {
             enabled: false,
             durationMs: 1400,
@@ -122,12 +80,6 @@ describe("TimelineStore Export Settings Actions", () => {
             scalePercent: 100,
           },
           reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
           formats: [],
           instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
@@ -168,24 +120,6 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
           keystrokeOverlay: {
             enabled: false,
             durationMs: 1400,
@@ -193,12 +127,6 @@ describe("TimelineStore Export Settings Actions", () => {
             scalePercent: 100,
           },
           reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
           formats: [],
           instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
@@ -240,24 +168,6 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
           keystrokeOverlay: {
             enabled: false,
             durationMs: 1400,
@@ -265,12 +175,6 @@ describe("TimelineStore Export Settings Actions", () => {
             scalePercent: 100,
           },
           reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
           formats: [],
           instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
@@ -311,24 +215,6 @@ describe("TimelineStore Export Settings Actions", () => {
           encoder: "auto",
           captionMode: "burn-in",
           chapterMode: "none",
-          audioMastering: { denoise: false, noiseReductionDb: 12, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
           keystrokeOverlay: {
             enabled: false,
             durationMs: 1400,
@@ -336,12 +222,6 @@ describe("TimelineStore Export Settings Actions", () => {
             scalePercent: 100,
           },
           reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
           formats: [],
           instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
         },
@@ -405,51 +285,11 @@ describe("Export settings persistence contract", () => {
   it("premium setters write into project.exportSettings for autosave", () => {
     useTimelineStore.setState({ project: createMockProject() })
 
-    useTimelineStore.getState().setBrandWatermark({
-      enabled: true,
-      logoPath: "brand/logo.png",
-      position: "top-left",
-      scalePercent: 12,
-      opacity: 0.6,
-    })
     useTimelineStore.getState().setKeystrokeOverlay(true)
     useTimelineStore.getState().setReframeMode("cursor-follow")
-    useTimelineStore.getState().setWebcamBackground({
-      enabled: true,
-      mode: "replace",
-      blurSigma: 30,
-      replaceColor: "#112233",
-    })
 
     const settings = useTimelineStore.getState().project?.exportSettings
-    expect(settings?.brandWatermark.enabled).toBe(true)
-    expect(settings?.brandWatermark.logoPath).toBe("brand/logo.png")
     expect(settings?.keystrokeOverlay.enabled).toBe(true)
     expect(settings?.reframeMode).toBe("cursor-follow")
-    expect(settings?.webcamBackground.enabled).toBe(true)
-  })
-})
-
-describe("setAudioMastering", () => {
-  it("a strength-only edit (12→6 dB) is not swallowed by the equality check", () => {
-    useTimelineStore.setState({ project: createMockProject(), projectRevision: 5 })
-    const base = { denoise: true, noiseReductionDb: 12, loudnessTarget: null }
-    useTimelineStore.getState().setAudioMastering(base)
-    const revisionAfterEnable = useTimelineStore.getState().projectRevision
-    expect(revisionAfterEnable).toBeGreaterThan(5)
-
-    useTimelineStore.getState().setAudioMastering({ ...base, noiseReductionDb: 6 })
-    const updated = useTimelineStore.getState().project?.exportSettings.audioMastering
-    expect(updated?.noiseReductionDb).toBe(6)
-    expect(useTimelineStore.getState().projectRevision).toBeGreaterThan(revisionAfterEnable)
-  })
-
-  it("a fully identical mastering object is an exact no-op", () => {
-    useTimelineStore.setState({ project: createMockProject(), projectRevision: 9 })
-    const mastering = { denoise: false, noiseReductionDb: 12, loudnessTarget: null }
-    useTimelineStore.getState().setAudioMastering(mastering)
-    const revision = useTimelineStore.getState().projectRevision
-    useTimelineStore.getState().setAudioMastering({ ...mastering })
-    expect(useTimelineStore.getState().projectRevision).toBe(revision)
   })
 })

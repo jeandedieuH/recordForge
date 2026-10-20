@@ -35,10 +35,6 @@ import {
   type ExecuteOptions,
   type TimelineCommand,
   type TimelineSelection,
-  type AudioMastering,
-  type BrandCards,
-  type WebcamBackground,
-  type BrandWatermark,
   type RenderCaptionMode,
   type RenderChapterMode,
   type TimelineState,
@@ -177,10 +173,6 @@ interface TimelineStore {
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
   setChapterMode: (mode: RenderChapterMode) => void
-  setAudioMastering: (mastering: AudioMastering) => void
-  setBrandWatermark: (watermark: BrandWatermark) => void
-  setBrandCards: (cards: BrandCards) => void
-  setWebcamBackground: (background: WebcamBackground) => void
   // Keystroke badge settings — a boolean toggles `enabled` (legacy callers)
   // while an object updates hold duration / position / scale, preserving the
   // other persisted fields.
@@ -1263,60 +1255,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = {
       ...project,
       exportSettings: { ...project.exportSettings, chapterMode: mode },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setAudioMastering: (mastering) => {
-    const project = get().project
-    if (!project) return
-    const current = project.exportSettings.audioMastering
-    // Compare the whole mastered shape — a strength-only edit (12→6 dB) must
-    // not be treated as a no-op.
-    if (
-      current?.denoise === mastering.denoise &&
-      current?.loudnessTarget === mastering.loudnessTarget &&
-      (current?.noiseReductionDb ?? 12) === (mastering.noiseReductionDb ?? 12)
-    ) {
-      return
-    }
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, audioMastering: mastering },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setBrandWatermark: (watermark) => {
-    const project = get().project
-    if (!project) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, brandWatermark: watermark },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setBrandCards: (cards) => {
-    const project = get().project
-    if (!project) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, brandCards: cards },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setWebcamBackground: (background) => {
-    const project = get().project
-    if (!project) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, webcamBackground: background },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)

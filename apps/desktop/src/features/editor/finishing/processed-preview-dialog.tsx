@@ -16,8 +16,8 @@ import { toErrorMessage } from "../../../lib/errors"
 import type { CanvasAspectRatio } from "@recordforge/contracts"
 
 // Real processed preview through the export renderer — opt-in because it
-// runs a full render pass (audio mastering, cards, webcam background,
-// keystroke badges) rather than a cheap canvas approximation.
+// runs a full render pass (captions, keystroke badges) rather than a cheap
+// canvas approximation.
 interface ProcessedPreviewDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -195,8 +195,7 @@ export function ProcessedPreviewDialog({ open, onOpenChange }: ProcessedPreviewD
           <DialogTitle>Finished video preview</DialogTitle>
           <DialogDescription>
             Local processed preview, up to 720p — export keeps your selected quality. Renders the
-            real export pipeline: mastered audio, intro/outro cards, webcam background, and
-            keystroke badges.
+            real export pipeline: captions, chapters, and keystroke badges.
           </DialogDescription>
         </DialogHeader>
 

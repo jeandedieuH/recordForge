@@ -2,9 +2,7 @@ import { createElement } from "react"
 import { renderToString } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 import { SmartCutScanControls } from "../panels/smart-cut-controls"
-import { StudioAudioControls } from "./studio-audio-controls"
 import { KeystrokeOverlayCard } from "./keystroke-overlay-card"
-import { VirtualBackgroundCard } from "../../export/virtual-background-card"
 
 // SSR smoke coverage for the shared finishing controls: a Radix primitive
 // misuse (SelectItem outside SelectContent) only throws at render time, so
@@ -25,28 +23,6 @@ describe("shared finishing controls render", () => {
     )
     expect(html).toContain("Sensitivity")
     expect(html.length).toBeGreaterThan(0)
-  })
-
-  it("StudioAudioControls renders gated and ungated states", () => {
-    const mastering = { denoise: true, noiseReductionDb: 12, loudnessTarget: -14 }
-    const free = renderToString(
-      createElement(StudioAudioControls, {
-        mastering,
-        isPro: false,
-        onChange: noop,
-        onUpgradeRequest: noop,
-      }),
-    )
-    expect(free).toContain("Noise reduction")
-    const pro = renderToString(
-      createElement(StudioAudioControls, {
-        mastering,
-        isPro: true,
-        onChange: noop,
-        onUpgradeRequest: noop,
-      }),
-    )
-    expect(pro).toContain("Reduction strength")
   })
 
   it("KeystrokeOverlayCard renders capture states honestly", () => {
@@ -84,22 +60,5 @@ describe("shared finishing controls render", () => {
     )
     // SSR splits adjacent expressions with <!-- --> markers — strip them.
     expect(populated.replace(/<!-- -->/g, "")).toContain("3 shortcuts captured")
-  })
-
-  it("VirtualBackgroundCard renders the no-camera state", () => {
-    const background = {
-      enabled: true,
-      mode: "blur" as const,
-      blurSigma: 20,
-      replaceColor: "#0f172a",
-    }
-    const html = renderToString(
-      createElement(VirtualBackgroundCard, {
-        background,
-        hasCamera: false,
-        onChange: noop,
-      }),
-    )
-    expect(html).toContain("No webcam in this project")
   })
 })

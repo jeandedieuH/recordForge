@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type {
-  AudioMastering,
-  BrandCards,
-  WebcamBackground,
-  BrandWatermark,
   CanvasAspectRatio,
   ExportEncoderPreference,
   ExportPreset,
@@ -56,14 +52,10 @@ import { UploadDialog } from "../storage/components/upload-dialog"
 import { useLicenseStore } from "../../stores/license-store"
 import { useStorageStore } from "../storage/storage-store"
 import { ProBadge } from "../licensing/pro-badge"
-import { BrandWatermarkCard } from "./brand-watermark-card"
-import { VirtualBackgroundCard } from "./virtual-background-card"
 import { YouTubePublishCard } from "./youtube-publish-card"
-import { StudioAudioControls } from "../editor/finishing/studio-audio-controls"
 import { KeystrokeOverlayCard } from "../editor/finishing/keystroke-overlay-card"
 import { ProcessedPreviewDialog } from "../editor/finishing/processed-preview-dialog"
 import { useTimelineStore } from "../../stores/timeline-store"
-import { isCameraRecording } from "../../lib/library"
 
 interface ExportViewProps {
   projectName?: string
@@ -74,10 +66,6 @@ interface ExportViewProps {
   onCaptionModeChange?: (mode: RenderCaptionMode) => void
   chapterMode?: RenderChapterMode
   onChapterModeChange?: (mode: RenderChapterMode) => void
-  onAudioMasteringChange?: (mastering: AudioMastering) => void
-  onBrandWatermarkChange?: (watermark: BrandWatermark) => void
-  onBrandCardsChange?: (cards: BrandCards) => void
-  onWebcamBackgroundChange?: (background: WebcamBackground) => void
   onKeystrokeOverlayChange?: (update: boolean | Partial<KeystrokeOverlay>) => void
   onReframeModeChange?: (mode: ReframeMode) => void
   // Batch-export format selection; empty = current canvas only.
@@ -326,10 +314,6 @@ export function ExportView({
   onCaptionModeChange,
   chapterMode = "embed",
   onChapterModeChange,
-  onAudioMasteringChange,
-  onBrandWatermarkChange,
-  onBrandCardsChange,
-  onWebcamBackgroundChange,
   onKeystrokeOverlayChange,
   onReframeModeChange,
   formats = [],
@@ -366,8 +350,8 @@ export function ExportView({
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const { toast } = useToast()
-  // Keystroke badge data + camera presence come from the timeline session —
-  // the same source the Finishing panel reads.
+  // Keystroke badge data comes from the timeline session — the same source
+  // the Finishing panel reads.
   const keystrokeEvents = useTimelineStore((state) => state.keystrokeEvents)
   const keystrokeEventsSupported = useTimelineStore((state) => state.keystrokeEventsSupported)
   const keystrokeStatus = useTimelineStore((state) =>
@@ -379,16 +363,6 @@ export function ExportView({
   )
   const keystrokeError = useTimelineStore((state) => state.keystrokeEventsError)
   const loadKeystrokeEvents = useTimelineStore((state) => state.loadKeystrokeEvents)
-  const timelineForCamera = useTimelineStore((state) => state.engine?.history.present)
-  const recordingForCamera = useTimelineStore((state) => state.recording)
-  const hasCamera = useMemo(() => {
-    if (isCameraRecording(recordingForCamera)) return true
-    return (
-      timelineForCamera?.tracks.some(
-        (track) => track.kind === "camera" && track.clips.length > 0,
-      ) ?? false
-    )
-  }, [timelineForCamera, recordingForCamera])
   const [previewDialogOpen, setPreviewDialogOpen] = useState(false)
   // Instant Share — MP4-only Pro feature (docs/specs/instant-share.md).
   // `target` is "hosted" or the id of an S3 storage profile (BYO bucket);
@@ -1140,38 +1114,9 @@ export function ExportView({
                     ? `Animated ${isWebp ? "WebP" : "GIF"} files do not support audio tracks. The exported file will be video-only.`
                     : "Audio tracks use the saved mute, solo, gain, fade, role, and speed settings."}
                 </p>
-                {!isAnimation ? (
-                  <StudioAudioControls
-                    mastering={exportSettings?.audioMastering}
-                    disabled={isRunning}
-                    isPro={isPro}
-                    onChange={(mastering) => onAudioMasteringChange?.(mastering)}
-                    onUpgradeRequest={openUpgradeDialog}
-                  />
-                ) : null}
               </div>
             ) : null}
           </div>
-
-          {exportSettings ? (
-            <BrandWatermarkCard
-              watermark={exportSettings.brandWatermark}
-              cards={exportSettings.brandCards}
-              isAnimation={isAnimation}
-              onCardsChange={(cards) => onBrandCardsChange?.(cards)}
-              disabled={isRunning}
-              onChange={(watermark) => onBrandWatermarkChange?.(watermark)}
-            />
-          ) : null}
-
-          {exportSettings ? (
-            <VirtualBackgroundCard
-              background={exportSettings.webcamBackground}
-              disabled={isRunning}
-              hasCamera={hasCamera}
-              onChange={(background) => onWebcamBackgroundChange?.(background)}
-            />
-          ) : null}
 
           {exportSettings ? (
             <KeystrokeOverlayCard
