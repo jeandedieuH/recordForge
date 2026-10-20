@@ -99,6 +99,12 @@ pub fn start_audio_track(
         ) {
             Ok(track) => return Ok(track),
             Err(error) => {
+                // A device that does not exist won't appear within the retry
+                // window — report it immediately instead of paying the
+                // transient-churn delay for a guaranteed repeat failure.
+                if error.code == "device_unavailable" {
+                    return Err(error);
+                }
                 if attempt < ATTEMPTS {
                     std::thread::sleep(RETRY_DELAY);
                 }

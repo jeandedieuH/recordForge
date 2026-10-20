@@ -20,7 +20,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -131,31 +131,16 @@ fn resolve_source(content: &SCShareableContent, source: &CaptureSource) -> Optio
     }
 }
 
-fn create_frame_pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as RawFd; 2];
-    // macOS lacks pipe2; set CLOEXEC explicitly so only the dup'd fd survives
-    // exec in the ffmpeg child.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc == -1 {
-        return Err(InternalError::Capture(format!(
-            "create SCK frame pipe: {}",
-            std::io::Error::last_os_error()
-        ))
-        .into());
-    }
-    unsafe {
-        libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
-        libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
-    }
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
-
-/// Blocking writer: packed frames in, pipe bytes out. Exits on channel close
-/// (stream stopped) or pipe death (ffmpeg gone).
-fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd) {
+/// Packed frames in, pipe bytes out. Exits on channel close (stream
+/// stopped), pipe death (ffmpeg gone), or the `stop` flag while the pipe is
+/// full — the last case is what makes teardown safe when the FFmpeg child
+/// never drained (spawn failure) or stalls mid-capture: a blocking `write`
+/// on a ~64 KiB pipe buffer holding an ~8 MiB frame can never be joined
+/// otherwise, since our own `_read_fd` keeps a read end open.
+fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd, stop: Arc<AtomicBool>) {
     let mut file = std::fs::File::from(write_fd);
     while let Ok(frame) = rx.recv() {
-        if file.write_all(&frame.0).is_err() {
+        if !super::frame_pipe::write_frame(&mut file, &frame.0, &stop) {
             break;
         }
     }
@@ -261,7 +246,7 @@ impl MacosSckCapture {
             return Ok(None);
         };
 
-        let (read_fd, write_fd) = create_frame_pipe()?;
+        let (read_fd, write_fd) = super::frame_pipe::create()?;
         let (frame_tx, frame_rx) = mpsc::sync_channel::<PackedFrame>(FRAME_QUEUE_DEPTH);
 
         let filter = if let Some(window) = &resolved.window {
@@ -302,9 +287,11 @@ impl MacosSckCapture {
             .start_capture()
             .map_err(|e| InternalError::Capture(format!("start SCK capture: {e}")))?;
 
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = Arc::clone(&stop);
         let frame_writer = thread::Builder::new()
             .name("rf-sck-frames".into())
-            .spawn(move || run_frame_writer(frame_rx, write_fd))
+            .spawn(move || run_frame_writer(frame_rx, write_fd, writer_stop))
             .map_err(|e| InternalError::Capture(format!("spawn SCK frame writer: {e}")))?;
 
         let read_fd_raw = read_fd.as_raw_fd();
@@ -320,7 +307,7 @@ impl MacosSckCapture {
             _read_fd: read_fd,
             read_fd: read_fd_raw,
             frame_writer: Some(frame_writer),
-            stop: Arc::new(AtomicBool::new(false)),
+            stop,
             width: resolved.width,
             height: resolved.height,
             fps: profile.fps.max(1) as u32,

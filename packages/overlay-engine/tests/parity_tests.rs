@@ -1,3 +1,10 @@
+//! Native-renderer parity checks. Every test here exercises
+//! `tiny_skia`/`render_to_pixmap`/`register_image_svg`, which exist only
+//! behind the `native-render` feature — gate the whole crate so a plain
+//! `cargo test` builds an empty binary instead of failing to compile.
+//! Run the suite with `cargo test --features native-render`.
+#![cfg(feature = "native-render")]
+
 use overlay_engine::{
     AnnotationDetails, ImageDetails, OverlayAnimation, OverlayCanvas, OverlayEngine, OverlayItem,
     OverlayItemBase, OverlayRenderPlan, OverlayTransform, TextDetails,

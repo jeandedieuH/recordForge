@@ -12,8 +12,10 @@
 //!        └─► tightly-packed frame ──► channel ──► writer thread ──► pipe ──► ffmpeg
 
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -68,6 +70,9 @@ pub struct LinuxPipeWireCapture {
     /// inherits it — Drop closes it which also signals EOF on the pipe.
     _read_fd: OwnedFd,
     stop_tx: pipewire::channel::Sender<Terminate>,
+    /// Stop signal for the frame writer — lets it abandon a pipe that no
+    /// reader is draining instead of sleeping in `write` forever.
+    stop: Arc<AtomicBool>,
     pw_thread: Option<JoinHandle<()>>,
     writer_thread: Option<JoinHandle<()>>,
     _portal: PortalScreenCastSession,
@@ -114,16 +119,18 @@ impl LinuxPipeWireCapture {
             .ok_or_else(|| InternalError::Capture("portal granted no streams".into()))?;
         let pw_fd = portal.take_pipewire_fd();
 
-        let (read_fd, write_fd) = create_frame_pipe()?;
+        let (read_fd, write_fd) = super::frame_pipe::create()?;
 
         let (frame_tx, frame_rx) = mpsc::sync_channel::<PackedFrame>(FRAME_QUEUE_DEPTH);
         let (format_tx, format_rx) = mpsc::channel::<PipeWireVideoInput>();
         let (stop_tx, stop_rx) = pipewire::channel::channel::<Terminate>();
         let (error_tx, error_rx) = mpsc::channel::<String>();
+        let stop = Arc::new(AtomicBool::new(false));
 
+        let writer_stop = Arc::clone(&stop);
         let writer_thread = std::thread::Builder::new()
             .name("rf-pw-writer".into())
-            .spawn(move || run_frame_writer(frame_rx, write_fd))
+            .spawn(move || run_frame_writer(frame_rx, write_fd, writer_stop))
             .map_err(|e| InternalError::Capture(format!("spawn pipewire writer: {e}")))?;
 
         let node_id = stream_info.pipewire_node_id;
@@ -146,6 +153,7 @@ impl LinuxPipeWireCapture {
             }
             Err(_) => {
                 let _ = stop_tx.send(Terminate);
+                stop.store(true, Ordering::Release);
                 let error = error_rx
                     .recv_timeout(std::time::Duration::from_millis(1500))
                     .unwrap_or_else(|_| "PipeWire stream produced no format".to_string());
@@ -194,6 +202,7 @@ impl LinuxPipeWireCapture {
             input,
             _read_fd: read_fd,
             stop_tx,
+            stop,
             pw_thread: Some(pw_thread),
             writer_thread: Some(writer_thread),
             _portal: portal,
@@ -206,6 +215,7 @@ impl LinuxPipeWireCapture {
 
     /// Stop the PipeWire loop and join the workers. Idempotent.
     pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
         let _ = self.stop_tx.send(Terminate);
         if let Some(t) = self.pw_thread.take() {
             let _ = t.join();
@@ -244,29 +254,17 @@ pub fn wayland_stream_geometry() -> Option<Bounds> {
     WAYLAND_STREAM_GEOMETRY.lock().ok().and_then(|g| *g)
 }
 
-fn create_frame_pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as RawFd; 2];
-    // O_CLOEXEC: the child's pre_exec dup2 makes fd 3 the only pipe fd that
-    // survives exec — the raw ends stay exclusive to the parent.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc != 0 {
-        return Err(InternalError::Capture(format!(
-            "create PipeWire frame pipe: {}",
-            std::io::Error::last_os_error()
-        ))
-        .into());
-    }
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
-
-/// Writer end of the frame pipe: blocks on `recv`, writes packed frames to the
-/// fd. Exits when the channel closes (pw loop stopped) or the pipe dies
-/// (ffmpeg exited).
-fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd) {
+/// Writer end of the frame pipe: packed frames in, pipe bytes out. Exits on
+/// channel close (pw loop stopped), pipe death (ffmpeg gone), or the `stop`
+/// flag while the pipe is full — that last case is what keeps `stop()`
+/// joinable when no reader ever drained the pipe (failed spawn) or the
+/// FFmpeg child stalls mid-capture; with a blocking `write` the ~64 KiB
+/// pipe buffer could never swallow an ~8 MiB frame.
+fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd, stop: Arc<AtomicBool>) {
     let mut file = std::fs::File::from(write_fd);
     while let Ok(frame) = rx.recv() {
-        if file.write_all(&frame.0).is_err() {
-            // EPIPE — ffmpeg is gone; nothing left to do.
+        if !super::frame_pipe::write_frame(&mut file, &frame.0, &stop) {
+            // Dead pipe or stop-requested full pipe — ffmpeg is gone or wedged.
             break;
         }
     }

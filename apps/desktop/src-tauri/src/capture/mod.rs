@@ -12,6 +12,8 @@ pub mod encoder;
 pub mod engine;
 pub mod fakes;
 pub mod ffmpeg;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod frame_pipe;
 pub mod keystrokes;
 #[cfg(target_os = "linux")]
 pub mod linux_pipewire;
