@@ -33,7 +33,6 @@ import { useEditorStore } from "../stores/editor-store"
 import { useThemeStore } from "../stores/theme-store"
 import { useTimelineStore } from "../stores/timeline-store"
 import { useLicenseStore } from "../stores/license-store"
-import { usePublicationStore } from "../stores/publication-store"
 import { useRecorderStore } from "../hooks/use-recorder"
 import { useUpdaterStore } from "../stores/updater-store"
 import { ViewErrorBoundary } from "../components/error-boundary"
@@ -110,6 +109,10 @@ export function AppShell() {
   )
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
   const setChapterMode = useTimelineStore((state) => state.setChapterMode)
+  const setAudioMastering = useTimelineStore((state) => state.setAudioMastering)
+  const setBrandWatermark = useTimelineStore((state) => state.setBrandWatermark)
+  const setBrandCards = useTimelineStore((state) => state.setBrandCards)
+  const setWebcamBackground = useTimelineStore((state) => state.setWebcamBackground)
   const setKeystrokeOverlay = useTimelineStore((state) => state.setKeystrokeOverlay)
   const setReframeMode = useTimelineStore((state) => state.setReframeMode)
   const exportFormats = useTimelineStore((state) => state.project?.exportSettings.formats)
@@ -173,15 +176,6 @@ export function AppShell() {
     return () => useLicenseStore.getState().stopListening()
   }, [])
 
-  // Publication jobs (share/YouTube) — the single listener fans out to the
-  // drawer, delivery cards, and toasts; refresh catches up after reloads.
-  useEffect(() => {
-    if (!isTauri()) return
-    void usePublicationStore.getState().startListening()
-    void usePublicationStore.getState().refresh()
-    return () => usePublicationStore.getState().stopListening()
-  }, [])
-
   // Scan for interrupted sessions once at startup so a force-quit recording is
   // surfaced immediately, not only when the user happens to open the Library.
   useEffect(() => {
@@ -230,7 +224,7 @@ export function AppShell() {
         markUpdateNotified(update.version)
         toast({
           title: `RecordForge ${update.version} is available`,
-          description:"A signed update is ready to install.",
+          description: update.body ?? "A signed update is ready to install.",
           variant: "info",
           duration: 20_000,
           action: {
@@ -416,8 +410,12 @@ export function AppShell() {
     return analyzeProFeatureUsage(timeline, {
       preset: exportSettings.preset,
       chapterMode,
+      audioMastering: exportSettings.audioMastering,
+      brandWatermark: exportSettings.brandWatermark,
+      brandCards: exportSettings.brandCards,
       keystrokeOverlay: exportSettings.keystrokeOverlay,
       reframeMode: exportSettings.reframeMode,
+      webcamBackground: exportSettings.webcamBackground,
       // Alternate-format jobs mirror timeline-store.export: animation
       // containers collapse to the primary canvas.
       formats: isAnimation ? [] : exportSettings.formats,
@@ -611,6 +609,10 @@ export function AppShell() {
                   onCaptionModeChange={setCaptionMode}
                   chapterMode={chapterMode}
                   onChapterModeChange={setChapterMode}
+                  onAudioMasteringChange={setAudioMastering}
+                  onBrandWatermarkChange={setBrandWatermark}
+                  onBrandCardsChange={setBrandCards}
+                  onWebcamBackgroundChange={setWebcamBackground}
                   onKeystrokeOverlayChange={setKeystrokeOverlay}
                   onReframeModeChange={setReframeMode}
                   formats={exportFormats}

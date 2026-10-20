@@ -522,13 +522,9 @@ export function useTimelineInteraction(): TimelineInteraction {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return
-      // Form controls AND media elements own their keys — Escape inside a
-      // <video> (e.g. its native controls) must not cancel a drag/commit,
-      // matching the timeline local keydown filter's target rule.
       if (
         event.target instanceof HTMLElement &&
-        (event.target.closest("input, textarea, select, button, video, audio") !== null ||
-          event.target.isContentEditable)
+        ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)
       ) {
         return
       }

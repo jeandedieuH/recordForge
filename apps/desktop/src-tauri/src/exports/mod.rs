@@ -16,17 +16,15 @@ use tiny_skia::{
 };
 
 mod annotations;
-pub(crate) mod audio_analysis;
+pub(crate) mod background;
 mod camera;
 mod captions;
+mod cards;
 mod cursor;
-// Lead-authored delivery measurement module — production jobs persist the
-// artifact manifest into `outputs.artifact`; the harness exercises it too.
-pub(crate) mod delivery_metadata;
 mod encoding;
 mod keystrokes;
 
-pub(crate) use captions::srt_to_vtt;
+pub(crate) use cards::{apply_brand_cards, BrandCards};
 
 pub(crate) use camera::build_zoompan_expressions;
 use camera::{build_reframe_crop, reframe_content_aspect, reframe_source_dims};
@@ -255,10 +253,8 @@ impl PlateCache {
 pub(crate) struct CompositionShared {
     probe: ProbeCache,
     plates: PlateCache,
-    /// Asset ids of the original primary capture (project role `screen`).
-    /// Keystroke badges only map events through segments sourcing these —
-    /// inserted b-roll must never replay the original capture's keystrokes.
-    keystroke_asset_ids: std::collections::HashSet<String>,
+    /// asset_id → pre-rendered segmentation mask video (virtual background).
+    masks: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 impl CompositionShared {
@@ -266,7 +262,7 @@ impl CompositionShared {
         Self {
             probe: ProbeCache::new(ffprobe_path),
             plates: PlateCache::new(),
-            keystroke_asset_ids: std::collections::HashSet::new(),
+            masks: std::collections::HashMap::new(),
         }
     }
 }
@@ -633,54 +629,129 @@ pub struct ExportSettings {
     #[serde(default)]
     pub range: Option<ExportRange>,
     #[serde(default)]
+    pub audio_mastering: Option<AudioMastering>,
+    #[serde(default)]
+    pub brand_watermark: Option<BrandWatermark>,
+    #[serde(default)]
     pub keystroke_overlay: Option<KeystrokeOverlay>,
     #[serde(default)]
     pub reframe_mode: Option<String>,
+    #[serde(default)]
+    pub brand_cards: Option<BrandCards>,
+    #[serde(default)]
+    pub webcam_background: Option<background::WebcamBackground>,
 }
 
 /// Keystroke overlay (Pro): modifier-combo badges captured during recording.
-/// The display fields mirror `keystrokeOverlaySchema`; `None` means the
-/// fixture predates them and renders with the defaults below.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeystrokeOverlay {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub position: Option<String>,
-    #[serde(default)]
-    pub scale_percent: Option<f64>,
 }
 
-impl KeystrokeOverlay {
-    pub const DEFAULT_DURATION_MS: u64 = 1_400;
-    pub const DEFAULT_POSITION: &'static str = "bottom-center";
-    pub const DEFAULT_SCALE_PERCENT: f64 = 100.0;
+/// Brand Kit (Pro): a logo watermark composited over the final raster. The
+/// overlay runs after the output-cap scale so `scale_percent` always measures
+/// against delivered pixels.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrandWatermark {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub logo_path: Option<String>,
+    #[serde(default = "default_watermark_position")]
+    pub position: String,
+    #[serde(default = "default_watermark_scale")]
+    pub scale_percent: f64,
+    #[serde(default = "default_watermark_opacity")]
+    pub opacity: f64,
+}
 
-    /// Badge hold time clamped to the contract's 400..=5000 ms window.
-    pub fn duration_ms(&self) -> u64 {
-        self.duration_ms
-            .unwrap_or(Self::DEFAULT_DURATION_MS)
-            .clamp(400, 5_000)
-    }
+fn default_watermark_position() -> String {
+    "bottom-right".into()
+}
+fn default_watermark_scale() -> f64 {
+    8.0
+}
+fn default_watermark_opacity() -> f64 {
+    0.85
+}
 
-    /// Badge scale multiplier clamped to the contract's 50..=150 percent.
-    pub fn scale_factor(&self) -> f64 {
-        (self.scale_percent.unwrap_or(Self::DEFAULT_SCALE_PERCENT) / 100.0).clamp(0.5, 1.5)
-    }
-
-    /// Position token validated against the contract enum; anything else —
-    /// including a legacy `position` a future field might collide with —
-    /// falls back to bottom-center rather than failing the export.
-    pub fn position(&self) -> &str {
-        match self.position.as_deref() {
-            Some("bottom-left" | "bottom-right" | "top-center" | "bottom-center") => {
-                self.position.as_deref().unwrap_or(Self::DEFAULT_POSITION)
-            }
-            _ => Self::DEFAULT_POSITION,
+impl BrandWatermark {
+    /// Active only when enabled AND the logo file still exists — a moved or
+    /// deleted logo degrades to no watermark rather than failing the export.
+    /// The filesystem stat runs once per render pass, not per frame.
+    pub fn active_logo(&self) -> Option<&str> {
+        let path = self.logo_path.as_deref()?;
+        if self.enabled && std::path::Path::new(path).is_file() {
+            Some(path)
+        } else {
+            None
         }
+    }
+}
+
+/// Resolve a stored brand-asset path to an absolute path under the project
+/// work dir. UI picks land in `brand/` as project-relative paths; absolute
+/// paths (legacy projects, hand-edited files) pass through untouched. A
+/// relative path that escapes the work dir is rejected — treated as absent.
+pub(crate) fn resolve_brand_asset_path(raw: &str, work_dir: &Path) -> Option<String> {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return path.is_file().then(|| raw.to_string());
+    }
+    let candidate = crate::path_policy::canonicalize_path(&work_dir.join(path)).ok()?;
+    let work = crate::path_policy::canonicalize_path(work_dir).ok()?;
+    if !candidate.starts_with(&work) {
+        warn!(path = %raw, "brand asset path escapes the project directory; ignoring");
+        return None;
+    }
+    Some(candidate.to_string_lossy().to_string())
+}
+
+/// Studio Audio (Pro): mastering filters applied to the final mixed track.
+/// `denoise` is FFmpeg's frequency-domain `afftdn` tuned for speech noise
+/// floors; `loudness_target` runs one-pass `loudnorm` at the chosen LUFS
+/// (dynamic normalization — a measured two-pass run would double export time
+/// for a marginal accuracy gain on speech-heavy screen recordings).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioMastering {
+    #[serde(default)]
+    pub denoise: bool,
+    #[serde(default)]
+    pub loudness_target: Option<f64>,
+}
+
+impl AudioMastering {
+    /// Filter suffix appended onto the `[aout]` chain, e.g.
+    /// `,afftdn=nr=12:nf=-50,loudnorm=I=-16:TP=-1.5:LRA=11`. Empty when off.
+    pub fn filter_suffix(&self) -> String {
+        let mut suffix = String::new();
+        if self.denoise {
+            // nr=12dB reduction, nf=-50dB noise floor — gentle enough to keep
+            // voice natural, strong enough to kill hiss/fan noise.
+            suffix.push_str(",afftdn=nr=12:nf=-50");
+        }
+        if let Some(target) = self.loudness_target {
+            // TP=-1.5 true-peak ceiling matches YouTube/podcast delivery.
+            suffix.push_str(&format!(",loudnorm=I={target}:TP=-1.5:LRA=11"));
+        }
+        suffix
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.denoise || self.loudness_target.is_some()
+    }
+}
+
+impl ExportSettings {
+    fn audio_mastering_suffix(&self) -> String {
+        self.audio_mastering
+            .as_ref()
+            .map(|mastering| mastering.filter_suffix())
+            .unwrap_or_default()
     }
 }
 
@@ -834,7 +905,7 @@ pub fn run_render_plan(
     project_id: &str,
     output_path: &Path,
     mut plan: RenderPlan,
-    settings: ExportSettings,
+    mut settings: ExportSettings,
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -872,6 +943,22 @@ pub fn run_render_plan(
         )
         .into());
     }
+    // Brand files picked through the UI are copied into the project's `brand/`
+    // dir and stored project-relative; legacy absolute picks still resolve
+    // directly. Missing or escaping paths degrade to "no file" downstream —
+    // the same don't-fail rule `active_logo`/`resolved_font` already apply.
+    if let Some(watermark) = settings.brand_watermark.as_mut() {
+        watermark.logo_path = watermark
+            .logo_path
+            .take()
+            .and_then(|path| resolve_brand_asset_path(&path, &work_dir));
+    }
+    if let Some(cards) = settings.brand_cards.as_mut() {
+        cards.font_path = cards
+            .font_path
+            .take()
+            .and_then(|path| resolve_brand_asset_path(&path, &work_dir));
+    }
     // Keystroke overlay events live in the work dir — attach post-plan so the
     // frontend never touches the session filesystem. Only when enabled: a
     // stale file must not leak badges into an export that opted out.
@@ -880,13 +967,7 @@ pub fn run_render_plan(
         .as_ref()
         .is_some_and(|overlay| overlay.enabled)
     {
-        // An unreadable events file must not fail the export — the load is
-        // privacy-sanitized either way, and get_keystroke_events surfaces the
-        // actionable error to the user separately.
-        plan.keystrokes = crate::capture::keystrokes::load_events(&work_dir).unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "keystroke events unreadable; exporting without badges");
-            Vec::new()
-        });
+        plan.keystrokes = crate::capture::keystrokes::load_events(&work_dir);
     } else {
         plan.keystrokes.clear();
     }
@@ -903,11 +984,12 @@ pub fn run_render_plan(
         )
         .into());
     }
-    // Every temp artifact renders inside a uniquely owned staging dir —
-    // nothing predictable next to the user's output is ever touched, and
-    // Drop removes only this render's own files on every exit path.
-    let staging = ExportStaging::create(output_path)?;
-    let partial_path = staging.partial_output();
+    let partial_path = partial_output_path(output_path);
+    cleanup_export_files(output_path);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| InternalError::Storage(format!("create export directory: {error}")))?;
+    }
     ensure_export_disk_space(output_path, &plan, &settings)?;
 
     update_progress(
@@ -919,6 +1001,7 @@ pub fn run_render_plan(
         Some("resolving project assets"),
     )?;
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
     }
 
@@ -970,15 +1053,72 @@ pub fn run_render_plan(
     // One probe/plate cache serves both the primary render and the software
     // retry so the fallback does not re-run the same ffprobe/plate work.
     let mut shared = CompositionShared::new(Some(ffprobe_path));
-    // Keystroke badges map events through segments of the original capture
-    // only — b-roll and inserted media share no source clock with the file.
-    shared.keystroke_asset_ids = loaded
-        .project
-        .assets
-        .iter()
-        .filter(|asset| asset.role == crate::projects::ProjectAssetRole::Screen)
-        .map(|asset| asset.id.clone())
-        .collect();
+
+    // Virtual background: pre-render one segmentation mask per camera asset
+    // before any pass runs — the masks feed the graph as regular inputs and
+    // are shared across chunks. The model is provisioned by the UI beforehand
+    // (download-on-demand), matching the whisper engine's contract.
+    let mut _mask_dir_guard: Option<TempExportDir> = None;
+    if settings
+        .webcam_background
+        .as_ref()
+        .is_some_and(|bg| bg.is_active())
+        && plan
+            .overlays
+            .iter()
+            .any(|overlay| overlay.visible && overlay.output_end_ms > overlay.output_start_ms)
+    {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| InternalError::Storage(format!("resolve app data dir: {e}")))?;
+        let model = background::model_path(&app_data_dir);
+        if !model.exists() {
+            return Err(InternalError::Media(
+                "virtual background model is not downloaded yet".into(),
+            )
+            .into());
+        }
+        let mask_dir = std::env::temp_dir().join(format!(
+            "recordforge_masks_{}_{}",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&mask_dir)
+            .map_err(|e| InternalError::Storage(format!("create mask dir: {e}")))?;
+        _mask_dir_guard = Some(TempExportDir(mask_dir.clone()));
+        let asset_ids: std::collections::BTreeSet<&str> = plan
+            .overlays
+            .iter()
+            .filter(|overlay| overlay.visible && overlay.output_end_ms > overlay.output_start_ms)
+            .map(|overlay| overlay.asset_id.as_str())
+            .collect();
+        for asset_id in asset_ids {
+            let Some(source) = asset_paths.get(asset_id) else {
+                continue;
+            };
+            update_progress(
+                &db,
+                app,
+                job_id,
+                0.05,
+                "rendering",
+                Some("segmenting camera background"),
+            )?;
+            let mask_path = mask_dir.join(format!("mask-{asset_id}.mp4"));
+            let reporter = &progress_reporter;
+            background::generate_mask(
+                ffmpeg_path,
+                ffprobe_path,
+                &model,
+                source,
+                &mask_path,
+                &cancel,
+                &|ratio| reporter(ratio * 0.02),
+            )?;
+            shared.masks.insert(asset_id.to_string(), mask_path);
+        }
+    }
 
     let composition = render_timeline_composition_shared(
         &ffmpeg,
@@ -997,13 +1137,16 @@ pub fn run_render_plan(
     // A hardware encoder can fail to initialize even after a passing probe
     // (driver capabilities differ by resolution and pixel format), so retry
     // once on software instead of failing the export outright. Cancelled jobs
-    // propagate unchanged.
-    let (outcome, _render_encoder) = match composition {
+    // propagate unchanged. `render_encoder` tracks which encoder produced the
+    // partial — brand cards must encode with it or the `-c copy` concat
+    // splices mismatched codec parameters.
+    let (outcome, render_encoder) = match composition {
         Ok(outcome) => (outcome, encoder),
         Err(error) => {
             if cancel.load(std::sync::atomic::Ordering::Relaxed)
                 || encoder == encoding::ExportEncoder::Software
             {
+                cleanup_export_files(output_path);
                 return Err(error);
             }
             warn!(
@@ -1017,9 +1160,6 @@ pub fn run_render_plan(
                 encoder.display_name(),
                 error
             );
-            // Clear only this render's own staged partial before the retry —
-            // everything outside the staging dir is off-limits.
-            let _ = std::fs::remove_file(&partial_path);
             update_progress(&db, app, job_id, 0.05, "rendering", Some(&retry_detail))?;
             (
                 render_timeline_composition_shared(
@@ -1042,7 +1182,59 @@ pub fn run_render_plan(
     };
 
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
+    }
+
+    // Brand cards (Pro): rendered segments concat-muxed around the finished
+    // partial; the added duration feeds the output validation below. MP4
+    // exports only — GIF/WebP partials aren't mp4 streams, so muxing mp4 card
+    // segments around them would produce garbage or fail outright.
+    let is_animation_export = settings.container != "mp4"
+        || settings.preset.starts_with("gif-")
+        || settings.preset.starts_with("webp-");
+    let mut intro_shift_ms = 0u64;
+    if let Some(cards) = settings.brand_cards.as_ref() {
+        if !is_animation_export && cards.card_durations().is_some() {
+            intro_shift_ms = cards.card_durations().map(|(intro, _)| intro).unwrap_or(0);
+            let (canvas_width, canvas_height, canvas_fps) = plan
+                .canvas
+                .as_ref()
+                .map(|canvas| {
+                    let (w, h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
+                    (w, h, canvas.fps)
+                })
+                .unwrap_or((1920, 1080, 30));
+            update_progress(
+                &db,
+                app,
+                job_id,
+                0.96,
+                "brand",
+                Some("rendering brand cards"),
+            )?;
+            let added_ms = apply_brand_cards(
+                std::path::Path::new(&ffmpeg),
+                ffprobe_path,
+                &partial_path,
+                cards,
+                settings
+                    .brand_watermark
+                    .as_ref()
+                    .and_then(|watermark| watermark.active_logo())
+                    .map(std::path::Path::new),
+                canvas_width,
+                canvas_height,
+                canvas_fps.max(1),
+                outcome.has_audio,
+                project_id,
+                &plan.chapters,
+                &settings,
+                render_encoder,
+                &cancel,
+            )?;
+            plan.duration_ms = plan.duration_ms.saturating_add(added_ms);
+        }
     }
 
     if plan.caption_mode == "sidecar" {
@@ -1067,7 +1259,22 @@ pub fn run_render_plan(
             "chapters",
             Some("writing chapter sidecar"),
         )?;
-        let sidecar_content = generate_youtube_chapters(&plan.chapters);
+        // The intro card prepends seconds of video, so the sidecar must shift
+        // just like the embedded chapters `apply_brand_cards` rewrites.
+        let sidecar_content = if intro_shift_ms > 0 {
+            let shifted: Vec<RenderPlanChapter> = plan
+                .chapters
+                .iter()
+                .map(|chapter| RenderPlanChapter {
+                    start_ms: chapter.start_ms.saturating_add(intro_shift_ms),
+                    end_ms: chapter.end_ms.saturating_add(intro_shift_ms),
+                    ..chapter.clone()
+                })
+                .collect();
+            generate_youtube_chapters(&shifted)
+        } else {
+            generate_youtube_chapters(&plan.chapters)
+        };
         let sidecar_path = partial_path.with_extension("chapters.txt");
         std::fs::write(&sidecar_path, sidecar_content.as_bytes())
             .map_err(|err| InternalError::Storage(format!("write chapter sidecar: {err}")))?;
@@ -1094,10 +1301,30 @@ pub fn run_render_plan(
         output_dims,
     )?;
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
     }
 
-    publish_export_outputs(&partial_path, output_path, &staging.dir)?;
+    crate::capture::disk::atomic_replace(&partial_path, output_path)?;
+    if plan.caption_mode == "sidecar" {
+        let partial_sidecar = partial_path.with_extension("srt");
+        let final_sidecar = output_path.with_extension("srt");
+        if let Err(error) = crate::capture::disk::atomic_replace(&partial_sidecar, &final_sidecar) {
+            let _ = std::fs::remove_file(output_path);
+            let _ = std::fs::remove_file(&final_sidecar);
+            return Err(error);
+        }
+    }
+    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty()
+    {
+        let partial_sidecar = partial_path.with_extension("chapters.txt");
+        let final_sidecar = output_path.with_extension("chapters.txt");
+        if let Err(error) = crate::capture::disk::atomic_replace(&partial_sidecar, &final_sidecar) {
+            let _ = std::fs::remove_file(output_path);
+            let _ = std::fs::remove_file(&final_sidecar);
+            return Err(error);
+        }
+    }
     info!(project_id = %project_id, "timeline export rendered");
     Ok(())
 }
@@ -1126,14 +1353,6 @@ pub struct ExportHarnessSpec {
     /// can exercise the same downscale path licensed exports use.
     #[serde(default)]
     pub output_cap: Option<ExportOutputCap>,
-    /// Full finish pass: sidecars, atomic publish, and the delivery
-    /// metadata artifact — the same order production jobs follow.
-    #[serde(default)]
-    pub finish: bool,
-    /// Asset ids of the original primary capture — fills the shared
-    /// keystroke mapping gate (production derives it from project roles).
-    #[serde(default)]
-    pub keystroke_asset_ids: Vec<String>,
 }
 
 /// Render a JSON `ExportHarnessSpec` through the real export path.
@@ -1161,39 +1380,17 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
     let on_progress = |ratio: f64| {
         eprintln!("[progress] {:.1}%", ratio.clamp(0.0, 1.0) * 100.0);
     };
-    // Explicit dev inputs fill the shared caches production derives from the
-    // persisted project — no model download on this path.
-    let mut shared = CompositionShared::new(Some(Path::new(&spec.ffprobe_path)));
-    shared.keystroke_asset_ids = spec.keystroke_asset_ids.iter().cloned().collect();
-
-    // finish renders through the same OWNED staging dir production uses;
-    // composition-only specs keep the historical direct-to-output write.
-    let output_path = PathBuf::from(&spec.output_path);
-    let staging = match spec.finish {
-        true => match ExportStaging::create(&output_path) {
-            Ok(staging) => Some(staging),
-            Err(error) => {
-                eprintln!("export_harness: staging failed: {error}");
-                return 1;
-            }
-        },
-        false => None,
-    };
-    let render_target = staging
-        .as_ref()
-        .map(|staging| staging.partial_output())
-        .unwrap_or_else(|| output_path.clone());
-
+    let shared = CompositionShared::new(Some(Path::new(&spec.ffprobe_path)));
     let result = if spec.force_single_pass {
         render_composition_window(
             &spec.ffmpeg_path,
-            &render_target,
+            Path::new(&spec.output_path),
             &spec.plan,
             "export-harness",
             &spec.asset_paths,
             &spec.settings,
             encoding::ExportEncoder::Software,
-            Arc::clone(&cancel),
+            cancel,
             None,
             &on_progress,
             None,
@@ -1205,13 +1402,13 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
     } else {
         render_timeline_composition_shared(
             &spec.ffmpeg_path,
-            &render_target,
+            Path::new(&spec.output_path),
             &spec.plan,
             "export-harness",
             &spec.asset_paths,
             &spec.settings,
             encoding::ExportEncoder::Software,
-            Arc::clone(&cancel),
+            cancel,
             &on_progress,
             None,
             &shared,
@@ -1226,114 +1423,23 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             return 1;
         }
     };
-
-    if !spec.finish {
-        let harness_dims =
-            spec.plan.canvas.as_ref().map(|canvas| {
-                capped_output_dimensions(canvas.width, canvas.height, spec.output_cap)
-            });
-        if let Err(error) = validate_export_output_with_dims(
-            Path::new(&spec.ffprobe_path),
-            &render_target,
-            &spec.plan,
-            &spec.settings,
-            outcome.has_audio,
-            harness_dims,
-        ) {
-            eprintln!("export_harness: output validation failed: {error}");
-            return 1;
-        }
-        return 0;
-    }
-
-    if let Err(error) = finish_harness_export(&spec, &render_target, &output_path, &outcome) {
-        eprintln!("export_harness: finish failed: {error}");
-        return 1;
-    }
-    0
-}
-
-/// The finish=true path: same production helpers in the same order as
-/// `run_render_plan` — sidecars, final-duration validation, atomic publish,
-/// VTT companion, and the artifact metadata.
-#[cfg(feature = "export-harness")]
-fn finish_harness_export(
-    spec: &ExportHarnessSpec,
-    partial_path: &Path,
-    output_path: &Path,
-    outcome: &RenderOutcome,
-) -> Result<()> {
-    let ffprobe_path = Path::new(&spec.ffprobe_path);
-    let settings = &spec.settings;
-    let plan = spec.plan.clone();
-
-    if plan.caption_mode == "sidecar" {
-        write_caption_sidecar(partial_path, &plan.captions)?;
-    }
-
-    if (plan.chapter_mode == "sidecar" || plan.chapter_mode == "both") && !plan.chapters.is_empty()
-    {
-        let sidecar_content = generate_youtube_chapters(&plan.chapters);
-        let sidecar_path = partial_path.with_extension("chapters.txt");
-        std::fs::write(&sidecar_path, sidecar_content.as_bytes())
-            .map_err(|err| InternalError::Storage(format!("write chapter sidecar: {err}")))?;
-    }
-
-    // Validation runs against the FINAL duration (cards included).
-    let output_dims = plan
+    let harness_dims = spec
+        .plan
         .canvas
         .as_ref()
         .map(|canvas| capped_output_dimensions(canvas.width, canvas.height, spec.output_cap));
-    validate_export_output_with_dims(
-        ffprobe_path,
-        partial_path,
-        &plan,
-        settings,
+    if let Err(error) = validate_export_output_with_dims(
+        Path::new(&spec.ffprobe_path),
+        Path::new(&spec.output_path),
+        &spec.plan,
+        &spec.settings,
         outcome.has_audio,
-        output_dims,
-    )?;
-
-    // Same publication order as production: sidecars first, video last.
-    publish_export_outputs(
-        partial_path,
-        output_path,
-        partial_path.parent().ok_or_else(|| {
-            InternalError::Storage("finish export requires an owned staging dir".into())
-        })?,
-    )?;
-
-    // VTT companion only when captions actually shipped — zero-cue sidecars
-    // are valid without one.
-    let captions_path = (plan.caption_mode == "sidecar" && !plan.captions.is_empty())
-        .then(|| output_path.with_extension("srt"));
-    if let Some(srt) = &captions_path {
-        write_vtt_companion(srt)?;
+        harness_dims,
+    ) {
+        eprintln!("export_harness: output validation failed: {error}");
+        return 1;
     }
-
-    // The delivery metadata measures the PUBLISHED artifact — same facts
-    // the Instant Share card will need.
-    let artifact =
-        delivery_metadata::capture_export_artifact(delivery_metadata::CaptureArtifactInput {
-            export_job_id: "export-harness",
-            project_name: &plan.project_id,
-            output_path,
-            captions_path: captions_path.as_deref(),
-            ffprobe_path,
-            plan: &plan,
-            legacy: false,
-        })?;
-    let artifact_path = output_path.with_file_name(format!(
-        "{}.artifact.json",
-        output_path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_else(|| "export".to_string())
-    ));
-    let artifact_json = serde_json::to_string_pretty(&artifact)
-        .map_err(|err| InternalError::Storage(format!("serialize artifact metadata: {err}")))?;
-    std::fs::write(&artifact_path, artifact_json)
-        .map_err(|err| InternalError::Storage(format!("write artifact metadata: {err}")))?;
-    Ok(())
+    0
 }
 
 /// Returns a source size shared by every screen segment, or `None` when the
@@ -1870,11 +1976,13 @@ fn render_composition_window(
     let mut input_indices: HashMap<String, usize> = HashMap::new();
     // overlay index → (clamp, input index, input seek) for the camera loop.
     let mut camera_inputs: HashMap<usize, (CameraClamp, usize, f64)> = HashMap::new();
+    // overlay index → input index of the segmentation mask (virtual bg).
+    let mut mask_inputs: HashMap<usize, usize> = HashMap::new();
     // window index in `planned.inputs` → input_specs index.
     let mut window_input_indices: Vec<usize> = Vec::new();
     match &seek_plan {
         Some(planned) => {
-            for window in planned.inputs.iter() {
+            for window in &planned.inputs {
                 let path = asset_paths.get(&window.asset_id).cloned().ok_or_else(|| {
                     InternalError::Media("render plan references an unknown asset".into())
                 })?;
@@ -1901,6 +2009,18 @@ fn render_composition_window(
                     duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
                     hwaccel: hwaccel_inputs,
                 });
+                // Virtual background: the mask rides the same window clamp —
+                // it's frame-aligned to the camera source.
+                if let Some(mask_path) = shared.masks.get(&overlay.asset_id) {
+                    mask_inputs.insert(job.overlay_index, input_specs.len());
+                    input_specs.push(InputSpec {
+                        key: format!("mask:{}:{}", overlay.asset_id, job.overlay_index),
+                        path: mask_path.clone(),
+                        seek_s: Some(seek_s),
+                        duration_s: Some(job.clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+                        hwaccel: false,
+                    });
+                }
             }
             if pass.include_audio {
                 // Audio chains read asset-level (unseeked) inputs — atrim
@@ -1956,6 +2076,16 @@ fn render_composition_window(
                     src_out_s: overlay.source_out_ms as f64 / 1000.0,
                 };
                 camera_inputs.insert(job.overlay_index, (clamp, input_index, 0.0));
+                if let Some(mask_path) = shared.masks.get(&overlay.asset_id) {
+                    mask_inputs.insert(job.overlay_index, input_specs.len());
+                    input_specs.push(InputSpec {
+                        key: format!("mask:{}:{}", overlay.asset_id, job.overlay_index),
+                        path: mask_path.clone(),
+                        seek_s: None,
+                        duration_s: None,
+                        hwaccel: false,
+                    });
+                }
             }
         }
     }
@@ -2295,7 +2425,6 @@ fn render_composition_window(
         if (speed - 1.0).abs() > f64::EPSILON {
             filter.push_str(&format!(",setpts=PTS/{:.6}", speed));
         }
-        let segment_duration = fmt_secs((clamped_end - clamped_start) / 1000.0);
         // Auto-reframe crop runs in source space before the fit-to-rect scale;
         // `t` here is already output-relative to this segment, so keyframes
         // are shifted by the segment's output start.
@@ -2310,6 +2439,7 @@ fn render_composition_window(
         } else {
             background.clone()
         };
+        let segment_duration = fmt_secs((clamped_end - clamped_start) / 1000.0);
         let canvas_w = canvas.width;
         let canvas_h = canvas.height;
         // scale runs per source frame at full canvas resolution and defaults
@@ -2750,9 +2880,41 @@ fn render_composition_window(
             canvas.fps
         ));
 
-        // 3. Continue the camera chain through a stable label — the shape
-        // mask and downstream filters keep working off one input pad.
-        let camera_stream_label = {
+        // 3. Virtual background: cut the person out via the segmentation
+        // mask and composite over a blurred or filled backdrop. Runs before
+        // the shape mask so circle/rounded crops keep working.
+        let camera_stream_label = if let Some(&mask_idx) = mask_inputs.get(&index) {
+            let raw_label = format!("camera_vb_raw{index}");
+            camera_filter.push_str(&format!("[{raw_label}]"));
+            filters.push(camera_filter);
+            camera_filter = String::new();
+            // Mask chain: same source-clock trim + geometry, gray out.
+            let bg_mask_label = format!("camera_vb_mask{index}");
+            let fg_label = format!("camera_vb_fg{index}");
+            let back_label = format!("camera_vb_back{index}");
+            let comp_label = format!("camera_vb_comp{index}");
+            filters.push(format!(
+                "[{mask_idx}:v:0]{time_ops}{geometry_ops},fps={},setsar=1,tpad=stop_mode=clone:stop_duration={overlay_duration},trim=duration={overlay_duration},setpts=PTS-STARTPTS,format=gray[{bg_mask_label}]",
+                canvas.fps
+            ));
+            let bg_spec = settings.webcam_background.clone().unwrap_or_default();
+            let backdrop = if bg_spec.mode == "replace" {
+                // drawbox t=fill covers the frame without a lavfi input.
+                format!(
+                    "drawbox=x=0:y=0:w=iw:h=ih:color={}:t=fill",
+                    cards::sanitize_color(&bg_spec.replace_color, "#0f172a")
+                )
+            } else {
+                format!("gblur=sigma={:.1}", bg_spec.blur_sigma.clamp(2.0, 80.0))
+            };
+            filters.push(format!(
+                "[{raw_label}]split=2[cam_vb_a{index}][cam_vb_b{index}];\
+                 [cam_vb_a{index}][{bg_mask_label}]alphamerge[{fg_label}];\
+                 [cam_vb_b{index}]{backdrop}[{back_label}];\
+                 [{back_label}][{fg_label}]overlay=0:0[{comp_label}]"
+            ));
+            comp_label
+        } else {
             let label = format!("camera_vb_skip{index}");
             camera_filter.push_str(&format!("[{label}]"));
             filters.push(camera_filter);
@@ -2975,54 +3137,70 @@ fn render_composition_window(
     } else {
         String::new()
     };
-    // The optional fragments all end in a comma, so the chain must still
-    // terminate on a real filter — a bare label would parse as a filterless
-    // chain and fail with FFmpeg's "No such filter: ''".
-    filters.push(format!(
-        "[{current_label}]{reanchor}{frame_cap}{output_scale}null[postscale]"
-    ));
-    current_label = "postscale".to_string();
+    // Brand Kit watermark: a still logo overlaid on the final raster, after
+    // the output-cap scale so scale_percent measures delivered pixels. The
+    // logo input loops forever (still frame) and overlay `eof_action=repeat`
+    // pins it — same trick as the camera border chain.
+    let watermark = settings.brand_watermark.as_ref();
+    if let Some(logo_path) = watermark.and_then(|w| w.active_logo()) {
+        let watermark = watermark.expect("active_logo implies watermark");
+        let logo_index = input_specs.len();
+        input_specs.push(InputSpec {
+            key: "brand:logo".to_string(),
+            path: std::path::PathBuf::from(logo_path),
+            seek_s: None,
+            duration_s: None,
+            hwaccel: false,
+        });
+        let logo_width =
+            ((out_w as f64 * watermark.scale_percent / 100.0).round() as u32).max(2) & !1;
+        let margin = ((out_w as f64 * 0.02).round() as u32).max(16);
+        let (x_expr, y_expr) = match watermark.position.as_str() {
+            "top-left" => (format!("{margin}"), format!("{margin}")),
+            "top-right" => (format!("W-w-{margin}"), format!("{margin}")),
+            "bottom-left" => (format!("{margin}"), format!("H-h-{margin}")),
+            _ => (format!("W-w-{margin}"), format!("H-h-{margin}")),
+        };
+        filters.push(format!(
+            "[{logo_index}:v]scale={logo_width}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={:.2},loop=loop=-1:size=1:start=0,setsar=1[brandlogo]",
+            watermark.opacity
+        ));
+        // The optional fragments all end in a comma, so the chain must still
+        // terminate on a real filter — a bare `[brandbase]` (or `[prev]
+        // [brandbase]` when every fragment is empty) parses as a filterless
+        // chain and fails with FFmpeg's "No such filter: ''".
+        filters.push(format!(
+            "[{current_label}]{reanchor}{frame_cap}{output_scale}null[brandbase]"
+        ));
+        filters.push(format!(
+            "[brandbase][brandlogo]overlay=x={x_expr}:y={y_expr}:eof_action=repeat:format=auto[brandout]"
+        ));
+        current_label = "brandout".to_string();
+    } else {
+        filters.push(format!(
+            "[{current_label}]{reanchor}{frame_cap}{output_scale}null[postscale]"
+        ));
+        current_label = "postscale".to_string();
+    }
 
     // Keystroke overlay (Pro): modifier-combo badges drawn on the final
-    // raster — gated to each event's display window.
-    // Events are source-time stamps; `build_badge_windows` maps them through
-    // the plan's primary segments so trims/moves/speeds land correctly, and
-    // the chunk bounds clip+rebase each badge for this window's raster.
+    // raster — above the watermark — gated to each event's display window.
     if !plan.keystrokes.is_empty() {
-        let overlay = settings
-            .keystroke_overlay
-            .clone()
-            .unwrap_or(KeystrokeOverlay {
-                enabled: false,
-                duration_ms: None,
-                position: None,
-                scale_percent: None,
-            });
-        let badge_windows = keystrokes::build_badge_windows(
+        let keystroke_dir = std::env::temp_dir().join(format!(
+            "rf-keystrokes-{}-{}",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        let font_path = keystrokes::write_font(&keystroke_dir)?;
+        temp_dir_guards.push(TempExportDir(keystroke_dir));
+        current_label = keystrokes::append_badge_chain(
+            &mut filters,
+            &current_label,
             &plan.keystrokes,
-            &plan.segments,
-            &shared.keystroke_asset_ids,
-            overlay.duration_ms(),
+            out_w,
+            out_h,
+            &font_path,
         );
-        if !badge_windows.is_empty() {
-            let keystroke_dir = std::env::temp_dir().join(format!(
-                "rf-keystrokes-{}-{}",
-                project_id,
-                uuid::Uuid::new_v4()
-            ));
-            let font_path = keystrokes::write_font(&keystroke_dir)?;
-            temp_dir_guards.push(TempExportDir(keystroke_dir));
-            current_label = keystrokes::append_badge_chain(
-                &mut filters,
-                &current_label,
-                &badge_windows,
-                window.start_s,
-                window.end_s,
-                &overlay,
-                out_h,
-                &font_path,
-            );
-        }
     }
 
     filters.push(format!(
@@ -3040,6 +3218,7 @@ fn render_composition_window(
         && !is_webp
         && append_audio_graph(
             &mut filters,
+            &settings.audio_mastering_suffix(),
             plan,
             project_id,
             &input_indices,
@@ -3248,6 +3427,7 @@ fn render_composition_window(
 #[allow(clippy::too_many_arguments)]
 fn append_audio_graph(
     filters: &mut Vec<String>,
+    mastering_suffix: &str,
     plan: &RenderPlan,
     project_id: &str,
     input_indices: &HashMap<String, usize>,
@@ -3362,16 +3542,18 @@ fn append_audio_graph(
     if audio_labels.len() == 1 {
         let label = "aout";
         filters.push(format!(
-            "{}atrim=duration={}[{label}]",
+            "{}atrim=duration={}{}[{label}]",
             audio_labels[0],
             seconds(duration_ms),
+            mastering_suffix,
         ));
     } else if !audio_labels.is_empty() {
         filters.push(format!(
-            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}[aout]",
+            "{}amix=inputs={}:duration=longest:normalize=0,atrim=duration={}{}[aout]",
             audio_labels.join(""),
             audio_labels.len(),
             seconds(duration_ms),
+            mastering_suffix,
         ));
     }
     Ok(!audio_labels.is_empty())
@@ -3788,6 +3970,7 @@ fn render_timeline_chunked(
     let mut audio_filters = Vec::new();
     let has_audio = append_audio_graph(
         &mut audio_filters,
+        &settings.audio_mastering_suffix(),
         plan,
         project_id,
         &audio_input_indices,
@@ -4867,6 +5050,19 @@ fn cursor_settings_for_effect(
     serde_json::from_value(value).unwrap_or_else(|_| base.clone())
 }
 
+/// Legacy intermediate path from the retired two-pass cursor render, kept only
+/// so cleanup removes files left behind by older app versions.
+fn cursor_partial_output_path(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "export".into());
+    output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.cursor.partial.mp4"))
+}
+
 fn collect_input_assets(
     plan: &RenderPlan,
     asset_paths: &HashMap<String, PathBuf>,
@@ -5604,11 +5800,20 @@ fn validate_export_output_with_dims(
     Ok(())
 }
 
-/// Paths a finished export may publish to — the collision check only needs
-/// the final output and the sidecars it will actually produce; temporary
-/// files live in the owned staging dir and can never collide with assets.
+fn temporary_export_paths(output_path: &Path) -> Vec<PathBuf> {
+    let partial = partial_output_path(output_path);
+    vec![
+        partial.clone(),
+        cursor_partial_output_path(output_path),
+        partial.with_extension("srt"),
+        partial.with_extension("chapters.txt"),
+        cursor_partial_output_path(&partial),
+    ]
+}
+
 fn managed_export_paths(output_path: &Path, plan: &RenderPlan) -> Vec<PathBuf> {
-    let mut paths = vec![output_path.to_path_buf()];
+    let mut paths = temporary_export_paths(output_path);
+    paths.push(output_path.to_path_buf());
     if plan.caption_mode == "sidecar" {
         paths.push(output_path.with_extension("srt"));
     }
@@ -5618,7 +5823,7 @@ fn managed_export_paths(output_path: &Path, plan: &RenderPlan) -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
     let left = crate::path_policy::canonicalize_path(left)
         .unwrap_or_else(|_| crate::path_policy::normalize_path(left));
     let right = crate::path_policy::canonicalize_path(right)
@@ -5631,6 +5836,12 @@ pub(crate) fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
     #[cfg(not(windows))]
     {
         left == right
+    }
+}
+
+pub(crate) fn cleanup_export_files(output_path: &Path) {
+    for path in temporary_export_paths(output_path) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -7364,138 +7575,15 @@ fn write_caption_sidecar(output_path: &Path, captions: &[RenderPlanCaption]) -> 
     captions::write_sidecar(output_path, captions)
 }
 
-/// Processed previews serve the sidecar through a browser `<track>` — VTT,
-/// derived from the already intro-shifted SRT.
-pub(crate) fn write_vtt_companion(srt_path: &Path) -> Result<PathBuf> {
-    captions::write_vtt_companion(srt_path)
-}
-
-/// Owned staging directory for ONE render — a unique hidden sibling of the
-/// destination (same filesystem, so publication stays an atomic rename).
-/// Every temporary artifact (partial video, sidecars) lives inside it, and
-/// Drop removes only this directory: a failed or cancelled export can never
-/// delete a pre-existing `name.partial.mp4`, user sidecars, or unknown
-/// legacy leftovers next to the output.
-pub(crate) struct ExportStaging {
-    dir: PathBuf,
-}
-
-impl ExportStaging {
-    /// Create a fresh, uniquely named staging dir next to `output_path`.
-    /// `create_dir` (not `_all`) means a pre-existing path is never adopted
-    /// as owned — distinct renders get distinct staging dirs.
-    pub(crate) fn create(output_path: &Path) -> Result<Self> {
-        let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)
-            .map_err(|error| InternalError::Storage(format!("create export directory: {error}")))?;
-        let dir = parent.join(format!(".rf-export-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir)
-            .map_err(|error| InternalError::Storage(format!("create export staging: {error}")))?;
-        Ok(Self { dir })
-    }
-
-    /// The render's owned partial output — name is fixed inside the owned
-    /// dir because no other file can ever live there.
-    pub(crate) fn partial_output(&self) -> PathBuf {
-        self.dir.join("export.partial.mp4")
-    }
-}
-
-impl Drop for ExportStaging {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// One sidecar replacement recorded so a failed commit can restore the
-/// destination to its pre-operation state exactly.
-struct PublishedSidecar {
-    final_path: PathBuf,
-    /// Owned copy of the destination file this operation replaced — `None`
-    /// when the sidecar did not exist before and removal restores state.
-    backup_path: Option<PathBuf>,
-}
-
-/// Publish every sidecar generated in the owned staging dir FIRST, then
-/// commit the video LAST: a stale sibling `.srt`/`.chapters.txt` left by an
-/// older export is never moved or claimed, and the pre-existing output video
-/// stays intact until the final atomic replace (no full-video backup copy
-/// needed). On any failure only the sidecar paths THIS operation actually
-/// replaced or created are rolled back; if rollback itself fails the owned
-/// backups are moved next to the output as `*.rf-recovery` files so they
-/// survive the staging-dir Drop, and the error stays honest.
-fn publish_export_outputs(
-    partial_path: &Path,
-    output_path: &Path,
-    staging_dir: &Path,
-) -> Result<()> {
-    let mut published: Vec<PublishedSidecar> = Vec::new();
-    for ext in ["srt", "chapters.txt"] {
-        let partial = partial_path.with_extension(ext);
-        if !partial.is_file() {
-            continue;
-        }
-        let final_path = output_path.with_extension(ext);
-        let backup_path = if final_path.exists() {
-            let backup = staging_dir.join(format!(
-                "rollback-backup-{}-{}",
-                ext.replace('.', "_"),
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::copy(&final_path, &backup).map_err(|error| {
-                InternalError::Storage(format!("back up existing {ext} sidecar: {error}"))
-            })?;
-            Some(backup)
-        } else {
-            None
-        };
-        if let Err(error) = crate::capture::disk::atomic_replace(&partial, &final_path) {
-            rollback_published_sidecars(&published, output_path);
-            return Err(InternalError::Storage(format!("publish {ext} sidecar: {error}")).into());
-        }
-        published.push(PublishedSidecar {
-            final_path,
-            backup_path,
-        });
-    }
-
-    if let Err(error) = crate::capture::disk::atomic_replace(partial_path, output_path) {
-        rollback_published_sidecars(&published, output_path);
-        return Err(error);
-    }
-    Ok(())
-}
-
-/// Restore sidecar destinations to their pre-operation state. A failed
-/// restore moves the owned backup out of the staging dir so the Drop cleanup
-/// cannot delete the only recoverable copy.
-fn rollback_published_sidecars(published: &[PublishedSidecar], output_path: &Path) {
-    for entry in published.iter().rev() {
-        let restored = match &entry.backup_path {
-            Some(backup) => crate::capture::disk::atomic_replace(backup, &entry.final_path)
-                .map(|_| ())
-                .map_err(|error| error.to_string()),
-            None => std::fs::remove_file(&entry.final_path).map_err(|error| error.to_string()),
-        };
-        if let Err(error) = restored {
-            if let Some(backup) = &entry.backup_path {
-                let recovery = output_path.with_file_name(format!(
-                    "{}.rf-recovery",
-                    entry
-                        .final_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("sidecar")
-                ));
-                let _ = std::fs::rename(backup, &recovery);
-            }
-            tracing::error!(
-                sidecar = %entry.final_path.display(),
-                error = %error,
-                "export rollback could not fully restore a replaced sidecar"
-            );
-        }
-    }
+pub(crate) fn partial_output_path(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_else(|| "export".into());
+    output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{stem}.partial.mp4"))
 }
 
 fn emit_job_update(app: &tauri::AppHandle, job: &MediaJob) -> Result<()> {
@@ -7525,6 +7613,39 @@ fn emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brand_asset_resolution_honors_relative_absolute_and_escaping_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path().join("project");
+        std::fs::create_dir_all(work_dir.join("brand")).unwrap();
+        let logo = work_dir.join("brand/logo.png");
+        std::fs::write(&logo, b"png").unwrap();
+
+        // UI picks land project-relative → resolve inside the work dir.
+        // Compare canonical forms: tempfile paths may carry Windows 8.3 short
+        // names (e.g. RUNNER~1 on CI) that canonicalization expands.
+        let resolved = resolve_brand_asset_path("brand/logo.png", &work_dir).unwrap();
+        let expected = crate::path_policy::canonicalize_path(&logo).unwrap();
+        assert_eq!(std::path::Path::new(&resolved), expected.as_path());
+
+        // Missing relative file degrades to absent.
+        assert!(resolve_brand_asset_path("brand/missing.png", &work_dir).is_none());
+
+        // Traversal out of the project dir is rejected, not followed.
+        std::fs::write(temp.path().join("outside.png"), b"png").unwrap();
+        assert!(resolve_brand_asset_path("../outside.png", &work_dir).is_none());
+
+        // Absolute paths pass through only while the file exists.
+        let external = temp.path().join("external.png");
+        std::fs::write(&external, b"png").unwrap();
+        let raw = external.to_string_lossy().to_string();
+        assert_eq!(
+            resolve_brand_asset_path(&raw, &work_dir).as_deref(),
+            Some(raw.as_str())
+        );
+        assert!(resolve_brand_asset_path("C:\\definitely\\missing\\logo.png", &work_dir).is_none());
+    }
 
     #[test]
     fn is_pipe_closed_matches_broken_pipe_errors() {
@@ -7766,6 +7887,7 @@ mod tests {
     fn hvc1_tag_applies_only_to_hevc() {
         let hevc = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "hevc".into(),
             encoder: "software".into(),
@@ -7773,11 +7895,15 @@ mod tests {
             caption_mode: "none".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert_eq!(hvc1_tag_args(&hevc), &["-tag:v", "hvc1"]);
         let h264 = ExportSettings {
             codec: "h264".into(),
+            brand_watermark: None,
             keystroke_overlay: None,
             ..hevc
         };
@@ -8214,214 +8340,49 @@ mod tests {
         assert_eq!(filter, ",atempo=2.0,atempo=2.000000");
     }
 
-    // ---- export_staging: owned staging dir lifecycle ----------------------
-
     #[test]
-    fn export_staging_preserves_all_neighbouring_files_on_drop() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let output = dir.path().join("demo.mp4");
-        // Pre-existing neighbors a failed render must never touch: a legacy
-        // predictable partial, a cursor render leftover, user sidecars, and
-        // the final output itself.
-        let neighbors = [
-            dir.path().join("demo.partial.mp4"),
-            dir.path().join("demo.cursor.partial.mp4"),
-            dir.path().join("demo.srt"),
-            dir.path().join("demo.chapters.txt"),
-            output.clone(),
-            dir.path().join("source-asset.mp4"),
-        ];
-        for path in &neighbors {
-            std::fs::write(path, b"pre-existing").expect("seed neighbour");
-        }
-
-        {
-            let staging = ExportStaging::create(&output).expect("staging");
-            let partial = staging.partial_output();
-            assert!(partial.starts_with(dir.path()));
-            assert_ne!(partial, output);
-            std::fs::write(&partial, b"rendered bytes").expect("partial");
-            std::fs::write(partial.with_extension("srt"), b"sidecar").expect("sidecar");
-            std::fs::write(partial.with_extension("chapters.txt"), b"chapters").expect("chapters");
-        } // simulated render failure/cancel: drop cleans the staging dir
-
-        for path in &neighbors {
-            assert_eq!(
-                std::fs::read(path).expect("neighbor still readable"),
-                b"pre-existing",
-                "staging drop touched {}",
-                path.display()
-            );
-        }
-        // Only the OWNED staging dir is gone — the seeded `.partial` legacy
-        // names are exactly the neighbors we must preserve, so they still
-        // sit here untouched (asserted above) and must not count as stray
-        // staging residue.
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .filter(|name| name.contains("rf-export"))
-            .collect();
-        assert!(leftovers.is_empty(), "staging leftovers: {leftovers:?}");
+    fn keeps_partial_paths_separate_from_published_paths() {
+        let output = Path::new("C:/exports/demo.mp4");
+        assert_ne!(partial_output_path(output), output);
+        assert!(partial_output_path(output)
+            .to_string_lossy()
+            .contains("partial"));
     }
 
     #[test]
-    fn export_staging_dirs_are_unique_per_render() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let output = dir.path().join("demo.mp4");
-        let a = ExportStaging::create(&output).expect("staging A");
-        let b = ExportStaging::create(&output).expect("staging B");
-        assert_ne!(a.partial_output(), b.partial_output());
-        // A pre-existing dir at the same path can never be adopted — the
-        // unique uuid makes collision impossible, and create_dir would fail
-        // rather than reuse.
-        drop(a);
-        drop(b);
+    fn cursor_partial_path_is_distinct_from_video_partial_path() {
+        let output = Path::new("C:/exports/demo.mp4");
+        let video_partial = partial_output_path(output);
+        let cursor_partial = cursor_partial_output_path(output);
+        assert_ne!(video_partial, cursor_partial);
+        assert!(cursor_partial.to_string_lossy().contains("partial"));
+        assert!(cursor_partial.to_string_lossy().contains("cursor"));
     }
 
     #[test]
-    fn export_staging_cleans_only_owned_files() {
+    fn cleanup_export_files_removes_cursor_partial_output() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("demo.mp4");
-        let outsider = dir.path().join("unrelated.tmp");
-        std::fs::write(&outsider, b"keep me").expect("seed outsider");
+        let cursor_partial = cursor_partial_output_path(&output);
+        std::fs::write(&cursor_partial, b"partial").expect("write partial");
+        assert!(cursor_partial.exists());
 
-        let staging = ExportStaging::create(&output).expect("staging");
-        std::fs::write(staging.partial_output(), b"x").expect("partial");
-        drop(staging);
+        cleanup_export_files(&output);
 
-        assert!(outsider.exists());
-        assert!(!dir.path().join("demo.partial.mp4").exists());
-    }
-
-    // ---- publish_export_outputs: sidecar-first, video-last commit ---------
-
-    #[test]
-    fn publish_export_outputs_zero_cue_sidecar_leaves_stale_sibling_untouched() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let output = dir.path().join("demo.mp4");
-        let stale_srt = dir.path().join("demo.srt");
-        std::fs::write(&stale_srt, b"stale older captions").expect("stale srt");
-
-        let staging = ExportStaging::create(&output).expect("staging");
-        let partial = staging.partial_output();
-        // A zero-cue sidecar write produces NO file — publish must neither
-        // fail on the missing partial nor touch the stale sibling.
-        std::fs::write(&partial, b"rendered").expect("partial");
-
-        publish_export_outputs(&partial, &output, &staging.dir).expect("publish");
-
-        assert_eq!(std::fs::read(&output).unwrap(), b"rendered");
-        assert_eq!(std::fs::read(&stale_srt).unwrap(), b"stale older captions");
-        drop(staging);
+        assert!(!cursor_partial.exists());
     }
 
     #[test]
-    fn publish_export_outputs_video_commit_failure_restores_replaced_sidecars() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Video commit fails: the output path is a DIRECTORY — the atomic
-        // replace cannot overwrite it. A pre-existing sibling srt and
-        // chapters file must be restored byte-for-byte.
-        let output = dir.path().join("demo.mp4");
-        std::fs::create_dir(&output).expect("output dir");
-        let final_srt = dir.path().join("demo.srt");
-        let final_chapters = dir.path().join("demo.chapters.txt");
-        std::fs::write(&final_srt, b"original captions").expect("seed srt");
-        std::fs::write(&final_chapters, b"original chapters").expect("seed chapters");
-
-        let staging = ExportStaging::create(&output).expect("staging");
-        let partial = staging.partial_output();
-        std::fs::write(&partial, b"rendered").expect("partial");
-        std::fs::write(partial.with_extension("srt"), b"new captions").expect("partial srt");
-        std::fs::write(partial.with_extension("chapters.txt"), b"new chapters")
-            .expect("partial chapters");
-
-        assert!(publish_export_outputs(&partial, &output, &staging.dir).is_err());
-
-        // The published sidecars rolled back to their original bytes; the
-        // blocked video path is untouched.
-        assert_eq!(std::fs::read(&final_srt).unwrap(), b"original captions");
-        assert_eq!(
-            std::fs::read(&final_chapters).unwrap(),
-            b"original chapters"
-        );
-        assert!(output.is_dir());
-        drop(staging);
-    }
-
-    #[test]
-    fn publish_export_outputs_sidecar_failure_never_deletes_preexisting_video() {
+    fn detects_export_partial_path_collisions_with_project_assets() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("demo.mp4");
-        std::fs::write(&output, b"previous good export").expect("seed video");
-        // Force the srt commit to fail: the destination is a directory.
-        let final_srt = dir.path().join("demo.srt");
-        std::fs::create_dir(&final_srt).expect("srt dir");
+        let asset = partial_output_path(&output);
+        std::fs::write(&asset, b"project asset").expect("write project asset");
 
-        let staging = ExportStaging::create(&output).expect("staging");
-        let partial = staging.partial_output();
-        std::fs::write(&partial, b"rendered").expect("partial");
-        std::fs::write(partial.with_extension("srt"), b"new captions").expect("partial srt");
-
-        assert!(publish_export_outputs(&partial, &output, &staging.dir).is_err());
-
-        // The OLD video survives — the video commit was never reached and
-        // nothing guessed at sibling deletion.
-        assert_eq!(std::fs::read(&output).unwrap(), b"previous good export");
-        assert!(final_srt.is_dir());
-        drop(staging);
-    }
-
-    #[test]
-    fn publish_export_outputs_created_only_sidecars_are_removed_on_rollback() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let output = dir.path().join("demo.mp4");
-        std::fs::create_dir(&output).expect("output dir");
-        // No pre-existing sidecars — files this op created must disappear on
-        // rollback rather than linger as half-published artifacts.
-        let final_srt = dir.path().join("demo.srt");
-        let final_chapters = dir.path().join("demo.chapters.txt");
-
-        let staging = ExportStaging::create(&output).expect("staging");
-        let partial = staging.partial_output();
-        std::fs::write(&partial, b"rendered").expect("partial");
-        std::fs::write(partial.with_extension("srt"), b"new captions").expect("partial srt");
-        std::fs::write(partial.with_extension("chapters.txt"), b"new chapters")
-            .expect("partial chapters");
-
-        assert!(publish_export_outputs(&partial, &output, &staging.dir).is_err());
-        assert!(!final_srt.exists());
-        assert!(!final_chapters.exists());
-        drop(staging);
-    }
-
-    #[test]
-    fn rollback_failure_preserves_owned_recovery_backup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let output = dir.path().join("demo.mp4");
-        let final_srt = dir.path().join("demo.srt");
-        // Restore must fail: the destination path is a directory.
-        std::fs::create_dir(&final_srt).expect("srt dir");
-        let staging = ExportStaging::create(&output).expect("staging");
-        let backup = staging.dir.join("rollback-backup-srt-1");
-        std::fs::write(&backup, b"original captions").expect("backup");
-
-        rollback_published_sidecars(
-            &[PublishedSidecar {
-                final_path: final_srt.clone(),
-                backup_path: Some(backup.clone()),
-            }],
-            &output,
-        );
-
-        // The recoverable copy escaped the staging dir — it is NOT deleted
-        // by the later staging Drop.
-        let recovery = dir.path().join("demo.srt.rf-recovery");
-        assert_eq!(std::fs::read(&recovery).unwrap(), b"original captions");
-        assert!(!backup.exists());
-        drop(staging);
-        assert_eq!(std::fs::read(&recovery).unwrap(), b"original captions");
+        assert!(managed_export_paths(&output, &valid_plan())
+            .iter()
+            .any(|path| paths_refer_to_same_file(&asset, path)));
+        assert_eq!(std::fs::read(&asset).unwrap(), b"project asset");
     }
 
     #[test]
@@ -8430,6 +8391,7 @@ mod tests {
         for preset in ["smooth-60fps", "ultra-4k", "ultra-4k-60"] {
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: preset.into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -8437,12 +8399,16 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "embed".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &plan).is_ok());
         }
         let settings_4k = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "ultra-4k".into(),
             codec: "h264".into(),
             encoder: "software".into(),
@@ -8450,7 +8416,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert_eq!(audio_bitrate(&settings_4k), "192k");
     }
@@ -8460,6 +8429,7 @@ mod tests {
         let plan = valid_plan();
         let mut settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "default-mp4".into(),
             codec: "h264".into(),
             encoder: "nvenc".into(),
@@ -8467,7 +8437,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &plan).is_err());
         settings.encoder = "auto".into();
@@ -9379,6 +9352,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -9386,7 +9360,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -9651,6 +9628,7 @@ mod tests {
             p.chapter_mode = mode.into();
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: "default-mp4".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -9658,7 +9636,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: mode.into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -9667,6 +9648,7 @@ mod tests {
         p.chapter_mode = "embed".into();
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "default-mp4".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -9674,7 +9656,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "invalid_mode".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_err());
     }
@@ -9687,6 +9672,7 @@ mod tests {
             p.chapter_mode = "none".into();
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: preset.into(),
                 codec: "gif".into(),
                 encoder: "auto".into(),
@@ -9694,7 +9680,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -9704,6 +9693,7 @@ mod tests {
         p.chapter_mode = "none".into();
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -9711,7 +9701,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -9720,6 +9713,7 @@ mod tests {
         p_sidecar.chapter_mode = "sidecar".into();
         let settings_sidecar = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -9727,7 +9721,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -9745,6 +9742,7 @@ mod tests {
             p.chapter_mode = "none".into();
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: preset.into(),
                 codec: "webp".into(),
                 encoder: "auto".into(),
@@ -9752,7 +9750,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
             assert!(validate_export_settings(&settings, &p).is_ok());
         }
@@ -9762,6 +9763,7 @@ mod tests {
         p.chapter_mode = "none".into();
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -9769,7 +9771,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings, &p).is_ok());
 
@@ -9778,6 +9783,7 @@ mod tests {
         p_sidecar.chapter_mode = "sidecar".into();
         let settings_sidecar = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -9785,7 +9791,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "sidecar".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         assert!(validate_export_settings(&settings_sidecar, &p_sidecar).is_ok());
     }
@@ -9796,6 +9805,7 @@ mod tests {
         plan.chapter_mode = "none".into();
         let gif_settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -9803,7 +9813,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         plan.duration_ms = 60_000;
         assert!(validate_export_settings(&gif_settings, &plan).is_ok());
@@ -9812,6 +9825,7 @@ mod tests {
         // The cap only applies to GIF — a long mp4 is unaffected.
         let mp4_settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -9819,7 +9833,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         plan.duration_ms = 120_000;
         plan.chapter_mode = "embed".into();
@@ -9832,6 +9849,7 @@ mod tests {
         plan.duration_ms = 60_000;
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -9839,7 +9857,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         // 1920*1080*30 * 0.01 bpp * 60 s / 8 + 128k/8 * 60 s.
         let expected = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0 + 128_000.0 / 8.0 * 60.0) as u64;
@@ -9848,7 +9869,9 @@ mod tests {
         let gif_settings = ExportSettings {
             preset: "gif-balanced".into(),
             container: "gif".into(),
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
             ..settings
         };
         let video_only = (1920.0 * 1080.0 * 30.0 * 0.01 * 60.0 / 8.0) as u64;
@@ -10172,6 +10195,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -10179,7 +10203,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -10287,6 +10314,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "gif-balanced".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -10294,7 +10322,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -10325,6 +10356,146 @@ mod tests {
             "validate gif failed: {:?}",
             validation.err()
         );
+    }
+
+    /// The watermark branch must terminate its chain with a real filter —
+    /// `[prev][brandbase]` (or `…,[brandbase]` after an optional fragment) is a
+    /// filterless chain FFmpeg rejects with "No such filter: ''".
+    #[test]
+    fn test_render_timeline_composition_brand_watermark_end_to_end() {
+        let ffmpeg = match crate::media::resolve_executable("ffmpeg") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ffprobe = match crate::media::resolve_executable("ffprobe") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("rf-test-watermark-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let screen_path = temp_dir.join("screen.mp4");
+        let logo_path = temp_dir.join("logo.png");
+        let out_path = temp_dir.join("out.mp4");
+
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=10",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&screen_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate screen test video");
+        let status = crate::process::create_command(&*ffmpeg.to_string_lossy())
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x32:d=0.1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&logo_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "generate logo png");
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("asset-screen".to_string(), screen_path);
+
+        let plan = RenderPlan {
+            reframe: None,
+            project_id: "test-watermark-project".into(),
+            duration_ms: 1000,
+            segments: vec![RenderSegment {
+                asset_id: "asset-screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1000,
+                output_start_ms: 0,
+                output_end_ms: 1000,
+                source_width: Some(320),
+                source_height: Some(240),
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "none".into(),
+            chapters: Vec::new(),
+            chapter_mode: "none".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: Some(cursor::RenderCanvas {
+                width: 320,
+                height: 240,
+                fps: 10,
+                ..Default::default()
+            }),
+            audio: None,
+            audio_tracks: None,
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            keystrokes: Vec::new(),
+        };
+
+        let settings = ExportSettings {
+            reframe_mode: None,
+            webcam_background: None,
+            preset: "balanced".into(),
+            codec: "h264".into(),
+            encoder: "software".into(),
+            container: "mp4".into(),
+            caption_mode: "none".into(),
+            chapter_mode: "none".into(),
+            range: None,
+            audio_mastering: None,
+            brand_watermark: Some(BrandWatermark {
+                enabled: true,
+                logo_path: Some(logo_path.to_string_lossy().to_string()),
+                position: "bottom-right".into(),
+                scale_percent: 8.0,
+                opacity: 0.85,
+            }),
+            keystroke_overlay: None,
+            brand_cards: None,
+        };
+
+        let res = render_timeline_composition(
+            &ffmpeg.to_string_lossy(),
+            &out_path,
+            &plan,
+            "test-watermark-project",
+            &asset_paths,
+            &settings,
+            encoding::ExportEncoder::Software,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &|_| {},
+            None,
+            Some(&ffprobe),
+        );
+        assert!(res.is_ok(), "watermarked render failed: {:?}", res.err());
+        assert!(out_path.is_file(), "watermarked export should exist");
     }
 
     #[test]
@@ -10424,6 +10595,7 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -10431,7 +10603,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -10526,6 +10701,7 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -10533,7 +10709,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -10649,6 +10828,7 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -10656,7 +10836,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -10754,6 +10937,7 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -10761,7 +10945,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -10861,6 +11048,7 @@ mod tests {
 
             let settings = ExportSettings {
                 reframe_mode: None,
+                webcam_background: None,
                 preset: "balanced".into(),
                 codec: "h264".into(),
                 encoder: "auto".into(),
@@ -10868,7 +11056,10 @@ mod tests {
                 caption_mode: "burn-in".into(),
                 chapter_mode: "none".into(),
                 range: None,
+                audio_mastering: None,
+                brand_watermark: None,
                 keystroke_overlay: None,
+                brand_cards: None,
             };
 
             let res = render_timeline_composition(
@@ -10997,6 +11188,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "webp-balanced".into(),
             codec: "webp".into(),
             encoder: "auto".into(),
@@ -11004,7 +11196,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11122,6 +11317,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "gif-fast".into(),
             codec: "gif".into(),
             encoder: "auto".into(),
@@ -11129,7 +11325,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -11338,6 +11537,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11345,7 +11545,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
         let res = render_timeline_composition(
             &ffmpeg.to_string_lossy(),
@@ -11845,6 +12048,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -11852,7 +12056,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12253,6 +12460,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -12260,7 +12468,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12475,6 +12686,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -12482,7 +12694,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12668,6 +12883,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -12675,7 +12891,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -12875,6 +13094,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -12882,7 +13102,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(
@@ -13052,6 +13275,7 @@ mod tests {
 
         let settings = ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: "balanced".into(),
             codec: "h264".into(),
             encoder: "auto".into(),
@@ -13059,7 +13283,10 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "none".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
             keystroke_overlay: None,
+            brand_cards: None,
         };
 
         let res = render_timeline_composition(

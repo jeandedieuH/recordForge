@@ -620,21 +620,11 @@ pub fn run_key_tap(origin: Instant, stop: Arc<AtomicBool>) -> Vec<(u64, String)>
             let alt = flags.contains(CGEventFlags::CGEventFlagAlternate);
             let shift = flags.contains(CGEventFlags::CGEventFlagShift);
             let cmd = flags.contains(CGEventFlags::CGEventFlagCommand);
-            // Same privacy allowlist as the Windows sampler: Shift-only and
-            // Option-only presses on printable keys are typing (shifted
-            // letters, accented glyphs), never a captured shortcut.
-            let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-            if let Some((name, printable)) = macos_key_name(keycode) {
-                let mods = super::keystrokes::ModifierState {
-                    ctrl,
-                    alt,
-                    shift,
-                    win: cmd,
-                    // macOS has no AltGr synthesis — right Option + a printable
-                    // key is already rejected by the Alt-only rule.
-                    alt_gr: false,
-                };
-                if super::keystrokes::combo_is_allowed(mods, printable) {
+            // Same privacy rule as the Windows sampler: plain typing never
+            // produces an event — only presses with a held modifier do.
+            if ctrl || alt || shift || cmd {
+                let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                if let Some(name) = macos_key_name(keycode) {
                     let t_ms = origin.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let mut parts = Vec::with_capacity(5);
                     if ctrl {
@@ -675,85 +665,83 @@ pub fn run_key_tap(origin: Instant, stop: Arc<AtomicBool>) -> Vec<(u64, String)>
     events.into_inner().unwrap_or_default()
 }
 
-/// macOS virtual keycode (`kVK_*`) → `(display name, printable)`. Mirrors
-/// the Windows VK table so export labels match across platforms — canonical
-/// tokens (LeftBracket, Comma, …) keep labels in the safe set, and
-/// `printable` drives the typing-vs-shortcut allowlist.
-fn macos_key_name(keycode: i64) -> Option<(&'static str, bool)> {
+/// macOS virtual keycode (`kVK_*`) → display name. Mirrors the Windows VK
+/// table so export labels match across platforms.
+fn macos_key_name(keycode: i64) -> Option<&'static str> {
     Some(match keycode {
-        0x00 => ("A", true),
-        0x0B => ("B", true),
-        0x08 => ("C", true),
-        0x02 => ("D", true),
-        0x0E => ("E", true),
-        0x03 => ("F", true),
-        0x05 => ("G", true),
-        0x04 => ("H", true),
-        0x22 => ("I", true),
-        0x26 => ("J", true),
-        0x28 => ("K", true),
-        0x25 => ("L", true),
-        0x2E => ("M", true),
-        0x2D => ("N", true),
-        0x1F => ("O", true),
-        0x23 => ("P", true),
-        0x0C => ("Q", true),
-        0x0F => ("R", true),
-        0x01 => ("S", true),
-        0x11 => ("T", true),
-        0x20 => ("U", true),
-        0x09 => ("V", true),
-        0x0D => ("W", true),
-        0x07 => ("X", true),
-        0x10 => ("Y", true),
-        0x06 => ("Z", true),
-        0x1D => ("0", true),
-        0x12 => ("1", true),
-        0x13 => ("2", true),
-        0x14 => ("3", true),
-        0x15 => ("4", true),
-        0x17 => ("5", true),
-        0x16 => ("6", true),
-        0x1A => ("7", true),
-        0x1C => ("8", true),
-        0x19 => ("9", true),
-        0x7A => ("F1", false),
-        0x78 => ("F2", false),
-        0x63 => ("F3", false),
-        0x76 => ("F4", false),
-        0x60 => ("F5", false),
-        0x61 => ("F6", false),
-        0x62 => ("F7", false),
-        0x64 => ("F8", false),
-        0x65 => ("F9", false),
-        0x6D => ("F10", false),
-        0x67 => ("F11", false),
-        0x6F => ("F12", false),
-        0x24 => ("Enter", false),
-        0x35 => ("Esc", false),
-        0x30 => ("Tab", false),
-        0x31 => ("Space", false),
-        0x33 => ("Backspace", false),
-        0x75 => ("Del", false),
-        0x73 => ("Home", false),
-        0x77 => ("End", false),
-        0x74 => ("PgUp", false),
-        0x79 => ("PgDn", false),
-        0x7B => ("Left", false),
-        0x7E => ("Up", false),
-        0x7C => ("Right", false),
-        0x7D => ("Down", false),
-        0x29 => ("Semicolon", true),
-        0x18 => ("Equal", true),
-        0x2B => ("Comma", true),
-        0x1B => ("Minus", true),
-        0x2F => ("Period", true),
-        0x2C => ("Slash", true),
-        0x32 => ("Backquote", true),
-        0x21 => ("LeftBracket", true),
-        0x2A => ("Backslash", true),
-        0x1E => ("RightBracket", true),
-        0x27 => ("Quote", true),
+        0x00 => "A",
+        0x0B => "B",
+        0x08 => "C",
+        0x02 => "D",
+        0x0E => "E",
+        0x03 => "F",
+        0x05 => "G",
+        0x04 => "H",
+        0x22 => "I",
+        0x26 => "J",
+        0x28 => "K",
+        0x25 => "L",
+        0x2E => "M",
+        0x2D => "N",
+        0x1F => "O",
+        0x23 => "P",
+        0x0C => "Q",
+        0x0F => "R",
+        0x01 => "S",
+        0x11 => "T",
+        0x20 => "U",
+        0x09 => "V",
+        0x0D => "W",
+        0x07 => "X",
+        0x10 => "Y",
+        0x06 => "Z",
+        0x1D => "0",
+        0x12 => "1",
+        0x13 => "2",
+        0x14 => "3",
+        0x15 => "4",
+        0x17 => "5",
+        0x16 => "6",
+        0x1A => "7",
+        0x1C => "8",
+        0x19 => "9",
+        0x7A => "F1",
+        0x78 => "F2",
+        0x63 => "F3",
+        0x76 => "F4",
+        0x60 => "F5",
+        0x61 => "F6",
+        0x62 => "F7",
+        0x64 => "F8",
+        0x65 => "F9",
+        0x6D => "F10",
+        0x67 => "F11",
+        0x6F => "F12",
+        0x24 => "Enter",
+        0x35 => "Esc",
+        0x30 => "Tab",
+        0x31 => "Space",
+        0x33 => "Backspace",
+        0x75 => "Del",
+        0x73 => "Home",
+        0x77 => "End",
+        0x74 => "PgUp",
+        0x79 => "PgDn",
+        0x7B => "Left",
+        0x7E => "Up",
+        0x7C => "Right",
+        0x7D => "Down",
+        0x29 => ";",
+        0x18 => "=",
+        0x2B => ",",
+        0x1B => "-",
+        0x2F => ".",
+        0x2C => "/",
+        0x32 => "`",
+        0x21 => "[",
+        0x2A => "\\",
+        0x1E => "]",
+        0x27 => "'",
         _ => return None,
     })
 }

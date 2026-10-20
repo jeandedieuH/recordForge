@@ -261,81 +261,56 @@ fn test_screencapturekit_capture_session_live_stream_and_wav_sync() {
 
 #[test]
 fn test_coreaudio_multitrack_recording_and_duration_alignment() {
-    use recordforge_desktop_lib::capture::fakes::FakeAudioTrack;
-    use recordforge_desktop_lib::capture::traits::AudioTrack;
-
     let temp_dir = temp_test_dir("coreaudio_multitrack");
     let mic_path = temp_dir.join("mic_000.wav");
     let sys_path = temp_dir.join("sys_000.wav");
 
-    // Enumerate CoreAudio devices: system loopback is always available, while
-    // physical/virtual microphones may be absent on headless Mac VMs.
+    // Enumerate CoreAudio devices
     let devices = enumerate_coreaudio_devices().expect("enumerate CoreAudio endpoints");
     assert!(!devices.is_empty(), "Must discover CoreAudio endpoints");
+    assert!(
+        devices.iter().any(|d| !d.is_loopback),
+        "Must discover microphone endpoint"
+    );
     assert!(
         devices.iter().any(|d| d.is_loopback),
         "Must discover system loopback endpoint"
     );
-    let has_mic = devices.iter().any(|d| !d.is_loopback);
-    #[cfg(not(target_os = "macos"))]
-    assert!(has_mic, "Must discover microphone endpoint");
 
     let timeline_origin = Instant::now();
 
     // On macOS these sessions drive real devices (avfoundation mic, SCK
     // loopback) — permission-less or headless hosts legitimately can't start
-    // them, so a startup failure falls back to a deterministic fake WAV track
-    // to keep the multitrack duration-alignment contract tested everywhere.
+    // them, so a startup failure skips instead of failing the suite. Other
+    // platforms keep the deterministic fake-worker path.
     let mic_options = AudioCaptureOptions::microphone(None, mic_path.clone())
         .with_timeline_origin(timeline_origin);
-    let mut mic_session = if has_mic {
-        match CoreAudioCaptureSession::start(mic_options) {
-            Ok(session) => Some(session),
-            Err(error) => {
-                eprintln!("skipping live CoreAudio mic arm: {error}");
-                None
-            }
+    let mut mic_session = match CoreAudioCaptureSession::start(mic_options) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("skipping live CoreAudio test: mic session unavailable: {error}");
+            return;
         }
-    } else {
-        let err = CoreAudioCaptureSession::start(mic_options)
-            .expect_err("mic capture must fail gracefully when no input device exists");
-        assert!(
-            err.message.contains("No usable microphone input device"),
-            "unexpected mic error: {}",
-            err.message
-        );
-        assert!(!mic_path.exists());
-        None
     };
 
     let sys_options = AudioCaptureOptions::system_loopback(None, sys_path.clone())
         .with_timeline_origin(timeline_origin);
     let mut sys_session = match CoreAudioCaptureSession::start(sys_options) {
-        Ok(session) => Some(session),
+        Ok(session) => session,
         Err(error) => {
-            eprintln!("skipping live CoreAudio sys loopback arm: {error}");
-            None
+            eprintln!("skipping live CoreAudio test: sys loopback unavailable: {error}");
+            return;
         }
     };
 
     // Record for 60 ms
     std::thread::sleep(Duration::from_millis(60));
 
-    let mic_bytes = match mic_session.take() {
-        Some(mut session) => session.stop().expect("stop mic session"),
-        None => {
-            let mut fake =
-                FakeAudioTrack::new(mic_path.clone(), timeline_origin).expect("create fake mic");
-            fake.request_stop();
-            fake.stop().expect("stop fake mic")
-        }
-    };
-    if let Some(mut session) = sys_session.take() {
-        let sys_bytes = session.stop().expect("stop sys session");
-        assert!(sys_bytes > WAV_HEADER_SIZE);
-    }
+    let mic_bytes = mic_session.stop().expect("stop mic session");
+    let sys_bytes = sys_session.stop().expect("stop sys session");
 
     assert!(mic_bytes > WAV_HEADER_SIZE);
+    assert!(sys_bytes > WAV_HEADER_SIZE);
 
     // Test timeline duration alignment (trim head and pad/clamp to exact 100ms)
     let aligned_len = align_wav_to_duration(

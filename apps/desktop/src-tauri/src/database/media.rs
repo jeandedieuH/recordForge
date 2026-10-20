@@ -142,22 +142,6 @@ pub struct MediaJobOutputs {
     pub video_tracks: Vec<MediaVideoTrackOutput>,
     pub output_path: Option<String>,
     pub captions_path: Option<String>,
-    /// Delivery manifest captured right after the output was published —
-    /// frozen facts for Instant Share/YouTube metadata. Absent on jobs
-    /// created before delivery capture existed (they inspect via a legacy
-    /// path instead).
-    #[serde(default)]
-    pub artifact: Option<crate::exports::delivery_metadata::ExportArtifactInfo>,
-}
-
-/// Optional batch-grouping metadata persisted with each export request —
-/// surfaced on the job so the UI can group/report multi-format submissions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportBatchMetadata {
-    pub id: String,
-    pub aspect_ratio: String,
-    pub is_primary: bool,
 }
 
 /// Media job record persisted in SQLite.
@@ -179,27 +163,8 @@ pub struct MediaJob {
     pub outputs: MediaJobOutputs,
     #[serde(default, skip_serializing)]
     pub options: serde_json::Value,
-    /// Surfaced from `options.preview` so the frontend can route processed
-    /// previews without deserializing the full persisted request.
-    #[serde(default)]
-    pub preview: bool,
-    /// Retry counter — surfaced so the frontend can version-merge same-id
-    /// events: a retry's pending snapshot must win over the previous
-    /// attempt's terminal event.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub attempts: u32,
-    /// Optional batch-grouping metadata surfaced from `options.batch` so a
-    /// multi-format submission can be grouped and its primary identified
-    /// without deserializing the persisted request.
-    #[serde(default)]
-    pub batch: Option<ExportBatchMetadata>,
-}
-
-/// Read the optional batch metadata out of a persisted request blob.
-fn options_batch(options: &serde_json::Value) -> Option<ExportBatchMetadata> {
-    options
-        .get("batch")
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 /// Cached FFprobe metadata for a recording.
@@ -323,13 +288,8 @@ pub fn insert_job_with_options(
         started_at: None,
         completed_at: None,
         outputs: MediaJobOutputs::default(),
-        preview: options
-            .get("preview")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
-        options: options.clone(),
+        options,
         attempts: 0,
-        batch: options_batch(&options),
     })
 }
 
@@ -434,19 +394,6 @@ pub fn complete_job(conn: &Connection, id: &str, outputs: &MediaJobOutputs) -> R
     get_job(conn, id)
 }
 
-/// Attach a non-fatal advisory message to a completed/running job — used for
-/// optional-step warnings (e.g. artifact capture) that must not downgrade a
-/// successful export.
-pub fn set_job_message(conn: &Connection, id: &str, message: &str) -> Result<MediaJob> {
-    let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE media_jobs SET message = ?1, updated_at = ?2 WHERE id = ?3",
-        params![message, now, id],
-    )
-    .map_err(|e| InternalError::Storage(format!("set job message: {e}")))?;
-    get_job(conn, id)
-}
-
 /// Mark a job as failed.
 pub fn fail_job(conn: &Connection, id: &str, error: &str) -> Result<MediaJob> {
     let now = Utc::now().to_rfc3339();
@@ -544,15 +491,6 @@ pub fn list_active_or_pending_jobs(conn: &Connection) -> Result<Vec<MediaJob>> {
 fn row_to_job(row: &Row<'_>) -> std::result::Result<MediaJob, rusqlite::Error> {
     let outputs_json: String = row.get("outputs")?;
     let outputs: MediaJobOutputs = serde_json::from_str(&outputs_json).unwrap_or_default();
-    let options: serde_json::Value = row
-        .get::<_, String>("options")
-        .ok()
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let preview = options
-        .get("preview")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
 
     Ok(MediaJob {
         id: row.get("id")?,
@@ -574,9 +512,11 @@ fn row_to_job(row: &Row<'_>) -> std::result::Result<MediaJob, rusqlite::Error> {
         started_at: row.get("started_at")?,
         completed_at: row.get("completed_at")?,
         outputs,
-        preview,
-        batch: options_batch(&options),
-        options,
+        options: row
+            .get::<_, String>("options")
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_else(|| serde_json::json!({})),
         attempts: row.get::<_, i64>("attempts").unwrap_or(0).max(0) as u32,
     })
 }

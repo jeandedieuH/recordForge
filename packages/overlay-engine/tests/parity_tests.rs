@@ -17,13 +17,11 @@ fn parity_test_renders_fixture_project_overlays() {
     let canvas_width = canvas_obj["width"].as_u64().unwrap_or(1920) as u32;
     let canvas_height = canvas_obj["height"].as_u64().unwrap_or(1080) as u32;
 
-    #[cfg(feature = "native-render")]
-    let logo_svg_bytes = {
-        let logo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tooling/fixtures/editor-fixtures/external-logo.svg");
-        std::fs::read(&logo_path)
-            .unwrap_or_else(|_| panic!("failed to read logo SVG at {:?}", logo_path))
-    };
+    // Load external-logo.svg
+    let logo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tooling/fixtures/editor-fixtures/external-logo.svg");
+    let logo_svg_bytes = std::fs::read(&logo_path)
+        .unwrap_or_else(|_| panic!("failed to read logo SVG at {:?}", logo_path));
 
     // Construct overlay items from the fixture clips
     let mut items = Vec::new();
@@ -252,10 +250,8 @@ fn parity_test_renders_fixture_project_overlays() {
         fonts: Vec::new(),
     };
 
-    #[cfg_attr(not(feature = "native-render"), allow(unused_mut))]
     let mut engine =
         OverlayEngine::from_render_plan(plan).expect("construct overlay engine from fixture");
-    #[cfg(feature = "native-render")]
     engine
         .register_image_svg("asset-external-logo", &logo_svg_bytes)
         .expect("register SVG image asset");
@@ -264,24 +260,19 @@ fn parity_test_renders_fixture_project_overlays() {
     let timestamps_to_verify = [0u64, 500, 1500, 2500, 3500, 4500, 5500, 9500];
     for &time_ms in &timestamps_to_verify {
         let display_list = engine.evaluate(time_ms);
-        #[cfg(feature = "native-render")]
-        {
-            let mut pixmap =
-                tiny_skia::Pixmap::new(canvas_width, canvas_height).expect("create canvas pixmap");
-            engine
-                .render_to_pixmap(time_ms, &mut pixmap)
-                .expect("render frame to pixmap");
+        let mut pixmap =
+            tiny_skia::Pixmap::new(canvas_width, canvas_height).expect("create canvas pixmap");
+        engine
+            .render_to_pixmap(time_ms, &mut pixmap)
+            .expect("render frame to pixmap");
 
-            if !display_list.items.is_empty() {
-                let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
-                assert!(
-                    non_transparent,
-                    "frame at {time_ms}ms with {} items should render pixels",
-                    display_list.items.len()
-                );
-            }
+        if !display_list.items.is_empty() {
+            let non_transparent = pixmap.data().chunks_exact(4).any(|p| p[3] > 0);
+            assert!(
+                non_transparent,
+                "frame at {time_ms}ms with {} items should render pixels",
+                display_list.items.len()
+            );
         }
-        #[cfg(not(feature = "native-render"))]
-        let _ = (canvas_width, canvas_height, &display_list);
     }
 }

@@ -1,6 +1,10 @@
 import type {
+  AudioMastering,
+  BrandCards,
+  BrandWatermark,
   ProjectExportSettings,
   TextClip,
+  WebcamBackground,
   TimelineState,
 } from "@recordforge/contracts"
 import type { ProFeatureKey } from "@recordforge/contracts"
@@ -61,8 +65,12 @@ function enabledClips(state: TimelineState, kind: "annotation" | "text") {
 export function analyzeProFeatureUsage(
   timeline: TimelineState,
   settings?: Pick<ProjectExportSettings, "preset" | "chapterMode"> & {
+    audioMastering?: AudioMastering
+    brandWatermark?: BrandWatermark
+    brandCards?: BrandCards
     keystrokeOverlay?: { enabled: boolean }
     reframeMode?: string
+    webcamBackground?: WebcamBackground
     formats?: string[]
   },
 ): ProUsageAnalysis {
@@ -103,6 +111,23 @@ export function analyzeProFeatureUsage(
     push("annotations", annotations.length, pluralize(annotations.length, "annotation"))
   }
 
+  // Studio Audio — flags on export settings, not timeline content.
+  const mastering = settings?.audioMastering
+  if (mastering?.denoise || mastering?.loudnessTarget != null) {
+    push("studio-audio", 1, "audio mastering")
+  }
+
+  const cards = settings?.brandCards
+  const hasCards = cards?.enabled === true && (cards.introMs > 0 || cards.outroMs > 0)
+  const hasWatermark = settings?.brandWatermark?.enabled && settings.brandWatermark.logoPath
+  if (hasWatermark || hasCards) {
+    push(
+      "brand-kit",
+      1,
+      hasWatermark && hasCards ? "brand kit" : hasCards ? "intro/outro cards" : "logo watermark",
+    )
+  }
+
   if (settings?.keystrokeOverlay?.enabled) {
     push("keystroke-overlay", 1, "keystroke badges")
   }
@@ -112,6 +137,19 @@ export function analyzeProFeatureUsage(
       "auto-reframe",
       1,
       settings.reframeMode === "fill" ? "crop to fill" : "cursor-followed crop",
+    )
+  }
+
+  // Virtual background only does real work when a camera clip is on the
+  // timeline — the same condition the Rust gate uses.
+  const hasCamera = timeline.tracks.some(
+    (track) => !track.muted && track.clips.some((clip) => clip.kind === "camera"),
+  )
+  if (hasCamera && settings?.webcamBackground?.enabled) {
+    push(
+      "virtual-background",
+      1,
+      settings.webcamBackground.mode === "replace" ? "background replacement" : "background blur",
     )
   }
 

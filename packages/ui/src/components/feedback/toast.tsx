@@ -46,7 +46,7 @@ function dismiss(id: number) {
   listeners.forEach((listener) => listener())
 }
 
-export function toast(options: ToastOptions): number {
+function toast(options: ToastOptions): number {
   const id = nextId++
   const item: ToastItem = { ...options, id, variant: options.variant ?? "default" }
   toasts = [...toasts, item]

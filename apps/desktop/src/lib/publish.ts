@@ -1,17 +1,17 @@
 import { invoke } from "@tauri-apps/api/core"
-import { listen } from "@tauri-apps/api/event"
-import {
-  PUBLICATION_JOB_EVENT,
-  publicationJobSchema,
-  youtubeOAuthCompletedSchema,
-  youtubePublishRequestSchema,
-  type OAuthFlowStartResult,
-  type PublicationJob,
-  type YouTubeConnection,
-  type YouTubeOAuthCompleted,
-  type YouTubePublishRequest,
+import { listen, type UnlistenFn } from "@tauri-apps/api/event"
+import type {
+  YouTubeConnection,
+  YouTubePublishProgress,
+  YouTubePublishRequest,
+  YouTubePublishResult,
 } from "@recordforge/contracts"
-import { invokeValidated } from "./ipc"
+
+interface OAuthFlowStartResult {
+  authUrl: string
+  state: string
+  port: number
+}
 
 export function startYouTubeOAuth(): Promise<OAuthFlowStartResult> {
   return invoke("start_youtube_oauth")
@@ -25,33 +25,32 @@ export function disconnectYouTube(): Promise<void> {
   return invoke("disconnect_youtube")
 }
 
-/** Publish a finished export to YouTube — returns the admitted publication
- * job; progress arrives via `publication-job-update` / the store. */
-export async function publishToYouTube(request: YouTubePublishRequest): Promise<PublicationJob> {
-  const parsed = youtubePublishRequestSchema.parse(request)
-  return invokeValidated("publish_to_youtube", { request: parsed }, publicationJobSchema)
+export function publishToYouTube(request: YouTubePublishRequest): Promise<YouTubePublishResult> {
+  return invoke("publish_to_youtube", { request })
 }
 
-/** Cancellation goes through the shared publication surface. */
-export { cancelPublicationJob as cancelPublication } from "./share"
+export function cancelYouTubePublish(): Promise<void> {
+  return invoke("cancel_youtube_publish")
+}
 
-/** OAuth completion — correlated by the flow's `state` so a stale emit from
- * an earlier flow can never mark this attempt connected. */
+export interface YouTubeOAuthCompleted {
+  success: boolean
+  accountLabel?: string
+  error?: string
+}
+
 export function onYouTubeOAuthCompleted(
   handler: (event: YouTubeOAuthCompleted) => void,
-): Promise<() => void> {
-  return listen<unknown>("youtube-oauth-completed", (event) => {
-    const parsed = youtubeOAuthCompletedSchema.safeParse(event.payload)
-    if (parsed.success) handler(parsed.data)
+): Promise<UnlistenFn> {
+  return listen<YouTubeOAuthCompleted>("youtube-oauth-completed", (event) => {
+    handler(event.payload)
   })
 }
 
-/** Every publication job state change — the store fans this out. */
-export function onPublicationJobUpdate(
-  handler: (job: PublicationJob) => void,
-): Promise<() => void> {
-  return listen<unknown>(PUBLICATION_JOB_EVENT, (event) => {
-    const parsed = publicationJobSchema.safeParse(event.payload)
-    if (parsed.success) handler(parsed.data)
+export function onYouTubePublishProgress(
+  handler: (progress: YouTubePublishProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<YouTubePublishProgress>("youtube-publish-progress", (event) => {
+    handler(event.payload)
   })
 }

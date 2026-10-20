@@ -240,6 +240,7 @@ mod tests {
     fn settings(preset: &str, codec: &str, encoder: &str) -> ExportSettings {
         ExportSettings {
             reframe_mode: None,
+            webcam_background: None,
             preset: preset.into(),
             codec: codec.into(),
             encoder: encoder.into(),
@@ -247,6 +248,9 @@ mod tests {
             caption_mode: "burn-in".into(),
             chapter_mode: "embed".into(),
             range: None,
+            audio_mastering: None,
+            brand_watermark: None,
+            brand_cards: None,
             keystroke_overlay: None,
         }
     }

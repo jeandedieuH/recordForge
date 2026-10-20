@@ -17,9 +17,6 @@ export const S3ConfigSchema = z.object({
     .nullish()
     .default(8 * 1024 * 1024), // 8MB default
   forcePathStyle: z.boolean().nullish().default(false),
-  // Optional HTTP(S) origin the bucket is publicly readable at — Instant
-  // Share to a BYO bucket needs it to build the returned player link.
-  publicBaseUrl: z.string().url().nullish(),
 })
 export type S3Config = z.infer<typeof S3ConfigSchema>
 

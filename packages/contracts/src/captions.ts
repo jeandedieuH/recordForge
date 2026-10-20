@@ -104,6 +104,22 @@ export const aiCaptionsProgressSchema = z.object({
 export type AiCaptionsProgress = z.infer<typeof aiCaptionsProgressSchema>
 export const AI_CAPTIONS_PROGRESS_EVENT = "ai-captions-progress"
 
+/** Virtual-background segmentation model status (export-side). */
+export const virtualBackgroundStatusSchema = z.object({
+  supported: z.boolean(),
+  modelReady: z.boolean(),
+})
+export type VirtualBackgroundStatus = z.infer<typeof virtualBackgroundStatusSchema>
+
+export const virtualBackgroundDownloadProgressSchema = z.object({
+  downloadedBytes: z.number().min(0),
+  totalBytes: z.number().min(0),
+})
+export type VirtualBackgroundDownloadProgress = z.infer<
+  typeof virtualBackgroundDownloadProgressSchema
+>
+export const VIRTUAL_BACKGROUND_DOWNLOAD_EVENT = "virtual-background-download"
+
 // Preset ids are persisted on captions tracks — the four legacy ids keep
 // working; their visuals are redesigned by the look catalogue in editor-core.
 export const captionStylePresetSchema = z.enum([

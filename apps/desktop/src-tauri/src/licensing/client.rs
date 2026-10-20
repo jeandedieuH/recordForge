@@ -376,33 +376,6 @@ impl LicenseClient {
             .map_err(|_| Self::server_error("share server returned an unreadable response"))
     }
 
-    /// Owner-side share edit — set or clear the viewer password. `password`
-    /// goes to the server as plaintext over TLS and is stored as a salted
-    /// hash; `clear_password` removes the gate entirely.
-    pub async fn share_update(
-        &self,
-        token: &str,
-        share_id: &str,
-        password: Option<&str>,
-        clear_password: bool,
-    ) -> Result<()> {
-        let url = self.endpoint("/v1/share/update")?;
-        let response = self
-            .http
-            .post(url)
-            .json(&serde_json::json!({
-                "shareId": share_id,
-                "token": token,
-                "password": password,
-                "clearPassword": clear_password,
-            }))
-            .send()
-            .await
-            .map_err(|error| Self::network_error("share update", &error))?;
-        Self::ensure_success(response, "share_update_failed").await?;
-        Ok(())
-    }
-
     pub async fn share_revoke(&self, token: &str, share_id: &str) -> Result<()> {
         let url = self.endpoint("/v1/share/revoke")?;
         let response = self

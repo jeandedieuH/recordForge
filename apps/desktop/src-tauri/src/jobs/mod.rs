@@ -11,7 +11,7 @@ use crate::database::media::{
     DerivativeFile, MediaAudioTrackOutput, MediaFormat, MediaJob, MediaJobKind, MediaJobOutputs,
     MediaVideoTrackOutput,
 };
-use crate::errors::{AppError, ErrorCategory, InternalError, Result};
+use crate::errors::{InternalError, Result};
 use crate::events::EventPublisher;
 use crate::exports::{run_render_plan, ExportSettings, RenderPlan};
 use crate::media::audio::extract_audio_track;
@@ -87,20 +87,6 @@ pub struct ExportRequest {
     pub output_path: String,
     pub plan: RenderPlan,
     pub settings: ExportSettings,
-    /// True only for native-initiated processed previews: the job keeps kind
-    /// `export` for DB compatibility while `preview` routes it away from the
-    /// export progress surface and skips resume-on-restart.
-    #[serde(default)]
-    pub preview: bool,
-    /// The project title frozen at admission — publishing reads this instead
-    /// of a mutable project name. Older callers omit it; the saved project
-    /// name is used as the fallback.
-    #[serde(default)]
-    pub project_name: Option<String>,
-    /// Optional multi-format batch identity — surfaced on the job for
-    /// grouping and primary/auto-share recovery.
-    #[serde(default)]
-    pub batch: Option<crate::database::media::ExportBatchMetadata>,
 }
 
 /// The normalized destination a persisted export request targets. Dedupe
@@ -111,52 +97,22 @@ fn export_request_output(options: &serde_json::Value) -> Option<&str> {
     options.get("outputPath").and_then(|value| value.as_str())
 }
 
-/// Find an in-flight export job occupying `destination` — across ALL
-/// recordings, so a render from another project can never silently share
-/// (or clobber) one output file. Normalized identity handles Windows path
-/// case differences.
-fn export_occupant_for_destination<'a>(
-    jobs: &'a [crate::database::media::MediaJob],
-    destination: &Path,
+/// Find an in-flight export job targeting `output_path`, if any.
+fn active_export_for_output<'a>(
+    jobs: impl IntoIterator<Item = &'a crate::database::media::MediaJob>,
+    exclude_job_id: Option<&str>,
+    output_path: &str,
 ) -> Option<&'a crate::database::media::MediaJob> {
-    jobs.iter().find(|job| {
-        job.kind == crate::database::media::MediaJobKind::Export
+    jobs.into_iter().find(|job| {
+        Some(job.id.as_str()) != exclude_job_id
+            && job.kind == crate::database::media::MediaJobKind::Export
             && matches!(
                 job.status,
                 crate::database::media::MediaJobStatus::Pending
                     | crate::database::media::MediaJobStatus::Running
             )
-            && export_request_output(&job.options).is_some_and(|output| {
-                crate::exports::paths_refer_to_same_file(Path::new(output), destination)
-            })
+            && export_request_output(&job.options) == Some(output_path)
     })
-}
-
-/// Structured "destination busy" failure — the UI can surface it honestly
-/// instead of a different render being reported as accepted.
-fn export_destination_busy() -> AppError {
-    AppError::new(
-        ErrorCategory::Media,
-        "export_destination_busy",
-        "Another export is already writing to this destination. Wait for it to finish or choose a different output file.",
-    )
-}
-
-/// The dedupe identity of a persisted export request. Destination equality is
-/// already established by `export_occupant_for_destination`'s normalized path
-/// comparison — the output path is stripped here so Windows casing/spelling
-/// differences can't break the value compare, and the serde default for
-/// `preview` is applied explicitly so legacy rows that predate the field still
-/// normalize to the same shape.
-fn export_request_identity(options: &serde_json::Value) -> serde_json::Value {
-    let mut value = options.clone();
-    if let Some(object) = value.as_object_mut() {
-        object.remove("outputPath");
-        if !object.contains_key("preview") {
-            object.insert("preview".into(), serde_json::Value::Bool(false));
-        }
-    }
-    value
 }
 
 fn expected_export_extension(settings: &ExportSettings) -> &'static str {
@@ -404,53 +360,20 @@ impl JobManager {
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
         let project = crate::database::projects::get_project(&conn, &request.project_id)?
             .ok_or_else(|| InternalError::Project("export project was not found".into()))?;
+        // Dedupe on the normalized destination, not "any running export": a
+        // batch export issues one job per canvas aspect, each with a distinct
+        // suffixed output path, and the gate serializes their encode work.
+        let active = media_db::list_jobs(&conn, &project.recording_id)?;
+        let active = active_export_for_output(&active, None, &destination.to_string_lossy());
+        if let Some(active) = active {
+            return Ok(active.clone());
+        }
 
         let mut request = request;
         request.output_path = destination.to_string_lossy().to_string();
-        // Freeze the manifest title at admission: publishing reads this value,
-        // never a mutable project name at upload time. A nonempty caller
-        // value wins (bounded); the saved project name is the legacy
-        // fallback.
-        let project_name = request
-            .project_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| project.name.trim())
-            .to_string();
-        if project_name.is_empty() || project_name.chars().count() > 120 {
-            return Err(InternalError::Project(
-                "export requires a project name between 1 and 120 characters".into(),
-            )
-            .into());
-        }
-        request.project_name = Some(project_name);
-        if let Some(batch) = &request.batch {
-            if batch.id.trim().is_empty()
-                || !["16:9", "9:16", "1:1", "4:5", "5:4"].contains(&batch.aspect_ratio.as_str())
-            {
-                return Err(InternalError::Media("export batch metadata is invalid".into()).into());
-            }
-        }
         let options = serde_json::to_value(&request).map_err(|error| {
             InternalError::Storage(format!("serialize export request: {error}"))
         })?;
-
-        // Reserve the destination across ALL active export jobs — a batch's
-        // per-aspect jobs each own a distinct suffixed path, and another
-        // project must not share one output file. An occupied path returns
-        // the existing job ONLY when the normalized persisted request is the
-        // same request (destination casing and legacy-field defaults applied);
-        // any other render is busy, and we never report a different render as
-        // accepted.
-        let active = media_db::list_active_or_pending_jobs(&conn)?;
-        if let Some(occupant) = export_occupant_for_destination(&active, &destination) {
-            if export_request_identity(&occupant.options) == export_request_identity(&options) {
-                return Ok(occupant.clone());
-            }
-            return Err(export_destination_busy());
-        }
-
         let job = media_db::insert_job_with_options(
             &conn,
             &project.recording_id,
@@ -490,17 +413,16 @@ impl JobManager {
         {
             return Ok(existing);
         }
-        // Same destination reservation as start_export, across all active
-        // jobs — but retry keeps its OWN job identity: ANY other job occupying
-        // this destination is busy, even one holding identical options. An
-        // occupied path can never be reported back as this retry's job.
+        // Same destination-scoped dedupe as start_export: a sibling batch job
+        // running to another output must not suppress this retry, but a fresh
+        // export already targeting the same file supersedes it.
         let retried_output = export_request_output(&existing.options).map(str::to_owned);
-        let active = media_db::list_active_or_pending_jobs(&conn)?;
-        if let Some(output) = retried_output.as_deref() {
-            let destination = Path::new(output);
-            if export_occupant_for_destination(&active, destination).is_some() {
-                return Err(export_destination_busy());
-            }
+        let active = media_db::list_jobs(&conn, &existing.recording_id)?;
+        if let Some(active) = retried_output
+            .as_deref()
+            .and_then(|output| active_export_for_output(&active, Some(&existing.id), output))
+        {
+            return Ok(active.clone());
         }
         let request: ExportRequest =
             serde_json::from_value(existing.options.clone()).map_err(|error| {
@@ -551,18 +473,9 @@ impl JobManager {
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
             resource_gate: Arc::clone(&self.resource_gate),
-            // Processed previews render at most 720p — they are derived
-            // media, never the deliverable. Ordinary exports keep the
-            // license-resolved cap (a downgrade between enqueue and
-            // retry/resume applies the Free raster limit).
-            output_cap: if request.preview {
-                Some(crate::exports::ExportOutputCap {
-                    max_width: 1280,
-                    max_height: 720,
-                })
-            } else {
-                self.license.entitlements().output_cap()
-            },
+            // The cap is resolved at spawn — a downgrade between enqueue and
+            // retry/resume applies the Free raster limit.
+            output_cap: self.license.entitlements().output_cap(),
             job_id: job.id,
             request,
         };
@@ -677,19 +590,6 @@ impl JobManager {
                         continue;
                     }
                 };
-                // Processed previews are throwaway derived media — a preview
-                // interrupted by a restart is cancelled rather than resumed,
-                // while ordinary export resume stays unchanged.
-                if request.preview {
-                    let conn = self
-                        .db
-                        .lock()
-                        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-                    let cancelled = media_db::cancel_job(&conn, &job.id)?;
-                    drop(conn);
-                    self.emit_job_update(&cancelled)?;
-                    continue;
-                }
                 if request.plan.validate().is_err() {
                     self.fail_unresumable_job(&job.id, "stored export timeline is invalid")?;
                     continue;
@@ -850,101 +750,28 @@ impl ExportWorker {
 
         match result {
             Ok(()) => {
-                // A sidecar request with ZERO cue rows is valid — the SRT
-                // writer deliberately creates nothing for an empty cue list.
-                // Reporting a captions path then would either fail preview
-                // VTT conversion on a missing file or claim a stale sibling
-                // SRT left by an older export.
-                let has_sidecar_captions = self.request.plan.caption_mode == "sidecar"
-                    && !self.request.plan.captions.is_empty();
-                // Browser <track> needs WebVTT, derived from the published
-                // (intro-shifted) SRT. For a preview the captions ARE the
-                // deliverable — a conversion failure is an actionable job
-                // failure, not a swallowed `.ok()`. Real exports don't take
-                // this branch at all.
-                let captions_path = if has_sidecar_captions {
-                    if self.request.preview {
-                        match crate::exports::write_vtt_companion(
-                            &Path::new(&self.request.output_path).with_extension("srt"),
-                        ) {
-                            Ok(path) => Some(path.to_string_lossy().to_string()),
-                            Err(error) => {
-                                return self
-                                    .fail(&format!("preview caption conversion failed: {error}"))
-                            }
-                        }
-                    } else {
-                        Some(
-                            Path::new(&self.request.output_path)
-                                .with_extension("srt")
-                                .to_string_lossy()
-                                .to_string(),
-                        )
-                    }
-                } else {
-                    None
-                };
-
-                // Delivery manifest — frozen publishable facts for Instant
-                // Share/YouTube, captured after the atomic publication and
-                // outside the DB lock. Derived previews and animation
-                // containers skip it; a capture failure never downgrades a
-                // valid local export.
-                let mut artifact_warning: Option<String> = None;
-                let artifact = if !self.request.preview
-                    && Path::new(&self.request.output_path)
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-                {
-                    match crate::exports::delivery_metadata::capture_export_artifact(
-                        crate::exports::delivery_metadata::CaptureArtifactInput {
-                            export_job_id: &self.job_id,
-                            project_name: self
-                                .request
-                                .project_name
-                                .as_deref()
-                                .unwrap_or("Untitled export"),
-                            output_path: Path::new(&self.request.output_path),
-                            captions_path: captions_path.as_deref().map(Path::new),
-                            ffprobe_path: &self.ffprobe_path,
-                            plan: &self.request.plan,
-                            legacy: false,
-                        },
-                    ) {
-                        Ok(artifact) => Some(artifact),
-                        Err(error) => {
-                            tracing::warn!(
-                                job_id = %self.job_id,
-                                error = %error,
-                                "export artifact capture failed; export still completes"
-                            );
-                            artifact_warning = Some(format!(
-                                "publishing metadata could not be captured: {error}"
-                            ));
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
                 let conn = self
                     .db
                     .lock()
                     .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-                let mut completed = media_db::complete_job(
+                let completed = media_db::complete_job(
                     &conn,
                     &self.job_id,
                     &media_db::MediaJobOutputs {
                         output_path: Some(self.request.output_path.clone()),
-                        captions_path,
-                        artifact,
+                        captions_path: if self.request.plan.caption_mode == "sidecar" {
+                            Some(
+                                Path::new(&self.request.output_path)
+                                    .with_extension("srt")
+                                    .to_string_lossy()
+                                    .to_string(),
+                            )
+                        } else {
+                            None
+                        },
                         ..Default::default()
                     },
                 )?;
-                if let Some(warning) = artifact_warning {
-                    completed = media_db::set_job_message(&conn, &self.job_id, &warning)?;
-                }
                 drop(conn);
                 self.cleanup_active_token();
                 self.emit(&completed)?;
@@ -962,6 +789,7 @@ impl ExportWorker {
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
         let job = media_db::fail_job(&conn, &self.job_id, message)?;
         drop(conn);
+        self.cleanup_partial_outputs();
         self.cleanup_active_token();
         self.emit(&job)
     }
@@ -973,8 +801,13 @@ impl ExportWorker {
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
         let job = media_db::cancel_job(&conn, &self.job_id)?;
         drop(conn);
+        self.cleanup_partial_outputs();
         self.cleanup_active_token();
         self.emit(&job)
+    }
+
+    fn cleanup_partial_outputs(&self) {
+        crate::exports::cleanup_export_files(Path::new(&self.request.output_path));
     }
 
     fn cleanup_active_token(&self) {
@@ -1950,8 +1783,6 @@ mod tests {
             started_at: None,
             completed_at: None,
             outputs: MediaJobOutputs::default(),
-            preview: false,
-            batch: None,
             options: serde_json::json!({
                 "projectId": "proj-1",
                 "outputPath": output_path,
@@ -1962,8 +1793,6 @@ mod tests {
         }
     }
 
-    // ---- export_dedupe: destination reservation -----------------------------
-
     #[test]
     fn export_dedupe_is_scoped_to_the_output_path() {
         let jobs = vec![
@@ -1972,86 +1801,19 @@ mod tests {
             export_job("job-done", MediaJobStatus::Completed, "/out/rec-square.mp4"),
         ];
 
-        // Same destination while its job is in flight → occupant found.
-        let found = export_occupant_for_destination(&jobs, Path::new("/out/rec-vertical.mp4"));
+        // Same destination while its job is in flight → dedupe to that job.
+        let found = active_export_for_output(&jobs, None, "/out/rec-vertical.mp4");
         assert_eq!(found.map(|job| job.id.as_str()), Some("job-9x16"));
-        let found = export_occupant_for_destination(&jobs, Path::new("/out/rec.mp4"));
+        let found = active_export_for_output(&jobs, None, "/out/rec.mp4");
         assert_eq!(found.map(|job| job.id.as_str()), Some("job-16x9"));
 
         // A different destination is a distinct export, never deduped away.
-        assert!(export_occupant_for_destination(&jobs, Path::new("/out/rec-4x5.mp4")).is_none());
+        assert!(active_export_for_output(&jobs, None, "/out/rec-4x5.mp4").is_none());
         // Finished jobs never block a re-export to their destination.
-        assert!(export_occupant_for_destination(&jobs, Path::new("/out/rec-square.mp4")).is_none());
-    }
-
-    #[test]
-    fn export_dedupe_reserves_destinations_across_recordings() {
-        // The occupant search takes the GLOBAL active-job list — an export
-        // from a different recording still occupies the file.
-        let mut other_project_job =
-            export_job("job-other", MediaJobStatus::Running, "/out/rec.mp4");
-        other_project_job.recording_id = "rec-2".into();
-        let jobs = vec![other_project_job];
-        let found = export_occupant_for_destination(&jobs, Path::new("/out/rec.mp4"));
-        assert_eq!(found.map(|job| job.recording_id.as_str()), Some("rec-2"));
-    }
-
-    #[test]
-    fn export_dedupe_normalizes_windows_casing() {
-        let jobs = vec![export_job(
-            "job-1",
-            MediaJobStatus::Running,
-            "D:/Out/Demo.MP4",
-        )];
-        // paths_refer_to_same_file casefolds on Windows; on other platforms
-        // case-sensitive paths are genuinely different files.
-        #[cfg(windows)]
-        assert!(export_occupant_for_destination(&jobs, Path::new("d:/out/demo.mp4")).is_some());
-        #[cfg(not(windows))]
-        assert!(export_occupant_for_destination(&jobs, Path::new("d:/out/demo.mp4")).is_none());
-    }
-
-    #[test]
-    fn export_dedupe_identical_request_only() {
-        // The occupant's normalized identity must equal the incoming request —
-        // same destination with a different plan/settings is busy.
-        let options_a = serde_json::json!({
-            "projectId": "proj-1", "outputPath": "/out/rec.mp4",
-            "plan": {"segments": 1}, "settings": {"codec": "h264"}
-        });
-        let options_b = serde_json::json!({
-            "projectId": "proj-1", "outputPath": "/out/rec.mp4",
-            "plan": {"segments": 2}, "settings": {"codec": "h264"}
-        });
-        assert_ne!(
-            export_request_identity(&options_a),
-            export_request_identity(&options_b),
-            "different plan must not dedupe"
-        );
-        let same = options_a.clone();
-        assert_eq!(
-            export_request_identity(&options_a),
-            export_request_identity(&same),
-            "identical request dedupes"
-        );
-    }
-
-    #[test]
-    fn export_dedupe_identity_normalizes_destination_and_legacy_preview() {
-        let incoming = serde_json::json!({
-            "projectId": "proj-1", "outputPath": "D:/OUT/demo.mp4",
-            "plan": {"segments": 1}, "settings": {"codec": "h264"},
-            "preview": false
-        });
-        // Legacy persisted row: different destination spelling and no
-        // `preview` field at all — normalized identity must still match.
-        let legacy = serde_json::json!({
-            "projectId": "proj-1", "outputPath": "d:/out/demo.mp4",
-            "plan": {"segments": 1}, "settings": {"codec": "h264"}
-        });
-        assert_eq!(
-            export_request_identity(&incoming),
-            export_request_identity(&legacy)
+        assert!(active_export_for_output(&jobs, None, "/out/rec-square.mp4").is_none());
+        // Retry excludes the job being retried from its own dedupe lookup.
+        assert!(
+            active_export_for_output(&jobs, Some("job-9x16"), "/out/rec-vertical.mp4").is_none()
         );
     }
 }

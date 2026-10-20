@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react"
 import {
   BarChart3,
   ExternalLink,
-  KeyRound,
   Link2,
   Lock,
   MessageSquare,
@@ -10,30 +9,9 @@ import {
   Share2,
   Trash2,
 } from "lucide-react"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-  Badge,
-  Button,
-  IconButton,
-  Input,
-  useToast,
-} from "@recordforge/ui"
+import { Badge, Button, IconButton, useToast } from "@recordforge/ui"
 import type { ShareAnalytics, ShareInfo } from "@recordforge/contracts"
-import {
-  listShares,
-  renewShare,
-  revokeShare,
-  shareAnalytics,
-  updateSharePassword,
-} from "../../lib/share"
+import { listShares, renewShare, revokeShare, shareAnalytics } from "../../lib/share"
 import { toErrorMessage } from "../../lib/errors"
 import { useLicenseStore } from "../../stores/license-store"
 import { ProBadge } from "../licensing/pro-badge"
@@ -94,12 +72,8 @@ export function SharedLinksCard() {
         <div className="flex items-center gap-2">
           <Share2 className="size-4 text-track-voiceover" aria-hidden />
           <h3 className="text-sm font-semibold text-foreground">Shared links</h3>
-          {/* "Active" mirrors the server's live-link count — revoked/expired
-              rows are shown but never counted. */}
           <Badge variant="outline" className="text-[10px]">
-            {shares?.filter((share) => share.status === "live" || share.status === "uploading")
-              .length ?? 0}{" "}
-            active
+            {shares?.filter((share) => share.status !== "expired").length ?? 0} active
           </Badge>
         </div>
         <Button
@@ -139,43 +113,12 @@ export function SharedLinksCard() {
               key={share.shareId}
               share={share}
               busy={busyId === share.shareId}
-              onPassword={async (options) => {
-                setBusyId(share.shareId)
-                try {
-                  await updateSharePassword(share.shareId, options)
-                  toast({
-                    title: options.clear ? "Password removed" : "Password updated",
-                    description: options.clear
-                      ? "The link is now public to anyone who has it."
-                      : "New viewers will need the password — existing viewers keep their unlocked tab.",
-                  })
-                  await refresh()
-                } catch (err) {
-                  toast({
-                    title: "Password update failed",
-                    description: toErrorMessage(err),
-                    variant: "warning",
-                  })
-                } finally {
-                  setBusyId(null)
-                }
-              }}
               onAction={async (action) => {
                 setBusyId(share.shareId)
                 try {
                   if (action === "copy") {
-                    // Honest clipboard state — a denied write says so instead
-                    // of claiming "copied" it never made.
-                    try {
-                      await navigator.clipboard.writeText(share.url)
-                      toast({ title: "Link copied", description: share.url })
-                    } catch {
-                      toast({
-                        title: "Copy failed",
-                        description: "Clipboard unavailable — copy the link from the row manually.",
-                        variant: "warning",
-                      })
-                    }
+                    await navigator.clipboard.writeText(share.url).catch(() => undefined)
+                    toast({ title: "Link copied", description: share.url })
                   } else if (action === "renew") {
                     await renewShare(share.shareId)
                     toast({ title: "Link renewed", description: "Expires 30 days from now." })
@@ -216,14 +159,11 @@ interface ShareRowProps {
   share: ShareInfo
   busy: boolean
   onAction: (action: "copy" | "renew" | "revoke") => Promise<void>
-  onPassword: (options: { password?: string; clear?: boolean }) => Promise<void>
 }
 
-function ShareRow({ share, busy, onAction, onPassword }: ShareRowProps) {
+function ShareRow({ share, busy, onAction }: ShareRowProps) {
   const expiry = new Date(share.expiresAtMs).toLocaleDateString()
   const [expanded, setExpanded] = useState(false)
-  const [editingPassword, setEditingPassword] = useState(false)
-  const [passwordDraft, setPasswordDraft] = useState("")
   const [stats, setStats] = useState<ShareAnalytics | null>(null)
   const [statsError, setStatsError] = useState(false)
 
@@ -291,118 +231,23 @@ function ShareRow({ share, busy, onAction, onPassword }: ShareRowProps) {
                 <RefreshCw className="size-3.5" />
               </IconButton>
               <IconButton
-                label={share.hasPassword ? "Change password" : "Set password"}
+                label="Revoke link"
                 variant="ghost"
                 size="sm"
                 disabled={busy}
-                onClick={() => {
-                  setPasswordDraft("")
-                  setEditingPassword((open) => !open)
-                }}
+                onClick={() => void onAction("revoke")}
               >
-                <KeyRound className="size-3.5" />
+                <Trash2 className="size-3.5" />
               </IconButton>
-              {/* Revocation deletes the hosted object — confirm once,
-                  destructive intent never hides behind a ghost icon. */}
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <IconButton label="Revoke link" variant="ghost" size="sm" disabled={busy}>
-                    <Trash2 className="size-3.5" />
-                  </IconButton>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Revoke this link?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      The hosted video for “{share.title}” is permanently deleted and the link stops
-                      working for every viewer. This cannot be undone.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Keep link</AlertDialogCancel>
-                    <AlertDialogAction
-                      className="bg-destructive text-white hover:bg-destructive/90"
-                      onClick={() => void onAction("revoke")}
-                    >
-                      Revoke permanently
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
             </>
           ) : null}
         </div>
       </div>
-      {editingPassword ? (
-        <form
-          className="flex items-center gap-2 border-t border-border/50 bg-surface-dim/40 px-3 py-2.5"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const password = passwordDraft.trim()
-            if (!password || busy) return
-            void onPassword({ password }).then(() => {
-              setEditingPassword(false)
-              setPasswordDraft("")
-            })
-          }}
-        >
-          <Input
-            type="password"
-            value={passwordDraft}
-            onChange={(event) => setPasswordDraft(event.target.value)}
-            placeholder={share.hasPassword ? "New password" : "Password"}
-            maxLength={128}
-            autoComplete="off"
-            className="h-7 max-w-56 text-xs"
-            aria-label="Share password"
-          />
-          <Button
-            type="submit"
-            size="sm"
-            className="h-7 text-xs"
-            disabled={busy || !passwordDraft.trim()}
-          >
-            {share.hasPassword ? "Change" : "Set"}
-          </Button>
-          {share.hasPassword ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-7 text-xs"
-              disabled={busy}
-              onClick={() => {
-                void onPassword({ clear: true }).then(() => {
-                  setEditingPassword(false)
-                  setPasswordDraft("")
-                })
-              }}
-            >
-              Remove
-            </Button>
-          ) : null}
-        </form>
-      ) : null}
       {expanded ? (
         <div className="border-t border-border/50 bg-surface-dim/40 px-3 py-2.5">
           {stats === null ? (
             statsError ? (
-              <span className="flex items-center gap-2 text-[11px] text-warning">
-                Analytics unavailable right now.
-                <button
-                  type="button"
-                  className="underline-offset-2 hover:underline"
-                  onClick={() => {
-                    // Retryable — the error row is not a dead end.
-                    setStatsError(false)
-                    shareAnalytics(share.shareId)
-                      .then(setStats)
-                      .catch(() => setStatsError(true))
-                  }}
-                >
-                  Retry
-                </button>
-              </span>
+              <span className="text-[11px] text-warning">Analytics unavailable right now.</span>
             ) : (
               <div className="h-6 animate-pulse rounded bg-surface-dim" aria-hidden />
             )

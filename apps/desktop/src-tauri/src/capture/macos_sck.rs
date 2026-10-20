@@ -131,15 +131,6 @@ fn resolve_source(content: &SCShareableContent, source: &CaptureSource) -> Optio
     }
 }
 
-/// How long `run_frame_writer` waits per `poll(2)` slice when the OS pipe
-/// buffer is full. Keeps `stop()` responsive even if a wedged child still holds
-/// fd 3 open without draining it.
-const FRAME_PIPE_POLL_TIMEOUT: Duration = Duration::from_millis(50);
-
-/// Maximum time `run_frame_writer` spends finishing an in-flight frame after
-/// `stop` is signaled while an active reader is draining the pipe.
-const FRAME_PIPE_STOP_DRAIN_BUDGET: Duration = Duration::from_millis(200);
-
 fn create_frame_pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as RawFd; 2];
     // macOS lacks pipe2; set CLOEXEC explicitly so only the dup'd fd survives
@@ -155,101 +146,16 @@ fn create_frame_pipe() -> Result<(OwnedFd, OwnedFd)> {
     unsafe {
         libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
         libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
-        // Non-blocking write end so `run_frame_writer` can poll with a timeout
-        // and honor `stop` instead of hanging inside `write(2)` when FFmpeg
-        // fails to spawn or stalls mid-capture.
-        let flags = libc::fcntl(fds[1], libc::F_GETFL);
-        if flags != -1 {
-            libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
     }
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-enum PipePoll {
-    Writable,
-    TimedOut,
-    Closed,
-}
-
-fn poll_pipe_writable(fd: RawFd, timeout: Duration) -> PipePoll {
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    // SAFETY: `pfd` is a valid stack struct and `fd` remains open for the call.
-    let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() == std::io::ErrorKind::Interrupted {
-            return PipePoll::TimedOut;
-        }
-        return PipePoll::Closed;
-    }
-    if rc == 0 {
-        return PipePoll::TimedOut;
-    }
-    if (pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
-        return PipePoll::Closed;
-    }
-    if (pfd.revents & libc::POLLOUT) != 0 {
-        PipePoll::Writable
-    } else {
-        PipePoll::TimedOut
-    }
-}
-
-fn write_frame(file: &mut std::fs::File, mut bytes: &[u8], stop: &AtomicBool) -> bool {
-    let fd = file.as_raw_fd();
-    let mut stop_deadline: Option<Instant> = None;
-    while !bytes.is_empty() {
-        if stop.load(Ordering::Acquire) {
-            let deadline =
-                *stop_deadline.get_or_insert_with(|| Instant::now() + FRAME_PIPE_STOP_DRAIN_BUDGET);
-            if Instant::now() >= deadline {
-                return false;
-            }
-        }
-        match file.write(bytes) {
-            Ok(0) => return false,
-            Ok(n) => bytes = &bytes[n..],
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                match poll_pipe_writable(fd, FRAME_PIPE_POLL_TIMEOUT) {
-                    PipePoll::Writable => continue,
-                    PipePoll::Closed => return false,
-                    PipePoll::TimedOut => {
-                        if stop.load(Ordering::Acquire) {
-                            // No reader drained the pipe during the poll slice
-                            // after stop was requested — abort so `stop()`
-                            // never deadlocks on `writer.join()`.
-                            return false;
-                        }
-                    }
-                }
-            }
-            Err(_) => return false,
-        }
-    }
-    true
-}
-
-/// Non-blocking writer: packed frames in, pipe bytes out. Exits on `stop`,
-/// channel close (stream stopped), or pipe death/stall.
-fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd, stop: Arc<AtomicBool>) {
+/// Blocking writer: packed frames in, pipe bytes out. Exits on channel close
+/// (stream stopped) or pipe death (ffmpeg gone).
+fn run_frame_writer(rx: Receiver<PackedFrame>, write_fd: OwnedFd) {
     let mut file = std::fs::File::from(write_fd);
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        let frame = match rx.recv_timeout(FRAME_PIPE_POLL_TIMEOUT) {
-            Ok(frame) => frame,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        if !write_frame(&mut file, &frame.0, &stop) {
+    while let Ok(frame) = rx.recv() {
+        if file.write_all(&frame.0).is_err() {
             break;
         }
     }
@@ -298,14 +204,12 @@ fn pack_bgra(sample: &CMSampleBuffer, frame_tx: &SyncSender<PackedFrame>) {
 /// command; dropping the struct stops the stream and drains the pipe.
 pub struct MacosSckCapture {
     stream: Option<SCStream>,
-    /// Read end of the frame pipe — kept alive until `stop()` so the ffmpeg
-    /// child can `dup2` it onto fd 3 during spawn. Taken and dropped at the
-    /// start of `stop()` so an unspawned or exited child leaves zero open
-    /// readers and wakes the writer immediately.
-    read_fd_owned: Option<OwnedFd>,
+    /// Read end of the frame pipe — must outlive the ffmpeg child (the child
+    /// uses a dup'd fd 3; our copy keeps the pipe open for it).
+    _read_fd: OwnedFd,
     read_fd: i32,
     frame_writer: Option<JoinHandle<()>>,
-    /// Drop signal for the writer and SCK output handler.
+    /// Drop signal for the writer if the stream ends mid-run.
     stop: Arc<AtomicBool>,
     width: u32,
     height: u32,
@@ -359,7 +263,6 @@ impl MacosSckCapture {
 
         let (read_fd, write_fd) = create_frame_pipe()?;
         let (frame_tx, frame_rx) = mpsc::sync_channel::<PackedFrame>(FRAME_QUEUE_DEPTH);
-        let stop = Arc::new(AtomicBool::new(false));
 
         let filter = if let Some(window) = &resolved.window {
             SCContentFilter::create().with_window(window).build()
@@ -388,31 +291,21 @@ impl MacosSckCapture {
 
         let mut stream = SCStream::new(&filter, &config)
             .map_err(|e| InternalError::Capture(format!("create SCK stream: {e}")))?;
-        let stop_handler = Arc::clone(&stop);
         stream
             .add_output_handler(
-                move |sample, _of_type| {
-                    if !stop_handler.load(Ordering::Acquire) {
-                        pack_bgra(&sample, &frame_tx);
-                    }
-                },
+                move |sample, _of_type| pack_bgra(&sample, &frame_tx),
                 SCStreamOutputType::Screen,
             )
             .map_err(|e| InternalError::Capture(format!("attach SCK output handler: {e}")))?;
 
-        let stop_writer = Arc::clone(&stop);
+        stream
+            .start_capture()
+            .map_err(|e| InternalError::Capture(format!("start SCK capture: {e}")))?;
+
         let frame_writer = thread::Builder::new()
             .name("rf-sck-frames".into())
-            .spawn(move || run_frame_writer(frame_rx, write_fd, stop_writer))
+            .spawn(move || run_frame_writer(frame_rx, write_fd))
             .map_err(|e| InternalError::Capture(format!("spawn SCK frame writer: {e}")))?;
-
-        if let Err(error) = stream.start_capture() {
-            stop.store(true, Ordering::Release);
-            drop(read_fd);
-            drop(stream);
-            let _ = frame_writer.join();
-            return Err(InternalError::Capture(format!("start SCK capture: {error}")).into());
-        }
 
         let read_fd_raw = read_fd.as_raw_fd();
         tracing::info!(
@@ -424,10 +317,10 @@ impl MacosSckCapture {
 
         Ok(Some(Self {
             stream: Some(stream),
-            read_fd_owned: Some(read_fd),
+            _read_fd: read_fd,
             read_fd: read_fd_raw,
             frame_writer: Some(frame_writer),
-            stop,
+            stop: Arc::new(AtomicBool::new(false)),
             width: resolved.width,
             height: resolved.height,
             fps: profile.fps.max(1) as u32,
@@ -450,11 +343,6 @@ impl MacosSckCapture {
 
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        // Drop our copy of the pipe's read end before joining the writer: if
-        // FFmpeg never spawned (or already exited), this closes the last reader
-        // on the pipe so any in-flight poll/write wakes immediately with
-        // POLLHUP/EPIPE instead of blocking on a full pipe buffer.
-        drop(self.read_fd_owned.take());
         if let Some(stream) = self.stream.take() {
             if let Err(error) = stream.stop_capture() {
                 tracing::warn!(error = ?error, "SCK stop_capture failed");
@@ -592,7 +480,6 @@ impl SckAudioCapture {
         let writer = spawn_audio_writer(
             audio_rx,
             file,
-            Arc::clone(&stop),
             Arc::clone(&data_bytes),
             Arc::clone(&level_bits),
         )
@@ -600,17 +487,15 @@ impl SckAudioCapture {
 
         let mut stream = SCStream::new(&filter, &config)
             .map_err(|e| InternalError::Capture(format!("create SCK audio stream: {e}")))?;
-        let stop_handler = Arc::clone(&stop);
         stream
             .add_output_handler(
                 move |sample: CMSampleBuffer, _of_type| {
-                    if stop_handler.load(Ordering::Acquire) {
-                        return;
-                    }
                     if let Ok(list) = sample.audio_buffer_list() {
                         let pcm = audio_list_to_s16le(&list, DEFAULT_CHANNELS as usize);
                         if !pcm.is_empty() {
-                            let _ = audio_tx.try_send(AudioChunk(pcm));
+                            // Blocking send: a full channel means the WAV
+                            // writer stalled — backpressure is honest here.
+                            let _ = audio_tx.send(AudioChunk(pcm));
                         }
                     }
                 },
@@ -722,7 +607,6 @@ impl Drop for SckAudioCapture {
 fn spawn_audio_writer(
     rx: Receiver<AudioChunk>,
     mut file: std::fs::File,
-    stop: Arc<AtomicBool>,
     data_bytes: Arc<AtomicU64>,
     level_bits: Arc<AtomicU32>,
 ) -> std::io::Result<JoinHandle<std::io::Result<u64>>> {
@@ -730,27 +614,11 @@ fn spawn_audio_writer(
         .name("rf-sck-audio".into())
         .spawn(move || {
             let mut total = data_bytes.load(Ordering::Acquire);
-            loop {
-                match rx.recv_timeout(FRAME_PIPE_POLL_TIMEOUT) {
-                    Ok(chunk) => {
-                        update_peak(&chunk.0, &level_bits);
-                        file.write_all(&chunk.0)?;
-                        total += chunk.0.len() as u64;
-                        data_bytes.store(total, Ordering::Release);
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if stop.load(Ordering::Acquire) {
-                            while let Ok(chunk) = rx.try_recv() {
-                                update_peak(&chunk.0, &level_bits);
-                                file.write_all(&chunk.0)?;
-                                total += chunk.0.len() as u64;
-                                data_bytes.store(total, Ordering::Release);
-                            }
-                            break;
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
+            while let Ok(chunk) = rx.recv() {
+                update_peak(&chunk.0, &level_bits);
+                file.write_all(&chunk.0)?;
+                total += chunk.0.len() as u64;
+                data_bytes.store(total, Ordering::Release);
             }
             file.flush()?;
             Ok(total)
@@ -838,76 +706,4 @@ fn audio_list_to_s16le(list: &AudioBufferList, channels: usize) -> Vec<u8> {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Read;
-
-    #[test]
-    fn frame_writer_exits_when_pipe_is_never_drained() {
-        let (read_fd, write_fd) = create_frame_pipe().expect("create frame pipe");
-        let (tx, rx) = mpsc::sync_channel::<PackedFrame>(FRAME_QUEUE_DEPTH);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_writer = Arc::clone(&stop);
-
-        let writer = thread::spawn(move || run_frame_writer(rx, write_fd, stop_writer));
-
-        // Queue a single 1080p BGRA frame (~8 MiB) — far larger than the OS
-        // pipe buffer (~64 KiB) so the writer fills the pipe and waits on poll
-        // while `read_fd` stays open and un-drained (simulating a wedged child
-        // or failed FFmpeg spawn).
-        tx.send(PackedFrame(vec![0xAAu8; 1920 * 1080 * 4]))
-            .expect("send frame");
-        thread::sleep(Duration::from_millis(80));
-
-        // Signal stop while keeping `read_fd` open to prove `stop` alone
-        // unblocks a writer facing a wedged reader; then drop `read_fd` too.
-        let started = Instant::now();
-        stop.store(true, Ordering::Release);
-        drop(tx);
-        writer.join().expect("frame writer must not deadlock");
-        drop(read_fd);
-
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "frame writer took {:?} to exit on stop with undrained pipe",
-            started.elapsed()
-        );
-    }
-
-    #[test]
-    fn frame_writer_delivers_full_frames_to_active_reader() {
-        let (read_fd, write_fd) = create_frame_pipe().expect("create frame pipe");
-        let (tx, rx) = mpsc::sync_channel::<PackedFrame>(FRAME_QUEUE_DEPTH);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_writer = Arc::clone(&stop);
-
-        let writer = thread::spawn(move || run_frame_writer(rx, write_fd, stop_writer));
-        let mut reader_file = std::fs::File::from(read_fd);
-        let drain = thread::spawn(move || {
-            let mut buf = vec![0u8; 256 * 1024];
-            let mut total = 0usize;
-            loop {
-                match reader_file.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => panic!("read failed: {e}"),
-                }
-            }
-            total
-        });
-
-        let frame_size = 1920 * 1080 * 4;
-        tx.send(PackedFrame(vec![0x55u8; frame_size]))
-            .expect("send first frame");
-        tx.send(PackedFrame(vec![0x55u8; frame_size]))
-            .expect("send second frame");
-        drop(tx);
-        writer.join().expect("writer finished");
-        let total = drain.join().expect("drain finished");
-        assert_eq!(total, frame_size * 2);
-    }
 }

@@ -217,5 +217,4 @@ describe("analyzeProFeatureUsage", () => {
       ),
     ).toEqual(["custom-aspect-ratio"])
   })
-
 })

@@ -14,18 +14,17 @@ import {
   useToast,
 } from "@recordforge/ui"
 import {
+  cancelYouTubePublish,
   disconnectYouTube,
   onYouTubeOAuthCompleted,
+  onYouTubePublishProgress,
   publishToYouTube,
   startYouTubeOAuth,
   youtubeConnectionStatus,
 } from "../../lib/publish"
 import { useLicenseStore } from "../../stores/license-store"
-import { usePublicationStore } from "../../stores/publication-store"
 import { ProBadge } from "../licensing/pro-badge"
-import { toErrorMessage } from "../../lib/errors"
 import type { MediaJob, TimelineMarker, YouTubePrivacy } from "@recordforge/contracts"
-import { publicationJobIsActive } from "@recordforge/contracts"
 import { formatYouTubeChapters } from "@recordforge/editor-core"
 
 interface YouTubePublishCardProps {
@@ -35,16 +34,7 @@ interface YouTubePublishCardProps {
   disabled?: boolean
 }
 
-// Captions attach through captions.insert — a real language is required; a
-// small curated set covers the common cases and stays honest.
-const CAPTION_LANGUAGES: Array<{ code: string; label: string }> = [
-  { code: "en", label: "English" },
-  { code: "de", label: "German" },
-  { code: "es", label: "Spanish" },
-  { code: "fr", label: "French" },
-  { code: "pt", label: "Portuguese" },
-  { code: "ja", label: "Japanese" },
-]
+type PublishState = "idle" | "connecting" | "uploading" | "done" | "failed"
 
 export function YouTubePublishCard({
   exportJob,
@@ -62,22 +52,15 @@ export function YouTubePublishCard({
   const [description, setDescription] = useState("")
   const [privacy, setPrivacy] = useState<YouTubePrivacy>("unlisted")
   const [attachCaptions, setAttachCaptions] = useState(true)
-  const [captionsLanguage, setCaptionsLanguage] = useState("en")
-  const [connecting, setConnecting] = useState(false)
-  // The flow's correlation id — a stale `youtube-oauth-completed` from an
-  // earlier flow must not mark THIS attempt connected.
-  const oauthStateRef = useRef<string | null>(null)
+  const [state, setState] = useState<PublishState>("idle")
+  const [progress, setProgress] = useState(0)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  // User-initiated cancel — the in-flight publish rejects with an error that
+  // must reset to idle, not surface a "publish failed" toast.
+  const cancelledRef = useRef(false)
 
-  // The latest YouTube publication for this export — provider-scoped so a
-  // hosted/BYO share of the same file never shows up as this card's job.
-  const job = usePublicationStore((state) =>
-    exportJob ? state.jobForExport(exportJob.id, "youTube") : undefined,
-  )
-  const publishing = job != null && publicationJobIsActive(job)
-  const progress = job && job.totalBytes > 0 ? Math.min(1, job.uploadedBytes / job.totalBytes) : 0
-
-  const exportFinished = exportJob?.status === "completed"
-  const captionsAvailable = exportFinished && exportJob?.outputs.captionsPath != null
+  const outputPath = exportJob?.status === "completed" ? exportJob.outputs.outputPath : null
+  const captionsPath = exportJob?.status === "completed" ? exportJob.outputs.captionsPath : null
 
   useEffect(() => {
     void youtubeConnectionStatus()
@@ -98,42 +81,40 @@ export function YouTubePublishCard({
     if (chapters) setDescription(chapters)
   }, [markers, description])
 
-  // Keep the field in sync when a different export/project loads — without
-  // clobbering edits made for this one.
   useEffect(() => {
-    setTitle(projectName)
-  }, [projectName])
-
-  useEffect(() => {
-    const unlisten = onYouTubeOAuthCompleted((event) => {
-      // Correlate on the flow state — an event for another flow is ignored.
-      if (oauthStateRef.current && event.state !== oauthStateRef.current) return
-      oauthStateRef.current = null
-      setConnecting(false)
-      if (event.success) {
-        setConnected(true)
-        setAccountLabel(event.accountLabel ?? "YouTube")
-      } else {
-        toast({
-          title: "YouTube sign-in failed",
-          description: event.error ?? "authorization failed",
-          variant: "warning",
-        })
-      }
-    })
+    const unlisteners: Array<Promise<() => void>> = [
+      onYouTubeOAuthCompleted((event) => {
+        setState("idle")
+        if (event.success) {
+          setConnected(true)
+          setAccountLabel(event.accountLabel ?? "YouTube")
+        } else {
+          toast({
+            title: "YouTube sign-in failed",
+            description: event.error ?? "authorization failed",
+            variant: "warning",
+          })
+        }
+      }),
+      onYouTubePublishProgress((event) => {
+        if (event.stage === "uploading" && event.totalBytes > 0) {
+          setProgress(event.uploadedBytes / event.totalBytes)
+        }
+        if (event.stage === "done") setProgress(1)
+      }),
+    ]
     return () => {
-      void unlisten.then((fn) => fn())
+      for (const unlisten of unlisteners) void unlisten.then((fn) => fn())
     }
   }, [toast])
 
   async function handleConnect() {
-    setConnecting(true)
+    setState("connecting")
     try {
       const flow = await startYouTubeOAuth()
-      oauthStateRef.current = flow.state
       await openUrl(flow.authUrl)
     } catch (error) {
-      setConnecting(false)
+      setState("idle")
       toast({
         title: "YouTube sign-in failed",
         description: error instanceof Error ? error.message : "failed to start",
@@ -143,41 +124,45 @@ export function YouTubePublishCard({
   }
 
   async function handlePublish() {
-    if (!exportJob || !exportFinished) return
+    if (!outputPath) return
+    cancelledRef.current = false
+    setState("uploading")
+    setProgress(0)
+    setVideoUrl(null)
     try {
-      await publishToYouTube({
-        exportJobId: exportJob.id,
-        operationId: crypto.randomUUID(),
-        privacy,
-        title: title.trim() || undefined,
+      const result = await publishToYouTube({
+        path: outputPath,
+        title: title.trim() || projectName,
         description,
+        privacy,
         categoryId: "28",
         tags: [],
-        captions: attachCaptions && captionsAvailable,
-        captionsLanguage: captionsLanguage,
+        captionsPath: attachCaptions && captionsPath ? captionsPath : undefined,
+        captionsLanguage: "en",
       })
-      // Progress + result land via the publication store — no local await.
+      setVideoUrl(result.url)
+      setState("done")
+      toast({ title: "Published to YouTube", description: result.url })
     } catch (error) {
+      if (cancelledRef.current) {
+        setState("idle")
+        return
+      }
+      setState("failed")
       toast({
         title: "YouTube publish failed",
-        description: toErrorMessage(error),
+        description: error instanceof Error ? error.message : "publish failed",
         variant: "warning",
       })
     }
   }
 
   function handleCancel() {
-    if (job) void usePublicationStore.getState().cancel(job.id)
+    cancelledRef.current = true
+    void cancelYouTubePublish()
   }
 
-  if (!exportFinished) return null
-
-  const resultUrl =
-    job?.status === "completed" && job.result?.kind === "youtube" ? job.result.url : null
-  const captionsAttached =
-    job?.status === "completed" && job.result?.kind === "youtube"
-      ? job.result.captionsAttached
-      : false
+  if (!outputPath) return null
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-surface">
@@ -214,7 +199,7 @@ export function YouTubePublishCard({
             </p>
             <Button
               variant="secondary"
-              disabled={disabled || connecting}
+              disabled={disabled || state === "connecting"}
               onClick={() => {
                 if (!isPro) {
                   openUpgradeDialog(["youtube-publish"])
@@ -223,7 +208,7 @@ export function YouTubePublishCard({
                 void handleConnect()
               }}
             >
-              {connecting ? "Waiting for Google sign-in…" : "Connect YouTube"}
+              {state === "connecting" ? "Waiting for Google sign-in…" : "Connect YouTube"}
             </Button>
           </>
         ) : (
@@ -237,7 +222,7 @@ export function YouTubePublishCard({
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 maxLength={100}
-                disabled={disabled || publishing}
+                disabled={disabled || state === "uploading"}
               />
             </label>
             <label className="flex flex-col gap-1.5">
@@ -246,62 +231,38 @@ export function YouTubePublishCard({
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 rows={4}
-                disabled={disabled || publishing}
+                disabled={disabled || state === "uploading"}
               />
             </label>
-            {/* Explicit audience — no silent "public". */}
             <label className="flex flex-col gap-1.5">
-              <span>Audience</span>
+              <span>Visibility</span>
               <Select
                 value={privacy}
                 onValueChange={(value) => setPrivacy(value as YouTubePrivacy)}
-                disabled={disabled || publishing}
+                disabled={disabled || state === "uploading"}
               >
-                <SelectTrigger className="h-8 w-full" aria-label="YouTube audience">
+                <SelectTrigger className="h-8 w-full" aria-label="YouTube visibility">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="unlisted">Unlisted — link only</SelectItem>
-                  <SelectItem value="private">Private — only you</SelectItem>
-                  <SelectItem value="public">Public — everyone</SelectItem>
+                  <SelectItem value="private">Private</SelectItem>
+                  <SelectItem value="public">Public</SelectItem>
                 </SelectContent>
               </Select>
             </label>
-            {captionsAvailable ? (
-              <div className="flex items-end gap-3">
-                <label className="flex flex-1 items-center justify-between">
-                  <span>Upload captions (sidecar)</span>
-                  <Switch
-                    checked={attachCaptions}
-                    onCheckedChange={setAttachCaptions}
-                    disabled={disabled || publishing}
-                    aria-label="Upload captions"
-                  />
-                </label>
-                {attachCaptions ? (
-                  <label className="flex w-36 flex-col gap-1.5">
-                    <span>Language</span>
-                    <Select
-                      value={captionsLanguage}
-                      onValueChange={setCaptionsLanguage}
-                      disabled={disabled || publishing}
-                    >
-                      <SelectTrigger className="h-8 w-full" aria-label="Captions language">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {CAPTION_LANGUAGES.map((lang) => (
-                          <SelectItem key={lang.code} value={lang.code}>
-                            {lang.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </label>
-                ) : null}
-              </div>
+            {captionsPath ? (
+              <label className="flex items-center justify-between">
+                <span>Upload captions (.srt sidecar)</span>
+                <Switch
+                  checked={attachCaptions}
+                  onCheckedChange={setAttachCaptions}
+                  disabled={disabled || state === "uploading"}
+                  aria-label="Upload captions"
+                />
+              </label>
             ) : null}
-            {publishing ? (
+            {state === "uploading" ? (
               <div className="flex flex-col gap-1.5">
                 <div className="h-1.5 overflow-hidden rounded-full bg-surface-muted">
                   <div
@@ -310,13 +271,7 @@ export function YouTubePublishCard({
                   />
                 </div>
                 <div className="flex justify-between">
-                  <span>
-                    {job?.status === "attachingCaptions"
-                      ? "Attaching captions…"
-                      : job?.status === "cancelling"
-                        ? "Cancelling…"
-                        : `${Math.round(progress * 100)}% uploaded`}
-                  </span>
+                  <span>{Math.round(progress * 100)}% uploaded</span>
                   <button
                     type="button"
                     className="underline-offset-2 hover:underline"
@@ -328,37 +283,21 @@ export function YouTubePublishCard({
               </div>
             ) : (
               <Button disabled={disabled || !title.trim()} onClick={() => void handlePublish()}>
-                {job?.status === "uncertain" || job?.status === "failed"
-                  ? "Publish again"
-                  : "Publish to YouTube"}
+                Publish to YouTube
               </Button>
             )}
-            {resultUrl ? (
-              <div className="flex flex-col gap-1">
-                <button
-                  type="button"
-                  className="text-left font-medium text-primary underline-offset-2 hover:underline"
-                  onClick={() => void openUrl(resultUrl)}
-                >
-                  Open on YouTube — {resultUrl}
-                </button>
-                {attachCaptions && captionsAvailable && !captionsAttached ? (
-                  <span className="text-subtle-foreground">
-                    The video is live; captions could not be attached.
-                  </span>
-                ) : null}
-              </div>
+            {state === "done" && videoUrl ? (
+              <button
+                type="button"
+                className="text-left font-medium text-primary underline-offset-2 hover:underline"
+                onClick={() => void openUrl(videoUrl)}
+              >
+                Open on YouTube — {videoUrl}
+              </button>
             ) : null}
-            {job?.status === "uncertain" ? (
+            {state === "failed" ? (
               <span className="font-medium text-warning">
-                {job.error?.message ??
-                  "The upload finished but its result could not be confirmed — check your channel before retrying."}
-              </span>
-            ) : null}
-            {job?.status === "failed" ? (
-              <span className="font-medium text-warning">
-                {job.error?.message ??
-                  "Publish failed — retry uploads resume from where they stopped."}
+                Publish failed — retry uploads resume from where they stopped.
               </span>
             ) : null}
           </>

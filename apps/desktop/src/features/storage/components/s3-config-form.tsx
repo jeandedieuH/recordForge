@@ -64,9 +64,6 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
   const [region, setRegion] = useState(initialProfile?.s3Config?.region ?? S3_PRESETS[0].region)
   const [bucket, setBucket] = useState(initialProfile?.s3Config?.bucket ?? "")
   const [prefix, setPrefix] = useState(initialProfile?.s3Config?.prefix ?? "recordings")
-  // Public read origin — Instant Share to this bucket builds its player link
-  // from it; without one the share target is rejected natively.
-  const [publicBaseUrl, setPublicBaseUrl] = useState(initialProfile?.s3Config?.publicBaseUrl ?? "")
   const [accessKeyId, setAccessKeyId] = useState("")
   const [secretAccessKey, setSecretAccessKey] = useState("")
   const [forcePathStyle, setForcePathStyle] = useState(
@@ -107,7 +104,6 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
         prefix,
         partSizeBytes: 8 * 1024 * 1024,
         forcePathStyle,
-        publicBaseUrl: publicBaseUrl.trim() || null,
       }
       const res = await testS3Credentials(config, accessKeyId, secretAccessKey)
       setTestResult(res)
@@ -131,13 +127,6 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
       setError("Endpoint and Bucket are required")
       return
     }
-    // Match the contract's URL schema early — a malformed origin would only
-    // surface as a Zod failure at save time otherwise.
-    const trimmedPublicBase = publicBaseUrl.trim()
-    if (trimmedPublicBase && !/^https?:\/\//i.test(trimmedPublicBase)) {
-      setError("Public Base URL must start with http:// or https://")
-      return
-    }
     if (!initialProfile?.hasCredentials && (!accessKeyId.trim() || !secretAccessKey.trim())) {
       setError("Access Key ID and Secret Access Key are required")
       return
@@ -157,7 +146,6 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
           prefix,
           partSizeBytes: 8 * 1024 * 1024,
           forcePathStyle,
-          publicBaseUrl: publicBaseUrl.trim() || null,
         },
         accessKeyId,
         secretAccessKey,
@@ -258,18 +246,6 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
         </div>
 
         <div className="col-span-2 sm:col-span-1">
-          <Label className="mb-1 block font-medium">Public Base URL (Optional)</Label>
-          <Input
-            value={publicBaseUrl}
-            onChange={(e) => setPublicBaseUrl(e.target.value)}
-            placeholder="https://cdn.example.com or https://bucket.s3…/prefix"
-          />
-          <p className="mt-1 text-ui-caption text-muted-foreground">
-            Required for Instant Share — the public HTTP origin this bucket serves files from.
-          </p>
-        </div>
-
-        <div className="col-span-2 sm:col-span-1">
           <Label className="mb-1 block font-medium">
             Access Key ID {initialProfile?.hasCredentials ? "(Leave blank to keep current)" : ""}
           </Label>
@@ -329,7 +305,7 @@ export function S3ConfigForm({ initialProfile, onSave, onCancel }: S3ConfigFormP
             <div className="font-semibold">
               {testResult.ok ? "Connection Verified" : "Test Failed"}
             </div>
-            <div className="text-ui-caption opacity-90">{testResult.message}</div>
+            <div className="text-[11px] opacity-90">{testResult.message}</div>
           </div>
         </Card>
       ) : null}

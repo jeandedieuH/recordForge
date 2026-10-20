@@ -3337,38 +3337,15 @@ function applyUpdateCanvas(
       error: editorError("invalid_canvas", "Canvas dimensions and frame rate must be positive"),
     }
   }
-
-  const targetAspectRatio = command.canvas.aspectRatio
-  if (targetAspectRatio !== undefined) {
-    // An unsupported runtime ratio is a structured error — never keep a
-    // canvas whose aspectRatio label doesn't match a known frame.
-    if (canvasSizeForAspectRatio(targetAspectRatio, nextCanvas) === undefined) {
-      return {
-        ok: false,
-        error: editorError(
-          "invalid_canvas",
-          `Unsupported canvas aspect ratio: ${targetAspectRatio}`,
-        ),
-      }
-    }
-  }
-
-  // Explicit width/height win over ratio defaults — the export-variant seam
-  // computes exact target dimensions itself. Aspect-only commands keep the
-  // legacy resolution-tier normalization; unrelated edits (background,
-  // cursor settings) never silently resize a bespoke frame.
-  const hasExplicitDimensions =
-    command.canvas.width !== undefined || command.canvas.height !== undefined
-  if (targetAspectRatio !== undefined && !hasExplicitDimensions) {
-    const size = canvasSizeForAspectRatio(targetAspectRatio, nextCanvas)
-    if (size) {
-      nextCanvas.width = size.width
-      nextCanvas.height = size.height
-    }
+  if (nextCanvas.aspectRatio) {
+    const size = canvasSizeForAspectRatio(nextCanvas.aspectRatio, nextCanvas)
+    nextCanvas.width = size.width
+    nextCanvas.height = size.height
   }
 
   // A ratio switch applies the target ratio's default configuration. Fields
   // the caller explicitly sent still win over the defaults.
+  const targetAspectRatio = command.canvas.aspectRatio
   const ratioChanged =
     targetAspectRatio !== undefined && targetAspectRatio !== state.canvas.aspectRatio
   if (ratioChanged) {

@@ -10,7 +10,6 @@ import {
   Shield,
   Type,
   Volume2,
-  WandSparkles,
   ZoomIn,
 } from "lucide-react"
 import { cn } from "@recordforge/ui"
@@ -25,7 +24,6 @@ export type EditorTask =
   | "layout"
   | "audio"
   | "privacy"
-  | "finish"
   | "export"
 
 interface TaskDefinition {
@@ -44,7 +42,6 @@ export const EDITOR_TASKS: TaskDefinition[] = [
   { value: "layout", label: "Layout", icon: LayoutTemplate },
   { value: "audio", label: "Audio", icon: Volume2 },
   { value: "privacy", label: "Privacy", icon: EyeOff },
-  { value: "finish", label: "Finish", icon: WandSparkles },
   { value: "export", label: "Export", icon: FileOutput },
 ]
 

@@ -1,52 +1,54 @@
-//! Instant Share — publish a completed export's MP4 to the hosted viewer or
-//! a BYO S3 bucket.
+//! Instant Share — upload a finished MP4 export to the hosted viewer.
 //!
-//! Both paths are EXPORT-JOB SOURCED: the caller names a finished `export`
-//! media job, the source (file, captions, title, measurements) is resolved
-//! and authorized natively from the job's persisted outputs + frozen
-//! artifact manifest — no caller-supplied media paths, captions, or
-//! measurement arrays.
-//!
-//! Admission pattern (shared with YouTube): validate → resolve source →
-//! `PublicationRegistry::begin` (idempotent `operationId`, one active op per
-//! provider) → return the admitted `PublicationJob` immediately while the
-//! worker owns updates.
+//! Flow (docs/specs/instant-share.md): reserve a share + presigned multipart
+//! plan from the license server → PUT each 8 MiB part straight to R2 → PUT
+//! the optional captions sidecar → POST the multipart-complete XML → tell the
+//! server the share is live. The share id doubles as the capability URL.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tauri::State;
-use tracing::{info, instrument};
+use std::sync::atomic::AtomicBool;
+use tauri::{Emitter, State};
+use tracing::{info, instrument, warn};
 
 use crate::errors::{AppError, ErrorCategory, InternalError, Result};
-use crate::licensing::client::{LicenseClient, ShareChapter, ShareInfo, ShareMeta};
-use crate::publish::hosted::{
-    run_hosted_share, HostedShareInput, WorkerOutcome, SHARE_MAX_BYTES, SHARE_MAX_DURATION_MS,
-    SHARE_MAX_PIXELS,
-};
-use crate::publish::jobs::{PublicationJob, PublicationProvider};
-use crate::publish::runner;
-use crate::publish::source::{resolve_export_source, ResolvedExportSource};
+use crate::licensing::client::{LicenseClient, ShareChapter, ShareInfo};
 use crate::state::AppState;
 use crate::storage::s3::S3Client;
 use crate::storage::vault;
 
+/// Multipart chunk size — MUST stay in sync with `SHARE_PART_SIZE` in
+/// recordforge-cloud/convex/r2.ts; the server presigns exactly
+/// `ceil(bytes/SHARE_PART_SIZE)` part URLs.
+const SHARE_PART_SIZE: usize = 8 * 1024 * 1024;
+const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareChapterArg {
+    pub t: u64,
+    pub label: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareExportArgs {
-    /// The finished export job whose output is published.
-    pub export_job_id: String,
-    /// Caller-generated idempotency key — replaying the same id + request
-    /// returns the existing job instead of double-publishing.
-    pub operation_id: String,
+    /// Absolute path of the finished MP4 export.
+    pub path: String,
+    pub title: String,
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    #[serde(default)]
+    pub chapters: Vec<ShareChapterArg>,
     #[serde(default = "default_true")]
     pub allow_download: bool,
     #[serde(default = "default_true")]
     pub allow_embed: bool,
-    /// Pro Cloud extra — hosted shares only. The server stores a salted hash
-    /// and gates the viewer manifest; BYO-bucket shares reject passwords
-    /// because a public bucket URL can't gate playback.
+    /// Optional captions sidecar (.vtt) uploaded next to the video.
+    pub captions_path: Option<String>,
+    /// Pro Cloud extras — server stores only a salted hash.
     #[serde(default)]
     pub password: Option<String>,
     #[serde(default)]
@@ -57,531 +59,261 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareResult {
+    pub share_id: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ShareProgress {
+    share_id: String,
+    status: &'static str,
+    bytes: u64,
+    parts_done: u32,
+    parts_total: u32,
+}
+
 fn licensing_error(code: &str, message: impl Into<String>) -> AppError {
-    let mut details = serde_json::Map::new();
-    details.insert("features".to_string(), serde_json::json!(["instant-share"]));
-    AppError::new(ErrorCategory::Licensing, code, message.into()).with_details(details)
+    AppError::new(ErrorCategory::Licensing, code, message.into())
 }
 
-/// Pro gate + license token + export-source resolution — the shared front
-/// half of both share entry points.
-fn admit_share_common(
-    state: &AppState,
-    args: &ShareExportArgs,
-) -> Result<(String, ResolvedExportSource)> {
-    if !state.license.entitlements().pro_enabled {
-        return Err(licensing_error(
-            "pro_feature_required",
-            "Instant Share is a RecordForge Pro feature",
-        ));
-    }
-    let token = state
-        .license
-        .license_token()
-        .ok_or_else(|| licensing_error("license_required", "a Pro license is required to share"))?;
-
-    // Source resolution runs under a short DB lock; the artifact backfill
-    // probes files, which no lock should wait on — resolve the job row
-    // first, then measure.
-    let job_id = args.export_job_id.clone();
-    let conn = state
-        .db
-        .lock()
-        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    let source = resolve_export_source(&conn, &state.ffprobe_path, &job_id)?;
-    drop(conn);
-
-    // Manifest product caps — rejected BEFORE any reservation or upload.
-    if source.artifact.duration_ms > SHARE_MAX_DURATION_MS {
-        return Err(licensing_error(
-            "share_too_large",
-            "Instant Share is limited to 10-minute exports",
-        ));
-    }
-    if (source.artifact.width as u64) * (source.artifact.height as u64) > SHARE_MAX_PIXELS {
-        return Err(licensing_error(
-            "share_too_large",
-            "Instant Share is limited to 1920×1080 exports",
-        ));
-    }
-    if source.artifact.bytes > SHARE_MAX_BYTES {
-        return Err(licensing_error(
-            "share_too_large",
-            "Instant Share is limited to 8 GB exports",
-        ));
-    }
-
-    Ok((token, source))
-}
-
-fn begin_publication(
-    state: &AppState,
-    provider: PublicationProvider,
-    profile_id: Option<String>,
-    args: &ShareExportArgs,
-    total_bytes: u64,
-) -> Result<(PublicationJob, crate::publish::jobs::CancelToken, bool)> {
-    // The idempotency fingerprint freezes the whole request shape.
-    let fingerprint = serde_json::json!({
-        "exportJobId": args.export_job_id,
-        "provider": format!("{provider:?}"),
-        "profileId": profile_id,
-        "allowDownload": args.allow_download,
-        "allowEmbed": args.allow_embed,
-        "expiresInDays": args.expires_in_days,
+/// The optional captions sidecar degrades to "no captions" when the expected
+/// file was never written (e.g. sidecar mode on a timeline with no cues) —
+/// failing the whole finished upload over a missing extra is the wrong trade.
+fn resolve_share_captions(raw: Option<&str>) -> Option<PathBuf> {
+    raw.and_then(|path| {
+        crate::path_policy::canonicalize_path(std::path::Path::new(path))
+            .map_err(|error| {
+                warn!(path = %path, error = %error, "share captions sidecar is unavailable; continuing without it");
+            })
+            .ok()
     })
-    .to_string();
-    state.publication_registry.begin(
-        &args.operation_id,
-        &args.export_job_id,
-        provider,
-        profile_id,
-        &fingerprint,
-        total_bytes,
-    )
 }
 
-/// Trim and bound the viewer password — empty means public; the server caps
-/// hashes at 128 chars so we reject longer input before a job is admitted.
-fn normalized_password(args: &ShareExportArgs) -> Result<Option<String>> {
-    let password = args
-        .password
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_string);
-    if let Some(p) = &password {
-        if p.chars().count() > 128 {
-            return Err(licensing_error(
-                "share_password_too_long",
-                "share passwords are limited to 128 characters",
-            ));
-        }
-    }
-    Ok(password)
-}
-
-/// Publish the export's MP4 to the hosted share viewer. Returns the admitted
-/// publication job; its progress arrives over `publication-job-update`.
+/// Upload `path` as a hosted share link. Pro-gated: Free callers get
+/// `pro_feature_required` with `instant-share` so the UI can route to the
+/// upgrade dialog. The local export is never touched.
 #[tauri::command]
 #[instrument(skip(state, app, args))]
 pub async fn share_export(
     args: ShareExportArgs,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-) -> Result<PublicationJob> {
-    let (token, source) = admit_share_common(&state, &args)?;
-    let password = normalized_password(&args)?;
-    let (job, cancel, is_new) = begin_publication(
-        &state,
-        PublicationProvider::Hosted,
-        None,
-        &args,
-        source.artifact.bytes,
-    )?;
-    runner::emit_job(&app, &job);
-    if !is_new {
-        return Ok(job);
-    }
-
-    let artifact = source.artifact.clone();
-    let meta = ShareMeta {
-        title: artifact.title.clone(),
-        duration_ms: artifact.duration_ms,
-        bytes: artifact.bytes,
-        width: artifact.width,
-        height: artifact.height,
-        fps: artifact.fps.round() as u32,
-        chapters: artifact
-            .chapters
-            .iter()
-            .map(|c| ShareChapter {
-                t: c.t,
-                label: c.label.clone(),
-            })
-            .collect(),
-        allow_download: args.allow_download,
-        allow_embed: args.allow_embed,
-        has_captions: source.captions_path.is_some(),
-        password,
-        expires_in_days: args.expires_in_days,
-    };
-
-    // The reservation is created inside the worker so an admitted job that
-    // never runs leaves no orphaned server-side share.
-    let job_id = job.id.clone();
-    let registry = Arc::clone(&state.publication_registry);
-    let sink = runner::progress_sink(app.clone(), Arc::clone(&registry), job_id.clone());
-    runner::spawn_worker(app, registry, job_id, cancel.clone(), async move {
-        let client = LicenseClient::new();
-        let created = match client.share_create(&token, &meta).await {
-            Ok(created) => created,
-            Err(error) => return WorkerOutcome::Failed(error),
-        };
-        run_hosted_share(HostedShareInput {
-            client,
-            license_token: token,
-            video_path: source.path,
-            captions_path: source.captions_path,
-            created,
-            bytes: meta.bytes,
-            progress: sink,
-            cancel,
-        })
-        .await
-    });
-    Ok(job)
-}
-
-/* ---------- BYO-bucket share (Instant Share, own storage) ---------- */
-
-/// Self-contained player page uploaded next to the video — placeholders are
-/// filled by `render_share_player`.
-const SHARE_PLAYER_HTML: &str = include_str!("assets/share-player.html");
-
-/// Upload the export's MP4 plus a generated player page into the user's own
-/// S3 bucket at `share/<slug>/`. Requires the profile's `publicBaseUrl` —
-/// a bucket with no public read URL cannot produce a shareable player.
-#[tauri::command]
-#[instrument(skip(state, app, args))]
-pub async fn share_to_profile(
-    profile_id: String,
-    args: ShareExportArgs,
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<PublicationJob> {
-    let (_token, source) = admit_share_common(&state, &args)?;
-
-    // A file in the user's own bucket is reachable at its public URL — a
-    // password field there would gate nothing, so it is rejected loudly
-    // rather than publishing a falsely-"protected" link.
-    if args
-        .password
-        .as_deref()
-        .is_some_and(|p| !p.trim().is_empty())
-    {
+) -> Result<ShareResult> {
+    // Entitlement + token — the server's own auth is the signed token, so a
+    // tampered Free client stops here AND there.
+    if !state.license.entitlements().pro_enabled {
+        let mut details = serde_json::Map::new();
+        details.insert("features".to_string(), serde_json::json!(["instant-share"]));
         return Err(licensing_error(
-            "share_password_unsupported",
-            "password-protected shares need hosted Instant Share — a file in your own bucket cannot gate playback",
-        ));
+            "pro_feature_required",
+            "Instant Share is a RecordForge Pro feature",
+        )
+        .with_details(details));
     }
+    let token = state
+        .license
+        .license_token()
+        .ok_or_else(|| licensing_error("license_required", "a Pro license is required to share"))?;
 
-    let profile = state.storage_manager.load_profile(&profile_id)?;
-    if profile.kind != "s3" {
-        return Err(licensing_error(
-            "share_provider_unsupported",
-            "Instant Share to your own storage currently supports S3-compatible buckets only",
-        ));
-    }
-    let s3_config = profile
-        .s3_config
-        .clone()
-        .ok_or_else(|| InternalError::Storage("S3 configuration missing for profile".into()))?;
-    let public_base = s3_config
-        .public_base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
+    // Path validation: canonicalize and require an MP4 (GIF/WebP shares are
+    // a later phase). The export pipeline already validated the destination.
+    let path = crate::path_policy::canonicalize_path(std::path::Path::new(&args.path)).map_err(
+        |error| {
             licensing_error(
-                "share_public_url_missing",
-                "this storage profile has no public base URL — set one on the profile so the player link is reachable",
+                "share_path_invalid",
+                format!("export path is invalid: {error}"),
+            )
+        },
+    )?;
+    let is_mp4 = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    if !is_mp4 {
+        return Err(licensing_error(
+            "share_format_unsupported",
+            "Instant Share supports MP4 exports only",
+        ));
+    }
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        licensing_error(
+            "share_file_missing",
+            format!("export file is not readable: {error}"),
+        )
+    })?;
+    let bytes = metadata.len();
+    let captions = resolve_share_captions(args.captions_path.as_deref());
+
+    // Reserve the share + presigned plan.
+    let client = LicenseClient::new();
+    let created = client
+        .share_create(
+            &token,
+            &crate::licensing::client::ShareMeta {
+                title: args.title.clone(),
+                duration_ms: args.duration_ms,
+                bytes,
+                width: args.width,
+                height: args.height,
+                fps: args.fps,
+                chapters: args
+                    .chapters
+                    .iter()
+                    .map(|chapter| ShareChapter {
+                        t: chapter.t,
+                        label: chapter.label.clone(),
+                    })
+                    .collect(),
+                allow_download: args.allow_download,
+                allow_embed: args.allow_embed,
+                has_captions: captions.is_some(),
+                password: args.password.clone().filter(|p| !p.trim().is_empty()),
+                expires_in_days: args.expires_in_days,
+            },
+        )
+        .await?;
+
+    let parts_total = created.upload.part_urls.len() as u32;
+    info!(share_id = %created.share_id, parts_total, bytes, "share upload started");
+
+    // Multipart upload: each part is a presigned PUT; the response `ETag`
+    // goes into the complete XML.
+    let upload_client = reqwest::Client::builder()
+        .timeout(UPLOAD_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let file = std::fs::File::open(&path)
+        .map_err(|error| licensing_error("share_file_missing", format!("{error}")))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut etags: Vec<String> = Vec::with_capacity(parts_total as usize);
+
+    for (index, part_url) in created.upload.part_urls.iter().enumerate() {
+        let is_last = index == created.upload.part_urls.len() - 1;
+        let want = if is_last {
+            (bytes as usize) - index * SHARE_PART_SIZE
+        } else {
+            SHARE_PART_SIZE
+        };
+        let mut chunk = vec![0u8; want];
+        use std::io::Read;
+        reader.read_exact(&mut chunk).map_err(|error| {
+            licensing_error(
+                "share_read_failed",
+                format!("could not read export data: {error}"),
             )
         })?;
-    // Only http(s) origins are shareable.
-    if !(public_base.starts_with("https://") || public_base.starts_with("http://")) {
+        let response = upload_client
+            .put(part_url)
+            .header("Content-Type", "video/mp4")
+            .body(chunk)
+            .send()
+            .await
+            .map_err(|error| {
+                licensing_error(
+                    "share_upload_failed",
+                    format!("part {} upload failed: {error}", index + 1),
+                )
+            })?;
+        if !response.status().is_success() {
+            return Err(licensing_error(
+                "share_upload_failed",
+                format!("part {} upload rejected ({})", index + 1, response.status()),
+            ));
+        }
+        etags.push(
+            response
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        let parts_done = index as u32 + 1;
+        let _ = app.emit(
+            "share-progress",
+            ShareProgress {
+                share_id: created.share_id.clone(),
+                status: "uploading",
+                bytes,
+                parts_done,
+                parts_total,
+            },
+        );
+        // Best-effort server progress so viewers see the bar move.
+        if let Err(error) = client
+            .share_progress(&token, &created.share_id, parts_done)
+            .await
+        {
+            warn!(error = %error, "share progress report failed");
+        }
+    }
+
+    // Captions sidecar — a single presigned PUT. Exports emit .srt sidecars
+    // while the web <track> needs WebVTT, so .srt input is converted in
+    // memory (comma millisecond separators become dots).
+    if let (Some(caption_path), Some(put_url)) =
+        (captions, created.upload.captions_put_url.as_ref())
+    {
+        let raw = std::fs::read_to_string(&caption_path)
+            .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
+        let body = if caption_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+        {
+            srt_to_vtt(&raw)
+        } else {
+            raw
+        };
+        let response = upload_client
+            .put(put_url)
+            .header("Content-Type", "text/vtt")
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
+        if !response.status().is_success() {
+            warn!(status = %response.status(), "captions upload rejected; continuing without them");
+        }
+    }
+
+    // Complete the multipart upload directly against R2 (presigned URL).
+    let xml = etags.iter().enumerate().fold(
+        String::from("<CompleteMultipartUpload>"),
+        |mut acc, (index, etag)| {
+            acc.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                index + 1,
+                etag
+            ));
+            acc
+        },
+    ) + "</CompleteMultipartUpload>";
+    let response = upload_client
+        .post(&created.upload.complete_url)
+        .header("Content-Type", "application/xml")
+        .body(xml)
+        .send()
+        .await
+        .map_err(|error| licensing_error("share_finalize_failed", format!("{error}")))?;
+    if !response.status().is_success() {
         return Err(licensing_error(
-            "share_public_url_invalid",
-            "the profile's public base URL must be an http(s) origin",
+            "share_finalize_failed",
+            format!("R2 rejected the upload ({})", response.status()),
         ));
     }
-    let access_key = vault::get_secret(&format!("{}:access_key", profile.id))?
-        .ok_or_else(|| InternalError::Storage("S3 Access Key ID missing from vault".into()))?;
-    let secret_key = vault::get_secret(&format!("{}:secret_key", profile.id))?
-        .ok_or_else(|| InternalError::Storage("S3 Secret Access Key missing from vault".into()))?;
 
-    let (job, cancel, is_new) = begin_publication(
-        &state,
-        PublicationProvider::S3,
-        Some(profile.id.clone()),
-        &args,
-        source.artifact.bytes,
-    )?;
-    runner::emit_job(&app, &job);
-    if !is_new {
-        return Ok(job);
-    }
-
-    let job_id = job.id.clone();
-    let registry = Arc::clone(&state.publication_registry);
-    let sink = runner::progress_sink(app.clone(), Arc::clone(&registry), job_id.clone());
-    let artifact = source.artifact.clone();
-    runner::spawn_worker(app, registry, job_id, cancel.clone(), async move {
-        run_byo_share(
-            S3Client::new(s3_config, access_key, secret_key),
-            public_base,
-            source,
-            artifact,
-            args.allow_download,
-            sink,
-            cancel,
-        )
-        .await
-    });
-    Ok(job)
+    client
+        .share_complete(&token, &created.share_id, bytes)
+        .await?;
+    info!(share_id = %created.share_id, "share upload complete");
+    Ok(ShareResult {
+        share_id: created.share_id,
+        url: created.url,
+    })
 }
-
-/// Encode one URL path segment — the player link is built from the profile's
-/// base URL, so slug/title bytes must not be able to escape it.
-fn url_segment(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
-/// Join a public base URL with path segments — the base keeps its own
-/// trailing path (e.g. a CDN prefix).
-fn public_url(base: &str, segments: &[&str]) -> String {
-    let mut url = base.trim_end_matches('/').to_string();
-    for segment in segments {
-        url.push('/');
-        url.push_str(&url_segment(segment));
-    }
-    url
-}
-
-/// The BYO worker: video → captions.vtt → player index.html LAST (the page
-/// is the link target, so it must not go live before its media does).
-async fn run_byo_share(
-    client: S3Client,
-    public_base: String,
-    source: ResolvedExportSource,
-    artifact: crate::exports::delivery_metadata::ExportArtifactInfo,
-    allow_download: bool,
-    progress: crate::publish::hosted::ProgressSink,
-    cancel: crate::publish::jobs::CancelToken,
-) -> WorkerOutcome {
-    use crate::publish::jobs::{PublicationResult, PublicationShareResult, PublicationStatus};
-
-    // upload_file_typed polls a plain AtomicBool — a driver task mirrors the
-    // shared CancelToken into it so mid-upload cancels propagate.
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    let _flag_driver = {
-        let flag = Arc::clone(&cancel_flag);
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                if cancel.is_cancelled() {
-                    flag.store(true, Ordering::SeqCst);
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        })
-    };
-    let flag = cancel_flag.as_ref();
-
-    let slug = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
-    let staging_dir = std::env::temp_dir().join(format!("recordforge-share-{slug}"));
-    let mut staged: Vec<PathBuf> = Vec::new();
-    let cleanup = |staged: &[PathBuf], dir: &std::path::Path| {
-        for file in staged {
-            let _ = std::fs::remove_file(file);
-        }
-        let _ = std::fs::remove_dir(dir);
-    };
-
-    let noop = |_uploaded: u64, _total: u64| {};
-    let total = source
-        .path
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or(artifact.bytes);
-
-    // 1. The video itself.
-    if cancel.is_cancelled() {
-        cleanup(&staged, &staging_dir);
-        return WorkerOutcome::Cancelled;
-    }
-    progress(PublicationStatus::Uploading, 0, total);
-    if let Err(error) = client
-        .upload_file_typed(
-            &source.path,
-            &format!("share/{slug}/video.mp4"),
-            "video/mp4",
-            noop,
-            flag,
-        )
-        .await
-    {
-        cleanup(&staged, &staging_dir);
-        return if cancel.is_cancelled() {
-            WorkerOutcome::Cancelled
-        } else {
-            WorkerOutcome::Failed(error)
-        };
-    }
-
-    // 2. Captions (optional) — .srt converts via the shared export VTT writer.
-    if let Some(caption_path) = source.captions_path.as_ref() {
-        if cancel.is_cancelled() {
-            cleanup(&staged, &staging_dir);
-            return WorkerOutcome::Cancelled;
-        }
-        let staged_vtt = staging_dir.join("captions.vtt");
-        match stage_captions(caption_path, &staging_dir, &staged_vtt) {
-            Ok(()) => {
-                if let Err(error) = client
-                    .upload_file_typed(
-                        &staged_vtt,
-                        &format!("share/{slug}/captions.vtt"),
-                        "text/vtt",
-                        noop,
-                        flag,
-                    )
-                    .await
-                {
-                    cleanup(&staged, &staging_dir);
-                    return if cancel.is_cancelled() {
-                        WorkerOutcome::Cancelled
-                    } else {
-                        WorkerOutcome::Failed(error)
-                    };
-                }
-                staged.push(staged_vtt);
-            }
-            Err(error) => {
-                cleanup(&staged, &staging_dir);
-                return WorkerOutcome::Failed(error);
-            }
-        }
-    }
-
-    // 3. The player page LAST — chapters/flags baked in; it is the link
-    // target and must never precede its media.
-    if cancel.is_cancelled() {
-        cleanup(&staged, &staging_dir);
-        return WorkerOutcome::Cancelled;
-    }
-    let player_html = render_share_player(
-        &artifact.title,
-        &artifact
-            .chapters
-            .iter()
-            .map(|c| ShareChapterArg {
-                t: c.t,
-                label: c.label.clone(),
-            })
-            .collect::<Vec<_>>(),
-        source.captions_path.is_some(),
-        allow_download,
-    );
-    let player_path = staging_dir.join("index.html");
-    if let Err(error) = (|| -> std::result::Result<(), std::io::Error> {
-        std::fs::create_dir_all(&staging_dir)?;
-        std::fs::write(&player_path, player_html)
-    })() {
-        cleanup(&staged, &staging_dir);
-        return WorkerOutcome::Failed(
-            InternalError::Storage(format!("write share player: {error}")).into(),
-        );
-    }
-    if let Err(error) = client
-        .upload_file_typed(
-            &player_path,
-            &format!("share/{slug}/index.html"),
-            "text/html",
-            noop,
-            flag,
-        )
-        .await
-    {
-        cleanup(&staged, &staging_dir);
-        return if cancel.is_cancelled() {
-            WorkerOutcome::Cancelled
-        } else {
-            WorkerOutcome::Failed(error)
-        };
-    }
-    staged.push(player_path);
-    cleanup(&staged, &staging_dir);
-
-    // The link points at the PLAYER under the profile's public base URL.
-    let url = public_url(&public_base, &["share", &slug, "index.html"]);
-    info!(slug = %slug, "BYO share uploaded");
-    WorkerOutcome::Completed(
-        PublicationResult::Share(PublicationShareResult {
-            share_id: slug,
-            url,
-        }),
-        Vec::new(),
-    )
-}
-
-fn stage_captions(
-    caption_path: &std::path::Path,
-    staging_dir: &std::path::Path,
-    staged_vtt: &std::path::Path,
-) -> Result<()> {
-    let raw = std::fs::read_to_string(caption_path)
-        .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
-    let vtt = if caption_path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
-    {
-        crate::exports::srt_to_vtt(&raw)
-    } else {
-        raw
-    };
-    std::fs::create_dir_all(staging_dir)
-        .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
-    std::fs::write(staged_vtt, vtt)
-        .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
-    Ok(())
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShareChapterArg {
-    pub t: u64,
-    pub label: String,
-}
-
-/// Fill the player template's placeholders. The chapters JSON gets `<`
-/// escaped so a `</script>` in a label can't break the inline script tag.
-fn render_share_player(
-    title: &str,
-    chapters: &[ShareChapterArg],
-    has_captions: bool,
-    allow_download: bool,
-) -> String {
-    use base64::Engine;
-    let chapters_json = serde_json::to_string(chapters).unwrap_or_else(|_| "[]".to_string());
-    let chapters_b64 = base64::engine::general_purpose::STANDARD.encode(chapters_json);
-    SHARE_PLAYER_HTML
-        .replace("{{TITLE}}", &html_escape(title))
-        .replace("%%CHAPTERS_B64%%", &chapters_b64)
-        .replace("%%HAS_CAPTIONS%%", if has_captions { "1" } else { "0" })
-        .replace("%%ALLOW_DOWNLOAD%%", if allow_download { "1" } else { "0" })
-}
-
-fn html_escape(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/* ---------- Owner's share management ---------- */
 
 /// Owner's share list for the "Shared links" management card. Returns the
 /// empty list for Free users rather than an error — the card hides itself.
@@ -603,39 +335,6 @@ pub async fn renew_share(share_id: String, state: State<'_, AppState>) -> Result
         .license_token()
         .ok_or_else(|| licensing_error("license_required", "a Pro license is required"))?;
     LicenseClient::new().share_renew(&token, &share_id).await
-}
-
-/// Set, change, or clear a hosted link's viewer password. Validation mirrors
-/// `normalized_password` — an empty string is rejected (use clear), 128 chars
-/// is the server cap.
-#[tauri::command]
-#[instrument(skip(state, password))]
-pub async fn update_share_password(
-    share_id: String,
-    password: Option<String>,
-    clear_password: bool,
-    state: State<'_, AppState>,
-) -> Result<()> {
-    let token = state
-        .license
-        .license_token()
-        .ok_or_else(|| licensing_error("license_required", "a Pro license is required"))?;
-    let trimmed = password.as_deref().map(str::trim).filter(|p| !p.is_empty());
-    if !clear_password && trimmed.is_none() {
-        return Err(licensing_error(
-            "share_password_empty",
-            "provide a password or clear the existing one",
-        ));
-    }
-    if trimmed.is_some_and(|p| p.chars().count() > 128) {
-        return Err(licensing_error(
-            "share_password_too_long",
-            "share passwords are limited to 128 characters",
-        ));
-    }
-    LicenseClient::new()
-        .share_update(&token, &share_id, trimmed, clear_password)
-        .await
 }
 
 /// Owner analytics for one share — views, uniques, watch time, comments.
@@ -665,60 +364,227 @@ pub async fn revoke_share(share_id: String, state: State<'_, AppState>) -> Resul
     LicenseClient::new().share_revoke(&token, &share_id).await
 }
 
-/* ---------- Publication job surface ---------- */
+/* ---------- BYO-bucket share (Instant Share, own storage) ---------- */
 
-/// Current state of one publication job.
-#[tauri::command]
-#[instrument(skip(state))]
-pub fn get_publication_job(job_id: String, state: State<'_, AppState>) -> Result<PublicationJob> {
-    state
-        .publication_registry
-        .get(&job_id)
-        .ok_or_else(|| InternalError::Storage("publication job not found".into()).into())
-}
+/// Self-contained player page uploaded next to the video — placeholders are
+/// filled by `render_share_player`.
+const SHARE_PLAYER_HTML: &str = include_str!("assets/share-player.html");
 
-/// Recent publication jobs (terminal ones are capped at 100).
+/// Upload `path` plus a generated player page into the user's own
+/// S3-compatible bucket at `share/<slug>/`. The returned link points at the
+/// player's public URL — no RecordForge server involved beyond the Pro gate.
 #[tauri::command]
-#[instrument(skip(state))]
-pub fn list_publication_jobs(state: State<'_, AppState>) -> Result<Vec<PublicationJob>> {
-    Ok(state.publication_registry.list())
-}
-
-/// Request cancellation — the operation moves to `cancelling` until its
-/// worker unwinds; a confirmed result is never fabricated into a cancel.
-#[tauri::command]
-#[instrument(skip(state))]
-pub fn cancel_publication_job(
-    job_id: String,
+#[instrument(skip(state, app, args))]
+pub async fn share_to_profile(
+    profile_id: String,
+    args: ShareExportArgs,
     state: State<'_, AppState>,
-) -> Result<PublicationJob> {
-    state.publication_registry.request_cancel(&job_id)
+    app: tauri::AppHandle,
+) -> Result<ShareResult> {
+    if !state.license.entitlements().pro_enabled {
+        let mut details = serde_json::Map::new();
+        details.insert("features".to_string(), serde_json::json!(["instant-share"]));
+        return Err(licensing_error(
+            "pro_feature_required",
+            "Instant Share is a RecordForge Pro feature",
+        )
+        .with_details(details));
+    }
+
+    // Same path policy as the normal upload flow — the export must live in an
+    // allowed location before it leaves the machine.
+    let path = state
+        .storage_manager
+        .validate_upload_source(std::path::Path::new(&args.path))?;
+    let is_mp4 = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+    if !is_mp4 {
+        return Err(licensing_error(
+            "share_format_unsupported",
+            "Instant Share supports MP4 exports only",
+        ));
+    }
+
+    // BYO is S3-only for v1 — Drive links make a poor player and a local folder
+    // is already where the export lives.
+    let profile = state.storage_manager.load_profile(&profile_id)?;
+    if profile.kind != "s3" {
+        return Err(licensing_error(
+            "share_provider_unsupported",
+            "Instant Share to your own storage currently supports S3-compatible buckets only",
+        ));
+    }
+    let s3_config = profile
+        .s3_config
+        .ok_or_else(|| InternalError::Storage("S3 configuration missing for profile".into()))?;
+    let access_key = vault::get_secret(&format!("{}:access_key", profile.id))?
+        .ok_or_else(|| InternalError::Storage("S3 Access Key ID missing from vault".into()))?;
+    let secret_key = vault::get_secret(&format!("{}:secret_key", profile.id))?
+        .ok_or_else(|| InternalError::Storage("S3 Secret Access Key missing from vault".into()))?;
+    let client = S3Client::new(s3_config, access_key, secret_key);
+
+    let slug = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let cancel = AtomicBool::new(false);
+    let noop = |_uploaded: u64, _total: u64| {};
+    let emit = |status: &'static str, done: u32, total: u32| {
+        let _ = app.emit(
+            "share-progress",
+            ShareProgress {
+                share_id: slug.clone(),
+                status,
+                bytes: 0,
+                parts_done: done,
+                parts_total: total,
+            },
+        );
+    };
+
+    // 1. The video itself.
+    emit("uploading", 0, 3);
+    client
+        .upload_file_typed(
+            &path,
+            &format!("share/{slug}/video.mp4"),
+            "video/mp4",
+            noop,
+            &cancel,
+        )
+        .await
+        .map_err(|error| licensing_error("share_upload_failed", error.to_string()))?;
+
+    // 2. Captions (optional) — .srt exports convert to VTT for the web.
+    let captions = resolve_share_captions(args.captions_path.as_deref());
+    let staging_dir = std::env::temp_dir().join(format!("recordforge-share-{slug}"));
+    let mut staged: Vec<PathBuf> = Vec::new();
+    let cleanup = |staged: &[PathBuf], dir: &std::path::Path| {
+        for file in staged {
+            let _ = std::fs::remove_file(file);
+        }
+        let _ = std::fs::remove_dir(dir);
+    };
+
+    if let Some(caption_path) = captions.as_ref() {
+        let raw = std::fs::read_to_string(caption_path)
+            .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
+        let vtt = if caption_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+        {
+            srt_to_vtt(&raw)
+        } else {
+            raw
+        };
+        std::fs::create_dir_all(&staging_dir)
+            .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
+        let vtt_path = staging_dir.join("captions.vtt");
+        std::fs::write(&vtt_path, vtt)
+            .map_err(|error| licensing_error("share_captions_failed", format!("{error}")))?;
+        client
+            .upload_file_typed(
+                &vtt_path,
+                &format!("share/{slug}/captions.vtt"),
+                "text/vtt",
+                noop,
+                &cancel,
+            )
+            .await
+            .map_err(|error| licensing_error("share_captions_failed", error.to_string()))?;
+        staged.push(vtt_path);
+    }
+    emit("uploading", 2, 3);
+
+    // 3. The generated player page — chapters/flags are baked in so it works
+    // as a single static file on any public bucket.
+    let player_html = render_share_player(
+        &args.title,
+        &args.chapters,
+        captions.is_some(),
+        args.allow_download,
+    );
+    std::fs::create_dir_all(&staging_dir)
+        .map_err(|error| licensing_error("share_upload_failed", format!("{error}")))?;
+    let player_path = staging_dir.join("index.html");
+    std::fs::write(&player_path, player_html)
+        .map_err(|error| licensing_error("share_upload_failed", format!("{error}")))?;
+    let player_url = client
+        .upload_file_typed(
+            &player_path,
+            &format!("share/{slug}/index.html"),
+            "text/html",
+            noop,
+            &cancel,
+        )
+        .await
+        .map_err(|error| licensing_error("share_upload_failed", error.to_string()))?;
+    staged.push(player_path);
+    cleanup(&staged, &staging_dir);
+
+    emit("live", 3, 3);
+    info!(slug = %slug, "BYO share uploaded");
+    Ok(ShareResult {
+        share_id: slug,
+        url: player_url,
+    })
 }
 
-/// The frozen artifact manifest for one finished export — the delivery
-/// card's read model (reuses the same validation as publishing).
-#[tauri::command]
-#[instrument(skip(state))]
-pub fn get_export_artifact(
-    export_job_id: String,
-    state: State<'_, AppState>,
-) -> Result<crate::exports::delivery_metadata::ExportArtifactInfo> {
-    let conn = state
-        .db
-        .lock()
-        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-    let artifact = crate::publish::source::export_artifact_for_job(
-        &conn,
-        &state.ffprobe_path,
-        &export_job_id,
-    )?;
-    drop(conn);
-    Ok(artifact)
+/// Fill the player template's placeholders. The chapters JSON gets `<`
+/// escaped so a `</script>` in a label can't break the inline script tag.
+fn render_share_player(
+    title: &str,
+    chapters: &[ShareChapterArg],
+    has_captions: bool,
+    allow_download: bool,
+) -> String {
+    use base64::Engine;
+    let chapters_json = serde_json::to_string(chapters).unwrap_or_else(|_| "[]".to_string());
+    let chapters_b64 = base64::engine::general_purpose::STANDARD.encode(chapters_json);
+    SHARE_PLAYER_HTML
+        .replace("{{TITLE}}", &html_escape(title))
+        .replace("%%CHAPTERS_B64%%", &chapters_b64)
+        .replace("%%HAS_CAPTIONS%%", if has_captions { "1" } else { "0" })
+        .replace("%%ALLOW_DOWNLOAD%%", if allow_download { "1" } else { "0" })
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Convert an SRT document to WebVTT: swap the `,` millisecond separator for
+/// `.` on timestamp lines and prepend the required header.
+fn srt_to_vtt(srt: &str) -> String {
+    let mut out = String::with_capacity(srt.len() + 16);
+    out.push_str("WEBVTT\n\n");
+    for line in srt.lines() {
+        if line.contains(" --> ") {
+            out.push_str(&line.replace(',', "."));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn srt_converts_timestamp_separators_and_keeps_cues() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,500\nHello, world\n\n2\n00:00:05,100 --> 00:00:06,000\nSecond cue, with comma\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        assert!(vtt.contains("00:00:01.000 --> 00:00:02.500"));
+        assert!(vtt.contains("Hello, world"));
+        // Commas in cue text stay untouched.
+        assert!(vtt.contains("Second cue, with comma"));
+    }
 
     #[test]
     fn player_template_bakes_title_chapters_and_flags() {
@@ -745,54 +611,18 @@ mod tests {
     }
 
     #[test]
-    fn public_url_joins_and_encodes_segments() {
-        assert_eq!(
-            public_url(
-                "https://cdn.example.com/base/",
-                &["share", "abc", "index.html"]
-            ),
-            "https://cdn.example.com/base/share/abc/index.html"
-        );
-        // Reserved bytes are percent-encoded, never smuggled raw.
-        assert_eq!(
-            public_url("https://cdn.example.com", &["a b?c"]),
-            "https://cdn.example.com/a%20b%3Fc"
-        );
-    }
+    fn missing_captions_sidecar_degrades_to_none_instead_of_failing() {
+        // Sidecar mode on a timeline with no cues produces no .srt — the share
+        // must still upload without captions rather than erroring out.
+        assert!(resolve_share_captions(Some("definitely/missing/export.srt")).is_none());
+        assert!(resolve_share_captions(None).is_none());
 
-    #[test]
-    fn url_segment_encodes_anything_not_unreserved() {
-        assert_eq!(url_segment("plain-OK_1.2"), "plain-OK_1.2");
-        assert_eq!(url_segment("a/b\\c"), "a%2Fb%5Cc");
-    }
-
-    fn share_args(password: Option<&str>) -> ShareExportArgs {
-        ShareExportArgs {
-            export_job_id: "job".into(),
-            operation_id: "op".into(),
-            allow_download: true,
-            allow_embed: true,
-            password: password.map(str::to_string),
-            expires_in_days: None,
-        }
-    }
-
-    #[test]
-    fn normalized_password_trims_bounds_and_empties() {
-        assert_eq!(normalized_password(&share_args(None)).unwrap(), None);
-        // Whitespace-only means "no password", never a stored empty hash.
-        assert_eq!(normalized_password(&share_args(Some("   "))).unwrap(), None);
+        let temp = tempfile::tempdir().unwrap();
+        let srt = temp.path().join("captions.srt");
+        std::fs::write(&srt, b"1\n00:00:01,000 --> 00:00:02,000\nhi\n").unwrap();
         assert_eq!(
-            normalized_password(&share_args(Some("  s3cret  "))).unwrap(),
-            Some("s3cret".to_string())
+            resolve_share_captions(Some(&srt.to_string_lossy())),
+            Some(crate::path_policy::canonicalize_path(&srt).unwrap())
         );
-        // 128 chars exactly is the server cap; 129 is rejected before a job
-        // is ever admitted.
-        let max = "x".repeat(128);
-        assert_eq!(
-            normalized_password(&share_args(Some(&max))).unwrap(),
-            Some(max)
-        );
-        assert!(normalized_password(&share_args(Some(&"y".repeat(129)))).is_err());
     }
 }

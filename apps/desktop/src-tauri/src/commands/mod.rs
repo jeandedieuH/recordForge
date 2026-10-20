@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod background;
 pub mod captions;
 pub mod exports;
 pub mod license;

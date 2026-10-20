@@ -1128,15 +1128,17 @@ export function freeExportSettings(settings: ProjectExportSettings): ProjectExpo
     ...settings,
     preset,
     chapterMode: "none",
+    // Studio Audio is Pro — Free exports keep the raw mixed track.
+    audioMastering: { denoise: false, loudnessTarget: null },
+    // Brand Kit is Pro — no watermark or intro/outro cards on Free exports.
+    brandWatermark: { ...settings.brandWatermark, enabled: false },
+    brandCards: { ...settings.brandCards, enabled: false },
     // Keystroke overlay is Pro — badges never render on Free exports.
-    keystrokeOverlay: {
-      enabled: false,
-      durationMs: 1400,
-      position: "bottom-center",
-      scalePercent: 100,
-    },
+    keystrokeOverlay: { enabled: false },
     // Auto-reframe is Pro — Free exports letterbox as before.
     reframeMode: "fit",
+    // Virtual background is Pro — camera feeds composite untouched.
+    webcamBackground: { ...settings.webcamBackground, enabled: false },
     // Multi-format alternates are Pro — Free exports the primary canvas only.
     formats: [],
   }

@@ -25,11 +25,6 @@ pub struct S3Config {
     pub part_size_bytes: usize,
     #[serde(default)]
     pub force_path_style: bool,
-    /// Optional HTTP(S) origin the bucket is publicly readable at (CDN or
-    /// static-site URL). Instant Share to a BYO bucket needs it to build the
-    /// returned link; plain upload profiles can leave it unset.
-    #[serde(default)]
-    pub public_base_url: Option<String>,
 }
 
 fn default_part_size() -> usize {
@@ -507,7 +502,6 @@ mod tests {
                 prefix: String::new(),
                 part_size_bytes: 8 * 1024 * 1024,
                 force_path_style,
-                public_base_url: None,
             },
             "ak".to_string(),
             "sk".to_string(),

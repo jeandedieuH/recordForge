@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type {
+  AudioMastering,
+  BrandCards,
+  WebcamBackground,
+  BrandWatermark,
   CanvasAspectRatio,
   ExportEncoderPreference,
   ExportPreset,
   ExportRange,
   InstantShareSettings,
-  KeystrokeOverlay,
   MediaJob,
   ProjectExportSettings,
   ReframeMode,
@@ -24,6 +27,7 @@ import {
   ChevronUp,
   Copy,
   Film,
+  Keyboard,
   LayoutGrid,
   Pause,
   Play,
@@ -47,15 +51,13 @@ import { ExportProgressCard } from "./components/export-progress-card"
 import { formatDuration } from "../../lib/format"
 import { toErrorMessage } from "../../lib/errors"
 import { shareExport, shareToProfile } from "../../lib/share"
-import { subscribePublicationJobs, usePublicationStore } from "../../stores/publication-store"
 import { UploadDialog } from "../storage/components/upload-dialog"
 import { useLicenseStore } from "../../stores/license-store"
 import { useStorageStore } from "../storage/storage-store"
 import { ProBadge } from "../licensing/pro-badge"
+import { BrandWatermarkCard } from "./brand-watermark-card"
+import { VirtualBackgroundCard } from "./virtual-background-card"
 import { YouTubePublishCard } from "./youtube-publish-card"
-import { KeystrokeOverlayCard } from "../editor/finishing/keystroke-overlay-card"
-import { ProcessedPreviewDialog } from "../editor/finishing/processed-preview-dialog"
-import { useTimelineStore } from "../../stores/timeline-store"
 
 interface ExportViewProps {
   projectName?: string
@@ -66,7 +68,11 @@ interface ExportViewProps {
   onCaptionModeChange?: (mode: RenderCaptionMode) => void
   chapterMode?: RenderChapterMode
   onChapterModeChange?: (mode: RenderChapterMode) => void
-  onKeystrokeOverlayChange?: (update: boolean | Partial<KeystrokeOverlay>) => void
+  onAudioMasteringChange?: (mastering: AudioMastering) => void
+  onBrandWatermarkChange?: (watermark: BrandWatermark) => void
+  onBrandCardsChange?: (cards: BrandCards) => void
+  onWebcamBackgroundChange?: (background: WebcamBackground) => void
+  onKeystrokeOverlayChange?: (enabled: boolean) => void
   onReframeModeChange?: (mode: ReframeMode) => void
   // Batch-export format selection; empty = current canvas only.
   formats?: CanvasAspectRatio[]
@@ -314,6 +320,10 @@ export function ExportView({
   onCaptionModeChange,
   chapterMode = "embed",
   onChapterModeChange,
+  onAudioMasteringChange,
+  onBrandWatermarkChange,
+  onBrandCardsChange,
+  onWebcamBackgroundChange,
   onKeystrokeOverlayChange,
   onReframeModeChange,
   formats = [],
@@ -350,26 +360,10 @@ export function ExportView({
   const isPro = useLicenseStore((state) => state.status.tier === "pro")
   const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const { toast } = useToast()
-  // Keystroke badge data comes from the timeline session — the same source
-  // the Finishing panel reads.
-  const keystrokeEvents = useTimelineStore((state) => state.keystrokeEvents)
-  const keystrokeEventsSupported = useTimelineStore((state) => state.keystrokeEventsSupported)
-  const keystrokeStatus = useTimelineStore((state) =>
-    state.keystrokeEventsStatus === "error"
-      ? ("error" as const)
-      : state.keystrokeEventsStatus === "loading"
-        ? ("loading" as const)
-        : ("loaded" as const),
-  )
-  const keystrokeError = useTimelineStore((state) => state.keystrokeEventsError)
-  const loadKeystrokeEvents = useTimelineStore((state) => state.loadKeystrokeEvents)
-  const [previewDialogOpen, setPreviewDialogOpen] = useState(false)
   // Instant Share — MP4-only Pro feature (docs/specs/instant-share.md).
   // `target` is "hosted" or the id of an S3 storage profile (BYO bucket);
-  // enabled/target/expiry persist per project. The link password stays
-  // session-only (the cloud stores a salted hash; the project file never
-  // carries secrets) — BYO targets can't gate a public bucket URL, so the
-  // field only appears for hosted shares.
+  // enabled/target/expiry persist per project. The password stays
+  // session-only — secrets never enter the durable project file.
   const share = exportSettings?.instantShare ?? {
     enabled: false,
     target: "hosted",
@@ -378,8 +372,8 @@ export function ExportView({
   const shareEnabled = share.enabled
   const shareTarget = share.target
   const shareExpiryDays = share.expiresInDays
-  const [sharePassword, setSharePassword] = useState("")
   const [shareState, setShareState] = useState<"idle" | "uploading" | "done" | "failed">("idle")
+  const [sharePassword, setSharePassword] = useState("")
   // Dedupe on the job id — the same output path can be re-exported and must
   // re-share. `mountedAt` prevents a persisted `enabled` flag from spending
   // a hosted link on a job that finished before this view opened; explicitly
@@ -485,68 +479,35 @@ export function ExportView({
     }
     sharedJobRef.current = exportJob.id
     setShareState("uploading")
-    // The request is export-JOB sourced — the file, captions, title, and
-    // measurements are resolved natively from the job's frozen artifact.
+    const wantsCaptions = captionMode === "sidecar"
     const shareArgs = {
-      exportJobId: exportJob.id,
-      operationId: crypto.randomUUID(),
+      path: outputPath,
+      title: projectName || "RecordForge export",
+      durationMs,
+      width: canvas?.width ?? 1920,
+      height: canvas?.height ?? 1080,
+      fps: canvas?.fps ?? 30,
+      chapters: markers.map((marker) => ({ t: marker.timeMs, label: marker.label })),
       allowDownload: true,
       allowEmbed: true,
+      captionsPath: wantsCaptions ? outputPath.replace(/\.mp4$/i, ".srt") : undefined,
+      // Hosted-only extras — BYO-bucket targets ignore these (their player
+      // page can't enforce passwords or expiry server-side).
+      password: shareTarget === "hosted" && sharePassword ? sharePassword : undefined,
       expiresInDays: shareTarget === "hosted" ? shareExpiryDays : undefined,
-      // Hosted shares support a viewer password; BYO buckets can't gate a
-      // public URL so the field only feeds the hosted path.
-      password: shareTarget === "hosted" && sharePassword.trim() ? sharePassword.trim() : undefined,
     }
     // "hosted" goes through recordforge-cloud; anything else is an S3 profile
     // id for the bring-your-own-bucket player page.
-    const admission =
+    const upload =
       shareTarget === "hosted" ? shareExport(shareArgs) : shareToProfile(shareTarget, shareArgs)
-    admission
-      .then((job) => {
-        // The admitted job carries the result — watch the store's snapshot
-        // (which the publication event keeps current) for its terminal state.
-        usePublicationStore.getState().upsertJob(job)
-        const onUpdate = (update: typeof job) => {
-          if (update.id !== job.id) return
-          if (update.status === "completed" && update.result?.kind === "share") {
-            stop()
-            setShareState("done")
-            const url = update.result.url
-            navigator.clipboard
-              .writeText(url)
-              .then(() => toast({ title: "Share link copied", description: url }))
-              .catch(() =>
-                toast({
-                  title: "Share link ready — copy it manually",
-                  description: url,
-                }),
-              )
-          } else if (update.status === "failed") {
-            stop()
-            setShareState("failed")
-            toast({
-              title: "Export done — share failed",
-              description: update.error?.message ?? "share upload failed",
-              variant: "warning",
-            })
-          } else if (update.status === "uncertain") {
-            stop()
-            setShareState("failed")
-            toast({
-              title: "Share upload finished — result unconfirmed",
-              description: update.error?.message ?? "check Shared links",
-              variant: "warning",
-            })
-          } else if (update.status === "cancelled") {
-            stop()
-            setShareState("idle")
-          }
-        }
-        const stop = subscribePublicationJobs(onUpdate)
-        // The terminal event may have landed between admission and
-        // subscription — check the cached snapshot once through the same path.
-        const cached = usePublicationStore.getState().jobById(job.id)
-        if (cached && cached.status !== job.status) onUpdate(cached)
+    upload
+      .then(async (result) => {
+        setShareState("done")
+        await navigator.clipboard.writeText(result.url).catch(() => undefined)
+        toast({
+          title: "Share link copied",
+          description: result.url,
+        })
       })
       .catch((error) => {
         setShareState("failed")
@@ -571,8 +532,8 @@ export function ExportView({
     markers,
     toast,
     shareTarget,
-    shareExpiryDays,
     sharePassword,
+    shareExpiryDays,
   ])
 
   function selectPreset(preset: ExportPreset) {
@@ -648,11 +609,11 @@ export function ExportView({
         </button>
 
         <div className="flex items-center gap-3">
-          <Badge variant="outline" className="font-mono text-ui-caption leading-none">
+          <Badge variant="outline" className="font-mono text-[11px] leading-none">
             {formatDuration(durationMs)}
           </Badge>
           {canvas ? (
-            <Badge variant="outline" className="font-mono text-ui-caption leading-none">
+            <Badge variant="outline" className="font-mono text-[11px] leading-none">
               {canvas.width}×{canvas.height} @ {canvas.fps}fps
             </Badge>
           ) : null}
@@ -783,7 +744,7 @@ export function ExportView({
                       ) : null}
                     </div>
                     <span className="text-xs text-subtle-foreground">{preset.description}</span>
-                    <span className="font-mono text-ui-caption text-muted-foreground">
+                    <span className="font-mono text-[11px] text-muted-foreground">
                       {preset.details}
                     </span>
                   </button>
@@ -828,13 +789,13 @@ export function ExportView({
                 />
               </div>
               {selectedRange ? (
-                <p className="mt-3 text-ui-caption text-subtle-foreground">
+                <p className="mt-3 text-[11px] text-subtle-foreground">
                   Exports {formatDuration(selectedRange.endMs - selectedRange.startMs)} ·{" "}
                   {formatDuration(selectedRange.startMs)}–{formatDuration(selectedRange.endMs)} of{" "}
                   {formatDuration(durationMs)} total
                 </p>
               ) : (
-                <p className="mt-3 text-ui-caption text-warning">
+                <p className="mt-3 text-[11px] text-warning">
                   Range end must be later than range start.
                 </p>
               )}
@@ -866,7 +827,7 @@ export function ExportView({
                       efficient compression. Cursor movements, highlights, and canvas overlays are
                       burned in directly.
                     </p>
-                    <p className="text-ui-caption text-muted-foreground">
+                    <p className="text-[11px] text-muted-foreground">
                       💡 <strong>50–80% smaller than GIF:</strong> WebP delivers crisp
                       high-resolution playback with significantly lower file sizes. Ideal for modern
                       documentation, GitHub PRs, Notion, and chat apps.
@@ -879,7 +840,7 @@ export function ExportView({
                       dithering, and infinite looping. Cursor movements, highlights, and canvas
                       overlays are burned in directly.
                     </p>
-                    <p className="text-ui-caption text-muted-foreground">
+                    <p className="text-[11px] text-muted-foreground">
                       💡 <strong>Tip for smaller files:</strong> Unlike MP4s with temporal
                       compression, GIFs store every frame as an uncompressed bitmap. Use{" "}
                       <strong>Balanced GIF</strong> (540p) or <strong>Fast GIF</strong> (360p), or
@@ -930,7 +891,7 @@ export function ExportView({
                         </SelectContent>
                       </Select>
                       {hardwareEncoderName ? (
-                        <span className="flex items-center gap-1.5 text-ui-caption text-subtle-foreground">
+                        <span className="flex items-center gap-1.5 text-[11px] text-subtle-foreground">
                           <Zap className="size-3 text-track-screen" aria-hidden />
                           {hardwareEncoderName} detected and will be used by Auto
                         </span>
@@ -961,7 +922,7 @@ export function ExportView({
                     </SelectContent>
                   </Select>
                 </label>
-                <p className="text-ui-caption leading-relaxed text-subtle-foreground">
+                <p className="text-[11px] leading-relaxed text-subtle-foreground">
                   Canvas transforms, camera, cursor, captions, masks, audio fades, speed, and
                   timeline gaps are resolved from the saved project.
                 </p>
@@ -981,7 +942,7 @@ export function ExportView({
                 {!isPro && markers.length > 0 ? <ProBadge /> : null}
               </span>
               <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-ui-micro font-normal">
+                <Badge variant="outline" className="text-[10px] font-normal">
                   {markers.length} {markers.length === 1 ? "marker" : "markers"}
                 </Badge>
                 {chaptersAccordionOpen ? (
@@ -1066,14 +1027,14 @@ export function ExportView({
                         )}
                       </Button>
                     </div>
-                    <pre className="max-h-36 overflow-y-auto whitespace-pre-wrap rounded border border-border/60 bg-background p-2.5 font-mono text-ui-caption text-subtle-foreground select-text">
+                    <pre className="max-h-36 overflow-y-auto whitespace-pre-wrap rounded border border-border/60 bg-background p-2.5 font-mono text-[11px] text-subtle-foreground select-text">
                       {youtubeChapterText}
                     </pre>
-                    <p className="text-ui-caption text-muted-foreground">
+                    <p className="text-[11px] text-muted-foreground">
                       Paste these timestamps into your video description to enable video chapters.
                     </p>
                     {!chaptersMeetYouTubeRules ? (
-                      <p className="flex items-center gap-1.5 text-ui-caption font-medium text-warning">
+                      <p className="flex items-center gap-1.5 text-[11px] font-medium text-warning">
                         <Bookmark className="size-3 shrink-0" aria-hidden />
                         YouTube requires 3+ chapters spaced at least 10 seconds apart — these may
                         not render as chapters.
@@ -1114,23 +1075,124 @@ export function ExportView({
                     ? `Animated ${isWebp ? "WebP" : "GIF"} files do not support audio tracks. The exported file will be video-only.`
                     : "Audio tracks use the saved mute, solo, gain, fade, role, and speed settings."}
                 </p>
+                {!isAnimation ? (
+                  <>
+                    {/* Studio Audio — Pro mastering applied to the final mix.
+                        Free users can toggle the controls to see the gate. */}
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="flex items-center gap-2 text-foreground">
+                        Noise reduction
+                        {!isPro ? <ProBadge /> : null}
+                      </span>
+                      <Switch
+                        checked={exportSettings?.audioMastering?.denoise ?? false}
+                        disabled={isRunning}
+                        onCheckedChange={(next) => {
+                          if (!isPro) {
+                            openUpgradeDialog(["studio-audio"])
+                            return
+                          }
+                          onAudioMasteringChange?.({
+                            denoise: next,
+                            loudnessTarget: exportSettings?.audioMastering?.loudnessTarget ?? null,
+                          })
+                        }}
+                        aria-label="Noise reduction"
+                      />
+                    </div>
+                    <label className="flex flex-col gap-1.5">
+                      <span className="flex items-center gap-2 text-foreground">
+                        Loudness target
+                        {!isPro ? <ProBadge /> : null}
+                      </span>
+                      <Select
+                        value={
+                          exportSettings?.audioMastering?.loudnessTarget != null
+                            ? String(exportSettings.audioMastering.loudnessTarget)
+                            : "off"
+                        }
+                        onValueChange={(value) => {
+                          if (!isPro) {
+                            openUpgradeDialog(["studio-audio"])
+                            return
+                          }
+                          onAudioMasteringChange?.({
+                            denoise: exportSettings?.audioMastering?.denoise ?? false,
+                            loudnessTarget: value === "off" ? null : Number(value),
+                          })
+                        }}
+                        disabled={isRunning}
+                      >
+                        <SelectTrigger className="h-8 w-full" aria-label="Loudness target">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="off">Off — keep original loudness</SelectItem>
+                          <SelectItem value="-14">−14 LUFS — YouTube</SelectItem>
+                          <SelectItem value="-16">−16 LUFS — Podcast</SelectItem>
+                          <SelectItem value="-19">−19 LUFS — Streaming</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+                    <p className="text-[11px]">
+                      Studio Audio applies noise reduction and broadcast loudness normalization to
+                      the final mixed track at export.
+                    </p>
+                  </>
+                ) : null}
               </div>
             ) : null}
           </div>
 
           {exportSettings ? (
-            <KeystrokeOverlayCard
-              overlay={exportSettings.keystrokeOverlay}
+            <BrandWatermarkCard
+              watermark={exportSettings.brandWatermark}
+              cards={exportSettings.brandCards}
+              isAnimation={isAnimation}
+              onCardsChange={(cards) => onBrandCardsChange?.(cards)}
               disabled={isRunning}
-              isPro={isPro}
-              eventCount={keystrokeEvents.length}
-              captureSupported={keystrokeEventsSupported}
-              status={keystrokeStatus}
-              statusError={keystrokeError}
-              onRetry={() => void loadKeystrokeEvents()}
-              onChange={(update) => onKeystrokeOverlayChange?.(update)}
-              onUpgradeRequest={openUpgradeDialog}
+              onChange={(watermark) => onBrandWatermarkChange?.(watermark)}
             />
+          ) : null}
+
+          {exportSettings ? (
+            <VirtualBackgroundCard
+              background={exportSettings.webcamBackground}
+              disabled={isRunning}
+              onChange={(background) => onWebcamBackgroundChange?.(background)}
+            />
+          ) : null}
+
+          {/* Keystroke overlay (Pro): only renders when the recording captured
+              modifier combos — the badge toggle is harmless otherwise. */}
+          {exportSettings ? (
+            <div className="overflow-hidden rounded-xl border border-border bg-surface">
+              <div className="flex w-full items-center justify-between p-4">
+                <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground font-label">
+                  <Keyboard className="size-4 text-primary" aria-hidden />
+                  Keystroke badges
+                  {!isPro ? <ProBadge /> : null}
+                </span>
+                <Switch
+                  checked={exportSettings.keystrokeOverlay.enabled}
+                  disabled={isRunning}
+                  aria-label="Keystroke badges"
+                  onCheckedChange={(enabled) => {
+                    if (enabled && !isPro) {
+                      openUpgradeDialog(["keystroke-overlay"])
+                      return
+                    }
+                    onKeystrokeOverlayChange?.(enabled)
+                  }}
+                />
+              </div>
+              {exportSettings.keystrokeOverlay.enabled ? (
+                <p className="border-t border-border px-5 py-3 text-xs text-subtle-foreground">
+                  Modifier combos recorded during capture (Ctrl+C, Alt+Tab…) appear as bottom-center
+                  badges. Plain typing is never recorded or shown.
+                </p>
+              ) : null}
+            </div>
           ) : null}
 
           {/* Multi-format batch export (Pro): extra canvas aspects render as
@@ -1203,7 +1265,7 @@ export function ExportView({
                     </SelectContent>
                   </Select>
                 </label>
-                <p className="text-ui-caption">
+                <p className="text-[11px]">
                   Each selected format exports as its own file (e.g. name-vertical.mp4). Cursor
                   follow uses the recorded cursor telemetry to pan a centered crop across the
                   screen.
@@ -1268,46 +1330,45 @@ export function ExportView({
                   </Select>
                 </label>
                 {shareTarget === "hosted" ? (
-                  <label className="flex w-32 flex-col gap-1.5">
-                    <span>Expires</span>
-                    <Select
-                      value={String(shareExpiryDays)}
-                      onValueChange={(days) => updateShare({ expiresInDays: Number(days) })}
-                      disabled={isRunning || !isPro}
-                    >
-                      <SelectTrigger className="h-8 w-full" aria-label="Link expiry">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1">1 day</SelectItem>
-                        <SelectItem value="7">7 days</SelectItem>
-                        <SelectItem value="30">30 days</SelectItem>
-                        <SelectItem value="90">90 days</SelectItem>
-                        <SelectItem value="365">1 year</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </label>
-                ) : null}
-                {shareTarget === "hosted" ? (
-                  <label className="flex w-48 flex-col gap-1.5">
-                    <span>Password</span>
-                    <Input
-                      type="password"
-                      value={sharePassword}
-                      onChange={(event) => setSharePassword(event.target.value)}
-                      disabled={isRunning || !isPro}
-                      placeholder="Optional"
-                      autoComplete="off"
-                      maxLength={128}
-                      aria-label="Link password"
-                    />
-                  </label>
+                  <div className="flex gap-3">
+                    <label className="flex flex-1 flex-col gap-1.5">
+                      <span>Password (optional)</span>
+                      <Input
+                        type="password"
+                        value={sharePassword}
+                        onChange={(event) => setSharePassword(event.target.value)}
+                        placeholder="Public link"
+                        maxLength={128}
+                        disabled={isRunning || !isPro}
+                        className="h-8"
+                      />
+                    </label>
+                    <label className="flex w-32 flex-col gap-1.5">
+                      <span>Expires</span>
+                      <Select
+                        value={String(shareExpiryDays)}
+                        onValueChange={(days) => updateShare({ expiresInDays: Number(days) })}
+                        disabled={isRunning || !isPro}
+                      >
+                        <SelectTrigger className="h-8 w-full" aria-label="Link expiry">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="1">1 day</SelectItem>
+                          <SelectItem value="7">7 days</SelectItem>
+                          <SelectItem value="30">30 days</SelectItem>
+                          <SelectItem value="90">90 days</SelectItem>
+                          <SelectItem value="365">1 year</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </label>
+                  </div>
                 ) : null}
                 <p>
                   {shareTarget === "hosted"
                     ? `Uploads the finished MP4 to a hosted viewer and copies the link — chapters${
                         captionMode === "sidecar" ? " and captions" : ""
-                      } included. Viewers can leave timestamped comments.`
+                      } included. Viewers can leave timestamped comments; password links stay unlisted.`
                     : "Uploads the MP4 plus a player page to your bucket — unlimited links, your storage, your rules."}
                 </p>
                 {shareState === "uploading" ? (
@@ -1341,7 +1402,7 @@ export function ExportView({
       <div className="shrink-0 border-t border-border bg-background/95 px-8 py-3 shadow-2xl backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4">
           <div className="flex min-w-0 flex-col">
-            <span className="text-ui-micro font-label font-bold uppercase tracking-wider text-subtle-foreground">
+            <span className="text-[10px] font-label font-bold uppercase tracking-wider text-subtle-foreground">
               Summary
             </span>
             <span className="truncate font-mono text-xs font-semibold text-foreground">
@@ -1358,17 +1419,6 @@ export function ExportView({
             <Button variant="secondary" onClick={onBack} disabled={isRunning}>
               Back to editor
             </Button>
-            {/* Processed preview runs the real pipeline at ≤720p — the export
-                stays at the selected quality. */}
-            {!isAnimation ? (
-              <Button
-                variant="outline"
-                onClick={() => setPreviewDialogOpen(true)}
-                disabled={isRunning}
-              >
-                Preview finished video
-              </Button>
-            ) : null}
             <Button
               onClick={() => void handleStartExport()}
               disabled={isStarting || isRunning || !canStart}
@@ -1391,7 +1441,6 @@ export function ExportView({
         exportId={exportJob?.id}
         defaultName={`${projectName ?? "export"}.${isWebp ? "webp" : isGif ? "gif" : "mp4"}`}
       />
-      <ProcessedPreviewDialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen} />
     </div>
   )
 }
