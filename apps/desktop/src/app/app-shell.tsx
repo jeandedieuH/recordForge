@@ -230,7 +230,7 @@ export function AppShell() {
         markUpdateNotified(update.version)
         toast({
           title: `RecordForge ${update.version} is available`,
-          description: update.body ?? "A signed update is ready to install.",
+          description:"A signed update is ready to install.",
           variant: "info",
           duration: 20_000,
           action: {
