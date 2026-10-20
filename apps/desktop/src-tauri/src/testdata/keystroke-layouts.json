@@ -21,37 +21,54 @@
         {
           "tMs": 1000,
           "key": "S",
-          "modifiers": ["ctrl", "shift"]
+          "modifiers": [
+            "ctrl",
+            "shift"
+          ]
         },
         {
           "tMs": 1600,
           "key": "Enter",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 2200,
           "key": "Z",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 2500,
           "key": "Z",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 3400,
           "key": "P",
-          "modifiers": ["ctrl"]
+          "modifiers": [
+            "ctrl"
+          ]
         },
         {
           "tMs": 3700,
           "key": "Q",
-          "modifiers": ["alt", "shift"]
+          "modifiers": [
+            "alt",
+            "shift"
+          ]
         },
         {
           "tMs": 4000,
           "key": "R",
-          "modifiers": ["meta", "shift"]
+          "modifiers": [
+            "meta",
+            "shift"
+          ]
         }
       ],
       "samples": [
@@ -236,37 +253,54 @@
         {
           "tMs": 1000,
           "key": "S",
-          "modifiers": ["ctrl", "shift"]
+          "modifiers": [
+            "ctrl",
+            "shift"
+          ]
         },
         {
           "tMs": 1600,
           "key": "Enter",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 2200,
           "key": "Z",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 2500,
           "key": "Z",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 3400,
           "key": "P",
-          "modifiers": ["ctrl"]
+          "modifiers": [
+            "ctrl"
+          ]
         },
         {
           "tMs": 3700,
           "key": "Q",
-          "modifiers": ["alt", "shift"]
+          "modifiers": [
+            "alt",
+            "shift"
+          ]
         },
         {
           "tMs": 4000,
           "key": "R",
-          "modifiers": ["meta", "shift"]
+          "modifiers": [
+            "meta",
+            "shift"
+          ]
         }
       ],
       "samples": [
@@ -451,37 +485,54 @@
         {
           "tMs": 1000,
           "key": "S",
-          "modifiers": ["ctrl", "shift"]
+          "modifiers": [
+            "ctrl",
+            "shift"
+          ]
         },
         {
           "tMs": 1600,
           "key": "Enter",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 2200,
           "key": "Z",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 2500,
           "key": "Z",
-          "modifiers": ["meta"]
+          "modifiers": [
+            "meta"
+          ]
         },
         {
           "tMs": 3400,
           "key": "P",
-          "modifiers": ["ctrl"]
+          "modifiers": [
+            "ctrl"
+          ]
         },
         {
           "tMs": 3700,
           "key": "Q",
-          "modifiers": ["alt", "shift"]
+          "modifiers": [
+            "alt",
+            "shift"
+          ]
         },
         {
           "tMs": 4000,
           "key": "R",
-          "modifiers": ["meta", "shift"]
+          "modifiers": [
+            "meta",
+            "shift"
+          ]
         }
       ],
       "samples": [

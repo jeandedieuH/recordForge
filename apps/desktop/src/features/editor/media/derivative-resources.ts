@@ -168,9 +168,7 @@ export function useWaveformResources(
     setByStream(
       new Map(streams.map((request) => [request.streamIndex, { status: "loading" as const }])),
     )
-    setByAsset(
-      new Map(assets.map((request) => [request.assetId, { status: "loading" as const }])),
-    )
+    setByAsset(new Map(assets.map((request) => [request.assetId, { status: "loading" as const }])))
 
     void Promise.all(
       streams.map(async (request): Promise<[number, DerivativeResource<WaveformData>]> => [

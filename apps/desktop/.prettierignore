@@ -4,3 +4,6 @@ src-tauri/gen
 src-tauri/target
 src-tauri/target-export-debug
 .bun
+# Generated contract fixtures — byte-exact output is locked by editor-core
+# fixture tests (UPDATE_*_FIXTURES=1); prettier reformatting breaks them.
+src-tauri/src/testdata/
