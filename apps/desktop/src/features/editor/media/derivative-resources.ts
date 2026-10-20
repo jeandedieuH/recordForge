@@ -138,8 +138,12 @@ export function useWaveformResources(
       ].join("|"),
     [streamRequests, assetRequests],
   )
-  const lastRequestsKeyRef = useRef("")
-  const lastRetryTokenRef = useRef(0)
+  // The effect must run on request *content*, not array identity — parents
+  // rebuild these arrays on unrelated renders, and each spurious re-run would
+  // discard an in-flight fetch via the isMounted cleanup while the old guard
+  // skipped refetching, leaving entries stuck at "loading" forever.
+  const latestRequestsRef = useRef({ streamRequests, assetRequests })
+  latestRequestsRef.current = { streamRequests, assetRequests }
 
   const [retryToken, setRetryToken] = useState(0)
   const [byStream, setByStream] = useState<Map<number, DerivativeResource<WaveformData>>>(
@@ -151,16 +155,9 @@ export function useWaveformResources(
   const retry = useCallback(() => setRetryToken((value) => value + 1), [])
 
   useEffect(() => {
-    // Avoid refetching when only the array identity changes; content and retry
-    // intent are the real triggers.
-    if (requestsKey === lastRequestsKeyRef.current && retryToken === lastRetryTokenRef.current) {
-      return
-    }
-    lastRequestsKeyRef.current = requestsKey
-    lastRetryTokenRef.current = retryToken
-
+    const { streamRequests: streams, assetRequests: assets } = latestRequestsRef.current
     let isMounted = true
-    if (streamRequests.length === 0 && assetRequests.length === 0) {
+    if (streams.length === 0 && assets.length === 0) {
       setByStream(new Map())
       setByAsset(new Map())
       return () => {
@@ -169,16 +166,14 @@ export function useWaveformResources(
     }
 
     setByStream(
-      new Map(
-        streamRequests.map((request) => [request.streamIndex, { status: "loading" as const }]),
-      ),
+      new Map(streams.map((request) => [request.streamIndex, { status: "loading" as const }])),
     )
     setByAsset(
-      new Map(assetRequests.map((request) => [request.assetId, { status: "loading" as const }])),
+      new Map(assets.map((request) => [request.assetId, { status: "loading" as const }])),
     )
 
     void Promise.all(
-      streamRequests.map(async (request): Promise<[number, DerivativeResource<WaveformData>]> => [
+      streams.map(async (request): Promise<[number, DerivativeResource<WaveformData>]> => [
         request.streamIndex,
         await loadWaveformResource(request.path, workDir),
       ]),
@@ -186,7 +181,7 @@ export function useWaveformResources(
       if (isMounted) setByStream(new Map(entries))
     })
     void Promise.all(
-      assetRequests.map(async (request): Promise<[string, DerivativeResource<WaveformData>]> => [
+      assets.map(async (request): Promise<[string, DerivativeResource<WaveformData>]> => [
         request.assetId,
         await loadWaveformResource(request.path, workDir),
       ]),
@@ -197,7 +192,8 @@ export function useWaveformResources(
     return () => {
       isMounted = false
     }
-  }, [streamRequests, assetRequests, requestsKey, workDir, retryToken])
+    // latestRequestsRef carries the arrays that produced this key.
+  }, [requestsKey, workDir, retryToken])
 
   const status = useMemo<WaveformResources["status"]>(() => {
     if (streamRequests.length === 0 && assetRequests.length === 0) return "missing"
@@ -235,8 +231,10 @@ export function useVideoTrackThumbnailResources(
     () => requests.map((request) => `${request.streamIndex}:${request.path}`).join("|"),
     [requests],
   )
-  const lastRequestsKeyRef = useRef("")
-  const lastRetryTokenRef = useRef(0)
+  // Same churn-kill fix as useWaveformResources: run on the content key and
+  // read the latest arrays via a ref, or spurious re-runs drop in-flight loads.
+  const latestRequestsRef = useRef(requests)
+  latestRequestsRef.current = requests
 
   const [retryToken, setRetryToken] = useState(0)
   const [byStream, setByStream] = useState<Map<number, DerivativeResource<ThumbnailManifest>>>(
@@ -245,14 +243,9 @@ export function useVideoTrackThumbnailResources(
   const retry = useCallback(() => setRetryToken((value) => value + 1), [])
 
   useEffect(() => {
-    if (requestsKey === lastRequestsKeyRef.current && retryToken === lastRetryTokenRef.current) {
-      return
-    }
-    lastRequestsKeyRef.current = requestsKey
-    lastRetryTokenRef.current = retryToken
-
+    const currentRequests = latestRequestsRef.current
     let isMounted = true
-    if (requests.length === 0) {
+    if (currentRequests.length === 0) {
       setByStream(new Map())
       return () => {
         isMounted = false
@@ -260,18 +253,22 @@ export function useVideoTrackThumbnailResources(
     }
 
     setByStream(
-      new Map(requests.map((request) => [request.streamIndex, { status: "loading" as const }])),
+      new Map(
+        currentRequests.map((request) => [request.streamIndex, { status: "loading" as const }]),
+      ),
     )
 
     void Promise.all(
-      requests.map(async (request): Promise<[number, DerivativeResource<ThumbnailManifest>]> => {
-        try {
-          const data = await fetchDerivative(request.path, thumbnailManifestSchema, workDir)
-          return [request.streamIndex, { status: "content", data }]
-        } catch {
-          return [request.streamIndex, { status: "error", message: derivativeError() }]
-        }
-      }),
+      currentRequests.map(
+        async (request): Promise<[number, DerivativeResource<ThumbnailManifest>]> => {
+          try {
+            const data = await fetchDerivative(request.path, thumbnailManifestSchema, workDir)
+            return [request.streamIndex, { status: "content", data }]
+          } catch {
+            return [request.streamIndex, { status: "error", message: derivativeError() }]
+          }
+        },
+      ),
     ).then((entries) => {
       if (isMounted) setByStream(new Map(entries))
     })
@@ -279,7 +276,8 @@ export function useVideoTrackThumbnailResources(
     return () => {
       isMounted = false
     }
-  }, [requests, requestsKey, workDir, retryToken])
+    // latestRequestsRef carries the array that produced this key.
+  }, [requestsKey, workDir, retryToken])
 
   const status = useMemo<VideoTrackThumbnailResources["status"]>(() => {
     if (requests.length === 0) return "missing"
