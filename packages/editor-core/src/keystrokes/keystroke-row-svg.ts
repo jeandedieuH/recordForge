@@ -69,7 +69,9 @@ export function keystrokeRowSvg(input: {
   const textBaselineY = capCenterY + m.fontPx * 0.35
 
   const parts: string[] = []
-  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${f(w)}" height="${f(h)}" viewBox="0 0 ${f(w)} ${f(h)}">`)
+  parts.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${f(w)}" height="${f(h)}" viewBox="0 0 ${f(w)} ${f(h)}">`,
+  )
   parts.push(
     `<defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">` +
       `<stop offset="0" stop-color="${t.capFillTop}" stop-opacity="${f(t.capFillTopOpacity)}"/>` +
@@ -107,7 +109,9 @@ export function keystrokeRowSvg(input: {
             ? `fill="${t.text}" opacity="${f(t.textOpacity)}" stroke="none"`
             : `fill="none" stroke="${t.text}" stroke-opacity="${f(t.textOpacity)}" stroke-width="${keyGlyphs.strokeWidth}" stroke-linecap="${keyGlyphs.strokeLinecap}" stroke-linejoin="${keyGlyphs.strokeLinejoin}"`
         for (const d of glyph.paths) {
-          parts.push(`<path d="${d}" transform="translate(${f(gx)} ${f(gy)}) scale(${f(scale)})" ${paint}/>`)
+          parts.push(
+            `<path d="${d}" transform="translate(${f(gx)} ${f(gy)}) scale(${f(scale)})" ${paint}/>`,
+          )
         }
       }
     } else if (cap.text) {

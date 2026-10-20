@@ -160,8 +160,13 @@ describe("resolveKeystrokeDisplay", () => {
     const s = settings({ maxStack: 3, holdMs: 5000 })
     // During the eviction fade the outgoing row is still visible — 4 rows.
     expect(
-      resolveKeystrokeDisplay({ events: evs, settings: s, platform: "windows", sourceMs: 1850, canvas })
-        .rows,
+      resolveKeystrokeDisplay({
+        events: evs,
+        settings: s,
+        platform: "windows",
+        sourceMs: 1850,
+        canvas,
+      }).rows,
     ).toHaveLength(4)
     const display = resolveKeystrokeDisplay({
       events: evs,

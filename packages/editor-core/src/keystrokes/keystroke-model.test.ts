@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-  capsKey,
-  eventCaps,
-  normalizeKeystrokeEvents,
-  normalizeV1Event,
-} from "./keystroke-model"
+import { capsKey, eventCaps, normalizeKeystrokeEvents, normalizeV1Event } from "./keystroke-model"
 
 describe("normalizeV1Event", () => {
   it("splits modifier labels into structured events", () => {

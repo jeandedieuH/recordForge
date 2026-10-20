@@ -63,7 +63,11 @@ export function keystrokeMetrics(canvasHeight: number, scale: number): Keystroke
  * mono-advance text width. Shared by the DOM preview and the export
  * rasterizer so both agree on row geometry before drawing anything.
  */
-export function capWidthPx(kind: "glyph" | "text", textLength: number, m: KeystrokeMetrics): number {
+export function capWidthPx(
+  kind: "glyph" | "text",
+  textLength: number,
+  m: KeystrokeMetrics,
+): number {
   if (kind === "glyph") return m.capHeightPx
   return m.capPadXPx * 2 + Math.max(1, textLength) * m.charAdvancePx
 }

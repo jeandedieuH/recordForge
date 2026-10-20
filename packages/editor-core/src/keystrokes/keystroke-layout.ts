@@ -3,16 +3,8 @@ import type {
   KeystrokeOverlaySettings,
   KeystrokePlatform,
 } from "@recordforge/contracts"
-import {
-  capsKey,
-  eventCaps,
-  type KeystrokeCap,
-} from "./keystroke-model"
-import {
-  KEYSTROKE_THEMES,
-  keystrokeMetrics,
-  type KeystrokeMetrics,
-} from "./keystroke-geometry"
+import { capsKey, eventCaps, type KeystrokeCap } from "./keystroke-model"
+import { KEYSTROKE_THEMES, keystrokeMetrics, type KeystrokeMetrics } from "./keystroke-geometry"
 import { keystrokeRowSvg } from "./keystroke-row-svg"
 
 /**
