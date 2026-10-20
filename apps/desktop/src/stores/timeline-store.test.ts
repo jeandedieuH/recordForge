@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { useTimelineStore } from "./timeline-store"
 import type { recordForgeProject } from "@recordforge/contracts"
-import { defaultCursorSettings } from "@recordforge/contracts"
+import { defaultCursorSettings, defaultKeystrokeOverlaySettings } from "@recordforge/contracts"
 
 function createMockProject(): recordForgeProject {
   return {
@@ -51,7 +51,7 @@ function createMockProject(): recordForgeProject {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,
@@ -110,7 +110,7 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -176,7 +176,7 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -243,7 +243,7 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -309,7 +309,7 @@ describe("TimelineStore Export Settings Actions", () => {
             textColor: "#f8fafc",
             fontPath: null,
           },
-          keystrokeOverlay: { enabled: false },
+          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
           reframeMode: "fit",
           webcamBackground: {
             enabled: false,
@@ -387,7 +387,7 @@ describe("Export settings persistence contract", () => {
       scalePercent: 12,
       opacity: 0.6,
     })
-    useTimelineStore.getState().setKeystrokeOverlay(true)
+    useTimelineStore.getState().setKeystrokeOverlay({ enabled: true })
     useTimelineStore.getState().setReframeMode("cursor-follow")
     useTimelineStore.getState().setWebcamBackground({
       enabled: true,

@@ -37,6 +37,7 @@ import type {
 import { toAssetUrl } from "../media/derivative-resources"
 import { TimelineClipItem } from "./timeline-clip-item"
 import { TimelineMarquee } from "./timeline-marquee"
+import { SilencePreviewLayer } from "./silence-preview-layer"
 import { TimelineMinimap } from "./timeline-minimap"
 import { TimelinePlayhead } from "./timeline-playhead"
 import { TimelineRuler, formatTimelineTime, getVisibleTickInterval } from "./timeline-ruler"
@@ -1096,6 +1097,9 @@ export function TimelineLanes({
                     />
                   )
                 })()}
+
+                {/* Smart Cut review: detected silences shaded across lanes */}
+                <SilencePreviewLayer pixelsPerMs={pixelsPerMs} top={scrollMargin} />
 
                 {/* Magnetic Snapping Guide Line & Smart Badge */}
                 {snapGuide ? (

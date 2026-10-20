@@ -1,0 +1,620 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "windows-dark-symbols",
+      "platform": "windows",
+      "settings": {
+        "enabled": true,
+        "position": "bottom-center",
+        "theme": "dark",
+        "scale": 1,
+        "maxStack": 3,
+        "holdMs": 2200,
+        "modifierStyle": "symbols"
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "events": [
+        {
+          "tMs": 1000,
+          "key": "S",
+          "modifiers": ["ctrl", "shift"]
+        },
+        {
+          "tMs": 1600,
+          "key": "Enter",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 2200,
+          "key": "Z",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 2500,
+          "key": "Z",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 3400,
+          "key": "P",
+          "modifiers": ["ctrl"]
+        },
+        {
+          "tMs": 3700,
+          "key": "Q",
+          "modifiers": ["alt", "shift"]
+        },
+        {
+          "tMs": 4000,
+          "key": "R",
+          "modifiers": ["meta", "shift"]
+        }
+      ],
+      "samples": [
+        {
+          "sourceMs": 1020,
+          "rows": [
+            {
+              "key": "1000",
+              "x": 818,
+              "y": 940.944,
+              "widthPx": 284,
+              "heightPx": 109,
+              "alpha": 0.33,
+              "scale": 0.9,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"284\" height=\"109\" viewBox=\"0 0 284 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"236\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"236\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"73.60\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"71.60\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"73.80\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"116.60\" y=\"34\" width=\"85\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"117.60\" y=\"35\" width=\"83\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"159.10\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"207.60\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"208.60\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"227.30\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 1300,
+          "rows": [
+            {
+              "key": "1000",
+              "x": 818,
+              "y": 936,
+              "widthPx": 284,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"284\" height=\"109\" viewBox=\"0 0 284 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"236\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"236\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"73.60\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"71.60\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"73.80\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"116.60\" y=\"34\" width=\"85\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"117.60\" y=\"35\" width=\"83\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"159.10\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"207.60\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"208.60\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"227.30\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 2550,
+          "rows": [
+            {
+              "key": "2200",
+              "x": 865.4,
+              "y": 936,
+              "widthPx": 189.2,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"189.20\" height=\"109\" viewBox=\"0 0 189.20 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M4 5h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 5h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M4 13h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 13h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"129.40\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"16.15\" font-weight=\"600\" fill=\"#9FB0C8\" fill-opacity=\"1\">×2</text></svg>"
+            },
+            {
+              "key": "1600",
+              "x": 879,
+              "y": 863,
+              "widthPx": 162,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"162\" height=\"109\" viewBox=\"0 0 162 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M4 5h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 5h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M4 13h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 13h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M9 10l-5 5 5 5\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#F4F7FB\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M20 4v7a4 4 0 0 1-4 4H4\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#F4F7FB\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+            },
+            {
+              "key": "1000",
+              "x": 818,
+              "y": 790,
+              "widthPx": 284,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"284\" height=\"109\" viewBox=\"0 0 284 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"236\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"236\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"73.60\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"71.60\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"73.80\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"116.60\" y=\"34\" width=\"85\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"117.60\" y=\"35\" width=\"83\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"159.10\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"207.60\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"208.60\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"227.30\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 3750,
+          "rows": [
+            {
+              "key": "3700",
+              "x": 823.7,
+              "y": 938.398,
+              "widthPx": 272.6,
+              "heightPx": 109,
+              "alpha": 0.675,
+              "scale": 0.951,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"272.60\" height=\"109\" viewBox=\"0 0 272.60 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"224.60\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"224.60\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"62.20\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"60.20\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"68.10\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Alt</text><rect x=\"105.20\" y=\"34\" width=\"85\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"106.20\" y=\"35\" width=\"83\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"147.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"196.20\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"197.20\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"215.90\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Q</text></svg>"
+            },
+            {
+              "key": "3400",
+              "x": 863.5,
+              "y": 886.721,
+              "widthPx": 193,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"193\" height=\"109\" viewBox=\"0 0 193 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"145\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"145\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"73.60\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"71.60\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"73.80\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"116.60\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"117.60\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"136.30\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">P</text></svg>"
+            },
+            {
+              "key": "2200",
+              "x": 865.4,
+              "y": 813.721,
+              "widthPx": 189.2,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"189.20\" height=\"109\" viewBox=\"0 0 189.20 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M4 5h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 5h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M4 13h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 13h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"129.40\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"16.15\" font-weight=\"600\" fill=\"#9FB0C8\" fill-opacity=\"1\">×2</text></svg>"
+            },
+            {
+              "key": "1600",
+              "x": 879,
+              "y": 740.721,
+              "widthPx": 162,
+              "heightPx": 109,
+              "alpha": 0.722,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"162\" height=\"109\" viewBox=\"0 0 162 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M4 5h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 5h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M4 13h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 13h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M9 10l-5 5 5 5\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#F4F7FB\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M20 4v7a4 4 0 0 1-4 4H4\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#F4F7FB\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 4150,
+          "rows": [
+            {
+              "key": "4000",
+              "x": 834.3,
+              "y": 936.002,
+              "widthPx": 251.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"251.40\" height=\"109\" viewBox=\"0 0 251.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"203.40\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"203.40\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"85\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"83\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"79.50\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"128\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"129\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M4 5h7v6H4z\" transform=\"translate(138 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 5h7v6h-7z\" transform=\"translate(138 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M4 13h7v6H4z\" transform=\"translate(138 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 13h7v6h-7z\" transform=\"translate(138 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><rect x=\"175\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"176\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"194.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">R</text></svg>"
+            },
+            {
+              "key": "3700",
+              "x": 823.7,
+              "y": 863.018,
+              "widthPx": 272.6,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"272.60\" height=\"109\" viewBox=\"0 0 272.60 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"224.60\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"224.60\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"62.20\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"60.20\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"68.10\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Alt</text><rect x=\"105.20\" y=\"34\" width=\"85\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"106.20\" y=\"35\" width=\"83\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"147.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"196.20\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"197.20\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"215.90\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Q</text></svg>"
+            },
+            {
+              "key": "3400",
+              "x": 863.5,
+              "y": 790.018,
+              "widthPx": 193,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"193\" height=\"109\" viewBox=\"0 0 193 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"145\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"145\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"73.60\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"71.60\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"73.80\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"116.60\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"117.60\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"136.30\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">P</text></svg>"
+            },
+            {
+              "key": "2200",
+              "x": 865.4,
+              "y": 717.018,
+              "widthPx": 189.2,
+              "heightPx": 109,
+              "alpha": 0.167,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"189.20\" height=\"109\" viewBox=\"0 0 189.20 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#FFFFFF\" stop-opacity=\"0.05\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#000000\" opacity=\"0.40\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#0B0E14\" fill-opacity=\"0.78\" stroke=\"#FFFFFF\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><path d=\"M4 5h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 5h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M4 13h7v6H4z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><path d=\"M13 13h7v6h-7z\" transform=\"translate(47 44) scale(0.88)\" fill=\"#F4F7FB\" opacity=\"1\" stroke=\"none\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.12\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.16\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#F4F7FB\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"129.40\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"16.15\" font-weight=\"600\" fill=\"#9FB0C8\" fill-opacity=\"1\">×2</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 8000,
+          "rows": []
+        }
+      ]
+    },
+    {
+      "id": "macos-light-symbols",
+      "platform": "macos",
+      "settings": {
+        "enabled": true,
+        "position": "bottom-left",
+        "theme": "light",
+        "scale": 1,
+        "maxStack": 3,
+        "holdMs": 2200,
+        "modifierStyle": "symbols"
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "events": [
+        {
+          "tMs": 1000,
+          "key": "S",
+          "modifiers": ["ctrl", "shift"]
+        },
+        {
+          "tMs": 1600,
+          "key": "Enter",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 2200,
+          "key": "Z",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 2500,
+          "key": "Z",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 3400,
+          "key": "P",
+          "modifiers": ["ctrl"]
+        },
+        {
+          "tMs": 3700,
+          "key": "Q",
+          "modifiers": ["alt", "shift"]
+        },
+        {
+          "tMs": 4000,
+          "key": "R",
+          "modifiers": ["meta", "shift"]
+        }
+      ],
+      "samples": [
+        {
+          "sourceMs": 1020,
+          "rows": [
+            {
+              "key": "1000",
+              "x": 35,
+              "y": 940.944,
+              "widthPx": 207.4,
+              "heightPx": 109,
+              "alpha": 0.33,
+              "scale": 0.9,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"207.40\" height=\"109\" viewBox=\"0 0 207.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M6 15l6-6 6 6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M12 19V6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M6 11l6-6 6 6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"131\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"132\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"150.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 1300,
+          "rows": [
+            {
+              "key": "1000",
+              "x": 35,
+              "y": 936,
+              "widthPx": 207.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"207.40\" height=\"109\" viewBox=\"0 0 207.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M6 15l6-6 6 6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M12 19V6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M6 11l6-6 6 6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"131\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"132\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"150.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 2550,
+          "rows": [
+            {
+              "key": "2200",
+              "x": 35,
+              "y": 936,
+              "widthPx": 189.2,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"189.20\" height=\"109\" viewBox=\"0 0 189.20 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"129.40\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"16.15\" font-weight=\"600\" fill=\"#5B6B82\" fill-opacity=\"1\">×2</text></svg>"
+            },
+            {
+              "key": "1600",
+              "x": 35,
+              "y": 863,
+              "widthPx": 162,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"162\" height=\"109\" viewBox=\"0 0 162 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M9 10l-5 5 5 5\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M20 4v7a4 4 0 0 1-4 4H4\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+            },
+            {
+              "key": "1000",
+              "x": 35,
+              "y": 790,
+              "widthPx": 207.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"207.40\" height=\"109\" viewBox=\"0 0 207.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M6 15l6-6 6 6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M12 19V6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M6 11l6-6 6 6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"131\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"132\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"150.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 3750,
+          "rows": [
+            {
+              "key": "3700",
+              "x": 35,
+              "y": 938.398,
+              "widthPx": 207.4,
+              "heightPx": 109,
+              "alpha": 0.675,
+              "scale": 0.951,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"207.40\" height=\"109\" viewBox=\"0 0 207.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M3 19h6l9-14h3\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M3 5h7\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M12 19V6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M6 11l6-6 6 6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"131\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"132\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"150.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">Q</text></svg>"
+            },
+            {
+              "key": "3400",
+              "x": 35,
+              "y": 886.721,
+              "widthPx": 160.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"160.40\" height=\"109\" viewBox=\"0 0 160.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"112.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"112.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M6 15l6-6 6 6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">P</text></svg>"
+            },
+            {
+              "key": "2200",
+              "x": 35,
+              "y": 813.721,
+              "widthPx": 189.2,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"189.20\" height=\"109\" viewBox=\"0 0 189.20 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"129.40\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"16.15\" font-weight=\"600\" fill=\"#5B6B82\" fill-opacity=\"1\">×2</text></svg>"
+            },
+            {
+              "key": "1600",
+              "x": 35,
+              "y": 740.721,
+              "widthPx": 162,
+              "heightPx": 109,
+              "alpha": 0.722,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"162\" height=\"109\" viewBox=\"0 0 162 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"114\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M9 10l-5 5 5 5\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M20 4v7a4 4 0 0 1-4 4H4\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 4150,
+          "rows": [
+            {
+              "key": "4000",
+              "x": 35,
+              "y": 936.002,
+              "widthPx": 207.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"207.40\" height=\"109\" viewBox=\"0 0 207.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M12 19V6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M6 11l6-6 6 6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"131\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"132\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"150.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">R</text></svg>"
+            },
+            {
+              "key": "3700",
+              "x": 35,
+              "y": 863.018,
+              "widthPx": 207.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"207.40\" height=\"109\" viewBox=\"0 0 207.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"159.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M3 19h6l9-14h3\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M3 5h7\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M12 19V6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M6 11l6-6 6 6\" transform=\"translate(94 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"131\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"132\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"150.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">Q</text></svg>"
+            },
+            {
+              "key": "3400",
+              "x": 35,
+              "y": 790.018,
+              "widthPx": 160.4,
+              "heightPx": 109,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"160.40\" height=\"109\" viewBox=\"0 0 160.40 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"112.40\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"112.40\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M6 15l6-6 6 6\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">P</text></svg>"
+            },
+            {
+              "key": "2200",
+              "x": 35,
+              "y": 717.018,
+              "widthPx": 189.2,
+              "heightPx": 109,
+              "alpha": 0.167,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"189.20\" height=\"109\" viewBox=\"0 0 189.20 109\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFFFFF\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#EEF2F7\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"12\"/></filter></defs><rect x=\"24\" y=\"27\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#0F172A\" opacity=\"0.22\" filter=\"url(#ds)\"/><rect x=\"24\" y=\"24\" width=\"141.20\" height=\"61\" rx=\"16\" fill=\"#FAFBFD\" fill-opacity=\"0.90\" stroke=\"#0F172A\" stroke-opacity=\"0.08\"/><rect x=\"37\" y=\"34\" width=\"41\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"38\" y=\"35\" width=\"39\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><path d=\"M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z\" transform=\"translate(47 44) scale(0.88)\" fill=\"none\" stroke=\"#0F172A\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><rect x=\"84\" y=\"34\" width=\"39.40\" height=\"41\" rx=\"11\" fill=\"url(#cg)\" stroke=\"#0F172A\" stroke-opacity=\"0.10\"/><rect x=\"85\" y=\"35\" width=\"37.40\" height=\"7.38\" rx=\"5.50\" fill=\"#FFFFFF\" opacity=\"0.90\"/><text x=\"103.70\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"19\" font-weight=\"600\" fill=\"#0F172A\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"129.40\" y=\"61.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"16.15\" font-weight=\"600\" fill=\"#5B6B82\" fill-opacity=\"1\">×2</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 8000,
+          "rows": []
+        }
+      ]
+    },
+    {
+      "id": "linux-contrast-text",
+      "platform": "linux",
+      "settings": {
+        "enabled": true,
+        "position": "top-right",
+        "theme": "contrast",
+        "scale": 1.5,
+        "maxStack": 2,
+        "holdMs": 1500,
+        "modifierStyle": "text"
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "events": [
+        {
+          "tMs": 1000,
+          "key": "S",
+          "modifiers": ["ctrl", "shift"]
+        },
+        {
+          "tMs": 1600,
+          "key": "Enter",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 2200,
+          "key": "Z",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 2500,
+          "key": "Z",
+          "modifiers": ["meta"]
+        },
+        {
+          "tMs": 3400,
+          "key": "P",
+          "modifiers": ["ctrl"]
+        },
+        {
+          "tMs": 3700,
+          "key": "Q",
+          "modifiers": ["alt", "shift"]
+        },
+        {
+          "tMs": 4000,
+          "key": "R",
+          "modifiers": ["meta", "shift"]
+        }
+      ],
+      "samples": [
+        {
+          "sourceMs": 1020,
+          "rows": [
+            {
+              "key": "1000",
+              "x": 1465,
+              "y": 13.524,
+              "widthPx": 434,
+              "heightPx": 168,
+              "alpha": 0.33,
+              "scale": 0.9,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"434\" height=\"168\" viewBox=\"0 0 434 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"358\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"358\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"111.60\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"109.60\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"113.80\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"178.60\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"179.60\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"243.10\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"316.60\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"317.60\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"346.30\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 1300,
+          "rows": [
+            {
+              "key": "1000",
+              "x": 1465,
+              "y": 21,
+              "widthPx": 434,
+              "heightPx": 168,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"434\" height=\"168\" viewBox=\"0 0 434 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"358\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"358\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"111.60\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"109.60\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"113.80\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"178.60\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"179.60\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"243.10\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"316.60\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"317.60\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"346.30\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">S</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 2550,
+          "rows": [
+            {
+              "key": "2200",
+              "x": 1541.8,
+              "y": 21,
+              "widthPx": 357.2,
+              "heightPx": 168,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"357.20\" height=\"168\" viewBox=\"0 0 357.20 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"281.20\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"281.20\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"122.50\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Super</text><rect x=\"196\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"197\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"225.70\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"264.40\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"24.65\" font-weight=\"600\" fill=\"#C4CDDC\" fill-opacity=\"1\">×2</text></svg>"
+            },
+            {
+              "key": "1600",
+              "x": 1583,
+              "y": 132,
+              "widthPx": 316,
+              "heightPx": 168,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"316\" height=\"168\" viewBox=\"0 0 316 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"240\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"240\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"122.50\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Super</text><rect x=\"196\" y=\"53\" width=\"62\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"197\" y=\"54\" width=\"60\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><path d=\"M9 10l-5 5 5 5\" transform=\"translate(211 68) scale(1.33)\" fill=\"none\" stroke=\"#FFFFFF\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M20 4v7a4 4 0 0 1-4 4H4\" transform=\"translate(211 68) scale(1.33)\" fill=\"none\" stroke=\"#FFFFFF\" stroke-opacity=\"1\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 3750,
+          "rows": [
+            {
+              "key": "3700",
+              "x": 1482.4,
+              "y": 17.374,
+              "widthPx": 416.6,
+              "heightPx": 168,
+              "alpha": 0.675,
+              "scale": 0.951,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"416.60\" height=\"168\" viewBox=\"0 0 416.60 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"340.60\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"340.60\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"94.20\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"92.20\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"105.10\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Alt</text><rect x=\"161.20\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"162.20\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"225.70\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"299.20\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"300.20\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"328.90\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Q</text></svg>"
+            },
+            {
+              "key": "3400",
+              "x": 1603,
+              "y": 95.93,
+              "widthPx": 296,
+              "heightPx": 168,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"296\" height=\"168\" viewBox=\"0 0 296 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"220\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"220\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"111.60\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"109.60\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"113.80\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"178.60\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"179.60\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"208.30\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">P</text></svg>"
+            },
+            {
+              "key": "2200",
+              "x": 1541.8,
+              "y": 206.93,
+              "widthPx": 357.2,
+              "heightPx": 168,
+              "alpha": 0.722,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"357.20\" height=\"168\" viewBox=\"0 0 357.20 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"281.20\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"281.20\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"122.50\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Super</text><rect x=\"196\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"197\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"225.70\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Z</text><text x=\"264.40\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"24.65\" font-weight=\"600\" fill=\"#C4CDDC\" fill-opacity=\"1\">×2</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 4150,
+          "rows": [
+            {
+              "key": "4000",
+              "x": 1447.6,
+              "y": 20.997,
+              "widthPx": 451.4,
+              "heightPx": 168,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"451.40\" height=\"168\" viewBox=\"0 0 451.40 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"375.40\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"375.40\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"122.50\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"196\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"197\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"260.50\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Super</text><rect x=\"334\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"335\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"363.70\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">R</text></svg>"
+            },
+            {
+              "key": "3700",
+              "x": 1482.4,
+              "y": 131.973,
+              "widthPx": 416.6,
+              "heightPx": 168,
+              "alpha": 1,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"416.60\" height=\"168\" viewBox=\"0 0 416.60 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"340.60\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"340.60\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"94.20\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"92.20\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"105.10\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Alt</text><rect x=\"161.20\" y=\"53\" width=\"129\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"162.20\" y=\"54\" width=\"127\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"225.70\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Shift</text><rect x=\"299.20\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"300.20\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"328.90\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Q</text></svg>"
+            },
+            {
+              "key": "3400",
+              "x": 1603,
+              "y": 242.973,
+              "widthPx": 296,
+              "heightPx": 168,
+              "alpha": 0.167,
+              "scale": 1,
+              "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"296\" height=\"168\" viewBox=\"0 0 296 168\"><defs><linearGradient id=\"cg\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#232936\" stop-opacity=\"1\"/><stop offset=\"1\" stop-color=\"#181D29\" stop-opacity=\"1\"/></linearGradient><filter id=\"ds\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feGaussianBlur stdDeviation=\"19\"/></filter></defs><rect x=\"38\" y=\"43\" width=\"220\" height=\"92\" rx=\"25\" fill=\"#000000\" opacity=\"0.55\" filter=\"url(#ds)\"/><rect x=\"38\" y=\"38\" width=\"220\" height=\"92\" rx=\"25\" fill=\"#05070B\" fill-opacity=\"0.94\" stroke=\"#FFFFFF\" stroke-opacity=\"0\"/><rect x=\"58\" y=\"53\" width=\"111.60\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"59\" y=\"54\" width=\"109.60\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"113.80\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">Ctrl</text><rect x=\"178.60\" y=\"53\" width=\"59.40\" height=\"62\" rx=\"16\" fill=\"url(#cg)\" stroke=\"#FFFFFF\" stroke-opacity=\"0.06\"/><rect x=\"179.60\" y=\"54\" width=\"57.40\" height=\"11.16\" rx=\"8\" fill=\"#FFFFFF\" opacity=\"0.10\"/><text x=\"208.30\" y=\"94.15\" font-family=\"JetBrains Mono, monospace\" font-size=\"29\" font-weight=\"600\" fill=\"#FFFFFF\" fill-opacity=\"1\" text-anchor=\"middle\">P</text></svg>"
+            }
+          ]
+        },
+        {
+          "sourceMs": 8000,
+          "rows": []
+        }
+      ]
+    }
+  ]
+}

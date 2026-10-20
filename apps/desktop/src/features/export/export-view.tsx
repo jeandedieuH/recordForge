@@ -72,7 +72,7 @@ interface ExportViewProps {
   onBrandWatermarkChange?: (watermark: BrandWatermark) => void
   onBrandCardsChange?: (cards: BrandCards) => void
   onWebcamBackgroundChange?: (background: WebcamBackground) => void
-  onKeystrokeOverlayChange?: (enabled: boolean) => void
+  onKeystrokeOverlayChange?: (patch: { enabled: boolean }) => void
   onReframeModeChange?: (mode: ReframeMode) => void
   // Batch-export format selection; empty = current canvas only.
   formats?: CanvasAspectRatio[]
@@ -1182,14 +1182,15 @@ export function ExportView({
                       openUpgradeDialog(["keystroke-overlay"])
                       return
                     }
-                    onKeystrokeOverlayChange?.(enabled)
+                    onKeystrokeOverlayChange?.({ enabled })
                   }}
                 />
               </div>
               {exportSettings.keystrokeOverlay.enabled ? (
                 <p className="border-t border-border px-5 py-3 text-xs text-subtle-foreground">
-                  Modifier combos recorded during capture (Ctrl+C, Alt+Tab…) appear as bottom-center
-                  badges. Plain typing is never recorded or shown.
+                  Modifier combos recorded during capture (Ctrl+C, Alt+Tab…) appear as keycap badges
+                  — position, size, stack, and theme are configured under Keys in the editor. Plain
+                  typing is never recorded or shown.
                 </p>
               ) : null}
             </div>

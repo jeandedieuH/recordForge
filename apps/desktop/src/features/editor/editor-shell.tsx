@@ -164,7 +164,7 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
         <TaskRail
           activeTask={activeTask}
           onSelect={handleSelectTask}
-          hiddenTasks={isCamera ? ["cursor"] : undefined}
+          hiddenTasks={isCamera ? ["cursor", "keys"] : undefined}
           onToggleInspector={() => setMobileInspectorOpen(true)}
           showInspectorToggle={isNarrow}
         />

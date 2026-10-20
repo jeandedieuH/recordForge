@@ -1,0 +1,78 @@
+{
+  "viewBox": "0 0 24 24",
+  "strokeWidth": 2,
+  "strokeLinecap": "round",
+  "strokeLinejoin": "round",
+  "glyphs": {
+    "mod-ctrl": {
+      "fill": "none",
+      "paths": ["M6 15l6-6 6 6"]
+    },
+    "mod-alt": {
+      "fill": "none",
+      "paths": ["M3 19h6l9-14h3", "M3 5h7"]
+    },
+    "mod-shift": {
+      "fill": "none",
+      "paths": ["M12 19V6", "M6 11l6-6 6 6"]
+    },
+    "mod-meta-cmd": {
+      "fill": "none",
+      "paths": [
+        "M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"
+      ]
+    },
+    "mod-meta-win": {
+      "fill": "fill",
+      "paths": ["M4 5h7v6H4z", "M13 5h7v6h-7z", "M4 13h7v6H4z", "M13 13h7v6h-7z"]
+    },
+    "mod-meta-super": {
+      "fill": "none",
+      "paths": ["M12 3l8 9-8 9-8-9z"]
+    },
+    "enter": {
+      "fill": "none",
+      "paths": ["M9 10l-5 5 5 5", "M20 4v7a4 4 0 0 1-4 4H4"]
+    },
+    "tab": {
+      "fill": "none",
+      "paths": ["M3 12h14", "M13 8l4 4-4 4", "M20 6v12"]
+    },
+    "backspace": {
+      "fill": "none",
+      "paths": [
+        "M20 5H9l-7 7 7 7h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z",
+        "M18 9l-6 6",
+        "M12 9l6 6"
+      ]
+    },
+    "delete": {
+      "fill": "none",
+      "paths": [
+        "M4 5h11l7 7-7 7H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
+        "M10 9l6 6",
+        "M16 9l-6 6"
+      ]
+    },
+    "space": {
+      "fill": "none",
+      "paths": ["M4 9v6h16V9"]
+    },
+    "arrow-left": {
+      "fill": "none",
+      "paths": ["M19 12H5", "M11 6l-6 6 6 6"]
+    },
+    "arrow-right": {
+      "fill": "none",
+      "paths": ["M5 12h14", "M13 6l6 6-6 6"]
+    },
+    "arrow-up": {
+      "fill": "none",
+      "paths": ["M12 19V5", "M6 11l6-6 6 6"]
+    },
+    "arrow-down": {
+      "fill": "none",
+      "paths": ["M12 5v14", "M18 13l-6 6-6-6"]
+    }
+  }
+}

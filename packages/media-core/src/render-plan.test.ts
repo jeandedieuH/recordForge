@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   annotationClipSchema,
   defaultCursorSettings,
+  defaultKeystrokeOverlaySettings,
   exportTimelineOptionsSchema,
   imageClipSchema,
   renderPlanSchema,
@@ -1677,7 +1678,7 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,
@@ -1789,7 +1790,7 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,
@@ -1838,7 +1839,7 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,
@@ -1939,7 +1940,7 @@ describe("render-plan", () => {
           textColor: "#f8fafc",
           fontPath: null,
         },
-        keystrokeOverlay: { enabled: false },
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
         reframeMode: "fit",
         webcamBackground: {
           enabled: false,

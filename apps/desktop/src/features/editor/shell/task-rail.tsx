@@ -3,6 +3,7 @@ import {
   Captions,
   EyeOff,
   FileOutput,
+  Keyboard,
   LayoutTemplate,
   Library,
   MousePointer2,
@@ -20,6 +21,7 @@ export type EditorTask =
   | "annotations"
   | "focus"
   | "cursor"
+  | "keys"
   | "captions"
   | "layout"
   | "audio"
@@ -38,6 +40,7 @@ export const EDITOR_TASKS: TaskDefinition[] = [
   { value: "annotations", label: "Shapes", icon: Shapes },
   { value: "focus", label: "Focus", icon: ZoomIn },
   { value: "cursor", label: "Cursor", icon: MousePointer2 },
+  { value: "keys", label: "Keys", icon: Keyboard },
   { value: "captions", label: "Captions", icon: Captions },
   { value: "layout", label: "Layout", icon: LayoutTemplate },
   { value: "audio", label: "Audio", icon: Volume2 },

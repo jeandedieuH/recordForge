@@ -1644,6 +1644,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         }
     }
 

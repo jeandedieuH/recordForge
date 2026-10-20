@@ -1,12 +1,18 @@
 //! Keystroke overlay capture — records modifier-combination key presses during
-//! a recording so the export can draw "Ctrl+S" style badges (Pro).
+//! a recording so the editor preview and export can draw "Ctrl+S" style keycap
+//! badges (Pro).
 //!
 //! Privacy by design:
-//! - Only key presses with at least one held modifier (Ctrl/Alt/Shift/Win)
+//! - Only key presses with at least one held modifier (Ctrl/Alt/Shift/Win/Cmd)
 //!   are recorded; plain typing (passwords, text) never produces events.
-//! - The event log contains key *names*, never focus target or window titles.
+//! - The event log contains key *names* and modifier flags, never focus
+//!   targets or window titles.
 //! - The file lives only inside the session's work dir — it is never uploaded.
 //! - Opt-in via `RecordingConfig.capture_keystrokes`.
+//!
+//! Event format v2: `{tMs, key, modifiers[], platform}` — structured enough
+//! for the shared display model to render platform-aware keycap glyphs.
+//! Version 1 files (`{tMs, label}`) still load via the fallback parser.
 //!
 //! Platform support: Windows (GetAsyncKeyState polling) and macOS
 //! (CGEventTap on a dedicated run loop — needs Accessibility trust, else the
@@ -20,18 +26,114 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+/// Normalized modifier identity — `Meta` is Cmd on macOS, Win on Windows,
+/// Super on Linux. The display layer picks the platform-appropriate glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeystrokeModifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Meta,
+}
+
 /// A recorded modifier-combo press, timestamped on the video timeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeystrokeEvent {
     pub t_ms: u64,
-    pub label: String,
+    pub key: String,
+    pub modifiers: Vec<KeystrokeModifier>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct KeystrokeFile {
-    version: u32,
-    events: Vec<KeystrokeEvent>,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeystrokeFile {
+    pub version: u32,
+    pub platform: String,
+    pub events: Vec<KeystrokeEvent>,
+}
+
+/// V1 event shape (`{tMs, label: "Ctrl+Shift+S"}`) accepted on load.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawKeystrokeEvent {
+    V2 {
+        #[serde(rename = "tMs")]
+        t_ms: u64,
+        key: String,
+        modifiers: Vec<KeystrokeModifier>,
+    },
+    V1 {
+        #[serde(rename = "tMs")]
+        t_ms: u64,
+        label: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawKeystrokeFile {
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    events: Vec<RawKeystrokeEvent>,
+}
+
+pub fn platform_name() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    }
+}
+
+/// Normalize a v1 `label` ("Ctrl+Shift+S") into the structured shape — the
+/// last `+`-separated token is the key, the rest are modifiers.
+fn normalize_v1_label(t_ms: u64, label: &str) -> Option<KeystrokeEvent> {
+    let tokens: Vec<&str> = label.split('+').filter(|token| !token.is_empty()).collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    let mut modifiers = Vec::with_capacity(4);
+    for token in &tokens[..tokens.len() - 1] {
+        let modifier = match token.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => KeystrokeModifier::Ctrl,
+            "alt" | "option" => KeystrokeModifier::Alt,
+            "shift" => KeystrokeModifier::Shift,
+            "win" | "cmd" | "command" | "meta" | "super" => KeystrokeModifier::Meta,
+            _ => continue,
+        };
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
+        }
+    }
+    if modifiers.is_empty() {
+        return None;
+    }
+    Some(KeystrokeEvent {
+        t_ms,
+        key: tokens[tokens.len() - 1].to_string(),
+        modifiers,
+    })
+}
+
+/// Canonical modifier ordering for display/serialization (Ctrl, Alt, Shift,
+/// Meta — matches the shared display model in `packages/editor-core`).
+pub(crate) fn ordered_modifiers(mut modifiers: Vec<KeystrokeModifier>) -> Vec<KeystrokeModifier> {
+    const ORDER: [KeystrokeModifier; 4] = [
+        KeystrokeModifier::Ctrl,
+        KeystrokeModifier::Alt,
+        KeystrokeModifier::Shift,
+        KeystrokeModifier::Meta,
+    ];
+    modifiers.sort_by_key(|m| ORDER.iter().position(|o| o == m).unwrap_or(ORDER.len()));
+    modifiers.dedup();
+    modifiers
 }
 
 /// Running sampler. `stop()` joins the thread and writes `keystrokes.json`
@@ -67,7 +169,11 @@ impl KeystrokeSampler {
         if events.is_empty() {
             return;
         }
-        let file = KeystrokeFile { version: 1, events };
+        let file = KeystrokeFile {
+            version: 2,
+            platform: platform_name().to_string(),
+            events,
+        };
         match serde_json::to_string_pretty(&file) {
             Ok(json) => {
                 let path = self.work_dir.join(KEYSTROKES_FILE_NAME);
@@ -82,15 +188,34 @@ impl KeystrokeSampler {
 
 pub const KEYSTROKES_FILE_NAME: &str = "keystrokes.json";
 
-/// Read the session's keystroke events, if any were captured.
-pub fn load_events(work_dir: &Path) -> Vec<KeystrokeEvent> {
+/// Read the session's keystroke event file (v1 or v2), normalized into v2
+/// events. Missing/unparseable files return `None` — absence is normal when
+/// capture was disabled.
+pub fn load_events(work_dir: &Path) -> Option<KeystrokeFile> {
     let path = work_dir.join(KEYSTROKES_FILE_NAME);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<KeystrokeFile>(&text)
-        .map(|file| file.events)
-        .unwrap_or_default()
+    let text = std::fs::read_to_string(&path).ok()?;
+    let raw = serde_json::from_str::<RawKeystrokeFile>(&text).ok()?;
+    let events = raw
+        .events
+        .into_iter()
+        .filter_map(|event| match event {
+            RawKeystrokeEvent::V2 {
+                t_ms,
+                key,
+                modifiers,
+            } => Some(KeystrokeEvent {
+                t_ms,
+                key,
+                modifiers: ordered_modifiers(modifiers),
+            }),
+            RawKeystrokeEvent::V1 { t_ms, label } => normalize_v1_label(t_ms, &label),
+        })
+        .collect();
+    Some(KeystrokeFile {
+        version: 2,
+        platform: raw.platform.unwrap_or_else(|| "unknown".to_string()),
+        events,
+    })
 }
 
 // ---- Platform implementations ------------------------------------------------
@@ -183,7 +308,10 @@ fn poll_keys(origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeystrokeEvent> {
     const VK_LWIN: i32 = 0x5B;
     const VK_RWIN: i32 = 0x5C;
 
-    let is_down = |vk: i32| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
+    // High bit = currently held; low bit = pressed since the previous call —
+    // the low bit catches taps shorter than the 25 ms poll interval.
+    let key_state = |vk: i32| unsafe { GetAsyncKeyState(vk) as u16 };
+    let is_down = |vk: i32| (key_state(vk) & 0x8000) != 0;
 
     let mut events = Vec::new();
     let mut previous: Vec<bool> = vec![false; KEYS.len()];
@@ -197,30 +325,31 @@ fn poll_keys(origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeystrokeEvent> {
 
         let t_ms = origin.elapsed().as_millis().min(u64::MAX as u128) as u64;
         for (index, (vk, name)) in KEYS.iter().enumerate() {
-            let down = any_modifier && is_down(*vk);
+            let state = key_state(*vk);
+            let down_now = any_modifier && (state & 0x8001) != 0;
             // Edge-triggered: only the up→down transition records an event,
             // which naturally debounces auto-repeat.
-            if down && !previous[index] {
-                let mut parts = Vec::with_capacity(5);
+            if down_now && !previous[index] {
+                let mut modifiers = Vec::with_capacity(4);
                 if ctrl {
-                    parts.push("Ctrl");
+                    modifiers.push(KeystrokeModifier::Ctrl);
                 }
                 if alt {
-                    parts.push("Alt");
+                    modifiers.push(KeystrokeModifier::Alt);
                 }
                 if shift {
-                    parts.push("Shift");
+                    modifiers.push(KeystrokeModifier::Shift);
                 }
                 if win {
-                    parts.push("Win");
+                    modifiers.push(KeystrokeModifier::Meta);
                 }
-                parts.push(name);
                 events.push(KeystrokeEvent {
                     t_ms,
-                    label: parts.join("+"),
+                    key: (*name).to_string(),
+                    modifiers,
                 });
             }
-            previous[index] = down;
+            previous[index] = down_now;
         }
         std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
     }
@@ -233,7 +362,11 @@ fn poll_keys(origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeystrokeEvent> {
     // immediately with no events (logged inside `run_key_tap`).
     super::macos_native::run_key_tap(origin, stop)
         .into_iter()
-        .map(|(t_ms, label)| KeystrokeEvent { t_ms, label })
+        .map(|press| KeystrokeEvent {
+            t_ms: press.t_ms,
+            key: press.key.to_string(),
+            modifiers: press.modifiers,
+        })
         .collect()
 }
 
@@ -252,19 +385,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_events_returns_empty_when_missing() {
-        assert!(load_events(Path::new("does-not-exist")).is_empty());
+    fn load_events_returns_none_when_missing() {
+        assert!(load_events(Path::new("does-not-exist")).is_none());
     }
 
     #[test]
-    fn load_events_reads_written_file() {
+    fn load_events_reads_v2_file() {
         let dir = std::env::temp_dir().join(format!("rf-keys-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = KeystrokeFile {
-            version: 1,
+            version: 2,
+            platform: "windows".into(),
             events: vec![KeystrokeEvent {
                 t_ms: 1500,
-                label: "Ctrl+C".into(),
+                key: "C".into(),
+                modifiers: vec![KeystrokeModifier::Ctrl],
             }],
         };
         std::fs::write(
@@ -272,10 +407,49 @@ mod tests {
             serde_json::to_string(&file).unwrap(),
         )
         .unwrap();
-        let events = load_events(&dir);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].t_ms, 1500);
-        assert_eq!(events[0].label, "Ctrl+C");
+        let loaded = load_events(&dir).unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.platform, "windows");
+        assert_eq!(loaded.events.len(), 1);
+        assert_eq!(loaded.events[0].key, "C");
+        assert_eq!(loaded.events[0].modifiers, vec![KeystrokeModifier::Ctrl]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_events_normalizes_v1_labels() {
+        let dir = std::env::temp_dir().join(format!("rf-keys-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(KEYSTROKES_FILE_NAME),
+            r#"{"version":1,"events":[{"tMs":1500,"label":"Ctrl+Shift+S"},{"tMs":2000,"label":"Cmd+Q"},{"tMs":3000,"label":"S"}]}"#,
+        )
+        .unwrap();
+        let loaded = load_events(&dir).unwrap();
+        assert_eq!(loaded.events.len(), 2);
+        assert_eq!(loaded.events[0].key, "S");
+        assert_eq!(
+            loaded.events[0].modifiers,
+            vec![KeystrokeModifier::Ctrl, KeystrokeModifier::Shift]
+        );
+        assert_eq!(loaded.events[1].key, "Q");
+        assert_eq!(loaded.events[1].modifiers, vec![KeystrokeModifier::Meta]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ordered_modifiers_canonicalizes() {
+        assert_eq!(
+            ordered_modifiers(vec![
+                KeystrokeModifier::Meta,
+                KeystrokeModifier::Shift,
+                KeystrokeModifier::Ctrl,
+            ]),
+            vec![
+                KeystrokeModifier::Ctrl,
+                KeystrokeModifier::Shift,
+                KeystrokeModifier::Meta
+            ]
+        );
     }
 }

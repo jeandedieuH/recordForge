@@ -1,11 +1,16 @@
 import type { AudioClip, TimelineTrack } from "@recordforge/contracts"
 import { createUpdateClipAudioCommand, createUpdateTrackCommand } from "@recordforge/editor-core"
 import { Volume2 } from "lucide-react"
-import { NumberInputField, Skeleton, Slider, Switch } from "@recordforge/ui"
+import { NumberInputField, ScrollArea, Skeleton, Slider, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { SmartCutCard } from "./smart-cut-card"
+import type { WaveformResources } from "../media/derivative-resources"
+import { SmartCutCard } from "./smart-cut/smart-cut-card"
 
-export function AudioPanel() {
+interface AudioPanelProps {
+  waveformResources: WaveformResources
+}
+
+export function AudioPanel({ waveformResources }: AudioPanelProps) {
   const timeline = useTimelineStore((state) => state.engine?.history.present)
   const isLoading = useTimelineStore((state) => state.isLoading)
 
@@ -76,7 +81,7 @@ export function AudioPanel() {
       </div>
 
       <div className="border-t border-border pt-3">
-        <SmartCutCard />
+        <SmartCutCard waveformResources={waveformResources} />
       </div>
     </div>
   )
@@ -134,54 +139,62 @@ function AudioClipsList() {
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      {clips.map((clip) => (
-        <div
-          key={clip.id}
-          className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2 text-[11px]"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate font-medium text-foreground">
-              {formatAudioTime(clip.startMs)} → {formatAudioTime(clip.startMs + clip.durationMs)}
-            </span>
-            <span className="shrink-0 text-subtle-foreground">
-              {Math.round((clip.volume ?? 1) * 100)}%
-            </span>
-          </div>
-          <Slider
-            variant="emerald"
-            value={[clip.volume ?? 1]}
-            min={0}
-            max={2}
-            step={0.01}
-            aria-label="Clip volume"
-            onValueChange={([value]) =>
-              execute(createUpdateClipAudioCommand(clip.id, { volume: value ?? 1 }))
-            }
-          />
-          <div className="grid grid-cols-2 gap-2">
-            <NumberInputField
-              size="sm"
-              label="Fade in"
-              unit="ms"
+    // Cap the height so many clips scroll inside the list instead of pushing
+    // the Smart Cut section below out of the panel.
+    <ScrollArea className="max-h-64 w-full border border-border p-2 rounded-2xl">
+      <div className="flex flex-col gap-2 pr-1">
+        {clips.map((clip) => (
+          <div
+            key={clip.id}
+            className="flex flex-col gap-2 rounded-md border border-border bg-surface-dim p-2 text-[11px]"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate font-medium text-foreground">
+                {formatAudioTime(clip.startMs)} → {formatAudioTime(clip.startMs + clip.durationMs)}
+              </span>
+              <span className="shrink-0 text-subtle-foreground">
+                {Math.round((clip.volume ?? 1) * 100)}%
+              </span>
+            </div>
+            <Slider
+              variant="emerald"
+              value={[clip.volume ?? 1]}
               min={0}
-              step={50}
-              value={clip.fadeInMs}
-              onChange={(val) => execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))}
+              max={2}
+              step={0.01}
+              aria-label="Clip volume"
+              onValueChange={([value]) =>
+                execute(createUpdateClipAudioCommand(clip.id, { volume: value ?? 1 }))
+              }
             />
-            <NumberInputField
-              size="sm"
-              label="Fade out"
-              unit="ms"
-              min={0}
-              step={50}
-              value={clip.fadeOutMs}
-              onChange={(val) => execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))}
-            />
+            <div className="grid grid-cols-2 gap-2">
+              <NumberInputField
+                size="sm"
+                label="Fade in"
+                unit="ms"
+                min={0}
+                step={50}
+                value={clip.fadeInMs}
+                onChange={(val) =>
+                  execute(createUpdateClipAudioCommand(clip.id, { fadeInMs: val }))
+                }
+              />
+              <NumberInputField
+                size="sm"
+                label="Fade out"
+                unit="ms"
+                min={0}
+                step={50}
+                value={clip.fadeOutMs}
+                onChange={(val) =>
+                  execute(createUpdateClipAudioCommand(clip.id, { fadeOutMs: val }))
+                }
+              />
+            </div>
           </div>
-        </div>
-      ))}
-    </div>
+        ))}
+      </div>
+    </ScrollArea>
   )
 }
 

@@ -8,11 +8,13 @@ import {
 import { zoomTargetForCursorPoint } from "@recordforge/cursor-core"
 import {
   createAddZoomSegmentCommand,
+  createDeleteZoomSegmentsCommand,
   createEngine,
   createUpdateZoomSegmentCommand,
   executeCommand,
   getManualZoomSegments,
   resolveZoomTransform,
+  undoCommand,
   zoomEasedProgress,
   zoomTransformToCss,
 } from "./index"
@@ -403,6 +405,89 @@ describe("Modern Zoom System", () => {
       expect(getManualZoomSegments(result.value.history.present)).toEqual([
         expect.objectContaining({ id: "auto-zoom", enabled: false, source: "click" }),
       ])
+    })
+
+    it("deletes all listed zoom segments in a single undoable step", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "zoom-a",
+          startMs: 0,
+          durationMs: 1_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "auto",
+          source: "click",
+          preset: "product-demo",
+        },
+        {
+          id: "zoom-b",
+          startMs: 2_000,
+          durationMs: 1_000,
+          target: { x: 400, y: 200, width: 960, height: 540 },
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: false,
+          mode: "manual",
+          source: "manual",
+          preset: "manual-only",
+        },
+      ]
+
+      const result = executeCommand(
+        createEngine(initial),
+        createDeleteZoomSegmentsCommand(["zoom-a", "zoom-b"]),
+      )
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(getManualZoomSegments(result.value.history.present)).toHaveLength(0)
+
+      // One command → one undo step restores every segment.
+      const undone = undoCommand(result.value)
+      expect(undone.ok).toBe(true)
+      if (!undone.ok) return
+      expect(getManualZoomSegments(undone.value.history.present)).toHaveLength(2)
+    })
+
+    it("refuses to bulk-delete when any listed segment is locked or missing", () => {
+      const initial = makeState()
+      initial.zoomSegments = [
+        {
+          id: "zoom-locked",
+          startMs: 0,
+          durationMs: 1_000,
+          target: { x: 200, y: 100, width: 960, height: 540 },
+          scale: 2,
+          easing: "smooth",
+          enabled: true,
+          locked: true,
+          mode: "auto",
+          source: "click",
+          preset: "product-demo",
+        },
+      ]
+
+      const locked = executeCommand(
+        createEngine(initial),
+        createDeleteZoomSegmentsCommand(["zoom-locked"]),
+      )
+      expect(locked.ok).toBe(false)
+      if (!locked.ok) expect(locked.error.code).toBe("zoom_segment_locked")
+
+      const missing = executeCommand(
+        createEngine(initial),
+        createDeleteZoomSegmentsCommand(["zoom-locked", "nope"]),
+      )
+      expect(missing.ok).toBe(false)
+      if (!missing.ok) expect(missing.error.code).toBe("zoom_segment_not_found")
+
+      // Failed preconditions must leave state untouched.
+      expect(getManualZoomSegments(initial)).toHaveLength(1)
     })
   })
 

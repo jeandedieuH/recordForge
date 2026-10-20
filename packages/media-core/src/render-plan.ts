@@ -1133,8 +1133,9 @@ export function freeExportSettings(settings: ProjectExportSettings): ProjectExpo
     // Brand Kit is Pro — no watermark or intro/outro cards on Free exports.
     brandWatermark: { ...settings.brandWatermark, enabled: false },
     brandCards: { ...settings.brandCards, enabled: false },
-    // Keystroke overlay is Pro — badges never render on Free exports.
-    keystrokeOverlay: { enabled: false },
+    // Keystroke overlay is Pro — badges never render on Free exports, but
+    // the user's style choices survive for when they upgrade.
+    keystrokeOverlay: { ...settings.keystrokeOverlay, enabled: false },
     // Auto-reframe is Pro — Free exports letterbox as before.
     reframeMode: "fit",
     // Virtual background is Pro — camera feeds composite untouched.

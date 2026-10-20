@@ -86,6 +86,7 @@ import type {
 } from "../media/derivative-resources"
 import { AudioTrackPreview } from "./audio-track-preview"
 import { CaptionPreview } from "./caption-preview"
+import { KeystrokePreview } from "../keystrokes/keystroke-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
 import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
@@ -327,6 +328,7 @@ export function TimelineView({
   const metadata = useTimelineStore((state) => state.metadata)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
   const cursorEngine = useTimelineStore((state) => state.cursorEngine)
+  const keystrokeData = useTimelineStore((state) => state.keystrokeData)
   const activeJob = useTimelineStore((state) => state.activeJob)
   const cursorClickSourceTimesMs = useMemo(() => {
     if (!cursorTelemetry) return []
@@ -2272,6 +2274,19 @@ export function TimelineView({
               ) : null}
 
               <CaptionPreview timeline={timeline} playheadMs={view.playheadMs} />
+
+              {/* Keystroke badges — the shared display model renders the same
+                  row SVG the export rasterizes, mapped through the screen
+                  track so edits stay aligned. z-45: above captions, below
+                  overlay-selection chrome. */}
+              {project ? (
+                <KeystrokePreview
+                  timeline={timeline}
+                  playheadMs={view.playheadMs}
+                  settings={project.exportSettings.keystrokeOverlay}
+                  data={keystrokeData}
+                />
+              ) : null}
 
               {mediaUrl &&
               !mediaError &&

@@ -12,6 +12,9 @@ import {
   type ReframeMode,
   type MediaJob,
   type CursorTelemetryFile,
+  type KeystrokeEvent,
+  type KeystrokePlatform,
+  type KeystrokeOverlaySettings,
   type MediaMetadata,
   type recordForgeProject,
   type TimelineViewState,
@@ -50,6 +53,7 @@ import {
 } from "../lib/assets"
 import { createProject, loadProject, saveProject, snapshotProject } from "../lib/project"
 import { getCursorTelemetry } from "../lib/cursor"
+import { getKeystrokeEvents } from "../lib/keystrokes"
 import { getRecordingSmartZoom } from "../lib/recorder"
 import {
   createCursorEngine,
@@ -72,6 +76,7 @@ import { exportTimeline, retryExport as retryExportRequest, revealExport } from 
 import { useLicenseStore } from "./license-store"
 import { notifyExportFinished } from "../lib/export-notifications"
 import { useEditorStore } from "./editor-store"
+import { useSmartCutStore } from "./smart-cut-store"
 
 interface TimelineStore {
   engine: CommandEngine | null
@@ -82,6 +87,10 @@ interface TimelineStore {
   cursorTelemetry: CursorTelemetryFile | null
   cursorEngine: CursorEngine | null
   cursorTelemetryStatus: "loading" | "available" | "unavailable"
+  // Recorded modifier-combo events (v2 normalized) + the capturing platform —
+  // drives the editor keystroke preview and the Keys panel status.
+  keystrokeData: { platform: KeystrokePlatform; events: KeystrokeEvent[] } | null
+  keystrokeStatus: "loading" | "available" | "unavailable"
   activeJob: MediaJob | null
   isLoading: boolean
   error: string | null
@@ -145,7 +154,7 @@ interface TimelineStore {
   setBrandWatermark: (watermark: BrandWatermark) => void
   setBrandCards: (cards: BrandCards) => void
   setWebcamBackground: (background: WebcamBackground) => void
-  setKeystrokeOverlay: (enabled: boolean) => void
+  setKeystrokeOverlay: (patch: Partial<KeystrokeOverlaySettings>) => void
   setReframeMode: (mode: ReframeMode) => void
   // Multi-format batch export (Pro): canvas aspects selected in the export
   // view are persisted in project.exportSettings.formats; empty means
@@ -347,6 +356,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   cursorTelemetry: null,
   cursorEngine: null,
   cursorTelemetryStatus: "unavailable",
+  keystrokeData: null,
+  keystrokeStatus: "unavailable",
   activeJob: null,
   isLoading: false,
   error: null,
@@ -379,6 +390,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       cursorTelemetry: null,
       cursorEngine: null,
       cursorTelemetryStatus: "loading",
+      keystrokeData: null,
+      keystrokeStatus: "loading",
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
@@ -404,6 +417,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         metadata,
         jobs,
         initialCursorTelemetry,
+        initialKeystrokeData,
         defaultCursorRaw,
         recordingSmartZoom,
         recordingPreferencesRaw,
@@ -411,6 +425,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         getMediaMetadata(recordingId),
         listMediaJobs(recordingId),
         isTauri() ? getCursorTelemetry(recordingId).catch(() => null) : Promise.resolve(null),
+        isTauri() ? getKeystrokeEvents(recordingId).catch(() => null) : Promise.resolve(null),
         isTauri() ? getSetting("defaultCursorSettings").catch(() => null) : Promise.resolve(null),
         isTauri() ? getRecordingSmartZoom(recordingId).catch(() => null) : Promise.resolve(null),
         getSetting("recordingPreferences").catch(() => null),
@@ -547,6 +562,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         cursorTelemetry: initialCursorTelemetry,
         cursorEngine,
         cursorTelemetryStatus: initialCursorTelemetry ? "available" : "unavailable",
+        keystrokeData: initialKeystrokeData,
+        keystrokeStatus:
+          initialKeystrokeData && initialKeystrokeData.events.length > 0
+            ? "available"
+            : "unavailable",
         activeJob,
         activeExportJob: null,
         missingAssets,
@@ -1125,12 +1145,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
-  setKeystrokeOverlay: (enabled) => {
+  setKeystrokeOverlay: (patch) => {
     const project = get().project
     if (!project) return
     const nextProject = {
       ...project,
-      exportSettings: { ...project.exportSettings, keystrokeOverlay: { enabled } },
+      exportSettings: {
+        ...project.exportSettings,
+        keystrokeOverlay: { ...project.exportSettings.keystrokeOverlay, ...patch },
+      },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)
@@ -1587,6 +1610,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       cursorTelemetry: null,
       cursorEngine: null,
       cursorTelemetryStatus: "unavailable",
+      keystrokeData: null,
+      keystrokeStatus: "unavailable",
       activeJob: null,
       activeExportJob: null,
       missingAssets: [],
@@ -1604,6 +1629,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       snapshotPending: false,
     })
     useEditorStore.getState().close()
+    // Drop any in-flight Smart Cut review — its ranges belong to this timeline.
+    useSmartCutStore.getState().clearReview()
   },
 
   clearError: () => {

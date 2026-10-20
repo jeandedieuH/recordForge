@@ -1355,7 +1355,7 @@ pub(crate) fn frame_time_ms(frame_index: u64, fps: u32) -> f64 {
 /// Map an output presentation timestamp to the source timestamp for the active
 /// segment. The result remains fractional so the cursor engine can interpolate
 /// at the same PTS that FFmpeg assigns to the overlay frame.
-fn source_time_for_output(segments: &[RenderSegment], output_ms: f64) -> Option<f64> {
+pub(crate) fn source_time_for_output(segments: &[RenderSegment], output_ms: f64) -> Option<f64> {
     if !output_ms.is_finite() || output_ms < 0.0 {
         return None;
     }
@@ -2835,6 +2835,7 @@ mod tests {
         let plan = crate::exports::RenderPlan {
             zoom_segments: vec![zoom.clone()],
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
             ..tests_plan()
         };
         // canvas = output frame dims; zoompan input = the 256x144 source.
@@ -2977,6 +2978,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         }
     }
 }

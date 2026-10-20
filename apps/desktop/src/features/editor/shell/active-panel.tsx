@@ -3,6 +3,7 @@ import {
   Captions,
   EyeOff,
   FileOutput,
+  Keyboard,
   Library,
   LayoutTemplate,
   MousePointer2,
@@ -21,6 +22,7 @@ import { EmptyState } from "@recordforge/ui"
 import { isCameraRecording } from "../../../lib/library"
 import { FocusPanel } from "../panels/focus-panel"
 import { CursorPanel } from "../panels/cursor-panel"
+import { KeysPanel } from "../panels/keys-panel"
 import { CaptionsPanel } from "../panels/captions-panel"
 import { LayoutPanel } from "../panels/layout-panel"
 import { AudioPanel } from "../panels/audio-panel"
@@ -39,6 +41,7 @@ export const TASK_ICONS: Record<EditorTask, LucideIcon> = {
   annotations: Shapes,
   focus: ZoomIn,
   cursor: MousePointer2,
+  keys: Keyboard,
   captions: Captions,
   layout: LayoutTemplate,
   audio: Volume2,
@@ -113,12 +116,14 @@ export function ActivePanel({
           )
         }
         return <CursorPanel />
+      case "keys":
+        return <KeysPanel />
       case "captions":
         return <CaptionsPanel />
       case "layout":
         return <LayoutPanel />
       case "audio":
-        return <AudioPanel />
+        return <AudioPanel waveformResources={waveformResources} />
       case "privacy":
         return <PrivacyPanel />
       case "export":

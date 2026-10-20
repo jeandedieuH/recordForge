@@ -82,6 +82,7 @@ import type {
   DeleteRangeCommand,
   DeleteTrackCommand,
   DeleteZoomSegmentCommand,
+  DeleteZoomSegmentsCommand,
   DuplicateClipCommand,
   DuplicateClipsCommand,
   GroupClipsCommand,
@@ -880,6 +881,16 @@ export function canApplyCommand(state: TimelineState, command: CommandRecord): C
       }
       return { ok: true, value: undefined }
     }
+    case "delete-zoom-segments": {
+      const segments = command.segmentIds.map((id) => findZoomSegment(state, id))
+      if (segments.some((segment) => !segment)) {
+        return { ok: false, error: editorError("zoom_segment_not_found", "Zoom segment not found") }
+      }
+      if (segments.some((segment) => segment?.locked)) {
+        return { ok: false, error: editorError("zoom_segment_locked", "Zoom segment is locked") }
+      }
+      return { ok: true, value: undefined }
+    }
     case "update-canvas":
       return { ok: true, value: undefined }
     case "update-smart-zoom-settings":
@@ -1032,6 +1043,8 @@ export function applyCommand(
       return applyResizeZoomSegment(state, command)
     case "delete-zoom-segment":
       return applyDeleteZoomSegment(state, command)
+    case "delete-zoom-segments":
+      return applyDeleteZoomSegments(state, command)
     case "regenerate-zoom-suggestions":
       return applyRegenerateZoomSuggestions(state, command)
     case "trim-timeline-ends":
@@ -3770,6 +3783,21 @@ function applyDeleteZoomSegment(
   }
 }
 
+function applyDeleteZoomSegments(
+  state: TimelineState,
+  command: DeleteZoomSegmentsCommand,
+): CommandResult<TimelineState> {
+  const removed = new Set(command.segmentIds)
+  return {
+    ok: true,
+    value: {
+      ...state,
+      zoomSegments: getManualZoomSegments(state).filter((segment) => !removed.has(segment.id)),
+      updatedAt: now(),
+    },
+  }
+}
+
 function zoomSegmentsOverlap(left: ManualZoomSegment, right: ManualZoomSegment): boolean {
   return (
     left.startMs < right.startMs + right.durationMs &&
@@ -4342,6 +4370,14 @@ export function createDeleteZoomSegmentCommand(segmentId: string): CommandRecord
     kind: "delete-zoom-segment",
     name: "Delete zoom segment",
     segmentId,
+  }
+}
+
+export function createDeleteZoomSegmentsCommand(segmentIds: string[]): CommandRecord {
+  return {
+    kind: "delete-zoom-segments",
+    name: "Delete zoom segments",
+    segmentIds: [...segmentIds],
   }
 }
 

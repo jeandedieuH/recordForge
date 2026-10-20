@@ -350,6 +350,9 @@ pub struct RenderPlan {
     /// dir's keystrokes.json; never sent by the frontend.
     #[serde(default)]
     pub keystrokes: Vec<crate::capture::keystrokes::KeystrokeEvent>,
+    /// Platform the keystrokes were captured on — drives glyph selection.
+    #[serde(default = "default_keystroke_platform_field")]
+    pub keystroke_platform: String,
     /// Auto-reframe (Pro): crops the screen stream to the canvas content
     /// aspect; keyframes pan the crop window along cursor telemetry.
     #[serde(default)]
@@ -642,12 +645,50 @@ pub struct ExportSettings {
     pub webcam_background: Option<background::WebcamBackground>,
 }
 
-/// Keystroke overlay (Pro): modifier-combo badges captured during recording.
+/// Keystroke overlay (Pro): keycap badges for modifier-combo presses captured
+/// during recording. Style fields mirror `keystrokeOverlaySettingsSchema` in
+/// `packages/contracts/src/keystrokes.ts` — the editor preview and this
+/// renderer read the same values (WYSIWYG).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KeystrokeOverlay {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_keystroke_position")]
+    pub position: String,
+    #[serde(default = "default_keystroke_theme")]
+    pub theme: String,
+    #[serde(default = "default_keystroke_scale")]
+    pub scale: f64,
+    #[serde(default = "default_keystroke_max_stack")]
+    pub max_stack: u32,
+    #[serde(default = "default_keystroke_hold_ms")]
+    pub hold_ms: u64,
+    #[serde(default = "default_keystroke_modifier_style")]
+    pub modifier_style: String,
+}
+
+fn default_keystroke_position() -> String {
+    "bottom-center".into()
+}
+fn default_keystroke_theme() -> String {
+    "dark".into()
+}
+fn default_keystroke_scale() -> f64 {
+    1.0
+}
+fn default_keystroke_max_stack() -> u32 {
+    3
+}
+fn default_keystroke_hold_ms() -> u64 {
+    2200
+}
+fn default_keystroke_modifier_style() -> String {
+    "symbols".into()
+}
+
+fn default_keystroke_platform_field() -> String {
+    "unknown".into()
 }
 
 /// Brand Kit (Pro): a logo watermark composited over the final raster. The
@@ -967,7 +1008,12 @@ pub fn run_render_plan(
         .as_ref()
         .is_some_and(|overlay| overlay.enabled)
     {
-        plan.keystrokes = crate::capture::keystrokes::load_events(&work_dir);
+        if let Some(file) = crate::capture::keystrokes::load_events(&work_dir) {
+            plan.keystrokes = file.events;
+            plan.keystroke_platform = file.platform;
+        } else {
+            plan.keystrokes.clear();
+        }
     } else {
         plan.keystrokes.clear();
     }
@@ -2730,7 +2776,16 @@ fn render_composition_window(
     // the camera and privacy-mask passes so titles render above them.
     let mut items_plate_label: Option<String> = None;
     let mut items_enable: Option<String> = None;
-    if !cursor_renderers.is_empty() || has_overlay_items {
+    // Label of the keystroke plate — the topmost composite, applied after the
+    // watermark pass near the end of the graph.
+    let mut keys_plate_label: Option<String> = None;
+    let mut keys_enable: Option<String> = None;
+    let has_keystrokes = settings
+        .keystroke_overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.enabled)
+        && !plan.keystrokes.is_empty();
+    if !cursor_renderers.is_empty() || has_overlay_items || has_keystrokes {
         let plate_input_index = input_specs.len();
         let plate_source = format!("[{plate_input_index}:v]");
         // Shift the generated stream into absolute time so it framesyncs with
@@ -2746,6 +2801,7 @@ fn render_composition_window(
             plan.duration_ms,
             cursor_renderers,
             plan,
+            settings,
             asset_paths,
             cursor_plane_rect,
         )?;
@@ -2761,37 +2817,91 @@ fn render_composition_window(
         let cursor_enable = plate_enable_expr(cursor_windows, plan.duration_ms)
             .map(|expr| format!(":enable='{expr}'"))
             .unwrap_or_default();
-        if prepared.dual_plane {
-            filters.push(format!(
-                "{plate_source}split=2[plate_cursor_src][plate_items_src];\
-                 [plate_cursor_src]crop={}:{}:0:0[cursor_plate];\
-                 [plate_items_src]crop={}:{}:{}:0[items_plate]",
-                canvas.width, canvas.height, canvas.width, canvas.height, canvas.width
-            ));
-            filters.push(format!(
-                "[{current_label}][cursor_plate]overlay=shortest=1:format=yuv420{cursor_enable}[with_cursor]"
-            ));
-            current_label = "with_cursor".to_string();
-            items_plate_label = Some("[items_plate]".to_string());
-        } else if !prepared.renderers.is_empty() {
-            // Cursor-only stream: composite directly below the camera layer.
-            // The plate is the fitted screen rect, not the full canvas, when
-            // `cursor_rect` is set — overlay it at that rect's origin.
-            let (plate_x, plate_y) = prepared
-                .cursor_rect
-                .map(|(x, y, _, _)| (x, y))
-                .unwrap_or((0, 0));
-            filters.push(format!(
-                "[{current_label}]{plate_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
-            ));
-            current_label = "with_cursor".to_string();
-        } else if prepared.overlay_engine.is_some() {
-            // Items-only stream: held until after the camera/mask passes.
-            items_plate_label = Some(plate_source);
+        if prepared.planes.len() > 1 {
+            // Crop each packed slice out of the stream into its own plate
+            // label, then composite each at its stack position.
+            let mut split = format!("{plate_source}split={}", prepared.planes.len());
+            for index in 0..prepared.planes.len() {
+                split.push_str(&format!("[plate_src{index}]"));
+            }
+            filters.push(split);
+            for (index, kind) in prepared.planes.iter().enumerate() {
+                let label = match kind {
+                    PlatePlane::Cursor => "cursor_plate",
+                    PlatePlane::Items => "items_plate",
+                    PlatePlane::Keys => "keys_plate",
+                };
+                filters.push(format!(
+                    "[plate_src{index}]crop={}:{}:{}:0[{label}]",
+                    canvas.width,
+                    canvas.height,
+                    canvas.width * index as u32,
+                ));
+            }
+            if prepared.planes.contains(&PlatePlane::Cursor) {
+                filters.push(format!(
+                    "[{current_label}][cursor_plate]overlay=shortest=1:format=yuv420{cursor_enable}[with_cursor]"
+                ));
+                current_label = "with_cursor".to_string();
+            }
+            if prepared.planes.contains(&PlatePlane::Items) {
+                items_plate_label = Some("[items_plate]".to_string());
+            }
+            if prepared.planes.contains(&PlatePlane::Keys) {
+                keys_plate_label = Some("[keys_plate]".to_string());
+            }
+        } else {
+            match prepared.planes.first().copied() {
+                Some(PlatePlane::Cursor) => {
+                    // Cursor-only stream: composite directly below the camera
+                    // layer. The plate is the fitted screen rect, not the
+                    // full canvas, when `cursor_rect` is set.
+                    let (plate_x, plate_y) = prepared
+                        .cursor_rect
+                        .map(|(x, y, _, _)| (x, y))
+                        .unwrap_or((0, 0));
+                    filters.push(format!(
+                        "[{current_label}]{plate_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
+                    ));
+                    current_label = "with_cursor".to_string();
+                }
+                Some(PlatePlane::Items) => {
+                    items_plate_label = Some(plate_source);
+                }
+                Some(PlatePlane::Keys) => {
+                    keys_plate_label = Some(plate_source);
+                }
+                None => {}
+            }
         }
         if items_plate_label.is_some() {
             items_enable = overlay_item_windows
                 .and_then(|windows| plate_enable_expr(windows, plan.duration_ms))
+                .map(|expr| format!(":enable='{expr}'"));
+        }
+        if keys_plate_label.is_some() {
+            // The keys composite runs after `setpts=PTS-STARTPTS` re-anchors
+            // the output stream, so its `enable` windows must be relative to
+            // this pass's start — unlike the camera/items overlays, which see
+            // absolute-shifted timestamps.
+            let pass_start_ms = win_start_ms as u64;
+            let pass_dur_ms = (win_end_ms - win_start_ms).max(0.0) as u64;
+            keys_enable = prepared
+                .keystroke_renderer
+                .as_ref()
+                .map(|renderer| {
+                    renderer
+                        .output_windows()
+                        .iter()
+                        .map(|(start, end)| {
+                            (
+                                start.saturating_sub(pass_start_ms),
+                                end.saturating_sub(pass_start_ms),
+                            )
+                        })
+                        .collect()
+                })
+                .and_then(|windows| plate_enable_expr(windows, pass_dur_ms))
                 .map(|expr| format!(":enable='{expr}'"));
         }
         cursor_plan = Some(prepared);
@@ -3183,24 +3293,29 @@ fn render_composition_window(
         current_label = "postscale".to_string();
     }
 
-    // Keystroke overlay (Pro): modifier-combo badges drawn on the final
-    // raster — above the watermark — gated to each event's display window.
-    if !plan.keystrokes.is_empty() {
-        let keystroke_dir = std::env::temp_dir().join(format!(
-            "rf-keystrokes-{}-{}",
-            project_id,
-            uuid::Uuid::new_v4()
+    // Keystroke overlay (Pro): keycap badges rasterized into their own plate
+    // plane, composited topmost — after the watermark so Pro badges always sit
+    // above every other layer, matching the editor preview's z-order. The
+    // plate is canvas-sized, so under a license output cap it is scaled to the
+    // delivered raster alongside everything else.
+    if let Some(keys_plate) = keys_plate_label {
+        let enable_suffix = keys_enable.unwrap_or_default();
+        // The plate stream carries absolute-shifted PTS like the other
+        // plates, but this composite runs after the output stream's
+        // PTS-STARTPTS re-anchor — reset the plate to the same 0-based clock.
+        let keys_source = if (out_w, out_h) != (canvas.width, canvas.height) {
+            filters.push(format!(
+                "{keys_plate}setpts=PTS-STARTPTS,scale={out_w}:{out_h}:flags=lanczos[keys_plate_scaled]"
+            ));
+            "[keys_plate_scaled]".to_string()
+        } else {
+            filters.push(format!("{keys_plate}setpts=PTS-STARTPTS[keys_plate_t]"));
+            "[keys_plate_t]".to_string()
+        };
+        filters.push(format!(
+            "[{current_label}]{keys_source}overlay=shortest=1:format=auto{enable_suffix}[with_keys]"
         ));
-        let font_path = keystrokes::write_font(&keystroke_dir)?;
-        temp_dir_guards.push(TempExportDir(keystroke_dir));
-        current_label = keystrokes::append_badge_chain(
-            &mut filters,
-            &current_label,
-            &plan.keystrokes,
-            out_w,
-            out_h,
-            &font_path,
-        );
+        current_label = "with_keys".to_string();
     }
 
     filters.push(format!(
@@ -3286,7 +3401,7 @@ fn render_composition_window(
         // overlay items coexist the stream packs both planes side by side, so
         // the declared width doubles. A cursor-only stream is the fitted screen
         // rect, not the full canvas.
-        let plate_width = frame_plan.width * if frame_plan.dual_plane { 2 } else { 1 };
+        let plate_width = frame_plan.width * frame_plan.planes.len().max(1) as u32;
         let queue_size =
             stdin_thread_queue_size(plate_width as usize * frame_plan.height as usize * 4);
         command
@@ -4304,10 +4419,23 @@ fn load_cursor_engine(
     Ok(Some(Arc::new(Mutex::new(engine))))
 }
 
+/// Which logical planes the generated plate stream carries, packed
+/// left-to-right in canonical order so the filter graph can crop each
+/// `width`-wide slice and composite it at its stack position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlatePlane {
+    /// Cursor effects — composited below the camera layer.
+    Cursor,
+    /// Overlay items (titles, annotations, images) — above masks, below captions.
+    Items,
+    /// Keystroke badges — topmost, composited after the watermark.
+    Keys,
+}
+
 /// Preallocated state for streaming generated overlay frames into FFmpeg's
-/// stdin. When `dual_plane` is set each frame packs two canvas-sized planes
-/// side by side — cursor on the left, overlay items on the right — so the
-/// filter graph can composite them at different stack positions.
+/// stdin. With more than one `planes` entry each frame packs the planes side
+/// by side — canonical order Cursor|Items|Keys — so the filter graph can
+/// composite them at different stack positions.
 #[allow(dead_code)]
 pub(crate) struct CursorFramePlan {
     fps: u32,
@@ -4336,16 +4464,21 @@ pub(crate) struct CursorFramePlan {
     /// budgets. Chunked renders run several FFmpeg processes concurrently, so
     /// each divides its budgets by this factor; 1 is the single-pass default.
     parallel_divisor: usize,
-    dual_plane: bool,
+    /// Logical planes packed into the stream, in canonical order. A single
+    /// entry ships a plain canvas plane; multiple entries pack side-by-side.
+    planes: Vec<PlatePlane>,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<overlay_engine::OverlayEngine>,
+    keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_cursor_frame_plan(
     canvas: &cursor::RenderCanvas,
     duration_ms: u64,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     plan: &RenderPlan,
+    settings: &ExportSettings,
     asset_paths: &HashMap<String, PathBuf>,
     screen_rect: (f64, f64, f64, f64),
 ) -> Result<CursorFramePlan> {
@@ -4381,8 +4514,8 @@ fn prepare_cursor_frame_plan(
 
     let overlay_engine = if let Some(mut parsed_plan) = overlay_plan {
         if parsed_plan.items.is_empty() {
-            // An empty items list would only force the dual-plane stream to
-            // carry a permanently transparent half, so skip the engine too.
+            // An empty items list would only force a multi-plane stream to
+            // carry a permanently transparent slice, so skip the engine too.
             None
         } else {
             parsed_plan.canvas = overlay_engine::OverlayCanvas {
@@ -4408,11 +4541,46 @@ fn prepare_cursor_frame_plan(
         None
     };
 
-    let dual_plane = !renderers.is_empty() && overlay_engine.is_some();
-    // Only a pure cursor stream can shrink to the fitted screen rect: overlay
-    // items draw in canvas coordinates, and the dual-plane stream needs both
-    // halves at the same size.
-    let cursor_rect = if overlay_engine.is_none() && !renderers.is_empty() {
+    // Keystroke badges (Pro): rasterized into their own topmost plate plane.
+    // Events are source-timestamped; the renderer maps them through the same
+    // render segments the cursor uses, so edits keep badges aligned.
+    let keystroke_renderer = if let Some(overlay) = &settings.keystroke_overlay {
+        if overlay.enabled && !plan.keystrokes.is_empty() {
+            match keystrokes::KeystrokeRenderer::new(
+                overlay,
+                &plan.keystroke_platform,
+                &plan.keystrokes,
+                plan.segments.clone(),
+                (canvas.width, canvas.height),
+            ) {
+                Ok(renderer) => Some(renderer),
+                Err(error) => {
+                    warn!(error = %error, "keystroke overlay disabled: renderer build failed");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut planes: Vec<PlatePlane> = Vec::with_capacity(3);
+    if !renderers.is_empty() {
+        planes.push(PlatePlane::Cursor);
+    }
+    if overlay_engine.is_some() {
+        planes.push(PlatePlane::Items);
+    }
+    if keystroke_renderer.is_some() {
+        planes.push(PlatePlane::Keys);
+    }
+
+    // Only a pure cursor stream can shrink to the fitted screen rect: the
+    // other planes draw in canvas coordinates, and every packed slice must be
+    // the same size.
+    let cursor_rect = if planes == [PlatePlane::Cursor] {
         let (sx, sy, sw, sh) = screen_rect;
         // The renderers clip every draw to this rect (rounded ints, matching
         // `ClipRect` construction in cursor.rs), so the crop covers all drawn
@@ -4440,9 +4608,10 @@ fn prepare_cursor_frame_plan(
         frame_count,
         first_frame_index: 0,
         parallel_divisor: 1,
-        dual_plane,
+        planes,
         renderers,
         overlay_engine,
+        keystroke_renderer,
     })
 }
 
@@ -4482,29 +4651,22 @@ fn register_overlay_image_asset(
     Ok(())
 }
 
-/// Pack two `plane_w`×`plane_h` RGBA planes into one side-by-side
-/// `2*plane_w`×`plane_h` frame. A missing plane contributes transparent
-/// pixels so the corresponding filter-graph composite becomes a no-op.
-fn pack_overlay_planes(
-    dst: &mut [u8],
-    plane_w: usize,
-    plane_h: usize,
-    left: Option<&[u8]>,
-    right: Option<&[u8]>,
-) {
+/// Pack `planes` `plane_w`×`plane_h` RGBA planes into one side-by-side
+/// `(planes.len())*plane_w`×`plane_h` frame, in order. A missing plane
+/// contributes transparent pixels so its composite becomes a no-op.
+fn pack_overlay_planes(dst: &mut [u8], plane_w: usize, plane_h: usize, planes: &[Option<&[u8]>]) {
     let plane_row_bytes = plane_w * 4;
-    let frame_row_bytes = plane_row_bytes * 2;
+    let frame_row_bytes = plane_row_bytes * planes.len();
     debug_assert_eq!(dst.len(), frame_row_bytes * plane_h);
     for row in 0..plane_h {
         let src_rows = row * plane_row_bytes..(row + 1) * plane_row_bytes;
         let dst_row = &mut dst[row * frame_row_bytes..(row + 1) * frame_row_bytes];
-        match left {
-            Some(plane) => dst_row[..plane_row_bytes].copy_from_slice(&plane[src_rows.clone()]),
-            None => dst_row[..plane_row_bytes].fill(0),
-        }
-        match right {
-            Some(plane) => dst_row[plane_row_bytes..].copy_from_slice(&plane[src_rows]),
-            None => dst_row[plane_row_bytes..].fill(0),
+        for (index, plane) in planes.iter().enumerate() {
+            let slot = &mut dst_row[index * plane_row_bytes..(index + 1) * plane_row_bytes];
+            match plane {
+                Some(plane) => slot.copy_from_slice(&plane[src_rows.clone()]),
+                None => slot.fill(0),
+            }
         }
     }
 }
@@ -4538,32 +4700,54 @@ enum ProducedFrame {
     Failed(String),
 }
 
-/// (cursor plane, items plane) for one output frame. The items plane is `Arc`
+/// Logical planes produced for one output frame. The items plane is `Arc`
 /// because the cached render is shared across frames while the evaluated
 /// display list is unchanged.
-type FramePlanes = (Option<Vec<u8>>, Option<Arc<Vec<u8>>>);
+#[derive(Default)]
+struct FramePlanes {
+    cursor: Option<Vec<u8>>,
+    items: Option<Arc<Vec<u8>>>,
+    keys: Option<Vec<u8>>,
+}
 
-/// Per-worker raster state. Cursor and overlay engines are cloned per worker
-/// because `CursorEngine` keeps a `RefCell` smoothing cache and tiny-skia
-/// pixmaps are single-owner; the engines are pure functions of the frame
-/// timestamp, so per-worker copies produce identical output.
+impl FramePlanes {
+    /// Borrowed slices in the declared packing order for the plate stream.
+    fn plane_slices<'a>(&'a self, kinds: &[PlatePlane]) -> Vec<Option<&'a [u8]>> {
+        kinds
+            .iter()
+            .map(|kind| match kind {
+                PlatePlane::Cursor => self.cursor.as_deref(),
+                PlatePlane::Items => self.items.as_deref().map(|plane| plane.as_slice()),
+                PlatePlane::Keys => self.keys.as_deref(),
+            })
+            .collect()
+    }
+}
+
+/// Per-worker raster state. Cursor, overlay, and keystroke renderers are
+/// cloned per worker because `CursorEngine` keeps a `RefCell` smoothing cache
+/// and tiny-skia pixmaps are single-owner; the renderers are pure functions
+/// of the frame timestamp, so per-worker copies produce identical output.
 struct OverlayWorkerState {
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<overlay_engine::OverlayEngine>,
+    keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
     cursor_pixmap: resvg::tiny_skia::Pixmap,
     /// Canvas-space rect the finished cursor plane is cropped to before it is
-    /// written to FFmpeg. `None` ships the full canvas (items planes and the
-    /// halves of a dual-plane frame are always full-canvas).
+    /// written to FFmpeg. `None` ships the full canvas (items and keys planes
+    /// and every slice of a multi-plane frame are always full-canvas).
     cursor_rect: Option<(u32, u32, u32, u32)>,
     items_layer: Option<resvg::tiny_skia::Pixmap>,
     last_display_items: Option<Vec<overlay_engine::DisplayItem>>,
     cached_unpremultiplied_frame: Option<Arc<Vec<u8>>>,
+    keys_pixmap: Option<resvg::tiny_skia::Pixmap>,
 }
 
 impl OverlayWorkerState {
     fn new(
         renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
         overlay_engine: Option<overlay_engine::OverlayEngine>,
+        keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
         width: u32,
         height: u32,
         cursor_rect: Option<(u32, u32, u32, u32)>,
@@ -4573,11 +4757,13 @@ impl OverlayWorkerState {
         Ok(Self {
             renderers,
             overlay_engine,
+            keystroke_renderer,
             cursor_pixmap,
             cursor_rect,
             items_layer: None,
             last_display_items: None,
             cached_unpremultiplied_frame: None,
+            keys_pixmap: None,
         })
     }
 
@@ -4662,7 +4848,48 @@ impl OverlayWorkerState {
             None => None,
         };
 
-        Ok((cursor_plane, items_plane))
+        // Keystroke badges draw at canvas scale into their own plane; the
+        // renderer is a pure function of the output timestamp. Outside every
+        // display window the plane is guaranteed transparent — skip the fill
+        // and rasterization entirely.
+        let keys_visible = self.keystroke_renderer.as_ref().is_some_and(|renderer| {
+            renderer
+                .output_windows()
+                .iter()
+                .any(|(start, end)| output_time_ms >= *start as f64 && output_time_ms < *end as f64)
+        });
+        let keys_plane = match &self.keystroke_renderer {
+            Some(renderer) if keys_visible => {
+                let pixmap = match &mut self.keys_pixmap {
+                    Some(pixmap) => pixmap,
+                    None => {
+                        self.keys_pixmap = Some(
+                            resvg::tiny_skia::Pixmap::new(
+                                self.cursor_pixmap.width(),
+                                self.cursor_pixmap.height(),
+                            )
+                            .ok_or_else(|| "allocate keys pixmap failed".to_string())?,
+                        );
+                        self.keys_pixmap
+                            .as_mut()
+                            .expect("keys pixmap just assigned")
+                    }
+                };
+                pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
+                renderer.render_frame_at(output_time_ms, pixmap);
+                let mut plane = pixmap.data().to_vec();
+                cursor::unpremultiply_rgba_bounded(&mut plane, pixmap.width() as usize);
+                Some(plane)
+            }
+            // Renderer exists but this frame sits outside every badge window.
+            _ => None,
+        };
+
+        Ok(FramePlanes {
+            cursor: cursor_plane,
+            items: items_plane,
+            keys: keys_plane,
+        })
     }
 }
 
@@ -4699,11 +4926,7 @@ fn feed_cursor_frames(
     let plane_w = cursor.width as usize;
     let plane_h = cursor.height as usize;
     let plane_byte_len = plane_w * plane_h * 4;
-    let frame_byte_len = if cursor.dual_plane {
-        plane_byte_len * 2
-    } else {
-        plane_byte_len
-    };
+    let frame_byte_len = plane_byte_len * cursor.planes.len().max(1);
     let zero_frame = vec![0u8; frame_byte_len];
     let frame_count = cursor.frame_count;
 
@@ -4748,7 +4971,7 @@ fn feed_cursor_frames(
     // pops them — on a single-plane stream pushing every finished frame
     // would grow the pool by one plate per frame until memory is exhausted.
     let free_buffers = Mutex::new(Vec::<Vec<u8>>::new());
-    let dual_plane = cursor.dual_plane;
+    let multi_plane = cursor.planes.len() > 1;
     let halted = || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
 
     let result = std::thread::scope(|scope| -> Result<()> {
@@ -4763,16 +4986,19 @@ fn feed_cursor_frames(
             // closure only moves owned `Send` state; `CursorEngine` is `!Sync`.
             let renderers = cursor.renderers.clone();
             let overlay_engine = cursor.overlay_engine.clone();
+            let keystroke_renderer = cursor.keystroke_renderer.clone();
             let width = cursor.canvas_width;
             let height = cursor.canvas_height;
             let cursor_rect = cursor.cursor_rect;
             let fps = cursor.fps;
             let first_frame_index = cursor.first_frame_index;
+            let planes = cursor.planes.clone();
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = match OverlayWorkerState::new(
                         renderers,
                         overlay_engine,
+                        keystroke_renderer,
                         width,
                         height,
                         cursor_rect,
@@ -4817,9 +5043,10 @@ fn feed_cursor_frames(
 
                         let produced = state
                             .render_planes(frame_index + first_frame_index, fps)
-                            .map(|(cursor_plane, items_plane)| {
-                                if dual_plane {
-                                    if cursor_plane.is_none() && items_plane.is_none() {
+                            .map(|frame| {
+                                if multi_plane {
+                                    let slices = frame.plane_slices(&planes);
+                                    if slices.iter().all(Option::is_none) {
                                         return ProducedFrame::Zero;
                                     }
                                     let mut buffer = free_buffers
@@ -4828,16 +5055,18 @@ fn feed_cursor_frames(
                                         .pop()
                                         .unwrap_or_else(|| vec![0u8; frame_byte_len]);
                                     buffer.resize(frame_byte_len, 0);
-                                    pack_overlay_planes(
-                                        &mut buffer,
-                                        plane_w,
-                                        plane_h,
-                                        cursor_plane.as_deref(),
-                                        items_plane.as_ref().map(|plane| plane.as_slice()),
-                                    );
+                                    pack_overlay_planes(&mut buffer, plane_w, plane_h, &slices);
                                     ProducedFrame::Bytes(buffer)
                                 } else {
-                                    match cursor_plane.or_else(|| items_plane.map(arc_into_vec)) {
+                                    // Single-plane stream: hand the owned buffer
+                                    // straight to the writer, no repack copy.
+                                    let plane = match planes.first().copied() {
+                                        Some(PlatePlane::Cursor) => frame.cursor,
+                                        Some(PlatePlane::Items) => frame.items.map(arc_into_vec),
+                                        Some(PlatePlane::Keys) => frame.keys,
+                                        None => None,
+                                    };
+                                    match plane {
                                         Some(plane) => ProducedFrame::Bytes(plane),
                                         None => ProducedFrame::Zero,
                                     }
@@ -4918,7 +5147,7 @@ fn feed_cursor_frames(
                         );
                     }
                     if let ProducedFrame::Bytes(bytes) = produced {
-                        if dual_plane {
+                        if multi_plane {
                             free_buffers
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -4964,7 +5193,8 @@ fn feed_cursor_frames_sequential(
 ) -> Result<()> {
     let plane_w = cursor.width as usize;
     let plane_h = cursor.height as usize;
-    let mut packed_frame = if cursor.dual_plane {
+    let multi_plane = cursor.planes.len() > 1;
+    let mut packed_frame = if multi_plane {
         vec![0u8; frame_byte_len]
     } else {
         Vec::new()
@@ -4972,6 +5202,7 @@ fn feed_cursor_frames_sequential(
     let mut state = OverlayWorkerState::new(
         cursor.renderers.clone(),
         cursor.overlay_engine.clone(),
+        cursor.keystroke_renderer.clone(),
         cursor.canvas_width,
         cursor.canvas_height,
         cursor.cursor_rect,
@@ -4984,28 +5215,26 @@ fn feed_cursor_frames_sequential(
         {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
-        let (cursor_plane, items_plane) = state
+        let frame = state
             .render_planes(frame_index + cursor.first_frame_index, cursor.fps)
             .map_err(InternalError::Media)?;
 
-        let frame: &[u8] = if cursor.dual_plane {
-            if cursor_plane.is_none() && items_plane.is_none() {
+        let frame: &[u8] = if multi_plane {
+            let slices = frame.plane_slices(&cursor.planes);
+            if slices.iter().all(Option::is_none) {
                 zero_frame
             } else {
-                pack_overlay_planes(
-                    &mut packed_frame,
-                    plane_w,
-                    plane_h,
-                    cursor_plane.as_deref(),
-                    items_plane.as_ref().map(|plane| plane.as_slice()),
-                );
+                pack_overlay_planes(&mut packed_frame, plane_w, plane_h, &slices);
                 packed_frame.as_slice()
             }
         } else {
-            cursor_plane
-                .as_deref()
-                .or(items_plane.as_deref().map(|plane| plane.as_slice()))
-                .unwrap_or(zero_frame)
+            match cursor.planes.first().copied() {
+                Some(PlatePlane::Cursor) => frame.cursor.as_deref(),
+                Some(PlatePlane::Items) => frame.items.as_deref().map(|plane| plane.as_slice()),
+                Some(PlatePlane::Keys) => frame.keys.as_deref(),
+                None => None,
+            }
+            .unwrap_or(zero_frame)
         };
 
         if let Err(error) = writer.write_all(frame) {
@@ -8024,6 +8253,12 @@ mod tests {
         assert!(kept_path.exists(), "non-owned plate survives the cache");
     }
 
+    /// `ExportSettings` with every serde default — the shape a minimal plan
+    /// payload deserializes into.
+    fn default_export_settings() -> ExportSettings {
+        serde_json::from_str::<ExportSettings>("{}").expect("empty settings deserialize")
+    }
+
     fn valid_plan() -> RenderPlan {
         RenderPlan {
             reframe: None,
@@ -8088,6 +8323,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         }
     }
 
@@ -8474,7 +8710,7 @@ mod tests {
         let left = vec![1u8; 2 * 2 * 4];
         let right = vec![2u8; 2 * 2 * 4];
         let mut dst = vec![0u8; 4 * 2 * 4];
-        pack_overlay_planes(&mut dst, 2, 2, Some(&left), Some(&right));
+        pack_overlay_planes(&mut dst, 2, 2, &[Some(&left), Some(&right)]);
         assert_eq!(
             dst,
             vec![
@@ -8488,7 +8724,7 @@ mod tests {
     fn pack_overlay_planes_fills_missing_side_with_transparency() {
         let right = vec![7u8; 2 * 4];
         let mut dst = vec![9u8; 4 * 4];
-        pack_overlay_planes(&mut dst, 2, 1, None, Some(&right));
+        pack_overlay_planes(&mut dst, 2, 1, &[None, Some(&right)]);
         assert_eq!(dst, vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
     }
 
@@ -8714,6 +8950,7 @@ mod tests {
             5000,
             Vec::new(),
             &plan,
+            &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
         )
@@ -8844,6 +9081,7 @@ mod tests {
             5000,
             Vec::new(),
             &plan,
+            &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
         )
@@ -9348,6 +9586,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -9982,6 +10221,7 @@ mod tests {
         let plan = RenderPlan {
             zoom_segments,
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
             ..valid_plan()
         };
         let canvas = cursor::RenderCanvas {
@@ -10056,6 +10296,7 @@ mod tests {
                 }),
             }],
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
             ..valid_plan()
         };
         let canvas = cursor::RenderCanvas {
@@ -10191,6 +10432,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -10310,6 +10552,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -10457,6 +10700,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -10591,6 +10835,7 @@ mod tests {
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
                 keystrokes: Vec::new(),
+                keystroke_platform: "unknown".into(),
             };
 
             let settings = ExportSettings {
@@ -10697,6 +10942,7 @@ mod tests {
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
                 keystrokes: Vec::new(),
+                keystroke_platform: "unknown".into(),
             };
 
             let settings = ExportSettings {
@@ -10824,6 +11070,7 @@ mod tests {
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
                 keystrokes: Vec::new(),
+                keystroke_platform: "unknown".into(),
             };
 
             let settings = ExportSettings {
@@ -10933,6 +11180,7 @@ mod tests {
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
                 keystrokes: Vec::new(),
+                keystroke_platform: "unknown".into(),
             };
 
             let settings = ExportSettings {
@@ -11044,6 +11292,7 @@ mod tests {
                 chapters: Vec::new(),
                 chapter_mode: "none".into(),
                 keystrokes: Vec::new(),
+                keystroke_platform: "unknown".into(),
             };
 
             let settings = ExportSettings {
@@ -11184,6 +11433,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -11313,6 +11563,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -11533,6 +11784,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -12044,6 +12296,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -12308,6 +12561,7 @@ mod tests {
             1000,
             Vec::new(),
             &plan,
+            &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
         )
@@ -12456,6 +12710,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -12682,6 +12937,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -12879,6 +13135,7 @@ mod tests {
             texts: Vec::new(),
             images: Vec::new(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -13090,6 +13347,7 @@ mod tests {
             chapters: Vec::new(),
             chapter_mode: "none".into(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {
@@ -13271,6 +13529,7 @@ mod tests {
             chapters: Vec::new(),
             chapter_mode: "none".into(),
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         };
 
         let settings = ExportSettings {

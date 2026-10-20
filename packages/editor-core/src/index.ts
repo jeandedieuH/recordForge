@@ -28,7 +28,9 @@ export * from "./interaction-transaction"
 export * from "./overlay-transaction"
 export * from "./smart-zoom-builder"
 export * from "./chapters"
+export * from "./smart-cut"
 export * from "./captions"
+export * from "./keystrokes"
 export * from "./audio-envelope"
 export {
   analyzeCursorTelemetry,

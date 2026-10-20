@@ -5,6 +5,17 @@
 
 /* RecordForge desktop base styles — Forge UI tokens come from @recordforge/ui. */
 
+/* Keycap badges render the same generated SVG the export rasterizes; the
+   bundled JetBrains Mono keeps preview text metrics identical to the Rust
+   rasterizer's embedded copy. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrainsmono.ttf") format("truetype");
+  font-weight: 400 800;
+  font-style: normal;
+  font-display: swap;
+}
+
 html {
   font-size: 14px; /* compact desktop density: rem base 14 */
 }

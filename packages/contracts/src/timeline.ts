@@ -17,6 +17,7 @@ import {
   renderCaptionModeSchema,
 } from "./captions"
 import type { OverlayRenderPlan } from "./overlay"
+import { keystrokeOverlaySettingsSchema } from "./keystrokes"
 
 // Output framing presets are intentionally explicit so preview and export can
 // reject unsupported aspect ratios instead of silently cropping the recording.
@@ -817,8 +818,18 @@ export const exportSettingsSchema = z.object({
     scalePercent: 8,
     opacity: 0.85,
   }),
-  // Keystroke overlay (Pro) — modifier-combo badges captured during recording.
-  keystrokeOverlay: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
+  // Keystroke overlay (Pro) — keycap badges for modifier combos captured
+  // during recording. Style fields feed the editor preview and the export
+  // rasterizer alike (WYSIWYG).
+  keystrokeOverlay: keystrokeOverlaySettingsSchema.default({
+    enabled: false,
+    position: "bottom-center",
+    theme: "dark",
+    scale: 1,
+    maxStack: 3,
+    holdMs: 2200,
+    modifierStyle: "symbols",
+  }),
   reframeMode: reframeModeSchema.default("fit"),
   brandCards: brandCardsSchema.default({
     enabled: false,

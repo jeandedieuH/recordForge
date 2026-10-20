@@ -1389,6 +1389,31 @@ pub fn get_cursor_telemetry(
     Ok(result)
 }
 
+/// Load the keystroke event file captured with a recording (modifier-combo
+/// presses only — never plain typing). Returns `None` when the recording has
+/// no keystrokes.json or capture was disabled. React sends only the recording
+/// id; Rust reads the project-dir file directly, so the overlay works before
+/// any project file is created during bootstrap.
+#[tauri::command]
+#[instrument(skip(state))]
+pub fn get_keystroke_events(
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> Result<Option<crate::capture::keystrokes::KeystrokeFile>> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+    let recording = match get_recording(&conn, &recording_id) {
+        Ok(rec) => rec,
+        Err(_) => return Ok(None),
+    };
+    drop(conn);
+
+    let project_dir = crate::projects::project_dir_for_recording(&recording);
+    Ok(crate::capture::keystrokes::load_events(&project_dir))
+}
+
 /// Return the smart-zoom preference captured with a recording session.
 #[tauri::command]
 #[instrument(skip(state))]

@@ -299,6 +299,7 @@ mod tests {
             texts: vec![],
             images: vec![],
             keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
         }
     }
 

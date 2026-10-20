@@ -5,7 +5,7 @@ import type {
   MediaMetadata,
   recordForgeProject,
 } from "@recordforge/contracts"
-import { defaultCursorSettings } from "@recordforge/contracts"
+import { defaultCursorSettings, defaultKeystrokeOverlaySettings } from "@recordforge/contracts"
 import type { CursorEngine } from "@recordforge/cursor-core"
 import { createEngine } from "@recordforge/editor-core"
 import { createTimelineFromRecording } from "@recordforge/domain"
@@ -216,7 +216,7 @@ function fakeProject(recordingId: string): recordForgeProject {
         textColor: "#f8fafc",
         fontPath: null,
       },
-      keystrokeOverlay: { enabled: false },
+      keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
       reframeMode: "fit",
       webcamBackground: {
         enabled: false,

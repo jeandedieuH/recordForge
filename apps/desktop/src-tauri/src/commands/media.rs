@@ -276,42 +276,63 @@ pub async fn detect_silences(
             .arg("-nostats")
             .arg("-i")
             .arg(&output_path);
-        if audio_indices.len() == 1 {
-            // Single audio stream — plain -af silencedetect.
-            command
-                .arg("-map")
-                .arg(format!("0:{}", audio_indices[0]))
-                .arg("-af")
-                .arg(format!(
-                    "silencedetect=noise={threshold_db}dB:d={min_duration_s}"
-                ));
-        } else {
-            // Multiple streams (mic + system): amerge first so "silence" only
-            // fires when EVERY audio source is silent — otherwise we'd cut
-            // while one track is still talking.
-            let labels: String = audio_indices
-                .iter()
-                .map(|index| format!("[0:{index}]"))
-                .collect();
-            command
-                .arg("-filter_complex")
-                .arg(format!(
-                    "{labels}amerge=inputs={}[a];[a]silencedetect=noise={threshold_db}dB:d={min_duration_s}",
-                    audio_indices.len()
-                ))
-                .args(["-map", "[a]"]);
+        for arg in silence_detect_args(&audio_indices, threshold_db, min_duration_s) {
+            command.arg(arg);
         }
         command.args(["-f", "null", "-"]);
         let output = command
             .output()
             .map_err(|error| InternalError::Media(format!("silencedetect spawn: {error}")))?;
         // silencedetect reports on stderr; exit failure still yields partial
-        // output worth parsing, so don't gate on status here.
+        // output worth parsing, so parse first and only fail when nothing
+        // usable came back.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Ok(parse_silence_ranges(&stderr, duration_ms))
+        let ranges = parse_silence_ranges(&stderr, duration_ms);
+        if !output.status.success() && ranges.is_empty() {
+            tracing::warn!(status = ?output.status.code(), "silencedetect ffmpeg failed");
+            return Err(InternalError::Media(
+                "audio analysis failed — the recording could not be scanned".into(),
+            )
+            .into());
+        }
+        Ok(ranges)
     })
     .await
     .map_err(|error| InternalError::Media(format!("silencedetect task: {error}")))?
+}
+
+/// Build the ffmpeg filter/mapping args for silence detection.
+///
+/// Multi-stream inputs are amerged so "silence" only fires when EVERY audio
+/// source is quiet. The mapped label must be the silencedetect output — a
+/// filter input label is consumed by the chain and cannot be mapped again
+/// (mapping `[a]` makes ffmpeg abort with "already used elsewhere").
+fn silence_detect_args(
+    audio_indices: &[i32],
+    threshold_db: f64,
+    min_duration_s: f64,
+) -> Vec<String> {
+    if audio_indices.len() == 1 {
+        return vec![
+            "-map".into(),
+            format!("0:{}", audio_indices[0]),
+            "-af".into(),
+            format!("silencedetect=noise={threshold_db}dB:d={min_duration_s}"),
+        ];
+    }
+    let labels: String = audio_indices
+        .iter()
+        .map(|index| format!("[0:{index}]"))
+        .collect();
+    vec![
+        "-filter_complex".into(),
+        format!(
+            "{labels}amerge=inputs={}[merged];[merged]silencedetect=noise={threshold_db}dB:d={min_duration_s}[out]",
+            audio_indices.len()
+        ),
+        "-map".into(),
+        "[out]".into(),
+    ]
 }
 
 #[cfg(test)]
@@ -340,6 +361,26 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn silence_detect_args_maps_filter_output_not_merge_label() {
+        // Regression: mapping the amerge label ("[a]") aborts ffmpeg — it is
+        // consumed by silencedetect. The output must be the chain's tail label.
+        let args = silence_detect_args(&[1, 2], -35.0, 0.5);
+        let graph = &args[1];
+        assert!(graph.contains("amerge=inputs=2[merged]"));
+        assert!(graph.contains("silencedetect=noise=-35dB:d=0.5[out]"));
+        assert_eq!(args[2], "-map");
+        assert_eq!(args[3], "[out]");
+        assert!(!args.iter().any(|arg| arg == "[a]"));
+
+        // Single stream stays a plain -af pass.
+        let single = silence_detect_args(&[3], -40.0, 1.0);
+        assert_eq!(single[0], "-map");
+        assert_eq!(single[1], "0:3");
+        assert_eq!(single[2], "-af");
+        assert!(single[3].contains("silencedetect=noise=-40dB:d=1"));
     }
 
     #[test]

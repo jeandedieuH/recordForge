@@ -5,6 +5,7 @@ import { buildSmartZoomSegment } from "@recordforge/editor-core"
 import {
   createAddZoomSegmentCommand,
   createDeleteZoomSegmentCommand,
+  createDeleteZoomSegmentsCommand,
   createRegenerateZoomSuggestionsCommand,
   createSplitZoomSegmentCommand,
   createUpdateSmartZoomSettingsCommand,
@@ -13,8 +14,23 @@ import {
   getManualZoomSegments,
   getTotalDuration,
 } from "@recordforge/editor-core"
-import { Plus, ZoomIn } from "lucide-react"
-import { Badge, Button, EmptyState } from "@recordforge/ui"
+import { Plus, Trash2, ZoomIn } from "lucide-react"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Badge,
+  Button,
+  EmptyState,
+  IconButton,
+  ScrollArea,
+  useToast,
+} from "@recordforge/ui"
 import { isCameraRecording } from "../../../lib/library"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { SmartZoomCard } from "./focus/smart-zoom-card"
@@ -63,6 +79,16 @@ export function FocusPanel() {
 
   const [preset, setPreset] = useState<ZoomPreset>(smartZoomPreset)
   const [reviewing, setReviewing] = useState<ManualZoomSegment[] | null>(null)
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
+  const { toast } = useToast()
+
+  // Locked segments survive a bulk delete — same protection rule the single
+  // delete and suggestion regeneration already apply.
+  const removableIds = useMemo(
+    () => segments.filter((segment) => !segment.locked).map((segment) => segment.id),
+    [segments],
+  )
+  const lockedCount = segments.length - removableIds.length
 
   useEffect(() => {
     setPreset(smartZoomPreset)
@@ -168,6 +194,29 @@ export function FocusPanel() {
     execute(createUpdateZoomSegmentCommand(segment.id, { locked: !segment.locked }))
   }
 
+  function requestDeleteAll() {
+    if (removableIds.length === 0) {
+      toast({
+        title: "All zoom keyframes are locked",
+        description: "Unlock a keyframe before deleting it.",
+      })
+      return
+    }
+    setConfirmDeleteAll(true)
+  }
+
+  function deleteAllSegments() {
+    setConfirmDeleteAll(false)
+    const applied = execute(createDeleteZoomSegmentsCommand(removableIds))
+    if (!applied) {
+      toast({ title: "Zoom keyframes could not be removed", variant: "error" })
+      return
+    }
+    if (view.selection?.kind === "zoom" && removableIds.includes(view.selection.segmentId)) {
+      setSelection(null)
+    }
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
       {/* Panel Header */}
@@ -223,9 +272,20 @@ export function FocusPanel() {
           <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
             Zoom Keyframes
           </span>
-          <span className="text-[10px] font-mono text-subtle-foreground">
-            {segments.length} total
-          </span>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] font-mono text-subtle-foreground">
+              {segments.length} total
+            </span>
+            {segments.length > 0 ? (
+              <IconButton
+                label="Delete all zoom keyframes"
+                className="size-6 text-destructive hover:text-destructive"
+                onClick={requestDeleteAll}
+              >
+                <Trash2 className="size-3.5" aria-hidden />
+              </IconButton>
+            ) : null}
+          </div>
         </div>
 
         {segments.length === 0 ? (
@@ -248,30 +308,55 @@ export function FocusPanel() {
             className="py-6 px-4"
           />
         ) : (
-          <div className="flex flex-col gap-2">
-            {segments.map((segment) => {
-              const isSelected = selectedId === segment.id
-              const isPlayheadInside =
-                playheadMs >= segment.startMs && playheadMs <= segment.startMs + segment.durationMs
+          // Cap the height so many keyframes scroll inside the list instead of
+          // stretching the whole panel.
+          <ScrollArea className="max-h-96 w-full border border-border p-2 rounded-2xl">
+            <div className="flex flex-col gap-2 pr-1">
+              {segments.map((segment) => {
+                const isSelected = selectedId === segment.id
+                const isPlayheadInside =
+                  playheadMs >= segment.startMs &&
+                  playheadMs <= segment.startMs + segment.durationMs
 
-              return (
-                <ZoomSegmentCard
-                  key={segment.id}
-                  segment={segment}
-                  canvas={canvas}
-                  selected={isSelected}
-                  isPlayheadInside={isPlayheadInside}
-                  onSelect={() => selectSegment(segment)}
-                  onJumpToStart={() => jumpToSegment(segment)}
-                  onSplit={() => splitSegment(segment)}
-                  onToggleLock={() => toggleLock(segment)}
-                  onDelete={() => deleteSegment(segment)}
-                />
-              )
-            })}
-          </div>
+                return (
+                  <ZoomSegmentCard
+                    key={segment.id}
+                    segment={segment}
+                    canvas={canvas}
+                    selected={isSelected}
+                    isPlayheadInside={isPlayheadInside}
+                    onSelect={() => selectSegment(segment)}
+                    onJumpToStart={() => jumpToSegment(segment)}
+                    onSplit={() => splitSegment(segment)}
+                    onToggleLock={() => toggleLock(segment)}
+                    onDelete={() => deleteSegment(segment)}
+                  />
+                )
+              })}
+            </div>
+          </ScrollArea>
         )}
       </div>
+
+      <AlertDialog open={confirmDeleteAll} onOpenChange={setConfirmDeleteAll}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete all zoom keyframes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes {removableIds.length} zoom keyframe
+              {removableIds.length === 1 ? "" : "s"}.
+              {lockedCount > 0
+                ? ` ${lockedCount} locked keyframe${lockedCount === 1 ? "" : "s"} will be kept.`
+                : ""}{" "}
+              You can undo this action.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={deleteAllSegments}>Delete keyframes</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   annotationClipSchema,
   defaultCursorSettings,
+  defaultKeystrokeOverlaySettings,
   textClipSchema,
   type AnnotationClip,
   type CanvasAspectRatio,
@@ -188,7 +189,7 @@ describe("freeExportSettings", () => {
       textColor: "#f8fafc",
       fontPath: null,
     },
-    keystrokeOverlay: { enabled: false },
+    keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
     reframeMode: "fit",
     webcamBackground: {
       enabled: false,

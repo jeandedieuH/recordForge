@@ -579,11 +579,19 @@ fn dict_rect(dict: &CFDictionary, key: CFStringRef) -> Option<CGRect> {
 // Keystroke event tap (CGEventTap + CFRunLoop)
 // ---------------------------------------------------------------------------
 
+/// One modifier-combination press observed by the key tap — the caller maps
+/// it into the shared `KeystrokeEvent` shape.
+pub struct KeyTapPress {
+    pub t_ms: u64,
+    pub key: &'static str,
+    pub modifiers: Vec<super::keystrokes::KeystrokeModifier>,
+}
+
 /// Run a CGEventTap on this thread's run loop until `stop` flips, returning
-/// `(t_ms, label)` pairs for every modifier-combination key press observed.
+/// structured presses for every modifier-combination key press observed.
 /// The tap needs Accessibility trust — when missing, `CGEventTap` fails to
 /// install and we emit nothing rather than fake capture.
-pub fn run_key_tap(origin: Instant, stop: Arc<AtomicBool>) -> Vec<(u64, String)> {
+pub fn run_key_tap(origin: Instant, stop: Arc<AtomicBool>) -> Vec<KeyTapPress> {
     use core_foundation::runloop::CFRunLoop;
     use core_graphics::event::{
         CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
@@ -626,22 +634,25 @@ pub fn run_key_tap(origin: Instant, stop: Arc<AtomicBool>) -> Vec<(u64, String)>
                 let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                 if let Some(name) = macos_key_name(keycode) {
                     let t_ms = origin.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    let mut parts = Vec::with_capacity(5);
+                    let mut modifiers = Vec::with_capacity(4);
                     if ctrl {
-                        parts.push("Ctrl");
+                        modifiers.push(super::keystrokes::KeystrokeModifier::Ctrl);
                     }
                     if alt {
-                        parts.push("Alt");
+                        modifiers.push(super::keystrokes::KeystrokeModifier::Alt);
                     }
                     if shift {
-                        parts.push("Shift");
+                        modifiers.push(super::keystrokes::KeystrokeModifier::Shift);
                     }
                     if cmd {
-                        parts.push("Cmd");
+                        modifiers.push(super::keystrokes::KeystrokeModifier::Meta);
                     }
-                    parts.push(name);
                     if let Ok(mut guard) = events.lock() {
-                        guard.push((t_ms, parts.join("+")));
+                        guard.push(KeyTapPress {
+                            t_ms,
+                            key: name,
+                            modifiers,
+                        });
                     }
                 }
             }

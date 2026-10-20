@@ -555,6 +555,14 @@ export const deleteZoomSegmentCommandSchema = commandMetaSchema.extend({
 
 export type DeleteZoomSegmentCommand = z.infer<typeof deleteZoomSegmentCommandSchema>
 
+// Bulk delete applies as one command → one undo step (mirrors delete-clips).
+export const deleteZoomSegmentsCommandSchema = commandMetaSchema.extend({
+  kind: z.literal("delete-zoom-segments"),
+  segmentIds: z.array(z.string()).min(1),
+})
+
+export type DeleteZoomSegmentsCommand = z.infer<typeof deleteZoomSegmentsCommandSchema>
+
 export const regenerateZoomSuggestionsCommandSchema = commandMetaSchema.extend({
   kind: z.literal("regenerate-zoom-suggestions"),
   segments: z.array(manualZoomSegmentSchema),
@@ -691,6 +699,7 @@ export const commandRecordSchema = z.discriminatedUnion("kind", [
   splitZoomSegmentCommandSchema,
   resizeZoomSegmentCommandSchema,
   deleteZoomSegmentCommandSchema,
+  deleteZoomSegmentsCommandSchema,
   regenerateZoomSuggestionsCommandSchema,
   trimTimelineEndsCommandSchema,
   addAnnotationClipCommandSchema,
