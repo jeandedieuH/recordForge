@@ -117,7 +117,9 @@ function ToastViewport(): ReactNode {
             <div className="flex min-w-0 flex-1 flex-col gap-1">
               <p className="text-sm font-medium text-foreground">{item.title}</p>
               {item.description ? (
-                <p className="text-xs break-words text-muted-foreground">{item.description}</p>
+                <p className="text-xs break-words text-muted-foreground line-clamp-3">
+                  {item.description}
+                </p>
               ) : null}
               {item.action ? (
                 <button
