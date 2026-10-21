@@ -33,12 +33,12 @@ node tooling/ffmpeg/setup.mjs
 
 ## Sources
 
-| Target                      | Primary source                   | Fallback source                  |
-| --------------------------- | -------------------------------- | -------------------------------- |
-| Windows x86_64              | GyanD GitHub release essentials  | gyan.dev release essentials      |
-| macOS Apple Silicon (arm64) | ffmpeg.martin-riedl.de (release) | evermeet.cx release zip          |
-| macOS Intel (x64)           | ffmpeg.martin-riedl.de (release) | evermeet.cx release zip          |
-| Linux x86_64                | BtbN FFmpeg-Builds (pinned)      | BtbN n9.0 latest autobuild       |
+| Target                      | Primary source                   | Fallback source                    |
+| --------------------------- | -------------------------------- | ---------------------------------- |
+| Windows x86_64              | GyanD GitHub release essentials  | gyan.dev release essentials        |
+| macOS Apple Silicon (arm64) | ffmpeg.martin-riedl.de (release) | martin-riedl.de latest-release zip |
+| macOS Intel (x64)           | ffmpeg.martin-riedl.de (release) | evermeet.cx release zip            |
+| Linux x86_64                | BtbN FFmpeg-Builds (pinned)      | BtbN n9.0 latest autobuild         |
 
 ## Upgrading FFmpeg
 
@@ -48,6 +48,12 @@ version changes.
 
 ## Notes
 
+- Transient download failures — 5xx (including Cloudflare origin errors),
+  408/425/429, and dropped connections — are retried with backoff; a source's
+  fallback URL is tried whenever its versioned URL can't be fetched. Note the
+  arm64 fallback lives on the same host as the primary, so a full
+  martin-riedl.de outage still requires re-running the script later (no
+  independent arm64 static-build mirror exists; evermeet.cx is Intel-only).
 - The `binaries/` directory is **git-ignored**. Every developer and CI machine
   must run this script after a fresh clone.
 - The pinned build includes x264, x265, and the other codecs the recorder needs.

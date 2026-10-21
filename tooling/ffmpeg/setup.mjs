@@ -11,6 +11,8 @@
  *     Linux builds ship no capture indevs — no x11grab/v4l2/pulse)
  *
  * Pinned version: FFmpeg 9.0.1
+ * Transient download failures retry with backoff before falling back to
+ * each source's fallbackUrl.
  *
  * Usage:
  *   node tooling/ffmpeg/setup.mjs            # from repo root (detects host OS/arch)
@@ -190,21 +192,46 @@ function isAlreadySetup(targetTriple) {
   return true
 }
 
-async function download(url, dest) {
-  log(`Downloading ${url} ...`)
+// Retried statuses: every 5xx (including Cloudflare 52x origin errors, which
+// ffmpeg.martin-riedl.de intermittently returns) plus request timeouts and
+// throttling. 404 is authoritative "no such artifact" — never retried.
+const DOWNLOAD_MAX_ATTEMPTS = 4
+const DOWNLOAD_BACKOFF_MS = [2_000, 5_000, 15_000]
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000
+
+function isRetryableStatus(status) {
+  return status >= 500 || status === 408 || status === 425 || status === 429
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// One fetch + stream pass. Returns "ok" or "missing" (404). Throws on any
+// other failure, flagging `err.retryable` — true for transient HTTP statuses
+// and network/stream errors, false for the rest of 4xx.
+async function downloadOnce(url, dest) {
   const res = await fetch(url, {
     headers: {
       "User-Agent": "recordForge-setup-ffmpeg/1.0",
     },
     redirect: "follow",
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
   })
 
-  if (res.status === 404) {
-    return false
-  }
-
   if (!res.ok) {
-    fatal(`HTTP ${res.status} ${res.statusText} from ${url}`)
+    // Release the keep-alive socket before returning/retrying.
+    if (res.body) {
+      await res.body.cancel().catch(() => {})
+    }
+
+    if (res.status === 404) {
+      return "missing"
+    }
+
+    const err = new Error(`HTTP ${res.status} ${res.statusText}`.trim())
+    err.retryable = isRetryableStatus(res.status)
+    throw err
   }
 
   const fileStream = createWriteStream(dest)
@@ -219,7 +246,32 @@ async function download(url, dest) {
 
   const stats = statSync(dest)
   log(`Downloaded ${(stats.size / 1024 / 1024).toFixed(1)} MB`)
-  return true
+  return "ok"
+}
+
+// Downloads `url` to `dest`, retrying transient failures with backoff.
+// Returns false when the URL should be abandoned — 404, a non-retryable
+// error, or exhausted retries — so the caller can move on to the fallback.
+// `options.maxAttempts`/`options.backoffMs` exist for tests.
+export async function download(url, dest, options = {}) {
+  const { maxAttempts = DOWNLOAD_MAX_ATTEMPTS, backoffMs = DOWNLOAD_BACKOFF_MS } = options
+
+  log(`Downloading ${url} ...`)
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const outcome = await downloadOnce(url, dest)
+      if (outcome === "ok") return true
+      warn(`No artifact at ${url} (404)`)
+      return false
+    } catch (err) {
+      warn(`Download failed: ${err.message} (${url})`)
+      if (err.retryable === false || attempt === maxAttempts) return false
+      const delay = backoffMs[attempt - 1] ?? backoffMs.at(-1) ?? 0
+      log(`Retrying in ${delay / 1000}s (attempt ${attempt + 1}/${maxAttempts}) ...`)
+      await sleep(delay)
+    }
+  }
+  return false
 }
 
 function extractArchive(archivePath, extractDir, archiveType) {
@@ -423,7 +475,7 @@ async function setupSource(targetTriple, config, source) {
     let downloaded = await download(source.versionedUrl, tempFile)
 
     if (!downloaded && source.fallbackUrl) {
-      log(`Versioned URL returned 404 — trying fallback URL: ${source.fallbackUrl} ...`)
+      log(`Versioned URL unavailable — trying fallback URL: ${source.fallbackUrl} ...`)
       downloaded = await download(source.fallbackUrl, tempFile)
       usedFallback = true
     }
@@ -491,6 +543,9 @@ async function main() {
   await setupTarget(hostTriple)
 }
 
-main().catch((err) => {
-  fatal(err.message)
-})
+// Only run when invoked as a script so tests can import the helpers above.
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  main().catch((err) => {
+    fatal(err.message)
+  })
+}

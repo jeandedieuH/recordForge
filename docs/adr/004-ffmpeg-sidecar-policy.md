@@ -17,8 +17,11 @@ Use FFmpeg as an **external sidecar binary**, bundled per platform and invoked f
 A tooling script (`tooling/ffmpeg/setup.mjs`) downloads pinned static builds and stages the binaries into `apps/desktop/src-tauri/binaries/` with the Tauri target-triple naming convention (e.g. `ffmpeg-x86_64-pc-windows-msvc.exe`). The script uses a per-platform provider with a fallback:
 
 - Windows x86_64: GyanD GitHub release essentials (GPLv3, includes x264/x265).
-- macOS arm64 and x64: Martin Riedl release builds (primary) with evermeet.cx release zip fallback.
+- macOS arm64: Martin Riedl release builds (primary) with the same host's `redirect/latest` URL as fallback — no independent arm64 static-build mirror exists (evermeet.cx is Intel-only).
+- macOS x64: Martin Riedl release builds (primary) with evermeet.cx release zip fallback.
 - Linux x86_64: BtbN FFmpeg-Builds, pinned to a retained monthly autobuild snapshot (n9.0.1 + release-branch commits), with the floating `n9.0-latest` asset as fallback. Martin Riedl and johnvansickle static builds ship no capture indevs (x11grab/v4l2/pulse), so they cannot serve the Linux recorder.
+
+Transient download failures (5xx including Cloudflare origin errors, 408/425/429, network/stream errors) are retried with backoff before the script moves to the fallback URL; a hard failure only aborts after both URLs are exhausted.
 
 The FFmpeg version is **pinned to 9.0.1**. To upgrade, edit `FFMPEG_VERSION` and the pinned Martin Riedl build IDs / BtbN autobuild tag in the setup script, then re-run.
 

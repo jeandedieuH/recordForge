@@ -5,6 +5,7 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
-    "setup": "node setup.mjs"
+    "setup": "node setup.mjs",
+    "test": "bun test"
   }
 }
