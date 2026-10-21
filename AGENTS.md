@@ -214,6 +214,13 @@ Regenerate app icons from the branding master SVG (`branding/icon.svg`):
 bun run --cwd tooling/scripts icons
 ```
 
+Render the cursor-asset contact sheet (all shapes × sizes × styles as HTML for headless-browser screenshots or manual review):
+
+```bash
+bun run --cwd packages/cursor-core generate:assets   # regenerates cursor-engine assets.json + shape-map.json (run after editing src/assets.ts)
+bun packages/cursor-core/scripts/preview-cursors.ts [out.html]
+```
+
 ## Completion-Report Format
 
 When finishing a task, report:

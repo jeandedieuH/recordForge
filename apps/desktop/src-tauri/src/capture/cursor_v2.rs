@@ -1697,6 +1697,7 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
 
     type FnMsgSendPoint = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSPoint;
     type FnMsgSendSize = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSSize;
+    type FnMsgSendBool = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> bool;
 
     extern "C" {
         fn objc_getClass(name: *const c_char) -> *mut c_void;
@@ -1724,14 +1725,22 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
         struct MacosCursorPointers {
             arrow: usize,
             ibeam: usize,
+            vertical_ibeam: usize,
             pointing_hand: usize,
             closed_hand: usize,
             open_hand: usize,
             crosshair: usize,
             resize_left_right: usize,
             resize_up_down: usize,
+            resize_left: usize,
+            resize_right: usize,
+            resize_up: usize,
+            resize_down: usize,
             operation_not_allowed: usize,
             disappearing_item: usize,
+            contextual_menu: usize,
+            drag_link: usize,
+            drag_copy: usize,
         }
 
         static POINTERS: OnceLock<MacosCursorPointers> = OnceLock::new();
@@ -1740,17 +1749,41 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
                 let sel = sel_registerName(sel_name.as_ptr());
                 objc_msgSend(nscursor_cls, sel) as usize
             };
+            // Guarded variant for class methods that do not exist on every
+            // supported macOS version (e.g. IBeamCursorForVerticalLayout is
+            // macOS 14+): messaging an unrecognized selector would raise an
+            // Objective-C exception, so check respondsToSelector: first and
+            // fall back to 0 (which never matches a live cursor address).
+            let responds_sel = sel_registerName(c"respondsToSelector:".as_ptr());
+            let responds: FnMsgSendBool =
+                std::mem::transmute::<*const (), FnMsgSendBool>(objc_msgSend as *const ());
+            let get_ptr_if_responds = |sel_name: &CStr| -> usize {
+                let sel = sel_registerName(sel_name.as_ptr());
+                if responds(nscursor_cls, responds_sel, sel) {
+                    objc_msgSend(nscursor_cls, sel) as usize
+                } else {
+                    0
+                }
+            };
             MacosCursorPointers {
                 arrow: get_ptr(c"arrowCursor"),
                 ibeam: get_ptr(c"IBeamCursor"),
+                vertical_ibeam: get_ptr_if_responds(c"IBeamCursorForVerticalLayout"),
                 pointing_hand: get_ptr(c"pointingHandCursor"),
                 closed_hand: get_ptr(c"closedHandCursor"),
                 open_hand: get_ptr(c"openHandCursor"),
                 crosshair: get_ptr(c"crosshairCursor"),
                 resize_left_right: get_ptr(c"resizeLeftRightCursor"),
                 resize_up_down: get_ptr(c"resizeUpDownCursor"),
+                resize_left: get_ptr_if_responds(c"resizeLeftCursor"),
+                resize_right: get_ptr_if_responds(c"resizeRightCursor"),
+                resize_up: get_ptr_if_responds(c"resizeUpCursor"),
+                resize_down: get_ptr_if_responds(c"resizeDownCursor"),
                 operation_not_allowed: get_ptr(c"operationNotAllowedCursor"),
                 disappearing_item: get_ptr(c"disappearingItemCursor"),
+                contextual_menu: get_ptr_if_responds(c"contextualMenuCursor"),
+                drag_link: get_ptr_if_responds(c"dragLinkCursor"),
+                drag_copy: get_ptr_if_responds(c"dragCopyCursor"),
             }
         });
 
@@ -1759,6 +1792,8 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             "arrow"
         } else if cursor_addr == pointers.ibeam {
             "ibeam"
+        } else if cursor_addr == pointers.vertical_ibeam {
+            "vertical-text"
         } else if cursor_addr == pointers.pointing_hand {
             "hand"
         } else if cursor_addr == pointers.closed_hand {
@@ -1771,6 +1806,20 @@ fn macos_capture_cursor_shape() -> Option<CursorShapeInfo> {
             "resize-horizontal"
         } else if cursor_addr == pointers.resize_up_down {
             "resize-vertical"
+        } else if cursor_addr == pointers.resize_left {
+            "w-resize"
+        } else if cursor_addr == pointers.resize_right {
+            "e-resize"
+        } else if cursor_addr == pointers.resize_up {
+            "n-resize"
+        } else if cursor_addr == pointers.resize_down {
+            "s-resize"
+        } else if cursor_addr == pointers.drag_link {
+            "alias"
+        } else if cursor_addr == pointers.drag_copy {
+            "copy"
+        } else if cursor_addr == pointers.contextual_menu {
+            "context-menu"
         } else if cursor_addr == pointers.operation_not_allowed
             || cursor_addr == pointers.disappearing_item
         {
@@ -1850,29 +1899,41 @@ fn linux_capture_cursor_shape() -> Option<CursorShapeInfo> {
 
             let kind = if let Some(ref name) = snapshot.shape_name {
                 match name.to_ascii_lowercase().as_str() {
-                    "arrow" | "default" | "left_ptr" | "top_left_arrow" => "arrow".into(),
-                    "pointer" | "hand" | "hand2" | "pointing_hand" => "hand".into(),
+                    "arrow" | "default" | "auto" | "left_ptr" | "top_left_arrow" | "right_ptr" => {
+                        "arrow".into()
+                    }
+                    "pointer" | "hand" | "hand1" | "hand2" | "pointing_hand" => "hand".into(),
                     "text" | "ibeam" | "xterm" => "ibeam".into(),
-                    "crosshair" | "cross" => "crosshair".into(),
+                    "vertical-text" => "vertical-text".into(),
+                    "crosshair" | "cross" | "diamond_cross" => "crosshair".into(),
                     "wait" | "watch" => "wait".into(),
                     "progress" | "left_ptr_watch" => "progress".into(),
                     "help" | "question_arrow" => "help".into(),
-                    "move" | "all-scroll" | "fleur" => "move".into(),
-                    "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => {
-                        "resize-horizontal".into()
-                    }
-                    "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => {
-                        "resize-vertical".into()
-                    }
+                    "move" | "all-scroll" | "fleur" | "size_all" | "dnd-move" => "move".into(),
+                    "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow"
+                    | "sb_h_double_arrow" => "resize-horizontal".into(),
+                    "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow"
+                    | "sb_v_double_arrow" => "resize-vertical".into(),
+                    "e-resize" | "right_side" | "sb_right_arrow" => "e-resize".into(),
+                    "w-resize" | "left_side" | "sb_left_arrow" => "w-resize".into(),
+                    "n-resize" | "top_side" | "sb_up_arrow" => "n-resize".into(),
+                    "s-resize" | "bottom_side" | "sb_down_arrow" => "s-resize".into(),
                     "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
                     "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
-                    "not-allowed" | "circle" | "crossed_circle" => "unavailable".into(),
+                    "nw-resize" | "top_left_corner" => "nw-resize".into(),
+                    "se-resize" | "bottom_right_corner" => "se-resize".into(),
+                    "ne-resize" | "top_right_corner" => "ne-resize".into(),
+                    "sw-resize" | "bottom_left_corner" => "sw-resize".into(),
+                    "not-allowed" | "no-drop" | "circle" | "crossed_circle" | "dnd-none"
+                    | "dnd-no-drop" => "unavailable".into(),
+                    "context-menu" | "context_menu" | "dnd-ask" => "context-menu".into(),
+                    "alias" | "dnd-link" | "link" => "alias".into(),
                     "grab" | "openhand" => "grab".into(),
                     "grabbing" | "closedhand" => "grabbing".into(),
                     "zoom-in" => "zoom-in".into(),
                     "zoom-out" => "zoom-out".into(),
-                    "copy" => "copy".into(),
-                    "cell" => "cell".into(),
+                    "copy" | "dnd-copy" => "copy".into(),
+                    "cell" | "plus" | "center_ptr" => "cell".into(),
                     _ => classify_cursor_kind_by_geometry(width, height, hx, hy),
                 }
             } else {
@@ -2047,29 +2108,41 @@ fn linux_capture_x11_cursor_shape() -> Option<CursorShapeInfo> {
                 .to_string_lossy()
                 .to_ascii_lowercase();
             match name_str.as_str() {
-                "arrow" | "default" | "left_ptr" | "top_left_arrow" => "arrow".into(),
-                "pointer" | "hand" | "hand2" | "pointing_hand" => "hand".into(),
+                "arrow" | "default" | "auto" | "left_ptr" | "top_left_arrow" | "right_ptr" => {
+                    "arrow".into()
+                }
+                "pointer" | "hand" | "hand1" | "hand2" | "pointing_hand" => "hand".into(),
                 "text" | "ibeam" | "xterm" => "ibeam".into(),
-                "crosshair" | "cross" => "crosshair".into(),
+                "vertical-text" => "vertical-text".into(),
+                "crosshair" | "cross" | "diamond_cross" => "crosshair".into(),
                 "wait" | "watch" => "wait".into(),
                 "progress" | "left_ptr_watch" => "progress".into(),
                 "help" | "question_arrow" => "help".into(),
-                "move" | "all-scroll" | "fleur" => "move".into(),
-                "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow" => {
-                    "resize-horizontal".into()
-                }
-                "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow" => {
-                    "resize-vertical".into()
-                }
+                "move" | "all-scroll" | "fleur" | "size_all" | "dnd-move" => "move".into(),
+                "col-resize" | "ew-resize" | "size_hor" | "h_double_arrow"
+                | "sb_h_double_arrow" => "resize-horizontal".into(),
+                "row-resize" | "ns-resize" | "size_ver" | "v_double_arrow"
+                | "sb_v_double_arrow" => "resize-vertical".into(),
+                "e-resize" | "right_side" | "sb_right_arrow" => "e-resize".into(),
+                "w-resize" | "left_side" | "sb_left_arrow" => "w-resize".into(),
+                "n-resize" | "top_side" | "sb_up_arrow" => "n-resize".into(),
+                "s-resize" | "bottom_side" | "sb_down_arrow" => "s-resize".into(),
                 "nwse-resize" | "size_fdiag" => "resize-diagonal-1".into(),
                 "nesw-resize" | "size_bdiag" => "resize-diagonal-2".into(),
-                "not-allowed" | "circle" | "crossed_circle" => "unavailable".into(),
+                "nw-resize" | "top_left_corner" => "nw-resize".into(),
+                "se-resize" | "bottom_right_corner" => "se-resize".into(),
+                "ne-resize" | "top_right_corner" => "ne-resize".into(),
+                "sw-resize" | "bottom_left_corner" => "sw-resize".into(),
+                "not-allowed" | "no-drop" | "circle" | "crossed_circle" | "dnd-none"
+                | "dnd-no-drop" => "unavailable".into(),
+                "context-menu" | "context_menu" | "dnd-ask" => "context-menu".into(),
+                "alias" | "dnd-link" | "link" => "alias".into(),
                 "grab" | "openhand" => "grab".into(),
                 "grabbing" | "closedhand" => "grabbing".into(),
                 "zoom-in" => "zoom-in".into(),
                 "zoom-out" => "zoom-out".into(),
-                "copy" => "copy".into(),
-                "cell" => "cell".into(),
+                "copy" | "dnd-copy" => "copy".into(),
+                "cell" | "plus" | "center_ptr" => "cell".into(),
                 _ => classify_cursor_kind_by_geometry(width, height, hotspot_x, hotspot_y),
             }
         } else {
