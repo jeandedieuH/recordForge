@@ -1,13 +1,18 @@
 //! Tauri commands for external publishing (YouTube).
+//!
+//! The OAuth flow is loopback+PKCE via `publish::loopback` — the refresh
+//! token lands directly in the OS credential vault and never crosses into
+//! the frontend. Manual publishes run on the command path; export-job
+//! auto-publish deliveries call `youtube::publish_video` directly.
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tauri::{Emitter, State};
 
 use crate::commands::storage::OAuthFlowStartResult;
-use crate::errors::{AppError, InternalError, Result};
+use crate::errors::{AppError, Result};
+use crate::publish::loopback;
 use crate::publish::youtube;
 use crate::state::AppState;
 use crate::storage::drive::{get_google_drive_client_id, get_google_drive_client_secret};
@@ -59,9 +64,63 @@ fn licensing_error(code: &str, message: impl Into<String>) -> AppError {
     .with_details(details)
 }
 
-/// Loopback+PKCE OAuth for the YouTube connection. Mirrors the Google Drive
-/// flow but stores the refresh token directly in the credential vault — it
-/// never crosses into the frontend.
+const OAUTH_SUCCESS_HTML: &str = "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; YouTube Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>";
+const OAUTH_FAILURE_HTML: &str = "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Return to RecordForge for details.</p></body></html>";
+
+/// Exchange an auth code for tokens on Google's token endpoint and stash the
+/// refresh token in the vault. Split out so both the happy path and error
+/// reporting stay readable in the listener thread.
+fn exchange_auth_code(
+    verifier: String,
+    port: u16,
+    auth_code: String,
+) -> std::result::Result<(), String> {
+    tauri::async_runtime::block_on(async move {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let client_id = get_google_drive_client_id();
+        let client_secret = get_google_drive_client_secret();
+        let redirect_uri = format!("http://127.0.0.1:{port}");
+        let mut params = vec![
+            ("client_id", client_id.as_str()),
+            ("code", auth_code.as_str()),
+            ("code_verifier", verifier.as_str()),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", redirect_uri.as_str()),
+        ];
+        // A present-but-empty client_secret is rejected by the token
+        // endpoint — omit the parameter entirely when unset.
+        if !client_secret.is_empty() {
+            params.push(("client_secret", client_secret.as_str()));
+        }
+        match http
+            .post("https://oauth2.googleapis.com/token")
+            .form(&params)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<crate::storage::drive::TokenResponse>().await {
+                    Ok(token_resp) => {
+                        if let Some(refresh) = token_resp.refresh_token.as_deref() {
+                            youtube::store_refresh_token(refresh).map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("failed to parse token response: {e}")),
+                }
+            }
+            Ok(resp) => Err(resp.text().await.unwrap_or_default()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+}
+
+/// Loopback+PKCE OAuth for the YouTube connection. Single-flight via
+/// `try_begin_oauth`; the listener thread exits on callback or deadline so
+/// abandoned sign-ins don't leak a parked thread.
 #[tauri::command]
 pub async fn start_youtube_oauth(
     app: tauri::AppHandle,
@@ -74,164 +133,110 @@ pub async fn start_youtube_oauth(
             "Publishing to YouTube is a RecordForge Pro feature",
         ));
     }
+    let _oauth_guard = loopback::try_begin_oauth()?;
+    let flow = loopback::begin_loopback_flow()?;
 
-    let verifier = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let challenge = base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        hasher.finalize(),
-    );
-    let state_str = uuid::Uuid::new_v4().to_string();
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| InternalError::Storage(format!("failed to bind loopback TCP server: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| InternalError::Storage(format!("failed to get local addr: {e}")))?
-        .port();
-
-    let redirect_uri = format!("http://127.0.0.1:{}", port);
+    let redirect_uri = format!("http://127.0.0.1:{}", flow.port);
     let client_id = get_google_drive_client_id();
     let scope = urlencoding(youtube::YOUTUBE_OAUTH_SCOPE);
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
-        client_id, redirect_uri, scope, challenge, state_str
+        client_id, redirect_uri, scope, flow.challenge, flow.state
     );
 
     let app_clone = app.clone();
-    let state_clone = state_str.clone();
-    let verifier_clone = verifier.clone();
+    let loopback::LoopbackFlow {
+        listener,
+        port,
+        state: state_str,
+        verifier,
+        ..
+    } = flow;
+    let result = OAuthFlowStartResult {
+        auth_url,
+        state: state_str.clone(),
+        port,
+    };
 
     std::thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buffer = [0u8; 4096];
-            let n = stream.read(&mut buffer).unwrap_or(0);
-            let req_str = String::from_utf8_lossy(&buffer[..n]);
-
-            let mut code = None;
-            let mut recv_state = None;
-            if let Some(first_line) = req_str.lines().next() {
-                if let Some(path) = first_line.split_whitespace().nth(1) {
-                    if let Some(query) = path.split('?').nth(1) {
-                        for pair in query.split('&') {
-                            let mut parts = pair.split('=');
-                            if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                                if k == "code" {
-                                    code = Some(v.to_string());
-                                } else if k == "state" {
-                                    recv_state = Some(v.to_string());
-                                }
+        // The guard lives for the listener's whole life so a second Connect
+        // click can't race this flow's port.
+        let _guard = _oauth_guard;
+        let event =
+            match loopback::accept_callback(&listener, &state_str, loopback::CALLBACK_TIMEOUT) {
+                Ok(loopback::Callback::Code { code, mut stream }) => {
+                    let outcome = exchange_auth_code(verifier, port, code);
+                    let account_label = if outcome.is_ok() {
+                        tauri::async_runtime::block_on(async {
+                            youtube::connection_label().await.ok().flatten()
+                        })
+                    } else {
+                        None
+                    };
+                    match outcome {
+                        Ok(()) => {
+                            loopback::respond_html(&mut stream, OAUTH_SUCCESS_HTML);
+                            YouTubeOAuthCompletedEvent {
+                                success: true,
+                                account_label,
+                                error: None,
+                            }
+                        }
+                        Err(err) => {
+                            loopback::respond_html(&mut stream, OAUTH_FAILURE_HTML);
+                            YouTubeOAuthCompletedEvent {
+                                success: false,
+                                account_label: None,
+                                error: Some(err),
                             }
                         }
                     }
                 }
-            }
-
-            let outcome = match code.filter(|_| recv_state.as_deref() == Some(&state_clone)) {
-                Some(auth_code) => tauri::async_runtime::block_on(async {
-                    let http = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()
-                        .unwrap_or_else(|_| reqwest::Client::new());
-                    let client_id = get_google_drive_client_id();
-                    let client_secret = get_google_drive_client_secret();
-                    let redirect_uri = format!("http://127.0.0.1:{}", port);
-                    let mut params = vec![
-                        ("client_id", client_id.as_str()),
-                        ("code", auth_code.as_str()),
-                        ("code_verifier", verifier_clone.as_str()),
-                        ("grant_type", "authorization_code"),
-                        ("redirect_uri", redirect_uri.as_str()),
-                    ];
-                    if !client_secret.is_empty() {
-                        params.push(("client_secret", client_secret.as_str()));
-                    }
-                    match http
-                        .post("https://oauth2.googleapis.com/token")
-                        .form(&params)
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            match resp.json::<crate::storage::drive::TokenResponse>().await {
-                                Ok(token_resp) => {
-                                    if let Some(refresh) = token_resp.refresh_token.as_deref() {
-                                        youtube::store_refresh_token(refresh)
-                                            .map_err(|e| e.to_string())?;
-                                    }
-                                    Ok(())
-                                }
-                                Err(e) => Err(format!("failed to parse token response: {e}")),
-                            }
-                        }
-                        Ok(resp) => Err(resp.text().await.unwrap_or_default()),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }),
-                None => Err("Invalid state or missing authorization code.".to_string()),
-            };
-
-            // Channel title is best-effort — the card falls back to "YouTube".
-            let account_label = if outcome.is_ok() {
-                tauri::async_runtime::block_on(async {
-                    youtube::connection_label().await.ok().flatten()
-                })
-            } else {
-                None
-            };
-
-            let (response_body, event) = match outcome {
-                Ok(()) => (
-                    "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; YouTube Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>",
-                    YouTubeOAuthCompletedEvent {
-                        success: true,
-                        account_label,
-                        error: None,
-                    },
-                ),
-                Err(err) => (
-                    "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Return to RecordForge for details.</p></body></html>",
+                Ok(loopback::Callback::Denied { error, mut stream }) => {
+                    loopback::respond_html(&mut stream, OAUTH_FAILURE_HTML);
                     YouTubeOAuthCompletedEvent {
                         success: false,
                         account_label: None,
-                        error: Some(err),
-                    },
-                ),
+                        error: Some(format!("authorization denied: {error}")),
+                    }
+                }
+                Ok(loopback::Callback::StateMismatch { mut stream }) => {
+                    loopback::respond_html(&mut stream, OAUTH_FAILURE_HTML);
+                    YouTubeOAuthCompletedEvent {
+                        success: false,
+                        account_label: None,
+                        error: Some("OAuth state mismatch — the sign-in was rejected".to_string()),
+                    }
+                }
+                Ok(loopback::Callback::TimedOut) => YouTubeOAuthCompletedEvent {
+                    success: false,
+                    account_label: None,
+                    error: Some("sign-in timed out — try connecting again".to_string()),
+                },
+                Err(error) => YouTubeOAuthCompletedEvent {
+                    success: false,
+                    account_label: None,
+                    error: Some(error.message),
+                },
             };
-
-            let http_response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            let _ = stream.write_all(http_response.as_bytes());
-            let _ = stream.flush();
-
-            let _ = app_clone.emit("youtube-oauth-completed", event);
-        }
+        let _ = app_clone.emit("youtube-oauth-completed", event);
     });
 
-    Ok(OAuthFlowStartResult {
-        auth_url,
-        state: state_str,
-        port,
-    })
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn youtube_connection_status() -> Result<YouTubeConnectionInfo> {
-    let connected = youtube::has_connection()?;
-    if !connected {
-        return Ok(YouTubeConnectionInfo {
+    match youtube::check_connection().await? {
+        youtube::ConnectionState::Connected(account_label) => Ok(YouTubeConnectionInfo {
+            connected: true,
+            account_label,
+        }),
+        youtube::ConnectionState::Disconnected => Ok(YouTubeConnectionInfo {
             connected: false,
             account_label: None,
-        });
+        }),
     }
-    Ok(YouTubeConnectionInfo {
-        connected: true,
-        account_label: youtube::connection_label().await.unwrap_or(None),
-    })
 }
 
 #[tauri::command]
@@ -266,18 +271,23 @@ pub async fn publish_to_youtube(
         );
     };
 
-    let (video_id, captions_attached) =
-        youtube::publish_video(&app_data_dir, &request, |uploaded, total| {
-            emit("uploading", uploaded, total)
-        })
-        .await
-        .inspect_err(|_| {
-            emit("failed", 0, 0);
-        })?;
+    let (video_id, captions_attached) = youtube::publish_video(
+        &app_data_dir,
+        &request,
+        Arc::new(AtomicBool::new(false)),
+        move |event: youtube::PublishProgress| {
+            let stage = match event.stage {
+                youtube::PublishStage::Uploading => "uploading",
+                youtube::PublishStage::AttachingCaptions => "attaching-captions",
+            };
+            emit(stage, event.uploaded_bytes, event.total_bytes)
+        },
+    )
+    .await
+    .inspect_err(|_| {
+        emit("failed", 0, 0);
+    })?;
 
-    if request.captions_path.is_some() {
-        emit("attaching-captions", 0, 0);
-    }
     emit("done", 0, 0);
     Ok(YouTubePublishResult {
         url: format!("https://www.youtube.com/watch?v={video_id}"),

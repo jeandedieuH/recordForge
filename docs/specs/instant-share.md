@@ -1,6 +1,6 @@
 # Instant Share — Phase 2 Design
 
-> **Status:** Design — needs approval before implementation
+> **Status:** Implemented — job-driven delivery pipeline (updated 2026-12)
 > **Related:** ADR 015 (open core), ADR 016 (license tokens), `docs/specs/storage-contract.md`, plan §6.1
 
 ## Goal
@@ -107,15 +107,50 @@ Embed code: `<iframe src="…/v/<id>?embed=1">` — a stripped chrome variant.
 - No server round-trip is required for BYO — but the license token still
   gates the feature client-side (Rust checks entitlement before starting).
 
-## Rust/UI flow
+## Rust/UI flow (implemented — job-driven delivery)
 
-1. `export_timeline` already returns a job; when it lands `completed` with
-   `share: true` in settings, `jobs/mod.rs` runs the share step as a second
-   stage of the same job (progress events continue on the same job channel).
-2. Entitlement: `license.requires("instant-share")` — a new ProFeatureKey —
-   enforced at job admission like the other five.
-3. Failure leaves the local export intact; the toast says "export done —
-   share failed: <reason>" with a retry action.
+1. `export_timeline` accepts `deliveries` on the options — an optional
+   `share` spec and an optional `youtube` spec (`ExportDeliveries` in
+   `jobs/mod.rs`, `exportDeliveriesSchema` in contracts). Both are attached
+   at export time from the persisted `exportSettings.instantShare` /
+   `exportSettings.youtubePublish` project settings.
+2. After `run_render_plan` completes the export file, the export worker
+   releases the render gates and runs the **delivery stage**: each
+   configured delivery updates its own persisted record in
+   `media_jobs.outputs.deliveries` (`pending → running → done | failed |
+   cancelled | skipped`, plus `url` + `detail`). Byte progress streams on
+   the `export-delivery-progress` event; every state change re-emits
+   `media-job-update`.
+3. Entitlement is enforced twice — at `start_export` (admission fails with
+   `pro_feature_required`) and again at delivery time inside the worker, so
+   a mid-export license change can't leak Pro uploads.
+4. The share link **password never touches disk**: `start_export` moves it
+   into the OS credential vault and persists only the opaque vault key; the
+   key is deleted once the share lands.
+5. Cancellation rides the job's cancel token — `cancel_media_job` aborts a
+   running upload even on a `completed` job; `cancel_share` covers manual
+   uploads. Delivery uploads hold an `update_gate` operation so an updater
+   install can't start mid-upload.
+6. On startup, `resume_pending_jobs` sweeps deliveries left `running`/`pending`
+   on completed jobs (crash mid-upload) and marks them `failed` so the UI
+   offers a **Retry** — `retry_export_delivery` re-runs a single delivery
+   from the persisted request without re-rendering.
+7. The upload engines live in `publish/share.rs` and `publish/youtube.rs`,
+   shared between the job stage and the manual commands
+   (`share_export`/`share_to_profile`, `publish_to_youtube`). Failures never
+   touch the completed export file; delivery errors surface as toasts +
+   per-delivery rows, not job failures.
+
+### YouTube auto-publish
+
+`exportSettings.youtubePublish` (`{enabled, privacy, attachCaptions,
+captionsLanguage}`) persists per project. When enabled and Pro, the export
+job carries a `youtube` delivery that uploads the finished MP4 via the
+resumable YouTube Data API `videos.insert` (8 MiB chunks, `Range`-confirmed
+resume, persisted session URI with a 6-day TTL), then attaches the SRT
+captions sidecar when produced. The persisted `privacy` and
+`captionsLanguage` apply to the auto-publish path; title/description come
+from the project name + generated chapter timestamps.
 
 ## Security & privacy notes
 

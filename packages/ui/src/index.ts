@@ -155,6 +155,7 @@ export { Skeleton } from "./components/feedback/skeleton"
 export {
   ToastViewport,
   useToast,
+  toast,
   type ToastOptions,
   type ToastVariant,
 } from "./components/feedback/toast"

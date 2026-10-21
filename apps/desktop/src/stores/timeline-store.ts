@@ -3,14 +3,15 @@ import {
   cursorSettingsSchema,
   defaultSmartZoomSettings,
   recordingPreferencesSchema,
-  type CanvasAspectRatio,
   type ExportEncoderPreference,
   type ExportPreset,
   type ExportRange,
+  type ExportDeliveries,
   type InstantShareSettings,
+  type JobDeliveryKind,
   type LibraryRecording,
-  type ReframeMode,
   type MediaJob,
+  type YouTubeAutoPublishSettings,
   type CursorTelemetryFile,
   type KeystrokeEvent,
   type KeystrokePlatform,
@@ -30,22 +31,18 @@ import {
   projectToTimeline,
   redoCommand,
   timelineToProject,
+  formatYouTubeChapters,
   type AppError,
   type CommandEngine,
   type ExecuteOptions,
   type TimelineCommand,
   type TimelineSelection,
-  type AudioMastering,
-  type BrandCards,
-  type WebcamBackground,
-  type BrandWatermark,
   type RenderCaptionMode,
   type RenderChapterMode,
   type TimelineState,
   undoCommand,
 } from "@recordforge/editor-core"
 import { buildRenderPlan, freeExportSettings } from "@recordforge/media-core"
-import { canvasDimensionsForAspect } from "@recordforge/domain"
 import {
   getProjectAssetPaths,
   relinkAsset as relinkAssetRequest,
@@ -73,8 +70,10 @@ import {
   requestPreviewProxy,
 } from "../lib/media"
 import { exportTimeline, retryExport as retryExportRequest, revealExport } from "../lib/timeline"
+import { retryExportDelivery } from "../lib/delivery"
 import { useLicenseStore } from "./license-store"
-import { notifyExportFinished } from "../lib/export-notifications"
+import { toast } from "@recordforge/ui"
+import { notifyExportFinished, terminalDeliveryTransitions } from "../lib/export-notifications"
 import { useEditorStore } from "./editor-store"
 import { useSmartCutStore } from "./smart-cut-store"
 
@@ -150,19 +149,12 @@ interface TimelineStore {
   setActiveExportJob: (job: MediaJob | null) => void
   setCaptionMode: (mode: RenderCaptionMode) => void
   setChapterMode: (mode: RenderChapterMode) => void
-  setAudioMastering: (mastering: AudioMastering) => void
-  setBrandWatermark: (watermark: BrandWatermark) => void
-  setBrandCards: (cards: BrandCards) => void
-  setWebcamBackground: (background: WebcamBackground) => void
   setKeystrokeOverlay: (patch: Partial<KeystrokeOverlaySettings>) => void
-  setReframeMode: (mode: ReframeMode) => void
-  // Multi-format batch export (Pro): canvas aspects selected in the export
-  // view are persisted in project.exportSettings.formats; empty means
-  // "current canvas only".
-  setExportFormats: (formats: CanvasAspectRatio[]) => void
   // Instant Share (Pro): hosted/BYO-bucket upload preferences, persisted
   // per project. The optional link password is deliberately session-only.
   setInstantShare: (share: InstantShareSettings) => void
+  // YouTube auto-publish preferences (Pro), persisted per project.
+  setYouTubePublish: (publish: YouTubeAutoPublishSettings) => void
   setExportContainer: (container: "mp4" | "gif" | "webp") => void
   setExportPreset: (preset: ExportPreset) => void
   setExportCodec: (codec: "h264" | "hevc" | "gif" | "webp") => void
@@ -170,6 +162,9 @@ interface TimelineStore {
   setExportRange: (range: ExportRange | undefined) => void
   cancelExport: () => Promise<void>
   retryExport: () => Promise<void>
+  // Re-run one post-export delivery on the completed export (share/youtube)
+  // without re-rendering — the persisted job request carries the spec.
+  retryExportDelivery: (kind: JobDeliveryKind) => Promise<void>
   revealExport: () => Promise<void>
   setSelection: (selection: TimelineSelection | null) => void
 
@@ -199,7 +194,7 @@ interface TimelineStore {
 
   export: (
     outputPath: string,
-    options?: { stripProFeatures?: boolean; formats?: CanvasAspectRatio[] },
+    options?: { stripProFeatures?: boolean; sharePassword?: string },
   ) => Promise<void>
   clearError: () => void
   // Phase 2: surface a validation or commit error without mutating project state.
@@ -207,23 +202,6 @@ interface TimelineStore {
 }
 
 const AUTOSAVE_DELAY_MS = 2000
-
-// Output-path tags for batch-export alternates (`name-vertical.mp4`).
-const EXPORT_FORMAT_TAGS: Record<CanvasAspectRatio, string> = {
-  "16:9": "landscape",
-  "9:16": "vertical",
-  "1:1": "square",
-  "4:5": "portrait-4x5",
-  "5:4": "wide-5x4",
-}
-
-function suffixExportPath(outputPath: string, format: CanvasAspectRatio): string {
-  const tag = EXPORT_FORMAT_TAGS[format]
-  const dot = outputPath.lastIndexOf(".")
-  return dot < 0
-    ? `${outputPath}-${tag}`
-    : `${outputPath.slice(0, dot)}-${tag}${outputPath.slice(dot)}`
-}
 
 const SNAPSHOT_COMMANDS = new Set([
   "delete-clip",
@@ -259,6 +237,47 @@ function fallbackMetadata(recording: LibraryRecording): MediaMetadata {
     streams: [],
     updatedAt: new Date().toISOString(),
   }
+}
+
+// Delivery specs travel inside the durable export request — Rust runs them
+// after the render completes, so sharing/publishing survives a closed export
+// view and an app restart. Both destinations are MP4-only; animation exports
+// (GIF/WebP) never attach deliveries.
+function buildExportDeliveries(
+  project: recordForgeProject,
+  isAnimation: boolean,
+  isPro: boolean,
+  sharePassword?: string,
+  chapterLines?: string,
+): ExportDeliveries | undefined {
+  if (isAnimation || !isPro) return undefined
+  const deliveries: ExportDeliveries = {}
+  const share = project.exportSettings.instantShare
+  if (share?.enabled) {
+    deliveries.share = {
+      target: share.target || "hosted",
+      title: project.name,
+      allowDownload: true,
+      allowEmbed: true,
+      expiresInDays: share.expiresInDays,
+      // Transient — Rust vaults it before the request is persisted.
+      password: sharePassword?.trim() ? sharePassword : undefined,
+    }
+  }
+  const publish = project.exportSettings.youtubePublish
+  if (publish?.enabled) {
+    deliveries.youtube = {
+      title: project.name,
+      // Chapter text is generated at export time so the description never
+      // ships stale marker copy.
+      description: chapterLines ?? "",
+      privacy: publish.privacy,
+      tags: [],
+      attachCaptions: publish.attachCaptions,
+      captionsLanguage: publish.captionsLanguage,
+    }
+  }
+  return deliveries.share || deliveries.youtube ? deliveries : undefined
 }
 
 function isDestructiveCommand(command: TimelineCommand): boolean {
@@ -644,6 +663,39 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           job.status === "completed"
         ) {
           void notifyExportFinished(job, recording?.name)
+        }
+
+        // Post-export delivery transitions arrive on the same job stream —
+        // toast each terminal change so an upload never ends silently, and
+        // a finished share link lands on the clipboard.
+        for (const delivery of terminalDeliveryTransitions(previousJob, job)) {
+          const hadInFlight =
+            previousJob?.outputs.deliveries.some(
+              (prior) =>
+                prior.kind === delivery.kind &&
+                (prior.status === "running" || prior.status === "pending"),
+            ) ?? false
+          if (!hadInFlight) continue
+          if (delivery.status === "done" && delivery.kind === "share" && delivery.url) {
+            void navigator.clipboard?.writeText(delivery.url).catch(() => {})
+            toast({
+              title: "Share link ready",
+              description: "Link copied to the clipboard.",
+              variant: "success",
+            })
+          } else if (delivery.status === "done" && delivery.kind === "youtube") {
+            toast({
+              title: "Published to YouTube",
+              description: delivery.url ?? undefined,
+              variant: "success",
+            })
+          } else if (delivery.status === "failed") {
+            toast({
+              title: delivery.kind === "share" ? "Share upload failed" : "YouTube publish failed",
+              description: delivery.detail ?? undefined,
+              variant: "error",
+            })
+          }
         }
       }
 
@@ -1094,57 +1146,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     get().markProjectChanged(nextProject)
   },
 
-  setAudioMastering: (mastering) => {
-    const project = get().project
-    if (!project) return
-    const current = project.exportSettings.audioMastering
-    if (
-      current?.denoise === mastering.denoise &&
-      current?.loudnessTarget === mastering.loudnessTarget
-    ) {
-      return
-    }
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, audioMastering: mastering },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setBrandWatermark: (watermark) => {
-    const project = get().project
-    if (!project) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, brandWatermark: watermark },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setBrandCards: (cards) => {
-    const project = get().project
-    if (!project) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, brandCards: cards },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setWebcamBackground: (background) => {
-    const project = get().project
-    if (!project) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, webcamBackground: background },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
   setKeystrokeOverlay: (patch) => {
     const project = get().project
     if (!project) return
@@ -1154,33 +1155,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         ...project.exportSettings,
         keystrokeOverlay: { ...project.exportSettings.keystrokeOverlay, ...patch },
       },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setReframeMode: (mode) => {
-    const project = get().project
-    if (!project || project.exportSettings.reframeMode === mode) return
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, reframeMode: mode },
-      updatedAt: new Date().toISOString(),
-    }
-    get().markProjectChanged(nextProject)
-  },
-
-  setExportFormats: (formats) => {
-    const project = get().project
-    if (!project) return
-    const next = [...new Set(formats)]
-    const current = project.exportSettings.formats
-    if (current.length === next.length && current.every((format, i) => format === next[i])) {
-      return
-    }
-    const nextProject = {
-      ...project,
-      exportSettings: { ...project.exportSettings, formats: next },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)
@@ -1200,6 +1174,26 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const nextProject = {
       ...project,
       exportSettings: { ...project.exportSettings, instantShare: share },
+      updatedAt: new Date().toISOString(),
+    }
+    get().markProjectChanged(nextProject)
+  },
+
+  setYouTubePublish: (publish) => {
+    const project = get().project
+    if (!project) return
+    const current = project.exportSettings.youtubePublish
+    if (
+      current.enabled === publish.enabled &&
+      current.privacy === publish.privacy &&
+      current.attachCaptions === publish.attachCaptions &&
+      current.captionsLanguage === publish.captionsLanguage
+    ) {
+      return
+    }
+    const nextProject = {
+      ...project,
+      exportSettings: { ...project.exportSettings, youtubePublish: publish },
       updatedAt: new Date().toISOString(),
     }
     get().markProjectChanged(nextProject)
@@ -1326,7 +1320,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   cancelExport: async () => {
     const job = get().activeExportJob
-    if (!job || !["pending", "running"].includes(job.status)) return
+    if (!job) return
+    // A completed export can still carry a running post-export delivery —
+    // the job's cancel token outlives the render phase so delivery cancels
+    // route through the same command.
+    const deliveryRunning =
+      job.outputs.deliveries?.some((delivery) => delivery.status === "running") ?? false
+    if (!["pending", "running"].includes(job.status) && !deliveryRunning) return
     try {
       await cancelMediaJob(job.id)
     } catch (err) {
@@ -1340,6 +1340,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     try {
       const retried = await retryExportRequest(job.id)
       set({ activeExportJob: retried, error: null })
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
+    }
+  },
+
+  retryExportDelivery: async (kind) => {
+    const job = get().activeExportJob
+    if (!job || job.status !== "completed") return
+    try {
+      const updated = await retryExportDelivery(job.id, kind)
+      set({ activeExportJob: updated })
     } catch (err) {
       set({ error: toErrorMessage(err) })
     }
@@ -1436,70 +1447,44 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       ? freeExportSettings(effectiveExportSettings)
       : effectiveExportSettings
 
-    // Multi-format batch export (Pro): each requested canvas aspect becomes
-    // an independent durable job. The primary format keeps the user's chosen
-    // output path; alternates get a format tag (`name-vertical.mp4`).
-    // Formats only apply to MP4 batch exports — animation containers ignore
-    // them. A strip-to-Free export collapses to the primary canvas so a
-    // persisted Pro selection can never reach an alternate job's entitlement
-    // check.
-    const canvas = engine.history.present.canvas
-    const currentAspect: CanvasAspectRatio = canvas.aspectRatio ?? "16:9"
-    const persisted = effectiveExportSettings.formats ?? []
-    const requested: CanvasAspectRatio[] =
-      isAnimation || strip
-        ? [currentAspect]
-        : options?.formats?.length
-          ? [...new Set(options.formats)]
-          : persisted.length
-            ? [...new Set(persisted)]
-            : [currentAspect]
-    // The current aspect exports first so an entitlement failure on an
-    // alternate never orphans the primary job.
-    const formats = requested.includes(currentAspect)
-      ? [currentAspect, ...requested.filter((format) => format !== currentAspect)]
-      : requested
-
-    for (const [index, format] of formats.entries()) {
-      const variantState = {
-        ...engine.history.present,
-        canvas: {
-          ...canvas,
-          ...canvasDimensionsForAspect(canvas, format),
-          aspectRatio: format,
-        },
-      }
-      const plan = buildRenderPlan({
-        state: variantState,
+    const plan = buildRenderPlan({
+      state: engine.history.present,
+      projectId: currentProject.id,
+      settings: finalSettings,
+      captionMode: finalSettings.captionMode,
+      chapterMode: finalSettings.chapterMode,
+      assets: currentProject.assets,
+      cursorTelemetry: get().cursorTelemetry,
+      cursorEngine: get().cursorEngine,
+      stripProFeatures: strip,
+    })
+    if (!plan.ok) {
+      set({ error: plan.error.message })
+      return
+    }
+    try {
+      const job = await exportTimeline({
         projectId: currentProject.id,
+        outputPath,
+        plan: plan.value,
         settings: finalSettings,
-        captionMode: finalSettings.captionMode,
-        chapterMode: finalSettings.chapterMode,
-        assets: currentProject.assets,
-        cursorTelemetry: get().cursorTelemetry,
-        cursorEngine: get().cursorEngine,
-        stripProFeatures: strip,
+        // Deliveries ride the durable job request — the Rust export worker
+        // runs them after the render regardless of which screen is open.
+        deliveries: buildExportDeliveries(
+          currentProject,
+          isAnimation,
+          !strip && useLicenseStore.getState().status.tier === "pro",
+          options?.sharePassword,
+          formatYouTubeChapters(
+            engine.history.present.markers ?? [],
+            plan.value.durationMs,
+            currentProject.name,
+          ),
+        ),
       })
-      if (!plan.ok) {
-        set({ error: plan.error.message })
-        return
-      }
-      try {
-        const job = await exportTimeline({
-          projectId: currentProject.id,
-          outputPath: index === 0 ? outputPath : suffixExportPath(outputPath, format),
-          plan: plan.value,
-          settings: finalSettings,
-        })
-        // Surface the primary job immediately so progress stays visible even
-        // if an alternate format fails to start afterwards.
-        if (index === 0) {
-          set({ activeExportJob: job })
-        }
-      } catch (err) {
-        set({ error: toErrorMessage(err) })
-        return
-      }
+      set({ activeExportJob: job })
+    } catch (err) {
+      set({ error: toErrorMessage(err) })
     }
   },
 

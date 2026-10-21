@@ -163,6 +163,32 @@ export const mediaVideoTrackOutputSchema = z.object({
 
 export type MediaVideoTrackOutput = z.infer<typeof mediaVideoTrackOutputSchema>
 
+// Post-export delivery destinations (Instant Share / YouTube auto-publish).
+// A delivery failure never fails the export job — the rendered file stays.
+export const jobDeliveryKindSchema = z.enum(["share", "youtube"])
+export type JobDeliveryKind = z.infer<typeof jobDeliveryKindSchema>
+
+export const jobDeliveryStatusSchema = z.enum([
+  "pending",
+  "running",
+  "done",
+  "failed",
+  "cancelled",
+  "skipped",
+])
+export type JobDeliveryStatus = z.infer<typeof jobDeliveryStatusSchema>
+
+export const jobDeliverySchema = z.object({
+  kind: jobDeliveryKindSchema,
+  status: jobDeliveryStatusSchema,
+  // The public URL once delivered (share link / YouTube watch URL).
+  url: z.string().nullish(),
+  // Progress blurb while running ("part 4 of 9"); the failure reason when
+  // failed/skipped so the UI can render it verbatim.
+  detail: z.string().nullish(),
+})
+export type JobDelivery = z.infer<typeof jobDeliverySchema>
+
 // Output files produced by a prepare job.
 export const mediaJobOutputsSchema = z.object({
   prepareVersion: z.number().int().min(0).default(0),
@@ -178,6 +204,7 @@ export const mediaJobOutputsSchema = z.object({
   videoTracks: z.array(mediaVideoTrackOutputSchema).default([]),
   outputPath: z.string().nullish(),
   captionsPath: z.string().nullish(),
+  deliveries: z.array(jobDeliverySchema).default([]),
 })
 
 export type MediaJobOutputs = z.infer<typeof mediaJobOutputsSchema>
@@ -200,6 +227,17 @@ export const mediaJobSchema = z.object({
 })
 
 export type MediaJob = z.infer<typeof mediaJobSchema>
+
+/** Event emitted while a post-export delivery uploads bytes. */
+export const DELIVERY_PROGRESS_EVENT = "export-delivery-progress" as const
+
+export const deliveryProgressSchema = z.object({
+  jobId: z.string(),
+  kind: jobDeliveryKindSchema,
+  uploadedBytes: z.number(),
+  totalBytes: z.number(),
+})
+export type DeliveryProgress = z.infer<typeof deliveryProgressSchema>
 
 // Options for starting a prepare job.
 export const prepareMediaOptionsSchema = z.object({

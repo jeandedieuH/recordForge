@@ -77,6 +77,13 @@ pub fn init(app: &tauri::App) -> Result<()> {
         app.handle().clone(),
     ));
 
+    let storage_manager = crate::storage::StorageManager::new(
+        app.handle().clone(),
+        Arc::clone(&db),
+        path_policy.clone(),
+    );
+    let update_gate = Arc::new(crate::state::UpdateGate::default());
+
     let job_manager = JobManager::new(
         app.handle().clone(),
         Arc::clone(&db),
@@ -86,18 +93,14 @@ pub fn init(app: &tauri::App) -> Result<()> {
         available_encoders,
         recorder.resource_gate(),
         Arc::clone(&license),
+        storage_manager.clone(),
+        Arc::clone(&update_gate),
     );
 
     // Resume any pending or interrupted jobs from a previous run.
     if let Err(err) = job_manager.resume_pending_jobs() {
         tracing::error!(error = ?err, "failed to resume media jobs");
     }
-
-    let storage_manager = crate::storage::StorageManager::new(
-        app.handle().clone(),
-        Arc::clone(&db),
-        path_policy.clone(),
-    );
 
     app.manage(AppState {
         recorder: Arc::new(recorder),
@@ -109,7 +112,7 @@ pub fn init(app: &tauri::App) -> Result<()> {
         quick_config: Arc::new(Mutex::new(None)),
         path_policy,
         storage_manager,
-        update_gate: Arc::new(crate::state::UpdateGate::default()),
+        update_gate,
         license: Arc::clone(&license),
         transcription: Arc::new(crate::transcript::TranscriptionRegistry::default()),
     });

@@ -1,11 +1,15 @@
 import { invoke } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
-import type {
-  YouTubeConnection,
-  YouTubePublishProgress,
-  YouTubePublishRequest,
-  YouTubePublishResult,
+import {
+  youtubeConnectionSchema,
+  youtubePublishRequestSchema,
+  youtubePublishResultSchema,
+  type YouTubeConnection,
+  type YouTubePublishProgress,
+  type YouTubePublishRequest,
+  type YouTubePublishResult,
 } from "@recordforge/contracts"
+import { invokeValidated } from "./ipc"
 
 interface OAuthFlowStartResult {
   authUrl: string
@@ -18,7 +22,7 @@ export function startYouTubeOAuth(): Promise<OAuthFlowStartResult> {
 }
 
 export function youtubeConnectionStatus(): Promise<YouTubeConnection> {
-  return invoke("youtube_connection_status")
+  return invokeValidated("youtube_connection_status", undefined, youtubeConnectionSchema)
 }
 
 export function disconnectYouTube(): Promise<void> {
@@ -26,7 +30,10 @@ export function disconnectYouTube(): Promise<void> {
 }
 
 export function publishToYouTube(request: YouTubePublishRequest): Promise<YouTubePublishResult> {
-  return invoke("publish_to_youtube", { request })
+  // Validated before IPC so a stale/malformed request fails locally with a
+  // readable zod error instead of a Rust-side deserialization rejection.
+  const parsed = youtubePublishRequestSchema.parse(request)
+  return invokeValidated("publish_to_youtube", { request: parsed }, youtubePublishResultSchema)
 }
 
 export function cancelYouTubePublish(): Promise<void> {

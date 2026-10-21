@@ -10,30 +10,14 @@
 //! segments, so trims, splits, and speed changes keep badges aligned.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use serde::Deserialize;
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
 use crate::capture::keystrokes::{ordered_modifiers, KeystrokeEvent, KeystrokeModifier};
-use crate::errors::{InternalError, Result};
 use crate::exports::cursor::source_time_for_output;
 use crate::exports::{KeystrokeOverlay, RenderSegment};
-
-const INTER_FONT_BYTES: &[u8] =
-    include_bytes!("../../../../../packages/overlay-engine/fonts/inter.ttf");
-
-/// Stage the embedded Inter font for FFmpeg drawtext consumers — shared by
-/// the brand-cards pipeline, which needs a real font file on disk.
-pub(crate) fn write_font(dir: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)
-        .map_err(|error| InternalError::Storage(format!("create font staging dir: {error}")))?;
-    let path = dir.join("inter.ttf");
-    std::fs::write(&path, INTER_FONT_BYTES)
-        .map_err(|error| InternalError::Storage(format!("write font: {error}")))?;
-    Ok(path)
-}
 
 const ENTER_MS: f64 = 160.0;
 const EXIT_MS: f64 = 220.0;

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 use tracing::{error, info, instrument};
 
 use crate::database::library::get_recording;
@@ -11,7 +12,7 @@ use crate::database::media::{
     DerivativeFile, MediaAudioTrackOutput, MediaFormat, MediaJob, MediaJobKind, MediaJobOutputs,
     MediaVideoTrackOutput,
 };
-use crate::errors::{InternalError, Result};
+use crate::errors::{AppError, ErrorCategory, InternalError, Result};
 use crate::events::EventPublisher;
 use crate::exports::{run_render_plan, ExportSettings, RenderPlan};
 use crate::media::audio::extract_audio_track;
@@ -78,6 +79,68 @@ pub struct AssetDerivativeOptions {
     pub force: bool,
 }
 
+/// Post-export delivery plan persisted inside `ExportRequest`. Deliveries
+/// ride the durable job row so a share/publish outlives the export view, a
+/// closed window, and an app restart — they are never UI-side fire-and-forget.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportDeliveries {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<ShareDeliveryRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube: Option<YouTubeDeliveryRequest>,
+}
+
+/// Instant Share delivery spec. `password` is accepted over IPC but never
+/// persisted: `start_export` moves it into the OS credential vault and the
+/// job row keeps only the opaque `password_vault_key`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareDeliveryRequest {
+    /// `"hosted"` or an S3 storage profile id.
+    pub target: String,
+    pub title: String,
+    #[serde(default = "default_true")]
+    pub allow_download: bool,
+    #[serde(default = "default_true")]
+    pub allow_embed: bool,
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
+    /// Transient IPC-only field — `skip_serializing` keeps it out of SQLite.
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
+    /// Vault account holding the link password for the delivery + retries.
+    #[serde(default)]
+    pub password_vault_key: Option<String>,
+}
+
+/// YouTube auto-publish spec persisted with the export job.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YouTubeDeliveryRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_unlisted")]
+    pub privacy: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_true")]
+    pub attach_captions: bool,
+    #[serde(default = "default_en")]
+    pub captions_language: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_unlisted() -> String {
+    "unlisted".to_string()
+}
+fn default_en() -> String {
+    "en".to_string()
+}
+
 /// Durable export request stored in the media job options column.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportRequest {
@@ -87,12 +150,15 @@ pub struct ExportRequest {
     pub output_path: String,
     pub plan: RenderPlan,
     pub settings: ExportSettings,
+    /// Post-export destinations; absent on rows persisted before deliveries.
+    #[serde(default)]
+    pub deliveries: ExportDeliveries,
 }
 
 /// The normalized destination a persisted export request targets. Dedupe
 /// compares request destinations so a running export to path A must not
-/// swallow a new export to path B — multi-format batches submit one job per
-/// canvas variant, each with its own suffixed output path.
+/// swallow a new export to path B — each export job owns its own output
+/// path, so destination-scoped dedupe never conflates siblings.
 fn export_request_output(options: &serde_json::Value) -> Option<&str> {
     options.get("outputPath").and_then(|value| value.as_str())
 }
@@ -145,6 +211,15 @@ pub struct JobManager {
     // Entitlements are checked at every export entry point (start, retry,
     // startup resume) so a persisted Pro export can't outlive the license.
     license: Arc<crate::licensing::LicenseManager>,
+    // Deliveries resolve BYO storage profiles + vault secrets through the
+    // manager, never through frontend-supplied credentials.
+    storage: crate::storage::StorageManager,
+    // Post-export uploads hold an update-gate op so an installer can't swap
+    // the binary mid-upload.
+    update_gate: Arc<crate::state::UpdateGate>,
+    // Delivery phases serialize across jobs — renders may queue but network
+    // uploads run one at a time so retries/cancels stay unambiguous.
+    delivery_lock: Arc<Mutex<()>>,
 }
 
 impl JobManager {
@@ -158,6 +233,8 @@ impl JobManager {
         available_encoders: Vec<String>,
         resource_gate: Arc<crate::state::CaptureWorkGate>,
         license: Arc<crate::licensing::LicenseManager>,
+        storage: crate::storage::StorageManager,
+        update_gate: Arc<crate::state::UpdateGate>,
     ) -> Self {
         Self {
             app,
@@ -171,6 +248,9 @@ impl JobManager {
             start_lock: Arc::new(Mutex::new(())),
             resource_gate,
             license,
+            storage,
+            update_gate,
+            delivery_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -360,9 +440,9 @@ impl JobManager {
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
         let project = crate::database::projects::get_project(&conn, &request.project_id)?
             .ok_or_else(|| InternalError::Project("export project was not found".into()))?;
-        // Dedupe on the normalized destination, not "any running export": a
-        // batch export issues one job per canvas aspect, each with a distinct
-        // suffixed output path, and the gate serializes their encode work.
+        // Dedupe on the normalized destination, not "any running export":
+        // two exports to different files may coexist and the gate serializes
+        // their encode work.
         let active = media_db::list_jobs(&conn, &project.recording_id)?;
         let active = active_export_for_output(&active, None, &destination.to_string_lossy());
         if let Some(active) = active {
@@ -371,6 +451,19 @@ impl JobManager {
 
         let mut request = request;
         request.output_path = destination.to_string_lossy().to_string();
+        // Post-export deliveries are Pro-only; check at admission now and
+        // again in the worker at delivery time so a mid-export downgrade
+        // can't smuggle Pro uploads through a stale decision.
+        self.enforce_delivery_entitlements(&request.deliveries)?;
+        // The share password is a secret: move it into the OS credential
+        // vault and persist only the opaque vault key in the job row.
+        if let Some(share) = request.deliveries.share.as_mut() {
+            if let Some(password) = share.password.take().filter(|p| !p.trim().is_empty()) {
+                let key = format!("share-link-password:{}", uuid::Uuid::new_v4());
+                crate::storage::vault::set_secret(&key, &password)?;
+                share.password_vault_key = Some(key);
+            }
+        }
         let options = serde_json::to_value(&request).map_err(|error| {
             InternalError::Storage(format!("serialize export request: {error}"))
         })?;
@@ -390,6 +483,32 @@ impl JobManager {
         self.emit_job_update(&job)?;
         self.spawn_export(job.clone(), request, token);
         Ok(job)
+    }
+
+    /// Pro-gate the configured deliveries; the AppError carries the feature
+    /// keys the frontend maps to the upgrade dialog.
+    fn enforce_delivery_entitlements(&self, deliveries: &ExportDeliveries) -> Result<()> {
+        if deliveries.share.is_none() && deliveries.youtube.is_none() {
+            return Ok(());
+        }
+        if self.license.entitlements().pro_enabled {
+            return Ok(());
+        }
+        let mut features = Vec::new();
+        if deliveries.share.is_some() {
+            features.push("instant-share");
+        }
+        if deliveries.youtube.is_some() {
+            features.push("youtube-publish");
+        }
+        let mut details = serde_json::Map::new();
+        details.insert("features".to_string(), serde_json::json!(features));
+        Err(AppError::new(
+            ErrorCategory::Licensing,
+            "pro_feature_required",
+            "Post-export sharing and publishing require RecordForge Pro",
+        )
+        .with_details(details))
     }
 
     /// Retry an export using its persisted request and the same job identity.
@@ -413,7 +532,7 @@ impl JobManager {
         {
             return Ok(existing);
         }
-        // Same destination-scoped dedupe as start_export: a sibling batch job
+        // Same destination-scoped dedupe as start_export: a sibling export
         // running to another output must not suppress this retry, but a fresh
         // export already targeting the same file supersedes it.
         let retried_output = export_request_output(&existing.options).map(str::to_owned);
@@ -469,6 +588,7 @@ impl JobManager {
             db: Arc::clone(&self.db),
             ffmpeg_path: self.ffmpeg_path.clone(),
             ffprobe_path: self.ffprobe_path.clone(),
+            path_policy: self.path_policy.clone(),
             available_encoders: self.available_encoders.clone(),
             active_tokens: Arc::clone(&self.active_tokens),
             worker_lock: Arc::clone(&self.worker_lock),
@@ -478,6 +598,10 @@ impl JobManager {
             output_cap: self.license.entitlements().output_cap(),
             job_id: job.id,
             request,
+            license: Arc::clone(&self.license),
+            storage: self.storage.clone(),
+            update_gate: Arc::clone(&self.update_gate),
+            delivery_lock: Arc::clone(&self.delivery_lock),
         };
         let worker_id = worker.job_id.clone();
         std::thread::spawn(move || {
@@ -485,6 +609,86 @@ impl JobManager {
                 error!(job_id = %worker_id, error = %error, "export job failed");
             }
         });
+    }
+
+    /// Re-run one post-export delivery (share or youtube) on a completed
+    /// export. The persisted request carries the spec — a failed upload
+    /// retries without re-rendering, and the vault key survives for the
+    /// password. A second click while the same delivery is running dedupes.
+    #[instrument]
+    pub fn retry_delivery(&self, job_id: &str, kind: &str) -> Result<MediaJob> {
+        let _start_lock = self
+            .start_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("job start mutex poisoned".into()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        let job = media_db::get_job(&conn, job_id)?;
+        if job.kind != MediaJobKind::Export
+            || job.status != crate::database::media::MediaJobStatus::Completed
+        {
+            return Ok(job);
+        }
+        // One in-flight attempt per delivery kind.
+        if job
+            .outputs
+            .deliveries
+            .iter()
+            .any(|delivery| delivery.kind == kind && delivery.status == "running")
+        {
+            return Ok(job);
+        }
+        let request: ExportRequest =
+            serde_json::from_value(job.options.clone()).map_err(|error| {
+                InternalError::Media(format!("stored export request is invalid: {error}"))
+            })?;
+        let configured = match kind {
+            "share" => request.deliveries.share.is_some(),
+            "youtube" => request.deliveries.youtube.is_some(),
+            _ => false,
+        };
+        if !configured {
+            return Err(InternalError::Media(format!(
+                "export {job_id} has no {kind} delivery configured"
+            ))
+            .into());
+        }
+        if !self.license.entitlements().pro_enabled {
+            return Err(AppError::new(
+                ErrorCategory::Licensing,
+                "pro_feature_required",
+                "Post-export sharing and publishing require RecordForge Pro",
+            ));
+        }
+        drop(conn);
+
+        let token = Arc::new(AtomicBool::new(false));
+        self.active_tokens
+            .lock()
+            .map_err(|_| InternalError::Unknown("active tokens mutex poisoned".into()))?
+            .insert(job.id.clone(), token.clone());
+        let runner = ExportDeliveryRunner {
+            app: self.app.clone(),
+            db: Arc::clone(&self.db),
+            license: Arc::clone(&self.license),
+            storage: self.storage.clone(),
+            path_policy: self.path_policy.clone(),
+            update_gate: Arc::clone(&self.update_gate),
+            delivery_lock: Arc::clone(&self.delivery_lock),
+            active_tokens: Arc::clone(&self.active_tokens),
+            job_id: job.id.clone(),
+            request,
+            kinds: vec![kind.to_string()],
+        };
+        let runner_id = runner.job_id.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = runner.run(token) {
+                error!(job_id = %runner_id, error = %error, "delivery retry failed");
+            }
+        });
+        Ok(job)
     }
 
     /// Cancel an active or pending job.
@@ -536,6 +740,13 @@ impl JobManager {
             .db
             .lock()
             .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+        // A crash mid-upload leaves "running" deliveries on completed jobs.
+        // Flag them failed so the UI offers a retry instead of a frozen bar;
+        // the delivery is cheap to re-run and auto-resuming a dead network
+        // upload would risk surprise re-uploads.
+        if let Err(error) = media_db::fail_interrupted_deliveries(&conn) {
+            error!(error = %error, "interrupted delivery sweep failed");
+        }
         let jobs = media_db::list_active_or_pending_jobs(&conn)?;
         drop(conn);
 
@@ -699,6 +910,7 @@ struct ExportWorker {
     db: Arc<Mutex<rusqlite::Connection>>,
     ffmpeg_path: PathBuf,
     ffprobe_path: PathBuf,
+    path_policy: PathPolicy,
     available_encoders: Vec<String>,
     active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     worker_lock: Arc<Mutex<()>>,
@@ -706,79 +918,113 @@ struct ExportWorker {
     output_cap: Option<crate::exports::ExportOutputCap>,
     job_id: String,
     request: ExportRequest,
+    license: Arc<crate::licensing::LicenseManager>,
+    storage: crate::storage::StorageManager,
+    update_gate: Arc<crate::state::UpdateGate>,
+    delivery_lock: Arc<Mutex<()>>,
 }
 
 impl ExportWorker {
+    /// Two phases with different resources: the render holds the worker and
+    /// media gates; deliveries are plain network uploads that run after both
+    /// are released so a slow share can't starve queued jobs or recording.
     fn run(self, cancel: Arc<AtomicBool>) -> Result<()> {
-        let _lock = self
-            .worker_lock
-            .lock()
-            .map_err(|_| InternalError::Unknown("worker lock poisoned".into()))?;
-        if cancel.load(Ordering::Relaxed) {
-            return self.finish_cancelled();
-        }
-        // Wait for any active capture/finalization to release the media gate
-        // before marking the job running; a cancelled wait starts nothing.
-        let _resource_permit = match self.resource_gate.wait_for_job(&cancel) {
-            Ok(Some(permit)) => permit,
-            Ok(None) => return self.finish_cancelled(),
-            Err(error) => return self.fail(&error.to_string()),
-        };
-
-        let conn = self
-            .db
-            .lock()
-            .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-        let job = media_db::start_job(&conn, &self.job_id)?;
-        drop(conn);
-        self.emit(&job)?;
-
-        let result = run_render_plan(
-            &self.job_id,
-            &self.request.project_id,
-            Path::new(&self.request.output_path),
-            self.request.plan.clone(),
-            self.request.settings.clone(),
-            &self.ffmpeg_path,
-            &self.ffprobe_path,
-            Arc::clone(&self.db),
-            &self.app,
-            cancel.clone(),
-            &self.available_encoders,
-            self.output_cap,
-        );
-
-        match result {
-            Ok(()) => {
-                let conn = self
-                    .db
-                    .lock()
-                    .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
-                let completed = media_db::complete_job(
-                    &conn,
-                    &self.job_id,
-                    &media_db::MediaJobOutputs {
-                        output_path: Some(self.request.output_path.clone()),
-                        captions_path: if self.request.plan.caption_mode == "sidecar" {
-                            Some(
-                                Path::new(&self.request.output_path)
-                                    .with_extension("srt")
-                                    .to_string_lossy()
-                                    .to_string(),
-                            )
-                        } else {
-                            None
-                        },
-                        ..Default::default()
-                    },
-                )?;
-                drop(conn);
-                self.cleanup_active_token();
-                self.emit(&completed)?;
-                Ok(())
+        {
+            let _lock = self
+                .worker_lock
+                .lock()
+                .map_err(|_| InternalError::Unknown("worker lock poisoned".into()))?;
+            if cancel.load(Ordering::Relaxed) {
+                return self.finish_cancelled();
             }
-            Err(_) if cancel.load(Ordering::Relaxed) => self.finish_cancelled(),
-            Err(error) => self.fail(&error.to_string()),
+            // Wait for any active capture/finalization to release the media gate
+            // before marking the job running; a cancelled wait starts nothing.
+            let _resource_permit = match self.resource_gate.wait_for_job(&cancel) {
+                Ok(Some(permit)) => permit,
+                Ok(None) => return self.finish_cancelled(),
+                Err(error) => return self.fail(&error.to_string()),
+            };
+
+            let conn = self
+                .db
+                .lock()
+                .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+            let job = media_db::start_job(&conn, &self.job_id)?;
+            drop(conn);
+            self.emit(&job)?;
+
+            let result = run_render_plan(
+                &self.job_id,
+                &self.request.project_id,
+                Path::new(&self.request.output_path),
+                self.request.plan.clone(),
+                self.request.settings.clone(),
+                &self.ffmpeg_path,
+                &self.ffprobe_path,
+                Arc::clone(&self.db),
+                &self.app,
+                cancel.clone(),
+                &self.available_encoders,
+                self.output_cap,
+            );
+
+            match result {
+                Ok(()) => {
+                    let conn = self
+                        .db
+                        .lock()
+                        .map_err(|_| InternalError::Storage("database mutex poisoned".into()))?;
+                    let completed = media_db::complete_job(
+                        &conn,
+                        &self.job_id,
+                        &media_db::MediaJobOutputs {
+                            output_path: Some(self.request.output_path.clone()),
+                            captions_path: if self.request.plan.caption_mode == "sidecar" {
+                                Some(
+                                    Path::new(&self.request.output_path)
+                                        .with_extension("srt")
+                                        .to_string_lossy()
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            },
+                            ..Default::default()
+                        },
+                    )?;
+                    drop(conn);
+                    self.emit(&completed)?;
+                }
+                Err(_) if cancel.load(Ordering::Relaxed) => return self.finish_cancelled(),
+                Err(error) => return self.fail(&error.to_string()),
+            }
+            // `worker_lock` + `resource_permit` drop here — the export file is
+            // durable at this point and uploads are pure network work.
+        }
+
+        // Post-export deliveries share the job's cancel token so
+        // `cancel_media_job` still aborts an upload on a completed job.
+        self.run_deliveries(&cancel);
+        self.cleanup_active_token();
+        Ok(())
+    }
+
+    fn run_deliveries(&self, cancel: &Arc<AtomicBool>) {
+        let runner = ExportDeliveryRunner {
+            app: self.app.clone(),
+            db: Arc::clone(&self.db),
+            license: Arc::clone(&self.license),
+            storage: self.storage.clone(),
+            path_policy: self.path_policy.clone(),
+            update_gate: Arc::clone(&self.update_gate),
+            delivery_lock: Arc::clone(&self.delivery_lock),
+            active_tokens: Arc::clone(&self.active_tokens),
+            job_id: self.job_id.clone(),
+            request: self.request.clone(),
+            kinds: vec!["share".to_string(), "youtube".to_string()],
+        };
+        if let Err(error) = runner.run(cancel.clone()) {
+            error!(job_id = %self.job_id, error = %error, "post-export delivery stage failed");
         }
     }
 
@@ -818,6 +1064,301 @@ impl ExportWorker {
 
     fn emit(&self, job: &MediaJob) -> Result<()> {
         EventPublisher::new(&self.app).media_job_update(job)
+    }
+}
+
+/// Payload for `export-delivery-progress` — byte-level upload progress for
+/// one delivery on one job. Mirrors `deliveryProgressSchema` in contracts.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryProgressEvent {
+    job_id: String,
+    kind: &'static str,
+    uploaded_bytes: u64,
+    total_bytes: u64,
+}
+
+const DELIVERY_PROGRESS_EVENT: &str = "export-delivery-progress";
+
+/// Runs the post-export delivery stage for one job — Instant Share and/or
+/// YouTube auto-publish. Every delivery writes its own status onto the job's
+/// persisted outputs (`outputs.deliveries`) and emits a fresh job update, so
+/// the UI shows a durable result regardless of which screen is open. A
+/// delivery failure never flips the completed export.
+struct ExportDeliveryRunner {
+    app: tauri::AppHandle,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    license: Arc<crate::licensing::LicenseManager>,
+    storage: crate::storage::StorageManager,
+    path_policy: PathPolicy,
+    update_gate: Arc<crate::state::UpdateGate>,
+    delivery_lock: Arc<Mutex<()>>,
+    active_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    job_id: String,
+    request: ExportRequest,
+    /// Delivery kinds this run covers — both on the export path, a single
+    /// kind on `retry_delivery`.
+    kinds: Vec<String>,
+}
+
+impl ExportDeliveryRunner {
+    fn run(&self, cancel: Arc<AtomicBool>) -> Result<()> {
+        let want_share =
+            self.kinds.iter().any(|k| k == "share") && self.request.deliveries.share.is_some();
+        let want_youtube =
+            self.kinds.iter().any(|k| k == "youtube") && self.request.deliveries.youtube.is_some();
+        if !want_share && !want_youtube {
+            return Ok(());
+        }
+
+        // Serialize deliveries across jobs — one upload at a time keeps
+        // cancel/retry semantics unambiguous and avoids saturating uplinks.
+        let _delivery_lock = self
+            .delivery_lock
+            .lock()
+            .map_err(|_| InternalError::Unknown("delivery lock poisoned".into()))?;
+
+        // An in-flight upload must not race an updater install.
+        let _update_op = match self.update_gate.acquire_operation() {
+            Ok(operation) => operation,
+            Err(error) => {
+                let detail = format!("delivery deferred — {error}");
+                if want_share {
+                    self.set_delivery(
+                        media_db::JobDelivery::new("share", "failed").detail(detail.clone()),
+                    );
+                }
+                if want_youtube {
+                    self.set_delivery(
+                        media_db::JobDelivery::new("youtube", "failed").detail(detail),
+                    );
+                }
+                return Ok(());
+            }
+        };
+
+        let output = PathBuf::from(&self.request.output_path);
+        if !output.is_file() {
+            let detail = "exported file no longer exists — re-export first".to_string();
+            if want_share {
+                self.set_delivery(media_db::JobDelivery::new("share", "failed").detail(&detail));
+            }
+            if want_youtube {
+                self.set_delivery(media_db::JobDelivery::new("youtube", "failed").detail(&detail));
+            }
+            return Ok(());
+        }
+
+        // Re-check the entitlement at delivery time: a license change during
+        // a long render must not leak Pro uploads.
+        let pro = self.license.entitlements().pro_enabled;
+        if let Some(spec) = self.request.deliveries.share.clone() {
+            if want_share {
+                if pro {
+                    self.deliver_share(&spec, &cancel);
+                } else {
+                    self.set_delivery(
+                        media_db::JobDelivery::new("share", "skipped")
+                            .detail("requires RecordForge Pro"),
+                    );
+                }
+            }
+        }
+        if let Some(spec) = self.request.deliveries.youtube.clone() {
+            if want_youtube {
+                if cancel.load(Ordering::Relaxed) {
+                    self.set_delivery(media_db::JobDelivery::new("youtube", "cancelled"));
+                } else if pro {
+                    self.deliver_youtube(&spec, &cancel);
+                } else {
+                    self.set_delivery(
+                        media_db::JobDelivery::new("youtube", "skipped")
+                            .detail("requires RecordForge Pro"),
+                    );
+                }
+            }
+        }
+        // The delivery phase is over — the job's token no longer needs to
+        // accept cancels (the export path also cleans up after us).
+        if let Ok(mut tokens) = self.active_tokens.lock() {
+            tokens.remove(&self.job_id);
+        }
+        Ok(())
+    }
+
+    /// Persist + broadcast one delivery record. The job stays `completed` —
+    /// delivery state lives purely in `outputs.deliveries`.
+    fn set_delivery(&self, delivery: media_db::JobDelivery) {
+        let updated =
+            self.db.lock().ok().and_then(|conn| {
+                media_db::upsert_job_delivery(&conn, &self.job_id, &delivery).ok()
+            });
+        if let Some(job) = updated {
+            let _ = EventPublisher::new(&self.app).media_job_update(&job);
+        }
+    }
+
+    fn deliver_share(&self, spec: &ShareDeliveryRequest, cancel: &Arc<AtomicBool>) {
+        use crate::publish::share;
+        self.set_delivery(media_db::JobDelivery::new("share", "running").detail("uploading"));
+        let output = PathBuf::from(&self.request.output_path);
+        // Sidecar captions ride along when the render produced them.
+        let captions_path = if self.request.plan.caption_mode == "sidecar" {
+            let sidecar = output.with_extension("srt");
+            sidecar.is_file().then_some(sidecar)
+        } else {
+            None
+        };
+        let password = spec
+            .password_vault_key
+            .as_ref()
+            .and_then(|key| crate::storage::vault::get_secret(key).ok().flatten());
+        let canvas = self.request.plan.canvas.clone();
+        let input = share::ShareUploadInput {
+            path: output,
+            title: spec.title.clone(),
+            duration_ms: self.request.plan.duration_ms,
+            width: canvas.as_ref().map(|c| c.width).unwrap_or(1920),
+            height: canvas.as_ref().map(|c| c.height).unwrap_or(1080),
+            fps: canvas.as_ref().map(|c| c.fps).unwrap_or(30),
+            chapters: self
+                .request
+                .plan
+                .chapters
+                .iter()
+                .map(|chapter| share::ShareChapterArg {
+                    t: chapter.start_ms,
+                    label: chapter.title.clone(),
+                })
+                .collect(),
+            allow_download: spec.allow_download,
+            allow_embed: spec.allow_embed,
+            captions_path,
+            password,
+            expires_in_days: spec.expires_in_days,
+        };
+        let (app, job_id) = (self.app.clone(), self.job_id.clone());
+        let progress = move |event: share::ShareProgress| {
+            let _ = app.emit(
+                DELIVERY_PROGRESS_EVENT,
+                DeliveryProgressEvent {
+                    job_id: job_id.clone(),
+                    kind: "share",
+                    uploaded_bytes: event.uploaded_bytes,
+                    total_bytes: event.bytes,
+                },
+            );
+        };
+        let result = if spec.target == "hosted" {
+            match self.license.license_token() {
+                Some(token) => tauri::async_runtime::block_on(share::upload_hosted(
+                    &token,
+                    &input,
+                    cancel.clone(),
+                    progress,
+                )),
+                None => Err(AppError::new(
+                    ErrorCategory::Licensing,
+                    "license_required",
+                    "a Pro license is required to share",
+                )),
+            }
+        } else {
+            tauri::async_runtime::block_on(share::upload_to_profile(
+                &self.storage,
+                &spec.target,
+                &input,
+                cancel.clone(),
+                progress,
+            ))
+        };
+        match result {
+            Ok(done) => {
+                self.set_delivery(
+                    media_db::JobDelivery::new("share", "done")
+                        .url(done.url)
+                        .detail("link ready"),
+                );
+                // The vault-held link password has served its purpose — the
+                // share itself stores only the salted hash server-side.
+                if let Some(key) = &spec.password_vault_key {
+                    let _ = crate::storage::vault::delete_secret(key);
+                }
+            }
+            Err(error) => {
+                if cancel.load(Ordering::Relaxed) {
+                    self.set_delivery(media_db::JobDelivery::new("share", "cancelled"));
+                } else {
+                    self.set_delivery(
+                        media_db::JobDelivery::new("share", "failed").detail(error.message),
+                    );
+                }
+            }
+        }
+    }
+
+    fn deliver_youtube(&self, spec: &YouTubeDeliveryRequest, cancel: &Arc<AtomicBool>) {
+        use crate::publish::youtube;
+        self.set_delivery(media_db::JobDelivery::new("youtube", "running").detail("uploading"));
+        let captions_path = if spec.attach_captions && self.request.plan.caption_mode == "sidecar" {
+            let sidecar = Path::new(&self.request.output_path).with_extension("srt");
+            sidecar
+                .is_file()
+                .then(|| sidecar.to_string_lossy().to_string())
+        } else {
+            None
+        };
+        let request = youtube::YouTubePublishRequest {
+            path: self.request.output_path.clone(),
+            title: spec.title.clone(),
+            description: spec.description.clone(),
+            privacy: spec.privacy.clone(),
+            category_id: "28".to_string(),
+            tags: spec.tags.clone(),
+            captions_path,
+            captions_language: spec.captions_language.clone(),
+        };
+        let app_data_dir = self.path_policy.app_data_dir().to_path_buf();
+        let (app, job_id) = (self.app.clone(), self.job_id.clone());
+        let progress = move |event: youtube::PublishProgress| {
+            let _ = app.emit(
+                DELIVERY_PROGRESS_EVENT,
+                DeliveryProgressEvent {
+                    job_id: job_id.clone(),
+                    kind: "youtube",
+                    uploaded_bytes: event.uploaded_bytes,
+                    total_bytes: event.total_bytes,
+                },
+            );
+        };
+        let result = tauri::async_runtime::block_on(youtube::publish_video(
+            &app_data_dir,
+            &request,
+            cancel.clone(),
+            progress,
+        ));
+        match result {
+            Ok((video_id, captions_attached)) => {
+                self.set_delivery(
+                    media_db::JobDelivery::new("youtube", "done")
+                        .url(format!("https://www.youtube.com/watch?v={video_id}"))
+                        .detail(if captions_attached {
+                            "published with captions"
+                        } else {
+                            "published"
+                        }),
+                );
+            }
+            Err(error) => {
+                if cancel.load(Ordering::Relaxed) {
+                    self.set_delivery(media_db::JobDelivery::new("youtube", "cancelled"));
+                } else {
+                    self.set_delivery(
+                        media_db::JobDelivery::new("youtube", "failed").detail(error.message),
+                    );
+                }
+            }
+        }
     }
 }
 

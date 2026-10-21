@@ -1,4 +1,4 @@
-import type { MediaJob } from "@recordforge/contracts"
+import type { JobDelivery, MediaJob } from "@recordforge/contracts"
 import { invoke } from "@tauri-apps/api/core"
 import { getSetting, isTauri } from "./settings"
 
@@ -181,4 +181,21 @@ export async function notifyExportFinished(
       }
     }
   }
+}
+
+/**
+ * Delivery records that just reached a terminal state between two job
+ * updates. Pure — the caller decides what each terminal transition means.
+ */
+export function terminalDeliveryTransitions(
+  previous: MediaJob | null | undefined,
+  next: MediaJob,
+): JobDelivery[] {
+  const before = new Map(
+    (previous?.outputs.deliveries ?? []).map((delivery) => [delivery.kind, delivery.status]),
+  )
+  return (next.outputs.deliveries ?? []).filter((delivery) => {
+    const prior = before.get(delivery.kind)
+    return prior !== delivery.status && ["done", "failed", "cancelled"].includes(delivery.status)
+  })
 }

@@ -3,7 +3,6 @@ import { cursorDpiScaleSchema, cursorTelemetryTimebaseSchema } from "./cursor"
 import { boundsSchema } from "./recording"
 import { mediaKindSchema, projectAssetImportStrategySchema, projectAssetRoleSchema } from "./media"
 import {
-  canvasAspectRatioSchema,
   manualZoomSegmentSchema,
   smartZoomSettingsSchema,
   timelineCanvasSchema,
@@ -11,6 +10,7 @@ import {
   timelineTrackSchema,
 } from "./timeline"
 import { exportSettingsSchema } from "./timeline"
+import { youtubeAutoPublishSchema } from "./publish"
 
 // Canvas settings are stored in the on-disk project file under the same schema.
 export const canvasSettingsSchema = timelineCanvasSchema
@@ -198,15 +198,20 @@ export const instantShareSettingsSchema = z.object({
 export type InstantShareSettings = z.infer<typeof instantShareSettingsSchema>
 
 // Export settings persisted with the project. This is the durable superset
-// of `exportSettingsSchema` — `formats` and `instantShare` drive the export
-// UI/batch orchestration but are not render-job settings, so they stay out
-// of the `export_timeline` contract (its schema strips unknown keys anyway).
+// of `exportSettingsSchema` — `instantShare` and `youtubePublish` drive the
+// export UI but are not render-job settings, so they stay out of the
+// `export_timeline` settings payload and travel as `deliveries` instead.
 export const projectExportSettingsSchema = exportSettingsSchema.extend({
-  formats: z.array(canvasAspectRatioSchema).default([]),
   instantShare: instantShareSettingsSchema.default({
     enabled: false,
     target: "hosted",
     expiresInDays: 30,
+  }),
+  youtubePublish: youtubeAutoPublishSchema.default({
+    enabled: false,
+    privacy: "unlisted",
+    attachCaptions: true,
+    captionsLanguage: "en",
   }),
 })
 

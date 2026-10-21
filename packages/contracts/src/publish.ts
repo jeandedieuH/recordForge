@@ -40,3 +40,14 @@ export const youtubePublishProgressSchema = z.object({
   totalBytes: z.number(),
 })
 export type YouTubePublishProgress = z.infer<typeof youtubePublishProgressSchema>
+
+// Auto-publish preferences persisted per project (Pro). Title/description are
+// deliberately not persisted — the delivery spec builds them fresh from the
+// project name and timeline markers at export time so stale copy never ships.
+export const youtubeAutoPublishSchema = z.object({
+  enabled: z.boolean().default(false),
+  privacy: youtubePrivacySchema.default("unlisted"),
+  attachCaptions: z.boolean().default(true),
+  captionsLanguage: z.string().min(2).max(20).default("en"),
+})
+export type YouTubeAutoPublishSettings = z.infer<typeof youtubeAutoPublishSchema>

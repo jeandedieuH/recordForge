@@ -33,35 +33,22 @@ function createMockProject(): recordForgeProject {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "embed",
-      audioMastering: { denoise: false, loudnessTarget: null },
-      brandWatermark: {
-        enabled: false,
-        logoPath: null,
-        position: "bottom-right",
-        scalePercent: 8,
-        opacity: 0.85,
-      },
-      brandCards: {
-        enabled: false,
-        introMs: 0,
-        outroMs: 0,
-        title: null,
-        subtitle: null,
-        background: "#0f172a",
-        textColor: "#f8fafc",
-        fontPath: null,
-      },
       keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-      reframeMode: "fit",
-      webcamBackground: {
-        enabled: false,
-        mode: "blur" as const,
-        blurSigma: 20,
-        replaceColor: "#0f172a",
-      },
-      formats: [],
       instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+      youtubePublish: {
+        enabled: false,
+        privacy: "unlisted" as const,
+        attachCaptions: true,
+        captionsLanguage: "en",
+      },
     },
+  }
+}
+
+function mockProjectWith(settings: recordForgeProject["exportSettings"]) {
+  return {
+    ...createMockProject(),
+    exportSettings: settings,
   }
 }
 
@@ -83,45 +70,22 @@ describe("TimelineStore Export Settings Actions", () => {
 
   it("switches container back to mp4 and restores standard balanced preset and h264 codec", () => {
     useTimelineStore.setState({
-      project: {
-        ...createMockProject(),
-        exportSettings: {
-          preset: "gif-high-quality",
-          container: "gif",
-          codec: "gif",
-          encoder: "auto",
-          captionMode: "burn-in",
-          chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
-          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-          reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
-          formats: [],
-          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+      project: mockProjectWith({
+        preset: "gif-high-quality",
+        container: "gif",
+        codec: "gif",
+        encoder: "auto",
+        captionMode: "burn-in",
+        chapterMode: "none",
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
+        instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+        youtubePublish: {
+          enabled: false,
+          privacy: "unlisted" as const,
+          attachCaptions: true,
+          captionsLanguage: "en",
         },
-      },
+      }),
     })
 
     const { setExportContainer } = useTimelineStore.getState()
@@ -149,45 +113,22 @@ describe("TimelineStore Export Settings Actions", () => {
 
   it("selecting selected-range while in gif mode retains gif container", () => {
     useTimelineStore.setState({
-      project: {
-        ...createMockProject(),
-        exportSettings: {
-          preset: "gif-balanced",
-          container: "gif",
-          codec: "gif",
-          encoder: "auto",
-          captionMode: "burn-in",
-          chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
-          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-          reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
-          formats: [],
-          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+      project: mockProjectWith({
+        preset: "gif-balanced",
+        container: "gif",
+        codec: "gif",
+        encoder: "auto",
+        captionMode: "burn-in",
+        chapterMode: "none",
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
+        instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+        youtubePublish: {
+          enabled: false,
+          privacy: "unlisted" as const,
+          attachCaptions: true,
+          captionsLanguage: "en",
         },
-      },
+      }),
     })
 
     const { setExportPreset } = useTimelineStore.getState()
@@ -216,45 +157,22 @@ describe("TimelineStore Export Settings Actions", () => {
 
   it("switches container from webp back to mp4 and restores standard balanced preset and h264 codec", () => {
     useTimelineStore.setState({
-      project: {
-        ...createMockProject(),
-        exportSettings: {
-          preset: "webp-high-quality",
-          container: "webp",
-          codec: "webp",
-          encoder: "auto",
-          captionMode: "burn-in",
-          chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
-          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-          reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
-          formats: [],
-          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+      project: mockProjectWith({
+        preset: "webp-high-quality",
+        container: "webp",
+        codec: "webp",
+        encoder: "auto",
+        captionMode: "burn-in",
+        chapterMode: "none",
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
+        instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+        youtubePublish: {
+          enabled: false,
+          privacy: "unlisted" as const,
+          attachCaptions: true,
+          captionsLanguage: "en",
         },
-      },
+      }),
     })
 
     const { setExportContainer } = useTimelineStore.getState()
@@ -282,45 +200,22 @@ describe("TimelineStore Export Settings Actions", () => {
 
   it("selecting selected-range while in webp mode retains webp container", () => {
     useTimelineStore.setState({
-      project: {
-        ...createMockProject(),
-        exportSettings: {
-          preset: "webp-balanced",
-          container: "webp",
-          codec: "webp",
-          encoder: "auto",
-          captionMode: "burn-in",
-          chapterMode: "none",
-          audioMastering: { denoise: false, loudnessTarget: null },
-          brandWatermark: {
-            enabled: false,
-            logoPath: null,
-            position: "bottom-right",
-            scalePercent: 8,
-            opacity: 0.85,
-          },
-          brandCards: {
-            enabled: false,
-            introMs: 0,
-            outroMs: 0,
-            title: null,
-            subtitle: null,
-            background: "#0f172a",
-            textColor: "#f8fafc",
-            fontPath: null,
-          },
-          keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-          reframeMode: "fit",
-          webcamBackground: {
-            enabled: false,
-            mode: "blur" as const,
-            blurSigma: 20,
-            replaceColor: "#0f172a",
-          },
-          formats: [],
-          instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+      project: mockProjectWith({
+        preset: "webp-balanced",
+        container: "webp",
+        codec: "webp",
+        encoder: "auto",
+        captionMode: "burn-in",
+        chapterMode: "none",
+        keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
+        instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+        youtubePublish: {
+          enabled: false,
+          privacy: "unlisted" as const,
+          attachCaptions: true,
+          captionsLanguage: "en",
         },
-      },
+      }),
     })
 
     const { setExportPreset } = useTimelineStore.getState()
@@ -339,27 +234,6 @@ describe("TimelineStore Export Settings Actions", () => {
 // "the toggle does not persist" — see the ProjectExportSettings fix in
 // src-tauri/src/projects/mod.rs.
 describe("Export settings persistence contract", () => {
-  it("setExportFormats stores multi-format batch picks in the project", () => {
-    useTimelineStore.setState({ project: createMockProject() })
-
-    useTimelineStore.getState().setExportFormats(["16:9", "9:16"])
-
-    const updated = useTimelineStore.getState().project
-    expect(updated?.exportSettings.formats).toEqual(["16:9", "9:16"])
-  })
-
-  it("setExportFormats dedupes and does not churn on identical input", () => {
-    const project = createMockProject()
-    useTimelineStore.setState({ project })
-
-    useTimelineStore.getState().setExportFormats(["9:16", "9:16", "1:1"])
-    expect(useTimelineStore.getState().project?.exportSettings.formats).toEqual(["9:16", "1:1"])
-
-    const revision = useTimelineStore.getState().projectRevision
-    useTimelineStore.getState().setExportFormats(["9:16", "1:1"])
-    expect(useTimelineStore.getState().projectRevision).toBe(revision)
-  })
-
   it("setInstantShare stores enabled/target/expiry in the project", () => {
     useTimelineStore.setState({ project: createMockProject() })
 
@@ -380,27 +254,9 @@ describe("Export settings persistence contract", () => {
   it("premium setters write into project.exportSettings for autosave", () => {
     useTimelineStore.setState({ project: createMockProject() })
 
-    useTimelineStore.getState().setBrandWatermark({
-      enabled: true,
-      logoPath: "brand/logo.png",
-      position: "top-left",
-      scalePercent: 12,
-      opacity: 0.6,
-    })
     useTimelineStore.getState().setKeystrokeOverlay({ enabled: true })
-    useTimelineStore.getState().setReframeMode("cursor-follow")
-    useTimelineStore.getState().setWebcamBackground({
-      enabled: true,
-      mode: "replace",
-      blurSigma: 30,
-      replaceColor: "#112233",
-    })
 
     const settings = useTimelineStore.getState().project?.exportSettings
-    expect(settings?.brandWatermark.enabled).toBe(true)
-    expect(settings?.brandWatermark.logoPath).toBe("brand/logo.png")
     expect(settings?.keystrokeOverlay.enabled).toBe(true)
-    expect(settings?.reframeMode).toBe("cursor-follow")
-    expect(settings?.webcamBackground.enabled).toBe(true)
   })
 })

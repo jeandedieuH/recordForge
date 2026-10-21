@@ -5,7 +5,6 @@ import {
   defaultKeystrokeOverlaySettings,
   textClipSchema,
   type AnnotationClip,
-  type CanvasAspectRatio,
   type TextClip,
   type TimelineClip,
   type TimelineState,
@@ -171,36 +170,14 @@ describe("freeExportSettings", () => {
     container: "mp4",
     captionMode: "burn-in",
     chapterMode: "embed",
-    audioMastering: { denoise: true, loudnessTarget: -16 },
-    brandWatermark: {
-      enabled: false,
-      logoPath: null,
-      position: "bottom-right",
-      scalePercent: 8,
-      opacity: 0.85,
-    },
-    brandCards: {
-      enabled: false,
-      introMs: 0,
-      outroMs: 0,
-      title: null,
-      subtitle: null,
-      background: "#0f172a",
-      textColor: "#f8fafc",
-      fontPath: null,
-    },
     keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-    reframeMode: "fit",
-    webcamBackground: {
-      enabled: false,
-      mode: "blur" as const,
-      blurSigma: 20,
-      replaceColor: "#0f172a",
-    },
-    // `as const` would freeze this into a readonly tuple — cast to the
-    // mutable array type ProjectExportSettings declares.
-    formats: ["16:9", "9:16"] as CanvasAspectRatio[],
     instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+    youtubePublish: {
+      enabled: false,
+      privacy: "unlisted",
+      attachCaptions: true,
+      captionsLanguage: "en",
+    },
   } as const
 
   it("downgrades ultra presets and disables chapter output", () => {
@@ -208,18 +185,12 @@ describe("freeExportSettings", () => {
     expect(settings.preset).toBe("high-quality")
     expect(settings.chapterMode).toBe("none")
     expect(settings.codec).toBe("h264")
-    // Studio Audio is Pro — mastering gets neutralized for Free exports.
-    expect(settings.audioMastering).toEqual({ denoise: false, loudnessTarget: null })
   })
 
   it("neutralizes ratio presets but leaves others untouched", () => {
     expect(freeExportSettings({ ...base, preset: "vertical" }).preset).toBe("balanced")
     expect(freeExportSettings({ ...base, preset: "square" }).preset).toBe("balanced")
     expect(freeExportSettings({ ...base, preset: "fast-share" }).preset).toBe("fast-share")
-  })
-
-  it("clears multi-format alternates — Free exports the primary canvas only", () => {
-    expect(freeExportSettings({ ...base }).formats).toEqual([])
   })
 })
 

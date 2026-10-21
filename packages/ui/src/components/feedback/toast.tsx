@@ -149,5 +149,5 @@ function ToastViewport(): ReactNode {
   )
 }
 
-export { ToastViewport, useToast }
+export { ToastViewport, useToast, toast }
 export type { ToastOptions, ToastVariant }

@@ -12,15 +12,11 @@ export const PRO_FEATURE_KEYS = [
   "premium-titles",
   "annotations",
   "instant-share",
-  "studio-audio",
   "smart-cut",
-  "brand-kit",
   "ai-captions",
   "teleprompter",
   "keystroke-overlay",
-  "auto-reframe",
   "youtube-publish",
-  "virtual-background",
 ] as const
 
 export const proFeatureKeySchema = z.enum(PRO_FEATURE_KEYS)
@@ -57,17 +53,9 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
     label: "Instant Share",
     description: "One click, one link — hosted web delivery of your export.",
   },
-  "studio-audio": {
-    label: "Studio Audio",
-    description: "Noise reduction and broadcast loudness targets at export.",
-  },
   "smart-cut": {
     label: "Smart Cut",
     description: "Remove silences and filler words from the timeline automatically.",
-  },
-  "brand-kit": {
-    label: "Brand Kit",
-    description: "Logo watermark, brand colors and fonts, intro and outro cards.",
   },
   "ai-captions": {
     label: "AI Captions",
@@ -80,15 +68,6 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
   "keystroke-overlay": {
     label: "Keystroke overlay",
     description: "Show shortcut keys pressed during recording for tutorials.",
-  },
-  "auto-reframe": {
-    label: "Auto-reframe & batch export",
-    description:
-      "Fill or cursor-followed crops for vertical and square formats, exported as a batch.",
-  },
-  "virtual-background": {
-    label: "Virtual background",
-    description: "Blur or replace the webcam backdrop with on-device segmentation.",
   },
   "youtube-publish": {
     label: "Publish to YouTube",
@@ -135,6 +114,7 @@ export const shareProgressSchema = z.object({
   shareId: z.string(),
   status: z.enum(["uploading", "live", "expired", "revoked"]),
   bytes: z.number().int(),
+  uploadedBytes: z.number().int().default(0),
   partsDone: z.number().int(),
   partsTotal: z.number().int(),
 })

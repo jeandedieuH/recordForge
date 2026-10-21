@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { TimelineCanvas } from "@recordforge/contracts"
 import {
-  exceedsGifDurationLimit,
+  exceedsAnimationDurationLimit,
   isPresetSupported,
   PRO_PRESETS,
   resolveExportRange,
@@ -40,27 +40,34 @@ describe("resolveExportRange", () => {
   })
 })
 
-describe("exceedsGifDurationLimit", () => {
+describe("exceedsAnimationDurationLimit", () => {
   it("blocks a full-length GIF over 60 seconds", () => {
-    expect(exceedsGifDurationLimit("gif", "gif-balanced", 61_000, undefined)).toBe(true)
+    expect(exceedsAnimationDurationLimit("gif", "gif-balanced", 61_000, undefined)).toBe(true)
   })
 
-  it("allows a GIF at exactly 60 seconds", () => {
-    expect(exceedsGifDurationLimit("gif", "gif-balanced", 60_000, undefined)).toBe(false)
+  it("blocks a full-length WebP over 60 seconds", () => {
+    expect(exceedsAnimationDurationLimit("webp", "webp-balanced", 61_000, undefined)).toBe(true)
+  })
+
+  it("allows an animation at exactly 60 seconds", () => {
+    expect(exceedsAnimationDurationLimit("gif", "gif-balanced", 60_000, undefined)).toBe(false)
+    expect(exceedsAnimationDurationLimit("webp", "webp-balanced", 60_000, undefined)).toBe(false)
   })
 
   it("judges the selected range rather than the timeline", () => {
     const range = { startMs: 10_000, endMs: 40_000 }
-    expect(exceedsGifDurationLimit("gif", "selected-range", 300_000, range)).toBe(false)
+    expect(exceedsAnimationDurationLimit("gif", "selected-range", 300_000, range)).toBe(false)
+    expect(exceedsAnimationDurationLimit("webp", "selected-range", 300_000, range)).toBe(false)
   })
 
   it("blocks a selected range over 60 seconds", () => {
     const range = { startMs: 0, endMs: 61_000 }
-    expect(exceedsGifDurationLimit("gif", "selected-range", 300_000, range)).toBe(true)
+    expect(exceedsAnimationDurationLimit("gif", "selected-range", 300_000, range)).toBe(true)
+    expect(exceedsAnimationDurationLimit("webp", "selected-range", 300_000, range)).toBe(true)
   })
 
   it("never blocks mp4", () => {
-    expect(exceedsGifDurationLimit("mp4", "balanced", 600_000, undefined)).toBe(false)
+    expect(exceedsAnimationDurationLimit("mp4", "balanced", 600_000, undefined)).toBe(false)
   })
 })
 

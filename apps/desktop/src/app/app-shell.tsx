@@ -109,15 +109,10 @@ export function AppShell() {
   )
   const setCaptionMode = useTimelineStore((state) => state.setCaptionMode)
   const setChapterMode = useTimelineStore((state) => state.setChapterMode)
-  const setAudioMastering = useTimelineStore((state) => state.setAudioMastering)
-  const setBrandWatermark = useTimelineStore((state) => state.setBrandWatermark)
-  const setBrandCards = useTimelineStore((state) => state.setBrandCards)
-  const setWebcamBackground = useTimelineStore((state) => state.setWebcamBackground)
   const setKeystrokeOverlay = useTimelineStore((state) => state.setKeystrokeOverlay)
-  const setReframeMode = useTimelineStore((state) => state.setReframeMode)
-  const exportFormats = useTimelineStore((state) => state.project?.exportSettings.formats)
-  const setExportFormats = useTimelineStore((state) => state.setExportFormats)
   const setInstantShare = useTimelineStore((state) => state.setInstantShare)
+  const setYouTubePublish = useTimelineStore((state) => state.setYouTubePublish)
+  const retryExportDelivery = useTimelineStore((state) => state.retryExportDelivery)
   const timelineMarkers = useTimelineStore((state) => state.engine?.history.present.markers)
   const setExportContainer = useTimelineStore((state) => state.setExportContainer)
   const setExportPreset = useTimelineStore((state) => state.setExportPreset)
@@ -410,19 +405,11 @@ export function AppShell() {
     return analyzeProFeatureUsage(timeline, {
       preset: exportSettings.preset,
       chapterMode,
-      audioMastering: exportSettings.audioMastering,
-      brandWatermark: exportSettings.brandWatermark,
-      brandCards: exportSettings.brandCards,
       keystrokeOverlay: exportSettings.keystrokeOverlay,
-      reframeMode: exportSettings.reframeMode,
-      webcamBackground: exportSettings.webcamBackground,
-      // Alternate-format jobs mirror timeline-store.export: animation
-      // containers collapse to the primary canvas.
-      formats: isAnimation ? [] : exportSettings.formats,
     })
   }
 
-  async function chooseOutputAndExport(stripProFeatures: boolean) {
+  async function chooseOutputAndExport(stripProFeatures: boolean, sharePassword?: string) {
     if (!timelineRecording) return
     try {
       const isGif =
@@ -458,13 +445,13 @@ export function AppShell() {
       // Phase 1: the export path flushes and freezes a durable project revision
       // before building the render plan, so it never exports unsaved edits.
       // Formats come from the persisted export settings inside export().
-      await timelineExport(outputPath, { stripProFeatures })
+      await timelineExport(outputPath, { stripProFeatures, sharePassword })
     } catch (error) {
       useTimelineStore.setState({ error: toErrorMessage(error) })
     }
   }
 
-  async function handleStartExport() {
+  async function handleStartExport(options?: { sharePassword?: string }) {
     if (!timelineRecording) return
     const isPro = useLicenseStore.getState().status.tier === "pro"
     if (!isPro) {
@@ -474,7 +461,7 @@ export function AppShell() {
         return
       }
     }
-    await chooseOutputAndExport(false)
+    await chooseOutputAndExport(false, options?.sharePassword)
   }
 
   /** Export-gate: "Convert canvas to 16:9" — reuses the same smart-layout
@@ -609,15 +596,10 @@ export function AppShell() {
                   onCaptionModeChange={setCaptionMode}
                   chapterMode={chapterMode}
                   onChapterModeChange={setChapterMode}
-                  onAudioMasteringChange={setAudioMastering}
-                  onBrandWatermarkChange={setBrandWatermark}
-                  onBrandCardsChange={setBrandCards}
-                  onWebcamBackgroundChange={setWebcamBackground}
                   onKeystrokeOverlayChange={setKeystrokeOverlay}
-                  onReframeModeChange={setReframeMode}
-                  formats={exportFormats}
-                  onFormatsChange={setExportFormats}
                   onInstantShareChange={setInstantShare}
+                  onYouTubePublishChange={setYouTubePublish}
+                  onRetryDelivery={retryExportDelivery}
                   markers={timelineMarkers}
                   onContainerChange={setExportContainer}
                   onPresetChange={setExportPreset}

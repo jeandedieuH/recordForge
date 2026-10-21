@@ -1,9 +1,6 @@
 //! Storage Tauri Commands
 
 use chrono::Utc;
-use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use tauri::{Emitter, State};
 use tracing::instrument;
 
@@ -283,6 +280,72 @@ pub async fn test_s3_credentials(
     client.test_connection().await
 }
 
+/// Exchange the Drive auth code for tokens, then fetch the account email —
+/// the refresh token travels back to the frontend which stores it in the
+/// vault via `create_storage_profile` (the established Drive contract).
+fn exchange_drive_auth_code(
+    verifier: String,
+    port: u16,
+    auth_code: String,
+) -> std::result::Result<(Option<String>, Option<String>), String> {
+    tauri::async_runtime::block_on(async move {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let client_id = get_google_drive_client_id();
+        let client_secret = get_google_drive_client_secret();
+        let redirect_uri = format!("http://127.0.0.1:{port}");
+        let mut params = vec![
+            ("client_id", client_id.as_str()),
+            ("code", auth_code.as_str()),
+            ("code_verifier", verifier.as_str()),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", redirect_uri.as_str()),
+        ];
+        // A present-but-empty client_secret is rejected by the token
+        // endpoint — omit the parameter entirely when unset.
+        if !client_secret.is_empty() {
+            params.push(("client_secret", client_secret.as_str()));
+        }
+
+        match http
+            .post("https://oauth2.googleapis.com/token")
+            .form(&params)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<crate::storage::drive::TokenResponse>().await {
+                    Ok(token_resp) => {
+                        let mut email = None;
+                        if let Ok(about_res) = http
+                            .get("https://www.googleapis.com/drive/v3/about?fields=user")
+                            .bearer_auth(&token_resp.access_token)
+                            .send()
+                            .await
+                        {
+                            if let Ok(about) = about_res
+                                .json::<crate::storage::drive::DriveAboutResponse>()
+                                .await
+                            {
+                                email = about.user.and_then(|u| u.email_address);
+                            }
+                        }
+                        Ok((token_resp.refresh_token, email))
+                    }
+                    Err(e) => Err(format!("failed to parse token response: {e}")),
+                }
+            }
+            Ok(resp) => Err(resp.text().await.unwrap_or_default()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+}
+
+const DRIVE_OAUTH_SUCCESS_HTML: &str = "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; Google Drive Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>";
+const DRIVE_OAUTH_FAILURE_HTML: &str = "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Return to RecordForge for details.</p></body></html>";
+
 #[tauri::command]
 #[instrument(skip(app))]
 pub async fn start_google_drive_oauth(
@@ -290,164 +353,105 @@ pub async fn start_google_drive_oauth(
     state: State<'_, AppState>,
 ) -> Result<OAuthFlowStartResult> {
     let _update_operation = state.update_gate.acquire_operation()?;
-    // Generate PKCE code verifier and challenge
-    let verifier = uuid::Uuid::new_v4().to_string() + &uuid::Uuid::new_v4().to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let challenge = base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        hasher.finalize(),
-    );
+    // Shared loopback machinery: single-flight guard, percent-decoded
+    // callback params, and a deadline so abandoned sign-ins can't leak a
+    // parked listener thread.
+    let oauth_guard = crate::publish::loopback::try_begin_oauth()?;
+    let flow = crate::publish::loopback::begin_loopback_flow()?;
 
-    let state_str = uuid::Uuid::new_v4().to_string();
-
-    // Bind to ephemeral port
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| InternalError::Storage(format!("failed to bind loopback TCP server: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| InternalError::Storage(format!("failed to get local addr: {e}")))?
-        .port();
-
-    let redirect_uri = format!("http://127.0.0.1:{}", port);
+    let redirect_uri = format!("http://127.0.0.1:{}", flow.port);
     let client_id = get_google_drive_client_id();
     let auth_url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
-        client_id, redirect_uri, GOOGLE_DRIVE_AUTH_SCOPE, challenge, state_str
+        client_id, redirect_uri, GOOGLE_DRIVE_AUTH_SCOPE, flow.challenge, flow.state
     );
 
     let app_clone = app.clone();
-    let state_clone = state_str.clone();
-    let verifier_clone = verifier.clone();
+    let crate::publish::loopback::LoopbackFlow {
+        listener,
+        port,
+        state: state_str,
+        verifier,
+        ..
+    } = flow;
+    let result = OAuthFlowStartResult {
+        auth_url,
+        state: state_str.clone(),
+        port,
+    };
 
-    // Spawn loopback listener in background thread
     std::thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buffer = [0u8; 4096];
-            let n = stream.read(&mut buffer).unwrap_or(0);
-            let req_str = String::from_utf8_lossy(&buffer[..n]);
-
-            // Parse GET /?code=...&state=...
-            let mut code = None;
-            let mut recv_state = None;
-
-            if let Some(first_line) = req_str.lines().next() {
-                if let Some(path) = first_line.split_whitespace().nth(1) {
-                    if let Some(query) = path.split('?').nth(1) {
-                        for pair in query.split('&') {
-                            let mut parts = pair.split('=');
-                            if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                                if k == "code" {
-                                    code = Some(v.to_string());
-                                } else if k == "state" {
-                                    recv_state = Some(v.to_string());
-                                }
-                            }
+        // Held for the listener's life so a second Connect click can't race.
+        let _guard = oauth_guard;
+        let event = match crate::publish::loopback::accept_callback(
+            &listener,
+            &state_str,
+            crate::publish::loopback::CALLBACK_TIMEOUT,
+        ) {
+            Ok(crate::publish::loopback::Callback::Code { code, mut stream }) => {
+                let outcome = exchange_drive_auth_code(verifier, port, code);
+                match outcome {
+                    Ok((refresh_token, account_email)) => {
+                        crate::publish::loopback::respond_html(
+                            &mut stream,
+                            DRIVE_OAUTH_SUCCESS_HTML,
+                        );
+                        OAuthCompletedEvent {
+                            success: true,
+                            refresh_token,
+                            account_email,
+                            error: None,
+                        }
+                    }
+                    Err(err) => {
+                        crate::publish::loopback::respond_html(
+                            &mut stream,
+                            DRIVE_OAUTH_FAILURE_HTML,
+                        );
+                        OAuthCompletedEvent {
+                            success: false,
+                            refresh_token: None,
+                            account_email: None,
+                            error: Some(err),
                         }
                     }
                 }
             }
-
-            // Exchange the authorization code before responding so the loopback
-            // page reflects the real outcome instead of claiming success early.
-            let outcome = match code.filter(|_| recv_state.as_deref() == Some(&state_clone)) {
-                Some(auth_code) => tauri::async_runtime::block_on(async {
-                    let http = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()
-                        .unwrap_or_else(|_| reqwest::Client::new());
-                    let client_id = get_google_drive_client_id();
-                    let client_secret = get_google_drive_client_secret();
-                    let redirect_uri = format!("http://127.0.0.1:{}", port);
-                    let mut params = vec![
-                        ("client_id", client_id.as_str()),
-                        ("code", auth_code.as_str()),
-                        ("code_verifier", verifier_clone.as_str()),
-                        ("grant_type", "authorization_code"),
-                        ("redirect_uri", redirect_uri.as_str()),
-                    ];
-                    // A present-but-empty client_secret is rejected by the token
-                    // endpoint — omit the parameter entirely when unset.
-                    if !client_secret.is_empty() {
-                        params.push(("client_secret", client_secret.as_str()));
-                    }
-
-                    match http
-                        .post("https://oauth2.googleapis.com/token")
-                        .form(&params)
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            match resp.json::<crate::storage::drive::TokenResponse>().await {
-                                Ok(token_resp) => {
-                                    // Fetch user email
-                                    let mut email = None;
-                                    if let Ok(about_res) = http
-                                        .get(
-                                            "https://www.googleapis.com/drive/v3/about?fields=user",
-                                        )
-                                        .bearer_auth(&token_resp.access_token)
-                                        .send()
-                                        .await
-                                    {
-                                        if let Ok(about) = about_res
-                                            .json::<crate::storage::drive::DriveAboutResponse>()
-                                            .await
-                                        {
-                                            email = about.user.and_then(|u| u.email_address);
-                                        }
-                                    }
-                                    Ok((token_resp.refresh_token, email))
-                                }
-                                Err(e) => Err(format!("failed to parse token response: {e}")),
-                            }
-                        }
-                        Ok(resp) => Err(resp.text().await.unwrap_or_default()),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }),
-                None => Err("Invalid state or missing authorization code.".to_string()),
-            };
-
-            let (response_body, event) = match outcome {
-                Ok((refresh_token, account_email)) => (
-                    "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#22c55e;\">&#10004; Google Drive Connected!</h2><p>You can close this tab and return to RecordForge.</p><script>setTimeout(() => window.close(), 1500)</script></body></html>",
-                    OAuthCompletedEvent {
-                        success: true,
-                        refresh_token,
-                        account_email,
-                        error: None,
-                    },
-                ),
-                Err(err) => (
-                    "<!DOCTYPE html><html><head><title>RecordForge Authentication</title></head><body style=\"font-family:sans-serif;text-align:center;padding:40px;background:#0f172a;color:#f8fafc;\"><h2 style=\"color:#ef4444;\">&#10008; Authentication Failed</h2><p>Return to RecordForge for details.</p></body></html>",
-                    OAuthCompletedEvent {
-                        success: false,
-                        refresh_token: None,
-                        account_email: None,
-                        error: Some(err),
-                    },
-                ),
-            };
-
-            let http_response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            let _ = stream.write_all(http_response.as_bytes());
-            let _ = stream.flush();
-
-            let _ = app_clone.emit("google-drive-oauth-completed", event);
-        }
+            Ok(crate::publish::loopback::Callback::Denied { error, mut stream }) => {
+                crate::publish::loopback::respond_html(&mut stream, DRIVE_OAUTH_FAILURE_HTML);
+                OAuthCompletedEvent {
+                    success: false,
+                    refresh_token: None,
+                    account_email: None,
+                    error: Some(format!("authorization denied: {error}")),
+                }
+            }
+            Ok(crate::publish::loopback::Callback::StateMismatch { mut stream }) => {
+                crate::publish::loopback::respond_html(&mut stream, DRIVE_OAUTH_FAILURE_HTML);
+                OAuthCompletedEvent {
+                    success: false,
+                    refresh_token: None,
+                    account_email: None,
+                    error: Some("OAuth state mismatch — the sign-in was rejected".to_string()),
+                }
+            }
+            Ok(crate::publish::loopback::Callback::TimedOut) => OAuthCompletedEvent {
+                success: false,
+                refresh_token: None,
+                account_email: None,
+                error: Some("sign-in timed out — try connecting again".to_string()),
+            },
+            Err(error) => OAuthCompletedEvent {
+                success: false,
+                refresh_token: None,
+                account_email: None,
+                error: Some(error.message),
+            },
+        };
+        let _ = app_clone.emit("google-drive-oauth-completed", event);
     });
 
-    Ok(OAuthFlowStartResult {
-        auth_url,
-        state: state_str,
-        port,
-    })
+    Ok(result)
 }
 
 #[tauri::command]

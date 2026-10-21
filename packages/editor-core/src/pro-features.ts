@@ -1,12 +1,4 @@
-import type {
-  AudioMastering,
-  BrandCards,
-  BrandWatermark,
-  ProjectExportSettings,
-  TextClip,
-  WebcamBackground,
-  TimelineState,
-} from "@recordforge/contracts"
+import type { ProjectExportSettings, TextClip, TimelineState } from "@recordforge/contracts"
 import type { ProFeatureKey } from "@recordforge/contracts"
 import { canvasIsSixteenNine, canvasResolutionTier } from "./composition"
 
@@ -65,13 +57,7 @@ function enabledClips(state: TimelineState, kind: "annotation" | "text") {
 export function analyzeProFeatureUsage(
   timeline: TimelineState,
   settings?: Pick<ProjectExportSettings, "preset" | "chapterMode"> & {
-    audioMastering?: AudioMastering
-    brandWatermark?: BrandWatermark
-    brandCards?: BrandCards
     keystrokeOverlay?: { enabled: boolean }
-    reframeMode?: string
-    webcamBackground?: WebcamBackground
-    formats?: string[]
   },
 ): ProUsageAnalysis {
   const features: ProFeatureUsage[] = []
@@ -86,10 +72,7 @@ export function analyzeProFeatureUsage(
 
   const nonStandardRatio =
     !canvasIsSixteenNine(timeline.canvas) ||
-    (settings?.preset ? NON_STANDARD_PRESETS.has(settings.preset) : false) ||
-    // A persisted multi-format batch renders alternate canvases — each
-    // non-16:9 alternate is a custom-aspect export job in Rust.
-    (settings?.formats?.some((format) => format !== "16:9") ?? false)
+    (settings?.preset ? NON_STANDARD_PRESETS.has(settings.preset) : false)
   if (nonStandardRatio) {
     push("custom-aspect-ratio", 1, `${timeline.canvas.width}×${timeline.canvas.height} canvas`)
   }
@@ -111,46 +94,8 @@ export function analyzeProFeatureUsage(
     push("annotations", annotations.length, pluralize(annotations.length, "annotation"))
   }
 
-  // Studio Audio — flags on export settings, not timeline content.
-  const mastering = settings?.audioMastering
-  if (mastering?.denoise || mastering?.loudnessTarget != null) {
-    push("studio-audio", 1, "audio mastering")
-  }
-
-  const cards = settings?.brandCards
-  const hasCards = cards?.enabled === true && (cards.introMs > 0 || cards.outroMs > 0)
-  const hasWatermark = settings?.brandWatermark?.enabled && settings.brandWatermark.logoPath
-  if (hasWatermark || hasCards) {
-    push(
-      "brand-kit",
-      1,
-      hasWatermark && hasCards ? "brand kit" : hasCards ? "intro/outro cards" : "logo watermark",
-    )
-  }
-
   if (settings?.keystrokeOverlay?.enabled) {
     push("keystroke-overlay", 1, "keystroke badges")
-  }
-
-  if (settings?.reframeMode && settings.reframeMode !== "fit") {
-    push(
-      "auto-reframe",
-      1,
-      settings.reframeMode === "fill" ? "crop to fill" : "cursor-followed crop",
-    )
-  }
-
-  // Virtual background only does real work when a camera clip is on the
-  // timeline — the same condition the Rust gate uses.
-  const hasCamera = timeline.tracks.some(
-    (track) => !track.muted && track.clips.some((clip) => clip.kind === "camera"),
-  )
-  if (hasCamera && settings?.webcamBackground?.enabled) {
-    push(
-      "virtual-background",
-      1,
-      settings.webcamBackground.mode === "replace" ? "background replacement" : "background blur",
-    )
   }
 
   return {

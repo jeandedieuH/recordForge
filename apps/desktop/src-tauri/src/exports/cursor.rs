@@ -2952,7 +2952,6 @@ mod tests {
 
     fn tests_plan() -> crate::exports::RenderPlan {
         crate::exports::RenderPlan {
-            reframe: None,
             project_id: "cursor-reg-test".into(),
             duration_ms: 2_000,
             segments: segments(),

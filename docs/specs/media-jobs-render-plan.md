@@ -268,7 +268,7 @@ How a compiled render plan reaches FFmpeg processes:
 | `square` | MP4 | H.264 or HEVC | AAC 128kbps | Enabled only for square canvases |
 | `selected-range` | MP4 | Project codec | Project bitrate | Requires a positive range |
 
-Presets are capability-driven. Unsupported canvas shapes and invalid ranges are disabled in the UI and rejected by Rust. Animated GIF exports are capped at 60 s (`MAX_GIF_DURATION_MS` / `GIF_MAX_DURATION_MS`); longer timelines require the Selected range preset, which is judged by the range length rather than the full timeline.
+Presets are capability-driven. Unsupported canvas shapes and invalid ranges are disabled in the UI and rejected by Rust. Animated GIF and WebP exports are capped at 60 s (`MAX_ANIMATION_DURATION_MS` / `ANIMATION_MAX_DURATION_MS`); longer timelines require the Selected range preset, which is judged by the range length rather than the full timeline.
 
 ---
 

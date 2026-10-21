@@ -5,7 +5,7 @@ use tracing::instrument;
 use crate::database::media::MediaJob;
 use crate::errors::{InternalError, Result};
 use crate::exports::{ExportSettings, RenderPlan};
-use crate::jobs::ExportRequest;
+use crate::jobs::{ExportDeliveries, ExportRequest};
 use crate::state::AppState;
 
 /// Export input contains a project identity and an explicit destination. Rust
@@ -17,6 +17,10 @@ pub struct ExportTimelineOptions {
     pub output_path: String,
     pub plan: RenderPlan,
     pub settings: ExportSettings,
+    /// Post-export share/publish destinations; absent when the export has
+    /// no deliveries configured.
+    #[serde(default)]
+    pub deliveries: ExportDeliveries,
 }
 
 /// Start one durable export job. The manager persists the request before the
@@ -46,6 +50,7 @@ pub fn export_timeline(
         output_path: options.output_path,
         plan: options.plan,
         settings: options.settings,
+        deliveries: options.deliveries,
     })
 }
 
@@ -59,6 +64,24 @@ pub fn retry_export(job_id: String, state: State<'_, AppState>) -> Result<MediaJ
         .lock()
         .map_err(|_| InternalError::Unknown("job manager mutex poisoned".into()))?;
     manager.retry_export(&job_id)
+}
+
+/// Re-run one post-export delivery (Instant Share or YouTube publish) on a
+/// completed export — the persisted request carries the spec, so a failed
+/// upload retries without re-rendering.
+#[tauri::command]
+#[instrument]
+pub fn retry_export_delivery(
+    job_id: String,
+    kind: String,
+    state: State<'_, AppState>,
+) -> Result<MediaJob> {
+    let _update_operation = state.update_gate.acquire_operation()?;
+    let manager = state
+        .job_manager
+        .lock()
+        .map_err(|_| InternalError::Unknown("job manager mutex poisoned".into()))?;
+    manager.retry_delivery(&job_id, &kind)
 }
 
 /// Reveal a completed export without allowing the UI to provide an arbitrary path.

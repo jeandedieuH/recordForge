@@ -1132,10 +1132,10 @@ mod tests {
         assert_eq!(loaded.project.assets[0].derivative_version, 1);
     }
 
-    /// Premium export settings (watermark, brand cards, mastering, share,
-    /// formats, …) are owned by the TS schema and must round-trip verbatim —
-    /// this is the regression for the struct-typed `export_settings` that
-    /// silently stripped every field it did not declare on save.
+    /// Export settings are owned by the TS schema and must round-trip
+    /// verbatim — this is the regression for the struct-typed
+    /// `export_settings` that silently stripped every field it did not
+    /// declare on save.
     #[test]
     fn export_settings_round_trip_preserves_unknown_fields() {
         let temp = tempfile::tempdir().unwrap();
@@ -1153,33 +1153,7 @@ mod tests {
             "chapterMode": "both",
             "encoder": "software",
             "range": { "startMs": 0, "endMs": 12000 },
-            "audioMastering": { "denoise": true, "loudnessTarget": -16 },
-            "brandWatermark": {
-                "enabled": true,
-                "logoPath": "brand/logo.png",
-                "position": "top-right",
-                "scalePercent": 12,
-                "opacity": 0.7,
-            },
-            "brandCards": {
-                "enabled": true,
-                "introMs": 1500,
-                "outroMs": 2000,
-                "title": "Demo",
-                "subtitle": null,
-                "background": "#111111",
-                "textColor": "#eeeeee",
-                "fontPath": "brand/font.ttf",
-            },
             "keystrokeOverlay": { "enabled": true },
-            "reframeMode": "cursor-follow",
-            "webcamBackground": {
-                "enabled": true,
-                "mode": "replace",
-                "blurSigma": 24,
-                "replaceColor": "#123456",
-            },
-            "formats": ["16:9", "9:16"],
             "instantShare": { "enabled": true, "target": "hosted", "expiresInDays": 30 },
             "futureField": { "not": "invented yet" },
         });

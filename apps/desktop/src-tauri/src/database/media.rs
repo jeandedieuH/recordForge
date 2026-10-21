@@ -120,6 +120,52 @@ pub struct MediaVideoTrackOutput {
     pub thumbnail_manifest_path: Option<String>,
 }
 
+/// One post-export delivery (Instant Share link or YouTube auto-publish)
+/// tracked on the completed export job. Statuses: pending → running →
+/// done | failed | cancelled | skipped. A delivery failure never flips the
+/// job itself — the rendered export stays completed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobDelivery {
+    /// "share" | "youtube" — matches `jobDeliveryKindSchema` in contracts.
+    pub kind: String,
+    pub status: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Progress blurb while running; failure reason when terminal.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl JobDelivery {
+    pub fn new(kind: &str, status: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            status: status.to_string(),
+            url: None,
+            detail: None,
+        }
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+
+    /// Terminal states — startup sweeps flag anything else as interrupted.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "done" | "failed" | "cancelled" | "skipped"
+        )
+    }
+}
+
 /// Output files produced by a media job.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +188,8 @@ pub struct MediaJobOutputs {
     pub video_tracks: Vec<MediaVideoTrackOutput>,
     pub output_path: Option<String>,
     pub captions_path: Option<String>,
+    #[serde(default)]
+    pub deliveries: Vec<JobDelivery>,
 }
 
 /// Media job record persisted in SQLite.
@@ -392,6 +440,78 @@ pub fn complete_job(conn: &Connection, id: &str, outputs: &MediaJobOutputs) -> R
     .map_err(|e| InternalError::Storage(format!("complete job: {e}")))?;
 
     get_job(conn, id)
+}
+
+/// Insert or replace one delivery record inside a job's persisted outputs.
+/// Works on completed jobs too — deliveries run after the render finishes.
+pub fn upsert_job_delivery(
+    conn: &Connection,
+    id: &str,
+    delivery: &JobDelivery,
+) -> Result<MediaJob> {
+    let mut job = get_job(conn, id)?;
+    job.outputs
+        .deliveries
+        .retain(|existing| existing.kind != delivery.kind);
+    job.outputs.deliveries.push(delivery.clone());
+    let outputs_json = serde_json::to_string(&job.outputs)
+        .map_err(|e| InternalError::Storage(format!("serialize outputs: {e}")))?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE media_jobs SET outputs = ?1, updated_at = ?2 WHERE id = ?3",
+        params![outputs_json, now, id],
+    )
+    .map_err(|e| InternalError::Storage(format!("update job deliveries: {e}")))?;
+    get_job(conn, id)
+}
+
+/// Startup sweep: a job that completed but left a delivery mid-flight means
+/// the app died or was closed during the upload. Flag those deliveries as
+/// failed so the UI offers a retry instead of an eternally-"running" row.
+pub fn fail_interrupted_deliveries(conn: &Connection) -> Result<usize> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, outputs FROM media_jobs
+             WHERE status IN ('completed', 'failed', 'cancelled')
+               AND outputs LIKE '%\"deliveries\":%'",
+        )
+        .map_err(|e| InternalError::Storage(format!("prepare delivery sweep: {e}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| InternalError::Storage(format!("scan deliveries: {e}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| InternalError::Storage(format!("scan deliveries: {e}")))?;
+
+    let mut fixed = 0usize;
+    for (job_id, outputs_json) in rows {
+        let Ok(mut outputs) = serde_json::from_str::<MediaJobOutputs>(&outputs_json) else {
+            continue;
+        };
+        let mut changed = false;
+        for delivery in outputs.deliveries.iter_mut() {
+            if !delivery.is_terminal() {
+                delivery.status = "failed".to_string();
+                delivery.detail =
+                    Some("interrupted by an app restart — retry the delivery".to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            let Ok(json) = serde_json::to_string(&outputs) else {
+                continue;
+            };
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE media_jobs SET outputs = ?1, updated_at = ?2 WHERE id = ?3",
+                params![json, now, job_id],
+            )
+            .map_err(|e| InternalError::Storage(format!("sweep delivery: {e}")))?;
+            fixed += 1;
+        }
+    }
+    Ok(fixed)
 }
 
 /// Mark a job as failed.

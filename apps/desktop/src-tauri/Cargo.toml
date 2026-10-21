@@ -49,6 +49,7 @@ hmac = "0.12"
 ed25519-dalek = "2"
 machine-uid = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["time"] }
 futures-util = { version = "0.3", default-features = false }
 # `deflate` restores the decompressor — without it every engine zip (Windows
 # x64 upstream + self-hosted macOS/ARM64) fails extraction at the first entry.
@@ -57,7 +58,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
-tract-onnx = "0.23.8"
 # Exact pin matching overlay-engine: the caption ASS writer measures text with
 # HarfBuzz so chip widths and line centers match the editor-core estimator.
 rustybuzz = "=0.20.1"

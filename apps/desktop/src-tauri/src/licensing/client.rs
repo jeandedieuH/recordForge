@@ -279,7 +279,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share create", &error))?;
-        let response = Self::ensure_success(response, "share_create_failed").await?;
+        let response = Self::ensure_share_success(response, "share_create_failed").await?;
         response
             .json()
             .await
@@ -300,7 +300,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share progress", &error))?;
-        Self::ensure_success(response, "share_progress_failed").await?;
+        Self::ensure_share_success(response, "share_progress_failed").await?;
         Ok(())
     }
 
@@ -318,7 +318,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share complete", &error))?;
-        Self::ensure_success(response, "share_complete_failed").await?;
+        Self::ensure_share_success(response, "share_complete_failed").await?;
         Ok(())
     }
 
@@ -332,7 +332,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share list", &error))?;
-        let response = Self::ensure_success(response, "share_list_failed").await?;
+        let response = Self::ensure_share_success(response, "share_list_failed").await?;
         let body: ShareListResponse = response
             .json()
             .await
@@ -350,7 +350,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share renew", &error))?;
-        let response = Self::ensure_success(response, "share_renew_failed").await?;
+        let response = Self::ensure_share_success(response, "share_renew_failed").await?;
         let body: ShareRenewResponse = response
             .json()
             .await
@@ -369,7 +369,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share analytics", &error))?;
-        let response = Self::ensure_success(response, "share_analytics_failed").await?;
+        let response = Self::ensure_share_success(response, "share_analytics_failed").await?;
         response
             .json()
             .await
@@ -385,7 +385,7 @@ impl LicenseClient {
             .send()
             .await
             .map_err(|error| Self::network_error("share revoke", &error))?;
-        Self::ensure_success(response, "share_revoke_failed").await?;
+        Self::ensure_share_success(response, "share_revoke_failed").await?;
         Ok(())
     }
 
@@ -415,6 +415,50 @@ impl LicenseClient {
             _ => format!("license server error ({status})"),
         };
         Err(AppError::new(ErrorCategory::Licensing, code, message))
+    }
+
+    /// Share-endpoint errors carry `{error, limits, oldestShareId}` — the
+    /// license-shaped `ensure_success` would misreport a link-quota 409 as a
+    /// device-slots problem, so share calls get their own body-aware mapping.
+    async fn ensure_share_success(
+        response: reqwest::Response,
+        code: &str,
+    ) -> Result<reqwest::Response> {
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        let server_code = body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let mut details = serde_json::Map::new();
+        if let Some(oldest) = body.get("oldestShareId").and_then(|v| v.as_str()) {
+            details.insert("oldestShareId".to_string(), serde_json::json!(oldest));
+        }
+        let message = match (status, server_code) {
+            (reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN, _) => {
+                "your license could not authorize this share — reactivate under Settings → License"
+                    .to_string()
+            }
+            (_, "quota_exceeded") | (reqwest::StatusCode::CONFLICT, _) => {
+                "the Instant Share link limit is reached — expire or revoke a link under Shared Links, then retry".to_string()
+            }
+            (_, "too_large") | (reqwest::StatusCode::PAYLOAD_TOO_LARGE, _) => {
+                "this export exceeds the hosted share limits (10 minutes, 1080p)".to_string()
+            }
+            (_, "unauthorized") => "this share doesn't belong to the active license".to_string(),
+            (reqwest::StatusCode::NOT_FOUND, _) => {
+                "that share no longer exists — it may have expired or been revoked".to_string()
+            }
+            (reqwest::StatusCode::TOO_MANY_REQUESTS, _) => {
+                "the share service is rate-limiting requests — retry in a moment".to_string()
+            }
+            _ if !server_code.is_empty() => format!("share service error: {server_code}"),
+            _ => format!("share service error ({status})"),
+        };
+        Err(AppError::new(ErrorCategory::Storage, code, message).with_details(details))
     }
 
     fn network_error(operation: &str, error: &reqwest::Error) -> AppError {

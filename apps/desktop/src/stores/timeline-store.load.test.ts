@@ -198,34 +198,14 @@ function fakeProject(recordingId: string): recordForgeProject {
       encoder: "auto",
       captionMode: "burn-in",
       chapterMode: "embed",
-      audioMastering: { denoise: false, loudnessTarget: null },
-      brandWatermark: {
-        enabled: false,
-        logoPath: null,
-        position: "bottom-right",
-        scalePercent: 8,
-        opacity: 0.85,
-      },
-      brandCards: {
-        enabled: false,
-        introMs: 0,
-        outroMs: 0,
-        title: null,
-        subtitle: null,
-        background: "#0f172a",
-        textColor: "#f8fafc",
-        fontPath: null,
-      },
       keystrokeOverlay: { ...defaultKeystrokeOverlaySettings },
-      reframeMode: "fit",
-      webcamBackground: {
-        enabled: false,
-        mode: "blur" as const,
-        blurSigma: 20,
-        replaceColor: "#0f172a",
-      },
-      formats: [],
       instantShare: { enabled: false, target: "hosted", expiresInDays: 30 },
+      youtubePublish: {
+        enabled: false,
+        privacy: "unlisted" as const,
+        attachCaptions: true,
+        captionsLanguage: "en",
+      },
     },
   } as recordForgeProject
 }
@@ -373,7 +353,7 @@ function fakeMetadata(recording: LibraryRecording): MediaMetadata {
   }
 }
 
-describe("timeline-store batch export", () => {
+describe("timeline-store export", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.saveProject.mockImplementation(async (project: recordForgeProject) => project)
@@ -384,10 +364,9 @@ describe("timeline-store batch export", () => {
     }))
   })
 
-  it("submits one export job per selected format, each with its own canvas and output path", async () => {
+  it("submits a single export job for the project canvas", async () => {
     const recording = fakeRecording("rec-1")
     const project = fakeProject("rec-1")
-    project.exportSettings.formats = ["16:9", "9:16", "1:1"]
     const timeline = createTimelineFromRecording(
       recording,
       fakeMetadata(recording),
@@ -409,36 +388,20 @@ describe("timeline-store batch export", () => {
 
     await useTimelineStore.getState().export("D:/out/demo.mp4")
 
-    expect(mocks.exportTimeline).toHaveBeenCalledTimes(3)
-    const outputs = mocks.exportTimeline.mock.calls.map(([options]) => options.outputPath)
-    expect(outputs).toEqual([
-      "D:/out/demo.mp4",
-      "D:/out/demo-vertical.mp4",
-      "D:/out/demo-square.mp4",
-    ])
-    const canvases = mocks.exportTimeline.mock.calls.map(
-      ([options]) =>
-        [
-          options.plan.canvas?.width,
-          options.plan.canvas?.height,
-          options.plan.canvas?.aspectRatio,
-        ] as const,
-    )
-    expect(canvases).toEqual([
-      [1920, 1080, "16:9"],
-      [1080, 1920, "9:16"],
-      [1080, 1080, "1:1"],
-    ])
+    expect(mocks.exportTimeline).toHaveBeenCalledTimes(1)
+    const options = mocks.exportTimeline.mock.calls[0][0]
+    expect(options.outputPath).toBe("D:/out/demo.mp4")
+    expect(options.plan.canvas?.width).toBe(1920)
+    expect(options.plan.canvas?.height).toBe(1080)
     expect(useTimelineStore.getState().error).toBeNull()
     expect(useTimelineStore.getState().activeExportJob?.id).toBe("job-D:/out/demo.mp4")
   })
 
-  it("collapses to the canvas ratio for animation containers even with a persisted selection", async () => {
+  it("submits a single job for animation containers", async () => {
     const recording = fakeRecording("rec-1")
     const project = fakeProject("rec-1")
     project.exportSettings.container = "gif"
     project.exportSettings.codec = "gif"
-    project.exportSettings.formats = ["16:9", "9:16"]
     const timeline = createTimelineFromRecording(
       recording,
       fakeMetadata(recording),
@@ -462,6 +425,6 @@ describe("timeline-store batch export", () => {
 
     expect(mocks.exportTimeline).toHaveBeenCalledTimes(1)
     expect(mocks.exportTimeline.mock.calls[0][0].outputPath).toBe("D:/out/demo.gif")
-    expect(mocks.exportTimeline.mock.calls[0][0].plan.canvas?.aspectRatio).toBe("16:9")
+    expect(mocks.exportTimeline.mock.calls[0][0].plan.canvas?.width).toBe(1920)
   })
 })

@@ -42,6 +42,11 @@ export async function shareExport(args: ShareExportArgs): Promise<ShareResult> {
   return invokeValidated("share_export", { args: parsed }, shareResultSchema)
 }
 
+/** Abort whichever share upload is running — manual or export-job-driven. */
+export async function cancelShare(): Promise<void> {
+  await invoke("cancel_share")
+}
+
 /** Upload progress while the multipart PUTs stream — mirrors the viewer bar. */
 export function onShareProgress(callback: (progress: ShareProgress) => void): Promise<() => void> {
   return listen<unknown>(SHARE_PROGRESS_EVENT, (event) => {
