@@ -83,6 +83,10 @@ fn read_env_var_from_file(key: &str) -> std::result::Result<String, ()> {
     Err(())
 }
 
+/// Drive MIME type for folders — used both in files.get checks and in
+/// find-or-create queries.
+const DRIVE_FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoogleDriveConfig {
@@ -94,6 +98,23 @@ pub struct GoogleDriveConfig {
     pub account_email: Option<String>,
     #[serde(default = "default_drive_chunk_size")]
     pub chunk_size_bytes: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DriveFileMeta {
+    id: String,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DriveFileList {
+    files: Option<Vec<DriveFileMeta>>,
+}
+
+/// Escape a value for use inside a single-quoted Drive `q` clause.
+fn escape_drive_query_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 fn default_root_folder() -> String {
@@ -229,6 +250,18 @@ impl GoogleDriveClient {
                         .user
                         .and_then(|u| u.email_address)
                         .unwrap_or_else(|| "Connected User".into());
+
+                    // Resolve (and if needed create) the destination folder
+                    // so a bad folder config fails the test instead of the
+                    // first real upload.
+                    if let Err(e) = self.resolve_upload_parent(&access_token).await {
+                        return Ok(ConnectionTestResult {
+                            ok: false,
+                            message: format!("Google Drive folder check failed: {}", e),
+                            latency_ms: Some(elapsed),
+                        });
+                    }
+
                     Ok(ConnectionTestResult {
                         ok: true,
                         message: format!("Connected to Google Drive as {}", user_email),
@@ -250,6 +283,160 @@ impl GoogleDriveClient {
                 latency_ms: Some(elapsed),
             }),
         }
+    }
+
+    /// Resolve the Drive folder uploads should land in.
+    ///
+    /// Resolution rules:
+    /// - `folder_id` empty or "root" → base folder is My Drive root.
+    /// - `folder_id` resolving to a real folder → used as the base folder;
+    ///   `folder_name` (when set) is found-or-created inside it.
+    /// - `folder_id` Drive can't see → treated as a folder *name* and
+    ///   found-or-created at root, then used directly as the destination.
+    ///   Users frequently paste a folder name into the ID field, and the
+    ///   `drive.file` scope also hides folders the app didn't create — in
+    ///   both cases a raw `parents` reference would 404 the upload.
+    async fn resolve_upload_parent(&self, access_token: &str) -> Result<String> {
+        let folder_id = self.config.folder_id.trim();
+        let folder_name = self.config.folder_name.trim();
+
+        let base = if folder_id.is_empty() || folder_id.eq_ignore_ascii_case("root") {
+            "root".to_string()
+        } else {
+            match self.get_file_meta(access_token, folder_id).await? {
+                Some(meta) => {
+                    if meta.mime_type.as_deref() != Some(DRIVE_FOLDER_MIME) {
+                        return Err(InternalError::Storage(format!(
+                            "configured Google Drive folder ID '{folder_id}' is not a folder"
+                        ))
+                        .into());
+                    }
+                    meta.id
+                }
+                // Not a Drive file ID (or not visible under drive.file
+                // scope) — treat the value as the destination folder name.
+                None => {
+                    return self
+                        .find_or_create_folder(access_token, folder_id, "root")
+                        .await;
+                }
+            }
+        };
+
+        if folder_name.is_empty() {
+            return Ok(base);
+        }
+        self.find_or_create_folder(access_token, folder_name, &base)
+            .await
+    }
+
+    /// Fetch a file's metadata; `None` when the file is not found or not
+    /// visible under the `drive.file` scope.
+    async fn get_file_meta(
+        &self,
+        access_token: &str,
+        file_id: &str,
+    ) -> Result<Option<DriveFileMeta>> {
+        let resp = self
+            .http
+            .get(format!(
+                "https://www.googleapis.com/drive/v3/files/{file_id}"
+            ))
+            .query(&[("fields", "id,mimeType")])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| InternalError::Storage(format!("failed to check Drive folder: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(InternalError::Storage(format!(
+                "failed to check Drive folder ({status}): {text}"
+            ))
+            .into());
+        }
+
+        let meta = resp.json().await.map_err(|e| {
+            InternalError::Storage(format!("failed to parse Drive file metadata: {e}"))
+        })?;
+        Ok(Some(meta))
+    }
+
+    /// Find a folder by name inside `parent_id`, creating it when missing.
+    async fn find_or_create_folder(
+        &self,
+        access_token: &str,
+        name: &str,
+        parent_id: &str,
+    ) -> Result<String> {
+        let query = format!(
+            "name = '{}' and mimeType = '{}' and '{}' in parents and trashed = false",
+            escape_drive_query_value(name),
+            DRIVE_FOLDER_MIME,
+            parent_id
+        );
+        let resp = self
+            .http
+            .get("https://www.googleapis.com/drive/v3/files")
+            .query(&[
+                ("q", query.as_str()),
+                ("fields", "files(id,name)"),
+                ("pageSize", "1"),
+            ])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| InternalError::Storage(format!("failed to search Drive folders: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(InternalError::Storage(format!(
+                "Drive folder search failed ({status}): {text}"
+            ))
+            .into());
+        }
+
+        let list: DriveFileList = resp
+            .json()
+            .await
+            .map_err(|e| InternalError::Storage(format!("failed to parse Drive file list: {e}")))?;
+        if let Some(file) = list.files.and_then(|f| f.into_iter().next()) {
+            return Ok(file.id);
+        }
+
+        let body = serde_json::json!({
+            "name": name,
+            "mimeType": DRIVE_FOLDER_MIME,
+            "parents": [parent_id],
+        });
+        let resp = self
+            .http
+            .post("https://www.googleapis.com/drive/v3/files")
+            .query(&[("fields", "id")])
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| InternalError::Storage(format!("failed to create Drive folder: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(InternalError::Storage(format!(
+                "failed to create Drive folder '{name}' ({status}): {text}"
+            ))
+            .into());
+        }
+
+        let meta: DriveFileMeta = resp.json().await.map_err(|e| {
+            InternalError::Storage(format!("failed to parse Drive folder response: {e}"))
+        })?;
+        Ok(meta.id)
     }
 
     /// Perform a resumable chunked upload to Google Drive
@@ -274,14 +461,15 @@ impl GoogleDriveClient {
             return Err(InternalError::Storage("upload cancelled by user".into()).into());
         }
 
+        // Resolve the destination folder to a real Drive file ID — passing
+        // a folder name (or an inaccessible ID) as `parents` fails the
+        // resumable session init with a 404.
+        let parent_id = self.resolve_upload_parent(&access_token).await?;
+
         // 1. Initiate Resumable Upload Session
         let metadata = serde_json::json!({
             "name": destination_name,
-            "parents": if self.config.folder_id != "root" && !self.config.folder_id.trim().is_empty() {
-                vec![self.config.folder_id.clone()]
-            } else {
-                vec![]
-            }
+            "parents": [parent_id],
         });
 
         let init_resp = self
@@ -394,5 +582,18 @@ impl GoogleDriveClient {
 
         info!(url = %drive_url, "Google Drive upload completed successfully");
         Ok(drive_url)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_drive_query_value;
+
+    #[test]
+    fn escapes_single_quotes_and_backslashes() {
+        assert_eq!(escape_drive_query_value("plain"), "plain");
+        assert_eq!(escape_drive_query_value("it's"), "it\\'s");
+        assert_eq!(escape_drive_query_value("a\\b"), "a\\\\b");
+        assert_eq!(escape_drive_query_value("x\\'y"), "x\\\\\\'y");
     }
 }

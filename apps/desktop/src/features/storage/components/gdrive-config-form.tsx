@@ -271,12 +271,12 @@ export function GDriveConfigForm({ initialProfile, onSave, onCancel }: GDriveCon
 
         <div className="col-span-2 sm:col-span-1">
           <Label className="mb-1 block font-medium">
-            Folder ID (Optional, "root" for top level)
+            Parent Folder ID or Name (Optional, "root" for top level)
           </Label>
           <Input
             value={folderId}
             onChange={(e) => setFolderId(e.target.value)}
-            placeholder="root or specific folder ID"
+            placeholder="root, folder ID, or folder name"
           />
         </div>
       </div>
