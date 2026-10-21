@@ -141,7 +141,7 @@ pub fn run() {
 
                     if minimize_to_tray {
                         api.prevent_close();
-                        let _ = window.hide();
+                        window::MainWindow::hide_to_tray(app);
                     }
                 }
             }

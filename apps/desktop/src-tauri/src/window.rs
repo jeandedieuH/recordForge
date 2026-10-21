@@ -31,22 +31,57 @@ impl MainWindow {
         Ok(())
     }
 
+    /// Hide the main window to the tray. On Windows a WebView2 window hidden
+    /// with `hide()` often fails to come back on `show()` — the HWND returns
+    /// but the webview stays invisible (upstream wry#637). Minimizing while
+    /// dropping the taskbar button looks identical to the user, and
+    /// `unminimize()` restores it reliably.
+    pub fn hide_to_tray(app: &tauri::AppHandle) {
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        {
+            let _ = window.set_skip_taskbar(true);
+            let _ = window.minimize();
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = window.hide();
+    }
+
+    /// Bring a live main window back to the front. Shared by every restore
+    /// surface: tray icon click/menu, global shortcut, recording stop, and
+    /// the `show_main_window` command.
+    fn restore<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            // Reverse hide_to_tray's taskbar suppression first so the window
+            // regains its taskbar entry on restore.
+            let _ = window.set_skip_taskbar(false);
+            // Windows denies SetForegroundWindow when the activating click
+            // came from the tray icon, so bounce through topmost to force the
+            // z-order. Cleared below on every outcome.
+            let _ = window.set_always_on_top(true);
+        }
+        // unminimize() before show(): a minimized window stays iconic under
+        // SW_SHOW, while SW_RESTORE clears both the hidden and iconic flags.
+        let result = window
+            .unminimize()
+            .and_then(|()| window.show())
+            .and_then(|()| window.set_focus());
+        #[cfg(target_os = "windows")]
+        let _ = window.set_always_on_top(false);
+        result.map_err(|error| InternalError::Unknown(format!("restore main window: {error}")))?;
+        Ok(())
+    }
+
     /// Restore and focus the main window, recreating it if it was destroyed
     /// while the process stayed alive — auxiliary windows (floating toolbar,
     /// webcam preview, teleprompter) keep the event loop running after a real
     /// close, and the tray must still be able to bring the app back.
     pub fn show_or_recreate(app: &tauri::AppHandle) -> Result<()> {
         if let Some(window) = app.get_webview_window("main") {
-            window
-                .show()
-                .map_err(|error| InternalError::Unknown(format!("show main window: {error}")))?;
-            window
-                .unminimize()
-                .map_err(|error| InternalError::Unknown(format!("restore main window: {error}")))?;
-            window
-                .set_focus()
-                .map_err(|error| InternalError::Unknown(format!("focus main window: {error}")))?;
-            return Ok(());
+            return Self::restore(&window);
         }
 
         // Mirror the `main` window block in tauri.conf.json — keep both in

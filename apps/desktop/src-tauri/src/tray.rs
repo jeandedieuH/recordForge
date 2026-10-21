@@ -323,9 +323,7 @@ fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
             }
         }
         "hide" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
-            }
+            crate::window::MainWindow::hide_to_tray(app);
         }
         "start" => {
             let app = app.clone();
