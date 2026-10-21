@@ -9,6 +9,11 @@ license = "GPL-3.0-or-later"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# wasm-pack downloads binaryen per-run to run wasm-opt, and that download is a
+# recurring flake on CI runners. These crates are small, so skip wasm-opt.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
