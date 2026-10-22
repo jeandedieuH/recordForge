@@ -779,10 +779,7 @@ function ClipSplitMenuItems({
       ) : null}
       {isClickInside &&
       (!isPlayheadInside || Math.abs((contextMenuTimeMs ?? 0) - playheadMs) > 200) ? (
-        <ContextMenuItem
-          onSelect={() => onSplitClip(clip, contextMenuTimeMs!)}
-          disabled={isLocked}
-        >
+        <ContextMenuItem onSelect={() => onSplitClip(clip, contextMenuTimeMs!)} disabled={isLocked}>
           <Scissors className="size-3.5 mr-2" /> Split here (
           {formatDurationSeconds(contextMenuTimeMs!)})
         </ContextMenuItem>

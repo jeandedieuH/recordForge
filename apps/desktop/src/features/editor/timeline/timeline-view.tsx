@@ -773,9 +773,7 @@ export function TimelineView({
   const frameMs = Math.max(1, Math.round(1000 / Math.max(1, timeline?.canvas.fps ?? 30)))
 
   function stepFrame(direction: -1 | 1) {
-    seek(
-      Math.max(0, Math.min(view.durationMs, getPlayheadSnapshot() + direction * frameMs)),
-    )
+    seek(Math.max(0, Math.min(view.durationMs, getPlayheadSnapshot() + direction * frameMs)))
   }
 
   const zoomToFit = useCallback(() => {
@@ -998,14 +996,7 @@ export function TimelineView({
 
     // 3. Fallback: ONLY when no clip or zoom segment is selected, split all clips at playhead
     handleSplitAllAtTime(playheadMs)
-  }, [
-    view.selection,
-    timeline,
-    execute,
-    toast,
-    handleSplitAllAtTime,
-    setSelection,
-  ])
+  }, [view.selection, timeline, execute, toast, handleSplitAllAtTime, setSelection])
 
   const deleteSelected = useCallback(
     (ripple: boolean) => {
@@ -1697,15 +1688,7 @@ export function TimelineView({
         })
       }
     },
-    [
-      timeline,
-      view.selection,
-      cursorTelemetry,
-      cursorEngine,
-      execute,
-      toast,
-      setSelection,
-    ],
+    [timeline, view.selection, cursorTelemetry, cursorEngine, execute, toast, setSelection],
   )
 
   const handleTimelineKeyDown = useCallback(

@@ -233,12 +233,9 @@ fn probe_single_encoder(ffmpeg_path: &str, encoder: &str) -> crate::errors::Resu
 /// encode. A null muxer keeps the probe file-free.
 #[cfg(target_os = "linux")]
 fn probe_vaapi_node(ffmpeg_path: &str, encoder: &str) -> Option<String> {
-    for node in vaapi_render_nodes() {
-        if probe_vaapi_on(ffmpeg_path, &node, encoder) {
-            return Some(node);
-        }
-    }
-    None
+    vaapi_render_nodes()
+        .into_iter()
+        .find(|node| probe_vaapi_on(ffmpeg_path, node, encoder))
 }
 
 /// One node/encoder VAAPI probe. `true` means the node opened, the upload

@@ -451,7 +451,10 @@ export function TimelineLanes({
         if (prevPlayhead !== state.playheadMs) {
           prevPlayheadMsRef.current = state.playheadMs
           const edgePadding = 24
-          if (playheadPx < currentScrollLeft + edgePadding || playheadPx > rightEdge - edgePadding) {
+          if (
+            playheadPx < currentScrollLeft + edgePadding ||
+            playheadPx > rightEdge - edgePadding
+          ) {
             const prevPlayheadPx = prevPlayhead * pixelsPerMs
             const isLargeJump = Math.abs(playheadPx - prevPlayheadPx) > viewportWidth * 0.4
             // Center the playhead for large jumps (cuts, markers, timecodes); otherwise keep in view with padding

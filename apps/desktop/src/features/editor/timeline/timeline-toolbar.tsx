@@ -759,9 +759,7 @@ function PlayheadTimecodeButton({ durationMs, ref, ...props }: PlayheadTimecodeB
         {formatTimelineTime(playheadMs)}
       </span>
       <span className="text-subtle-foreground font-sans">/</span>
-      <span className="tabular-nums text-muted-foreground">
-        {formatTimelineTime(durationMs)}
-      </span>
+      <span className="tabular-nums text-muted-foreground">{formatTimelineTime(durationMs)}</span>
     </button>
   )
 }

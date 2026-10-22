@@ -1,9 +1,5 @@
 import { useEffect, useMemo } from "react"
-import type {
-  CursorTelemetryFile,
-  ManualZoomSegment,
-  TimelineState,
-} from "@recordforge/contracts"
+import type { CursorTelemetryFile, ManualZoomSegment, TimelineState } from "@recordforge/contracts"
 import {
   createUpdateZoomSegmentCommand,
   resolvePreviewComposition,
@@ -66,11 +62,10 @@ export function PlaybackOverlays({
   const cssZoomTransform = useMemo(
     () =>
       composition?.screen.zoomTransform
-        ? zoomTransformToCss(
-            composition.screen.zoomTransform,
-            timeline.canvas,
-            { width: videoBounds.width, height: videoBounds.height },
-          )
+        ? zoomTransformToCss(composition.screen.zoomTransform, timeline.canvas, {
+            width: videoBounds.width,
+            height: videoBounds.height,
+          })
         : undefined,
     [composition?.screen.zoomTransform, timeline.canvas, videoBounds],
   )
@@ -93,13 +88,7 @@ export function PlaybackOverlays({
   const cursorPointAtPlayhead = useMemo(() => {
     if (composition?.cursor.zoomSpacePoint) return composition.cursor.zoomSpacePoint
     return getCursorPointAtTimelineTime(timeline, playheadMs, cursorTelemetry, cursorEngine)
-  }, [
-    composition?.cursor.zoomSpacePoint,
-    timeline,
-    playheadMs,
-    cursorTelemetry,
-    cursorEngine,
-  ])
+  }, [composition?.cursor.zoomSpacePoint, timeline, playheadMs, cursorTelemetry, cursorEngine])
 
   return (
     <>

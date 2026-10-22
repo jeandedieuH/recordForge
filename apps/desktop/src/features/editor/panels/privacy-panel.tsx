@@ -8,7 +8,6 @@ import { EyeOff, ShieldAlert } from "lucide-react"
 import { Button, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
-
 const MASK_MODES: { value: MaskMode; label: string }[] = [
   { value: "blur", label: "Blur" },
   { value: "pixelate", label: "Pixelate" },

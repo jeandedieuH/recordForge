@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type {
-  AnnotationClip,
-  OverlayDisplayList,
-  OverlayRenderPlan,
-} from "@recordforge/contracts"
+import type { AnnotationClip, OverlayDisplayList, OverlayRenderPlan } from "@recordforge/contracts"
 import {
   createOverlayWasmEngine,
   renderOverlayDisplayList,
