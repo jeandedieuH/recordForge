@@ -159,7 +159,7 @@ export function OverlayCanvas({
       canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height)
       console.warn("Overlay renderToCanvas error:", err)
     }
-  }, [assetUrls, canvasHeight, canvasWidth, drawing, playheadMs])
+  }, [assetUrls, canvasWidth, drawing, playheadMs])
 
   renderFrameRef.current = renderFrame
 
