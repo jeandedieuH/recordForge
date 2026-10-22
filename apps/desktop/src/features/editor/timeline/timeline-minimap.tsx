@@ -2,16 +2,29 @@ import { memo, useCallback, useMemo, useRef, useState } from "react"
 import type { TimelineState } from "@recordforge/contracts"
 import { cn } from "@recordforge/ui"
 import { formatTimelineTime } from "./timeline-ruler"
+import { usePlayheadMs } from "./use-playback-state"
 
 export interface TimelineMinimapProps {
   timeline: TimelineState
   durationMs: number
   visibleStartMs: number
   visibleEndMs: number
-  playheadMs: number
   onSeek: (ms: number) => void
   onSetScrollMs: (ms: number) => void
   className?: string
+}
+
+// The needle is the only playhead-driven part of the minimap; isolating it
+// keeps per-frame re-renders to this element instead of the clip list.
+function MinimapPlayheadNeedle({ durationMs }: { durationMs: number }) {
+  const playheadMs = usePlayheadMs()
+  const playheadPercent = Math.max(0, Math.min(100, (playheadMs / durationMs) * 100))
+  return (
+    <div
+      className="absolute inset-y-0 z-20 w-0.5 -translate-x-1/2 bg-foreground shadow-xs pointer-events-none"
+      style={{ left: `${playheadPercent}%` }}
+    />
+  )
 }
 
 export const TimelineMinimap = memo(function TimelineMinimap({
@@ -19,7 +32,6 @@ export const TimelineMinimap = memo(function TimelineMinimap({
   durationMs,
   visibleStartMs,
   visibleEndMs,
-  playheadMs,
   onSeek,
   onSetScrollMs,
   className,
@@ -39,8 +51,6 @@ export const TimelineMinimap = memo(function TimelineMinimap({
     2,
     Math.min(100 - lensLeftPercent, (visibleSpanMs / effectiveDuration) * 100),
   )
-
-  const playheadPercent = Math.max(0, Math.min(100, (playheadMs / effectiveDuration) * 100))
 
   // Flatten all track clips into color-coded mini blocks
   const miniClips = useMemo(() => {
@@ -233,10 +243,7 @@ export const TimelineMinimap = memo(function TimelineMinimap({
         ) : null}
 
         {/* Micro Playhead Needle */}
-        <div
-          className="absolute inset-y-0 z-20 w-0.5 -translate-x-1/2 bg-foreground shadow-xs pointer-events-none"
-          style={{ left: `${playheadPercent}%` }}
-        />
+        <MinimapPlayheadNeedle durationMs={effectiveDuration} />
 
         {/* Interactive Viewport Window (Lens) */}
         <div

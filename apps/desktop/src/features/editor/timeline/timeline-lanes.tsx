@@ -45,6 +45,8 @@ import { TimelineSnapBadge } from "./timeline-snap-badge"
 import { TimelineTrackHeader } from "./timeline-track-header"
 import type { TimelineTool } from "./timeline-toolbar"
 import { ZoomTrackRow } from "./zoom-track"
+import { getPlayheadSnapshot, subscribeToPlayhead, usePlayheadMs } from "./use-playback-state"
+import { useTimelineStore } from "../../../stores/timeline-store"
 
 const RULER_TOTAL_HEIGHT = 52
 const TRACK_ROW_HEIGHT = 56
@@ -71,7 +73,10 @@ export interface ZoomSegmentAction {
 
 export interface TimelineLanesProps {
   timeline: TimelineState
-  view: TimelineViewState
+  // playheadMs is intentionally absent: the parent view no longer subscribes
+  // to it, so reading it here would see a stale snapshot. Playhead-driven
+  // lanes subscribe via usePlayheadMs or read getPlayheadSnapshot().
+  view: Omit<TimelineViewState, "playheadMs">
   tool?: TimelineTool
   timelineWidth?: number
   pixelsPerMs?: number
@@ -167,7 +172,10 @@ function clipIntersectsWindow(clip: TimelineClip, startMs: number, endMs: number
   return clipEndMs >= startMs && clip.startMs <= endMs
 }
 
-function getTrackHeight(track: TimelineTrack, view: TimelineViewState): number {
+function getTrackHeight(
+  track: TimelineTrack,
+  view: Pick<TimelineViewState, "collapsedTrackIds" | "trackHeights">,
+): number {
   if (view.collapsedTrackIds.includes(track.id)) return COLLAPSED_TRACK_HEIGHT
   return view.trackHeights[track.id] ?? TRACK_ROW_HEIGHT
 }
@@ -406,56 +414,61 @@ export function TimelineLanes({
     }
   }, [pixelsPerMs, view.scrollMs])
 
-  const prevPlayheadMsRef = useRef(view.playheadMs)
+  const prevPlayheadMsRef = useRef(getPlayheadSnapshot())
 
-  // Auto-scroll timeline during playback OR when seeking / jumping to an offscreen position
+  // Auto-scroll is imperative: subscribing directly to playhead ticks avoids
+  // re-rendering the whole lanes tree on every video frame just to update
+  // scrollLeft on the DOM element.
   useEffect(() => {
     const element = scrollRef.current
     if (!element || viewportWidth <= 0) return
 
-    const playheadPx = view.playheadMs * pixelsPerMs
-    const currentScrollLeft = element.scrollLeft
-    const rightEdge = currentScrollLeft + viewportWidth
+    return subscribeToPlayhead(() => {
+      const state = useTimelineStore.getState().view
+      const playheadPx = state.playheadMs * pixelsPerMs
+      const currentScrollLeft = element.scrollLeft
+      const rightEdge = currentScrollLeft + viewportWidth
 
-    if (view.isPlaying) {
-      // If playhead moves past the right viewport boundary, page forward cleanly
-      if (playheadPx >= rightEdge - 30) {
-        const nextScroll = Math.max(0, playheadPx - 60)
-        element.scrollLeft = nextScroll
-        setScrollLeft(nextScroll)
-        onSetScroll(nextScroll / pixelsPerMs)
-      } else if (playheadPx < currentScrollLeft) {
-        // If playhead has looped or jumped before current view, reset view to playhead
-        const nextScroll = Math.max(0, playheadPx - 60)
-        element.scrollLeft = nextScroll
-        setScrollLeft(nextScroll)
-        onSetScroll(nextScroll / pixelsPerMs)
-      }
-      prevPlayheadMsRef.current = view.playheadMs
-    } else {
-      // While paused: if playhead changed and moved outside the visible viewport (or within edge padding),
-      // scroll to keep playhead comfortably visible
-      const prevPlayhead = prevPlayheadMsRef.current
-      if (prevPlayhead !== view.playheadMs) {
-        prevPlayheadMsRef.current = view.playheadMs
-        const edgePadding = 24
-        if (playheadPx < currentScrollLeft + edgePadding || playheadPx > rightEdge - edgePadding) {
-          const prevPlayheadPx = prevPlayhead * pixelsPerMs
-          const isLargeJump = Math.abs(playheadPx - prevPlayheadPx) > viewportWidth * 0.4
-          // Center the playhead for large jumps (cuts, markers, timecodes); otherwise keep in view with padding
-          const nextScroll = isLargeJump
-            ? Math.max(0, Math.round(playheadPx - viewportWidth / 2))
-            : playheadPx > rightEdge - edgePadding
-              ? Math.max(0, Math.round(playheadPx - viewportWidth + 80))
-              : Math.max(0, Math.round(playheadPx - 80))
-
+      if (state.isPlaying) {
+        // If playhead moves past the right viewport boundary, page forward cleanly
+        if (playheadPx >= rightEdge - 30) {
+          const nextScroll = Math.max(0, playheadPx - 60)
+          element.scrollLeft = nextScroll
+          setScrollLeft(nextScroll)
+          onSetScroll(nextScroll / pixelsPerMs)
+        } else if (playheadPx < currentScrollLeft) {
+          // If playhead has looped or jumped before current view, reset view to playhead
+          const nextScroll = Math.max(0, playheadPx - 60)
           element.scrollLeft = nextScroll
           setScrollLeft(nextScroll)
           onSetScroll(nextScroll / pixelsPerMs)
         }
+        prevPlayheadMsRef.current = state.playheadMs
+      } else {
+        // While paused: if playhead changed and moved outside the visible viewport (or within edge padding),
+        // scroll to keep playhead comfortably visible
+        const prevPlayhead = prevPlayheadMsRef.current
+        if (prevPlayhead !== state.playheadMs) {
+          prevPlayheadMsRef.current = state.playheadMs
+          const edgePadding = 24
+          if (playheadPx < currentScrollLeft + edgePadding || playheadPx > rightEdge - edgePadding) {
+            const prevPlayheadPx = prevPlayhead * pixelsPerMs
+            const isLargeJump = Math.abs(playheadPx - prevPlayheadPx) > viewportWidth * 0.4
+            // Center the playhead for large jumps (cuts, markers, timecodes); otherwise keep in view with padding
+            const nextScroll = isLargeJump
+              ? Math.max(0, Math.round(playheadPx - viewportWidth / 2))
+              : playheadPx > rightEdge - edgePadding
+                ? Math.max(0, Math.round(playheadPx - viewportWidth + 80))
+                : Math.max(0, Math.round(playheadPx - 80))
+
+            element.scrollLeft = nextScroll
+            setScrollLeft(nextScroll)
+            onSetScroll(nextScroll / pixelsPerMs)
+          }
+        }
       }
-    }
-  }, [view.isPlaying, view.playheadMs, pixelsPerMs, viewportWidth, onSetScroll])
+    })
+  }, [pixelsPerMs, viewportWidth, onSetScroll])
 
   const visibleStartMs = Math.max(0, scrollLeft / pixelsPerMs - 2_000)
   const visibleEndMs = Math.min(
@@ -795,9 +808,12 @@ export function TimelineLanes({
 
   const thumbnailData = thumbnailResource.status === "content" ? thumbnailResource.data : null
   const spriteUrl = thumbnailData ? toAssetUrl(thumbnailData.spritePath, workDir) : null
+  // Snap targets exclude the live playhead so playback ticks don't rebuild
+  // the list; gesture consumers append it via playheadSnapTarget at
+  // pointer-down.
   const snapTargets = useMemo(
-    () => buildSnapTargets(timeline, { playheadMs: view.playheadMs, cursorClickTimesMs }),
-    [timeline, view.playheadMs, cursorClickTimesMs],
+    () => buildSnapTargets(timeline, { cursorClickTimesMs }),
+    [timeline, cursorClickTimesMs],
   )
 
   const onSnapGuideCallback = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
@@ -916,7 +932,6 @@ export function TimelineLanes({
           durationMs={view.durationMs}
           visibleStartMs={visibleStartMs}
           visibleEndMs={visibleEndMs}
-          playheadMs={view.playheadMs}
           onSeek={onSeek}
           onSetScrollMs={(scrollMs) => onSetScroll(scrollMs)}
         />
@@ -1124,7 +1139,6 @@ export function TimelineLanes({
 
                 {/* Playhead Needle */}
                 <TimelinePlayhead
-                  playheadMs={view.playheadMs}
                   pixelsPerMs={pixelsPerMs}
                   timelineHeight={contentHeight}
                   durationMs={view.durationMs}
@@ -1157,7 +1171,6 @@ export function TimelineLanes({
                         selectedZoomId={selectedZoomId}
                         snapEnabled={view.snapEnabled}
                         snapThresholdMs={view.snapThresholdMs}
-                        playheadMs={view.playheadMs}
                         cursorClickTimesMs={cursorClickTimesMs}
                         getTimelineTime={timelineTimeFromClientX}
                         tool={tool}
@@ -1270,7 +1283,6 @@ export function TimelineLanes({
                               pixelsPerMs={pixelsPerMs}
                               selected={selectedClipIds.has(clip.id)}
                               tool={tool}
-                              playheadMs={view.playheadMs}
                               frameMs={Math.max(
                                 1,
                                 Math.round(1000 / Math.max(1, timeline.canvas.fps)),
@@ -1339,30 +1351,12 @@ export function TimelineLanes({
                   {formatTimelineTime(emptyLanesContextMenuTimeMs)})
                 </ContextMenuItem>
               ) : null}
-              {onAddZoomAtTime ? (
-                <ContextMenuItem onSelect={() => onAddZoomAtTime(view.playheadMs)}>
-                  <ZoomIn className="size-3.5 mr-2 text-primary" /> Add Zoom at playhead (
-                  {formatTimelineTime(view.playheadMs)})
-                </ContextMenuItem>
-              ) : null}
-              {emptyLanesContextMenuTimeMs !== null && onAddMarkerAtTime ? (
-                <ContextMenuItem onSelect={() => onAddMarkerAtTime(emptyLanesContextMenuTimeMs)}>
-                  <BookmarkPlus className="size-3.5 mr-2" /> Add marker here (
-                  {formatTimelineTime(emptyLanesContextMenuTimeMs)})
-                </ContextMenuItem>
-              ) : null}
-              {onAddMarkerAtTime ? (
-                <ContextMenuItem onSelect={() => onAddMarkerAtTime(view.playheadMs)}>
-                  <BookmarkPlus className="size-3.5 mr-2" /> Add marker at playhead (
-                  {formatTimelineTime(view.playheadMs)})
-                </ContextMenuItem>
-              ) : null}
-              {onSplitAllAtPlayhead ? (
-                <ContextMenuItem onSelect={() => onSplitAllAtPlayhead()}>
-                  <Scissors className="size-3.5 mr-2" /> Split all at playhead (
-                  {formatTimelineTime(view.playheadMs)})
-                </ContextMenuItem>
-              ) : null}
+              <LanesPlayheadMenuActions
+                emptyLanesContextMenuTimeMs={emptyLanesContextMenuTimeMs}
+                onAddZoomAtTime={onAddZoomAtTime}
+                onAddMarkerAtTime={onAddMarkerAtTime}
+                onSplitAllAtPlayhead={onSplitAllAtPlayhead}
+              />
               {view.selection ? (
                 <>
                   <ContextMenuSeparator />
@@ -1384,6 +1378,56 @@ export function TimelineLanes({
         </div>
       </div>
     </div>
+  )
+}
+
+interface LanesPlayheadMenuActionsProps {
+  emptyLanesContextMenuTimeMs: number | null
+  onAddZoomAtTime?: (
+    timeMs: number,
+    options?: { preset?: ZoomPreset; scale?: number; endMs?: number },
+  ) => void
+  onAddMarkerAtTime?: (timeMs: number) => void
+  onSplitAllAtPlayhead?: () => void
+}
+
+// These items read the live playhead; mounting them inside ContextMenuContent
+// (rendered only while the menu is open) keeps the subscription scoped to the
+// menu's lifetime instead of the whole lanes tree.
+function LanesPlayheadMenuActions({
+  emptyLanesContextMenuTimeMs,
+  onAddZoomAtTime,
+  onAddMarkerAtTime,
+  onSplitAllAtPlayhead,
+}: LanesPlayheadMenuActionsProps) {
+  const playheadMs = usePlayheadMs()
+  return (
+    <>
+      {onAddZoomAtTime ? (
+        <ContextMenuItem onSelect={() => onAddZoomAtTime(playheadMs)}>
+          <ZoomIn className="size-3.5 mr-2 text-primary" /> Add Zoom at playhead (
+          {formatTimelineTime(playheadMs)})
+        </ContextMenuItem>
+      ) : null}
+      {emptyLanesContextMenuTimeMs !== null && onAddMarkerAtTime ? (
+        <ContextMenuItem onSelect={() => onAddMarkerAtTime(emptyLanesContextMenuTimeMs)}>
+          <BookmarkPlus className="size-3.5 mr-2" /> Add marker here (
+          {formatTimelineTime(emptyLanesContextMenuTimeMs)})
+        </ContextMenuItem>
+      ) : null}
+      {onAddMarkerAtTime ? (
+        <ContextMenuItem onSelect={() => onAddMarkerAtTime(playheadMs)}>
+          <BookmarkPlus className="size-3.5 mr-2" /> Add marker at playhead (
+          {formatTimelineTime(playheadMs)})
+        </ContextMenuItem>
+      ) : null}
+      {onSplitAllAtPlayhead ? (
+        <ContextMenuItem onSelect={() => onSplitAllAtPlayhead()}>
+          <Scissors className="size-3.5 mr-2" /> Split all at playhead (
+          {formatTimelineTime(playheadMs)})
+        </ContextMenuItem>
+      ) : null}
+    </>
   )
 }
 

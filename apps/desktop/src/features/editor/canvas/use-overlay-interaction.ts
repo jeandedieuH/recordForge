@@ -20,7 +20,7 @@ import {
 } from "@recordforge/editor-core"
 import type { OverlayTransform } from "@recordforge/contracts"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { usePlayheadMs } from "../timeline/use-playback-state"
+import { getPlayheadSnapshot } from "../timeline/use-playback-state"
 
 export interface OverlayInteractionOptions {
   canvasRef: RefObject<HTMLElement | null>
@@ -173,11 +173,8 @@ export function useOverlayInteraction({
   canvasWidth,
   canvasHeight,
 }: OverlayInteractionOptions): OverlayInteraction {
-  const playheadMs = usePlayheadMs()
   const dimensionsRef = useRef({ canvasWidth, canvasHeight })
   dimensionsRef.current = { canvasWidth, canvasHeight }
-  const playheadRef = useRef(playheadMs)
-  playheadRef.current = playheadMs
 
   const transactionRef = useRef<InteractionTransaction<OverlayGestureDraft> | null>(null)
   const gestureRef = useRef<OverlayPointerState | null>(null)
@@ -369,7 +366,7 @@ export function useOverlayInteraction({
 
   const beginGesture = useCallback(
     (event: PointerEvent<Element>, clip: OverlayClip, handle: OverlayHandle) => {
-      if (event.button !== 0 || !isActive(clip, playheadRef.current) || clip.locked) return
+      if (event.button !== 0 || !isActive(clip, getPlayheadSnapshot()) || clip.locked) return
       event.preventDefault()
       event.stopPropagation()
       clearFrame()

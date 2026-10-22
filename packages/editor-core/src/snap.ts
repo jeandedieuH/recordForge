@@ -66,6 +66,21 @@ function addClipEdgeTargets(targets: SnapTarget[], clip: TimelineClip, excludeCl
   )
 }
 
+/**
+ * Build the playhead snap target. Kept as a standalone helper so callers can
+ * memoize the static target set and append the playhead lazily at gesture
+ * time — a live playhead in the memoized list would rebuild it every frame.
+ */
+export function playheadSnapTarget(timeMs: number): SnapTarget {
+  return {
+    id: "playhead",
+    kind: "playhead",
+    timeMs,
+    priority: SNAP_PRIORITY.playhead,
+    label: "Playhead",
+  }
+}
+
 /** Build the deterministic target set used by move, trim, and range gestures. */
 export function buildSnapTargets(state: TimelineState, options: SnapOptions = {}): SnapTarget[] {
   const targets: SnapTarget[] = []
@@ -118,13 +133,7 @@ export function buildSnapTargets(state: TimelineState, options: SnapOptions = {}
   }
 
   if (options.playheadMs !== undefined) {
-    targets.push({
-      id: "playhead",
-      kind: "playhead",
-      timeMs: options.playheadMs,
-      priority: SNAP_PRIORITY.playhead,
-      label: "Playhead",
-    })
+    targets.push(playheadSnapTarget(options.playheadMs))
   }
 
   for (const [index, timeMs] of (options.cursorClickTimesMs ?? []).entries()) {

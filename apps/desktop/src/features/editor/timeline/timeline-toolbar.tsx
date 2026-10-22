@@ -45,6 +45,7 @@ import type { MaskClip, TimelineMarker, ZoomPreset } from "@recordforge/contract
 import { formatTimelineTime } from "./timeline-ruler"
 import { parseTimecode } from "./timeline-navigation"
 import { TimelineShortcutsDialog } from "./timeline-shortcuts-dialog"
+import { getPlayheadSnapshot, usePlayheadMs } from "./use-playback-state"
 
 export type TimelineTool = "select" | "split" | "range"
 
@@ -73,7 +74,6 @@ export interface TimelineToolbarProps {
   snapThresholdMs: number
   onToggleSnap: (enabled: boolean) => void
   onChangeSnapThreshold: (thresholdMs: number) => void
-  playheadMs: number
   durationMs: number
   isPlaying: boolean
   playbackRate: number
@@ -105,7 +105,6 @@ export function TimelineToolbar({
   snapThresholdMs,
   onToggleSnap,
   onChangeSnapThreshold,
-  playheadMs,
   durationMs,
   isPlaying,
   playbackRate,
@@ -141,7 +140,8 @@ export function TimelineToolbar({
 
   function handleJumpSubmit(e: React.FormEvent) {
     e.preventDefault()
-    const parsedMs = parseTimecode(jumpInputText, durationMs, playheadMs)
+    // Relative offsets (-5s, +10) resolve against the live playhead at submit.
+    const parsedMs = parseTimecode(jumpInputText, durationMs, getPlayheadSnapshot())
     if (parsedMs !== null) {
       onSeek(parsedMs)
       setJumpTimePopoverOpen(false)
@@ -517,20 +517,7 @@ export function TimelineToolbar({
           }}
         >
           <PopoverTrigger asChild>
-            <button
-              type="button"
-              className="flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/90 px-2 py-0.5 font-mono text-xs shadow-xs transition-all duration-fast hover:border-primary/60 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer"
-              title="Click to jump to specific timestamp or marker"
-              aria-label={`Current playhead ${formatTimelineTime(playheadMs)} of total ${formatTimelineTime(durationMs)}. Click to jump to timecode.`}
-            >
-              <span className="font-semibold tabular-nums text-foreground">
-                {formatTimelineTime(playheadMs)}
-              </span>
-              <span className="text-subtle-foreground font-sans">/</span>
-              <span className="tabular-nums text-muted-foreground">
-                {formatTimelineTime(durationMs)}
-              </span>
-            </button>
+            <PlayheadTimecodeButton durationMs={durationMs} />
           </PopoverTrigger>
           <PopoverContent className="w-72 p-3 bg-surface border-border shadow-e2" align="center">
             <form onSubmit={handleJumpSubmit} className="space-y-3">
@@ -582,7 +569,7 @@ export function TimelineToolbar({
                 <button
                   type="button"
                   onClick={() => {
-                    onSeek(Math.max(0, playheadMs - 5000))
+                    onSeek(Math.max(0, getPlayheadSnapshot() - 5000))
                     setJumpTimePopoverOpen(false)
                   }}
                   className="text-primary hover:underline"
@@ -592,7 +579,7 @@ export function TimelineToolbar({
                 <button
                   type="button"
                   onClick={() => {
-                    onSeek(Math.min(durationMs, playheadMs + 5000))
+                    onSeek(Math.min(durationMs, getPlayheadSnapshot() + 5000))
                     setJumpTimePopoverOpen(false)
                   }}
                   className="text-primary hover:underline"
@@ -745,5 +732,36 @@ export function TimelineToolbar({
         </IconButton>
       </div>
     </div>
+  )
+}
+
+interface PlayheadTimecodeButtonProps extends React.ComponentProps<"button"> {
+  durationMs: number
+  ref?: React.Ref<HTMLButtonElement>
+}
+
+// The live timecode is the only playhead-driven part of the toolbar; keeping
+// the subscription on this leaf prevents the whole toolbar re-rendering on
+// every video frame. ref is forwarded through props so PopoverTrigger's
+// asChild Slot can anchor to the underlying button.
+function PlayheadTimecodeButton({ durationMs, ref, ...props }: PlayheadTimecodeButtonProps) {
+  const playheadMs = usePlayheadMs()
+  return (
+    <button
+      ref={ref}
+      type="button"
+      className="flex items-center gap-1.5 rounded-md border border-border/80 bg-surface/90 px-2 py-0.5 font-mono text-xs shadow-xs transition-all duration-fast hover:border-primary/60 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary cursor-pointer"
+      title="Click to jump to specific timestamp or marker"
+      aria-label={`Current playhead ${formatTimelineTime(playheadMs)} of total ${formatTimelineTime(durationMs)}. Click to jump to timecode.`}
+      {...props}
+    >
+      <span className="font-semibold tabular-nums text-foreground">
+        {formatTimelineTime(playheadMs)}
+      </span>
+      <span className="text-subtle-foreground font-sans">/</span>
+      <span className="tabular-nums text-muted-foreground">
+        {formatTimelineTime(durationMs)}
+      </span>
+    </button>
   )
 }

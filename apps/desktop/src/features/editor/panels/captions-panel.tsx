@@ -41,6 +41,7 @@ import {
   useToast,
 } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { getPlayheadSnapshot } from "../timeline/use-playback-state"
 import { CaptionCueList } from "../captions/caption-cue-list"
 import { CaptionImportPanel } from "../captions/caption-import-panel"
 import { AiCaptionsCard } from "../captions/ai-captions-card"
@@ -58,7 +59,6 @@ function shiftDeltaLabel(deltaMs: number): string {
 
 export function CaptionsPanel() {
   const execute = useTimelineStore((state) => state.execute)
-  const playheadMs = useTimelineStore((state) => state.view.playheadMs)
   const isPlaying = useTimelineStore((state) => state.view.isPlaying)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const captionTrack = useTimelineStore((state) =>
@@ -131,7 +131,7 @@ export function CaptionsPanel() {
     const clipId = crypto.randomUUID()
     // New cues inherit the track design — no per-clip overrides on creation.
     const applied = execute(
-      createAddCaptionClipCommand("New caption", playheadMs, 2_000, { clipId }),
+      createAddCaptionClipCommand("New caption", getPlayheadSnapshot(), 2_000, { clipId }),
     )
     if (!applied) {
       toast({
@@ -383,7 +383,6 @@ export function CaptionsPanel() {
             ) : null}
             <CaptionCueList
               track={captionTrack}
-              playheadMs={playheadMs}
               isPlaying={isPlaying}
               screenDurationMs={screenDurationMs}
               design={captionDesign}

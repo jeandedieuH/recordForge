@@ -119,6 +119,15 @@ pub(crate) struct RenderOutcome {
 type MediaProber =
     Box<dyn Fn(&Path, &str) -> Result<crate::database::media::MediaMetadata> + Send + Sync>;
 
+/// Benchmark tuning knob: `RECORDFORGE_EXPORT_*` env vars let the export
+/// harness A/B scheduling parameters without code changes. Not user-facing.
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
 /// FFprobe metadata memoized across the passes of one export. A `None` prober
 /// disables probing entirely — callers then behave exactly like the legacy
 /// `ffprobe_path: None` path (no probe, specifier guesses only).
@@ -242,12 +251,26 @@ impl PlateCache {
     }
 }
 
-/// Per-export state shared by every composition pass: one probe memoization
-/// and one generated-plate memoization, so chunk passes stop redoing the same
-/// ffprobe/raster work and a hardware→software retry reuses both.
+/// Per-export state shared by every composition pass: probe and generated-plate
+/// memoization plus the prepared cursor/overlay/keystroke engines, so chunk
+/// passes stop redoing telemetry reads, plan parsing, and image decodes — and
+/// a hardware→software retry reuses everything.
 pub(crate) struct CompositionShared {
     probe: ProbeCache,
     plates: PlateCache,
+    /// Cursor engines keyed by telemetry asset id. `None` memoizes degraded
+    /// assets the same way the per-chunk loader did. The engine's evaluate is
+    /// a pure read (its RefCell smoothing cache lives behind the Mutex), so
+    /// one instance can serve every chunk pass.
+    cursor_engines: Mutex<HashMap<String, Option<Arc<Mutex<cursor_engine::CursorEngine>>>>>,
+    /// Prepared overlay engine: outer `None` = not built yet; the inner
+    /// `Result` keeps a deterministic build error stable across passes.
+    overlay_engine:
+        Mutex<Option<std::result::Result<Option<Arc<overlay_engine::OverlayEngine>>, String>>>,
+    /// Prepared keystroke renderer, cloned per pass — `render_frame_at` is
+    /// `&self` but the type's RefCell badge cache makes it !Sync, so `Arc`
+    /// sharing is out; cloning still shares the warm `Arc<Pixmap>` cache.
+    keystroke_renderer: Mutex<Option<Option<keystrokes::KeystrokeRenderer>>>,
 }
 
 impl CompositionShared {
@@ -255,7 +278,71 @@ impl CompositionShared {
         Self {
             probe: ProbeCache::new(ffprobe_path),
             plates: PlateCache::new(),
+            cursor_engines: Mutex::new(HashMap::new()),
+            overlay_engine: Mutex::new(None),
+            keystroke_renderer: Mutex::new(None),
         }
+    }
+
+    /// Return the cursor engine for `asset_id`, running `load` at most once
+    /// per export per asset. `None` ("degraded telemetry") is memoized too.
+    /// Load errors are not cached — a retry pass gets to retry the read.
+    fn cursor_engine(
+        &self,
+        asset_id: &str,
+        load: impl FnOnce() -> Result<Option<Arc<Mutex<cursor_engine::CursorEngine>>>>,
+    ) -> Result<Option<Arc<Mutex<cursor_engine::CursorEngine>>>> {
+        let mut engines = self
+            .cursor_engines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = engines.get(asset_id) {
+            return Ok(entry.clone());
+        }
+        let loaded = load()?;
+        engines.insert(asset_id.to_string(), loaded.clone());
+        Ok(loaded)
+    }
+
+    /// Build the overlay engine once per export. The render plan, canvas
+    /// override, and image decode set are identical across chunk passes, and
+    /// `OverlayEngine::evaluate`/`render_to_pixmap` are `&self` reads, so one
+    /// shared `Arc` serves every pass and every plate producer worker.
+    fn overlay_engine(
+        &self,
+        build: impl FnOnce() -> Result<Option<overlay_engine::OverlayEngine>>,
+    ) -> Result<Option<Arc<overlay_engine::OverlayEngine>>> {
+        let mut slot = self
+            .overlay_engine
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(result) = slot.as_ref() {
+            return result
+                .clone()
+                .map_err(|message| InternalError::Media(message).into());
+        }
+        let built = build()
+            .map(|engine| engine.map(Arc::new))
+            .map_err(|error| error.to_string());
+        *slot = Some(built.clone());
+        built.map_err(|message| InternalError::Media(message).into())
+    }
+
+    /// Build the keystroke renderer once per export; construction failures
+    /// already degrade to "no overlay", so only the Option is memoized.
+    /// Returns a clone — the renderer is !Sync so each pass needs its own.
+    fn keystroke_renderer(
+        &self,
+        build: impl FnOnce() -> Option<keystrokes::KeystrokeRenderer>,
+    ) -> Option<keystrokes::KeystrokeRenderer> {
+        let mut slot = self
+            .keystroke_renderer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(build());
+        }
+        slot.as_ref().expect("keystroke slot initialized").clone()
     }
 }
 
@@ -893,6 +980,7 @@ pub fn run_render_plan(
     // capture path), so hevc exports verify the vendor's hevc variant with a
     // one-second test encode before committing the job to it.
     let ffmpeg = ffmpeg_path.to_string_lossy().to_string();
+    let probe_started = std::time::Instant::now();
     let encoder = encoding::resolve_export_encoder(
         &settings.encoder,
         &settings.codec,
@@ -902,6 +990,7 @@ pub fn run_render_plan(
     info!(
         project_id = %project_id,
         encoder = encoder.display_name(),
+        probe_ms = probe_started.elapsed().as_millis() as u64,
         "selected export encoder"
     );
 
@@ -938,6 +1027,7 @@ pub fn run_render_plan(
     // retry so the fallback does not re-run the same ffprobe/plate work.
     let shared = CompositionShared::new(Some(ffprobe_path));
 
+    let composition_started = std::time::Instant::now();
     let composition = render_timeline_composition_shared(
         &ffmpeg,
         &partial_path,
@@ -977,7 +1067,8 @@ pub fn run_render_plan(
                 error
             );
             update_progress(&db, app, job_id, 0.05, "rendering", Some(&retry_detail))?;
-            render_timeline_composition_shared(
+            let retry_started = std::time::Instant::now();
+            let retry = render_timeline_composition_shared(
                 &ffmpeg,
                 &partial_path,
                 &plan,
@@ -990,9 +1081,21 @@ pub fn run_render_plan(
                 resource_dir.as_deref(),
                 &shared,
                 output_cap,
-            )?
+            );
+            info!(
+                project_id = %project_id,
+                retry_ms = retry_started.elapsed().as_millis() as u64,
+                succeeded = retry.is_ok(),
+                "export: software retry finished"
+            );
+            retry?
         }
     };
+    info!(
+        project_id = %project_id,
+        composition_ms = composition_started.elapsed().as_millis() as u64,
+        "export: composition finished"
+    );
 
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
@@ -1039,6 +1142,7 @@ pub fn run_render_plan(
         .canvas
         .as_ref()
         .map(|canvas| capped_output_dimensions(canvas.width, canvas.height, output_cap));
+    let validate_started = std::time::Instant::now();
     validate_export_output_with_dims(
         ffprobe_path,
         &partial_path,
@@ -1047,6 +1151,11 @@ pub fn run_render_plan(
         outcome.has_audio,
         output_dims,
     )?;
+    info!(
+        project_id = %project_id,
+        validate_ms = validate_started.elapsed().as_millis() as u64,
+        "export: output validated"
+    );
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         cleanup_export_files(output_path);
         return Err(InternalError::Media("export cancelled".into()).into());
@@ -2393,6 +2502,7 @@ fn render_composition_window(
         canvas,
         (screen_x, screen_y, screen_w, screen_h),
         cursor_screen_windows,
+        shared,
     )?;
     // Renderers whose window never intersects this pass can never produce a
     // visible frame; dropping them lets a cursor-free chunk skip the plate
@@ -2461,6 +2571,7 @@ fn render_composition_window(
             settings,
             asset_paths,
             cursor_plane_rect,
+            shared,
         )?;
         // This pass emits only its window of plate frames; renderer
         // timestamps are absolute, so the feed offsets by `first_frame_index`.
@@ -2841,7 +2952,7 @@ fn render_composition_window(
     }
 
     let final_pix_fmt = match encoder {
-        encoding::ExportEncoder::Qsv => "nv12",
+        encoding::ExportEncoder::Qsv | encoding::ExportEncoder::Vaapi => "nv12",
         _ => "yuv420p",
     };
     let final_label = "export_output";
@@ -2937,6 +3048,12 @@ fn render_composition_window(
         // Machine-readable progress blocks on stderr; the runner parses
         // `out_time=` from them and keeps them out of failure diagnostics.
         .args(["-progress", "pipe:2"]);
+    // VAAPI is a device + encoder pair: point it at the render node the startup
+    // probe validated. Must precede the inputs, and GIF/WebP renders ignore
+    // `encoder` entirely, so they never open the device.
+    if !is_gif && !is_webp {
+        encoding::append_export_device_args(&mut command, encoder);
+    }
     // Hardware decode keeps compressed frames off the CPU-side demux/decode
     // path when a hardware encoder is in use. `auto` picks any working
     // backend (D3D11VA/DXVA2/NVDEC on Windows, VideoToolbox on macOS, VAAPI on
@@ -3029,6 +3146,16 @@ fn render_composition_window(
             "[{current_label}]fps={webp_fps},{scale_filter}format=yuv420p[webp_out]"
         ));
         current_label = "webp_out".to_string();
+    }
+
+    // VAAPI consumes hardware frames only, so the mapped label must carry
+    // `vaapi` frames. Upload after every software stage — including the final
+    // format conversion above — and only for the encode path: GIF/WebP append
+    // their own palette/scale stages and never use `encoder`.
+    if encoder == encoding::ExportEncoder::Vaapi && !is_gif && !is_webp {
+        let (stage, label) = encoding::vaapi_export_upload(&current_label);
+        filters.push(stage);
+        current_label = label.to_string();
     }
 
     let filter_script_content = filters.join(";\n");
@@ -3256,6 +3383,38 @@ fn append_audio_graph(
         ));
     }
     Ok(!audio_labels.is_empty())
+}
+
+/// Per-asset upper decode bound for the dedicated audio pass: the maximum
+/// `source_out_ms` across every segment referencing the asset, using the same
+/// legacy-fallback convention as `append_audio_graph` (a segmentless track
+/// reads the first `duration_ms` of its source).
+fn audio_source_bounds_ms(plan: &RenderPlan, duration_ms: u64) -> HashMap<String, u64> {
+    let mut bounds: HashMap<String, u64> = HashMap::new();
+    let tracks: Vec<&RenderPlanAudio> = plan
+        .audio_tracks
+        .as_ref()
+        .map(|tracks| tracks.iter().collect())
+        .unwrap_or_else(|| plan.audio.iter().collect());
+    for track in tracks {
+        if track.muted {
+            continue;
+        }
+        if track.segments.is_empty() {
+            bounds
+                .entry(track.asset_id.clone())
+                .and_modify(|bound| *bound = (*bound).max(duration_ms))
+                .or_insert(duration_ms);
+            continue;
+        }
+        for segment in &track.segments {
+            bounds
+                .entry(segment.asset_id.clone())
+                .and_modify(|bound| *bound = (*bound).max(segment.source_out_ms))
+                .or_insert(segment.source_out_ms);
+        }
+    }
+    bounds
 }
 
 /// One `-i` argument for the composition command: the file plus an optional
@@ -3608,18 +3767,31 @@ fn render_timeline_chunked(
         .max(1);
     // Half the cores per pass keeps each process's encode/decode thread pools
     // from drowning the serial filter stages; ~2 chunks per worker absorbs
-    // uneven slice costs.
-    let workers = std::thread::available_parallelism()
-        .map(|count| (count.get() / 2).clamp(2, 4))
-        .unwrap_or(2);
+    // uneven slice costs. The cap scales with the machine — 4 leaves 16+
+    // core boxes half idle. NVENC is capped separately: consumer GeForce
+    // drivers refuse more than ~3 concurrent encode sessions, and a session
+    // failure escalates into a whole-export software retry (the slowest
+    // possible outcome).
+    let cores = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4);
+    let worker_cap = if encoder == encoding::ExportEncoder::Nvenc {
+        3
+    } else {
+        8
+    };
+    let workers = env_usize("RECORDFORGE_EXPORT_CHUNK_WORKERS")
+        .unwrap_or_else(|| (cores / 2).clamp(2, worker_cap));
     // Each pass caps its filter-graph and software-encoder threads to a fair
     // share of the machine; without it N parallel FFmpeg processes oversubscribe.
-    let pass_threads = std::thread::available_parallelism()
-        .map(|count| (count.get() / workers).max(2))
-        .unwrap_or(2);
-    let chunk_frames = total_frames
-        .div_ceil((workers * 2) as u64)
-        .max(fps.saturating_mul(2));
+    let pass_threads = (cores / workers).max(2);
+    let chunk_frames = env_usize("RECORDFORGE_EXPORT_CHUNK_FRAMES")
+        .map(|frames| frames as u64)
+        .unwrap_or_else(|| {
+            total_frames
+                .div_ceil((workers * 2) as u64)
+                .max(fps.saturating_mul(2))
+        });
     let boundaries = chunk_boundaries(total_frames, chunk_frames);
     if boundaries.len() <= 1 {
         return render_composition_window(
@@ -3678,6 +3850,10 @@ fn render_timeline_chunked(
         plan.duration_ms.max(1),
         &cancel,
     )?;
+    // Each asset's decode is bounded to its last needed source timestamp —
+    // without `-t` a 60-minute recording trims to a 5-minute export by decoding
+    // all 60 minutes of audio before atrim drops the tail.
+    let audio_input_bounds = audio_source_bounds_ms(plan, plan.duration_ms.max(1));
     let audio_path = chunk_dir.join("audio.m4a");
     let audio_filter_path = chunk_dir.join("audio-filter.txt");
     if has_audio {
@@ -3743,7 +3919,15 @@ fn render_timeline_chunked(
                 .arg("pipe:2")
                 .arg("-thread_queue_size")
                 .arg("128");
-            for (_, path) in &audio_inputs {
+            for (asset_id, path) in &audio_inputs {
+                // Input-side `-t` only: `-ss` would rebase pts and force every
+                // atrim timestamp in the graph to shift; `-t` leaves pts
+                // absolute. The 1s margin covers demux granularity.
+                if let Some(max_out_ms) = audio_input_bounds.get(asset_id) {
+                    command
+                        .arg("-t")
+                        .arg(seconds(max_out_ms.saturating_add(1_000)));
+                }
                 command.arg("-i").arg(path);
             }
             command
@@ -3775,6 +3959,7 @@ fn render_timeline_chunked(
                 plate_divisor: workers,
                 threads: pass_threads,
             };
+            let chunk_started = std::time::Instant::now();
             render_composition_window(
                 ffmpeg_path,
                 &chunk_path,
@@ -3792,9 +3977,15 @@ fn render_timeline_chunked(
                 &pass,
                 output_cap,
             )
-            // Chunk pass outcomes are all video-only; the audio job's own
-            // result decides `has_audio` for the mux stage.
-            .map(|_| ())
+            .map(|_| {
+                info!(
+                    %project_id,
+                    chunk = chunk_index,
+                    frames = end_frame - first_frame,
+                    elapsed_ms = chunk_started.elapsed().as_millis() as u64,
+                    "export: chunk pass finished"
+                );
+            })
         }
     };
 
@@ -3872,6 +4063,7 @@ fn render_timeline_chunked(
     mux.args(["-t", &seconds(plan.duration_ms)])
         .arg(output_path);
     on_progress(0.98);
+    let mux_started = std::time::Instant::now();
     run_export_ffmpeg(
         &mut mux,
         &cancel,
@@ -3886,6 +4078,7 @@ fn render_timeline_chunked(
     info!(
         %project_id,
         chunks = boundaries.len(),
+        mux_ms = mux_started.elapsed().as_millis() as u64,
         "export: chunked render muxed"
     );
     Ok(RenderOutcome { has_audio })
@@ -3901,28 +4094,20 @@ fn build_cursor_renderers(
     canvas: &cursor::RenderCanvas,
     screen_rect: (f64, f64, f64, f64),
     screen_windows: Option<Vec<cursor::ScreenRectWindow>>,
+    shared: &CompositionShared,
 ) -> Result<Vec<(u64, u64, cursor::CursorRenderer)>> {
-    // One shared engine per telemetry asset — cursor ranges of the same
-    // capture reuse a single smoothed event pipeline.
-    let mut engines: HashMap<String, Option<Arc<Mutex<cursor_engine::CursorEngine>>>> =
-        HashMap::new();
     let mut renderers = Vec::new();
     for effect in plan
         .cursor_effects
         .iter()
         .filter(|effect| effect.enabled && effect.end_ms > effect.start_ms)
     {
-        let engine = match engines.entry(effect.asset_id.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => {
-                // A previously-diagnosed asset stays skipped (`None`).
-                entry.get().clone()
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let engine = load_cursor_engine(project_id, &effect.asset_id, asset_paths)?;
-                entry.insert(engine.clone());
-                engine
-            }
-        };
+        // The engine map lives in CompositionShared so chunk passes reuse the
+        // same parsed telemetry and smoothing pipeline; a previously
+        // diagnosed asset stays skipped (`None`).
+        let engine = shared.cursor_engine(&effect.asset_id, || {
+            load_cursor_engine(project_id, &effect.asset_id, asset_paths)
+        })?;
         let Some(engine) = engine else {
             continue;
         };
@@ -4052,7 +4237,7 @@ pub(crate) struct CursorFramePlan {
     /// entry ships a plain canvas plane; multiple entries pack side-by-side.
     planes: Vec<PlatePlane>,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
-    overlay_engine: Option<overlay_engine::OverlayEngine>,
+    overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
     keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
 }
 
@@ -4065,6 +4250,7 @@ fn prepare_cursor_frame_plan(
     settings: &ExportSettings,
     asset_paths: &HashMap<String, PathBuf>,
     screen_rect: (f64, f64, f64, f64),
+    shared: &CompositionShared,
 ) -> Result<CursorFramePlan> {
     // Validate the canvas pixmap can be allocated up front; each producer
     // worker allocates its own copy when feeding starts.
@@ -4078,77 +4264,78 @@ fn prepare_cursor_frame_plan(
         .unwrap_or(1)
         .max(1);
 
-    let overlay_plan: Option<overlay_engine::OverlayRenderPlan> = if let Some(value) =
-        &plan.overlay_render_plan
-    {
-        Some(serde_json::from_value(value.clone()).map_err(|error| {
-            InternalError::Media(format!("overlay render plan is invalid: {error}"))
-        })?)
-    } else if !plan.annotations.is_empty() || !plan.texts.is_empty() || !plan.images.is_empty() {
-        Some(annotations::build_overlay_render_plan_from_legacy(
-            canvas.width,
-            canvas.height,
-            &plan.annotations,
-            &plan.texts,
-            &plan.images,
-        ))
-    } else {
-        None
-    };
-
-    let overlay_engine = if let Some(mut parsed_plan) = overlay_plan {
+    // The prepared engine is identical for every chunk pass of this export
+    // (same plan, same canvas, same image assets) — CompositionShared builds
+    // and memoizes it once, including the plan deserialization itself.
+    let overlay_engine = shared.overlay_engine(|| {
+        let overlay_plan: Option<overlay_engine::OverlayRenderPlan> = if let Some(value) =
+            &plan.overlay_render_plan
+        {
+            Some(serde_json::from_value(value.clone()).map_err(|error| {
+                InternalError::Media(format!("overlay render plan is invalid: {error}"))
+            })?)
+        } else if !plan.annotations.is_empty() || !plan.texts.is_empty() || !plan.images.is_empty()
+        {
+            Some(annotations::build_overlay_render_plan_from_legacy(
+                canvas.width,
+                canvas.height,
+                &plan.annotations,
+                &plan.texts,
+                &plan.images,
+            ))
+        } else {
+            None
+        };
+        let Some(mut parsed_plan) = overlay_plan else {
+            return Ok(None);
+        };
         if parsed_plan.items.is_empty() {
             // An empty items list would only force a multi-plane stream to
             // carry a permanently transparent slice, so skip the engine too.
-            None
-        } else {
-            parsed_plan.canvas = overlay_engine::OverlayCanvas {
-                width: canvas.width,
-                height: canvas.height,
-            };
-            let mut image_asset_ids = std::collections::BTreeSet::new();
-            image_asset_ids.extend(plan.images.iter().map(|image| image.asset_id.clone()));
-            image_asset_ids.extend(parsed_plan.assets.iter().map(|asset| asset.id.clone()));
-            let mut engine =
-                overlay_engine::OverlayEngine::from_render_plan(parsed_plan).map_err(|error| {
-                    InternalError::Media(format!("build overlay render plan: {error}"))
-                })?;
-            for asset_id in image_asset_ids {
-                let path = asset_paths.get(&asset_id).ok_or_else(|| {
-                    InternalError::Permissions("overlay references a missing image asset".into())
-                })?;
-                register_overlay_image_asset(&mut engine, &asset_id, path)?;
-            }
-            Some(engine)
+            return Ok(None);
         }
-    } else {
-        None
-    };
+        parsed_plan.canvas = overlay_engine::OverlayCanvas {
+            width: canvas.width,
+            height: canvas.height,
+        };
+        let mut image_asset_ids = std::collections::BTreeSet::new();
+        image_asset_ids.extend(plan.images.iter().map(|image| image.asset_id.clone()));
+        image_asset_ids.extend(parsed_plan.assets.iter().map(|asset| asset.id.clone()));
+        let mut engine = overlay_engine::OverlayEngine::from_render_plan(parsed_plan)
+            .map_err(|error| InternalError::Media(format!("build overlay render plan: {error}")))?;
+        for asset_id in image_asset_ids {
+            let path = asset_paths.get(&asset_id).ok_or_else(|| {
+                InternalError::Permissions("overlay references a missing image asset".into())
+            })?;
+            register_overlay_image_asset(&mut engine, &asset_id, path)?;
+        }
+        Ok(Some(engine))
+    })?;
 
     // Keystroke badges (Pro): rasterized into their own topmost plate plane.
     // Events are source-timestamped; the renderer maps them through the same
     // render segments the cursor uses, so edits keep badges aligned.
-    let keystroke_renderer = if let Some(overlay) = &settings.keystroke_overlay {
-        if overlay.enabled && !plan.keystrokes.is_empty() {
-            match keystrokes::KeystrokeRenderer::new(
-                overlay,
-                &plan.keystroke_platform,
-                &plan.keystrokes,
-                plan.segments.clone(),
-                (canvas.width, canvas.height),
-            ) {
-                Ok(renderer) => Some(renderer),
-                Err(error) => {
-                    warn!(error = %error, "keystroke overlay disabled: renderer build failed");
-                    None
-                }
-            }
-        } else {
-            None
+    let keystroke_renderer = shared.keystroke_renderer(|| {
+        let Some(overlay) = &settings.keystroke_overlay else {
+            return None;
+        };
+        if !overlay.enabled || plan.keystrokes.is_empty() {
+            return None;
         }
-    } else {
-        None
-    };
+        match keystrokes::KeystrokeRenderer::new(
+            overlay,
+            &plan.keystroke_platform,
+            &plan.keystrokes,
+            plan.segments.clone(),
+            (canvas.width, canvas.height),
+        ) {
+            Ok(renderer) => Some(renderer),
+            Err(error) => {
+                warn!(error = %error, "keystroke overlay disabled: renderer build failed");
+                None
+            }
+        }
+    });
 
     let mut planes: Vec<PlatePlane> = Vec::with_capacity(3);
     if !renderers.is_empty() {
@@ -4308,13 +4495,14 @@ impl FramePlanes {
     }
 }
 
-/// Per-worker raster state. Cursor, overlay, and keystroke renderers are
-/// cloned per worker because `CursorEngine` keeps a `RefCell` smoothing cache
-/// and tiny-skia pixmaps are single-owner; the renderers are pure functions
-/// of the frame timestamp, so per-worker copies produce identical output.
+/// Per-worker raster state. Cursor renderers are cloned per worker because
+/// `CursorEngine` keeps a `RefCell` smoothing cache and tiny-skia pixmaps are
+/// single-owner; the overlay engine is a pure `&self` reader so `Arc` shares
+/// one instance across workers, while the keystroke renderer stays per-worker
+/// for its own `RefCell` badge cache.
 struct OverlayWorkerState {
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
-    overlay_engine: Option<overlay_engine::OverlayEngine>,
+    overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
     keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
     cursor_pixmap: resvg::tiny_skia::Pixmap,
     /// Canvas-space rect the finished cursor plane is cropped to before it is
@@ -4330,7 +4518,7 @@ struct OverlayWorkerState {
 impl OverlayWorkerState {
     fn new(
         renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
-        overlay_engine: Option<overlay_engine::OverlayEngine>,
+        overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
         keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
         width: u32,
         height: u32,
@@ -4557,6 +4745,13 @@ fn feed_cursor_frames(
     let free_buffers = Mutex::new(Vec::<Vec<u8>>::new());
     let multi_plane = cursor.planes.len() > 1;
     let halted = || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+    // Producer-side timing split: `raster` accumulates per-worker render time;
+    // the writer records how long it starved on the channel (producer-bound)
+    // versus blocked on the pipe (consumer/FFmpeg-bound).
+    let raster_nanos = std::sync::atomic::AtomicU64::new(0);
+    let mut recv_wait = Duration::ZERO;
+    let mut write_time = Duration::ZERO;
+    let mut bytes_written = 0u64;
 
     let result = std::thread::scope(|scope| -> Result<()> {
         for _ in 0..workers {
@@ -4577,6 +4772,7 @@ fn feed_cursor_frames(
             let fps = cursor.fps;
             let first_frame_index = cursor.first_frame_index;
             let planes = cursor.planes.clone();
+            let raster_nanos = &raster_nanos;
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = match OverlayWorkerState::new(
@@ -4625,6 +4821,7 @@ fn feed_cursor_frames(
                             }
                         };
 
+                        let render_started = std::time::Instant::now();
                         let produced = state
                             .render_planes(frame_index + first_frame_index, fps)
                             .map(|frame| {
@@ -4657,6 +4854,10 @@ fn feed_cursor_frames(
                                 }
                             })
                             .unwrap_or_else(ProducedFrame::Failed);
+                        raster_nanos.fetch_add(
+                            render_started.elapsed().as_nanos() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
 
                         let is_failure = matches!(produced, ProducedFrame::Failed(_));
                         if frame_tx.send((frame_index, produced)).is_err() {
@@ -4689,8 +4890,12 @@ fn feed_cursor_frames(
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) || halted() {
                     return Err(InternalError::Media("export cancelled".into()).into());
                 }
+                let recv_started = std::time::Instant::now();
                 let (frame_index, produced) = match frame_rx.recv() {
-                    Ok(message) => message,
+                    Ok(message) => {
+                        recv_wait += recv_started.elapsed();
+                        message
+                    }
                     Err(_) => {
                         // Every sender is gone before all frames arrived: only
                         // an unreported worker exit can leave a permanent gap.
@@ -4717,11 +4922,14 @@ fn feed_cursor_frames(
                     }
                 }
                 while let Some(produced) = pending.remove(&expected) {
+                    let write_started = std::time::Instant::now();
                     let written = match &produced {
                         ProducedFrame::Zero => writer.write_all(&zero_frame),
                         ProducedFrame::Bytes(bytes) => writer.write_all(bytes),
                         ProducedFrame::Failed(_) => unreachable!("failures return early"),
                     };
+                    write_time += write_started.elapsed();
+                    bytes_written += frame_byte_len as u64;
                     if let Err(error) = written {
                         if is_pipe_closed(&error) {
                             return Ok(());
@@ -4756,6 +4964,15 @@ fn feed_cursor_frames(
         result
     });
     let _ = writer.flush();
+    info!(
+        frames = frame_count,
+        workers,
+        bytes_mib = bytes_written / (1024 * 1024),
+        raster_ms = raster_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        starved_ms = recv_wait.as_millis() as u64,
+        write_ms = write_time.as_millis() as u64,
+        "export: plate feed finished"
+    );
     result
 }
 
@@ -5389,37 +5606,57 @@ pub(crate) fn run_export_ffmpeg(
     let mut child = command
         .spawn()
         .map_err(|error| InternalError::Media(format!("start {stage}: {error}")))?;
+    let pass_started = std::time::Instant::now();
 
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| InternalError::Media(format!("{stage} stderr unavailable")))?;
 
+    // Last `speed=` multiplier FFmpeg reported, captured off the progress
+    // stream so pass logs can compare encode throughput across stages.
+    let last_speed = Arc::new(Mutex::new(None::<f64>));
+
     // A scoped thread lets the drain borrow the progress callback while
     // guaranteeing it is joined before this function returns.
     std::thread::scope(|scope| -> Result<()> {
-        let diagnostics = scope.spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stderr);
-            let mut diagnostic = Vec::new();
-            for line in reader.lines().map_while(|result| result.ok()) {
-                let trimmed = line.trim_end();
-                if is_progress_line(trimmed) {
-                    if let (Some(report), Some(duration_ms)) = (on_progress, expected_duration_ms) {
-                        if let Some(time_ms) = crate::media::parse_ffmpeg_time(trimmed) {
-                            if duration_ms > 0 {
-                                report((time_ms as f64 / duration_ms as f64).clamp(0.0, 1.0));
+        let diagnostics = {
+            let last_speed = Arc::clone(&last_speed);
+            scope.spawn(move || {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(stderr);
+                let mut diagnostic = Vec::new();
+                for line in reader.lines().map_while(|result| result.ok()) {
+                    let trimmed = line.trim_end();
+                    if is_progress_line(trimmed) {
+                        if let Some(speed) = trimmed
+                            .strip_prefix("speed=")
+                            .and_then(|value| value.trim().strip_suffix('x'))
+                            .and_then(|value| value.parse::<f64>().ok())
+                        {
+                            *last_speed
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(speed);
+                        }
+                        if let (Some(report), Some(duration_ms)) =
+                            (on_progress, expected_duration_ms)
+                        {
+                            if let Some(time_ms) = crate::media::parse_ffmpeg_time(trimmed) {
+                                if duration_ms > 0 {
+                                    report((time_ms as f64 / duration_ms as f64).clamp(0.0, 1.0));
+                                }
                             }
                         }
+                    } else if !trimmed.is_empty() {
+                        diagnostic.extend_from_slice(trimmed.as_bytes());
+                        diagnostic.push(b'\n');
                     }
-                } else if !trimmed.is_empty() {
-                    diagnostic.extend_from_slice(trimmed.as_bytes());
-                    diagnostic.push(b'\n');
                 }
-            }
-            diagnostic
-        });
+                diagnostic
+            })
+        };
 
+        let feed_started = std::time::Instant::now();
         let fed = match cursor.as_mut() {
             Some(cursor_plan) => match child.stdin.take() {
                 Some(mut stdin) => feed_cursor_frames(&mut stdin, cursor_plan, cancel, halt),
@@ -5427,6 +5664,7 @@ pub(crate) fn run_export_ffmpeg(
             },
             None => Ok(()),
         };
+        let feed_elapsed = feed_started.elapsed();
         if let Err(error) = fed {
             let _ = child.kill();
             let _ = child.wait();
@@ -5448,6 +5686,17 @@ pub(crate) fn run_export_ffmpeg(
                 Ok(Some(status)) => {
                     let diagnostic = diagnostics.join().unwrap_or_default();
                     if status.success() {
+                        let speed = last_speed
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take();
+                        info!(
+                            stage,
+                            elapsed_ms = pass_started.elapsed().as_millis() as u64,
+                            feed_ms = feed_elapsed.as_millis() as u64,
+                            ffmpeg_speed = speed,
+                            "export: ffmpeg pass complete"
+                        );
                         return Ok(());
                     }
                     let _ = std::fs::remove_file(partial_path);
@@ -8472,6 +8721,7 @@ mod tests {
             ..Default::default()
         };
         let asset_paths = HashMap::new();
+        let shared = CompositionShared::new(None);
         let frame_plan = prepare_cursor_frame_plan(
             &canvas,
             5000,
@@ -8480,6 +8730,7 @@ mod tests {
             &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+            &shared,
         )
         .expect("prepare frame plan succeeds");
 
@@ -8603,6 +8854,7 @@ mod tests {
             fps: 30,
             ..Default::default()
         };
+        let shared = CompositionShared::new(None);
         let frame_plan = prepare_cursor_frame_plan(
             &canvas,
             5000,
@@ -8611,6 +8863,7 @@ mod tests {
             &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+            &shared,
         )
         .expect("prepare frame plan succeeds");
 
@@ -11813,6 +12066,7 @@ mod tests {
             fps: 30,
             ..Default::default()
         };
+        let shared = CompositionShared::new(None);
         let frame_plan = prepare_cursor_frame_plan(
             &canvas,
             1000,
@@ -11821,6 +12075,7 @@ mod tests {
             &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
+            &shared,
         )
         .expect("prepare frame plan succeeds");
 

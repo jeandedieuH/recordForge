@@ -33,6 +33,7 @@ import {
 } from "@recordforge/ui"
 import { isCameraRecording } from "../../../lib/library"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { usePlayheadMs } from "../timeline/use-playback-state"
 import { SmartZoomCard } from "./focus/smart-zoom-card"
 import { ReviewSuggestionsCard } from "./focus/review-suggestions-card"
 import { ZoomSegmentCard } from "./focus/zoom-segment-card"
@@ -50,15 +51,17 @@ export function FocusPanel() {
   const setSelection = useTimelineStore((state) => state.setSelection)
   const seek = useTimelineStore((state) => state.seek)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
-  const view = useTimelineStore((state) => state.view)
+  const selection = useTimelineStore((state) => state.view.selection)
   const cursorTelemetry = useTimelineStore((state) => state.cursorTelemetry)
   const cursorEngine = useTimelineStore((state) => state.cursorEngine)
   const cursorTelemetryStatus = useTimelineStore((state) => state.cursorTelemetryStatus)
   const isCamera = useTimelineStore((state) => isCameraRecording(state.recording))
 
-  const playheadMs = view.playheadMs
+  // This panel highlights the live segment, so the playhead subscription
+  // stays — but scoped here instead of subscribing to the whole view object.
+  const playheadMs = usePlayheadMs()
   const segments = useMemo(() => (timeline ? getManualZoomSegments(timeline) : []), [timeline])
-  const selectedId = view.selection?.kind === "zoom" ? view.selection.segmentId : null
+  const selectedId = selection?.kind === "zoom" ? selection.segmentId : null
 
   // Mirrors the preservation rule in applyRegenerateZoomSuggestions: user-authored
   // (manual/follow/legacy) and locked segments survive suggestion regeneration.
@@ -212,7 +215,7 @@ export function FocusPanel() {
       toast({ title: "Zoom keyframes could not be removed", variant: "error" })
       return
     }
-    if (view.selection?.kind === "zoom" && removableIds.includes(view.selection.segmentId)) {
+    if (selection?.kind === "zoom" && removableIds.includes(selection.segmentId)) {
       setSelection(null)
     }
   }

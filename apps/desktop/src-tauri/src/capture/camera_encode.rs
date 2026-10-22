@@ -23,14 +23,17 @@ pub(crate) fn add_camera_encoder_args(
     command.arg("-c:v").arg(encoder);
     // No `-hw_encoding 1` for h264_mf (see the match arm below); MF accepts
     // nv12 either way so the pixel format stays consistent with the sidecar.
-    command.args([
-        "-pix_fmt",
-        if encoder == "h264_mf" {
-            "nv12"
-        } else {
-            "yuv420p"
-        },
-    ]);
+    // VAAPI frames come from the graph's upload stage instead.
+    if !super::encoder::is_vaapi_encoder(encoder) {
+        command.args([
+            "-pix_fmt",
+            if encoder == "h264_mf" {
+                "nv12"
+            } else {
+                "yuv420p"
+            },
+        ]);
+    }
 
     let target = format!("{}k", plan.video_bitrate_kbps);
     let maxrate = format!("{}k", plan.max_bitrate_kbps);
@@ -103,6 +106,13 @@ pub(crate) fn add_camera_encoder_args(
             // Same knobs the sidecar uses, but at the plan's bitrate.
             command.args(["-b:v", &target, "-allow_sw", "1", "-realtime", "1"]);
         }
+        "h264_vaapi" | "hevc_vaapi" => {
+            // Quality VBR with the software path's ceiling. VAAPI has no CRF
+            // mode, so the tier's bitrate budget carries quality.
+            command.args([
+                "-rc_mode", "VBR", "-b:v", &target, "-maxrate", &maxrate, "-bufsize", &bufsize,
+            ]);
+        }
         "libx264" | "libx265" => {
             command.args([
                 "-preset",
@@ -152,6 +162,7 @@ mod tests {
             buffer_kbps: 10264,
             crf: 21,
             limited_by_camera: false,
+            encoder_limited: false,
             fit: Default::default(),
         }
     }
@@ -174,7 +185,8 @@ mod tests {
     #[test]
     fn libx264_uses_quality_rate_control_without_zerolatency() {
         let args = args("libx264");
-        assert_eq!(paired(&args, "-preset"), Some("superfast")); // 1080p30 > 35 Mpx/s
+        // 1080p30 (62 Mpx/s) is past the software-realtime knee → ultrafast.
+        assert_eq!(paired(&args, "-preset"), Some("ultrafast"));
         assert_eq!(paired(&args, "-crf"), Some("21"));
         assert_eq!(paired(&args, "-maxrate"), Some("10264k"));
         assert_eq!(paired(&args, "-bufsize"), Some("10264k"));
@@ -185,6 +197,36 @@ mod tests {
         // Camera-primary must not carry the sidecar's realtime tuning.
         assert!(!args.iter().any(|a| a == "zerolatency" || a == "-tune"));
         assert!(!args.iter().any(|a| a.contains("rc-lookahead=0")));
+    }
+
+    #[test]
+    fn software_preset_keeps_a_quality_rung_at_720p() {
+        let mut plan = plan();
+        plan.output_width = 1280;
+        plan.output_height = 720;
+        let mut command = Command::new("ffmpeg");
+        add_camera_encoder_args(&mut command, &plan, "libx264");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        // 720p30 = 27.6 Mpx/s stays on the tier's quality preset.
+        assert_eq!(paired(&args, "-preset"), Some("superfast"));
+    }
+
+    #[test]
+    fn vaapi_uses_vbr_caps_without_pix_fmt_or_x264_knobs() {
+        let args = args("h264_vaapi");
+        assert_eq!(paired(&args, "-rc_mode"), Some("VBR"));
+        assert_eq!(paired(&args, "-b:v"), Some("6843k"));
+        assert_eq!(paired(&args, "-maxrate"), Some("10264k"));
+        assert_eq!(paired(&args, "-bufsize"), Some("10264k"));
+        // hw frames come from the graph's upload stage — never force a system
+        // format, and never pass x264 args to a VAAPI encoder.
+        assert!(paired(&args, "-pix_fmt").is_none());
+        assert!(paired(&args, "-preset").is_none());
+        assert!(!args.iter().any(|a| a.contains("x264-params")));
+        assert!(!args.iter().any(|a| a == "-crf"));
     }
 
     #[test]

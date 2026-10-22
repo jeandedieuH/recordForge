@@ -38,9 +38,10 @@ interface InspectorShellProps {
 
 export function InspectorShell({ metadata }: InspectorShellProps) {
   const engine = useTimelineStore((state) => state.engine)
-  const view = useTimelineStore((state) => state.view)
+  // Selection-only subscription — subscribing to the whole view would
+  // re-render the inspector on every playback frame via playheadMs.
+  const selection = useTimelineStore((state) => state.view.selection)
   const timeline = engine?.history.present
-  const selection = view.selection
   const setSelection = useTimelineStore((state) => state.setSelection)
 
   const selectedClip = useMemo(() => {

@@ -61,6 +61,22 @@ list of `CameraCapturePlan` attempts:
   fragments stay stream-copy-concat compatible.
 - `limitedByCamera` reports when the device cannot fill the tier budget on
   both axes — a 4:3 output filling the budget height is _not_ limited.
+- **Software-encoder policy.** Camera-only recordings have no second encoder to
+  offload to, so the x264 preset ladder assumes a 4C/8T low-end CPU: above the
+  35 Mpx/s knee (1080p30) `camera-balanced` drops to `ultrafast` and
+  `camera-high` to `superfast`; at or below it they keep `superfast` /
+  `veryfast`. The tier's `crf` + bitrate cap carry the quality difference.
+  Hardware encoders are unaffected (they never take the x264 path).
+- **Software output cap.** With no hardware H.264 encoder detected, the
+  planner clamps the tier budget to 1080p (`SOFTWARE_OUTPUT_HEIGHT_CAP`,
+  aspect preserved) and marks every plan `encoderLimited`, so Ultra records
+  1080p instead of 4K and the picker explains why. A locked resume segment is
+  never clamped — fragments must stay concat-compatible with segment 0.
+- **Input buffering.** `-rtbufsize` and `-thread_queue_size` are sized from the
+  negotiated _input_ mode (a 4K sensor scaled to 720p still queues 4K frames),
+  not the output budget: 32/64/256 MB and 8 raw / 16 compressed packets. A
+  deeper queue only hides a slow encoder behind hundreds of MB of backlog and
+  visible self-view latency.
 
 The plan is surfaced to the UI via `plan_camera_tiers` and the contract
 `cameraCapturePlanSchema`.
@@ -77,7 +93,10 @@ The plan is surfaced to the UI via `plan_camera_tiers` and the contract
   smart-zoom suggestion seed — there is no cursor to record.
 - **Preview modes are self-view.** `webcamPreviewMode` (`off`/`low`/
   `standard`) becomes the presenter self-view quality rather than a PiP
-  preview.
+  preview. It defaults to `low` (5 fps): every level is a second MJPEG encode
+  inside the recording process plus an HTTP stream and a WebView decode, and
+  that work runs for the whole session even while the floating self-view is
+  hidden. `standard` (15 fps) is an explicit opt-in.
 - **Pause/resume** concatenates matching segments under the output lock.
 - **Disk guard.** Camera recordings refuse to start with less than **1 GiB**
   free on the sessions volume (`ensure_camera_disk_space`); an unreadable

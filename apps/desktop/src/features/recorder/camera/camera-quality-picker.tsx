@@ -62,6 +62,16 @@ export function CameraQualityPicker({
   // One banner for the whole list instead of a "Camera max" badge per card —
   // the badges wrapped and collided with the bitrate metrics.
   const limitedPlan = plans ? Object.values(plans).find((plan) => plan.limitedByCamera) : null
+  // The encoder banner only appears when the camera is not already the more
+  // fundamental limit — otherwise the camera message explains the same
+  // downscale.
+  const encoderLimitedPlan =
+    plans && !limitedPlan ? Object.values(plans).find((plan) => plan.encoderLimited) : undefined
+  // Built as one string: JSX collapses a line break between two expressions
+  // into a space, which would render "1920× 1080".
+  const encoderLimitedSize = encoderLimitedPlan
+    ? `${encoderLimitedPlan.outputWidth}×${encoderLimitedPlan.outputHeight}`
+    : ""
 
   function handleKeyDown(event: React.KeyboardEvent, index: number) {
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
@@ -87,6 +97,19 @@ export function CameraQualityPicker({
           <p className="text-[11px] leading-snug text-muted-foreground">
             Your camera tops out at {limitedPlan.outputWidth}×{limitedPlan.outputHeight}. Higher
             tiers keep that size but add bitrate for cleaner detail.
+          </p>
+        </div>
+      ) : null}
+
+      {encoderLimitedPlan ? (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-md border border-info/30 bg-info/10 p-2.5"
+        >
+          <Info className="mt-0.5 size-3.5 shrink-0 text-info" aria-hidden />
+          <p className="text-[11px] leading-snug text-muted-foreground">
+            No hardware video encoder found, so Ultra records at {encoderLimitedSize} instead of 4K.
+            Software-encoding 4K live drops frames on most PCs.
           </p>
         </div>
       ) : null}

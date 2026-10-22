@@ -39,6 +39,7 @@ import { loadProject } from "../../../lib/project"
 import { toErrorMessage } from "../../../lib/errors"
 import { isTauri } from "../../../lib/settings"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { getPlayheadSnapshot } from "../timeline/use-playback-state"
 import { assetDurationMs, createImageClipForAsset } from "../assets/asset-clip-factory"
 import { toAssetUrl } from "../media/derivative-resources"
 
@@ -111,7 +112,7 @@ export function ProjectAssetsPanel() {
   const project = useTimelineStore((state) => state.project)
   const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
   const assetPaths = useTimelineStore((state) => state.assetPaths)
-  const playheadMs = useTimelineStore((state) => state.view.playheadMs)
+
   const execute = useTimelineStore((state) => state.execute)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const syncProject = useTimelineStore((state) => state.syncProject)
@@ -240,7 +241,7 @@ export function ProjectAssetsPanel() {
 
   function addAssetAtPlayhead(asset: ProjectAsset) {
     if (!timeline || !recording) return
-    const startMs = Math.round(playheadMs)
+    const startMs = Math.round(getPlayheadSnapshot())
     if (asset.kind === "audio") {
       const durationMs = assetDurationMs(asset, 30_000)
       const audioTrack = timeline.tracks.find(

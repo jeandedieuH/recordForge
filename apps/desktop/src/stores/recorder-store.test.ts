@@ -51,7 +51,7 @@ describe("recorder-store preferences & fallback", () => {
         regionBounds: null,
         profile: "low-impact",
         cameraProfile: "camera-balanced",
-        cameraPreviewMode: "standard",
+        cameraPreviewMode: "low",
         cameraMirrorPreview: true,
         cameraFramingGuide: false,
         smartZoomEnabled: false,

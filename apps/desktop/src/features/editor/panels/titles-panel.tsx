@@ -12,6 +12,7 @@ import {
 import { Button, IconButton, useToast } from "@recordforge/ui"
 import { Plus, Save, Type } from "lucide-react"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { getPlayheadSnapshot } from "../timeline/use-playback-state"
 import { TitlePresetBrowser } from "../titles/title-preset-browser"
 import { useTitleLibraryState } from "../titles/title-library-state"
 import { TitleSaveDialog } from "../titles/title-save-dialog"
@@ -19,7 +20,9 @@ import type { TitleReplaceOptions } from "../titles/title-preview-plan"
 
 export function TitlesPanel() {
   const engine = useTimelineStore((state) => state.engine)
-  const view = useTimelineStore((state) => state.view)
+  // Only the selection is render-relevant; handlers read the playhead
+  // imperatively so playback ticks don't re-render the panel.
+  const selection = useTimelineStore((state) => state.view.selection)
   const execute = useTimelineStore((state) => state.execute)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const remember = useTitleLibraryState((state) => state.remember)
@@ -29,20 +32,20 @@ export function TitlesPanel() {
   const canvasWidth = timeline?.canvas.width ?? 1920
   const canvasHeight = timeline?.canvas.height ?? 1080
   const selectedTextClip = useMemo(() => {
-    if (!timeline || view.selection?.kind !== "clip") return undefined
-    const primaryClipId = view.selection.primaryClipId
+    if (!timeline || selection?.kind !== "clip") return undefined
+    const primaryClipId = selection.primaryClipId
     for (const track of timeline.tracks) {
       const clip = track.clips.find((candidate) => candidate.id === primaryClipId)
       if (clip?.kind === "text") return clip as TextClip
     }
     return undefined
-  }, [timeline, view.selection])
+  }, [timeline, selection])
 
   function handleAddPreset(preset: TextPresetRecord) {
     try {
       const titlesTrack = timeline?.tracks.find((track) => track.kind === "titles" && !track.locked)
       const existingClips = titlesTrack?.clips ?? []
-      const startMs = Math.max(0, Math.round(view.playheadMs))
+      const startMs = Math.max(0, Math.round(getPlayheadSnapshot()))
       const durationMs = 4000
 
       const clip = createTextClipFromDefinition(textPresetToDefinition(preset), {

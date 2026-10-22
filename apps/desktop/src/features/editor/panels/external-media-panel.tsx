@@ -6,6 +6,7 @@ import {
 } from "@recordforge/editor-core"
 import type { ImageClip } from "@recordforge/contracts"
 import { useTimelineStore } from "../../../stores/timeline-store"
+import { getPlayheadSnapshot } from "../timeline/use-playback-state"
 import { Button, Card, CardContent, useToast, cn } from "@recordforge/ui"
 import { FileAudio, FileImage, FolderOpen, Music, Plus, Trash2, Upload } from "lucide-react"
 
@@ -30,7 +31,6 @@ export function ExternalMediaPanel() {
   const [importType, setImportType] = useState<"all" | "audio" | "image">("all")
 
   const engine = useTimelineStore((state) => state.engine)
-  const view = useTimelineStore((state) => state.view)
   const execute = useTimelineStore((state) => state.execute)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const { toast } = useToast()
@@ -90,7 +90,7 @@ export function ExternalMediaPanel() {
   }
 
   function handleAddToTimeline(item: ExternalMediaItem) {
-    const startMs = Math.round(view.playheadMs)
+    const startMs = Math.round(getPlayheadSnapshot())
 
     if (item.kind === "audio") {
       const durationMs = item.durationMs ?? 30000

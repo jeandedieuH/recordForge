@@ -7,10 +7,12 @@ import type {
 } from "@recordforge/contracts"
 import {
   buildSnapTargets,
+  playheadSnapTarget,
   snapClipStart,
   snapTrimEdge,
   type SnapTarget,
 } from "@recordforge/editor-core"
+import { getPlayheadSnapshot } from "./use-playback-state"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -43,7 +45,6 @@ export interface ZoomTrackRowProps {
   selectedZoomId: string | null
   snapEnabled: boolean
   snapThresholdMs: number
-  playheadMs: number
   cursorClickTimesMs: number[]
   getTimelineTime: (clientX: number) => number
   onSelectZoom: (segmentId: string) => void
@@ -72,6 +73,9 @@ interface SegmentGesture {
   initialStartMs: number
   initialEndMs: number
   moved: boolean
+  // Captured at gesture start; includes the live playhead which the memoized
+  // prop list omits so playback ticks don't rebuild it.
+  snapTargets: SnapTarget[]
 }
 
 export const ZoomTrackRow = memo(function ZoomTrackRow({
@@ -86,7 +90,6 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
   selectedZoomId,
   snapEnabled,
   snapThresholdMs,
-  playheadMs,
   cursorClickTimesMs,
   getTimelineTime,
   onSelectZoom,
@@ -99,9 +102,11 @@ export const ZoomTrackRow = memo(function ZoomTrackRow({
   const [hoverGhost, setHoverGhost] = useState<{ timeMs: number } | null>(null)
   const onSnapGuide = useCallback((target: SnapTarget | null) => setSnapGuide(target), [])
 
+  // Snap targets exclude the live playhead so playback ticks don't rebuild
+  // the list; gestures append it at pointer-down (see playheadSnapTarget).
   const snapTargets = useMemo(
-    () => buildSnapTargets(timeline, { playheadMs, cursorClickTimesMs }),
-    [timeline, playheadMs, cursorClickTimesMs],
+    () => buildSnapTargets(timeline, { cursorClickTimesMs }),
+    [timeline, cursorClickTimesMs],
   )
 
   const visibleSegments = useMemo(
@@ -266,6 +271,7 @@ function ZoomSegmentItem({
       initialStartMs: segment.startMs,
       initialEndMs: segment.startMs + segment.durationMs,
       moved: false,
+      snapTargets: [...snapTargets, playheadSnapTarget(getPlayheadSnapshot())],
     }
   }
 
@@ -284,7 +290,7 @@ function ZoomSegmentItem({
     if (gesture.mode === "move") {
       const duration = gesture.initialEndMs - gesture.initialStartMs
       const rawStartMs = Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, snapTargets, snap)
+      const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
       onSnapGuide(snapped.snapped ? snapped.target : null)
       setGestureDelta({
         mode: "Move",
@@ -299,7 +305,7 @@ function ZoomSegmentItem({
       edge === "start"
         ? Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
         : Math.max(0, Math.round(gesture.initialEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, snapTargets, snap)
+    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
     onSnapGuide(snapped.snapped ? snapped.target : null)
     const nextStartMs =
       edge === "start" ? Math.min(snapped.timeMs, gesture.initialEndMs - 1) : gesture.initialStartMs
@@ -337,7 +343,7 @@ function ZoomSegmentItem({
     if (gesture.mode === "move") {
       const duration = gesture.initialEndMs - gesture.initialStartMs
       const rawStartMs = Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, snapTargets, snap)
+      const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
       onSnapGuide(null)
       onMoveZoomSegment(segment, snapped.timeMs, snapped.timeMs + duration, { phase: "commit" })
       return
@@ -348,7 +354,7 @@ function ZoomSegmentItem({
       edge === "start"
         ? Math.max(0, Math.round(gesture.initialStartMs + deltaMs))
         : Math.max(0, Math.round(gesture.initialEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, snapTargets, snap)
+    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
     onSnapGuide(null)
     const nextStartMs =
       edge === "start" ? Math.min(snapped.timeMs, gesture.initialEndMs - 1) : gesture.initialStartMs

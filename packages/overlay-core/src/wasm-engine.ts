@@ -1,5 +1,4 @@
 import {
-  overlayDisplayListSchema,
   overlayRenderPlanSchema,
   type OverlayDisplayList,
   type OverlayRenderPlan,
@@ -44,10 +43,20 @@ export async function createOverlayWasmEngine(plan: OverlayRenderPlan): Promise<
 
   const wasm = new WasmOverlayEngine(JSON.stringify(validatedPlan))
   let isDisposed = false
+  // The display list comes from our own Rust engine, so per-frame Zod
+  // validation is pure overhead (the plan itself is validated once above).
+  // String equality on the raw JSON additionally lets callers skip a full
+  // canvas redraw — and this parse — on frames where the scene is unchanged.
+  let lastJson: string | null = null
+  let lastList: OverlayDisplayList | null = null
   const evaluate = (timeMs: number): OverlayDisplayList => {
     if (isDisposed) throw new Error("WASM overlay engine has been disposed")
-    const result = JSON.parse(wasm.evaluate(normalizeTimeMs(timeMs))) as unknown
-    return overlayDisplayListSchema.parse(result)
+    const json = wasm.evaluate(normalizeTimeMs(timeMs))
+    if (json === lastJson && lastList) return lastList
+    const list = JSON.parse(json) as OverlayDisplayList
+    lastJson = json
+    lastList = list
+    return list
   }
 
   return {

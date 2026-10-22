@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useShallow } from "zustand/react/shallow"
 import { toAssetUrl } from "../../../lib/assets"
 import {
   type AnnotationClip,
@@ -58,9 +59,7 @@ import {
   mergeClipIds,
   selectAllClipIds,
   toggleClipSelection,
-  resolvePreviewComposition,
   sourceToTimelineForTrack,
-  zoomTransformToCss,
   type PlaybackBoundary,
   canvasShadowStyle,
   computeBackgroundImageLayerStyle,
@@ -89,7 +88,6 @@ import { CaptionPreview } from "./caption-preview"
 import { KeystrokePreview } from "../keystrokes/keystroke-preview"
 import { CameraPreview } from "./camera-preview"
 import { MaskPreview } from "./mask-preview"
-import { ZoomCanvasOverlay } from "../canvas/zoom-canvas-overlay"
 import { OverlayCanvas } from "../canvas/overlay-canvas"
 import { getAnnotationEditTime, type AnnotationDrawSettings } from "../annotations/annotation-tools"
 import { OverlaySelectionLayer } from "../canvas/overlay-selection-layer"
@@ -102,7 +100,8 @@ import { findNextCut, findPreviousCut, getTimelineEditPoints } from "./timeline-
 import { useOverlayInteraction } from "../canvas/use-overlay-interaction"
 import { useTimelineInteraction } from "./use-timeline-interaction"
 import { usePlaybackClock } from "./use-playback-clock"
-import { CustomCursorOverlay } from "../cursor"
+import { PlaybackOverlays } from "../canvas/playback-overlays"
+import { getPlayheadSnapshot, subscribeToPlayhead } from "./use-playback-state"
 import { ResizableHandle } from "../shell/resizable-handle"
 import { useResizableDimension } from "../shell/use-resizable-dimension"
 import { VideoCanvasControls } from "../canvas/video-canvas-controls"
@@ -321,7 +320,25 @@ export function TimelineView({
   const engine = useTimelineStore((state) => state.engine)
   const draftTimeline = useTimelineStore((state) => state.draftTimeline)
   const timeline = draftTimeline ?? engine?.history.present ?? null
-  const view = useTimelineStore((state) => state.view)
+  // Everything in view except playheadMs — shallow equality means a playback
+  // tick produces an identical object, so this component no longer re-renders
+  // per video frame. Playhead consumers read getPlayheadSnapshot() in event
+  // handlers or subscribe via leaf components (PlaybackOverlays, needles).
+  const view = useTimelineStore(
+    useShallow((state) => ({
+      zoom: state.view.zoom,
+      scrollMs: state.view.scrollMs,
+      isPlaying: state.view.isPlaying,
+      playbackRate: state.view.playbackRate,
+      previewQuality: state.view.previewQuality,
+      durationMs: state.view.durationMs,
+      selection: state.view.selection,
+      snapEnabled: state.view.snapEnabled,
+      snapThresholdMs: state.view.snapThresholdMs,
+      collapsedTrackIds: state.view.collapsedTrackIds,
+      trackHeights: state.view.trackHeights,
+    })),
+  )
   const recording = useTimelineStore((state) => state.recording)
   const project = useTimelineStore((state) => state.project)
   const assetPaths = useTimelineStore((state) => state.assetPaths)
@@ -432,23 +449,6 @@ export function TimelineView({
     () => toAssetUrl(mediaPath, recording?.workDir),
     [mediaPath, recording?.workDir],
   )
-  const composition = useMemo(
-    () =>
-      timeline ? resolvePreviewComposition(timeline, view.playheadMs, { cursorEngine }) : null,
-    [cursorEngine, timeline, view.playheadMs],
-  )
-
-  const zoomTransformStyle = useMemo(
-    () =>
-      composition?.screen.zoomTransform
-        ? zoomTransformToCss(
-            composition.screen.zoomTransform,
-            timeline?.canvas ?? { width: 1, height: 1 },
-            videoBounds ?? { width: 1, height: 1 },
-          )
-        : undefined,
-    [composition, timeline?.canvas, videoBounds],
-  )
   const selectedZoomSegment = useMemo(() => {
     if (!view.selection || view.selection.kind !== "zoom" || !timeline) return null
     const zoomSelection = view.selection
@@ -463,13 +463,6 @@ export function TimelineView({
     setZoomPreviewActive(false)
   }, [selectedZoomSegmentId])
   const isZoomFraming = Boolean(selectedZoomSegment?.enabled) && !zoomPreviewActive
-  const screenZoomTransformStyle = isZoomFraming ? undefined : zoomTransformStyle
-  const cursorPointAtPlayhead = useMemo(() => {
-    if (composition?.cursor.zoomSpacePoint) {
-      return composition.cursor.zoomSpacePoint
-    }
-    return getCursorPointAtTimelineTime(timeline, view.playheadMs, cursorTelemetry, cursorEngine)
-  }, [composition?.cursor.zoomSpacePoint, timeline, view.playheadMs, cursorTelemetry, cursorEngine])
   const cursorClickTimesMs = useMemo(() => {
     if (!timeline) return []
     const screenAssetId = timeline.tracks.find((track) => track.kind === "screen")?.clips[0]
@@ -561,15 +554,10 @@ export function TimelineView({
     thumbnailResource.retry()
   }, [thumbnailResource])
 
-  const isSideBySideAtPlayhead = useMemo(() => {
-    return cameraClips.some(
-      (clip) =>
-        clip.transform.preset === "side-by-side" &&
-        clip.transform.visible !== false &&
-        view.playheadMs >= clip.startMs &&
-        view.playheadMs < clip.startMs + clip.durationMs,
-    )
-  }, [cameraClips, view.playheadMs])
+  // Whether the playhead sits inside a side-by-side camera clip — tracked in a
+  // ref and recomputed via an imperative playhead subscription so playback
+  // ticks don't re-render the view just to flip a boolean.
+  const sideBySideRef = useRef(false)
 
   const updateVideoBounds = useCallback(() => {
     const canvas = canvasRef.current
@@ -593,7 +581,7 @@ export function TimelineView({
 
     const canvasScale = canvasWidth / width
 
-    if (isSideBySideAtPlayhead) {
+    if (sideBySideRef.current) {
       const usableWidth = width - padding * 2
       const usableHeight = height - padding * 2
       const targetScreenWidth = Math.round(usableWidth * 0.76)
@@ -669,13 +657,34 @@ export function TimelineView({
       return nextBounds
     })
   }, [
-    isSideBySideAtPlayhead,
     timeline?.canvas.width,
     timeline?.canvas.height,
     timeline?.canvas.padding,
     timeline?.canvas.aspectRatio,
     timeline?.canvas.videoPositionY,
   ])
+
+  // When the playhead crosses a side-by-side boundary the screen rect changes,
+  // so videoBounds must be recomputed outside the render path.
+  useEffect(() => {
+    const computeSideBySide = (timeMs: number) =>
+      cameraClips.some(
+        (clip) =>
+          clip.transform.preset === "side-by-side" &&
+          clip.transform.visible !== false &&
+          timeMs >= clip.startMs &&
+          timeMs < clip.startMs + clip.durationMs,
+      )
+    const refreshIfChanged = () => {
+      const next = computeSideBySide(getPlayheadSnapshot())
+      if (next !== sideBySideRef.current) {
+        sideBySideRef.current = next
+        updateVideoBounds()
+      }
+    }
+    refreshIfChanged()
+    return subscribeToPlayhead(refreshIfChanged)
+  }, [cameraClips, updateVideoBounds])
 
   const canvasStyle = useMemo<React.CSSProperties>(() => {
     if (!timeline) return {}
@@ -764,7 +773,9 @@ export function TimelineView({
   const frameMs = Math.max(1, Math.round(1000 / Math.max(1, timeline?.canvas.fps ?? 30)))
 
   function stepFrame(direction: -1 | 1) {
-    seek(Math.max(0, Math.min(view.durationMs, view.playheadMs + direction * frameMs)))
+    seek(
+      Math.max(0, Math.min(view.durationMs, getPlayheadSnapshot() + direction * frameMs)),
+    )
   }
 
   const zoomToFit = useCallback(() => {
@@ -778,14 +789,14 @@ export function TimelineView({
   )
 
   const jumpToPreviousCut = useCallback(() => {
-    const targetMs = findPreviousCut(editPoints, view.playheadMs)
+    const targetMs = findPreviousCut(editPoints, getPlayheadSnapshot())
     seek(targetMs)
-  }, [editPoints, seek, view.playheadMs])
+  }, [editPoints, seek])
 
   const jumpToNextCut = useCallback(() => {
-    const targetMs = findNextCut(editPoints, view.playheadMs)
+    const targetMs = findNextCut(editPoints, getPlayheadSnapshot())
     seek(targetMs)
-  }, [editPoints, seek, view.playheadMs])
+  }, [editPoints, seek])
 
   const handleSplitAllAtTime = useCallback(
     (timeMs: number) => {
@@ -808,7 +819,7 @@ export function TimelineView({
 
   const splitSelected = useCallback(() => {
     const selection = view.selection
-    const playheadMs = Math.round(view.playheadMs)
+    const playheadMs = Math.round(getPlayheadSnapshot())
 
     // 1. If a zoom segment is selected:
     if (selection?.kind === "zoom" && timeline) {
@@ -990,7 +1001,6 @@ export function TimelineView({
   }, [
     view.selection,
     timeline,
-    view.playheadMs,
     execute,
     toast,
     handleSplitAllAtTime,
@@ -1171,7 +1181,7 @@ export function TimelineView({
   }
 
   function splitClip(clip: TimelineClip, splitTimeMs?: number) {
-    const timeMs = Math.round(splitTimeMs ?? view.playheadMs)
+    const timeMs = Math.round(splitTimeMs ?? getPlayheadSnapshot())
     if (splitTimeMs !== undefined) {
       seek(timeMs)
     }
@@ -1214,7 +1224,7 @@ export function TimelineView({
   }
 
   function splitAllAtPlayhead() {
-    handleSplitAllAtTime(view.playheadMs)
+    handleSplitAllAtTime(getPlayheadSnapshot())
   }
 
   function deleteClip(clip: TimelineClip, ripple = false) {
@@ -1562,8 +1572,8 @@ export function TimelineView({
   }
 
   const addMarker = useCallback(() => {
-    addMarkerAtTime(view.playheadMs)
-  }, [addMarkerAtTime, view.playheadMs])
+    addMarkerAtTime(getPlayheadSnapshot())
+  }, [addMarkerAtTime])
 
   function addMask(mode: MaskClip["mode"]) {
     if (!timeline) return
@@ -1571,7 +1581,7 @@ export function TimelineView({
       ?.assetId
     if (!screenAssetId) return
     const selectedRange = view.selection?.kind === "range" ? view.selection : null
-    const startMs = Math.round(selectedRange?.startMs ?? view.playheadMs)
+    const startMs = Math.round(selectedRange?.startMs ?? getPlayheadSnapshot())
     const endMs = Math.round(selectedRange?.endMs ?? Math.min(view.durationMs, startMs + 2_000))
     if (endMs <= startMs) return
     execute(
@@ -1632,7 +1642,11 @@ export function TimelineView({
 
       const rangeSelection = view.selection?.kind === "range" ? view.selection : null
       const effectiveStartMs =
-        timeMs !== undefined ? timeMs : rangeSelection ? rangeSelection.startMs : view.playheadMs
+        timeMs !== undefined
+          ? timeMs
+          : rangeSelection
+            ? rangeSelection.startMs
+            : getPlayheadSnapshot()
       const effectiveEndMs =
         endMs !== undefined
           ? endMs
@@ -1686,7 +1700,6 @@ export function TimelineView({
     [
       timeline,
       view.selection,
-      view.playheadMs,
       cursorTelemetry,
       cursorEngine,
       execute,
@@ -1858,7 +1871,7 @@ export function TimelineView({
         } else if (hasModifier && selectedClip) {
           nudgeSelected(direction * (event.shiftKey ? 1_000 : frameMs))
         } else {
-          seek(view.playheadMs + direction * (event.shiftKey ? 1_000 : frameMs))
+          seek(getPlayheadSnapshot() + direction * (event.shiftKey ? 1_000 : frameMs))
         }
       } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         event.preventDefault()
@@ -1928,7 +1941,6 @@ export function TimelineView({
       view.durationMs,
       view.isPlaying,
       view.playbackRate,
-      view.playheadMs,
       view.selection,
       view.zoom,
       zoomToFit,
@@ -2123,15 +2135,8 @@ export function TimelineView({
                     src={mediaUrl}
                     {...playbackVideoProps}
                     className="size-full object-contain cursor-pointer"
-                    style={
-                      screenZoomTransformStyle
-                        ? {
-                            transform: screenZoomTransformStyle,
-                            transformOrigin: "0 0",
-                            willChange: "transform",
-                          }
-                        : undefined
-                    }
+                    // Zoom transform is applied imperatively by
+                    // PlaybackOverlays so playback frames bypass React.
                     muted={isPreviewMuted}
                     playsInline
                     onError={() => {
@@ -2172,15 +2177,8 @@ export function TimelineView({
                     src={mediaUrl}
                     {...playbackVideoProps}
                     className="size-full object-contain cursor-pointer"
-                    style={
-                      screenZoomTransformStyle
-                        ? {
-                            transform: screenZoomTransformStyle,
-                            transformOrigin: "0 0",
-                            willChange: "transform",
-                          }
-                        : undefined
-                    }
+                    // Zoom transform is applied imperatively by
+                    // PlaybackOverlays so playback frames bypass React.
                     muted={isPreviewMuted}
                     playsInline
                     onError={() => {
@@ -2236,7 +2234,6 @@ export function TimelineView({
                   clips={cameraClips}
                   outputs={cameraVideoOutputs}
                   workDir={recording?.workDir}
-                  playheadMs={view.playheadMs}
                   isPlaying={view.isPlaying}
                   playbackRate={view.playbackRate}
                   frameMs={frameMs}
@@ -2257,7 +2254,6 @@ export function TimelineView({
               {mediaUrl && maskClips.length > 0 ? (
                 <MaskPreview
                   clips={maskClips}
-                  playheadMs={view.playheadMs}
                   canvasWidth={timeline.canvas.width}
                   canvasHeight={timeline.canvas.height}
                   videoElement={videoRef.current}
@@ -2273,7 +2269,7 @@ export function TimelineView({
                 />
               ) : null}
 
-              <CaptionPreview timeline={timeline} playheadMs={view.playheadMs} />
+              <CaptionPreview timeline={timeline} />
 
               {/* Keystroke badges — the shared display model renders the same
                   row SVG the export rasterizes, mapped through the screen
@@ -2282,50 +2278,22 @@ export function TimelineView({
               {project ? (
                 <KeystrokePreview
                   timeline={timeline}
-                  playheadMs={view.playheadMs}
                   settings={project.exportSettings.keystrokeOverlay}
                   data={keystrokeData}
                 />
               ) : null}
 
-              {mediaUrl &&
-              !mediaError &&
-              videoBounds &&
-              composition?.cursor.active &&
-              composition.cursor.frame &&
-              cursorTelemetry ? (
-                <CustomCursorOverlay
-                  frame={composition.cursor.frame}
-                  cursorSettings={composition.cursor.settings}
-                  telemetry={cursorTelemetry}
-                  containerWidth={videoBounds.width}
-                  containerHeight={videoBounds.height}
-                  canvasWidth={timeline.canvas.width}
-                  canvasHeight={timeline.canvas.height}
-                  offsetX={videoBounds.left}
-                  offsetY={videoBounds.top}
+              {mediaUrl && !mediaError && videoBounds ? (
+                <PlaybackOverlays
+                  timeline={timeline}
+                  cursorEngine={cursorEngine}
+                  cursorTelemetry={cursorTelemetry}
+                  videoRef={videoRef}
+                  videoBounds={videoBounds}
+                  isZoomFraming={isZoomFraming}
+                  selectedZoomSegment={selectedZoomSegment}
                   borderRadius={screenStyle.borderRadius as number | string | undefined}
-                  zoomTransform={isZoomFraming ? undefined : composition?.screen.zoomTransform}
-                />
-              ) : null}
-
-              {mediaUrl && !mediaError && videoBounds && selectedZoomSegment ? (
-                <ZoomCanvasOverlay
-                  segment={selectedZoomSegment}
-                  canvasWidth={timeline.canvas.width}
-                  canvasHeight={timeline.canvas.height}
-                  containerWidth={videoBounds.width}
-                  containerHeight={videoBounds.height}
-                  offsetX={videoBounds.left}
-                  offsetY={videoBounds.top}
-                  cursorPointAtPlayhead={cursorPointAtPlayhead}
-                  dimOutsideFrame={isZoomFraming}
-                  onUpdateTarget={(target, options) =>
-                    interaction.updateZoomTarget(selectedZoomSegment.id, { target }, options)
-                  }
-                  onUpdateSegment={(update, options) =>
-                    interaction.updateZoomTarget(selectedZoomSegment.id, update, options)
-                  }
+                  onUpdateZoomTarget={interaction.updateZoomTarget}
                 />
               ) : null}
 
@@ -2381,7 +2349,6 @@ export function TimelineView({
             <AudioTrackPreview
               tracks={timeline.tracks}
               outputs={audioTrackOutputs}
-              playheadMs={view.playheadMs}
               isPlaying={view.isPlaying}
               playbackRate={view.playbackRate}
               frameMs={frameMs}
@@ -2428,7 +2395,6 @@ export function TimelineView({
           snapThresholdMs={view.snapThresholdMs}
           onToggleSnap={(enabled) => setSnapEnabled(enabled)}
           onChangeSnapThreshold={(threshold) => setSnapThreshold(threshold)}
-          playheadMs={view.playheadMs}
           durationMs={view.durationMs}
           isPlaying={view.isPlaying}
           playbackRate={view.playbackRate}

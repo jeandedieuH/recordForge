@@ -72,7 +72,9 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
   const recording = useTimelineStore((state) => state.recording)
   const metadata = useTimelineStore((state) => state.metadata)
   const timeline = useTimelineStore((state) => state.engine?.history.present ?? null)
-  const view = useTimelineStore((state) => state.view)
+  // Selection-only subscription — the wholesale view object would re-render
+  // this shell on every playback frame via playheadMs.
+  const selection = useTimelineStore((state) => state.view.selection)
   const project = useTimelineStore((state) => state.project)
   // Camera recordings never produce cursor telemetry, so the Cursor task is
   // hidden from the rail (a persisted "cursor" task still renders a
@@ -114,10 +116,10 @@ export function EditorShell({ recordingId, onClose, onOpenExport }: EditorShellP
 
   // Close the mobile inspector when a selection is made so the user can see the workspace.
   useEffect(() => {
-    if (view.selection && mobileInspectorOpen) {
+    if (selection && mobileInspectorOpen) {
       setMobileInspectorOpen(false)
     }
-  }, [view.selection, mobileInspectorOpen])
+  }, [selection, mobileInspectorOpen])
 
   useEffect(() => {
     if (!drawMode) return

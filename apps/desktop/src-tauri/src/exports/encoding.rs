@@ -12,13 +12,19 @@ pub(crate) enum ExportEncoder {
     Qsv,
     Amf,
     Mf,
+    Vaapi,
 }
 
-const HARDWARE_PRIORITY: [ExportEncoder; 5] = [
+/// Native vendor encoders first. This mirrors the frontend's display list
+/// (`app-shell.tsx`) so the "Auto will use …" hint names the same encoder the
+/// renderer picks. VAAPI is a device + encoder pair, so it is only ever
+/// selected when the startup probe validated a render node.
+const HARDWARE_PRIORITY: [ExportEncoder; 6] = [
     ExportEncoder::VideoToolbox,
     ExportEncoder::Nvenc,
     ExportEncoder::Qsv,
     ExportEncoder::Amf,
+    ExportEncoder::Vaapi,
     ExportEncoder::Mf,
 ];
 
@@ -31,6 +37,7 @@ impl ExportEncoder {
             ExportEncoder::Qsv => "h264_qsv",
             ExportEncoder::Amf => "h264_amf",
             ExportEncoder::Mf => "h264_mf",
+            ExportEncoder::Vaapi => "h264_vaapi",
         }
     }
 
@@ -42,6 +49,7 @@ impl ExportEncoder {
             ExportEncoder::Qsv => "hevc_qsv",
             ExportEncoder::Amf => "hevc_amf",
             ExportEncoder::Mf => "hevc_mf",
+            ExportEncoder::Vaapi => "hevc_vaapi",
         }
     }
 
@@ -61,6 +69,7 @@ impl ExportEncoder {
             ExportEncoder::Qsv => "Intel Quick Sync",
             ExportEncoder::Amf => "AMD AMF",
             ExportEncoder::Mf => "Media Foundation",
+            ExportEncoder::Vaapi => "Linux VAAPI",
         }
     }
 }
@@ -107,9 +116,35 @@ fn quality_crf(preset: &str) -> u8 {
     software_preset(preset).1.parse().unwrap_or(20)
 }
 
-/// Append encoder arguments for one export render. Hardware encoders have no
-/// CRF mode, so the export preset's CRF target maps to each vendor's closest
-/// constant-quality mode; software output is unchanged from the legacy path.
+/// Append the encoder arguments for one export render.
+///
+/// Hardware encoders have no CRF mode, so the export preset's CRF target maps
+/// to each vendor's closest constant-quality mode; software output is unchanged
+/// from the legacy path.
+///
+/// VAAPI additionally needs `-vaapi_device` before the inputs (see
+/// [`append_export_device_args`]) and an upload stage at the end of the filter
+/// graph — the renderer adds that stage itself.
+pub(crate) fn append_export_device_args(command: &mut Command, encoder: ExportEncoder) {
+    if encoder == ExportEncoder::Vaapi {
+        command.args([
+            "-vaapi_device",
+            &crate::capture::encoder::vaapi_render_node(),
+        ]);
+    }
+}
+
+/// Final filter stage that moves the composed export frame onto the VAAPI device.
+///
+/// Returns the segment plus the label the renderer must `-map`. VAAPI consumes
+/// `vaapi` frames only, so this must be the last video stage before the map.
+pub(crate) fn vaapi_export_upload(input_label: &str) -> (String, &'static str) {
+    (
+        format!("[{input_label}]format=nv12,hwupload[vaapi_upload]"),
+        "vaapi_upload",
+    )
+}
+
 pub(crate) fn append_export_video_args(
     command: &mut Command,
     settings: &ExportSettings,
@@ -222,15 +257,27 @@ pub(crate) fn append_export_video_args(
                 .arg("-b:v")
                 .arg(format!("{bitrate_kbps}k"));
         }
+        ExportEncoder::Vaapi => {
+            // VAAPI's constant-quality mode is CQP: `-qp` maps directly onto
+            // the preset's CRF target, matching NVENC's `-cq` / AMF's `-qp_i`.
+            command
+                .arg("-rc_mode")
+                .arg("CQP")
+                .arg("-qp")
+                .arg(crf.to_string());
+        }
     }
+    // VAAPI consumes hardware frames only — the renderer uploads them, so a
+    // system pixel format here would force a download/conversion round trip.
     let pix_fmt = match encoder {
-        ExportEncoder::Qsv => "nv12",
-        _ => "yuv420p",
+        ExportEncoder::Qsv => Some("nv12"),
+        ExportEncoder::Vaapi => None,
+        _ => Some("yuv420p"),
     };
-    command
-        .arg("-r")
-        .arg(target_fps.to_string())
-        .args(["-pix_fmt", pix_fmt]);
+    command.arg("-r").arg(target_fps.to_string());
+    if let Some(pix_fmt) = pix_fmt {
+        command.args(["-pix_fmt", pix_fmt]);
+    }
 }
 
 #[cfg(test)]
@@ -259,6 +306,12 @@ mod tests {
 
     fn available(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    fn paired<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1).map(String::as_str))
     }
 
     #[test]
@@ -319,6 +372,82 @@ mod tests {
         assert_eq!(ExportEncoder::Software.encoder_id("h264"), "libx264");
         assert_eq!(ExportEncoder::Software.encoder_id("hevc"), "libx265");
         assert_eq!(ExportEncoder::Mf.encoder_id("hevc"), "hevc_mf");
+        assert_eq!(ExportEncoder::Vaapi.encoder_id("h264"), "h264_vaapi");
+        assert_eq!(ExportEncoder::Vaapi.encoder_id("hevc"), "hevc_vaapi");
+    }
+
+    #[test]
+    fn vendor_encoders_win_over_vaapi() {
+        // Linux NVIDIA exposes NVENC and VAAPI; the vendor encoder wins.
+        let resolved = resolve_export_encoder(
+            "auto",
+            "h264",
+            &available(&["h264_nvenc", "h264_vaapi", "libx264"]),
+            |_| true,
+        );
+        assert_eq!(resolved, ExportEncoder::Nvenc);
+
+        // VAAPI-only (Intel/AMD iGPU through Mesa) is still preferred over x264.
+        let resolved = resolve_export_encoder(
+            "auto",
+            "h264",
+            &available(&["h264_vaapi", "libx264"]),
+            |_| true,
+        );
+        assert_eq!(resolved, ExportEncoder::Vaapi);
+
+        // Software preference still wins over a detected VAAPI node.
+        let resolved =
+            resolve_export_encoder("software", "h264", &available(&["h264_vaapi"]), |_| true);
+        assert_eq!(resolved, ExportEncoder::Software);
+    }
+
+    #[test]
+    fn vaapi_export_args_use_cqp_and_never_force_a_pixel_format() {
+        let mut command = Command::new("ffmpeg");
+        append_export_video_args(
+            &mut command,
+            &settings("high-quality", "h264", "auto"),
+            ExportEncoder::Vaapi,
+            30,
+            1920,
+            1080,
+        );
+        let args = args_of(&command);
+        assert_eq!(paired(&args, "-c:v"), Some("h264_vaapi"));
+        assert_eq!(paired(&args, "-rc_mode"), Some("CQP"));
+        // high-quality maps to CRF 18 on the software ladder.
+        assert_eq!(paired(&args, "-qp"), Some("18"));
+        // The renderer uploads to `vaapi` frames; a system pix_fmt here would
+        // force a download round trip and break the encoder.
+        assert_eq!(paired(&args, "-pix_fmt"), None);
+        assert_eq!(paired(&args, "-r"), Some("30"));
+    }
+
+    #[test]
+    fn vaapi_export_upload_stage_closes_the_graph() {
+        let (stage, label) = vaapi_export_upload("export_output");
+        assert_eq!(stage, "[export_output]format=nv12,hwupload[vaapi_upload]");
+        assert_eq!(label, "vaapi_upload");
+    }
+
+    #[test]
+    fn vaapi_export_opens_the_validated_device() {
+        let _guard = crate::capture::encoder::VAAPI_NODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::capture::encoder::store_vaapi_node(Some("/dev/dri/renderD129".to_string()));
+
+        let mut command = Command::new("ffmpeg");
+        append_export_device_args(&mut command, ExportEncoder::Vaapi);
+        let args = args_of(&command);
+        assert_eq!(paired(&args, "-vaapi_device"), Some("/dev/dri/renderD129"));
+
+        let mut command = Command::new("ffmpeg");
+        append_export_device_args(&mut command, ExportEncoder::Nvenc);
+        assert_eq!(paired(&args_of(&command), "-vaapi_device"), None);
+
+        crate::capture::encoder::store_vaapi_node(None);
     }
 
     #[test]

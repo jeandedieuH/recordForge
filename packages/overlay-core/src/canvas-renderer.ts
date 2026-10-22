@@ -18,6 +18,13 @@ export interface OverlayCanvasRenderOptions {
   assetUrls?: Readonly<Record<string, string>>
   imageCache?: Map<string, HTMLImageElement>
   onImageLoad?: () => void
+  /**
+   * Scale applied to every drawing operation. Display lists are authored in
+   * project pixels; a preview canvas whose backing store is display-resolution
+   * passes `backingWidth / projectWidth` here so item coordinates stay
+   * project-space while raster work happens at the smaller resolution.
+   */
+  pixelScale?: number
 }
 
 export function renderOverlayDisplayList(
@@ -28,8 +35,54 @@ export function renderOverlayDisplayList(
   const context = canvas.getContext("2d")
   if (!context) throw new Error("2D canvas context is unavailable")
 
-  context.clearRect(0, 0, canvas.width, canvas.height)
-  for (const item of displayList.items) renderDisplayItem(context, item, options)
+  const scale = options.pixelScale ?? 1
+  // save/restore keep the scale transform from leaking into the next frame;
+  // minimal test mocks may not implement them.
+  const canScope = typeof context.save === "function" && typeof context.restore === "function"
+  if (canScope) context.save()
+  try {
+    if (scale !== 1 && typeof context.scale === "function") context.scale(scale, scale)
+    context.clearRect(0, 0, canvas.width / scale, canvas.height / scale)
+    for (const item of displayList.items) renderDisplayItem(context, item, options)
+  } finally {
+    if (canScope) context.restore()
+  }
+}
+
+// SVG path data → Path2D parsing is the expensive part of title scenes and is
+// recomputed identically every frame; path strings are stable so a bounded
+// cache removes the parse from the hot path.
+const pathCache = new Map<string, Path2D>()
+const PATH_CACHE_LIMIT = 512
+
+function cachedPath2D(pathData: string): Path2D {
+  const cached = pathCache.get(pathData)
+  if (cached) return cached
+  const path = new Path2D(pathData)
+  if (pathCache.size >= PATH_CACHE_LIMIT) pathCache.clear()
+  pathCache.set(pathData, path)
+  return path
+}
+
+// measureText calls repeat per wrap pass per frame with the same font/text
+// pairs; the current context font is part of the key so scaled passes stay
+// correct. Text is bounded (title strings), so a clear-on-limit cap is enough.
+const measureCache = new Map<string, number>()
+const MEASURE_CACHE_LIMIT = 2_048
+
+function measureTextCached(
+  context: CanvasRenderingContext2D,
+  text: string,
+  fallbackWidth: number,
+): number {
+  const key = `${context.font}${text}`
+  const cached = measureCache.get(key)
+  if (cached !== undefined) return cached
+  const width =
+    typeof context.measureText === "function" ? context.measureText(text).width : fallbackWidth
+  if (measureCache.size >= MEASURE_CACHE_LIMIT) measureCache.clear()
+  measureCache.set(key, width)
+  return width
 }
 
 function renderDisplayItem(
@@ -149,9 +202,7 @@ function renderAnnotation(
       transform.width - (item.annotationType === "badge" ? 24 : item.fontSize * 1.5),
     )
     const lines = wrapTextToLines(item.text, maxLineWidth, (str) =>
-      typeof context.measureText === "function"
-        ? context.measureText(str).width
-        : str.length * item.fontSize * 0.6,
+      measureTextCached(context, str, str.length * item.fontSize * 0.6),
     )
     const lineHeight = item.fontSize * 1.25
     const totalHeight = (lines.length - 1) * lineHeight
@@ -284,9 +335,7 @@ function renderText(
   const basePrimaryLineHeight = basePrimaryFs * 1.25
   const primaryText = revealText(item.primaryText, item.textProgress)
   const basePrimaryLines = wrapTextToLines(primaryText, usableWidth, (str) =>
-    typeof context.measureText === "function"
-      ? context.measureText(str).width
-      : str.length * basePrimaryFs * 0.58,
+    measureTextCached(context, str, str.length * basePrimaryFs * 0.58),
   )
   const basePrimaryH = basePrimaryLines.length * basePrimaryLineHeight
 
@@ -305,9 +354,7 @@ function renderText(
   const baseSubLines =
     hasSub && item.secondaryText
       ? wrapTextToLines(item.secondaryText, usableWidth, (str) =>
-          typeof context.measureText === "function"
-            ? context.measureText(str).width
-            : str.length * baseSubFs * 0.58,
+          measureTextCached(context, str, str.length * baseSubFs * 0.58),
         )
       : []
   const baseSubH =
@@ -342,9 +389,7 @@ function renderText(
     primaryFs = Math.max(10, Math.min(120, basePrimaryFs * scale))
     primaryLineHeight = primaryFs * 1.25
     primaryLines = wrapTextToLines(primaryText, usableWidth, (str) =>
-      typeof context.measureText === "function"
-        ? context.measureText(str).width
-        : str.length * primaryFs * 0.58,
+      measureTextCached(context, str, str.length * primaryFs * 0.58),
     )
     primaryH = primaryLines.length * primaryLineHeight
 
@@ -358,9 +403,7 @@ function renderText(
     secondaryLines =
       hasSub && item.secondaryText
         ? wrapTextToLines(item.secondaryText, usableWidth, (str) =>
-            typeof context.measureText === "function"
-              ? context.measureText(str).width
-              : str.length * subFs * 0.58,
+            measureTextCached(context, str, str.length * subFs * 0.58),
           )
         : []
     subH =
@@ -425,7 +468,7 @@ function renderTitleScene(
     }
     context.translate(element.translateX, element.translateY)
     context.scale(element.scaleX, element.scaleY)
-    context.fill(new Path2D(element.path))
+    context.fill(cachedPath2D(element.path))
     context.restore()
   }
 }

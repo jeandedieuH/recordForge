@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type MutableRefObject } from "react"
 import type { MaskClip, MaskRect } from "@recordforge/contracts"
 import { renderMasksToCanvas } from "../canvas/mask-shader-renderer"
+import { usePlayheadMs } from "./use-playback-state"
 
 type WebGLBundle = NonNullable<Parameters<typeof renderMasksToCanvas>[4]["current"]>
 
@@ -14,7 +15,6 @@ export interface MaskVideoBounds {
 
 interface MaskPreviewProps {
   clips: MaskClip[]
-  playheadMs: number
   canvasWidth: number
   canvasHeight: number
   videoElement?: HTMLVideoElement | null
@@ -276,7 +276,6 @@ function PixelateMaskVisual({
 
 export function MaskPreview({
   clips,
-  playheadMs,
   canvasWidth,
   canvasHeight,
   videoElement,
@@ -286,6 +285,8 @@ export function MaskPreview({
   onSelectMask,
   onUpdateMask,
 }: MaskPreviewProps) {
+  // Subscribed internally — playback frames re-render only this mask layer.
+  const playheadMs = usePlayheadMs()
   const gestureRef = useRef<MaskGesture | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const webglBundleRef = useRef<WebGLBundle | null>(null) as MutableRefObject<WebGLBundle | null>

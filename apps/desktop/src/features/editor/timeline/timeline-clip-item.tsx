@@ -39,8 +39,15 @@ import {
   ContextMenuTrigger,
   cn,
 } from "@recordforge/ui"
-import { snapClipStart, snapTime, snapTrimEdge, type SnapTarget } from "@recordforge/editor-core"
+import {
+  playheadSnapTarget,
+  snapClipStart,
+  snapTime,
+  snapTrimEdge,
+  type SnapTarget,
+} from "@recordforge/editor-core"
 import type { ThumbnailManifest, WaveformResources } from "../media/derivative-resources"
+import { getPlayheadSnapshot, usePlayheadMs } from "./use-playback-state"
 import { ThumbnailFilmstrip } from "./thumbnail-filmstrip"
 import { TimelineWaveform } from "./timeline-waveform"
 import { TimelineAudioEnvelope } from "./timeline-audio-envelope"
@@ -55,6 +62,10 @@ interface ClipGesture {
   initialClipStartMs: number
   initialClipEndMs: number
   moved: boolean
+  // Snap targets captured at gesture start — includes the live playhead,
+  // which is intentionally absent from the memoized prop list so playback
+  // ticks do not rebuild it.
+  snapTargets: SnapTarget[]
 }
 
 export interface TimelineClipItemProps {
@@ -63,7 +74,6 @@ export interface TimelineClipItemProps {
   height: number
   pixelsPerMs: number
   selected: boolean
-  playheadMs: number
   frameMs: number
   collapsed: boolean
   thumbnailManifest: ThumbnailManifest | null
@@ -242,7 +252,6 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   height,
   pixelsPerMs,
   selected,
-  playheadMs,
   frameMs,
   collapsed,
   thumbnailManifest,
@@ -303,13 +312,6 @@ export const TimelineClipItem = memo(function TimelineClipItem({
   const isLocked = track.locked || (cursorRange ? cursorRange.locked : false)
   const isGrouped = "groupId" in clip && Boolean(clip.groupId)
 
-  const isPlayheadInside =
-    playheadMs > clip.startMs + 1 && playheadMs < clip.startMs + clip.durationMs - 1
-  const isClickInside =
-    contextMenuTimeMs !== null &&
-    contextMenuTimeMs > clip.startMs + 1 &&
-    contextMenuTimeMs < clip.startMs + clip.durationMs - 1
-
   const ClipIcon = getClipIcon(clip, track)
   const theme = getClipTheme(clip, track)
 
@@ -331,6 +333,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       initialClipStartMs: clip.startMs,
       initialClipEndMs: clip.startMs + clip.durationMs,
       moved: false,
+      snapTargets: [...clipTargets, playheadSnapTarget(getPlayheadSnapshot())],
     }
   }
 
@@ -349,7 +352,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     if (gesture.mode === "move") {
       const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
       const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, clipTargets, snap)
+      const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
       onSnapGuide(snapped.snapped ? snapped.target : null)
       setGestureDelta({
         mode: "Move",
@@ -364,7 +367,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       edge === "start"
         ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
         : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
+    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
     onSnapGuide(snapped.snapped ? snapped.target : null)
     setGestureDelta({
       mode: edge === "start" ? "Trim In" : "Trim Out",
@@ -403,7 +406,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     if (gesture.mode === "move") {
       const duration = gesture.initialClipEndMs - gesture.initialClipStartMs
       const rawStartMs = Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
-      const snapped = snapClipStart(rawStartMs, duration, clipTargets, snap)
+      const snapped = snapClipStart(rawStartMs, duration, gesture.snapTargets, snap)
       onSnapGuide(null)
       onMoveClip(clip, track, snapped.timeMs, { phase: "commit" })
       return
@@ -414,7 +417,7 @@ export const TimelineClipItem = memo(function TimelineClipItem({
       edge === "start"
         ? Math.max(0, Math.round(gesture.initialClipStartMs + deltaMs))
         : Math.max(0, Math.round(gesture.initialClipEndMs + deltaMs))
-    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, clipTargets, snap)
+    const snapped = snapTrimEdge(edge, rawEdgeTimeMs, gesture.snapTargets, snap)
     onSnapGuide(null)
     onTrimClip(clip, track, edge, snapped.timeMs, { phase: "commit" })
   }
@@ -460,10 +463,14 @@ export const TimelineClipItem = memo(function TimelineClipItem({
               event.stopPropagation()
               event.preventDefault()
               const rawMs = getTimelineTime(event.clientX)
-              const snap = snapTime(rawMs, clipTargets, {
-                enabled: snapEnabled && !event.altKey,
-                thresholdMs: snapThresholdMs,
-              })
+              const snap = snapTime(
+                rawMs,
+                [...clipTargets, playheadSnapTarget(getPlayheadSnapshot())],
+                {
+                  enabled: snapEnabled && !event.altKey,
+                  thresholdMs: snapThresholdMs,
+                },
+              )
               const clipEndMs = clip.startMs + clip.durationMs
               let splitTimeMs = Math.round(rawMs)
               if (snap.snapped && snap.timeMs > clip.startMs + 1 && snap.timeMs < clipEndMs - 1) {
@@ -712,27 +719,12 @@ export const TimelineClipItem = memo(function TimelineClipItem({
             </ContextMenuItem>
           </>
         ) : null}
-        {isPlayheadInside ? (
-          <ContextMenuItem onSelect={() => onSplitClip(clip, playheadMs)} disabled={isLocked}>
-            <Scissors className="size-3.5 mr-2" /> Split at playhead (
-            {formatDurationSeconds(playheadMs)})
-          </ContextMenuItem>
-        ) : null}
-        {isClickInside &&
-        (!isPlayheadInside || Math.abs((contextMenuTimeMs ?? 0) - playheadMs) > 200) ? (
-          <ContextMenuItem
-            onSelect={() => onSplitClip(clip, contextMenuTimeMs!)}
-            disabled={isLocked}
-          >
-            <Scissors className="size-3.5 mr-2" /> Split here (
-            {formatDurationSeconds(contextMenuTimeMs!)})
-          </ContextMenuItem>
-        ) : null}
-        {!isPlayheadInside && !isClickInside ? (
-          <ContextMenuItem disabled>
-            <Scissors className="size-3.5 mr-2" /> Split (playhead outside)
-          </ContextMenuItem>
-        ) : null}
+        <ClipSplitMenuItems
+          clip={clip}
+          contextMenuTimeMs={contextMenuTimeMs}
+          isLocked={isLocked}
+          onSplitClip={onSplitClip}
+        />
         <ContextMenuSeparator />
         <ContextMenuItem
           className="text-destructive focus:bg-destructive/10 focus:text-destructive"
@@ -752,3 +744,54 @@ export const TimelineClipItem = memo(function TimelineClipItem({
     </ContextMenu>
   )
 })
+
+interface ClipSplitMenuItemsProps {
+  clip: TimelineClip
+  contextMenuTimeMs: number | null
+  isLocked: boolean
+  onSplitClip: (clip: TimelineClip, splitTimeMs?: number) => void
+}
+
+// The split items are the only playhead-dependent UI on a clip. Mounting them
+// inside ContextMenuContent (which Radix renders only while open) keeps the
+// per-frame playhead subscription off every resting clip item.
+function ClipSplitMenuItems({
+  clip,
+  contextMenuTimeMs,
+  isLocked,
+  onSplitClip,
+}: ClipSplitMenuItemsProps) {
+  const playheadMs = usePlayheadMs()
+  const isPlayheadInside =
+    playheadMs > clip.startMs + 1 && playheadMs < clip.startMs + clip.durationMs - 1
+  const isClickInside =
+    contextMenuTimeMs !== null &&
+    contextMenuTimeMs > clip.startMs + 1 &&
+    contextMenuTimeMs < clip.startMs + clip.durationMs - 1
+
+  return (
+    <>
+      {isPlayheadInside ? (
+        <ContextMenuItem onSelect={() => onSplitClip(clip, playheadMs)} disabled={isLocked}>
+          <Scissors className="size-3.5 mr-2" /> Split at playhead (
+          {formatDurationSeconds(playheadMs)})
+        </ContextMenuItem>
+      ) : null}
+      {isClickInside &&
+      (!isPlayheadInside || Math.abs((contextMenuTimeMs ?? 0) - playheadMs) > 200) ? (
+        <ContextMenuItem
+          onSelect={() => onSplitClip(clip, contextMenuTimeMs!)}
+          disabled={isLocked}
+        >
+          <Scissors className="size-3.5 mr-2" /> Split here (
+          {formatDurationSeconds(contextMenuTimeMs!)})
+        </ContextMenuItem>
+      ) : null}
+      {!isPlayheadInside && !isClickInside ? (
+        <ContextMenuItem disabled>
+          <Scissors className="size-3.5 mr-2" /> Split (playhead outside)
+        </ContextMenuItem>
+      ) : null}
+    </>
+  )
+}

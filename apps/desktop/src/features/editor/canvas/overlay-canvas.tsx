@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { AnnotationClip, OverlayRenderPlan } from "@recordforge/contracts"
+import type {
+  AnnotationClip,
+  OverlayDisplayList,
+  OverlayRenderPlan,
+} from "@recordforge/contracts"
 import {
   createOverlayWasmEngine,
   renderOverlayDisplayList,
@@ -25,6 +29,8 @@ interface OverlayCanvasProps {
   className?: string
 }
 
+const EMPTY_DISPLAY_LIST: OverlayDisplayList = { timeMs: 0, items: [] }
+
 export function OverlayCanvas({
   renderPlan,
   canvasWidth,
@@ -40,6 +46,10 @@ export function OverlayCanvas({
   const engineRef = useRef<OverlayEngine | null>(null)
   const imageCacheRef = useRef(new Map<string, HTMLImageElement>())
   const renderFrameRef = useRef<() => void>(() => undefined)
+  // The engine's JSON-string cache returns the same display-list object on
+  // unchanged frames, so identity comparison can skip a full canvas redraw.
+  const lastRenderedRef = useRef<OverlayDisplayList | null>(null)
+  const forceRedrawRef = useRef(false)
   const onCreateClipRef = useRef(onCreateClip)
   onCreateClipRef.current = onCreateClip
   const [engineVersion, setEngineVersion] = useState(0)
@@ -114,25 +124,41 @@ export function OverlayCanvas({
     const engine = engineRef.current
     if (!canvas) return
 
-    if (canvas.width !== canvasWidth) canvas.width = canvasWidth
-    if (canvas.height !== canvasHeight) canvas.height = canvasHeight
+    // The backing store tracks the displayed rect (×dpr), not project
+    // resolution — a 4K project in an 800px monitor previously rasterized
+    // ~8MP of 2D work per frame for under 1MP of output.
+    const dpr = window.devicePixelRatio || 1
+    const rect = canvas.getBoundingClientRect()
+    const targetWidth = Math.max(1, Math.round(rect.width * dpr))
+    const targetHeight = Math.max(1, Math.round(rect.height * dpr))
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth
+      canvas.height = targetHeight
+      // Resizing a canvas erases its contents — the next paint must not be
+      // skipped just because the display list identity is unchanged.
+      forceRedrawRef.current = true
+    }
 
     try {
       // Existing clips retain canonical WASM evaluation. Only the transient draft bypasses
       // timeline animation, sharing the renderer so arrow heads, fills and stroke styles match.
-      const displayList = engine?.evaluate(playheadMs) ?? { timeMs: 0, items: [] }
+      const displayList = engine?.evaluate(playheadMs) ?? EMPTY_DISPLAY_LIST
       const draft = drawing.getPreview()
-      renderOverlayDisplayList(
-        draft
-          ? { ...displayList, items: [...displayList.items, getAnnotationDrawingPreview(draft)] }
-          : displayList,
-        canvas,
-        {
-          assetUrls,
-          imageCache: imageCacheRef.current,
-          onImageLoad: () => renderFrameRef.current(),
+      const list = draft
+        ? { ...displayList, items: [...displayList.items, getAnnotationDrawingPreview(draft)] }
+        : displayList
+      if (!forceRedrawRef.current && list === lastRenderedRef.current) return
+      renderOverlayDisplayList(list, canvas, {
+        assetUrls,
+        imageCache: imageCacheRef.current,
+        pixelScale: targetWidth / Math.max(1, canvasWidth),
+        onImageLoad: () => {
+          forceRedrawRef.current = true
+          renderFrameRef.current()
         },
-      )
+      })
+      lastRenderedRef.current = list
+      forceRedrawRef.current = false
     } catch (err) {
       canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height)
       console.warn("Overlay renderToCanvas error:", err)
@@ -144,6 +170,16 @@ export function OverlayCanvas({
   useEffect(() => {
     renderFrame()
   }, [engineVersion, renderFrame])
+
+  // The backing store follows the displayed size; while paused nothing else
+  // calls renderFrame, so resizes must trigger a repaint explicitly.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const observer = new ResizeObserver(() => renderFrameRef.current())
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [])
 
   function getCanvasCoords(clientX: number, clientY: number): { x: number; y: number } {
     const canvas = canvasRef.current

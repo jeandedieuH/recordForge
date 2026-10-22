@@ -272,12 +272,23 @@ pub async fn plan_camera_tiers(
     // friendly reason instead of the generic gate message.
     let _permit = acquire_camera_probe_permit(&state.recorder.resource_gate())?;
     let ffmpeg = state.ffmpeg_path.to_string_lossy().to_string();
+    // Same encoder policy the capture path uses: without a hardware H.264
+    // encoder the planner caps Ultra to 1080p, and the picker must not
+    // advertise a 4K output the recorder will not write.
+    let hardware_encoder =
+        capture::encoder::has_hardware_candidate(&capture::encoder::recording_encoder_candidates(
+            state.recorder.available_encoders(),
+            &capture::config::default_encoder_priority(),
+        ));
     let modes = tauri::async_runtime::spawn_blocking(move || {
         capture::webcam::probe_camera_modes(&ffmpeg, &device_id, 30.0)
     })
     .await
     .map_err(|e| InternalError::Unknown(format!("camera mode probe worker failed: {e}")))?;
-    Ok(capture::camera_plan::plan_all_tiers(&modes))
+    Ok(capture::camera_plan::plan_all_tiers(
+        &modes,
+        hardware_encoder,
+    ))
 }
 
 /// Camera tier probing shares the capture work gate; a busy gate gets a
@@ -1498,7 +1509,10 @@ mod tests {
                 codec: None,
             },
         ];
-        let plans = capture::camera_plan::plan_all_tiers(&modes);
+        // No 4K mode advertised here, so the encoder cap does not change the
+        // geometry; every plan still negotiates an input and stays <= the
+        // device.
+        let plans = capture::camera_plan::plan_all_tiers(&modes, false);
         assert_eq!(plans.len(), 4);
         assert_eq!(
             plans

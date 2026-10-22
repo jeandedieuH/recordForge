@@ -1180,7 +1180,9 @@ impl Recorder {
         // Ordered attempts: the planner's fitted modes first, the device-
         // defaults fallback last. A lock from a previous segment forces
         // identical output geometry/rate on every plan.
-        let plans = super::camera_plan::plan_camera_capture(profile, modes.unwrap_or(&[]), lock);
+        //
+        // The encoder set is resolved first: a software-only machine gets the
+        // planner's output cap (Ultra → 1080p) instead of a 4K libx264 encode.
         let encoder_candidates = prefer_encoder_first(
             &super::encoder::recording_encoder_candidates(
                 &self.available_encoders,
@@ -1188,10 +1190,18 @@ impl Recorder {
             ),
             preferred_encoder,
         );
+        let hardware_encoder = super::encoder::has_hardware_candidate(&encoder_candidates);
+        let plans = super::camera_plan::plan_camera_capture_for_encoders(
+            profile,
+            modes.unwrap_or(&[]),
+            lock,
+            hardware_encoder,
+        );
         info!(
             plan_count = plans.len(),
             candidates = ?encoder_candidates,
             profile = %profile.id,
+            encoder_limited = plans.first().is_some_and(|plan| plan.encoder_limited),
             "camera capture encoder candidates"
         );
 
@@ -1264,6 +1274,9 @@ impl Recorder {
                                     reasons.push("device-default-mode");
                                 } else if plan_index > 0 {
                                     reasons.push("mode-fallback");
+                                }
+                                if plan.encoder_limited {
+                                    reasons.push("software-encoder-cap");
                                 }
                                 if encoder_candidates.first() != Some(encoder) {
                                     reasons.push("encoder-fallback");
@@ -3597,6 +3610,7 @@ mod tests {
             crf: 21,
             fit: crate::capture::camera_plan::CameraFit::Native,
             limited_by_camera: false,
+            encoder_limited: false,
         };
         // The probed file wins over the plan.
         assert_eq!(

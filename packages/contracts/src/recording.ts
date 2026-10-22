@@ -255,6 +255,10 @@ export const cameraCapturePlanSchema = z.object({
   bufferKbps: z.number().int().positive(),
   crf: z.number().int().min(0).max(51),
   limitedByCamera: z.boolean(),
+  // The ENCODER, not the camera, capped the output below the tier budget —
+  // e.g. Ultra plans 1080p instead of 4K when no hardware H.264 encoder is
+  // available. The picker explains the downscale instead of promising 4K.
+  encoderLimited: z.boolean(),
 })
 export type CameraCapturePlan = z.infer<typeof cameraCapturePlanSchema>
 
@@ -610,7 +614,11 @@ export const recordingPreferencesSchema = z.object({
   // `cameraProfile`.
   profile: screenProfileIdSchema.default("low-impact"),
   cameraProfile: cameraProfileIdSchema.default("camera-balanced"),
-  cameraPreviewMode: webcamPreviewModeSchema.default("standard"),
+  // Self-view defaults to Low. The preview is a second MJPEG encode inside the
+  // recording process (plus an HTTP stream and a WebView decode) and it runs
+  // for the whole session even when the floating self-view is hidden;
+  // Standard (15 fps) is a visible-cost opt-in, not a default.
+  cameraPreviewMode: webcamPreviewModeSchema.default("low"),
   // Mirror preview only; the recorded camera file is never mirrored.
   cameraMirrorPreview: z.boolean().default(true),
   cameraFramingGuide: z.boolean().default(false),
@@ -640,7 +648,7 @@ export const defaultRecordingPreferences: RecordingPreferences = {
   regionBounds: null,
   profile: "low-impact",
   cameraProfile: "camera-balanced",
-  cameraPreviewMode: "standard",
+  cameraPreviewMode: "low",
   cameraMirrorPreview: true,
   cameraFramingGuide: false,
   smartZoomEnabled: false,

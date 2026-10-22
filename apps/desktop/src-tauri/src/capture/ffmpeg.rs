@@ -672,6 +672,7 @@ fn build_screen_command(
         .stderr(Stdio::piped())
         .arg("-y");
     add_progress_reporting(&mut command);
+    add_vaapi_device(&mut command, encoder);
 
     // ddagrab captures a specific DXGI output, and its offset/video_size are
     // interpreted in that output's own coordinate space. Displays and regions
@@ -719,6 +720,7 @@ fn build_screen_command(
                 use_ddagrab,
                 external_video_input,
                 screen_crop,
+                super::encoder::is_vaapi_encoder(encoder),
             ),
             cpu_backend,
         ),
@@ -750,6 +752,72 @@ fn build_screen_command(
     (command, backend)
 }
 
+/// `-rtbufsize` ceiling for a camera input delivering frames of `input_pixels`.
+///
+/// DirectShow (and AVFoundation/v4l2 behind `-thread_queue_size`) buffers
+/// *input* frames, so the ceiling must be derived from the negotiated input
+/// mode — a 4K sensor scaled down to 720p still queues 4K frames. 32/64/256 MB
+/// is roughly 8-17 frames depending on the pixel format: enough jitter slack,
+/// without letting a slow encoder accumulate hundreds of MB and make the
+/// self-view visibly lag.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn camera_rtbufsize(input_pixels: u64) -> &'static str {
+    if input_pixels <= 1280 * 720 {
+        "32M"
+    } else if input_pixels <= 1920 * 1080 {
+        "64M"
+    } else {
+        "256M"
+    }
+}
+
+/// `-thread_queue_size` (demuxer packets) for a camera input.
+///
+/// Each raw packet is a whole frame, so a deep queue is a hidden multi-hundred
+/// MB buffer that only shows up when the encoder falls behind. Eight frames
+/// (the FFmpeg default) is enough slack on top of `-rtbufsize`; compressed
+/// packets (MJPEG/H.264) are small, so a slightly deeper queue is cheap.
+fn camera_queue_size(raw_frames: bool) -> &'static str {
+    if raw_frames {
+        "8"
+    } else {
+        "16"
+    }
+}
+
+/// Emit the VAAPI device selection when `encoder` needs it.
+///
+/// Placed before the input so the encoder is initialised against the same
+/// render node the startup probe validated (see
+/// `capture::encoder::vaapi_render_node` — multi-GPU machines do not
+/// necessarily encode on `renderD128`). Also used by the webcam concat job
+/// (`capture::media`), which re-encodes sidecar segments.
+pub(crate) fn add_vaapi_device(command: &mut Command, encoder: &str) {
+    if super::encoder::is_vaapi_encoder(encoder) {
+        command.args(["-vaapi_device", &super::encoder::vaapi_render_node()]);
+    }
+}
+
+/// Filter chain segment that moves software frames onto the VAAPI device.
+///
+/// VAAPI encoders only accept `vaapi` hw frames, so the recording branch must
+/// end with this stage. It is never applied to preview/JPEG branches — the
+/// MJPEG encoder needs system memory.
+pub(crate) const VAAPI_UPLOAD: &str = "format=nv12,hwupload";
+/// `-thread_queue_size` (demuxer packets) for a screen/desktop input.
+///
+/// Each raw packet is a whole BGRA frame (~8 MB at 1080p, ~33 MB at 4K), so a
+/// flat depth is either uselessly shallow at low resolution or a multi-GB
+/// backlog at high resolution — the previous 512 allowed 4 GB+ at 1080p and
+/// 16 GB+ at 4K whenever the encoder fell behind. Keep ~96 MiB of frames in
+/// flight (the same budget the export plate feed uses, see
+/// `exports::stdin_thread_queue_size`) with a 4-frame floor so 4K+ still
+/// absorbs encoder jitter instead of emptying the queue on every stall.
+fn screen_queue_size(input_pixels: u64) -> usize {
+    let frame_bytes = input_pixels.max(1) * 4; // BGRA
+    (96 * 1024 * 1024 / frame_bytes).clamp(4, 32) as usize
+}
+
 fn build_webcam_command(
     ffmpeg_path: &str,
     device: &str,
@@ -771,6 +839,7 @@ fn build_webcam_command(
         .stderr(Stdio::piped())
         .arg("-y");
     add_progress_reporting(&mut command);
+    add_vaapi_device(&mut command, encoder);
 
     // Windows only: keep source timestamps (-copyts stops the demuxer from
     // re-basing the camera clock) and raise the log level so the DirectShow
@@ -778,15 +847,25 @@ fn build_webcam_command(
     #[cfg(windows)]
     command.args(["-copyts", "-loglevel", "verbose"]);
 
+    // Input packets are buffered by the OS capture backend, so the sizing
+    // knobs follow the NEGOTIATED INPUT mode, never the output profile: a 4K
+    // sensor scaled down to 720p still queues 4K raw frames. Device-defaults
+    // mode assumes raw 720p (the sidecar's ceiling).
+    let raw_frames = mode.map(|mode| mode.pixel_format.is_some()).unwrap_or(true);
+    #[cfg(windows)]
+    let input_pixels = mode
+        .map(|mode| u64::from(mode.width) * u64::from(mode.height))
+        .unwrap_or(1280 * 720);
+
     #[cfg(windows)]
     let backend = {
         command.args([
             "-f",
             "dshow",
             "-thread_queue_size",
-            "256",
+            camera_queue_size(raw_frames),
             "-rtbufsize",
-            "50M",
+            camera_rtbufsize(input_pixels),
         ]);
         // Negotiated mode: pin the input to a size/rate/format the device
         // actually advertised. With no negotiated mode the device defaults are
@@ -825,7 +904,7 @@ fn build_webcam_command(
             "-f",
             "avfoundation",
             "-thread_queue_size",
-            "256",
+            camera_queue_size(raw_frames),
             "-framerate",
             &profile.fps.to_string(),
             "-i",
@@ -840,7 +919,7 @@ fn build_webcam_command(
             "-f",
             "v4l2",
             "-thread_queue_size",
-            "256",
+            camera_queue_size(raw_frames),
             "-framerate",
             &profile.fps.to_string(),
             "-i",
@@ -874,12 +953,18 @@ fn build_webcam_command(
     // original PTS is preserved for stats (`{ptsi}`) and for `-stats_enc_pre`.
     #[cfg(windows)]
     let scale = format!("setpts=PTS-STARTPTS,{scale}");
-    let filter = if let Some(preview_fps) = preview_fps {
-        format!(
+    // VAAPI: upload only the recording branch. The self-view stays on the CPU
+    // (MJPEG consumes system frames), so the upload sits after the split.
+    let vaapi = super::encoder::is_vaapi_encoder(encoder);
+    let filter = match (preview_fps, vaapi) {
+        (Some(preview_fps), true) => format!(
+            "[0:v]{scale},split=2[vrec][vprev];[vrec]{VAAPI_UPLOAD}[vout];[vprev]fps={preview_fps},scale=320:-2[vprev_out]"
+        ),
+        (Some(preview_fps), false) => format!(
             "[0:v]{scale},split=2[vout][vprev];[vprev]fps={preview_fps},scale=320:-2[vprev_out]"
-        )
-    } else {
-        format!("[0:v]{scale}[vout]")
+        ),
+        (None, true) => format!("[0:v]{scale},{VAAPI_UPLOAD}[vout]"),
+        (None, false) => format!("[0:v]{scale}[vout]"),
     };
     command
         .args(["-filter_complex", &filter])
@@ -921,8 +1006,10 @@ fn build_webcam_command(
             "[vprev_out]",
             "-c:v",
             "mjpeg",
+            // Quality 7 (of 31) is invisible at the 220 px self-view size and
+            // keeps the pipe/HTTP/WebView payload well under quality 5.
             "-q:v",
-            "5",
+            "7",
             "-f",
             "image2pipe",
             "-",
@@ -962,23 +1049,29 @@ fn build_camera_command(
         .stderr(Stdio::piped())
         .arg("-y");
     add_progress_reporting(&mut command);
+    add_vaapi_device(&mut command, encoder);
 
     #[cfg(windows)]
     command.args(["-copyts", "-loglevel", "verbose"]);
 
-    // Input buffering scales with delivered frame size. `plan.output_*` is
-    // the ceiling — the Adaptive fit never produces more pixels than this.
-    let pixels = u64::from(plan.output_width) * u64::from(plan.output_height);
-    // `-rtbufsize` is a dshow-only option; only the Windows backend consumes it.
+    // Input buffering is sized from the negotiated INPUT mode — the output is
+    // only the fit ceiling. Device defaults leave the delivered size unknown,
+    // so size for at least 1080p raw rather than the (possibly smaller)
+    // output budget.
     #[cfg(windows)]
-    let rtbufsize = if pixels <= 1280 * 720 {
-        "64M"
-    } else if pixels <= 1920 * 1080 {
-        "150M"
-    } else {
-        "512M"
-    };
-    let queue_size = if pixels > 1920 * 1080 { "512" } else { "256" };
+    let rtbufsize = camera_rtbufsize(plan.input.as_ref().map_or_else(
+        || {
+            let output = u64::from(plan.output_width) * u64::from(plan.output_height);
+            output.max(1920 * 1080)
+        },
+        |mode| u64::from(mode.width) * u64::from(mode.height),
+    ));
+    let queue_size = camera_queue_size(
+        plan.input
+            .as_ref()
+            .map(|mode| mode.pixel_format.is_some())
+            .unwrap_or(false),
+    );
 
     #[cfg(windows)]
     let backend = {
@@ -1086,12 +1179,18 @@ fn build_camera_command(
         filters.push("null".to_string());
     }
     let chain = filters.join(",");
-    let filter = if let Some(preview_fps) = preview_fps {
-        format!(
+    // VAAPI: upload only the recording branch; the self-view MJPEG encoder
+    // needs system-memory frames, so the upload follows the split.
+    let vaapi = super::encoder::is_vaapi_encoder(encoder);
+    let filter = match (preview_fps, vaapi) {
+        (Some(preview_fps), true) => format!(
+            "[0:v]{chain},split=2[vrec][vprev];[vrec]{VAAPI_UPLOAD}[vout];[vprev]fps={preview_fps},scale=480:-2[vprev_out]"
+        ),
+        (Some(preview_fps), false) => format!(
             "[0:v]{chain},split=2[vout][vprev];[vprev]fps={preview_fps},scale=480:-2[vprev_out]"
-        )
-    } else {
-        format!("[0:v]{chain}[vout]")
+        ),
+        (None, true) => format!("[0:v]{chain},{VAAPI_UPLOAD}[vout]"),
+        (None, false) => format!("[0:v]{chain}[vout]"),
     };
     command
         .args(["-filter_complex", &filter])
@@ -1135,8 +1234,10 @@ fn build_camera_command(
             "[vprev_out]",
             "-c:v",
             "mjpeg",
+            // Quality 7 (of 31) is invisible at the 220 px self-view size and
+            // keeps the pipe/HTTP/WebView payload well under quality 5.
             "-q:v",
-            "5",
+            "7",
             "-f",
             "image2pipe",
             "-",
@@ -1182,7 +1283,15 @@ fn add_screen_video_input(
             "ddagrab=draw_mouse=0:framerate={}:output_idx={}:offset_x={}:offset_y={}:video_size={}x{}",
             profile.fps, target.output_idx, offset_x, offset_y, width, height
         );
-        command.args(["-f", "lavfi", "-thread_queue_size", "512", "-i", &ddagrab]);
+        let queue = screen_queue_size(u64::from(width.max(2)) * u64::from(height.max(2)));
+        command.args([
+            "-f",
+            "lavfi",
+            "-thread_queue_size",
+            &queue.to_string(),
+            "-i",
+            &ddagrab,
+        ]);
         ("ddagrab-cpu", None)
     } else if cfg!(windows)
         && (source.kind == "display" || source.kind == "window" || source.kind == "region")
@@ -1193,13 +1302,16 @@ fn add_screen_video_input(
         // scale before being handed to gdigrab (a no-op at 100% scaling).
         // -draw_mouse 0 hides the native mouse cursor so software custom cursor overlay can be customized post-recording.
         let logical = gdigrab_logical_bounds(bounds, system_dpi());
+        let queue = screen_queue_size(
+            u64::from(logical.width.max(2) as u32) * u64::from(logical.height.max(2) as u32),
+        );
         command.args([
             "-f",
             "gdigrab",
             "-draw_mouse",
             "0",
             "-thread_queue_size",
-            "512",
+            &queue.to_string(),
             "-framerate",
             &profile.fps.to_string(),
             "-video_size",
@@ -1256,19 +1368,32 @@ fn add_screen_video_input(
         // sources crop the display-sized frame in the video filter, the same
         // shape as the PipeWire path.
         #[cfg(target_os = "macos")]
-        let (device_spec, crop) = {
+        let (device_spec, crop, input_pixels) = {
             let input = super::macos_native::resolve_screen_input(ffmpeg_path, source);
-            (input.device_spec, input.crop)
+            // AVFoundation delivers the whole display; a window/region crop is
+            // applied later in the filter graph, so size the queue for the
+            // display, not the crop.
+            let pixels = input
+                .display
+                .as_ref()
+                .map(|display| {
+                    u64::from(display.bounds.width.max(2) as u32)
+                        * u64::from(display.bounds.height.max(2) as u32)
+                })
+                // Enumeration failed → assume 4K so the queue stays shallow.
+                .unwrap_or(3840 * 2160);
+            (input.device_spec, input.crop, pixels)
         };
         #[cfg(not(target_os = "macos"))]
-        let (device_spec, crop) = ("default".to_string(), None);
+        let (device_spec, crop, input_pixels) = ("default".to_string(), None, 3840 * 2160);
+        let queue = screen_queue_size(input_pixels);
         command.args([
             "-f",
             "avfoundation",
             "-capture_cursor",
             "0",
             "-thread_queue_size",
-            "512",
+            &queue.to_string(),
             "-framerate",
             &profile.fps.to_string(),
             "-i",
@@ -1317,6 +1442,7 @@ fn add_screen_video_input(
         // PipeWire input above.
         let w = bounds.width.max(2);
         let h = bounds.height.max(2);
+        let queue = screen_queue_size(u64::from(w as u32) * u64::from(h as u32));
         let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
         command.args([
             "-f",
@@ -1324,7 +1450,7 @@ fn add_screen_video_input(
             "-draw_mouse",
             "0",
             "-thread_queue_size",
-            "512",
+            &queue.to_string(),
             "-framerate",
             &profile.fps.to_string(),
             "-video_size",
@@ -1416,10 +1542,17 @@ fn build_video_filter(
     use_ddagrab: bool,
     external_video_input: Option<&PipeWireVideoInput>,
     screen_crop: Option<Bounds>,
+    vaapi: bool,
 ) -> String {
     let fit_filter = source
         .bounds
         .build_aspect_fit_filter(profile.width, profile.height);
+    // VAAPI encoders only take hw frames, so the graph's final stage uploads.
+    let upload = if vaapi {
+        format!(",{VAAPI_UPLOAD}")
+    } else {
+        String::new()
+    };
 
     #[cfg(target_os = "linux")]
     if let Some(input) = external_video_input {
@@ -1433,7 +1566,7 @@ fn build_video_filter(
             ));
         }
         chain.push_str(&format!("fps={},", profile.fps));
-        return format!("[0:v]{chain}{fit_filter}[vout]");
+        return format!("[0:v]{chain}{fit_filter}{upload}[vout]");
     }
 
     // Backends that only ingest whole displays (avfoundation `Capture screen
@@ -1446,9 +1579,9 @@ fn build_video_filter(
     if use_ddagrab {
         // ddagrab emits D3D11 hardware frames; download to system memory as
         // bgra before aspect-preserving scale and letterboxing (fixes P0.5).
-        format!("[0:v]hwdownload,format=bgra,{fit_filter}[vout]")
+        format!("[0:v]hwdownload,format=bgra,{fit_filter}{upload}[vout]")
     } else {
-        format!("[0:v]{crop_filter}{fit_filter}[vout]")
+        format!("[0:v]{crop_filter}{fit_filter}{upload}[vout]")
     }
 }
 
@@ -1505,17 +1638,20 @@ fn add_video_encoder_for_frames(
         command.args(["-hw_encoding", "1"]);
     }
     // GPU pipelines hand D3D11 frames to the encoder; CPU pipelines feed NV12
-    // (MF hardware) or yuv420p (software encoders).
-    command.args([
-        "-pix_fmt",
-        if gpu_frames {
-            "d3d11"
-        } else if encoder == "h264_mf" {
-            "nv12"
-        } else {
-            "yuv420p"
-        },
-    ]);
+    // (MF hardware) or yuv420p (software encoders). VAAPI frames are created by
+    // the graph's upload stage and must not be forced back to a system format.
+    if !super::encoder::is_vaapi_encoder(encoder) {
+        command.args([
+            "-pix_fmt",
+            if gpu_frames {
+                "d3d11"
+            } else if encoder == "h264_mf" {
+                "nv12"
+            } else {
+                "yuv420p"
+            },
+        ]);
+    }
     command.args(["-r", &format!("{output_fps}")]);
 
     // GOP tracks the real output rate so the keyframe cadence stays ~1 second
@@ -1586,6 +1722,13 @@ fn add_video_encoder_for_frames(
                 "-realtime",
                 "1",
             ]);
+        }
+        "h264_vaapi" | "hevc_vaapi" => {
+            // VAAPI has no CRF mode and no zerolatency tune. The shared
+            // realtime paths target an average bitrate, so VBR matches the
+            // other hardware encoders — CBR would pad a static screen up to
+            // the full target.
+            command.args(["-rc_mode", "VBR", "-b:v", &format!("{default_bitrate}k")]);
         }
         "libx264" | "libx265" => {
             // Allocate 4 threads for 4K / 60fps capture to prevent encoder bottleneck on powerful machines,
@@ -2234,6 +2377,40 @@ mod tests {
 
         // The capture rect must be translated into the output's own space.
         assert!(debug.contains("ddagrab=draw_mouse=0:framerate=30:output_idx=2:offset_x=200:offset_y=120:video_size=640x480"));
+        // Queue depth follows the grabbed frame size, never the old flat 512.
+        // A 640x480 crop sits on the 32-frame ceiling.
+        assert!(debug.contains("\"-thread_queue_size\" \"32\""));
+        assert!(!debug.contains("\"-thread_queue_size\" \"512\""));
+    }
+
+    #[test]
+    fn screen_queue_depth_follows_the_grabbed_frame_size() {
+        // Each raw packet is a whole BGRA frame, so a flat 512 was >4 GB at
+        // 1080p and >16 GB at 4K of potential backlog. The byte budget keeps
+        // ~96 MiB in flight with a 4-frame floor for high resolutions.
+        assert_eq!(screen_queue_size(640 * 480), 32); // clamped ceiling
+        assert_eq!(screen_queue_size(1280 * 720), 27);
+        assert_eq!(screen_queue_size(1920 * 1080), 12);
+        assert_eq!(screen_queue_size(2560 * 1440), 6);
+        assert_eq!(screen_queue_size(3840 * 2160), 4); // floor
+        assert_eq!(screen_queue_size(5120 * 2880), 4);
+        // Never zero, never unbounded.
+        assert_eq!(screen_queue_size(0), 32);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn gdigrab_queue_follows_the_grab_size() {
+        // A small region: the DPI-virtualized grab size stays far below 1080p
+        // on every scaling factor, so the assertion is display-independent.
+        let source = region_source(0, 0, 800, 600);
+        let mut command = Command::new("ffmpeg");
+        add_screen_video_input(&mut command, "ffmpeg", &source, &test_profile(), None, None);
+        let debug = format!("{command:?}");
+        assert!(debug.contains("\"-f\" \"gdigrab\""));
+        // A small grab sits on the 32-frame ceiling regardless of DPI scaling.
+        assert!(debug.contains("\"-thread_queue_size\" \"32\""));
+        assert!(!debug.contains("\"-thread_queue_size\" \"512\""));
     }
 
     #[test]
@@ -2310,11 +2487,26 @@ mod tests {
     #[test]
     fn ddagrab_filter_downloads_hardware_frames() {
         let source = region_source(0, 0, 800, 600);
-        let filter = build_video_filter(&source, &test_profile(), true, None, None);
+        let filter = build_video_filter(&source, &test_profile(), true, None, None, false);
         assert!(filter.starts_with("[0:v]hwdownload,format=bgra,"));
 
-        let gdigrab_filter = build_video_filter(&source, &test_profile(), false, None, None);
+        let gdigrab_filter = build_video_filter(&source, &test_profile(), false, None, None, false);
         assert!(gdigrab_filter.starts_with("[0:v]scale="));
+    }
+
+    #[test]
+    fn vaapi_filter_uploads_the_final_stage() {
+        let source = region_source(0, 0, 800, 600);
+        let filter = build_video_filter(&source, &test_profile(), false, None, None, true);
+        // The upload must be the last stage: h264_vaapi only takes hw frames.
+        assert!(
+            filter.ends_with(&format!(",{VAAPI_UPLOAD}[vout]")),
+            "{filter}"
+        );
+        // Software encoding is byte-identical to the pre-VAAPI graph.
+        let software = build_video_filter(&source, &test_profile(), false, None, None, false);
+        assert!(!software.contains("hwupload"));
+        assert!(software.ends_with("[vout]"));
     }
 
     #[test]
@@ -2753,6 +2945,111 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    fn webcam_input_buffers_follow_the_negotiated_mode() {
+        let profile = webcam_profile();
+        let raw = CameraMode {
+            width: 1280,
+            height: 720,
+            fps: 30.0,
+            pixel_format: Some("yuyv422".into()),
+            codec: None,
+        };
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            Some(&raw),
+            None,
+        );
+        let debug = format!("{command:?}");
+        // Raw 720p frames are ~1.4-1.8 MB each: a 32 MB ceiling is enough
+        // slack, and 8 queued packets cannot balloon into GBs.
+        assert!(debug.contains("\"-rtbufsize\" \"32M\""));
+        assert!(debug.contains("\"-thread_queue_size\" \"8\""));
+
+        let mjpeg = CameraMode {
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+            pixel_format: None,
+            codec: Some("mjpeg".into()),
+        };
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            Some(&mjpeg),
+            None,
+        );
+        let debug = format!("{command:?}");
+        // Compressed 1080p: bigger frame ceiling, still a shallow queue.
+        assert!(debug.contains("\"-rtbufsize\" \"64M\""));
+        assert!(debug.contains("\"-thread_queue_size\" \"16\""));
+
+        // No negotiated mode: assume raw 720p (the sidecar ceiling).
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            None,
+            None,
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("\"-rtbufsize\" \"32M\""));
+        assert!(debug.contains("\"-thread_queue_size\" \"8\""));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn webcam_vaapi_uploads_only_the_recording_branch() {
+        let profile = webcam_profile();
+        let mode = CameraMode {
+            width: 1280,
+            height: 720,
+            fps: 30.0,
+            pixel_format: Some("nv12".into()),
+            codec: None,
+        };
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "h264_vaapi",
+            "webcam.mp4",
+            Some(&mode),
+            Some(5),
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("\"-vaapi_device\""));
+        // Recording branch uploaded; preview branch stays on system memory for
+        // the MJPEG encoder.
+        assert!(debug.contains("[vrec]format=nv12,hwupload[vout]"));
+        assert!(debug.contains("[vprev]fps=5"));
+        assert!(!debug.contains("-pix_fmt"));
+        // Software encoding keeps the old graph untouched.
+        let (command, _) = build_webcam_command(
+            "ffmpeg",
+            "USB Camera",
+            &profile,
+            "libx264",
+            "webcam.mp4",
+            Some(&mode),
+            Some(5),
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("[0:v]setpts=PTS-STARTPTS,scale="));
+        assert!(!debug.contains("hwupload"));
+        assert!(!debug.contains("-vaapi_device"));
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn webcam_negotiated_codec_mode_uses_vcodec() {
         let profile = webcam_profile();
         let mode = CameraMode {
@@ -2933,6 +3230,43 @@ mod tests {
     }
 
     #[test]
+    fn vaapi_encoder_has_no_system_pix_fmt() {
+        let profile = test_profile();
+        let mut command = Command::new("ffmpeg");
+        add_video_encoder(&mut command, &profile, "h264_vaapi", false, 30.0);
+        let debug = format!("{command:?}");
+
+        // The graph's upload stage produces vaapi frames; forcing a system
+        // pixel format here would make FFmpeg insert a download/conversion.
+        assert!(!debug.contains("-pix_fmt"), "{debug}");
+        assert!(debug.contains("\"-rc_mode\" \"VBR\""));
+        assert!(debug.contains("\"-b:v\""));
+        // No x264-only knobs may leak into the VAAPI path.
+        assert!(!debug.contains("zerolatency"));
+        assert!(!debug.contains("-x264-params"));
+    }
+
+    #[test]
+    fn vaapi_device_is_emitted_for_vaapi_only() {
+        // The node is process-wide probe state; serialize with the tests that
+        // mutate it and start from the fallback.
+        let _guard = super::super::encoder::VAAPI_NODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        super::super::encoder::store_vaapi_node(None);
+
+        let mut command = Command::new("ffmpeg");
+        add_vaapi_device(&mut command, "h264_vaapi");
+        let debug = format!("{command:?}");
+        assert!(debug.contains("\"-vaapi_device\""));
+        assert!(debug.contains(super::super::encoder::VAAPI_RENDER_NODE));
+
+        let mut command = Command::new("ffmpeg");
+        add_vaapi_device(&mut command, "libx264");
+        assert!(!format!("{command:?}").contains("-vaapi_device"));
+    }
+
+    #[test]
     fn segment_movflags_drop_empty_moov_for_mediafoundation() {
         // `-hw_encoding 1` + `+empty_moov` writes a corrupt first sample (the
         // hw MFT's format-change extradata arrives after the empty moov —
@@ -3005,6 +3339,7 @@ mod tests {
             buffer_kbps: target * 3 / 2,
             crf: 21,
             limited_by_camera: false,
+            encoder_limited: false,
             fit,
         }
     }
@@ -3155,33 +3490,87 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn camera_command_scales_input_buffer_to_frame_size() {
+    fn camera_command_sizes_input_buffers_from_the_input_mode() {
+        // Raw input: buffer + queue follow the negotiated input size, not the
+        // output budget (a 4K sensor scaled down to 720p still queues 4K raw
+        // frames).
         for (w, h, expected) in [
-            (1280, 720, "64M"),
-            (1920, 1080, "150M"),
-            (3840, 2160, "512M"),
+            (1280, 720, "32M"),
+            (1920, 1080, "64M"),
+            (3840, 2160, "256M"),
         ] {
-            let plan = camera_test_plan(CameraFit::Adaptive, w, h, 30.0, None);
+            let plan = camera_test_plan(
+                CameraFit::Native,
+                w,
+                h,
+                30.0,
+                Some(camera_mode(w, h, 30.0, Some("yuyv422"), None)),
+            );
             let (command, _) =
                 build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
             let args = camera_args(&command);
             assert_eq!(paired_arg(&args, "-rtbufsize"), Some(expected), "{w}x{h}");
+            assert_eq!(
+                paired_arg(&args, "-thread_queue_size"),
+                Some("8"),
+                "{w}x{h}"
+            );
         }
-        // >1080p also bumps the demux thread queue.
-        let plan = camera_test_plan(CameraFit::Adaptive, 3840, 2160, 30.0, None);
+
+        // 4K input fitted down to a 1080p output still gets the 4K buffer.
+        let plan = camera_test_plan(
+            CameraFit::Scale,
+            1920,
+            1080,
+            30.0,
+            Some(camera_mode(3840, 2160, 30.0, Some("nv12"), None)),
+        );
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
+        assert_eq!(
+            paired_arg(&camera_args(&command), "-rtbufsize"),
+            Some("256M")
+        );
+
+        // Compressed input (MJPEG) keeps a deeper packet queue — packets are
+        // small, so the depth costs little.
+        let plan = camera_test_plan(
+            CameraFit::Native,
+            1920,
+            1080,
+            30.0,
+            Some(camera_mode(1920, 1080, 30.0, None, Some("mjpeg"))),
+        );
         let (command, _) =
             build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
         assert_eq!(
             paired_arg(&camera_args(&command), "-thread_queue_size"),
-            Some("512")
+            Some("16")
         );
-        let plan = camera_test_plan(CameraFit::Adaptive, 1920, 1080, 30.0, None);
+
+        // Device-defaults attempts size for at least 1080p raw.
+        let plan = camera_test_plan(CameraFit::Adaptive, 1280, 720, 30.0, None);
         let (command, _) =
             build_camera_command("ffmpeg", "USB Camera", &plan, "libx264", "cam.mp4", None);
         assert_eq!(
-            paired_arg(&camera_args(&command), "-thread_queue_size"),
-            Some("256")
+            paired_arg(&camera_args(&command), "-rtbufsize"),
+            Some("64M")
         );
+        assert_eq!(
+            paired_arg(&camera_args(&command), "-thread_queue_size"),
+            Some("16")
+        );
+    }
+
+    #[test]
+    fn camera_buffer_tiers_cover_the_advertised_modes() {
+        assert_eq!(camera_rtbufsize(640 * 480), "32M");
+        assert_eq!(camera_rtbufsize(1280 * 720), "32M");
+        assert_eq!(camera_rtbufsize(1920 * 1080), "64M");
+        assert_eq!(camera_rtbufsize(2560 * 1440), "256M");
+        assert_eq!(camera_rtbufsize(3840 * 2160), "256M");
+        assert_eq!(camera_queue_size(true), "8");
+        assert_eq!(camera_queue_size(false), "16");
     }
 
     #[test]
@@ -3235,6 +3624,42 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "zerolatency"));
         assert_eq!(paired_arg(&args, "-crf"), Some("21"));
         assert_eq!(paired_arg(&args, "-maxrate"), Some("10264k"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn camera_command_vaapi_uploads_recording_branch_only() {
+        let plan = camera_test_plan(
+            CameraFit::Native,
+            1920,
+            1080,
+            30.0,
+            Some(camera_mode(1920, 1080, 30.0, Some("nv12"), None)),
+        );
+        let (command, _) = build_camera_command(
+            "ffmpeg",
+            "USB Camera",
+            &plan,
+            "h264_vaapi",
+            "cam.mp4",
+            Some(5),
+        );
+        let args = camera_args(&command);
+        let filter = filter_arg(&args);
+        assert!(args.iter().any(|arg| arg == "-vaapi_device"));
+        // Self-view keeps software frames; only the recording branch uploads.
+        assert!(filter.contains("split=2[vrec][vprev]"));
+        assert!(filter.contains("[vrec]format=nv12,hwupload[vout]"));
+        assert!(filter.contains("[vprev]fps=5"));
+        assert_eq!(paired_arg(&args, "-rc_mode"), Some("VBR"));
+        assert_eq!(paired_arg(&args, "-pix_fmt"), None);
+
+        // No preview → the upload is the graph's final stage.
+        let (command, _) =
+            build_camera_command("ffmpeg", "USB Camera", &plan, "h264_vaapi", "cam.mp4", None);
+        let args = camera_args(&command);
+        let filter = filter_arg(&args);
+        assert!(filter.ends_with("format=nv12,hwupload[vout]"), "{filter}");
     }
 
     #[test]

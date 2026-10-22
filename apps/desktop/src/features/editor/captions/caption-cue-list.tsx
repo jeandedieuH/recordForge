@@ -15,10 +15,10 @@ import {
 import { Badge, Button, IconButton, ScrollArea, Textarea, cn, useToast } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 import { useTimelineInteraction } from "../timeline/use-timeline-interaction"
+import { usePlayheadMs } from "../timeline/use-playback-state"
 
 interface CaptionCueListProps {
   track: TimelineTrack
-  playheadMs: number
   isPlaying: boolean
   screenDurationMs: number
   design: CaptionDesign
@@ -47,12 +47,13 @@ const CHIP_CLASS = "px-1 py-0 font-sans text-[10px] font-normal leading-tight [&
  */
 export function CaptionCueList({
   track,
-  playheadMs,
   isPlaying,
   screenDurationMs,
   design,
   canvas,
 }: CaptionCueListProps) {
+  // Subscribed internally so playback frames re-render this list only.
+  const playheadMs = usePlayheadMs()
   const seek = useTimelineStore((state) => state.seek)
   const setSelection = useTimelineStore((state) => state.setSelection)
   const execute = useTimelineStore((state) => state.execute)

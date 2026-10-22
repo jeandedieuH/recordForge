@@ -8,6 +8,7 @@ import { EyeOff, ShieldAlert } from "lucide-react"
 import { Button, Switch } from "@recordforge/ui"
 import { useTimelineStore } from "../../../stores/timeline-store"
 
+
 const MASK_MODES: { value: MaskMode; label: string }[] = [
   { value: "blur", label: "Blur" },
   { value: "pixelate", label: "Pixelate" },
@@ -17,7 +18,6 @@ const MASK_MODES: { value: MaskMode; label: string }[] = [
 export function PrivacyPanel() {
   const execute = useTimelineStore((state) => state.execute)
   const timeline = useTimelineStore((state) => state.engine?.history.present)
-  const view = useTimelineStore((state) => state.view)
 
   const masks =
     timeline?.tracks.flatMap((track) =>
@@ -30,6 +30,7 @@ export function PrivacyPanel() {
 
   function addMask(mode: MaskMode) {
     if (!timeline || !screenAssetId) return
+    const view = useTimelineStore.getState().view
     const startMs = Math.round(view.playheadMs)
     const endMs = Math.min(view.durationMs, view.playheadMs + 2_000)
     if (endMs <= startMs) return

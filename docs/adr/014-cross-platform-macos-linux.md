@@ -34,6 +34,13 @@ Expand RecordForge to support **Windows 10/11**, **macOS 12+ (Apple Silicon & In
   - macOS: Apple VideoToolbox (`h264_videotoolbox` on Apple Silicon and Intel).
   - Linux: VAAPI (`h264_vaapi`), NVIDIA NVENC (`h264_nvenc`), Intel QuickSync (`h264_qsv`).
   - Universal Software Fallback: `libx264`.
+- VAAPI only accepts `vaapi` hardware frames, so the capture and export
+  builders append a `format=nv12,hwupload` stage to the video branch (never to
+  the MJPEG self-view branch) and pass `-vaapi_device <node>`. The startup
+  probe enumerates every `/dev/dri/renderD*` node, keeps the first one that can
+  actually encode, and that validated node is what every builder receives — a
+  discrete GPU is frequently not `renderD128`. Proxy/media jobs keep the shared
+  priority list and never receive an un-uploadable encoder.
 
 ### 3. OS Credential Vault Abstraction
 - Windows: Native Windows Credential Manager.

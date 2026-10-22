@@ -214,14 +214,28 @@ fn build_webcam_concat_command(
     command
         .arg("-y")
         .args(["-hide_banner", "-loglevel", "error"]);
+    super::ffmpeg::add_vaapi_device(&mut command, encoder);
     for segment in segments {
         command.arg("-i").arg(&segment.path);
     }
 
     let filter = build_webcam_stitch_filter(segments, camera.width, camera.height);
+    // VAAPI needs the stitched output uploaded before the encoder; the label
+    // is renamed so the map below targets the hw-format branch.
+    let (filter, map_label) = if super::encoder::is_vaapi_encoder(encoder) {
+        (
+            format!(
+                "{filter};[webcam]{upload}[webcam_hw]",
+                upload = super::ffmpeg::VAAPI_UPLOAD
+            ),
+            "[webcam_hw]",
+        )
+    } else {
+        (filter, "[webcam]")
+    };
     command
         .args(["-filter_complex", &filter])
-        .args(["-map", "[webcam]", "-an"]);
+        .args(["-map", map_label, "-an"]);
     super::ffmpeg::add_video_encoder(&mut command, camera, encoder, true, camera.fps as f64);
     let total_duration = segments
         .iter()
@@ -786,6 +800,44 @@ mod tests {
         assert!(debug.contains("\"-c:v\" \"libx264\""));
         assert!(debug.contains("\"-r\" \"30\""));
         assert!(!debug.contains("\"-r\" \"60\""));
+    }
+
+    #[test]
+    fn webcam_concat_uploads_for_vaapi_and_stays_software_by_default() {
+        let camera =
+            super::super::webcam::camera_profile(&super::super::config::builtin_profiles()[0]);
+        let segments = [WebcamSegmentInput {
+            path: PathBuf::from("webcam_000.mp4"),
+            duration: Duration::from_secs(3),
+            offset_ms: 0,
+        }];
+
+        let software = build_webcam_concat_command(
+            "ffmpeg",
+            &segments,
+            Path::new("webcam.partial.mp4"),
+            &camera,
+            "libx264",
+        );
+        let debug = format!("{software:?}");
+        assert!(!debug.contains("hwupload"));
+        assert!(!debug.contains("-vaapi_device"));
+        assert!(debug.contains("\"-map\" \"[webcam]\""));
+
+        let vaapi = build_webcam_concat_command(
+            "ffmpeg",
+            &segments,
+            Path::new("webcam.partial.mp4"),
+            &camera,
+            "h264_vaapi",
+        );
+        let debug = format!("{vaapi:?}");
+        assert!(debug.contains("\"-vaapi_device\""));
+        // The stitched output is uploaded into a renamed label the map uses.
+        assert!(debug.contains("[webcam]format=nv12,hwupload[webcam_hw]"));
+        assert!(debug.contains("\"-map\" \"[webcam_hw]\""));
+        // VAAPI must not be handed a system pixel format.
+        assert!(!debug.contains("-pix_fmt"));
     }
 
     #[test]

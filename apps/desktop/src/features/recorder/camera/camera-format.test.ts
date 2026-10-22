@@ -23,6 +23,7 @@ const BASE_PLAN: CameraCapturePlan = {
   bufferKbps: 10264,
   crf: 21,
   limitedByCamera: false,
+  encoderLimited: false,
 }
 
 describe("camera-format", () => {
@@ -90,6 +91,16 @@ describe("camera-format", () => {
     expect(estimateImpact(pHigh, false)).toBe("heavy")
     expect(estimateImpact(p4k, true)).toBe("moderate")
     expect(estimateImpact(p4k, false)).toBe("heavy")
+    // What the Rust planner actually returns for Ultra on a software-only
+    // machine: 1080p and flagged, so the chip says Moderate — not Heavy for a
+    // 4K encode that will never run.
+    const cappedUltra: CameraCapturePlan = {
+      ...BASE_PLAN,
+      profileId: "camera-ultra",
+      encoderLimited: true,
+    }
+    expect(estimateImpact(cappedUltra, false)).toBe("moderate")
+    expect(planSummary(cappedUltra)).toBe("1920×1080 · 30 fps")
   })
 
   it("summarizes a plan or reports Auto", () => {

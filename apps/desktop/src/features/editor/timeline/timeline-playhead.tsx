@@ -2,9 +2,9 @@ import { memo, useState } from "react"
 import { formatTimelineTime } from "./timeline-ruler"
 import { snapTime, type SnapTarget } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
+import { usePlayheadMs } from "./use-playback-state"
 
 export interface TimelinePlayheadProps {
-  playheadMs: number
   pixelsPerMs: number
   timelineHeight: number
   durationMs?: number
@@ -20,7 +20,6 @@ export interface TimelinePlayheadProps {
 }
 
 export const TimelinePlayhead = memo(function TimelinePlayhead({
-  playheadMs,
   pixelsPerMs,
   timelineHeight,
   durationMs,
@@ -34,6 +33,9 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
   onSnapGuide,
   isSplitTool = false,
 }: TimelinePlayheadProps) {
+  // Subscribed internally so a playback tick re-renders only this needle,
+  // not the lanes that host it.
+  const playheadMs = usePlayheadMs()
   const [isDragging, setIsDragging] = useState(false)
   const [snappedLabel, setSnappedLabel] = useState<string | null>(null)
   const left = Math.round(playheadMs * pixelsPerMs)
@@ -188,7 +190,7 @@ export const TimelinePlayhead = memo(function TimelinePlayhead({
         {/* Sculpted Precision Playhead Cap */}
         <div
           className={cn(
-            "flex h-5 w-7 items-center justify-center rounded-t-md bg-gradient-to-b from-primary via-primary to-primary-hover text-white shadow-e2 transition-all duration-fast",
+            "flex h-5 w-7 items-center justify-center rounded-t-md bg-linear-to-b from-primary via-primary to-primary-hover text-white shadow-e2 transition-all duration-fast",
             isDragging
               ? "scale-110 shadow-e3 ring-2 ring-primary ring-offset-1 ring-offset-surface-dim"
               : "group-hover:scale-105 group-hover:shadow-e2",

@@ -212,6 +212,7 @@ describe("recording contracts", () => {
       bufferKbps: 10263,
       crf: 21,
       limitedByCamera: false,
+      encoderLimited: false,
     }
     expect(cameraCapturePlanSchema.parse(plan)).toEqual(plan)
 
@@ -752,7 +753,7 @@ describe("recording contracts", () => {
       expect(parsed.sourceType).toBe("screen")
       expect(parsed.profile).toBe("camera-only")
       expect(parsed.cameraProfile).toBe("camera-balanced")
-      expect(parsed.cameraPreviewMode).toBe("standard")
+      expect(parsed.cameraPreviewMode).toBe("low")
       expect(parsed.cameraMirrorPreview).toBe(true)
       expect(parsed.cameraFramingGuide).toBe(false)
     })
@@ -955,8 +956,12 @@ describe("recording contracts", () => {
         microphoneId: "mic-custom",
       })
       expect(parsed.webcamPreviewMode).toBe("low")
+      // Camera-only self-view is a second MJPEG encode inside the recording
+      // process, so it defaults to the cheap tier as well.
+      expect(parsed.cameraPreviewMode).toBe("low")
       expect(parsed.gpuScreenCapture).toBe(true)
       expect(defaultRecordingPreferences.webcamPreviewMode).toBe("low")
+      expect(defaultRecordingPreferences.cameraPreviewMode).toBe("low")
       expect(defaultRecordingPreferences.gpuScreenCapture).toBe(true)
     })
 

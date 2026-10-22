@@ -4,12 +4,12 @@ import { computePreviewMediaSync } from "@recordforge/editor-core"
 import { cn } from "@recordforge/ui"
 import { Circle, Square } from "lucide-react"
 import { toAssetUrl } from "../media/derivative-resources"
+import { usePlayheadMs } from "./use-playback-state"
 
 interface CameraPreviewProps {
   clips: CameraClip[]
   outputs: MediaVideoTrackOutput[]
   workDir?: string | null
-  playheadMs: number
   isPlaying: boolean
   playbackRate: number
   frameMs: number
@@ -126,7 +126,6 @@ export function CameraPreview({
   clips,
   outputs,
   workDir,
-  playheadMs,
   isPlaying,
   playbackRate,
   frameMs,
@@ -136,6 +135,9 @@ export function CameraPreview({
   onSelectClip,
   onUpdateTransform,
 }: CameraPreviewProps) {
+  // Subscribed internally — playback frames sync these camera elements
+  // without re-rendering the parent canvas stack.
+  const playheadMs = usePlayheadMs()
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({})
   const gestureRef = useRef<CameraGesture | null>(null)
   const [loadedDimensions, setLoadedDimensions] = useState<

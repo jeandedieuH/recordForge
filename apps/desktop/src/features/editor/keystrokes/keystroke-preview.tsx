@@ -3,10 +3,10 @@ import type { KeystrokeOverlaySettings, TimelineState } from "@recordforge/contr
 import { resolveKeystrokeDisplay, timelineToSourceForTrack } from "@recordforge/editor-core"
 import type { KeystrokeData } from "../../../lib/keystrokes"
 import { KeystrokeBadge } from "./keystroke-badge"
+import { usePlayheadMs } from "../timeline/use-playback-state"
 
 interface KeystrokePreviewProps {
   timeline: TimelineState | null
-  playheadMs: number
   settings: KeystrokeOverlaySettings
   data: KeystrokeData | null
 }
@@ -18,7 +18,9 @@ interface KeystrokePreviewProps {
  * them. Every px is a pure function of playheadMs — scrubbing is exact
  * (same rule as CaptionPreview: no CSS transition animations).
  */
-export function KeystrokePreview({ timeline, playheadMs, settings, data }: KeystrokePreviewProps) {
+export function KeystrokePreview({ timeline, settings, data }: KeystrokePreviewProps) {
+  // Subscribed internally — playback frames re-render only this badge layer.
+  const playheadMs = usePlayheadMs()
   const frameRef = useRef<HTMLDivElement>(null)
   const [frameWidth, setFrameWidth] = useState(0)
 

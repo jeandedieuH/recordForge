@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react"
 import type { AudioClip, MediaAudioTrackOutput, TimelineTrack } from "@recordforge/contracts"
 import { computePreviewMediaSync, evaluateVolumeEnvelope } from "@recordforge/editor-core"
 import { toAssetUrl } from "../../../lib/assets"
+import { usePlayheadMs } from "./use-playback-state"
 
 interface PreviewAudioTrack {
   id: string
@@ -14,7 +15,6 @@ interface PreviewAudioTrack {
 interface AudioTrackPreviewProps {
   tracks: TimelineTrack[]
   outputs: MediaAudioTrackOutput[]
-  playheadMs: number
   isPlaying: boolean
   playbackRate: number
   frameMs: number
@@ -67,7 +67,6 @@ function buildPreviewTracks(
 export function AudioTrackPreview({
   tracks,
   outputs,
-  playheadMs,
   isPlaying,
   playbackRate,
   frameMs,
@@ -75,6 +74,9 @@ export function AudioTrackPreview({
   workDir,
   isVideoSeeking = false,
 }: AudioTrackPreviewProps) {
+  // Subscribed internally — playback frames sync these hidden audio elements
+  // without re-rendering the parent canvas stack.
+  const playheadMs = usePlayheadMs()
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({})
   const previewTracks = useMemo(
     () => buildPreviewTracks(tracks, outputs, assetPaths, workDir),

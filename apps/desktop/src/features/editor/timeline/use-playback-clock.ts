@@ -8,7 +8,7 @@ import {
   type PreviewQualityMode,
 } from "@recordforge/editor-core"
 import { useTimelineStore } from "../../../stores/timeline-store"
-import { usePlayheadMs } from "./use-playback-state"
+import { getPlayheadSnapshot, subscribeToPlayhead } from "./use-playback-state"
 
 interface UsePlaybackClockOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>
@@ -49,7 +49,6 @@ export function usePlaybackClock({
   onPlayNext,
   onPause,
 }: UsePlaybackClockOptions): UsePlaybackClockResult {
-  const playheadMs = usePlayheadMs()
   const isPlaying = useTimelineStore((state) => state.view.isPlaying)
   const playbackRate = useTimelineStore((state) => state.view.playbackRate)
   const clock = useMemo<PlaybackClock | null>(() => {
@@ -61,8 +60,11 @@ export function usePlaybackClock({
   const [isSeeking, setIsSeeking] = useState(false)
   const isSeekingRef = useRef(false)
 
-  const playheadRef = useRef(playheadMs)
-  const drivenPlayheadRef = useRef(playheadMs)
+  // The playhead is read imperatively (subscription below) instead of via
+  // usePlayheadMs: this hook's owner renders the whole timeline view, so a
+  // render-bound playhead subscription would re-render it every video frame.
+  const playheadRef = useRef(getPlayheadSnapshot())
+  const drivenPlayheadRef = useRef(getPlayheadSnapshot())
   const isPlayingRef = useRef(isPlaying)
   const playbackRateRef = useRef(playbackRate)
   const clipIdRef = useRef<string | null>(null)
@@ -74,18 +76,11 @@ export function usePlaybackClock({
   const gapRafRef = useRef<number | null>(null)
 
   // Keep refs synchronized immediately during render so callbacks never observe stale values
-  playheadRef.current = playheadMs
   isPlayingRef.current = isPlaying
   playbackRateRef.current = playbackRate
   onSeekRef.current = onSeek
   onPlayNextRef.current = onPlayNext
   onPauseRef.current = onPause
-
-  // If the authoritative playhead has jumped (e.g. user seek while paused),
-  // reset the driven playhead so the frame loop starts from the right place.
-  if (Math.abs(drivenPlayheadRef.current - playheadMs) > (clock?.frameMs ?? 33) * 2) {
-    drivenPlayheadRef.current = playheadMs
-  }
 
   const handleSeeking = useCallback(() => {
     isSeekingRef.current = true
@@ -230,7 +225,7 @@ export function usePlaybackClock({
     setIsReady(true)
   }, [clock, videoRef])
 
-  // Sync the media element when the user explicitly seeks or toggles playback.
+  // Sync the media element when playback toggles or the source changes.
   useEffect(() => {
     syncVideo()
     const video = videoRef.current
@@ -247,7 +242,30 @@ export function usePlaybackClock({
         video.pause()
       }
     }
-  }, [playheadMs, isPlaying, playbackRate, previewQuality, mediaUrl, syncVideo, videoRef])
+  }, [isPlaying, playbackRate, previewQuality, mediaUrl, syncVideo, videoRef])
+
+  // Playhead changes arrive through an imperative subscription so the editor
+  // does not re-render every video frame. Handles explicit seeks (paused or
+  // playing) exactly like the old effect dependency did.
+  useEffect(() => {
+    return subscribeToPlayhead(() => {
+      const ms = getPlayheadSnapshot()
+      playheadRef.current = ms
+      // If the authoritative playhead has jumped (e.g. user seek while
+      // paused), reset the driven playhead so the frame loop starts from the
+      // right place.
+      if (Math.abs(drivenPlayheadRef.current - ms) > (clock?.frameMs ?? 33) * 2) {
+        drivenPlayheadRef.current = ms
+      }
+      syncVideo()
+      const video = videoRef.current
+      if (video && isPlayingRef.current && video.paused && !isSeekingRef.current) {
+        video.play().catch(() => {
+          onPauseRef.current?.()
+        })
+      }
+    })
+  }, [clock, syncVideo, videoRef])
 
   const handleFrame = useCallback(
     (sourceMs: number) => {

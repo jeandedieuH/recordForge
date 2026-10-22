@@ -10,9 +10,10 @@ import {
   SPACELESS_CHAR,
 } from "@recordforge/editor-core"
 
+import { usePlayheadMs } from "./use-playback-state"
+
 interface CaptionPreviewProps {
   timeline: TimelineState | null
-  playheadMs: number
 }
 
 /**
@@ -28,7 +29,10 @@ interface CaptionPreviewProps {
  * - ASS shadow is a Gaussian blur σ; CSS text-shadow/box-shadow blur is the
  *   same convention closely enough at these radii.
  */
-export function CaptionPreview({ timeline, playheadMs }: CaptionPreviewProps) {
+export function CaptionPreview({ timeline }: CaptionPreviewProps) {
+  // Playhead is subscribed internally so playback frames re-render only this
+  // caption layer, not the parent canvas stack.
+  const playheadMs = usePlayheadMs()
   const frameRef = useRef<HTMLDivElement>(null)
   const [frameWidth, setFrameWidth] = useState(0)
 

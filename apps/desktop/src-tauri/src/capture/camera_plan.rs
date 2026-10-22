@@ -40,6 +40,11 @@ pub struct CameraCapturePlan {
     /// e.g. a 720p-only device under a 1080p budget. A 4:3 output that fills
     /// the budget height (1440x1080) is NOT limited.
     pub limited_by_camera: bool,
+    /// True when the ENCODER (not the camera) capped the output below the
+    /// tier's budget — e.g. Ultra plans 1080p instead of 4K on a machine with
+    /// no hardware H.264 encoder. Serialized so the UI can explain the
+    /// downscale instead of silently promising 4K.
+    pub encoder_limited: bool,
     /// How the input frames map onto the output; runtime-only metadata for
     /// the command builder, never serialized into the contract payload.
     #[serde(skip)]
@@ -178,6 +183,7 @@ fn build_plan(
         // sensor that reaches the full budget height still gets the tier's
         // real output density on the axis that matters.
         limited_by_camera: out_w < profile.width as u32 && out_h < profile.height as u32,
+        encoder_limited: false,
         fit,
     }
 }
@@ -289,32 +295,95 @@ pub fn plan_camera_capture(
 
 /// First (best) attempt for each camera tier, in tier order — the shape the
 /// UI needs after a single device probe to preview all four qualities.
-pub fn plan_all_tiers(modes: &[CameraMode]) -> Vec<CameraCapturePlan> {
+///
+/// `hardware_encoder` applies the software-encoder output cap (see
+/// [`plan_camera_capture_for_encoders`]) so the picker never advertises 4K on
+/// a machine that would encode it with libx264.
+pub fn plan_all_tiers(modes: &[CameraMode], hardware_encoder: bool) -> Vec<CameraCapturePlan> {
     camera_profiles()
         .iter()
-        .filter_map(|profile| plan_camera_capture(profile, modes, None).into_iter().next())
+        .filter_map(|profile| {
+            plan_camera_capture_for_encoders(profile, modes, None, hardware_encoder)
+                .into_iter()
+                .next()
+        })
+        .collect()
+}
+
+/// Output height a software-only encoder may not exceed.
+///
+/// Software x264 at 4K30 measured ~1.24 cores and 427 MB RSS on an i5-11400H
+/// before preview and UI — the 4C/8T low-end target cannot sustain it, and a
+/// camera-only recording has no second encoder to offload to. 1080p at the
+/// tier's bitrate is the honest ceiling.
+pub const SOFTWARE_OUTPUT_HEIGHT_CAP: u32 = 1080;
+
+/// Plan a tier for the encoders this machine actually has.
+///
+/// With no hardware H.264 encoder available, the tier's output budget is
+/// clamped to [`SOFTWARE_OUTPUT_HEIGHT_CAP`] (aspect preserved) and every plan
+/// is marked `encoder_limited` so the UI can explain the downscale. A locked
+/// segment geometry is never clamped: pause/resume fragments must stay
+/// stream-copy-concat compatible with the first segment.
+pub fn plan_camera_capture_for_encoders(
+    profile: &RecordingProfile,
+    modes: &[CameraMode],
+    lock: Option<CameraOutputLock>,
+    hardware_encoder: bool,
+) -> Vec<CameraCapturePlan> {
+    if hardware_encoder || lock.is_some() {
+        return plan_camera_capture(profile, modes, lock);
+    }
+
+    let budget_height = profile.height.max(0) as u32;
+    if budget_height <= SOFTWARE_OUTPUT_HEIGHT_CAP {
+        return plan_camera_capture(profile, modes, lock);
+    }
+
+    // Preserve the aspect ratio rather than distorting: only the 16:9 4K tier
+    // exceeds the cap today, so 3840x2160 becomes 1920x1080.
+    let factor = SOFTWARE_OUTPUT_HEIGHT_CAP as f64 / budget_height as f64;
+    let capped_width = even_down((profile.width.max(0) as f64 * factor) as u32);
+    let mut capped = profile.clone();
+    capped.width = capped_width as i32;
+    capped.height = SOFTWARE_OUTPUT_HEIGHT_CAP as i32;
+
+    plan_camera_capture(&capped, modes, lock)
+        .into_iter()
+        .map(|plan| CameraCapturePlan {
+            encoder_limited: true,
+            ..plan
+        })
         .collect()
 }
 
 /// x264 speed preset for a camera attempt, traded against the output pixel
 /// rate so realtime encoding survives on low-end CPUs. Ultra is already
 /// expensive at 4K30 (~249 Mpx/s), so it takes the cheapest preset.
+///
+/// Software x264 cannot hold realtime at 1080p30+ with a quality preset on the
+/// 4C/8T low-end target (measured ~0.86 core for `superfast` at 1080p30 on an
+/// i5-11400H; a 2018-era mobile CPU needs roughly 1.5x that), and a camera-only
+/// recording has no second encoder to offload to. Above the 35 Mpx/s knee
+/// (1080p30) the ladder therefore drops one rung and the tier's `crf`/bitrate
+/// budget — not the preset — carries the quality difference.
 pub fn x264_preset_for(profile_id: &str, plan: &CameraCapturePlan) -> &'static str {
     let mpx_per_s = plan.output_width as f64 * plan.output_height as f64 * plan.output_fps / 1e6;
+    let heavy = mpx_per_s > 35.0;
     match profile_id {
         "camera-low" => "ultrafast",
         "camera-balanced" => {
-            if mpx_per_s <= 35.0 {
-                "veryfast"
+            if heavy {
+                "ultrafast"
             } else {
                 "superfast"
             }
         }
         "camera-high" => {
-            if mpx_per_s <= 70.0 {
-                "veryfast"
-            } else {
+            if heavy {
                 "superfast"
+            } else {
+                "veryfast"
             }
         }
         "camera-ultra" => "ultrafast",
@@ -553,7 +622,7 @@ mod tests {
 
     #[test]
     fn plan_all_tiers_returns_one_plan_per_tier_in_order() {
-        let plans = plan_all_tiers(&typical_webcam());
+        let plans = plan_all_tiers(&typical_webcam(), true);
         assert_eq!(plans.len(), 4);
         let ids: Vec<&str> = plans.iter().map(|p| p.profile_id.as_str()).collect();
         assert_eq!(
@@ -565,6 +634,85 @@ mod tests {
                 "camera-ultra"
             ]
         );
+    }
+
+    #[test]
+    fn software_only_caps_ultra_to_1080p() {
+        let modes = vec![mode(3840, 2160, 30.0, Some("nv12"), None)];
+        let ultra = tier("camera-ultra");
+
+        // Hardware encoder: the tier's 4K budget stands.
+        let hardware = plan_camera_capture_for_encoders(&ultra, &modes, None, true);
+        assert_eq!(
+            (hardware[0].output_width, hardware[0].output_height),
+            (3840, 2160)
+        );
+        assert!(!hardware[0].encoder_limited);
+
+        // Software encoder: 4K30 libx264 measured ~1.24 cores + 427 MB before
+        // preview/UI, so Ultra plans 1080p instead and says why.
+        let software = plan_camera_capture_for_encoders(&ultra, &modes, None, false);
+        assert_eq!(
+            (software[0].output_width, software[0].output_height),
+            (1920, 1080)
+        );
+        assert!(software[0].encoder_limited);
+        // The camera fills the capped budget → the camera is not the limit.
+        assert!(!software[0].limited_by_camera);
+        // Rate control re-derives from the capped geometry, still inside the
+        // tier's clamp (ultra min 10000 kbps at 1080p30).
+        assert_eq!(software[0].video_bitrate_kbps, 10_000);
+        // The device-defaults attempt is capped too.
+        assert!(software.last().unwrap().encoder_limited);
+        assert_eq!(
+            (
+                software.last().unwrap().output_width,
+                software.last().unwrap().output_height
+            ),
+            (1920, 1080)
+        );
+
+        // Tiers already at or below the cap are untouched and unflagged.
+        let balanced = tier("camera-balanced");
+        let plans = plan_camera_capture_for_encoders(&balanced, &modes, None, false);
+        assert_eq!(
+            (plans[0].output_width, plans[0].output_height),
+            (1920, 1080)
+        );
+        assert!(!plans[0].encoder_limited);
+    }
+
+    #[test]
+    fn software_only_cap_is_aspect_preserving_and_even() {
+        let mut ultra = tier("camera-ultra");
+        // A DCI-ish 4096x2160 budget becomes 2048x1080, not 1920x1080.
+        ultra.width = 4096;
+        let modes = vec![mode(4096, 2160, 30.0, Some("nv12"), None)];
+        let plans = plan_camera_capture_for_encoders(&ultra, &modes, None, false);
+        assert_eq!(
+            (plans[0].output_width, plans[0].output_height),
+            (2048, 1080)
+        );
+        assert_eq!(plans[0].output_width % 2, 0);
+        assert!(plans[0].encoder_limited);
+    }
+
+    #[test]
+    fn output_lock_wins_over_the_software_cap() {
+        // A resumed segment must match segment 0 exactly so the fragments
+        // concat without a re-encode — even if the encoder set changed.
+        let lock = CameraOutputLock {
+            width: 3840,
+            height: 2160,
+            fps: 30.0,
+        };
+        let modes = vec![mode(3840, 2160, 30.0, Some("nv12"), None)];
+        let plans =
+            plan_camera_capture_for_encoders(&tier("camera-ultra"), &modes, lock.into(), false);
+        assert!(plans
+            .iter()
+            .all(|p| p.output_width == 3840 && p.output_height == 2160));
+        assert!(plans.iter().all(|p| !p.encoder_limited));
     }
 
     #[test]
@@ -621,15 +769,16 @@ mod tests {
             &[mode(1280, 720, 30.0, Some("nv12"), None)],
             None,
         );
-        // 720p30 = 27.6 Mpx/s → veryfast.
-        assert_eq!(x264_preset_for("camera-balanced", &small[0]), "veryfast");
+        // 720p30 = 27.6 Mpx/s (below the 35 Mpx/s knee) → superfast.
+        assert_eq!(x264_preset_for("camera-balanced", &small[0]), "superfast");
         let big = plan_camera_capture(
             &balanced,
             &[mode(1920, 1080, 30.0, Some("nv12"), None)],
             None,
         );
-        // 1080p30 = 62.2 Mpx/s → superfast.
-        assert_eq!(x264_preset_for("camera-balanced", &big[0]), "superfast");
+        // 1080p30 = 62.2 Mpx/s: software x264 drops to ultrafast so the
+        // default tier stays realtime on low-end CPUs (0.44 vs 0.86 core).
+        assert_eq!(x264_preset_for("camera-balanced", &big[0]), "ultrafast");
         assert_eq!(x264_preset_for("camera-low", &small[0]), "ultrafast");
         assert_eq!(x264_preset_for("camera-ultra", &big[0]), "ultrafast");
         let high_big = plan_camera_capture(
@@ -637,7 +786,9 @@ mod tests {
             &[mode(1920, 1080, 30.0, Some("nv12"), None)],
             None,
         );
-        assert_eq!(x264_preset_for("camera-high", &high_big[0]), "veryfast");
+        // High Quality keeps one rung above the default tier at 1080p, not
+        // the two-rung `veryfast` that costs a full core.
+        assert_eq!(x264_preset_for("camera-high", &high_big[0]), "superfast");
     }
 
     #[test]
