@@ -13,6 +13,8 @@ import {
   SimpleSelect,
 } from "@recordforge/ui"
 import { toErrorMessage } from "../../../lib/errors"
+import { useIsPro, useLicenseStore } from "../../../stores/license-store"
+import { ProBadge } from "../../licensing/pro-badge"
 import { useStorageStore } from "../storage-store"
 
 interface UploadDialogProps {
@@ -48,6 +50,8 @@ export function UploadDialog({
     fetchProfiles,
     startUpload,
   } = useStorageStore()
+  const isPro = useIsPro()
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
   const [hasRequestedProfiles, setHasRequestedProfiles] = useState(false)
 
   useEffect(() => {
@@ -67,10 +71,20 @@ export function UploadDialog({
   const [error, setError] = useState<string | null>(null)
   const isLoadingProfileList = open && (!hasRequestedProfiles || isLoadingProfiles)
 
+  const activeProfile = profiles.find((p) => p.id === (selectedProfileId || defaultProfile?.id))
+  // S3/Google Drive destinations are Pro; the local-folder provider stays
+  // free (it's a file copy, not cloud storage). Rust enforces the same rule.
+  const cloudProfileGated = !!activeProfile && activeProfile.kind !== "local" && !isPro
+
   async function handleStart() {
     const profileId = selectedProfileId || defaultProfile?.id
     if (!profileId) {
       setError("Please select a cloud storage destination.")
+      return
+    }
+    if (cloudProfileGated) {
+      onOpenChange(false)
+      openUpgradeDialog(["cloud-storage"])
       return
     }
 
@@ -93,8 +107,6 @@ export function UploadDialog({
       setIsStarting(false)
     }
   }
-
-  const activeProfile = profiles.find((p) => p.id === (selectedProfileId || defaultProfile?.id))
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -140,6 +152,14 @@ export function UploadDialog({
           </div>
         ) : (
           <div className="space-y-3 text-xs">
+            {/* The file actually going up — an export's rendered output or the
+                raw recording when nothing was exported yet. */}
+            {localPath ? (
+              <div className="text-[11px] text-muted-foreground truncate">
+                Source: <code className="text-foreground">{localPath.split(/[\\/]/).pop()}</code>
+              </div>
+            ) : null}
+
             <div>
               <Label className="mb-1 block font-medium">Destination Profile</Label>
               <SimpleSelect
@@ -147,7 +167,9 @@ export function UploadDialog({
                 onValueChange={(val) => setSelectedProfileId(val)}
                 options={profiles.map((p) => ({
                   value: p.id,
-                  label: `${p.name} (${p.kind.toUpperCase()})${p.isDefault ? " ★ Default" : ""}`,
+                  label: `${p.name} (${p.kind.toUpperCase()})${p.isDefault ? " ★ Default" : ""}${
+                    p.kind !== "local" && !isPro ? " — Pro" : ""
+                  }`,
                 }))}
               />
             </div>
@@ -167,6 +189,16 @@ export function UploadDialog({
                     : activeProfile.kind === "gdrive"
                       ? `Folder: ${activeProfile.driveConfig?.folderName}`
                       : `Path: ${activeProfile.localConfig?.destinationPath}`}
+                </span>
+              </div>
+            ) : null}
+
+            {cloudProfileGated ? (
+              <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 p-2.5 text-[11px] text-warning">
+                <ProBadge />
+                <span>
+                  Cloud uploads to {activeProfile?.kind === "s3" ? "S3" : "Google Drive"} require
+                  RecordForge Pro.
                 </span>
               </div>
             ) : null}

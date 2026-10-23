@@ -5,6 +5,7 @@ import { LayoutGrid, List } from "lucide-react"
 import { Button, NumberInputField } from "@recordforge/ui"
 import type { LibraryRecording } from "@recordforge/contracts"
 import { getSetting, isTauri } from "../../lib/settings"
+import { latestCompletedExport, listMediaJobs } from "../../lib/media"
 import { useRecorderStore } from "../../stores/recorder-store"
 import { useEditorStore } from "../../stores/editor-store"
 import { useJobsStore } from "../../stores/jobs-store"
@@ -60,7 +61,11 @@ export function LibraryView() {
   const [trimEnd, setTrimEnd] = useState("")
   const [trimError, setTrimError] = useState<string | null>(null)
   const [prepareTarget, setPrepareTarget] = useState<LibraryRecording | null>(null)
-  const [uploadTarget, setUploadTarget] = useState<LibraryRecording | null>(null)
+  const [uploadTarget, setUploadTarget] = useState<{
+    recording: LibraryRecording
+    localPath: string
+    exportId?: string
+  } | null>(null)
 
   useEffect(() => {
     void useLibraryStore.getState().load()
@@ -169,6 +174,24 @@ export function LibraryView() {
 
   function handleOpenEditor(recording: LibraryRecording) {
     editorStore.open(recording.id)
+  }
+
+  async function handleUpload(recording: LibraryRecording) {
+    // Uploads must ship the rendered export — cursor, zooms, overlays, and
+    // timeline edits live in the export file, not the raw capture. Prefer the
+    // newest completed export job; fall back to the recording when the
+    // recording was never exported (the raw file is still a valid source).
+    try {
+      const jobs = await listMediaJobs(recording.id)
+      const exported = latestCompletedExport(jobs)
+      setUploadTarget({
+        recording,
+        localPath: exported?.outputs.outputPath ?? recording.outputPath ?? "",
+        exportId: exported?.id,
+      })
+    } catch {
+      setUploadTarget({ recording, localPath: recording.outputPath ?? "" })
+    }
   }
 
   return (
@@ -281,7 +304,7 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
-              onUpload={(rec) => setUploadTarget(rec)}
+              onUpload={(rec) => void handleUpload(rec)}
               onPrepare={handleOpenPrepare}
               onOpenEditor={handleOpenEditor}
               onAddTag={store.addTag}
@@ -299,7 +322,7 @@ export function LibraryView() {
               onReveal={store.reveal}
               onTrim={handleStartTrim}
               onExport={handleExport}
-              onUpload={(rec) => setUploadTarget(rec)}
+              onUpload={(rec) => void handleUpload(rec)}
               onPrepare={handleOpenPrepare}
               onOpenEditor={handleOpenEditor}
               onAddTag={store.addTag}
@@ -312,9 +335,10 @@ export function LibraryView() {
       <UploadDialog
         open={!!uploadTarget}
         onOpenChange={(open) => !open && setUploadTarget(null)}
-        localPath={uploadTarget?.outputPath ?? ""}
-        recordingId={uploadTarget?.id}
-        defaultName={uploadTarget ? `${uploadTarget.name}.mp4` : undefined}
+        localPath={uploadTarget?.localPath ?? ""}
+        recordingId={uploadTarget?.recording.id}
+        exportId={uploadTarget?.exportId}
+        defaultName={uploadTarget ? uploadTarget.localPath.split(/[\\/]/).pop() : undefined}
       />
     </div>
   )

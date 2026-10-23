@@ -17,6 +17,7 @@ export const PRO_FEATURE_KEYS = [
   "teleprompter",
   "keystroke-overlay",
   "youtube-publish",
+  "cloud-storage",
 ] as const
 
 export const proFeatureKeySchema = z.enum(PRO_FEATURE_KEYS)
@@ -73,6 +74,10 @@ export const PRO_FEATURES: Record<ProFeatureKey, ProFeature> = {
     label: "Publish to YouTube",
     description:
       "Upload exports straight to YouTube with chapters, captions, and privacy controls.",
+  },
+  "cloud-storage": {
+    label: "Cloud storage uploads",
+    description: "Send exports and recordings to S3-compatible buckets and Google Drive.",
   },
 }
 

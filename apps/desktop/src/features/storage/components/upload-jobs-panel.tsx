@@ -14,11 +14,14 @@ import {
 import { Badge, Button, Card, Progress } from "@recordforge/ui"
 import { calculateProgress, formatBytes, formatEta, formatSpeed } from "@recordforge/storage-core"
 import { useStorageStore } from "../storage-store"
+import { useIsPro, useLicenseStore } from "../../../stores/license-store"
 import { openUrl } from "@tauri-apps/plugin-opener"
 
 export function UploadJobsPanel() {
   const { jobs, isLoadingJobs, fetchJobs, cancelUpload, retryUpload, deleteJob, initListeners } =
     useStorageStore()
+  const isPro = useIsPro()
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
 
   useEffect(() => {
     fetchJobs()
@@ -186,7 +189,15 @@ export function UploadJobsPanel() {
                         size="sm"
                         variant="outline"
                         className="h-7 px-2 text-xs gap-1"
-                        onClick={() => retryUpload(job.id)}
+                        onClick={() => {
+                          // Cloud retries carry the same Pro gate as the
+                          // original upload — Rust enforces it too.
+                          if (job.providerKind !== "local" && !isPro) {
+                            openUpgradeDialog(["cloud-storage"])
+                            return
+                          }
+                          void retryUpload(job.id)
+                        }}
                       >
                         <RefreshCw className="h-3 w-3" />
                         Retry

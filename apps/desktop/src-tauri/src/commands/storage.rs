@@ -5,7 +5,7 @@ use tauri::{Emitter, State};
 use tracing::instrument;
 
 use crate::database::storage::{self as storage_db, StorageProfile, UploadJob};
-use crate::errors::{InternalError, Result};
+use crate::errors::{AppError, ErrorCategory, InternalError, Result};
 use crate::state::AppState;
 use crate::storage::drive::{
     get_google_drive_client_id, get_google_drive_client_secret, GoogleDriveClient,
@@ -66,6 +66,28 @@ pub struct OAuthFlowStartResult {
     pub port: u16,
 }
 
+/// Cloud destinations (S3 / Google Drive) are a Pro feature. Every command
+/// that configures a cloud profile or moves bytes to one checks the
+/// entitlement here, keyed by provider kind — the `local` folder provider is
+/// a plain filesystem copy, not cloud storage, and stays free. Rust is the
+/// authority: a crafted IPC call hits this gate before any profile or upload
+/// is persisted.
+fn enforce_cloud_storage(state: &AppState, provider_kind: &str) -> Result<()> {
+    if provider_kind == "local" || state.license.entitlements().pro_enabled {
+        return Ok(());
+    }
+    Err(AppError::new(
+        ErrorCategory::Licensing,
+        "pro_feature_required",
+        "This feature requires RecordForge Pro",
+    )
+    .with_details(
+        [("features".to_string(), serde_json::json!(["cloud-storage"]))]
+            .into_iter()
+            .collect(),
+    ))
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthCompletedEvent {
@@ -91,6 +113,7 @@ pub fn save_s3_profile(
     input: SaveS3ProfileInput,
     state: State<'_, AppState>,
 ) -> Result<StorageProfile> {
+    enforce_cloud_storage(&state, "s3")?;
     let profile_id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let now = Utc::now().to_rfc3339();
 
@@ -133,6 +156,7 @@ pub fn save_google_drive_profile(
     input: SaveGoogleDriveProfileInput,
     state: State<'_, AppState>,
 ) -> Result<StorageProfile> {
+    enforce_cloud_storage(&state, "gdrive")?;
     let profile_id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let now = Utc::now().to_rfc3339();
 
@@ -236,6 +260,8 @@ pub async fn test_storage_profile(
         (p, ak, sk, rt)
     };
 
+    enforce_cloud_storage(&state, &profile.kind)?;
+
     match profile.kind.as_str() {
         "s3" => {
             let s3_config = profile.s3_config.ok_or_else(|| {
@@ -275,7 +301,9 @@ pub async fn test_s3_credentials(
     config: S3Config,
     access_key: String,
     secret_key: String,
+    state: State<'_, AppState>,
 ) -> Result<ConnectionTestResult> {
+    enforce_cloud_storage(&state, "s3")?;
     let client = S3Client::new(config, access_key, secret_key);
     client.test_connection().await
 }
@@ -352,6 +380,7 @@ pub async fn start_google_drive_oauth(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<OAuthFlowStartResult> {
+    enforce_cloud_storage(&state, "gdrive")?;
     let _update_operation = state.update_gate.acquire_operation()?;
     // Shared loopback machinery: single-flight guard, percent-decoded
     // callback params, and a deadline so abandoned sign-ins can't leak a
@@ -461,6 +490,10 @@ pub fn start_upload_job(
     state: State<'_, AppState>,
 ) -> Result<UploadJob> {
     let _update_operation = state.update_gate.acquire_operation()?;
+    // Resolve the profile first so the entitlement check keys on the actual
+    // destination kind — cloud uploads are Pro; local-folder copies are not.
+    let profile = state.storage_manager.load_profile(&input.profile_id)?;
+    enforce_cloud_storage(&state, &profile.kind)?;
     state.storage_manager.start_upload(
         &input.profile_id,
         input.recording_id,
@@ -480,6 +513,19 @@ pub fn cancel_upload_job(job_id: String, state: State<'_, AppState>) -> Result<(
 #[instrument(skip(state))]
 pub fn retry_upload_job(job_id: String, state: State<'_, AppState>) -> Result<UploadJob> {
     let _update_operation = state.update_gate.acquire_operation()?;
+    // A retry performs the same cloud upload as the original job, so it
+    // carries the same entitlement check — a license downgrade mid-queue
+    // must not leak a Pro upload.
+    let provider_kind = {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("db mutex poisoned".into()))?;
+        let job = storage_db::get_upload_job(&conn, &job_id)?
+            .ok_or_else(|| InternalError::Storage(format!("job {job_id} not found")))?;
+        job.provider_kind.clone()
+    };
+    enforce_cloud_storage(&state, &provider_kind)?;
     state.storage_manager.retry_upload(&job_id)
 }
 

@@ -93,6 +93,25 @@ export async function detectSilences(
   )
 }
 
+/**
+ * The newest completed export job that has an output file on record. This is
+ * the upload/share source for post-export delivery: the rendered file
+ * carries the cursor, zoom, overlay, and timeline edits the raw capture
+ * lacks. `list_jobs` arrives newest-first; sorting on completedAt keeps the
+ * pick stable if the order ever changes.
+ */
+export function latestCompletedExport(jobs: MediaJob[]): MediaJob | undefined {
+  return jobs
+    .filter(
+      (job) =>
+        job.kind === "export" &&
+        job.status === "completed" &&
+        typeof job.outputs.outputPath === "string" &&
+        job.outputs.outputPath.length > 0,
+    )
+    .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt))[0]
+}
+
 export function onMediaJobUpdate(callback: (job: MediaJob) => void): Promise<() => void> {
   return listen<unknown>("media-job-update", (event) => {
     const parsed = mediaJobSchema.safeParse(event.payload)

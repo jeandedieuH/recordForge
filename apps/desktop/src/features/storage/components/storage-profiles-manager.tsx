@@ -31,6 +31,8 @@ import type {
   StorageProviderKind,
 } from "@recordforge/contracts"
 import { useStorageStore } from "../storage-store"
+import { useIsPro, useLicenseStore } from "../../../stores/license-store"
+import { ProBadge } from "../../licensing/pro-badge"
 import {
   saveGoogleDriveProfile,
   saveLocalProfile,
@@ -42,6 +44,8 @@ import { GDriveConfigForm } from "./gdrive-config-form"
 
 export function StorageProfilesManager() {
   const { profiles, isLoadingProfiles, fetchProfiles, deleteProfile } = useStorageStore()
+  const isPro = useIsPro()
+  const openUpgradeDialog = useLicenseStore((state) => state.openUpgradeDialog)
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [selectedKind, setSelectedKind] = useState<StorageProviderKind>("s3")
@@ -61,7 +65,13 @@ export function StorageProfilesManager() {
     fetchProfiles()
   }, [fetchProfiles])
 
-  async function handleTestProfile(id: string) {
+  async function handleTestProfile(profile: StorageProfile) {
+    // Cloud destinations are a Pro feature; local folders stay free.
+    if (profile.kind !== "local" && !isPro) {
+      openUpgradeDialog(["cloud-storage"])
+      return
+    }
+    const id = profile.id
     setTestingId(id)
     try {
       const res = await testStorageProfile(id)
@@ -112,12 +122,22 @@ export function StorageProfilesManager() {
   }
 
   function handleOpenAdd(kind: StorageProviderKind) {
+    // Configuring a cloud destination is part of the Pro cloud-storage
+    // feature; the local folder provider stays free.
+    if (kind !== "local" && !isPro) {
+      openUpgradeDialog(["cloud-storage"])
+      return
+    }
     setEditingProfile(null)
     setSelectedKind(kind)
     setDialogOpen(true)
   }
 
   function handleOpenEdit(profile: StorageProfile) {
+    if (profile.kind !== "local" && !isPro) {
+      openUpgradeDialog(["cloud-storage"])
+      return
+    }
     setEditingProfile(profile)
     setSelectedKind(profile.kind)
     if (profile.kind === "local" && profile.localConfig) {
@@ -148,6 +168,7 @@ export function StorageProfilesManager() {
           >
             <Plus className="h-3.5 w-3.5" />
             Add S3 Bucket
+            {!isPro ? <ProBadge /> : null}
           </Button>
           <Button
             size="sm"
@@ -157,6 +178,7 @@ export function StorageProfilesManager() {
           >
             <Cloud className="h-3.5 w-3.5 text-primary" />
             Connect Google Drive
+            {!isPro ? <ProBadge /> : null}
           </Button>
         </div>
       </div>
@@ -172,7 +194,10 @@ export function StorageProfilesManager() {
               <Server className="h-5 w-5" />
             </div>
             <div>
-              <div className="font-semibold text-xs text-foreground">S3-Compatible Storage</div>
+              <div className="font-semibold text-xs text-foreground flex items-center gap-1.5">
+                S3-Compatible Storage
+                {!isPro ? <ProBadge /> : null}
+              </div>
               <div className="text-[11px] text-subtle-foreground">
                 AWS S3, Cloudflare R2, MinIO, Wasabi
               </div>
@@ -189,7 +214,10 @@ export function StorageProfilesManager() {
               <Cloud className="h-5 w-5" />
             </div>
             <div>
-              <div className="font-semibold text-xs text-foreground">Google Drive</div>
+              <div className="font-semibold text-xs text-foreground flex items-center gap-1.5">
+                Google Drive
+                {!isPro ? <ProBadge /> : null}
+              </div>
               <div className="text-[11px] text-subtle-foreground">
                 OAuth 2.0 PKCE Resumable Uploads
               </div>
@@ -330,7 +358,7 @@ export function StorageProfilesManager() {
                         variant="ghost"
                         className="h-8 px-2 text-xs"
                         disabled={isTesting}
-                        onClick={() => handleTestProfile(profile.id)}
+                        onClick={() => handleTestProfile(profile)}
                       >
                         {isTesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Test"}
                       </Button>

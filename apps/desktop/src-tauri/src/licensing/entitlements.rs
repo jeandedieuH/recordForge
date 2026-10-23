@@ -23,6 +23,7 @@ pub const PRO_FEATURE_KEYS: &[&str] = &[
     "teleprompter",
     "keystroke-overlay",
     "youtube-publish",
+    "cloud-storage",
 ];
 
 const HIGH_RES_EXPORT: &str = "high-res-export";

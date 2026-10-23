@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tracing::{info, warn};
 
+use crate::database::media::{MediaJobKind, MediaJobStatus};
 use crate::database::storage::{
     get_profile_by_id, get_upload_job, update_upload_job_progress, update_upload_job_status,
     StorageProfile, UploadJob,
@@ -68,6 +69,21 @@ impl StorageManager {
             .ok_or_else(|| InternalError::Storage(format!("profile {profile_id} not found")).into())
     }
 
+    /// An upload tagged with an export always ships the persisted export
+    /// output — the rendered file carries the cursor, zoom, overlay, and
+    /// timeline edits the raw capture lacks. `local_path` is honored only for
+    /// recording-level uploads (no export reference).
+    fn resolve_upload_source(&self, export_id: Option<&str>, local_path: &str) -> Result<String> {
+        let Some(export_id) = export_id else {
+            return Ok(local_path.to_string());
+        };
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| InternalError::Storage("db mutex poisoned".into()))?;
+        export_output_path_for_upload(&conn, export_id)
+    }
+
     pub fn start_upload(
         &self,
         profile_id: &str,
@@ -76,11 +92,14 @@ impl StorageManager {
         local_path: &str,
         custom_destination_name: Option<String>,
     ) -> Result<UploadJob> {
-        let path = Path::new(local_path);
+        let source_path = self.resolve_upload_source(export_id.as_deref(), local_path)?;
+        let path = Path::new(&source_path);
         let validated_path = self.validate_upload_source(path)?;
 
         if !validated_path.is_file() {
-            return Err(InternalError::Storage(format!("file not found at {}", local_path)).into());
+            return Err(
+                InternalError::Storage(format!("file not found at {}", source_path)).into(),
+            );
         }
 
         let file_len = validated_path
@@ -115,7 +134,7 @@ impl StorageManager {
             provider_kind: profile.kind.clone(),
             recording_id,
             export_id,
-            local_path: local_path.to_string(),
+            local_path: source_path.clone(),
             remote_path: file_name.clone(),
             state: "uploading".to_string(),
             bytes_uploaded: 0,
@@ -359,5 +378,82 @@ impl StorageManager {
             }
             other => Err(InternalError::Storage(format!("unknown provider kind: {other}")).into()),
         }
+    }
+}
+
+/// The on-disk output of a completed export job — the rendered file that
+/// carries the editor's cursor, zoom, overlay, and timeline edits. Uploads
+/// tagged with an export must ship this file, never the raw recording.
+fn export_output_path_for_upload(conn: &rusqlite::Connection, export_id: &str) -> Result<String> {
+    let job = crate::database::media::get_job(conn, export_id)?;
+    if job.kind != MediaJobKind::Export {
+        return Err(InternalError::Storage("upload source is not an export job".into()).into());
+    }
+    if job.status != MediaJobStatus::Completed {
+        return Err(InternalError::Storage(
+            "the referenced export has not finished — export first, then upload".into(),
+        )
+        .into());
+    }
+    job.outputs.output_path.ok_or_else(|| {
+        InternalError::Storage("the referenced export has no output file".into()).into()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::media::{complete_job, insert_job, MediaJobOutputs};
+    use crate::database::migrations::run_migrations;
+
+    fn test_conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
+        run_migrations(&mut conn).expect("run migrations");
+        conn
+    }
+
+    #[test]
+    fn resolves_completed_export_output_path() {
+        let conn = test_conn();
+        let job = insert_job(&conn, "recording-1", MediaJobKind::Export).expect("insert export");
+        complete_job(
+            &conn,
+            &job.id,
+            &MediaJobOutputs {
+                output_path: Some("C:/exports/rendered.mp4".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("complete export");
+
+        let resolved = export_output_path_for_upload(&conn, &job.id).expect("resolve output");
+        assert_eq!(resolved, "C:/exports/rendered.mp4");
+    }
+
+    #[test]
+    fn rejects_unfinished_and_non_export_jobs() {
+        let conn = test_conn();
+        let pending =
+            insert_job(&conn, "recording-1", MediaJobKind::Export).expect("insert export");
+        let pending_error = export_output_path_for_upload(&conn, &pending.id)
+            .expect_err("unfinished export must not upload");
+        assert!(pending_error.message.contains("not finished"));
+
+        let prepare =
+            insert_job(&conn, "recording-1", MediaJobKind::Prepare).expect("insert prepare");
+        complete_job(&conn, &prepare.id, &MediaJobOutputs::default()).expect("complete prepare");
+        let kind_error = export_output_path_for_upload(&conn, &prepare.id)
+            .expect_err("prepare job is not an export source");
+        assert!(kind_error.message.contains("not an export job"));
+    }
+
+    #[test]
+    fn rejects_export_without_output_file() {
+        let conn = test_conn();
+        let job = insert_job(&conn, "recording-1", MediaJobKind::Export).expect("insert export");
+        complete_job(&conn, &job.id, &MediaJobOutputs::default()).expect("complete export");
+        let error = export_output_path_for_upload(&conn, &job.id)
+            .expect_err("export without output must not upload");
+        assert!(error.message.contains("no output file"));
     }
 }
