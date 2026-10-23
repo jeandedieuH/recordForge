@@ -20,17 +20,32 @@ pub(crate) fn render_to_pixmap(
     time_ms: u64,
     pixmap: &mut Pixmap,
 ) -> Result<(), OverlayError> {
+    render_to_pixmap_at(engine, time_ms, pixmap, (0.0, 0.0))
+}
+
+/// Render into a pixmap that represents the `origin`-anchored crop of the
+/// canvas: every canvas-space draw is shifted by `-origin` so the export
+/// plate feed can ship only a plane's bounding rect instead of the full
+/// canvas. Everything that draws through the item transform inherits the
+/// shift automatically (`post_translate` composes after it); draws that
+/// bypass it get `origin` threaded in explicitly.
+pub(crate) fn render_to_pixmap_at(
+    engine: &OverlayEngine,
+    time_ms: u64,
+    pixmap: &mut Pixmap,
+    origin: (f32, f32),
+) -> Result<(), OverlayError> {
     let display_list = engine.evaluate(time_ms);
     for item in &display_list.items {
         match item {
             DisplayItem::Annotation { item } => {
-                render_annotation(pixmap, item)?;
+                render_annotation(pixmap, item, origin)?;
             }
             DisplayItem::Text { item } => {
-                render_text(pixmap, item)?;
+                render_text(engine, pixmap, item, origin)?;
             }
             DisplayItem::Image { item } => {
-                render_image(pixmap, item, engine.images())?;
+                render_image(pixmap, item, engine.images(), origin)?;
             }
         }
     }
@@ -470,11 +485,16 @@ fn fast_blur(pixmap: &mut Pixmap, radius: f32) {
     }
 }
 
-fn render_annotation(pixmap: &mut Pixmap, item: &DisplayAnnotation) -> Result<(), OverlayError> {
+fn render_annotation(
+    pixmap: &mut Pixmap,
+    item: &DisplayAnnotation,
+    origin: (f32, f32),
+) -> Result<(), OverlayError> {
     let t = &item.transform;
     let ts = item_transform(
         t.x, t.y, t.width, t.height, t.rotation, t.anchor_x, t.anchor_y,
-    );
+    )
+    .post_translate(-origin.0, -origin.1);
     let opacity = t.opacity * item.draw_progress;
     let stroke_width = item.stroke_width.max(1.0) as f32;
 
@@ -685,20 +705,32 @@ fn render_annotation(pixmap: &mut Pixmap, item: &DisplayAnnotation) -> Result<()
     Ok(())
 }
 
-fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayError> {
+fn render_text(
+    engine: &OverlayEngine,
+    pixmap: &mut Pixmap,
+    item: &DisplayText,
+    origin: (f32, f32),
+) -> Result<(), OverlayError> {
     let t = &item.transform;
     let ts = item_transform(
         t.x, t.y, t.width, t.height, t.rotation, t.anchor_x, t.anchor_y,
-    );
+    )
+    .post_translate(-origin.0, -origin.1);
     let opacity = t.opacity;
+    // SVG contents are authored in canvas space, so their viewBox must be the
+    // canvas — not the possibly-cropped target pixmap — and the render
+    // transform shifts them into crop space.
+    let canvas = engine.canvas();
+    let (canvas_w, canvas_h) = (canvas.width, canvas.height);
+    let origin_transform = Transform::from_translate(-origin.0, -origin.1);
 
     // Designed titles carry a pre-computed scene graph; render it as SVG so
     // native export matches the browser preview path element for element.
     if let Some(scene) = &item.title_scene {
-        let svg = build_title_scene_svg(scene, t, pixmap.width(), pixmap.height());
+        let svg = build_title_scene_svg(scene, t, canvas_w, canvas_h);
         // The SVG itself carries translate/rotate for the item, so do not apply
         // the external transform a second time.
-        if let Err(err) = render_svg_markup(&svg, Transform::identity(), pixmap) {
+        if let Err(err) = render_svg_markup(&svg, origin_transform, pixmap) {
             eprintln!("failed to render title scene SVG: {err}");
         }
         return Ok(());
@@ -989,8 +1021,8 @@ fn render_text(pixmap: &mut Pixmap, item: &DisplayText) -> Result<(), OverlayErr
                 {content}
             </g>
         </svg>"##,
-        cw = pixmap.width(),
-        ch = pixmap.height(),
+        cw = canvas_w,
+        ch = canvas_h,
         clip_id = clip_id,
         x = x,
         y = y,
@@ -1011,11 +1043,13 @@ fn render_image(
     pixmap: &mut Pixmap,
     item: &DisplayImage,
     images: &ImageCache,
+    origin: (f32, f32),
 ) -> Result<(), OverlayError> {
     let t = &item.transform;
     let ts = item_transform(
         t.x, t.y, t.width, t.height, t.rotation, t.anchor_x, t.anchor_y,
-    );
+    )
+    .post_translate(-origin.0, -origin.1);
     let opacity = t.opacity;
 
     let x = t.x as f32;

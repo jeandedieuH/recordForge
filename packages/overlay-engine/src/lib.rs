@@ -130,6 +130,120 @@ impl OverlayEngine {
     ) -> Result<(), OverlayError> {
         export_adapter::render_to_pixmap(self, time_ms, pixmap)
     }
+
+    /// Render into a pixmap covering only the canvas crop whose top-left
+    /// corner sits at `origin` — the export plate feed ships per-plane
+    /// bounding rects instead of full canvases.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native-render"))]
+    pub fn render_to_pixmap_cropped(
+        &self,
+        time_ms: u64,
+        pixmap: &mut tiny_skia::Pixmap,
+        origin: (f64, f64),
+    ) -> Result<(), OverlayError> {
+        export_adapter::render_to_pixmap_at(
+            self,
+            time_ms,
+            pixmap,
+            (origin.0 as f32, origin.1 as f32),
+        )
+    }
+
+    /// Union of every active item's canvas-space rect at `time_ms`, widened
+    /// by a margin covering strokes, borders, shadows, backdrop blur and
+    /// connector endpoints — the plate feed uses it to size the items plane.
+    /// A spotlight annotation darkens the whole canvas, so it always reports
+    /// the full canvas. `None` when nothing is active.
+    pub fn items_bounds(&self, time_ms: u64) -> Option<(f64, f64, f64, f64)> {
+        let canvas = self.canvas();
+        let mut acc: Option<(f64, f64, f64, f64)> = None;
+        for item in &self.evaluate(time_ms).items {
+            let bounds = display_item_bounds(item, canvas.width, canvas.height);
+            if let Some((x0, y0, x1, y1)) = bounds {
+                acc = Some(match acc {
+                    Some((ax0, ay0, ax1, ay1)) => {
+                        (ax0.min(x0), ay0.min(y0), ax1.max(x1), ay1.max(y1))
+                    }
+                    None => (x0, y0, x1, y1),
+                });
+            }
+        }
+        acc
+    }
+}
+
+/// Axis-aligned canvas bounds of one evaluated display item, including the
+/// effects margin. All values are `(x0, y0, x1, y1)`.
+fn display_item_bounds(
+    item: &scene::DisplayItem,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Option<(f64, f64, f64, f64)> {
+    let (transform, pad, extra_point) = match item {
+        scene::DisplayItem::Annotation { item } => {
+            // Spotlight fills the canvas with a mask punched by its rect.
+            if item.annotation_type == "spotlight" {
+                return Some((0.0, 0.0, canvas_w as f64, canvas_h as f64));
+            }
+            (
+                &item.transform,
+                item.stroke_width / 2.0 + item.shadow_blur * 2.0,
+                item.end_x.zip(item.end_y),
+            )
+        }
+        scene::DisplayItem::Text { item } => (
+            &item.transform,
+            // Designed-title scenes can overhang the item box with descenders
+            // and ornament paths; a font-proportional term covers the usual
+            // case while shadows and backdrop blur add their own margins.
+            item.shadow_blur * 2.0 + item.backdrop_blur + item.font_size * 0.4,
+            None,
+        ),
+        scene::DisplayItem::Image { item } => (
+            &item.transform,
+            item.border_width + item.shadow_blur * 2.0,
+            None,
+        ),
+    };
+    let t = *transform;
+    if !t.opacity.is_finite() || t.opacity <= 0.0 || t.width <= 0.0 || t.height <= 0.0 {
+        return None;
+    }
+    // Rotate the rect's corners around its anchor pivot, then take the
+    // axis-aligned hull. Callout tails and AA fringe ride on the fixed pad.
+    let pivot_x = t.x + t.width * t.anchor_x;
+    let pivot_y = t.y + t.height * t.anchor_y;
+    let radians = t.rotation.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let mut x0 = f64::MAX;
+    let mut y0 = f64::MAX;
+    let mut x1 = f64::MIN;
+    let mut y1 = f64::MIN;
+    for corner in [
+        (t.x, t.y),
+        (t.x + t.width, t.y),
+        (t.x + t.width, t.y + t.height),
+        (t.x, t.y + t.height),
+    ]
+    .into_iter()
+    .chain(extra_point)
+    {
+        let dx = corner.0 - pivot_x;
+        let dy = corner.1 - pivot_y;
+        let px = pivot_x + dx * cos - dy * sin;
+        let py = pivot_y + dx * sin + dy * cos;
+        x0 = x0.min(px);
+        y0 = y0.min(py);
+        x1 = x1.max(px);
+        y1 = y1.max(py);
+    }
+    let pad = pad + 8.0;
+    Some((
+        (x0 - pad).max(0.0),
+        (y0 - pad).max(0.0),
+        (x1 + pad).min(canvas_w as f64),
+        (y1 + pad).min(canvas_h as f64),
+    ))
 }
 
 #[cfg(test)]

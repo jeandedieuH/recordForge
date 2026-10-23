@@ -1237,6 +1237,9 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
         eprintln!("[progress] {:.1}%", ratio.clamp(0.0, 1.0) * 100.0);
     };
     let shared = CompositionShared::new(Some(Path::new(&spec.ffprobe_path)));
+    // The harness bypasses `run_render_plan`, so emit the same composition
+    // total here — the bench parser expects the field either way.
+    let composition_started = std::time::Instant::now();
     let result = if spec.force_single_pass {
         render_composition_window(
             &spec.ffmpeg_path,
@@ -1272,6 +1275,10 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
         )
     };
 
+    tracing::info!(
+        composition_ms = composition_started.elapsed().as_millis() as u64,
+        "export: composition finished"
+    );
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -2540,12 +2547,16 @@ fn render_composition_window(
             .unwrap_or_else(|| plan.overlay_render_plan.is_some());
     let mut cursor_plan = None;
     // Label of the overlay-items plate (already bracketed), composited after
-    // the camera and privacy-mask passes so titles render above them.
+    // the camera and privacy-mask passes so titles render above them, plus the
+    // plate's canvas-space rect — the stream ships only the bounding crop, so
+    // the composite must offset back to the rect origin.
     let mut items_plate_label: Option<String> = None;
+    let mut items_plate_rect: Option<(u32, u32, u32, u32)> = None;
     let mut items_enable: Option<String> = None;
     // Label of the keystroke plate — the topmost composite, applied after the
-    // watermark pass near the end of the graph.
+    // watermark pass near the end of the graph — plus its canvas-space rect.
     let mut keys_plate_label: Option<String> = None;
+    let mut keys_plate_rect: Option<(u32, u32, u32, u32)> = None;
     let mut keys_enable: Option<String> = None;
     let has_keystrokes = settings
         .keystroke_overlay
@@ -2563,20 +2574,20 @@ fn render_composition_window(
             filters.push(format!("{plate_source}setpts=PTS{abs_pts}[plate_shifted]"));
             "[plate_shifted]".to_string()
         };
+        // This pass emits only its window of plate frames; renderer
+        // timestamps are absolute, so the feed offsets by `first_frame_index`,
+        // and the per-plane crop rects are swept over the same window.
         let mut prepared = prepare_cursor_frame_plan(
             canvas,
-            plan.duration_ms,
             cursor_renderers,
             plan,
             settings,
             asset_paths,
             cursor_plane_rect,
             shared,
+            window.first_frame,
+            window.frame_count,
         )?;
-        // This pass emits only its window of plate frames; renderer
-        // timestamps are absolute, so the feed offsets by `first_frame_index`.
-        prepared.first_frame_index = window.first_frame;
-        prepared.frame_count = window.frame_count;
         prepared.parallel_divisor = pass.plate_divisor;
         // Gate each plate overlay to the time windows where its content can be
         // visible; outside them the blend is skipped and the base passes
@@ -2587,7 +2598,10 @@ fn render_composition_window(
             .unwrap_or_default();
         if prepared.planes.len() > 1 {
             // Crop each packed slice out of the stream into its own plate
-            // label, then composite each at its stack position.
+            // label, then composite each at its stack position. Slices pack
+            // side-by-side at their own bounding rects, so the crop origin
+            // walks the cumulative width and each plate composites back at
+            // its rect's canvas origin.
             let mut split = format!("{plate_source}split={}", prepared.planes.len());
             for index in 0..prepared.planes.len() {
                 split.push_str(&format!("[plate_src{index}]"));
@@ -2599,33 +2613,33 @@ fn render_composition_window(
                     PlatePlane::Items => "items_plate",
                     PlatePlane::Keys => "keys_plate",
                 };
+                let (_, _, plane_w, plane_h) = prepared.plane_rects[index];
+                let (slice_x, slice_y) = prepared.plane_offsets[index];
                 filters.push(format!(
-                    "[plate_src{index}]crop={}:{}:{}:0[{label}]",
-                    canvas.width,
-                    canvas.height,
-                    canvas.width * index as u32,
+                    "[plate_src{index}]crop={plane_w}:{plane_h}:{slice_x}:{slice_y}[{label}]"
                 ));
             }
-            if prepared.planes.contains(&PlatePlane::Cursor) {
+            if let Some((plate_x, plate_y, _, _)) = prepared.plane_rect(PlatePlane::Cursor) {
                 filters.push(format!(
-                    "[{current_label}][cursor_plate]overlay=shortest=1:format=yuv420{cursor_enable}[with_cursor]"
+                    "[{current_label}][cursor_plate]overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
                 ));
                 current_label = "with_cursor".to_string();
             }
-            if prepared.planes.contains(&PlatePlane::Items) {
+            if let Some((x, y, w, h)) = prepared.plane_rect(PlatePlane::Items) {
                 items_plate_label = Some("[items_plate]".to_string());
+                items_plate_rect = Some((x, y, w, h));
             }
-            if prepared.planes.contains(&PlatePlane::Keys) {
+            if let Some((x, y, w, h)) = prepared.plane_rect(PlatePlane::Keys) {
                 keys_plate_label = Some("[keys_plate]".to_string());
+                keys_plate_rect = Some((x, y, w, h));
             }
         } else {
             match prepared.planes.first().copied() {
                 Some(PlatePlane::Cursor) => {
                     // Cursor-only stream: composite directly below the camera
-                    // layer. The plate is the fitted screen rect, not the
-                    // full canvas, when `cursor_rect` is set.
+                    // layer at the plate rect's canvas origin.
                     let (plate_x, plate_y) = prepared
-                        .cursor_rect
+                        .plane_rect(PlatePlane::Cursor)
                         .map(|(x, y, _, _)| (x, y))
                         .unwrap_or((0, 0));
                     filters.push(format!(
@@ -2635,9 +2649,11 @@ fn render_composition_window(
                 }
                 Some(PlatePlane::Items) => {
                     items_plate_label = Some(plate_source);
+                    items_plate_rect = prepared.plane_rect(PlatePlane::Items);
                 }
                 Some(PlatePlane::Keys) => {
                     keys_plate_label = Some(plate_source);
+                    keys_plate_rect = prepared.plane_rect(PlatePlane::Keys);
                 }
                 None => {}
             }
@@ -2914,8 +2930,11 @@ fn render_composition_window(
     // editor preview stacking (z-35 above masks at z-30, below captions z-40).
     if let Some(items_plate) = items_plate_label {
         let enable_suffix = items_enable.unwrap_or_default();
+        let (plate_x, plate_y) = items_plate_rect
+            .map(|(x, y, _, _)| (x, y))
+            .unwrap_or((0, 0));
         filters.push(format!(
-            "[{current_label}]{items_plate}overlay=shortest=1:format=auto{enable_suffix}[with_items]"
+            "[{current_label}]{items_plate}overlay=x={plate_x}:y={plate_y}:shortest=1:format=auto{enable_suffix}[with_items]"
         ));
         current_label = "with_items".to_string();
     }
@@ -2999,20 +3018,28 @@ fn render_composition_window(
     // delivered raster alongside everything else.
     if let Some(keys_plate) = keys_plate_label {
         let enable_suffix = keys_enable.unwrap_or_default();
+        let (rect_x, rect_y, rect_w, rect_h) = keys_plate_rect.unwrap_or_default();
         // The plate stream carries absolute-shifted PTS like the other
         // plates, but this composite runs after the output stream's
         // PTS-STARTPTS re-anchor — reset the plate to the same 0-based clock.
+        // Under a license output cap the badge plane is scaled to the capped
+        // raster, so both the plate dims and its composite origin scale by
+        // the output/canvas ratio.
         let keys_source = if (out_w, out_h) != (canvas.width, canvas.height) {
+            let scaled_w = ((rect_w as u64 * out_w as u64) / canvas.width as u64).max(1);
+            let scaled_h = ((rect_h as u64 * out_h as u64) / canvas.height as u64).max(1);
             filters.push(format!(
-                "{keys_plate}setpts=PTS-STARTPTS,scale={out_w}:{out_h}:flags=lanczos[keys_plate_scaled]"
+                "{keys_plate}setpts=PTS-STARTPTS,scale={scaled_w}:{scaled_h}:flags=lanczos[keys_plate_scaled]"
             ));
             "[keys_plate_scaled]".to_string()
         } else {
             filters.push(format!("{keys_plate}setpts=PTS-STARTPTS[keys_plate_t]"));
             "[keys_plate_t]".to_string()
         };
+        let plate_x = (rect_x as u64 * out_w as u64) / canvas.width as u64;
+        let plate_y = (rect_y as u64 * out_h as u64) / canvas.height as u64;
         filters.push(format!(
-            "[{current_label}]{keys_source}overlay=shortest=1:format=auto{enable_suffix}[with_keys]"
+            "[{current_label}]{keys_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=auto{enable_suffix}[with_keys]"
         ));
         current_label = "with_keys".to_string();
     }
@@ -3101,16 +3128,14 @@ fn render_composition_window(
     }
     if let Some(frame_plan) = &cursor_plan {
         // The generated overlay stream is a transparent RGBA rawvideo feed over
-        // stdin; frame timestamps come from the declared rate. When cursor and
-        // overlay items coexist the stream packs both planes side by side, so
-        // the declared width doubles. A cursor-only stream is the fitted screen
-        // rect, not the full canvas.
-        let plate_width = frame_plan.width * frame_plan.planes.len().max(1) as u32;
-        let queue_size =
-            stdin_thread_queue_size(plate_width as usize * frame_plan.height as usize * 4);
+        // stdin; frame timestamps come from the declared rate. Planes pack
+        // side-by-side at their own bounding rects, so the stream is `sum(w)`
+        // wide and `max(h)` tall.
+        let (plate_width, plate_height) = (frame_plan.stream_width, frame_plan.stream_height);
+        let queue_size = stdin_thread_queue_size(plate_width as usize * plate_height as usize * 4);
         command
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-            .args(["-s", &format!("{}x{}", plate_width, frame_plan.height)])
+            .args(["-s", &format!("{}x{}", plate_width, plate_height)])
             .args(["-r", &canvas.fps.to_string()])
             .args(["-thread_queue_size", &queue_size.to_string()])
             .arg("-i")
@@ -4208,21 +4233,25 @@ pub(crate) enum PlatePlane {
 #[allow(dead_code)]
 pub(crate) struct CursorFramePlan {
     fps: u32,
-    /// Dimensions of each plane written to FFmpeg's stdin. Equal to the canvas
-    /// size except for a cursor-only stream, where the plane is the fitted
-    /// screen rect — the cursor is clipped to that rect, so shipping the
-    /// smaller plane cuts rasterization, pipe, and composite work by the
-    /// padding fraction for free.
-    width: u32,
-    height: u32,
-    /// Canvas size the cursor renderer draws into before the cursor rect is
-    /// cropped out. Only differs from `width`/`height` for cursor-only plans.
+    /// Canvas-space rect each logical plane is rasterized and packed at —
+    /// index-aligned with `planes`. Content can never appear outside a
+    /// plane's rect (the cursor is clipped to the fitted screen rect, and
+    /// items/keys rects come from a per-pass bounds sweep), so the stream
+    /// ships only the rect pixels and the graph composites each plane back
+    /// at its rect origin.
+    plane_rects: Vec<(u32, u32, u32, u32)>,
+    /// Each plane's `(x, y)` position inside the packed stream, index-aligned
+    /// with `planes`. Planes tile along whichever axis shrinks the declared
+    /// frame the most — side-by-side (`sum(w) × max(h)`) or stacked
+    /// (`max(w) × sum(h)`).
+    plane_offsets: Vec<(u32, u32)>,
+    /// Declared rawvideo frame dimensions of the packed plane stream.
+    stream_width: u32,
+    stream_height: u32,
+    /// Canvas size the renderers draw into before their plane's rect is
+    /// cropped out.
     canvas_width: u32,
     canvas_height: u32,
-    /// Canvas-space rect the cursor plane is cropped to before streaming, and
-    /// where the graph composites it back (`overlay=x:y`). `None` keeps the
-    /// plane at full canvas size.
-    cursor_rect: Option<(u32, u32, u32, u32)>,
     frame_count: u64,
     /// Absolute output index of the first frame this plan emits. Nonzero only
     /// for chunked renders, where each pass feeds the plate frames
@@ -4234,35 +4263,91 @@ pub(crate) struct CursorFramePlan {
     /// each divides its budgets by this factor; 1 is the single-pass default.
     parallel_divisor: usize,
     /// Logical planes packed into the stream, in canonical order. A single
-    /// entry ships a plain canvas plane; multiple entries pack side-by-side.
+    /// entry ships a plain plane; multiple entries pack side-by-side, each
+    /// slice occupying its own `plane_rects` width.
     planes: Vec<PlatePlane>,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
     keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
 }
 
+impl CursorFramePlan {
+    /// The rect a plane occupies, or the full canvas when it has none.
+    fn plane_rect(&self, kind: PlatePlane) -> Option<(u32, u32, u32, u32)> {
+        self.planes
+            .iter()
+            .zip(self.plane_rects.iter())
+            .find(|(plane, _)| **plane == kind)
+            .map(|(_, rect)| *rect)
+    }
+
+    /// Packed RGBA bytes per frame — the declared rawvideo frame size.
+    fn frame_byte_len(&self) -> usize {
+        self.stream_width as usize * self.stream_height as usize * 4
+    }
+}
+
+/// Lay out plane rects inside one stream frame, choosing the tiling axis
+/// that wastes the least padding. Returns each plane's offset and the
+/// stream's declared dimensions.
+fn pack_plane_layout(plane_rects: &[(u32, u32, u32, u32)]) -> (Vec<(u32, u32)>, u32, u32) {
+    let side_by_side_area = {
+        let w: u64 = plane_rects.iter().map(|rect| rect.2 as u64).sum();
+        let h: u64 = plane_rects
+            .iter()
+            .map(|rect| rect.3 as u64)
+            .max()
+            .unwrap_or(1);
+        w * h
+    };
+    let stacked_area = {
+        let w: u64 = plane_rects
+            .iter()
+            .map(|rect| rect.2 as u64)
+            .max()
+            .unwrap_or(1);
+        let h: u64 = plane_rects.iter().map(|rect| rect.3 as u64).sum();
+        w * h
+    };
+    let mut offsets = Vec::with_capacity(plane_rects.len());
+    if side_by_side_area <= stacked_area {
+        let mut x = 0u32;
+        for rect in plane_rects {
+            offsets.push((x, 0));
+            x += rect.2;
+        }
+        let width = plane_rects.iter().map(|rect| rect.2).sum();
+        let height = plane_rects.iter().map(|rect| rect.3).max().unwrap_or(1);
+        (offsets, width, height.max(1))
+    } else {
+        let mut y = 0u32;
+        for rect in plane_rects {
+            offsets.push((0, y));
+            y += rect.3;
+        }
+        let width = plane_rects.iter().map(|rect| rect.2).max().unwrap_or(1);
+        let height = plane_rects.iter().map(|rect| rect.3).sum();
+        (offsets, width.max(1), height)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_cursor_frame_plan(
     canvas: &cursor::RenderCanvas,
-    duration_ms: u64,
     renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
     plan: &RenderPlan,
     settings: &ExportSettings,
     asset_paths: &HashMap<String, PathBuf>,
     screen_rect: (f64, f64, f64, f64),
     shared: &CompositionShared,
+    window_first_frame: u64,
+    window_frame_count: u64,
 ) -> Result<CursorFramePlan> {
     // Validate the canvas pixmap can be allocated up front; each producer
     // worker allocates its own copy when feeding starts.
     if resvg::tiny_skia::Pixmap::new(canvas.width, canvas.height).is_none() {
         return Err(InternalError::Media("overlay frame is too large".into()).into());
     }
-    let frame_count = duration_ms
-        .saturating_mul(canvas.fps as u64)
-        .saturating_add(999)
-        .checked_div(1000)
-        .unwrap_or(1)
-        .max(1);
 
     // The prepared engine is identical for every chunk pass of this export
     // (same plan, same canvas, same image assets) — CompositionShared builds
@@ -4348,42 +4433,108 @@ fn prepare_cursor_frame_plan(
         planes.push(PlatePlane::Keys);
     }
 
-    // Only a pure cursor stream can shrink to the fitted screen rect: the
-    // other planes draw in canvas coordinates, and every packed slice must be
-    // the same size.
-    let cursor_rect = if planes == [PlatePlane::Cursor] {
-        let (sx, sy, sw, sh) = screen_rect;
-        // The renderers clip every draw to this rect (rounded ints, matching
-        // `ClipRect` construction in cursor.rs), so the crop covers all drawn
-        // pixels exactly; clamp to the canvas for degenerate rect inputs.
-        let x = sx.round().clamp(0.0, canvas.width.saturating_sub(1) as f64) as u32;
-        let y = sy
-            .round()
-            .clamp(0.0, canvas.height.saturating_sub(1) as f64) as u32;
-        let w = (sw.round().max(1.0) as u32).min(canvas.width - x);
-        let h = (sh.round().max(1.0) as u32).min(canvas.height - y);
-        Some((x, y, w, h))
-    } else {
-        None
-    };
-    let (plane_w, plane_h) = cursor_rect
-        .map(|(_, _, w, h)| (w, h))
-        .unwrap_or((canvas.width, canvas.height));
+    // Each plane ships only the rect its content can appear in: the cursor
+    // clips to the fitted screen rect, while the items/keys rects come from a
+    // bounds sweep over this pass's frames — cheap `evaluate` calls, no
+    // raster. An empty sweep still carries a 1×1 plane so the packed stream
+    // layout and crop labels stay stable.
+    let plane_rects: Vec<(u32, u32, u32, u32)> = planes
+        .iter()
+        .map(|kind| {
+            let rect = match kind {
+                PlatePlane::Cursor => {
+                    let (sx, sy, sw, sh) = screen_rect;
+                    // Every drawn pixel is clipped to this rect (rounded ints,
+                    // matching `ClipRect` construction in cursor.rs), so the
+                    // crop covers all content exactly; clamp to the canvas
+                    // for degenerate rect inputs.
+                    let x = sx.round().clamp(0.0, canvas.width.saturating_sub(1) as f64) as u32;
+                    let y = sy
+                        .round()
+                        .clamp(0.0, canvas.height.saturating_sub(1) as f64)
+                        as u32;
+                    let w = (sw.round().max(1.0) as u32).min(canvas.width - x);
+                    let h = (sh.round().max(1.0) as u32).min(canvas.height - y);
+                    Some((x, y, w, h))
+                }
+                PlatePlane::Items => overlay_engine.as_ref().and_then(|engine| {
+                    items_plane_rect(
+                        engine,
+                        window_first_frame,
+                        window_frame_count,
+                        canvas.fps,
+                        canvas,
+                    )
+                }),
+                PlatePlane::Keys => keystroke_renderer.as_ref().and_then(|renderer| {
+                    renderer.bounds_in_range(
+                        cursor::frame_time_ms(window_first_frame, canvas.fps),
+                        cursor::frame_time_ms(window_first_frame + window_frame_count, canvas.fps),
+                        1000.0 / canvas.fps as f64,
+                    )
+                }),
+            };
+            rect.unwrap_or((0, 0, 1, 1))
+        })
+        .collect();
+    let (plane_offsets, stream_width, stream_height) = pack_plane_layout(&plane_rects);
     Ok(CursorFramePlan {
         fps: canvas.fps,
-        width: plane_w,
-        height: plane_h,
+        plane_rects,
+        plane_offsets,
+        stream_width,
+        stream_height,
         canvas_width: canvas.width,
         canvas_height: canvas.height,
-        cursor_rect,
-        frame_count,
-        first_frame_index: 0,
+        frame_count: window_frame_count,
+        first_frame_index: window_first_frame,
         parallel_divisor: 1,
         planes,
         renderers,
         overlay_engine,
         keystroke_renderer,
     })
+}
+
+/// Union the evaluated items bounds across `[first_frame, +frame_count)` and
+/// return a clamped integer rect — `None` when no item is active anywhere in
+/// the window, in which case the caller ships a 1×1 transparent plane.
+fn items_plane_rect(
+    engine: &overlay_engine::OverlayEngine,
+    first_frame: u64,
+    frame_count: u64,
+    fps: u32,
+    canvas: &cursor::RenderCanvas,
+) -> Option<(u32, u32, u32, u32)> {
+    let mut acc: Option<(f64, f64, f64, f64)> = None;
+    for frame in 0..frame_count {
+        let time_ms = cursor::frame_time_ms(first_frame + frame, fps)
+            .floor()
+            .max(0.0) as u64;
+        let Some(bounds) = engine.items_bounds(time_ms) else {
+            continue;
+        };
+        acc = Some(match acc {
+            Some((ax0, ay0, ax1, ay1)) => (
+                ax0.min(bounds.0),
+                ay0.min(bounds.1),
+                ax1.max(bounds.2),
+                ay1.max(bounds.3),
+            ),
+            None => bounds,
+        });
+    }
+    let (x0, y0, x1, y1) = acc?;
+    let rx0 = x0.floor().max(0.0).min(canvas.width as f64 - 1.0);
+    let ry0 = y0.floor().max(0.0).min(canvas.height as f64 - 1.0);
+    let rx1 = x1.ceil().min(canvas.width as f64).max(rx0 + 1.0);
+    let ry1 = y1.ceil().min(canvas.height as f64).max(ry0 + 1.0);
+    Some((
+        rx0 as u32,
+        ry0 as u32,
+        (rx1 - rx0) as u32,
+        (ry1 - ry0) as u32,
+    ))
 }
 
 fn register_overlay_image_asset(
@@ -4425,19 +4576,30 @@ fn register_overlay_image_asset(
 /// Pack `planes` `plane_w`×`plane_h` RGBA planes into one side-by-side
 /// `(planes.len())*plane_w`×`plane_h` frame, in order. A missing plane
 /// contributes transparent pixels so its composite becomes a no-op.
-fn pack_overlay_planes(dst: &mut [u8], plane_w: usize, plane_h: usize, planes: &[Option<&[u8]>]) {
-    let plane_row_bytes = plane_w * 4;
-    let frame_row_bytes = plane_row_bytes * planes.len();
-    debug_assert_eq!(dst.len(), frame_row_bytes * plane_h);
-    for row in 0..plane_h {
-        let src_rows = row * plane_row_bytes..(row + 1) * plane_row_bytes;
-        let dst_row = &mut dst[row * frame_row_bytes..(row + 1) * frame_row_bytes];
-        for (index, plane) in planes.iter().enumerate() {
-            let slot = &mut dst_row[index * plane_row_bytes..(index + 1) * plane_row_bytes];
-            match plane {
-                Some(plane) => slot.copy_from_slice(&plane[src_rows.clone()]),
-                None => slot.fill(0),
-            }
+/// Pack each plane's pixels into the rawvideo stream at its layout offset.
+/// `plane_sizes[i]`/`offsets[i]` are `(w, h)`/`(x, y)` for plane `i`, and
+/// regions outside every plane stay transparent — a recycled buffer may
+/// carry a previous frame's tail, so clear once up front.
+fn pack_overlay_planes(
+    dst: &mut [u8],
+    plane_sizes: &[(usize, usize)],
+    offsets: &[(u32, u32)],
+    stream_row_bytes: usize,
+    planes: &[Option<&[u8]>],
+) {
+    debug_assert_eq!(planes.len(), plane_sizes.len());
+    debug_assert_eq!(planes.len(), offsets.len());
+    dst.fill(0);
+    for (index, plane) in planes.iter().enumerate() {
+        let (plane_w, plane_h) = plane_sizes[index];
+        let Some(plane) = plane else { continue };
+        debug_assert_eq!(plane.len(), plane_w * plane_h * 4);
+        let plane_row_bytes = plane_w * 4;
+        let (ox, oy) = (offsets[index].0 as usize, offsets[index].1 as usize);
+        for row in 0..plane_h {
+            let dst_start = (oy + row) * stream_row_bytes + ox * 4;
+            dst[dst_start..dst_start + plane_row_bytes]
+                .copy_from_slice(&plane[row * plane_row_bytes..(row + 1) * plane_row_bytes]);
         }
     }
 }
@@ -4505,10 +4667,12 @@ struct OverlayWorkerState {
     overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
     keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
     cursor_pixmap: resvg::tiny_skia::Pixmap,
-    /// Canvas-space rect the finished cursor plane is cropped to before it is
-    /// written to FFmpeg. `None` ships the full canvas (items and keys planes
-    /// and every slice of a multi-plane frame are always full-canvas).
+    /// Canvas-space rects each plane is rasterized at — the cursor renders the
+    /// full canvas then crops, while the items/keys pixmaps are allocated at
+    /// their rect size and rendered with the rect origin offset.
     cursor_rect: Option<(u32, u32, u32, u32)>,
+    items_rect: Option<(u32, u32, u32, u32)>,
+    keys_rect: Option<(u32, u32, u32, u32)>,
     items_layer: Option<resvg::tiny_skia::Pixmap>,
     last_display_items: Option<Vec<overlay_engine::DisplayItem>>,
     cached_unpremultiplied_frame: Option<Arc<Vec<u8>>>,
@@ -4516,6 +4680,7 @@ struct OverlayWorkerState {
 }
 
 impl OverlayWorkerState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         renderers: Vec<(u64, u64, cursor::CursorRenderer)>,
         overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
@@ -4523,6 +4688,8 @@ impl OverlayWorkerState {
         width: u32,
         height: u32,
         cursor_rect: Option<(u32, u32, u32, u32)>,
+        items_rect: Option<(u32, u32, u32, u32)>,
+        keys_rect: Option<(u32, u32, u32, u32)>,
     ) -> std::result::Result<Self, String> {
         let cursor_pixmap = resvg::tiny_skia::Pixmap::new(width, height)
             .ok_or_else(|| "allocate cursor pixmap failed".to_string())?;
@@ -4532,6 +4699,8 @@ impl OverlayWorkerState {
             keystroke_renderer,
             cursor_pixmap,
             cursor_rect,
+            items_rect,
+            keys_rect,
             items_layer: None,
             last_display_items: None,
             cached_unpremultiplied_frame: None,
@@ -4557,15 +4726,18 @@ impl OverlayWorkerState {
                 self.last_display_items = Some(Vec::new());
                 self.cached_unpremultiplied_frame = None;
             } else if self.last_display_items.as_ref() != Some(&display_list.items) {
+                let (rect_x, rect_y, rect_w, rect_h) = self.items_rect.unwrap_or((
+                    0,
+                    0,
+                    self.cursor_pixmap.width(),
+                    self.cursor_pixmap.height(),
+                ));
                 let layer = match &mut self.items_layer {
                     Some(layer) => layer,
                     None => {
                         self.items_layer = Some(
-                            resvg::tiny_skia::Pixmap::new(
-                                self.cursor_pixmap.width(),
-                                self.cursor_pixmap.height(),
-                            )
-                            .ok_or_else(|| "allocate overlay pixmap failed".to_string())?,
+                            resvg::tiny_skia::Pixmap::new(rect_w, rect_h)
+                                .ok_or_else(|| "allocate overlay pixmap failed".to_string())?,
                         );
                         self.items_layer
                             .as_mut()
@@ -4574,13 +4746,14 @@ impl OverlayWorkerState {
                 };
                 layer.fill(resvg::tiny_skia::Color::TRANSPARENT);
                 engine
-                    .render_to_pixmap(overlay_time_ms, layer)
+                    .render_to_pixmap_cropped(
+                        overlay_time_ms,
+                        layer,
+                        (rect_x as f64, rect_y as f64),
+                    )
                     .map_err(|error| format!("render overlay frame: {error}"))?;
                 let mut unprem = layer.data().to_vec();
-                cursor::unpremultiply_rgba_bounded(
-                    &mut unprem,
-                    self.cursor_pixmap.width() as usize,
-                );
+                cursor::unpremultiply_rgba_bounded(&mut unprem, rect_w as usize);
                 self.cached_unpremultiplied_frame = Some(Arc::new(unprem));
                 self.last_display_items = Some(display_list.items);
             }
@@ -4632,15 +4805,18 @@ impl OverlayWorkerState {
         });
         let keys_plane = match &self.keystroke_renderer {
             Some(renderer) if keys_visible => {
+                let (rect_x, rect_y, rect_w, rect_h) = self.keys_rect.unwrap_or((
+                    0,
+                    0,
+                    self.cursor_pixmap.width(),
+                    self.cursor_pixmap.height(),
+                ));
                 let pixmap = match &mut self.keys_pixmap {
                     Some(pixmap) => pixmap,
                     None => {
                         self.keys_pixmap = Some(
-                            resvg::tiny_skia::Pixmap::new(
-                                self.cursor_pixmap.width(),
-                                self.cursor_pixmap.height(),
-                            )
-                            .ok_or_else(|| "allocate keys pixmap failed".to_string())?,
+                            resvg::tiny_skia::Pixmap::new(rect_w, rect_h)
+                                .ok_or_else(|| "allocate keys pixmap failed".to_string())?,
                         );
                         self.keys_pixmap
                             .as_mut()
@@ -4648,9 +4824,13 @@ impl OverlayWorkerState {
                     }
                 };
                 pixmap.fill(resvg::tiny_skia::Color::TRANSPARENT);
-                renderer.render_frame_at(output_time_ms, pixmap);
+                renderer.render_frame_at_offset(
+                    output_time_ms,
+                    pixmap,
+                    (rect_x as f64, rect_y as f64),
+                );
                 let mut plane = pixmap.data().to_vec();
-                cursor::unpremultiply_rgba_bounded(&mut plane, pixmap.width() as usize);
+                cursor::unpremultiply_rgba_bounded(&mut plane, rect_w as usize);
                 Some(plane)
             }
             // Renderer exists but this frame sits outside every badge window.
@@ -4695,10 +4875,16 @@ fn feed_cursor_frames(
     halt: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
     let mut writer = std::io::BufWriter::with_capacity(256 * 1024, stdin);
-    let plane_w = cursor.width as usize;
-    let plane_h = cursor.height as usize;
-    let plane_byte_len = plane_w * plane_h * 4;
-    let frame_byte_len = plane_byte_len * cursor.planes.len().max(1);
+    // Planes tile at their own (possibly cropped) sizes inside the declared
+    // `stream_width × stream_height` rawvideo frame.
+    let plane_sizes: Vec<(usize, usize)> = cursor
+        .plane_rects
+        .iter()
+        .map(|rect| (rect.2 as usize, rect.3 as usize))
+        .collect();
+    let plane_offsets = cursor.plane_offsets.clone();
+    let stream_row_bytes = cursor.stream_width as usize * 4;
+    let frame_byte_len = cursor.frame_byte_len();
     let zero_frame = vec![0u8; frame_byte_len];
     let frame_count = cursor.frame_count;
 
@@ -4752,6 +4938,7 @@ fn feed_cursor_frames(
     let mut recv_wait = Duration::ZERO;
     let mut write_time = Duration::ZERO;
     let mut bytes_written = 0u64;
+    let mut zero_frames = 0u64;
 
     let result = std::thread::scope(|scope| -> Result<()> {
         for _ in 0..workers {
@@ -4768,10 +4955,14 @@ fn feed_cursor_frames(
             let keystroke_renderer = cursor.keystroke_renderer.clone();
             let width = cursor.canvas_width;
             let height = cursor.canvas_height;
-            let cursor_rect = cursor.cursor_rect;
+            let cursor_rect = cursor.plane_rect(PlatePlane::Cursor);
+            let items_rect = cursor.plane_rect(PlatePlane::Items);
+            let keys_rect = cursor.plane_rect(PlatePlane::Keys);
             let fps = cursor.fps;
             let first_frame_index = cursor.first_frame_index;
             let planes = cursor.planes.clone();
+            let plane_sizes = plane_sizes.clone();
+            let plane_offsets = plane_offsets.clone();
             let raster_nanos = &raster_nanos;
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -4782,6 +4973,8 @@ fn feed_cursor_frames(
                         width,
                         height,
                         cursor_rect,
+                        items_rect,
+                        keys_rect,
                     ) {
                         Ok(state) => state,
                         Err(error) => {
@@ -4836,7 +5029,13 @@ fn feed_cursor_frames(
                                         .pop()
                                         .unwrap_or_else(|| vec![0u8; frame_byte_len]);
                                     buffer.resize(frame_byte_len, 0);
-                                    pack_overlay_planes(&mut buffer, plane_w, plane_h, &slices);
+                                    pack_overlay_planes(
+                                        &mut buffer,
+                                        &plane_sizes,
+                                        &plane_offsets,
+                                        stream_row_bytes,
+                                        &slices,
+                                    );
                                     ProducedFrame::Bytes(buffer)
                                 } else {
                                     // Single-plane stream: hand the owned buffer
@@ -4922,6 +5121,9 @@ fn feed_cursor_frames(
                     }
                 }
                 while let Some(produced) = pending.remove(&expected) {
+                    if matches!(produced, ProducedFrame::Zero) {
+                        zero_frames += 1;
+                    }
                     let write_started = std::time::Instant::now();
                     let written = match &produced {
                         ProducedFrame::Zero => writer.write_all(&zero_frame),
@@ -4967,6 +5169,7 @@ fn feed_cursor_frames(
     info!(
         frames = frame_count,
         workers,
+        zero_frames,
         bytes_mib = bytes_written / (1024 * 1024),
         raster_ms = raster_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
         starved_ms = recv_wait.as_millis() as u64,
@@ -4992,8 +5195,13 @@ fn feed_cursor_frames_sequential(
     frame_byte_len: usize,
     zero_frame: &[u8],
 ) -> Result<()> {
-    let plane_w = cursor.width as usize;
-    let plane_h = cursor.height as usize;
+    let plane_sizes: Vec<(usize, usize)> = cursor
+        .plane_rects
+        .iter()
+        .map(|rect| (rect.2 as usize, rect.3 as usize))
+        .collect();
+    let plane_offsets = cursor.plane_offsets.clone();
+    let stream_row_bytes = cursor.stream_width as usize * 4;
     let multi_plane = cursor.planes.len() > 1;
     let mut packed_frame = if multi_plane {
         vec![0u8; frame_byte_len]
@@ -5006,26 +5214,41 @@ fn feed_cursor_frames_sequential(
         cursor.keystroke_renderer.clone(),
         cursor.canvas_width,
         cursor.canvas_height,
-        cursor.cursor_rect,
+        cursor.plane_rect(PlatePlane::Cursor),
+        cursor.plane_rect(PlatePlane::Items),
+        cursor.plane_rect(PlatePlane::Keys),
     )
     .map_err(InternalError::Media)?;
 
+    // Same producer breakdown as the parallel path: raster vs pipe write, so a
+    // single-producer pass still shows where the feed time went.
+    let mut raster = std::time::Duration::ZERO;
+    let mut write_time = std::time::Duration::ZERO;
+    let mut zero_frames = 0u64;
     for frame_index in 0..cursor.frame_count {
         if cancel.load(std::sync::atomic::Ordering::Relaxed)
             || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
         {
             return Err(InternalError::Media("export cancelled".into()).into());
         }
+        let render_started = std::time::Instant::now();
         let frame = state
             .render_planes(frame_index + cursor.first_frame_index, cursor.fps)
             .map_err(InternalError::Media)?;
+        raster += render_started.elapsed();
 
         let frame: &[u8] = if multi_plane {
             let slices = frame.plane_slices(&cursor.planes);
             if slices.iter().all(Option::is_none) {
                 zero_frame
             } else {
-                pack_overlay_planes(&mut packed_frame, plane_w, plane_h, &slices);
+                pack_overlay_planes(
+                    &mut packed_frame,
+                    &plane_sizes,
+                    &plane_offsets,
+                    stream_row_bytes,
+                    &slices,
+                );
                 packed_frame.as_slice()
             }
         } else {
@@ -5038,14 +5261,28 @@ fn feed_cursor_frames_sequential(
             .unwrap_or(zero_frame)
         };
 
+        if std::ptr::eq(frame.as_ptr(), zero_frame.as_ptr()) {
+            zero_frames += 1;
+        }
+        let write_started = std::time::Instant::now();
         if let Err(error) = writer.write_all(frame) {
             if is_pipe_closed(&error) {
                 return Ok(());
             }
             return Err(InternalError::Media(format!("write overlay frame: {error}")).into());
         }
+        write_time += write_started.elapsed();
     }
     let _ = writer.flush();
+    info!(
+        frames = cursor.frame_count,
+        workers = 1,
+        zero_frames,
+        bytes_mib = cursor.frame_count * frame_byte_len as u64 / (1024 * 1024),
+        raster_ms = raster.as_millis() as u64,
+        write_ms = write_time.as_millis() as u64,
+        "export: plate feed finished"
+    );
     Ok(())
 }
 
@@ -8486,7 +8723,13 @@ mod tests {
         let left = vec![1u8; 2 * 2 * 4];
         let right = vec![2u8; 2 * 2 * 4];
         let mut dst = vec![0u8; 4 * 2 * 4];
-        pack_overlay_planes(&mut dst, 2, 2, &[Some(&left), Some(&right)]);
+        pack_overlay_planes(
+            &mut dst,
+            &[(2, 2), (2, 2)],
+            &[(0, 0), (2, 0)],
+            4 * 4,
+            &[Some(&left), Some(&right)],
+        );
         assert_eq!(
             dst,
             vec![
@@ -8500,8 +8743,37 @@ mod tests {
     fn pack_overlay_planes_fills_missing_side_with_transparency() {
         let right = vec![7u8; 2 * 4];
         let mut dst = vec![9u8; 4 * 4];
-        pack_overlay_planes(&mut dst, 2, 1, &[None, Some(&right)]);
+        pack_overlay_planes(
+            &mut dst,
+            &[(2, 1), (2, 1)],
+            &[(0, 0), (2, 0)],
+            16,
+            &[None, Some(&right)],
+        );
         assert_eq!(dst, vec![0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7]);
+    }
+
+    #[test]
+    fn pack_overlay_planes_handles_uneven_plane_heights() {
+        // Planes pack at their own rects: a tall left plane beside a 1px
+        // right plane leaves the second row's right slot transparent.
+        let left = vec![3u8; 2 * 2 * 4];
+        let right = vec![8u8; 1 * 1 * 4];
+        let mut dst = vec![0u8; (2 + 1) * 2 * 4];
+        pack_overlay_planes(
+            &mut dst,
+            &[(2, 2), (1, 1)],
+            &[(0, 0), (2, 0)],
+            (2 + 1) * 4,
+            &[Some(&left), Some(&right)],
+        );
+        assert_eq!(
+            dst,
+            vec![
+                3, 3, 3, 3, 3, 3, 3, 3, 8, 8, 8, 8, // row 0: both planes
+                3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, // row 1: right plane ended
+            ]
+        );
     }
 
     #[test]
@@ -8724,13 +8996,14 @@ mod tests {
         let shared = CompositionShared::new(None);
         let frame_plan = prepare_cursor_frame_plan(
             &canvas,
-            5000,
             Vec::new(),
             &plan,
             &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
             &shared,
+            0,
+            150,
         )
         .expect("prepare frame plan succeeds");
 
@@ -8857,13 +9130,14 @@ mod tests {
         let shared = CompositionShared::new(None);
         let frame_plan = prepare_cursor_frame_plan(
             &canvas,
-            5000,
             Vec::new(),
             &plan,
             &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
             &shared,
+            0,
+            150,
         )
         .expect("prepare frame plan succeeds");
 
@@ -12069,13 +12343,14 @@ mod tests {
         let shared = CompositionShared::new(None);
         let frame_plan = prepare_cursor_frame_plan(
             &canvas,
-            1000,
             Vec::new(),
             &plan,
             &default_export_settings(),
             &asset_paths,
             (0.0, 0.0, canvas.width as f64, canvas.height as f64),
             &shared,
+            0,
+            30,
         )
         .expect("prepare frame plan succeeds");
 

@@ -7,6 +7,8 @@
   "scripts": {
     "benchmark:phase9": "bun run editor-phase9-benchmark.ts",
     "benchmark:cursor-follow": "bun run cursor-follow-path-benchmark.ts",
+    "benchmark:export:synth": "bun run export-synth-spec.ts",
+    "benchmark:export": "bun run export-bench.ts",
     "typecheck": "tsc --noEmit",
     "format:check": "prettier --check .",
     "format": "prettier --write ."

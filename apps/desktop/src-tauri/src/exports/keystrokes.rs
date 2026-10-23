@@ -796,14 +796,16 @@ impl KeystrokeRenderer {
         keystroke_output_windows(&self.segments, &source_windows)
     }
 
-    /// Draw the badge stack at `output_ms` into the canvas-sized pixmap.
-    /// Pure function of the frame timestamp — no retained animation state.
-    pub fn render_frame_at(&self, output_ms: f64, frame: &mut Pixmap) {
+    /// Per-row placement for one output timestamp — `(row index, x, y, alpha,
+    /// scale)` in canvas space. Shared by the renderer (which rasterizes the
+    /// row pixmap on top) and the plane-bounds sweep (which only unions).
+    fn layout_rows(&self, output_ms: f64) -> Vec<(usize, f64, f64, f64, f64)> {
+        let mut rows = Vec::new();
         if self.rows.is_empty() || !self.settings.enabled {
-            return;
+            return rows;
         }
         let Some(source_ms) = source_time_for_output(&self.segments, output_ms) else {
-            return;
+            return rows;
         };
         let is_top = self.settings.position.starts_with("top");
         let anchor_y = if is_top {
@@ -825,16 +827,11 @@ impl KeystrokeRenderer {
             if alpha <= 0.0 {
                 continue;
             }
-            let Some(pixmap) = self.row_pixmap(index) else {
-                continue;
-            };
             let scale = 0.85 + 0.15 * enter_p;
 
             let pad = self.metrics.shadow_blur * 2.0;
-            let row_w = row.svg_w;
-            let row_h = row.svg_h;
-            let pill_w = row_w - pad * 2.0;
-            let pill_h = row_h - pad * 2.0;
+            let pill_w = row.svg_w - pad * 2.0;
+            let pill_h = row.svg_h - pad * 2.0;
 
             let x = match self.settings.position.as_str() {
                 "bottom-left" | "top-left" => self.metrics.margin - pad,
@@ -848,6 +845,75 @@ impl KeystrokeRenderer {
             } else {
                 anchor_y - pill_h - stack_offset - pad + (1.0 - enter_p) * nudge
             };
+            rows.push((index, x, y, alpha, scale));
+            stack_offset += step * enter_p * exit_p;
+        }
+        rows
+    }
+
+    /// Union of the badge rects drawn across `[start_ms, end_ms)` sampled at
+    /// `step_ms` — sizes the cropped keys plate for chunked export passes.
+    /// Scale happens around each row's center, so the drawn extent is the
+    /// row svg rect scaled by `scale`.
+    pub fn bounds_in_range(
+        &self,
+        start_ms: f64,
+        end_ms: f64,
+        step_ms: f64,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        let mut time = start_ms;
+        while time < end_ms {
+            for (index, x, y, _alpha, scale) in self.layout_rows(time) {
+                let row = &self.rows[index];
+                let cx = x + row.svg_w / 2.0;
+                let cy = y + row.svg_h / 2.0;
+                x0 = x0.min(cx - row.svg_w * scale / 2.0);
+                y0 = y0.min(cy - row.svg_h * scale / 2.0);
+                x1 = x1.max(cx + row.svg_w * scale / 2.0);
+                y1 = y1.max(cy + row.svg_h * scale / 2.0);
+            }
+            time += step_ms;
+        }
+        if x0 > x1 || y0 > y1 {
+            return None;
+        }
+        // ±1px for the AA fringe, clamped to the canvas.
+        let rx0 = (x0 - 1.0).floor().max(0.0).min(self.canvas.0 as f64 - 1.0);
+        let ry0 = (y0 - 1.0).floor().max(0.0).min(self.canvas.1 as f64 - 1.0);
+        let rx1 = (x1 + 1.0).ceil().min(self.canvas.0 as f64).max(rx0 + 1.0);
+        let ry1 = (y1 + 1.0).ceil().min(self.canvas.1 as f64).max(ry0 + 1.0);
+        Some((
+            rx0 as u32,
+            ry0 as u32,
+            (rx1 - rx0) as u32,
+            (ry1 - ry0) as u32,
+        ))
+    }
+
+    /// Draw the badge stack at `output_ms` into the canvas-sized pixmap.
+    /// Pure function of the frame timestamp — no retained animation state.
+    /// The export feed uses the offset variant; this stays for the tests.
+    #[allow(dead_code)]
+    pub fn render_frame_at(&self, output_ms: f64, frame: &mut Pixmap) {
+        self.render_frame_at_offset(output_ms, frame, (0.0, 0.0));
+    }
+
+    /// Draw into a pixmap representing the `origin`-anchored crop of the
+    /// canvas — the keys plate ships only its bounding rect, so canvas-space
+    /// row positions shift by `-origin` before scaling.
+    pub fn render_frame_at_offset(&self, output_ms: f64, frame: &mut Pixmap, origin: (f64, f64)) {
+        for (index, x, y, alpha, scale) in self.layout_rows(output_ms) {
+            let Some(pixmap) = self.row_pixmap(index) else {
+                continue;
+            };
+            let row = &self.rows[index];
+            let (row_w, row_h) = (row.svg_w, row.svg_h);
+            let x = x - origin.0;
+            let y = y - origin.1;
 
             // Scale around the row's own center, matching the DOM preview's
             // `transform: scale()` on the row box.
@@ -861,8 +927,6 @@ impl KeystrokeRenderer {
                 ..Default::default()
             };
             frame.draw_pixmap(0, 0, pixmap.as_ref().as_ref(), &paint, transform, None);
-
-            stack_offset += step * enter_p * exit_p;
         }
     }
 }

@@ -148,6 +148,16 @@ cd apps/desktop/src-tauri
 cargo build --release --features export-harness --bin export_harness
 ```
 
+Benchmark the export pipeline end-to-end (spec → real render → per-stage timing table). Specs come from `tooling/gen-export-spec.ts <sessionDir> <outDir>` for real projects, or the self-contained synthetic fixture. `RF_HARNESS` points at a non-default binary location (e.g. a custom `CARGO_TARGET_DIR` when the repo drive is short on space); `--scratch` redirects run outputs to a disk with room:
+
+```bash
+bun run --cwd tooling/benchmarks benchmark:export:synth [outDir]   # generate fixture + specs
+bun run --cwd tooling/benchmarks benchmark:export <specDir> [--workers 2,4,8] [--repeats N] [--scratch dir]
+bun run tooling/benchmarks/export-bench.ts --reparse <logDir>       # rebuild the table from logs
+```
+
+Stage timings land in `bench-*.log` + `bench-results-*.json` next to the specs; `RECORDFORGE_EXPORT_CHUNK_WORKERS`/`RECORDFORGE_EXPORT_CHUNK_FRAMES` env knobs control chunk parallelism/size during measurement.
+
 Official desktop releases are published by `.github/workflows/release-desktop.yml` from `app-v*` tags. The workflow builds signed NSIS/MSI artifacts and uploads `latest.json` to the GitHub Release.
 
 Write `apps/desktop/release-notes/<version>.md` **before** pushing an `app-v*` tag — the workflow injects it into both the GitHub Release body (above the auto-generated "What's Changed") and the updater `latest.json` `notes` shown in the in-app update dialog. Missing file → generic fallback body + workflow warning.
