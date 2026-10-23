@@ -50,6 +50,8 @@ cargo build --release
 ## Dependencies
 
 - `tauri` is configured with the `tray-icon` and `image-png` features.
+- `tauri-plugin-single-instance` is registered first so a second launch focuses the running instance instead of starting another tray app.
+- `tauri-plugin-notification` provides the native one-time close-to-tray hint (Rust-side only; no JS notification permission is required).
 - `tauri-plugin-global-shortcut` is used for global hotkeys.
 - `tauri-plugin-dialog` is used for save/export dialogs.
 - `tauri-plugin-updater` verifies signed official GitHub Release artifacts; its installer is guarded by `UpdateGate`.

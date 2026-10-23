@@ -71,7 +71,7 @@ export function SettingsView({
 
   const [savePath, setSavePath] = useState("")
   const [countdownSec, setCountdownSec] = useState("3")
-  const [minimizeToTray, setMinimizeToTray] = useState(false)
+  const [minimizeToTray, setMinimizeToTray] = useState(true)
   const [notifyOnExport, setNotifyOnExport] = useState(true)
   const [soundOnExport, setSoundOnExport] = useState(true)
   const [cursorSettings, setCursorSettings] = useState<CursorSettings>(defaultCursorSettings)
@@ -99,18 +99,17 @@ export function SettingsView({
         const results = await Promise.all([
           getSetting("countdownSeconds").catch(() => null),
           getSetting("minimizeToTray").catch(() => null),
-          getSetting("startMinimized").catch(() => null),
           getSetting("defaultCursorSettings").catch(() => null),
           getSetting("defaultOutputFolder").catch(() => null),
           getSetting("notifyOnExportComplete").catch(() => null),
           getSetting("soundOnExportComplete").catch(() => null),
         ])
         countdown = results[0]
-        minimized = results[1] ?? results[2]
-        cursorRaw = results[3]
-        folder = results[4]
-        if (results[5] !== null) setNotifyOnExport(results[5] === "true")
-        if (results[6] !== null) setSoundOnExport(results[6] === "true")
+        minimized = results[1]
+        cursorRaw = results[2]
+        folder = results[3]
+        if (results[4] !== null) setNotifyOnExport(results[4] === "true")
+        if (results[5] !== null) setSoundOnExport(results[5] === "true")
 
         if (!folder) {
           try {
@@ -181,7 +180,6 @@ export function SettingsView({
     setMinimizeToTray(value)
     if (isTauri()) {
       void setSetting("minimizeToTray", String(value))
-      void setSetting("startMinimized", String(value))
     }
   }
 
@@ -441,9 +439,10 @@ export function SettingsView({
 
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs font-medium text-foreground">Minimize to System Tray</p>
+                <p className="text-xs font-medium text-foreground">Close to System Tray</p>
                 <p className="text-[11px] text-subtle-foreground">
-                  Keep RecordForge running in the notification area when window is closed.
+                  Keep RecordForge running in the notification area when the window is closed. Use
+                  Quit in the tray menu to exit completely.
                 </p>
               </div>
               <Switch checked={minimizeToTray} onCheckedChange={handleMinimizeToTrayChange} />

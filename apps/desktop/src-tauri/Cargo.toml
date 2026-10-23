@@ -25,6 +25,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "macos-private-api"] }
+# A tray app must be a single process: a second launch would add another tray
+# icon and another instance holding the executable the updater has to replace.
+tauri-plugin-single-instance = "2.5.4"
+# Native notifications (used for the one-time close-to-tray hint). Native so it
+# also shows while the webview is minimized.
+tauri-plugin-notification = "2.7.0"
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"

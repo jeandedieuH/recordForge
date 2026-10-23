@@ -2667,6 +2667,34 @@ impl Recorder {
         Some(levels)
     }
 
+    /// Non-blocking "is a session live?" probe for the main-thread close
+    /// handler. `status()` can queue behind a stop/finalize that holds the
+    /// session locks; blocking the window event loop on that would freeze the
+    /// app. A busy lock means a transition is in flight, which counts as live.
+    pub fn is_session_active_nonblocking(&self) -> bool {
+        match self.current.try_lock() {
+            Ok(guard) => {
+                if let Some(session) = guard.as_ref() {
+                    return match session.manifest.try_lock() {
+                        Ok(manifest) => !matches!(
+                            manifest.state,
+                            RecorderState::Idle | RecorderState::Completed | RecorderState::Failed
+                        ),
+                        // Finalization owns the manifest but the session lives.
+                        Err(_) => true,
+                    };
+                }
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return true,
+            Err(std::sync::TryLockError::Poisoned(_)) => return true,
+        }
+
+        match self.finalizing.try_lock() {
+            Ok(guard) => guard.is_some(),
+            Err(_) => true,
+        }
+    }
+
     /// Runtime status for the React UI.
     pub fn status(&self) -> crate::errors::Result<RecordingStatus> {
         if let Ok(mut guard) = self.current.lock() {
@@ -3460,6 +3488,38 @@ mod tests {
             RecorderState::Idle
         );
         assert!(!temp_dir.path().join(&session_id).exists());
+    }
+
+    #[test]
+    fn nonblocking_session_probe_tracks_manifest_state() {
+        let temp_dir = tempfile::tempdir().expect("create temporary sessions directory");
+        let recorder = test_recorder(temp_dir.path());
+        assert!(!recorder.is_session_active_nonblocking());
+
+        let work_dir = temp_dir.path().join("session-1");
+        std::fs::create_dir_all(&work_dir).expect("create session work dir");
+        let session = test_session(&work_dir, test_config());
+        session
+            .manifest
+            .lock()
+            .expect("manifest")
+            .set_state(RecorderState::Recording);
+        *recorder.current.lock().expect("session slot") = Some(session);
+        assert!(recorder.is_session_active_nonblocking());
+
+        {
+            let mut guard = recorder.current.lock().expect("session slot");
+            let session = guard.as_mut().expect("active session");
+            session
+                .manifest
+                .lock()
+                .expect("manifest")
+                .set_state(RecorderState::Completed);
+        }
+        assert!(!recorder.is_session_active_nonblocking());
+
+        *recorder.current.lock().expect("session slot") = None;
+        assert!(!recorder.is_session_active_nonblocking());
     }
 
     #[test]

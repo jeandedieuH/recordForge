@@ -1,15 +1,69 @@
 use tauri::menu::{Menu, MenuEvent, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
+use tauri_plugin_notification::NotificationExt;
 
 use crate::capture::manifest::RecorderState;
+use crate::database::settings;
 use crate::errors::{InternalError, Result};
 use crate::state::AppState;
 
 const TRAY_ID: &str = "main-tray";
 
+/// Settings key that records whether the one-time close-to-tray hint has been
+/// delivered. Internal to Rust; not part of the IPC settings surface.
+const TRAY_HINT_SETTING: &str = "trayHintShown";
+
 fn map_tauri_err(e: tauri::Error) -> InternalError {
     InternalError::Unknown(format!("{e:?}"))
+}
+
+/// Whether the tray icon currently exists.
+///
+/// The main window may only be hidden while this is true: a hidden window with
+/// no tray icon has no surface that can bring it back, which leaves a running
+/// process the user cannot see or close (and the updater cannot shut down).
+pub fn is_available(app: &tauri::AppHandle) -> bool {
+    app.tray_by_id(TRAY_ID).is_some()
+}
+
+/// Show a one-time OS notification the first time the window is parked in the
+/// tray, so users know the app is still running and how to get it back.
+///
+/// The flag lives in settings, so the hint survives restarts and never repeats.
+pub fn show_first_close_hint(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let already_shown = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|db| settings::get_setting(&db, TRAY_HINT_SETTING).ok().flatten())
+        .is_some_and(|value| value == "true");
+    if already_shown {
+        return;
+    }
+
+    match app
+        .notification()
+        .builder()
+        .title("RecordForge is still running")
+        .body(
+            "RecordForge keeps working in the system tray. Click the tray icon to reopen it, \
+             or choose Quit there to exit completely.",
+        )
+        .show()
+    {
+        Ok(()) => {
+            if let Ok(db) = state.db.lock() {
+                if let Err(error) = settings::set_setting(&db, TRAY_HINT_SETTING, "true") {
+                    tracing::warn!(error = ?error, "could not record tray hint state");
+                }
+            }
+        }
+        // Dev builds without an install shortcut may not support toasts. Keep
+        // the flag unset so a packaged build still shows the hint once.
+        Err(error) => tracing::debug!(error = %error, "close-to-tray hint not shown"),
+    }
 }
 
 /// Snapshot of recorder state used to render the tray menu. `Copy` so it can
@@ -40,18 +94,23 @@ impl TrayMenuState {
 }
 
 /// Create the system tray icon and menu for RecordForge.
-pub fn create_tray(app: &tauri::App) -> Result<()> {
+pub fn create_tray(app: &tauri::AppHandle) -> Result<()> {
     let menu = build_menu(
-        app.handle(),
+        app,
         &TrayMenuState::from_recorder_state(RecorderState::Idle),
     )?;
 
+    // Fall back to the bundled icon when the window icon is unavailable: a
+    // missing icon must never turn into a missing tray icon, because that is
+    // the only way back into a window that was closed to the tray.
     let icon = app
         .default_window_icon()
-        .ok_or(InternalError::Unknown("no default window icon".into()))?;
+        .cloned()
+        .or_else(|| tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")).ok())
+        .ok_or_else(|| InternalError::Unknown("no tray icon available".into()))?;
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon.clone())
+        .icon(icon)
         // macOS template icon: black/alpha artwork the system recolors for
         // the menu bar's light/dark appearance — required for a native look.
         // The flag is ignored on Windows/Linux where icons render as-is.
@@ -79,6 +138,37 @@ pub fn create_tray(app: &tauri::App) -> Result<()> {
         .map_err(map_tauri_err)?;
 
     Ok(())
+}
+
+/// Retry tray creation once, shortly after startup.
+///
+/// On Windows the shell can still be initialising when the app launches at
+/// login/autostart, so the first `Shell_NotifyIcon(NIM_ADD)` can fail. Without
+/// a retry the process would run with no tray icon at all — while still being
+/// allowed to hide its window.
+pub fn schedule_retry(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let thread_app = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            if thread_app.tray_by_id(TRAY_ID).is_some() {
+                return;
+            }
+            match create_tray(&thread_app) {
+                Ok(()) => {
+                    tracing::info!("tray icon created on retry");
+                    refresh_tray_menu(&thread_app);
+                }
+                Err(error) => tracing::error!(
+                    error = ?error,
+                    "tray icon retry failed; close-to-tray stays disabled"
+                ),
+            }
+        }) {
+            tracing::warn!(error = ?error, "could not schedule tray icon retry");
+        }
+    });
 }
 
 /// Rebuild the tray menu so labels and enabled state match the recorder.
@@ -371,7 +461,9 @@ fn handle_tray_event(app: &tauri::AppHandle, event: MenuEvent) {
             }
         }
         "quit" => {
-            app.exit(0);
+            // Route through the window close guard so unsaved editor work is
+            // flushed before the process ends.
+            crate::window::MainWindow::quit(app);
         }
         _ => {}
     }

@@ -48,9 +48,24 @@ pub fn run() {
 
     info!("RecordForge desktop starting");
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // A tray app must be single-instance: a second launch would add another
+    // tray icon and leave another process holding the executable that the
+    // updater has to replace. Register first so it runs before the others.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Err(error) = window::MainWindow::show_or_recreate(app) {
+                warn!(error = ?error, "second launch could not restore main window");
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
@@ -63,8 +78,13 @@ pub fn run() {
                 // init error and let setup fail.
                 return Err(err.into());
             }
-            if let Err(err) = tray::create_tray(app) {
+            if let Err(err) = tray::create_tray(app.handle()) {
                 tracing::error!(error = ?err, "failed to create tray icon");
+                // Windows can still be bringing up the shell (login/autostart),
+                // so give registration one delayed retry. Until an icon exists
+                // close-to-tray is disabled rather than hiding the window with
+                // no way to get it back.
+                tray::schedule_retry(app.handle());
             }
             if let Err(err) = shortcuts::register_shortcuts(app) {
                 tracing::error!(error = ?err, "failed to register global shortcuts");
@@ -103,47 +123,22 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    let app = window.app_handle();
-                    let state = app.state::<state::AppState>();
-
-                    // While an update install is pending a close must be real:
-                    // the spawned installer expects the process to exit, and
-                    // hiding to the tray would keep the exe running and stall
-                    // or fail the install.
-                    let installing_update = state
-                        .update_gate
-                        .snapshot()
-                        .map(|snapshot| snapshot.installing)
-                        .unwrap_or(false);
-
-                    let minimize_to_tray = !installing_update
-                        && state
-                            .db
-                            .lock()
-                            .ok()
-                            .and_then(|db| {
-                                crate::database::settings::get_setting(&db, "minimizeToTray")
-                                    .ok()
-                                    .flatten()
-                                    .or_else(|| {
-                                        crate::database::settings::get_setting(
-                                            &db,
-                                            "startMinimized",
-                                        )
-                                        .ok()
-                                        .flatten()
-                                    })
-                            })
-                            .map(|val| val == "true")
-                            .unwrap_or(false);
-
-                    if minimize_to_tray {
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window::MainWindow::handle_close_request(window.app_handle()) {
                         api.prevent_close();
-                        window::MainWindow::hide_to_tray(app);
                     }
                 }
+                // A close that was meant to quit reaches `Destroyed` after the
+                // editor's save guard allowed it; auxiliary windows must not
+                // keep that process alive.
+                tauri::WindowEvent::Destroyed => {
+                    window::MainWindow::handle_destroyed(window.app_handle());
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![

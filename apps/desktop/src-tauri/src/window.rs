@@ -1,7 +1,11 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{LogicalPosition, LogicalSize, Manager, Position, Size};
 
 use crate::capture::source::Bounds;
+use crate::database::settings;
 use crate::errors::{InternalError, Result};
+use crate::state::AppState;
 
 const FLOATING_WINDOW_WIDTH: f64 = 620.0;
 const FLOATING_WINDOW_HEIGHT: f64 = 88.0;
@@ -17,6 +21,57 @@ const TELEPROMPTER_WINDOW_HEIGHT: f64 = 460.0;
 const TELEPROMPTER_WINDOW_MIN_WIDTH: f64 = 420.0;
 const TELEPROMPTER_WINDOW_MIN_HEIGHT: f64 = 300.0;
 const TELEPROMPTER_WINDOW_TOP_MARGIN: f64 = 24.0;
+
+/// Set when a main-window close is meant to end the process instead of hiding
+/// the window. Consumed on `Destroyed` so auxiliary windows cannot keep a
+/// headless app (and its locked executable) alive.
+static QUIT_AFTER_MAIN_CLOSE: AtomicBool = AtomicBool::new(false);
+
+/// Set when the user asked to quit from the tray. The close still goes through
+/// the webview close guard first, so the editor can flush unsaved work.
+static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// What a close request on the main window should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainCloseAction {
+    /// Keep the process alive and park the window in the tray.
+    HideToTray,
+    /// Keep the process alive but leave the window on the taskbar. Only used
+    /// when a recording is running and no tray icon exists to restore from.
+    MinimizeToTaskbar,
+    /// Let the window close, then end the process.
+    Exit,
+}
+
+/// Decide how a user-initiated close of the main window behaves.
+///
+/// The tray is the only surface that can bring a hidden window back, so the
+/// window may only be hidden while a tray icon actually exists. An update
+/// install (and an explicit tray Quit) must always be allowed to terminate the
+/// process, and a live recording forces the tray route even when close-to-tray
+/// is disabled — closing the window must never discard an in-progress session.
+pub(crate) fn main_close_action(
+    tray_available: bool,
+    close_to_tray: bool,
+    recording_active: bool,
+    installing_update: bool,
+    quit_requested: bool,
+) -> MainCloseAction {
+    if installing_update || quit_requested {
+        return MainCloseAction::Exit;
+    }
+    if tray_available {
+        if close_to_tray || recording_active {
+            MainCloseAction::HideToTray
+        } else {
+            MainCloseAction::Exit
+        }
+    } else if recording_active {
+        MainCloseAction::MinimizeToTaskbar
+    } else {
+        MainCloseAction::Exit
+    }
+}
 
 /// Main application window lifecycle helpers used by the recorder.
 pub struct MainWindow;
@@ -47,6 +102,94 @@ impl MainWindow {
         }
         #[cfg(not(target_os = "windows"))]
         let _ = window.hide();
+    }
+
+    /// Handle a user close request on the main window.
+    ///
+    /// Returns `true` when the window must stay alive (parked in the tray).
+    /// Returning `false` lets the close proceed; `handle_destroyed` then ends
+    /// the process so auxiliary windows cannot keep it running headless.
+    pub fn handle_close_request(app: &tauri::AppHandle) -> bool {
+        let state = app.state::<AppState>();
+
+        // A pending update install must terminate the process: the spawned
+        // installer cannot replace the executable while it is still running.
+        let installing_update = state
+            .update_gate
+            .snapshot()
+            .map(|snapshot| snapshot.installing)
+            .unwrap_or(false);
+
+        let recording_active = state.recorder.is_session_active_nonblocking();
+
+        // Unset or unreadable settings keep the documented default: closing
+        // the window parks the app in the tray. Only an explicit "false"
+        // opts a user out of close-to-tray.
+        let close_to_tray = state
+            .db
+            .lock()
+            .ok()
+            .and_then(|db| settings::get_setting(&db, "minimizeToTray").ok().flatten())
+            .map(|value| value != "false")
+            .unwrap_or(true);
+
+        match main_close_action(
+            crate::tray::is_available(app),
+            close_to_tray,
+            recording_active,
+            installing_update,
+            QUIT_REQUESTED.load(Ordering::SeqCst),
+        ) {
+            MainCloseAction::HideToTray => {
+                Self::hide_to_tray(app);
+                crate::tray::show_first_close_hint(app);
+                true
+            }
+            MainCloseAction::MinimizeToTaskbar => {
+                // Ensure the taskbar entry exists: it is the only way back
+                // when there is no tray icon.
+                #[cfg(target_os = "windows")]
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_skip_taskbar(false);
+                }
+                if let Err(error) = Self::minimize(app) {
+                    tracing::warn!(error = ?error, "close could not minimize main window");
+                }
+                true
+            }
+            MainCloseAction::Exit => {
+                QUIT_AFTER_MAIN_CLOSE.store(true, Ordering::SeqCst);
+                false
+            }
+        }
+    }
+
+    /// Quit through the normal close path.
+    ///
+    /// Going through `close()` lets the editor's webview close guard flush
+    /// unsaved work before the process ends, even though close-to-tray is the
+    /// default. If the guard vetoes the close, the app simply stays open.
+    pub fn quit(app: &tauri::AppHandle) {
+        QUIT_REQUESTED.store(true, Ordering::SeqCst);
+        match app.get_webview_window("main") {
+            Some(window) => {
+                if let Err(error) = window.close() {
+                    tracing::warn!(error = ?error, "quit could not close main window");
+                    app.exit(0);
+                }
+            }
+            None => app.exit(0),
+        }
+    }
+
+    /// End the process after a deliberate main-window close.
+    ///
+    /// Called from `WindowEvent::Destroyed`; the destroyed event only fires
+    /// after the webview close guard had its chance to flush unsaved edits.
+    pub fn handle_destroyed(app: &tauri::AppHandle) {
+        if QUIT_AFTER_MAIN_CLOSE.swap(false, Ordering::SeqCst) {
+            app.exit(0);
+        }
     }
 
     /// Bring a live main window back to the front. Shared by every restore
@@ -808,13 +951,75 @@ fn query_component(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::query_component;
+    use super::{main_close_action, query_component, MainCloseAction};
 
     #[test]
     fn query_component_preserves_window_query_boundaries() {
         assert_eq!(
             query_component("Display 1 & 100%"),
             "Display%201%20%26%20100%25"
+        );
+    }
+
+    #[test]
+    fn close_to_tray_requires_a_tray_icon() {
+        // Hiding without a tray icon would strand a running process with no
+        // way back, so the setting alone must never be enough.
+        assert_eq!(
+            main_close_action(false, true, false, false, false),
+            MainCloseAction::Exit
+        );
+        assert_eq!(
+            main_close_action(true, true, false, false, false),
+            MainCloseAction::HideToTray
+        );
+    }
+
+    #[test]
+    fn close_exits_when_the_user_disabled_close_to_tray() {
+        assert_eq!(
+            main_close_action(true, false, false, false, false),
+            MainCloseAction::Exit
+        );
+    }
+
+    #[test]
+    fn active_recording_always_parks_in_the_tray() {
+        assert_eq!(
+            main_close_action(true, false, true, false, false),
+            MainCloseAction::HideToTray
+        );
+    }
+
+    #[test]
+    fn recording_without_a_tray_icon_minimizes_to_the_taskbar() {
+        // Never destroy a running session just because the tray failed.
+        assert_eq!(
+            main_close_action(false, false, true, false, false),
+            MainCloseAction::MinimizeToTaskbar
+        );
+    }
+
+    #[test]
+    fn update_install_always_terminates_the_process() {
+        // The installer waits for the old executable to be released.
+        assert_eq!(
+            main_close_action(true, true, false, true, false),
+            MainCloseAction::Exit
+        );
+        assert_eq!(
+            main_close_action(true, false, true, true, false),
+            MainCloseAction::Exit
+        );
+    }
+
+    #[test]
+    fn tray_quit_bypasses_close_to_tray() {
+        // Quit still goes through the webview close guard, but it must not
+        // be converted back into a hide by the default setting.
+        assert_eq!(
+            main_close_action(true, true, false, false, true),
+            MainCloseAction::Exit
         );
     }
 }

@@ -1078,7 +1078,13 @@ mod tests {
         );
 
         renderer.render_frame_at(1500.0, &mut frame);
-        let lit = frame.data().chunks_exact(4).filter(|px| px[3] > 0).count();
+        let lit = frame
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] > 0)
+            .count();
         assert!(lit > 500, "badge pixels drawn inside window: {lit}");
 
         frame.fill(tiny_skia::Color::TRANSPARENT);
