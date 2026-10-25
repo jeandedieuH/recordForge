@@ -1209,6 +1209,51 @@ pub struct ExportHarnessSpec {
     /// can exercise the same downscale path licensed exports use.
     #[serde(default)]
     pub output_cap: Option<ExportOutputCap>,
+    /// Encoder override: `"software"` (default) or a pinned variant —
+    /// `"nvenc"`, `"qsv"`, `"amf"`, `"mf"`, `"videotoolbox"`, `"vaapi"` —
+    /// used without probing. `"auto"` probes every hardware candidate at
+    /// spec-load time and resolves through the normal priority list.
+    #[serde(default)]
+    pub encoder: Option<String>,
+}
+
+/// Resolve the spec's `encoder` override. Pinned hardware variants are trusted
+/// verbatim — the harness is a measurement tool, so a failing encoder should
+/// fail the render rather than silently fall back to software. `"auto"` has
+/// no startup probe list to reuse, so it probes every candidate on demand.
+#[cfg(feature = "export-harness")]
+fn resolve_harness_encoder(
+    request: Option<&str>,
+    ffmpeg_path: &str,
+    codec: &str,
+) -> std::result::Result<encoding::ExportEncoder, String> {
+    match request {
+        None | Some("software") => Ok(encoding::ExportEncoder::Software),
+        Some("nvenc") => Ok(encoding::ExportEncoder::Nvenc),
+        Some("qsv") => Ok(encoding::ExportEncoder::Qsv),
+        Some("amf") => Ok(encoding::ExportEncoder::Amf),
+        Some("mf") => Ok(encoding::ExportEncoder::Mf),
+        Some("videotoolbox") => Ok(encoding::ExportEncoder::VideoToolbox),
+        Some("vaapi") => Ok(encoding::ExportEncoder::Vaapi),
+        Some("auto") => {
+            let available: Vec<String> = encoding::HARDWARE_PRIORITY
+                .iter()
+                .filter(|candidate| {
+                    crate::capture::encoder::probe_encoder(ffmpeg_path, candidate.h264_id())
+                })
+                .map(|candidate| candidate.h264_id().to_string())
+                .collect();
+            Ok(encoding::resolve_export_encoder(
+                "auto",
+                codec,
+                &available,
+                |candidate| {
+                    crate::capture::encoder::probe_encoder(ffmpeg_path, candidate.hevc_id())
+                },
+            ))
+        }
+        Some(other) => Err(format!("unknown encoder {other:?}")),
+    }
 }
 
 /// Render a JSON `ExportHarnessSpec` through the real export path.
@@ -1232,6 +1277,22 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
         }
     };
 
+    let encoder = match resolve_harness_encoder(
+        spec.encoder.as_deref(),
+        &spec.ffmpeg_path,
+        &spec.settings.codec,
+    ) {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            eprintln!("export_harness: {error}");
+            return 2;
+        }
+    };
+    tracing::info!(
+        encoder = encoder.display_name(),
+        "export harness: encoder resolved"
+    );
+
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let on_progress = |ratio: f64| {
         eprintln!("[progress] {:.1}%", ratio.clamp(0.0, 1.0) * 100.0);
@@ -1248,7 +1309,7 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             "export-harness",
             &spec.asset_paths,
             &spec.settings,
-            encoding::ExportEncoder::Software,
+            encoder,
             cancel,
             None,
             &on_progress,
@@ -1266,7 +1327,7 @@ pub fn run_export_harness_spec(spec_json: &[u8]) -> i32 {
             "export-harness",
             &spec.asset_paths,
             &spec.settings,
-            encoding::ExportEncoder::Software,
+            encoder,
             cancel,
             &on_progress,
             None,
@@ -4633,6 +4694,17 @@ enum ProducedFrame {
     Failed(String),
 }
 
+/// Per-plane raster nanoseconds for one produced frame, summed into the
+/// feed's counters by the caller. `items` is only non-zero on frames whose
+/// evaluated display list actually changed (the plane is cached otherwise),
+/// so it measures real re-render work rather than per-frame evaluation.
+#[derive(Default)]
+struct PlaneRasterNanos {
+    cursor: u64,
+    items: u64,
+    keys: u64,
+}
+
 /// Logical planes produced for one output frame. The items plane is `Arc`
 /// because the cached render is shared across frames while the evaluated
 /// display list is unchanged.
@@ -4716,11 +4788,13 @@ impl OverlayWorkerState {
         &mut self,
         frame_index: u64,
         fps: u32,
-    ) -> std::result::Result<FramePlanes, String> {
+    ) -> std::result::Result<(FramePlanes, PlaneRasterNanos), String> {
+        let mut timings = PlaneRasterNanos::default();
         let output_time_ms = cursor::frame_time_ms(frame_index, fps);
         let overlay_time_ms = output_time_ms.floor().max(0.0) as u64;
 
         if let Some(engine) = &self.overlay_engine {
+            let items_started = std::time::Instant::now();
             let display_list = engine.evaluate(overlay_time_ms);
             if display_list.items.is_empty() {
                 self.last_display_items = Some(Vec::new());
@@ -4756,10 +4830,12 @@ impl OverlayWorkerState {
                 cursor::unpremultiply_rgba_bounded(&mut unprem, rect_w as usize);
                 self.cached_unpremultiplied_frame = Some(Arc::new(unprem));
                 self.last_display_items = Some(display_list.items);
+                timings.items = items_started.elapsed().as_nanos() as u64;
             }
         }
         let items_plane = self.cached_unpremultiplied_frame.clone();
 
+        let cursor_started = std::time::Instant::now();
         let cursor_plane = match self.renderers.iter_mut().find(|(start_ms, end_ms, _)| {
             output_time_ms >= *start_ms as f64 && output_time_ms < *end_ms as f64
         }) {
@@ -4792,11 +4868,13 @@ impl OverlayWorkerState {
             }
             None => None,
         };
+        timings.cursor = cursor_started.elapsed().as_nanos() as u64;
 
         // Keystroke badges draw at canvas scale into their own plane; the
         // renderer is a pure function of the output timestamp. Outside every
         // display window the plane is guaranteed transparent — skip the fill
         // and rasterization entirely.
+        let keys_started = std::time::Instant::now();
         let keys_visible = self.keystroke_renderer.as_ref().is_some_and(|renderer| {
             renderer
                 .output_windows()
@@ -4836,12 +4914,16 @@ impl OverlayWorkerState {
             // Renderer exists but this frame sits outside every badge window.
             _ => None,
         };
+        timings.keys = keys_started.elapsed().as_nanos() as u64;
 
-        Ok(FramePlanes {
-            cursor: cursor_plane,
-            items: items_plane,
-            keys: keys_plane,
-        })
+        Ok((
+            FramePlanes {
+                cursor: cursor_plane,
+                items: items_plane,
+                keys: keys_plane,
+            },
+            timings,
+        ))
     }
 }
 
@@ -4933,8 +5015,14 @@ fn feed_cursor_frames(
     let halted = || halt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
     // Producer-side timing split: `raster` accumulates per-worker render time;
     // the writer records how long it starved on the channel (producer-bound)
-    // versus blocked on the pipe (consumer/FFmpeg-bound).
+    // versus blocked on the pipe (consumer/FFmpeg-bound). The per-plane
+    // counters break `raster` down by cursor/items/keys so the ablation
+    // matrix can attribute producer cost to a feature.
     let raster_nanos = std::sync::atomic::AtomicU64::new(0);
+    let cursor_nanos = std::sync::atomic::AtomicU64::new(0);
+    let items_nanos = std::sync::atomic::AtomicU64::new(0);
+    let keys_nanos = std::sync::atomic::AtomicU64::new(0);
+    let pack_nanos = std::sync::atomic::AtomicU64::new(0);
     let mut recv_wait = Duration::ZERO;
     let mut write_time = Duration::ZERO;
     let mut bytes_written = 0u64;
@@ -4964,6 +5052,10 @@ fn feed_cursor_frames(
             let plane_sizes = plane_sizes.clone();
             let plane_offsets = plane_offsets.clone();
             let raster_nanos = &raster_nanos;
+            let cursor_nanos = &cursor_nanos;
+            let items_nanos = &items_nanos;
+            let keys_nanos = &keys_nanos;
+            let pack_nanos = &pack_nanos;
             scope.spawn(move || {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = match OverlayWorkerState::new(
@@ -5015,28 +5107,31 @@ fn feed_cursor_frames(
                         };
 
                         let render_started = std::time::Instant::now();
-                        let produced = state
+                        let (produced, plane_nanos, pack_elapsed) = match state
                             .render_planes(frame_index + first_frame_index, fps)
-                            .map(|frame| {
-                                if multi_plane {
+                        {
+                            Ok((frame, plane_nanos)) => {
+                                let pack_started = std::time::Instant::now();
+                                let produced = if multi_plane {
                                     let slices = frame.plane_slices(&planes);
                                     if slices.iter().all(Option::is_none) {
-                                        return ProducedFrame::Zero;
+                                        ProducedFrame::Zero
+                                    } else {
+                                        let mut buffer = free_buffers
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                            .pop()
+                                            .unwrap_or_else(|| vec![0u8; frame_byte_len]);
+                                        buffer.resize(frame_byte_len, 0);
+                                        pack_overlay_planes(
+                                            &mut buffer,
+                                            &plane_sizes,
+                                            &plane_offsets,
+                                            stream_row_bytes,
+                                            &slices,
+                                        );
+                                        ProducedFrame::Bytes(buffer)
                                     }
-                                    let mut buffer = free_buffers
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .pop()
-                                        .unwrap_or_else(|| vec![0u8; frame_byte_len]);
-                                    buffer.resize(frame_byte_len, 0);
-                                    pack_overlay_planes(
-                                        &mut buffer,
-                                        &plane_sizes,
-                                        &plane_offsets,
-                                        stream_row_bytes,
-                                        &slices,
-                                    );
-                                    ProducedFrame::Bytes(buffer)
                                 } else {
                                     // Single-plane stream: hand the owned buffer
                                     // straight to the writer, no repack copy.
@@ -5050,13 +5145,21 @@ fn feed_cursor_frames(
                                         Some(plane) => ProducedFrame::Bytes(plane),
                                         None => ProducedFrame::Zero,
                                     }
-                                }
-                            })
-                            .unwrap_or_else(ProducedFrame::Failed);
-                        raster_nanos.fetch_add(
-                            render_started.elapsed().as_nanos() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                                };
+                                (produced, plane_nanos, pack_started.elapsed())
+                            }
+                            Err(error) => (
+                                ProducedFrame::Failed(error),
+                                PlaneRasterNanos::default(),
+                                Duration::ZERO,
+                            ),
+                        };
+                        let order = std::sync::atomic::Ordering::Relaxed;
+                        raster_nanos.fetch_add(render_started.elapsed().as_nanos() as u64, order);
+                        cursor_nanos.fetch_add(plane_nanos.cursor, order);
+                        items_nanos.fetch_add(plane_nanos.items, order);
+                        keys_nanos.fetch_add(plane_nanos.keys, order);
+                        pack_nanos.fetch_add(pack_elapsed.as_nanos() as u64, order);
 
                         let is_failure = matches!(produced, ProducedFrame::Failed(_));
                         if frame_tx.send((frame_index, produced)).is_err() {
@@ -5172,6 +5275,10 @@ fn feed_cursor_frames(
         zero_frames,
         bytes_mib = bytes_written / (1024 * 1024),
         raster_ms = raster_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        cursor_ms = cursor_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        items_ms = items_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        keys_ms = keys_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+        pack_ms = pack_nanos.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
         starved_ms = recv_wait.as_millis() as u64,
         write_ms = write_time.as_millis() as u64,
         "export: plate feed finished"
@@ -5223,6 +5330,8 @@ fn feed_cursor_frames_sequential(
     // Same producer breakdown as the parallel path: raster vs pipe write, so a
     // single-producer pass still shows where the feed time went.
     let mut raster = std::time::Duration::ZERO;
+    let mut plane_nanos = PlaneRasterNanos::default();
+    let mut pack_time = std::time::Duration::ZERO;
     let mut write_time = std::time::Duration::ZERO;
     let mut zero_frames = 0u64;
     for frame_index in 0..cursor.frame_count {
@@ -5232,11 +5341,15 @@ fn feed_cursor_frames_sequential(
             return Err(InternalError::Media("export cancelled".into()).into());
         }
         let render_started = std::time::Instant::now();
-        let frame = state
+        let (frame, frame_nanos) = state
             .render_planes(frame_index + cursor.first_frame_index, cursor.fps)
             .map_err(InternalError::Media)?;
         raster += render_started.elapsed();
+        plane_nanos.cursor += frame_nanos.cursor;
+        plane_nanos.items += frame_nanos.items;
+        plane_nanos.keys += frame_nanos.keys;
 
+        let pack_started = std::time::Instant::now();
         let frame: &[u8] = if multi_plane {
             let slices = frame.plane_slices(&cursor.planes);
             if slices.iter().all(Option::is_none) {
@@ -5260,6 +5373,7 @@ fn feed_cursor_frames_sequential(
             }
             .unwrap_or(zero_frame)
         };
+        pack_time += pack_started.elapsed();
 
         if std::ptr::eq(frame.as_ptr(), zero_frame.as_ptr()) {
             zero_frames += 1;
@@ -5280,6 +5394,10 @@ fn feed_cursor_frames_sequential(
         zero_frames,
         bytes_mib = cursor.frame_count * frame_byte_len as u64 / (1024 * 1024),
         raster_ms = raster.as_millis() as u64,
+        cursor_ms = plane_nanos.cursor / 1_000_000,
+        items_ms = plane_nanos.items / 1_000_000,
+        keys_ms = plane_nanos.keys / 1_000_000,
+        pack_ms = pack_time.as_millis() as u64,
         write_ms = write_time.as_millis() as u64,
         "export: plate feed finished"
     );
@@ -8758,7 +8876,7 @@ mod tests {
         // Planes pack at their own rects: a tall left plane beside a 1px
         // right plane leaves the second row's right slot transparent.
         let left = vec![3u8; 2 * 2 * 4];
-        let right = vec![8u8; 1 * 1 * 4];
+        let right = vec![8u8; 4];
         let mut dst = vec![0u8; (2 + 1) * 2 * 4];
         pack_overlay_planes(
             &mut dst,

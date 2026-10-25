@@ -12,6 +12,7 @@
  * Options:
  *   --repeats N      run each configuration N times (default 1)
  *   --workers a,b,c  RECORDFORGE_EXPORT_CHUNK_WORKERS overrides (chunked only)
+ *   --filter <str>   run only specs whose name contains <str>
  *   --no-build       skip the release-binary build check
  *   --out <dir>      where to write logs + results JSON (default: spec dir)
  *   --scratch <dir>  redirect each run's output mp4 + rewritten spec here
@@ -31,6 +32,7 @@ interface BenchArgs {
   input: string
   repeats: number
   workers: number[]
+  filter?: string
   noBuild: boolean
   outDir?: string
   scratchDir: string
@@ -56,6 +58,9 @@ function parseArgs(argv: string[]): BenchArgs {
           .map((value) => Number(value.trim()))
           .filter((value) => Number.isInteger(value) && value > 0)
         break
+      case "--filter":
+        args.filter = argv[++i]
+        break
       case "--no-build":
         args.noBuild = true
         break
@@ -78,7 +83,7 @@ function parseArgs(argv: string[]): BenchArgs {
   }
   if (!args.input && !args.reparseDir) {
     console.error(
-      "usage: export-bench.ts <spec.json|dir> [--repeats N] [--workers a,b,c] [--no-build] [--out dir] [--scratch dir]",
+      "usage: export-bench.ts <spec.json|dir> [--repeats N] [--workers a,b,c] [--filter str] [--no-build] [--out dir] [--scratch dir]",
     )
     process.exit(2)
   }
@@ -122,6 +127,7 @@ if (!args.reparseDir) {
   } else {
     for (const entry of readdirSync(inputPath)) {
       if (entry.startsWith("spec") && entry.endsWith(".json")) {
+        if (args.filter && !entry.includes(args.filter)) continue
         specPaths.push(join(inputPath, entry))
       }
     }
@@ -143,6 +149,10 @@ interface PlateFeed {
   zeroFrames?: number
   bytesMib?: number
   rasterMs?: number
+  cursorMs?: number
+  itemsMs?: number
+  keysMs?: number
+  packMs?: number
   starvedMs?: number
   writeMs?: number
 }
@@ -214,6 +224,10 @@ function parseLog(stderr: string): Omit<RunMetrics, "spec" | "label" | "wallMs" 
         zeroFrames: num(fields, "zero_frames"),
         bytesMib: num(fields, "bytes_mib"),
         rasterMs: num(fields, "raster_ms"),
+        cursorMs: num(fields, "cursor_ms"),
+        itemsMs: num(fields, "items_ms"),
+        keysMs: num(fields, "keys_ms"),
+        packMs: num(fields, "pack_ms"),
         starvedMs: num(fields, "starved_ms"),
         writeMs: num(fields, "write_ms"),
       })
@@ -254,6 +268,7 @@ if (args.reparseDir) {
     if (!entry.startsWith("bench-") || !entry.endsWith(".log")) continue
     const tag = basename(entry, ".log").slice("bench-".length)
     const spec = tag.replace(/-[^-]+$/, "")
+    if (args.filter && !spec.includes(args.filter)) continue
     const label = tag.slice(spec.length + 1)
     const parsed = parseLog(readFileSync(join(args.reparseDir, entry), "utf8"))
     results.push({ spec, label, wallMs: 0, exitCode: 0, ...parsed })
@@ -323,22 +338,25 @@ function median(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
 }
 
-function sumFeeds(
-  feeds: PlateFeed[],
-): Pick<PlateFeed, "rasterMs" | "starvedMs" | "writeMs" | "bytesMib" | "zeroFrames" | "frames"> {
+function sumFeeds(feeds: PlateFeed[]): Required<PlateFeed> {
   return {
     rasterMs: feeds.reduce((sum, feed) => sum + (feed.rasterMs ?? 0), 0),
+    cursorMs: feeds.reduce((sum, feed) => sum + (feed.cursorMs ?? 0), 0),
+    itemsMs: feeds.reduce((sum, feed) => sum + (feed.itemsMs ?? 0), 0),
+    keysMs: feeds.reduce((sum, feed) => sum + (feed.keysMs ?? 0), 0),
+    packMs: feeds.reduce((sum, feed) => sum + (feed.packMs ?? 0), 0),
     starvedMs: feeds.reduce((sum, feed) => sum + (feed.starvedMs ?? 0), 0),
     writeMs: feeds.reduce((sum, feed) => sum + (feed.writeMs ?? 0), 0),
     bytesMib: feeds.reduce((sum, feed) => sum + (feed.bytesMib ?? 0), 0),
     zeroFrames: feeds.reduce((sum, feed) => sum + (feed.zeroFrames ?? 0), 0),
     frames: feeds.reduce((sum, feed) => sum + (feed.frames ?? 0), 0),
+    workers: feeds.reduce((max, feed) => Math.max(max, feed.workers ?? 0), 0),
   }
 }
 
 const header =
-  "| spec | run | wall s | compose ms | chunks | chunk p50 ms | plate MiB | zero% | raster ms | starved ms | write ms | feed ms | ffmpeg speed | mux ms |"
-const divider = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+  "| spec | run | wall s | compose ms | chunks | chunk p50 ms | plate MiB | zero% | raster ms | cursor ms | items ms | keys ms | pack ms | starved ms | write ms | feed ms | ffmpeg speed | mux ms |"
+const divider = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 summaryRows.push(header, divider)
 results.sort((a, b) => `${a.spec}|${a.label}`.localeCompare(`${b.spec}|${b.label}`))
 for (const metrics of results) {
@@ -363,12 +381,76 @@ for (const metrics of results) {
     `| ${metrics.spec} | ${metrics.label} | ${metrics.wallMs > 0 ? (metrics.wallMs / 1000).toFixed(1) : "-"} | ` +
       `${metrics.compositionMs ?? "-"} | ${metrics.chunks ?? "-"} | ` +
       `${metrics.chunkElapsedMs.length > 0 ? Math.round(median(metrics.chunkElapsedMs)) : "-"} | ` +
-      `${Math.round(feeds.bytesMib ?? 0)} | ${zeroPct} | ` +
-      `${Math.round(feeds.rasterMs ?? 0)} | ${Math.round(feeds.starvedMs ?? 0)} | ` +
-      `${Math.round(feeds.writeMs ?? 0)} | ${Math.round(feedMs)} | ${speeds ? `${speeds}x` : "-"} | ` +
+      `${Math.round(feeds.bytesMib)} | ${zeroPct} | ` +
+      `${Math.round(feeds.rasterMs)} | ${Math.round(feeds.cursorMs)} | ` +
+      `${Math.round(feeds.itemsMs)} | ${Math.round(feeds.keysMs)} | ` +
+      `${Math.round(feeds.packMs)} | ${Math.round(feeds.starvedMs)} | ` +
+      `${Math.round(feeds.writeMs)} | ${Math.round(feedMs)} | ${speeds ? `${speeds}x` : "-"} | ` +
       `${metrics.muxMs ?? "-"} |`,
   )
 }
+
+// --- ablation report --------------------------------------------------------
+// spec_abl-<variant>_chunked[_<enc>].json runs measure each feature's marginal
+// cost. The baseline is `plain` within the same encoder suffix; radius and
+// shadow also diff against `padding` since they build on it.
+
+const ABLATION_ORDER = [
+  "plain",
+  "padding",
+  "radius",
+  "shadow",
+  "zoom",
+  "cursor",
+  "items",
+  "captions",
+  "camera",
+]
+
+function ablationKey(spec: string): { variant: string; enc: string } | undefined {
+  const match = /^spec_abl-([a-z]+)_chunked(?:_([a-z0-9]+))?$/.exec(spec)
+  if (!match) return undefined
+  return { variant: match[1], enc: match[2] ?? "" }
+}
+
+const ablationWalls = new Map<string, Map<string, number>>()
+for (const metrics of results) {
+  const key = ablationKey(metrics.spec)
+  if (!key || metrics.wallMs <= 0) continue
+  const walls = results
+    .filter((run) => run.spec === metrics.spec && run.wallMs > 0)
+    .map((run) => run.wallMs)
+  if (!ablationWalls.has(key.enc)) ablationWalls.set(key.enc, new Map())
+  ablationWalls.get(key.enc)?.set(key.variant, median(walls))
+}
+
+if (ablationWalls.size > 0) {
+  const delta = (wall: number, base: number | undefined): string =>
+    base === undefined ? "-" : `${(((wall - base) / base) * 100).toFixed(1)}%`
+  summaryRows.push(
+    "",
+    "| ablation | encoder | wall s (median) | Δ vs plain | Δ vs padding |",
+    "|---|---|---|---|---|",
+  )
+  for (const [enc, walls] of [...ablationWalls.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const plain = walls.get("plain")
+    const padding = walls.get("padding")
+    const variants = [...walls.keys()].sort(
+      (a, b) =>
+        (ABLATION_ORDER.indexOf(a) + 1 || ABLATION_ORDER.length) -
+        (ABLATION_ORDER.indexOf(b) + 1 || ABLATION_ORDER.length),
+    )
+    for (const variant of variants) {
+      const wall = walls.get(variant) ?? 0
+      summaryRows.push(
+        `| abl-${variant} | ${enc || "software"} | ${(wall / 1000).toFixed(1)} | ` +
+          `${variant === "plain" ? "baseline" : delta(wall, plain)} | ` +
+          `${variant === "radius" || variant === "shadow" ? delta(wall, padding) : "-"} |`,
+      )
+    }
+  }
+}
+
 console.log("\n" + summaryRows.join("\n"))
 
 const resultsPath = join(

@@ -9,6 +9,7 @@
     "benchmark:cursor-follow": "bun run cursor-follow-path-benchmark.ts",
     "benchmark:export:synth": "bun run export-synth-spec.ts",
     "benchmark:export": "bun run export-bench.ts",
+    "benchmark:parity": "bun run parity.ts",
     "typecheck": "tsc --noEmit",
     "format:check": "prettier --check .",
     "format": "prettier --write ."

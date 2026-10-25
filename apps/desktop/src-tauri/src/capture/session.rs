@@ -1591,6 +1591,7 @@ impl Recorder {
             .map(|value| value.to_string_lossy())
             .unwrap_or_else(|| "segment".into());
         let muxed_path = screen_path.with_file_name(format!("audio_mux_{stem}.mp4"));
+        let mux_started = std::time::Instant::now();
         if let Err(error) = media::mux_audio_tracks(
             &self.ffmpeg_path.to_string_lossy(),
             &screen_path,
@@ -1603,6 +1604,11 @@ impl Recorder {
             tracing::warn!(error = ?error, "failed to mux native WASAPI tracks; keeping video fragment");
             return;
         }
+        info!(
+            step = "segment_audio_mux",
+            elapsed_ms = mux_started.elapsed().as_millis() as u64,
+            "finalize: step finished"
+        );
 
         match disk::atomic_replace(&muxed_path, &screen_path) {
             Ok(()) => {
@@ -2245,9 +2251,16 @@ impl Recorder {
     where
         F: Fn(FinalizationProgress) + Send + Sync,
     {
+        let finalize_started = std::time::Instant::now();
         let session_id = session.session_id.clone();
         let total = session.total_recorded_ms;
+        let step_started = std::time::Instant::now();
         let webcam_output = self.finalize_webcam_asset(session);
+        info!(
+            step = "webcam_asset",
+            elapsed_ms = step_started.elapsed().as_millis() as u64,
+            "finalize: step finished"
+        );
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
@@ -2267,7 +2280,13 @@ impl Recorder {
             percent: 30,
         });
 
+        let step_started = std::time::Instant::now();
         let segment_files = self.validated_segments(session)?;
+        info!(
+            step = "validate_segments",
+            elapsed_ms = step_started.elapsed().as_millis() as u64,
+            "finalize: step finished"
+        );
         if segment_files.is_empty() {
             return Err(crate::errors::InternalError::Capture(
                 "no valid recording segments".into(),
@@ -2289,6 +2308,7 @@ impl Recorder {
                 crate::errors::InternalError::Storage(format!("remove partial output: {error}"))
             })?;
         }
+        let step_started = std::time::Instant::now();
         media::concatenate_segments(
             &self.ffmpeg_path.to_string_lossy(),
             &session.work_dir,
@@ -2296,6 +2316,11 @@ impl Recorder {
             &partial_output,
         )?;
         disk::atomic_replace(&partial_output, &output)?;
+        info!(
+            step = "concat",
+            elapsed_ms = step_started.elapsed().as_millis() as u64,
+            "finalize: step finished"
+        );
 
         let output_size = std::fs::metadata(&output)
             .map(|metadata| metadata.len())
@@ -2317,11 +2342,17 @@ impl Recorder {
             percent: 80,
         });
 
+        let step_started = std::time::Instant::now();
         let mut metadata = crate::media::probe::probe_media(
             &self.ffprobe_path.to_string_lossy(),
             &output,
             "pending-recording",
         )?;
+        info!(
+            step = "probe",
+            elapsed_ms = step_started.elapsed().as_millis() as u64,
+            "finalize: step finished"
+        );
         if !metadata.streams.iter().any(|stream| stream.kind == "video") {
             return Err(crate::errors::InternalError::Media(
                 "final recording has no video stream".into(),
@@ -2333,6 +2364,7 @@ impl Recorder {
         final_stats.output_size_bytes = output_size;
 
         let poster_path = session.work_dir.join("poster.jpg");
+        let step_started = std::time::Instant::now();
         let poster_path_str = if crate::media::thumbnails::generate_poster_frame(
             &self.ffmpeg_path.to_string_lossy(),
             &output,
@@ -2344,6 +2376,11 @@ impl Recorder {
         } else {
             None
         };
+        info!(
+            step = "poster",
+            elapsed_ms = step_started.elapsed().as_millis() as u64,
+            "finalize: step finished"
+        );
 
         progress(FinalizationProgress {
             session_id: session_id.clone(),
@@ -2405,6 +2442,10 @@ impl Recorder {
             manifest.write()?;
         }
 
+        info!(
+            finalize_ms = finalize_started.elapsed().as_millis() as u64,
+            "finalize: finished"
+        );
         Ok(final_stats)
     }
 

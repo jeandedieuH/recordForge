@@ -1,11 +1,18 @@
 /**
- * Synthetic export-benchmark fixture: generates a 60 s screen source
- * (h264+aac), a 60 s mic track, a V2 cursor telemetry asset
- * (cursor_telemetry.json + cursor_events.bin), and chunked/single-pass
- * ExportHarnessSpec JSONs driving a 30 s render with zoom, cursor plate,
- * legacy title/annotation items, burn-in captions, and a bounded audio pass.
+ * Synthetic export-benchmark fixture: generates a screen source (h264+aac),
+ * a mic track, a V2 cursor telemetry asset (cursor_telemetry.json +
+ * cursor_events.bin), an optional webcam clip, and ExportHarnessSpec JSONs —
+ * the "all features" chunked/single-pass specs plus the `abl-<variant>`
+ * ablation matrix that isolates the marginal cost of each overlay feature.
  *
- *   bun run tooling/benchmarks/export-synth-spec.ts [outDir]
+ *   bun run tooling/benchmarks/export-synth-spec.ts [outDir] [--encoder <enc>] [--long]
+ *
+ * `--encoder` (default `software`) is written into each spec's top-level
+ * `encoder` field for the harness to resolve; non-software runs get a
+ * `_<encoder>` suffix on spec and render file stems so matrices coexist.
+ * `--long` raises the fixture to a 6 min source / 5 min export and emits only
+ * the chunked "all" + plain-ablation specs — pass a separate outDir so the
+ * long matrix doesn't collide with the 30 s one.
  *
  * The source media is longer than the export on purpose: the audio pass's
  * input `-t` bound and the seeked video inputs both show up in the timings.
@@ -16,7 +23,35 @@ import { fileURLToPath } from "node:url"
 import { dirname, join, resolve } from "node:path"
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
-const outDir = resolve(process.argv[2] ?? join(scriptDir, "out", "synth"))
+
+// --- args ----------------------------------------------------------------
+
+const VALID_ENCODERS = new Set(["software", "auto", "nvenc", "qsv", "amf", "videotoolbox", "vaapi"])
+
+let outDirArg: string | undefined
+let encoder = "software"
+let longMode = false
+const argv = process.argv.slice(2)
+for (let i = 0; i < argv.length; i++) {
+  const arg = argv[i]
+  if (arg === "--encoder") {
+    encoder = argv[++i] ?? ""
+    if (!VALID_ENCODERS.has(encoder)) {
+      console.error(`--encoder must be one of: ${[...VALID_ENCODERS].join(", ")}`)
+      process.exit(2)
+    }
+  } else if (arg === "--long") {
+    longMode = true
+  } else if (arg.startsWith("--")) {
+    console.error(`unknown option: ${arg}`)
+    process.exit(2)
+  } else {
+    outDirArg = arg
+  }
+}
+
+const outDir = resolve(outDirArg ?? join(scriptDir, "out", "synth"))
+const encSuffix = encoder === "software" ? "" : `_${encoder}`
 mkdirSync(join(outDir, "cursor"), { recursive: true })
 
 // Repo sidecars come from `bun run setup:ffmpeg`; RF_FFMPEG/RF_FFPROBE override.
@@ -26,8 +61,8 @@ const binDir = resolve(scriptDir, "../../apps/desktop/src-tauri/binaries")
 const ffmpeg = process.env.RF_FFMPEG ?? join(binDir, `ffmpeg${suffix}`)
 const ffprobe = process.env.RF_FFPROBE ?? join(binDir, `ffprobe${suffix}`)
 
-const SOURCE_MS = 60_000
-const EXPORT_MS = 30_000
+const SOURCE_MS = longMode ? 360_000 : 60_000
+const EXPORT_MS = longMode ? 300_000 : 30_000
 const WIDTH = 1920
 const HEIGHT = 1080
 const FPS = 30
@@ -43,7 +78,8 @@ function run(args: string[]): void {
 
 const screenPath = join(outDir, "screen.mp4")
 const micPath = join(outDir, "mic.m4a")
-console.log("generating 60s screen source + mic track…")
+const webcamPath = join(outDir, "webcam.mp4")
+console.log(`generating ${SOURCE_MS / 1000}s screen source + mic track…`)
 run([
   ffmpeg,
   "-y",
@@ -81,6 +117,26 @@ run([
   "128k",
   micPath,
 ])
+if (!longMode) {
+  // Webcam clip for the `camera` ablation: small + cheap to decode, long
+  // enough to cover the whole export window.
+  run([
+    ffmpeg,
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    `testsrc2=size=640x480:rate=${FPS}:duration=${SOURCE_MS / 1000}`,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-pix_fmt",
+    "yuv420p",
+    "-an",
+    webcamPath,
+  ])
+}
 
 // --- V2 cursor telemetry ---------------------------------------------------
 // Binary format (read_event_record in capture/cursor_v2.rs): RFCT magic +
@@ -147,9 +203,11 @@ const telemetryMeta = {
 writeFileSync(join(cursorDir, "cursor_telemetry.json"), JSON.stringify(telemetryMeta, null, 1))
 console.log(`telemetry: ${eventCount} events @ ${SAMPLE_HZ}Hz`)
 
-// --- render plan -------------------------------------------------------------
-// Two contiguous source windows from the same 60 s asset exercise the
-// seeked-input path; zoom/cursor/texts/captions load every plate plane.
+// --- render plan -----------------------------------------------------------
+// Two contiguous source windows from the same long asset exercise the
+// seeked-input path. `plain` (the ablation base) is the same two screen
+// segments + the mic track on a bare canvas; every variant adds exactly one
+// feature so the table reports its marginal cost.
 
 const screenSegment = (
   sourceInMs: number,
@@ -167,10 +225,198 @@ const screenSegment = (
   sourceHeight: HEIGHT,
 })
 
-const plan = {
+const screenSegments = longMode
+  ? [screenSegment(10_000, 160_000, 0), screenSegment(200_000, 350_000, 150_000)]
+  : [screenSegment(5_000, 20_000, 0), screenSegment(30_000, 45_000, 15_000)]
+
+const micSource = longMode ? { inMs: 20_000, outMs: 320_000 } : { inMs: 5_000, outMs: 35_000 }
+const audioTracks = [
+  {
+    assetId: "mic",
+    streamIndex: 0,
+    volume: 1.0,
+    muted: false,
+    segments: [
+      {
+        assetId: "mic",
+        streamIndex: 0,
+        speed: 1.0,
+        sourceInMs: micSource.inMs,
+        sourceOutMs: micSource.outMs,
+        outputStartMs: 0,
+        outputEndMs: EXPORT_MS,
+      },
+    ],
+  },
+]
+
+// Effect timings stay in the first 30 s even in --long mode — the ablations
+// measure marginal cost on identical short bursts either way.
+const zoomSegments = [
+  {
+    id: "zoom-1",
+    startMs: 4_000,
+    endMs: 9_000,
+    target: { x: 480, y: 270, width: 960, height: 540 },
+    scale: 1.5,
+    mode: "manual",
+  },
+  {
+    id: "zoom-2",
+    startMs: 16_000,
+    endMs: 22_000,
+    target: { x: 960, y: 540, width: 960, height: 540 },
+    scale: 2.0,
+    mode: "manual",
+  },
+]
+const cursorEffects = [
+  {
+    id: "cursor-1",
+    assetId: "cursor",
+    startMs: 0,
+    endMs: EXPORT_MS,
+    enabled: true,
+    presetId: "recorded-system",
+    scale: 1.0,
+    smoothing: "strong",
+    settings: {},
+  },
+]
+const texts = [
+  {
+    id: "title-1",
+    startMs: 2_000,
+    endMs: 8_000,
+    primaryText: "Export Benchmark",
+    secondaryText: "synthetic fixture",
+    tagText: "BENCH",
+    x: 160,
+    y: 760,
+    width: 1_200,
+    height: 240,
+  },
+  {
+    id: "title-2",
+    startMs: 17_000,
+    endMs: 25_000,
+    primaryText: "Second Title",
+    x: 320,
+    y: 200,
+    width: 1_000,
+    height: 180,
+  },
+]
+const annotations = [
+  {
+    id: "ann-1",
+    startMs: 10_000,
+    endMs: 15_000,
+    annotationType: "arrow",
+    x: 400,
+    y: 400,
+    width: 500,
+    height: 200,
+    endX: 900,
+    endY: 600,
+  },
+  {
+    id: "ann-2",
+    startMs: 20_000,
+    endMs: 28_000,
+    annotationType: "rectangle",
+    x: 1_200,
+    y: 700,
+    width: 400,
+    height: 250,
+  },
+]
+const captions = [
+  { id: "cap-1", text: "synthetic caption line one", startMs: 1_000, endMs: 4_000 },
+  {
+    id: "cap-2",
+    text: "a second caption exercises the ASS path",
+    startMs: 12_000,
+    endMs: 16_000,
+  },
+  { id: "cap-3", text: "final caption for chunked seams", startMs: 26_000, endMs: 29_500 },
+]
+// One camera overlay covering the whole export: circle, bottom-right with the
+// same 48 px margin the padded variants use, border + shadow on so the full
+// mask/border/shadow-plate path is exercised.
+const cameraOverlay = {
+  assetId: "webcam",
+  sourceInMs: 0,
+  sourceOutMs: EXPORT_MS,
+  outputStartMs: 0,
+  outputEndMs: EXPORT_MS,
+  x: WIDTH - 320 - 48,
+  y: HEIGHT - 320 - 48,
+  width: 320,
+  height: 320,
+  shape: "circle",
+  borderWidth: 4,
+  borderColor: "#ffffff",
+  borderOpacity: 1.0,
+  shadowEnabled: true,
+  shadowColor: "#000000",
+  shadowBlur: 24,
+  shadowOffsetX: 0,
+  shadowOffsetY: 8,
+}
+
+const plainCanvas = {
+  width: WIDTH,
+  height: HEIGHT,
+  fps: FPS,
+  padding: 0,
+  borderRadius: 0,
+  shadow: false,
+}
+
+function plainPlan(canvas: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    projectId: "bench-synth",
+    durationMs: EXPORT_MS,
+    segments: screenSegments,
+    gaps: [],
+    canvas: { ...plainCanvas, ...canvas },
+    zoomSegments: [],
+    cursorEffects: [],
+    texts: [],
+    annotations: [],
+    captions: [],
+    overlays: [],
+    audioTracks,
+  }
+}
+
+const ablations: Array<{
+  name: string
+  plan: Record<string, unknown>
+  extraAssets?: Record<string, string>
+}> = [
+  { name: "plain", plan: plainPlan() },
+  { name: "padding", plan: plainPlan({ padding: 48 }) },
+  { name: "radius", plan: plainPlan({ padding: 48, borderRadius: 24 }) },
+  { name: "shadow", plan: plainPlan({ padding: 48, shadow: true }) },
+  { name: "zoom", plan: { ...plainPlan(), zoomSegments } },
+  { name: "cursor", plan: { ...plainPlan(), cursorEffects } },
+  { name: "items", plan: { ...plainPlan(), texts, annotations } },
+  { name: "captions", plan: { ...plainPlan(), captions } },
+  {
+    name: "camera",
+    plan: { ...plainPlan(), overlays: [cameraOverlay] },
+    extraAssets: { webcam: webcamPath },
+  },
+]
+
+// The "all features" plan is unchanged from the original fixture so existing
+// docs/benchmarks numbers stay comparable.
+const synthPlan = {
   projectId: "bench-synth",
   durationMs: EXPORT_MS,
-  segments: [screenSegment(5_000, 20_000, 0), screenSegment(30_000, 45_000, 15_000)],
+  segments: screenSegments,
   gaps: [],
   canvas: {
     width: WIDTH,
@@ -180,114 +426,12 @@ const plan = {
     borderRadius: 24,
     shadow: true,
   },
-  zoomSegments: [
-    {
-      id: "zoom-1",
-      startMs: 4_000,
-      endMs: 9_000,
-      target: { x: 480, y: 270, width: 960, height: 540 },
-      scale: 1.5,
-      mode: "manual",
-    },
-    {
-      id: "zoom-2",
-      startMs: 16_000,
-      endMs: 22_000,
-      target: { x: 960, y: 540, width: 960, height: 540 },
-      scale: 2.0,
-      mode: "manual",
-    },
-  ],
-  cursorEffects: [
-    {
-      id: "cursor-1",
-      assetId: "cursor",
-      startMs: 0,
-      endMs: EXPORT_MS,
-      enabled: true,
-      presetId: "recorded-system",
-      scale: 1.0,
-      smoothing: "strong",
-      settings: {},
-    },
-  ],
-  texts: [
-    {
-      id: "title-1",
-      startMs: 2_000,
-      endMs: 8_000,
-      primaryText: "Export Benchmark",
-      secondaryText: "synthetic fixture",
-      tagText: "BENCH",
-      x: 160,
-      y: 760,
-      width: 1_200,
-      height: 240,
-    },
-    {
-      id: "title-2",
-      startMs: 17_000,
-      endMs: 25_000,
-      primaryText: "Second Title",
-      x: 320,
-      y: 200,
-      width: 1_000,
-      height: 180,
-    },
-  ],
-  annotations: [
-    {
-      id: "ann-1",
-      startMs: 10_000,
-      endMs: 15_000,
-      annotationType: "arrow",
-      x: 400,
-      y: 400,
-      width: 500,
-      height: 200,
-      endX: 900,
-      endY: 600,
-    },
-    {
-      id: "ann-2",
-      startMs: 20_000,
-      endMs: 28_000,
-      annotationType: "rectangle",
-      x: 1_200,
-      y: 700,
-      width: 400,
-      height: 250,
-    },
-  ],
-  captions: [
-    { id: "cap-1", text: "synthetic caption line one", startMs: 1_000, endMs: 4_000 },
-    {
-      id: "cap-2",
-      text: "a second caption exercises the ASS path",
-      startMs: 12_000,
-      endMs: 16_000,
-    },
-    { id: "cap-3", text: "final caption for chunked seams", startMs: 26_000, endMs: 29_500 },
-  ],
-  audioTracks: [
-    {
-      assetId: "mic",
-      streamIndex: 0,
-      volume: 1.0,
-      muted: false,
-      segments: [
-        {
-          assetId: "mic",
-          streamIndex: 0,
-          speed: 1.0,
-          sourceInMs: 5_000,
-          sourceOutMs: 35_000,
-          outputStartMs: 0,
-          outputEndMs: EXPORT_MS,
-        },
-      ],
-    },
-  ],
+  zoomSegments,
+  cursorEffects,
+  texts,
+  annotations,
+  captions,
+  audioTracks,
 }
 
 const settings = {
@@ -299,26 +443,77 @@ const settings = {
   chapterMode: "off",
 }
 
-const assetPaths = {
+const baseAssetPaths = {
   screen: screenPath,
   mic: micPath,
   // The cursor effect resolves telemetry from the asset path's parent dir.
   cursor: join(cursorDir, "cursor_telemetry.json"),
 }
 
-for (const single of [false, true]) {
+interface SpecEntry {
+  name: string
+  outputName: string
+  plan: Record<string, unknown>
+  assetPaths: Record<string, string>
+  forceSinglePass: boolean
+}
+
+const specs: SpecEntry[] = []
+if (longMode) {
+  specs.push({
+    name: `spec_synth_chunked${encSuffix}`,
+    outputName: `render_synth_chunked${encSuffix}.mp4`,
+    plan: synthPlan,
+    assetPaths: baseAssetPaths,
+    forceSinglePass: false,
+  })
+  specs.push({
+    name: `spec_abl-plain_chunked${encSuffix}`,
+    outputName: `render_abl-plain_chunked${encSuffix}.mp4`,
+    plan: plainPlan(),
+    assetPaths: baseAssetPaths,
+    forceSinglePass: false,
+  })
+} else {
+  for (const single of [false, true]) {
+    const mode = single ? "single" : "chunked"
+    specs.push({
+      name: `spec_synth_${mode}${encSuffix}`,
+      outputName: `render_synth_${mode}${encSuffix}.mp4`,
+      plan: synthPlan,
+      assetPaths: baseAssetPaths,
+      forceSinglePass: single,
+    })
+  }
+  for (const ablation of ablations) {
+    specs.push({
+      name: `spec_abl-${ablation.name}_chunked${encSuffix}`,
+      outputName: `render_abl-${ablation.name}_chunked${encSuffix}.mp4`,
+      plan: ablation.plan,
+      assetPaths: { ...baseAssetPaths, ...ablation.extraAssets },
+      forceSinglePass: false,
+    })
+  }
+}
+
+for (const entry of specs) {
   const spec = {
-    plan,
+    plan: entry.plan,
     settings,
-    assetPaths,
+    assetPaths: entry.assetPaths,
     ffmpegPath: ffmpeg,
     ffprobePath: ffprobe,
-    outputPath: join(outDir, `render_synth${single ? "_single" : "_chunked"}.mp4`),
-    forceSinglePass: single,
+    outputPath: join(outDir, entry.outputName),
+    forceSinglePass: entry.forceSinglePass,
+    // `encoder` is a harness-only override; software stays implicit so
+    // software specs remain byte-compatible with the pre-encoder schema.
+    ...(encoder === "software" ? {} : { encoder }),
   }
-  const name = `spec_synth_${single ? "single" : "chunked"}.json`
-  writeFileSync(join(outDir, name), JSON.stringify(spec))
-  console.log(`wrote ${join(outDir, name)}`)
+  writeFileSync(join(outDir, `${entry.name}.json`), JSON.stringify(spec))
+  console.log(`wrote ${join(outDir, `${entry.name}.json`)}`)
 }
 console.log(`\nsynth fixture ready in ${outDir}`)
+if (longMode) {
+  console.log("long mode: run against a dedicated outDir (e.g. out/synth-long)")
+}
 console.log(`run: bun run tooling/benchmarks/export-bench.ts ${outDir}`)

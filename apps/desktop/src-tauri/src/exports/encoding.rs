@@ -19,7 +19,7 @@ pub(crate) enum ExportEncoder {
 /// (`app-shell.tsx`) so the "Auto will use …" hint names the same encoder the
 /// renderer picks. VAAPI is a device + encoder pair, so it is only ever
 /// selected when the startup probe validated a render node.
-const HARDWARE_PRIORITY: [ExportEncoder; 6] = [
+pub(crate) const HARDWARE_PRIORITY: [ExportEncoder; 6] = [
     ExportEncoder::VideoToolbox,
     ExportEncoder::Nvenc,
     ExportEncoder::Qsv,

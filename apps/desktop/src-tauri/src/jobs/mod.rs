@@ -1402,6 +1402,7 @@ impl Worker {
         drop(conn);
 
         self.emit(&job)?;
+        let prepare_started = Instant::now();
 
         let recording = match self.with_db(|conn| get_recording(conn, &self.options.recording_id)) {
             Ok(r) => r,
@@ -1449,6 +1450,7 @@ impl Worker {
         let mut metadata: Option<media_db::MediaMetadata> = None;
 
         if !cancel.load(Ordering::Relaxed) {
+            let stage_started = Instant::now();
             match self.extract_metadata(&input_path, &metadata_path, cancel.clone()) {
                 Ok(m) => {
                     metadata = Some(m);
@@ -1456,6 +1458,12 @@ impl Worker {
                 }
                 Err(e) => return self.fail(&format!("metadata extraction: {e}")),
             }
+            info!(
+                job_id = %self.job_id,
+                stage = "metadata",
+                elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                "prepare: stage finished"
+            );
         }
 
         let metadata = match metadata {
@@ -1521,6 +1529,7 @@ impl Worker {
                     &crate::capture::config::default_encoder_priority(),
                 );
 
+                let stage_started = Instant::now();
                 match generate_proxy(
                     &self.ffmpeg_path.to_string_lossy(),
                     &input_path,
@@ -1536,6 +1545,12 @@ impl Worker {
                     }
                     Err(e) => return self.fail(&format!("proxy: {e}")),
                 }
+                info!(
+                    job_id = %self.job_id,
+                    stage = "proxy",
+                    elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                    "prepare: stage finished"
+                );
             }
         } else if proxy_path.exists() {
             outputs.proxy_path = Some(proxy_path.to_string_lossy().to_string());
@@ -1553,6 +1568,7 @@ impl Worker {
             if cancel.load(Ordering::Relaxed) {
                 return self.finish_cancelled();
             }
+            let stage_started = Instant::now();
             let webcam_metadata = probe_media(
                 &self.ffprobe_path.to_string_lossy(),
                 &standalone_webcam_path,
@@ -1597,6 +1613,12 @@ impl Worker {
                 thumbnail_dir: webcam_thumb_dir_str,
                 thumbnail_manifest_path: webcam_thumb_manifest_str,
             });
+            info!(
+                job_id = %self.job_id,
+                stage = "camera_track",
+                elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                "prepare: stage finished"
+            );
         } else {
             let secondary_video_streams = metadata
                 .streams
@@ -1611,6 +1633,7 @@ impl Worker {
                     if cancel.load(Ordering::Relaxed) {
                         return self.finish_cancelled();
                     }
+                    let stage_started = Instant::now();
                     let title = stream
                         .title
                         .clone()
@@ -1674,6 +1697,13 @@ impl Worker {
                         thumbnail_dir: stream_thumb_dir_str,
                         thumbnail_manifest_path: stream_thumb_manifest_str,
                     });
+                    info!(
+                        job_id = %self.job_id,
+                        stage = "camera_track",
+                        stream_index = stream.index,
+                        elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                        "prepare: stage finished"
+                    );
                 }
             }
         }
@@ -1683,6 +1713,7 @@ impl Worker {
         let thumbnail_dir = derivative_dir(&work_dir, "thumbnails");
         let thumbnail_sprite_path = thumbnail_dir.join("sprite.jpg");
         let thumbnail_manifest_path = thumbnail_dir.join("thumbnails.json");
+        let thumbnails_started = Instant::now();
         if !cancel.load(Ordering::Relaxed) {
             if regenerate_derivatives
                 || !thumbnail_sprite_path.is_file()
@@ -1709,6 +1740,12 @@ impl Worker {
                 outputs.thumbnail_manifest_path =
                     Some(thumbnail_manifest_path.to_string_lossy().to_string());
             }
+            info!(
+                job_id = %self.job_id,
+                stage = "thumbnails",
+                elapsed_ms = thumbnails_started.elapsed().as_millis() as u64,
+                "prepare: stage finished"
+            );
         }
 
         if cancel.load(Ordering::Relaxed) {
@@ -1746,6 +1783,7 @@ impl Worker {
                     });
                 let audio_path = audio_dir.join(format!("stream_{:03}.wav", stream.index));
                 if self.options.force || !audio_path.is_file() {
+                    let stage_started = Instant::now();
                     if let Err(error) = extract_audio_track(
                         &self.ffmpeg_path.to_string_lossy(),
                         &input_path,
@@ -1755,11 +1793,19 @@ impl Worker {
                     ) {
                         return self.fail(&format!("audio track {}: {error}", stream.index));
                     }
+                    info!(
+                        job_id = %self.job_id,
+                        stage = "audio_track",
+                        stream_index = stream.index,
+                        elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                        "prepare: stage finished"
+                    );
                 }
 
                 let track_waveform_dir = waveform_dir.join(format!("stream_{:03}", stream.index));
                 let waveform_json = track_waveform_dir.join("waveform.json");
                 if regenerate_derivatives || !waveform_json.is_file() {
+                    let stage_started = Instant::now();
                     let json = match generate_waveform_for_stream(
                         &self.ffmpeg_path.to_string_lossy(),
                         &input_path,
@@ -1774,6 +1820,13 @@ impl Worker {
                         }
                     };
                     self.record_derivative(&json.to_string_lossy(), "waveform")?;
+                    info!(
+                        job_id = %self.job_id,
+                        stage = "waveform",
+                        stream_index = stream.index,
+                        elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                        "prepare: stage finished"
+                    );
                 }
 
                 self.record_derivative(&audio_path.to_string_lossy(), "audio")?;
@@ -1819,6 +1872,11 @@ impl Worker {
         self.cleanup_active_token();
         self.emit(&job)?;
 
+        info!(
+            job_id = %self.job_id,
+            prepare_ms = prepare_started.elapsed().as_millis() as u64,
+            "prepare: finished"
+        );
         info!(job_id = %self.job_id, "prepare job completed");
         Ok(())
     }
