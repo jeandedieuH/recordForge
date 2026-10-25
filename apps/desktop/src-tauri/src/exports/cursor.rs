@@ -69,6 +69,54 @@ impl Rgba {
     }
 }
 
+/// Destination buffer for one cursor raster. `origin` is the canvas-space
+/// position of the buffer's (0,0); full-canvas rendering uses (0,0), while the
+/// tiled export path renders only the cursor's bounds into a small buffer.
+struct DrawTarget<'a> {
+    frame: &'a mut [u8],
+    stride_w: u32,
+    height: u32,
+    canvas_w: u32,
+    canvas_h: u32,
+    origin_x: i32,
+    origin_y: i32,
+}
+
+impl<'a> DrawTarget<'a> {
+    #[cfg(test)]
+    fn full_canvas(frame: &'a mut [u8], canvas_w: u32, canvas_h: u32) -> Self {
+        Self {
+            frame,
+            stride_w: canvas_w,
+            height: canvas_h,
+            canvas_w,
+            canvas_h,
+            origin_x: 0,
+            origin_y: 0,
+        }
+    }
+
+    fn tile(
+        frame: &'a mut [u8],
+        width: u32,
+        height: u32,
+        canvas_w: u32,
+        canvas_h: u32,
+        origin_x: i32,
+        origin_y: i32,
+    ) -> Self {
+        Self {
+            frame,
+            stride_w: width,
+            height,
+            canvas_w,
+            canvas_h,
+            origin_x,
+            origin_y,
+        }
+    }
+}
+
 /// A pixel-aligned rectangle used to clip all cursor drawing to the fitted
 /// recorded video screen. Respects canvas border_radius for rounded video corners.
 #[derive(Debug, Clone, Copy)]
@@ -123,6 +171,17 @@ impl ClipRect {
         }
         true
     }
+}
+
+/// Integer blit box and phase for one cursor asset at a canvas position.
+struct CursorDrawGeometry {
+    scale_bin: u32,
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    phase_x: u8,
+    phase_y: u8,
 }
 
 /// A software-rasterized cursor ready to be composited onto the export frame.
@@ -552,10 +611,47 @@ impl CursorRenderer {
     /// Render at the exact fractional presentation timestamp assigned to a
     /// CFR frame so cursor evaluation shares the video frame PTS.
     pub fn render_frame_at(&mut self, output_ms: f64, frame: &mut [u8]) {
-        let expected_len = self.canvas_width as usize * self.canvas_height as usize * 4;
-        if frame.len() != expected_len || !output_ms.is_finite() || output_ms < 0.0 {
+        self.render_frame_at_offset(
+            output_ms,
+            frame,
+            self.canvas_width,
+            self.canvas_height,
+            0,
+            0,
+        );
+    }
+
+    /// Render into a buffer that covers only `origin`-anchored canvas pixels.
+    /// The tiled export path uses this to rasterize a cursor-sized plate
+    /// instead of a full canvas.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_frame_at_offset(
+        &mut self,
+        output_ms: f64,
+        frame: &mut [u8],
+        width: u32,
+        height: u32,
+        origin_x: i32,
+        origin_y: i32,
+    ) {
+        let expected_len = width as usize * height as usize * 4;
+        if width == 0
+            || height == 0
+            || frame.len() != expected_len
+            || !output_ms.is_finite()
+            || output_ms < 0.0
+        {
             return;
         }
+        let mut target = DrawTarget::tile(
+            frame,
+            width,
+            height,
+            self.canvas_width,
+            self.canvas_height,
+            origin_x,
+            origin_y,
+        );
 
         let source_time_ms = match source_time_for_output(&self.segments, output_ms) {
             Some(time) => time,
@@ -589,7 +685,7 @@ impl CursorRenderer {
         let effective_cursor_scale = self.cursor_scale_factor * zoom_px_scale;
 
         if self.settings.spotlight_mode {
-            self.render_spotlight(frame, x, y, effective_cursor_scale, &clip);
+            self.render_spotlight(&mut target, x, y, effective_cursor_scale, &clip);
         }
 
         if self.settings.click_feedback != "none" {
@@ -602,7 +698,14 @@ impl CursorRenderer {
                     rect,
                     fit_scale,
                 );
-                self.render_click_feedback(frame, cx, cy, click, effective_cursor_scale, &clip);
+                self.render_click_feedback(
+                    &mut target,
+                    cx,
+                    cy,
+                    click,
+                    effective_cursor_scale,
+                    &clip,
+                );
             }
         }
 
@@ -610,7 +713,7 @@ impl CursorRenderer {
         // Apply the idle fade opacity computed by the canonical engine. The
         // cached asset is rendered at full opacity and modulated per-frame.
         self.draw_cursor(
-            frame,
+            &mut target,
             x,
             y,
             cursor_frame.opacity,
@@ -655,7 +758,7 @@ impl CursorRenderer {
     /// Coverage is sampled at pixel centers so the hole edge is antialiased.
     fn render_spotlight(
         &self,
-        frame: &mut [u8],
+        target: &mut DrawTarget,
         x: f64,
         y: f64,
         cursor_scale: f64,
@@ -671,8 +774,8 @@ impl CursorRenderer {
         let feather = (0.12 * radius).max(1.5);
         let dim = Rgba::opaque(0, 0, 0);
 
-        let end_x = clip.x.saturating_add(clip.w).min(self.canvas_width);
-        let end_y = clip.y.saturating_add(clip.h).min(self.canvas_height);
+        let end_x = clip.x.saturating_add(clip.w).min(target.canvas_w);
+        let end_y = clip.y.saturating_add(clip.h).min(target.canvas_h);
         for py in clip.y..end_y {
             for px in clip.x..end_x {
                 if !clip.contains(px as i32, py as i32) {
@@ -687,8 +790,7 @@ impl CursorRenderer {
                     continue;
                 }
                 blend_pixel(
-                    frame,
-                    self.canvas_width,
+                    target,
                     px as i32,
                     py as i32,
                     dim.with_alpha(dim_alpha * coverage),
@@ -703,7 +805,7 @@ impl CursorRenderer {
     /// the click size scaled by the same factor as the cursor artwork.
     fn render_click_feedback(
         &self,
-        frame: &mut [u8],
+        target: &mut DrawTarget,
         x: f64,
         y: f64,
         click: &cursor_engine::CursorClickEffect,
@@ -720,32 +822,10 @@ impl CursorRenderer {
 
         match self.settings.click_feedback.as_str() {
             // Core disc at 0.55r plus a quadratic halo out to r at half alpha.
-            "spotlight" => fill_spotlight_glow(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
-                x,
-                y,
-                radius,
-                color,
-                alpha,
-                clip,
-            ),
-            "pulse" => fill_disc(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
-                x,
-                y,
-                radius,
-                color,
-                alpha,
-                clip,
-            ),
+            "spotlight" => fill_spotlight_glow(target, x, y, radius, color, alpha, clip),
+            "pulse" => fill_disc(target, x, y, radius, color, alpha, clip),
             "ripple" => draw_ring_aa(
-                frame,
-                self.canvas_width,
-                self.canvas_height,
+                target,
                 x,
                 y,
                 radius,
@@ -758,17 +838,15 @@ impl CursorRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn draw_cursor(
-        &mut self,
-        frame: &mut [u8],
+    /// Resolve the exact integer blit box for a cursor asset at a position.
+    /// Shared by rasterization and the tile-bounds sweep so they cannot drift.
+    fn cursor_draw_geometry(
+        &self,
+        shape_id: &str,
         x: f64,
         y: f64,
-        opacity: f64,
-        shape_id: &str,
         cursor_scale: f64,
-        clip: &ClipRect,
-    ) {
+    ) -> CursorDrawGeometry {
         let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
         let scale_bin = (cursor_scale.max(0.005) * 200.0).round().max(1.0) as u32;
         let scale = scale_bin as f64 / 200.0;
@@ -778,12 +856,128 @@ impl CursorRenderer {
         let scale_y = asset.height * scale / vb_h;
         let hotspot_x = (asset.hotspot_x - vb_x + pad) * scale_x;
         let hotspot_y = (asset.hotspot_y - vb_y + pad) * scale_y;
-
-        // Quarter-pixel phases keep subpixel placement without re-rasterizing.
         let origin_x = x - hotspot_x;
         let origin_y = y - hotspot_y;
         let (x0, phase_x) = quantize_phase(origin_x);
         let (y0, phase_y) = quantize_phase(origin_y);
+        let width = (((vb_w + pad * 2.0) * scale_x).ceil() as u32 + 1).max(1);
+        let height = (((vb_h + pad * 2.0) * scale_y).ceil() as u32 + 1).max(1);
+        CursorDrawGeometry {
+            scale_bin,
+            x0,
+            y0,
+            width,
+            height,
+            phase_x,
+            phase_y,
+        }
+    }
+
+    /// Conservative canvas-space bounds of everything this renderer draws at
+    /// `output_ms`, or `None` when nothing is visible.
+    ///
+    /// Spotlight mode dims the entire fitted screen, so it returns the full
+    /// clip rect and the export keeps the full-size cursor plane. Otherwise the
+    /// bounds union the cursor sprite (including its shadow padding) and every
+    /// active click effect.
+    pub(crate) fn frame_bounds(&self, output_ms: f64) -> Option<(f64, f64, f64, f64)> {
+        if !self.settings.enabled || !output_ms.is_finite() || output_ms < 0.0 {
+            return None;
+        }
+        let source_time_ms = source_time_for_output(&self.segments, output_ms)?;
+        let cursor_frame = self
+            .engine
+            .lock()
+            .expect("cursor engine")
+            .evaluate(source_time_ms, &self.settings);
+        if !cursor_frame.visible {
+            return None;
+        }
+
+        let transform = self.resolve_zoom_transform_at(output_ms);
+        let (clip, fit_scale, rect) = self.screen_entry_at(output_ms);
+        if self.settings.spotlight_mode {
+            return Some((
+                clip.x as f64,
+                clip.y as f64,
+                (clip.x + clip.w) as f64,
+                (clip.y + clip.h) as f64,
+            ));
+        }
+
+        let (x, y, zoom_px_scale) = self.map_source_point(
+            &transform,
+            cursor_frame.source_x,
+            cursor_frame.source_y,
+            clip,
+            rect,
+            fit_scale,
+        );
+        let effective_cursor_scale = self.cursor_scale_factor * zoom_px_scale;
+        let shape_id = self.resolve_cursor_shape_id(&cursor_frame.shape_id);
+        let geometry = self.cursor_draw_geometry(
+            &shape_id,
+            x,
+            y,
+            effective_cursor_scale * cursor_frame.click_scale,
+        );
+        let mut x0 = geometry.x0 as f64;
+        let mut y0 = geometry.y0 as f64;
+        let mut x1 = x0 + geometry.width as f64;
+        let mut y1 = y0 + geometry.height as f64;
+
+        if self.settings.click_feedback != "none" {
+            for click in &cursor_frame.active_clicks {
+                let (cx, cy, _) = self.map_source_point(
+                    &transform,
+                    click.source_x,
+                    click.source_y,
+                    clip,
+                    rect,
+                    fit_scale,
+                );
+                let click_size = self.settings.click_size.max(10.0) * effective_cursor_scale;
+                let radius = click_size / 2.0 * (0.25 + 0.75 * click.expand);
+                // 1px AA + the widest ripple stroke are inside this margin.
+                let reach = radius.max(1.0) + click_size * 0.1 + 1.0;
+                x0 = x0.min(cx - reach);
+                y0 = y0.min(cy - reach);
+                x1 = x1.max(cx + reach);
+                y1 = y1.max(cy + reach);
+            }
+        }
+
+        // Drawing is clipped to the fitted screen and the canvas.
+        x0 = x0.max(clip.x as f64).max(0.0);
+        y0 = y0.max(clip.y as f64).max(0.0);
+        x1 = x1
+            .min((clip.x + clip.w) as f64)
+            .min(self.canvas_width as f64);
+        y1 = y1
+            .min((clip.y + clip.h) as f64)
+            .min(self.canvas_height as f64);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some((x0, y0, x1, y1))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_cursor(
+        &mut self,
+        target: &mut DrawTarget,
+        x: f64,
+        y: f64,
+        opacity: f64,
+        shape_id: &str,
+        cursor_scale: f64,
+        clip: &ClipRect,
+    ) {
+        let asset = cursor_engine::assets::resolve_cursor_asset_or_default(shape_id);
+        let geometry = self.cursor_draw_geometry(shape_id, x, y, cursor_scale);
+        let scale_bin = geometry.scale_bin;
+        let (x0, y0) = (geometry.x0, geometry.y0);
+        let (phase_x, phase_y) = (geometry.phase_x, geometry.phase_y);
 
         let cursor_index = match self.raster_index(asset, scale_bin, phase_x, phase_y) {
             Ok(index) => index,
@@ -793,7 +987,7 @@ impl CursorRenderer {
             }
         };
         self.blit_cursor(
-            frame,
+            target,
             &self.raster_cache[cursor_index].cursor,
             x0,
             y0,
@@ -839,7 +1033,7 @@ impl CursorRenderer {
 
     fn blit_cursor(
         &self,
-        frame: &mut [u8],
+        target: &mut DrawTarget,
         cursor: &RasterizedCursor,
         x0: i32,
         y0: i32,
@@ -871,7 +1065,7 @@ impl CursorRenderer {
                     blue: cursor.data[src + 2],
                     alpha,
                 };
-                blend_pixel(frame, self.canvas_width, fx, fy, color, clip);
+                blend_pixel(target, fx, fy, color, clip);
             }
         }
     }
@@ -1423,11 +1617,17 @@ impl Rgba {
     }
 }
 
-fn blend_pixel(frame: &mut [u8], width: u32, x: i32, y: i32, color: Rgba, clip: &ClipRect) {
-    if x < 0 || y < 0 || x >= width as i32 || !clip.contains(x, y) {
+fn blend_pixel(target: &mut DrawTarget, x: i32, y: i32, color: Rgba, clip: &ClipRect) {
+    if x < 0 || y < 0 || x >= target.canvas_w as i32 || !clip.contains(x, y) {
         return;
     }
-    let index = (y as usize * width as usize + x as usize) * 4;
+    let tx = x - target.origin_x;
+    let ty = y - target.origin_y;
+    if tx < 0 || ty < 0 || tx >= target.stride_w as i32 || ty >= target.height as i32 {
+        return;
+    }
+    let index = (ty as usize * target.stride_w as usize + tx as usize) * 4;
+    let frame = &mut *target.frame;
     if index + 3 >= frame.len() {
         return;
     }
@@ -1458,9 +1658,7 @@ fn disc_coverage(distance: f64, radius: f64) -> f64 {
 
 #[allow(clippy::too_many_arguments)]
 fn fill_disc(
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
+    target: &mut DrawTarget,
     cx: f64,
     cy: f64,
     radius: f64,
@@ -1470,9 +1668,9 @@ fn fill_disc(
 ) {
     let outer = radius + 0.5;
     let min_x = (cx - outer).floor().max(0.0) as u32;
-    let max_x = (cx + outer).ceil().min(width as f64) as u32;
+    let max_x = (cx + outer).ceil().min(target.canvas_w as f64) as u32;
     let min_y = (cy - outer).floor().max(0.0) as u32;
-    let max_y = (cy + outer).ceil().min(height as f64) as u32;
+    let max_y = (cy + outer).ceil().min(target.canvas_h as f64) as u32;
     for py in min_y..max_y {
         for px in min_x..max_x {
             if !clip.contains(px as i32, py as i32) {
@@ -1485,8 +1683,7 @@ fn fill_disc(
                 continue;
             }
             blend_pixel(
-                frame,
-                width,
+                target,
                 px as i32,
                 py as i32,
                 color.with_alpha(alpha * coverage),
@@ -1500,9 +1697,7 @@ fn fill_disc(
 /// whose alpha falls off quadratically to zero at half strength.
 #[allow(clippy::too_many_arguments)]
 fn fill_spotlight_glow(
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
+    target: &mut DrawTarget,
     cx: f64,
     cy: f64,
     radius: f64,
@@ -1513,9 +1708,9 @@ fn fill_spotlight_glow(
     let core = radius * 0.55;
     let outer = radius + 0.5;
     let min_x = (cx - outer).floor().max(0.0) as u32;
-    let max_x = (cx + outer).ceil().min(width as f64) as u32;
+    let max_x = (cx + outer).ceil().min(target.canvas_w as f64) as u32;
     let min_y = (cy - outer).floor().max(0.0) as u32;
-    let max_y = (cy + outer).ceil().min(height as f64) as u32;
+    let max_y = (cy + outer).ceil().min(target.canvas_h as f64) as u32;
     for py in min_y..max_y {
         for px in min_x..max_x {
             if !clip.contains(px as i32, py as i32) {
@@ -1539,8 +1734,7 @@ fn fill_spotlight_glow(
                 continue;
             }
             blend_pixel(
-                frame,
-                width,
+                target,
                 px as i32,
                 py as i32,
                 color.with_alpha(pixel_alpha),
@@ -1554,9 +1748,7 @@ fn fill_spotlight_glow(
 /// analytically at pixel centers for 1px antialiased edges.
 #[allow(clippy::too_many_arguments)]
 fn draw_ring_aa(
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
+    target: &mut DrawTarget,
     cx: f64,
     cy: f64,
     radius: f64,
@@ -1568,9 +1760,9 @@ fn draw_ring_aa(
     let half_stroke = thickness / 2.0;
     let outer = radius + half_stroke + 0.5;
     let min_x = (cx - outer).floor().max(0.0) as u32;
-    let max_x = (cx + outer).ceil().min(width as f64) as u32;
+    let max_x = (cx + outer).ceil().min(target.canvas_w as f64) as u32;
     let min_y = (cy - outer).floor().max(0.0) as u32;
-    let max_y = (cy + outer).ceil().min(height as f64) as u32;
+    let max_y = (cy + outer).ceil().min(target.canvas_h as f64) as u32;
     for py in min_y..max_y {
         for px in min_x..max_x {
             if !clip.contains(px as i32, py as i32) {
@@ -1585,8 +1777,7 @@ fn draw_ring_aa(
                 continue;
             }
             blend_pixel(
-                frame,
-                width,
+                target,
                 px as i32,
                 py as i32,
                 color.with_alpha(alpha * coverage),
@@ -1778,6 +1969,100 @@ mod tests {
         let mut frame = vec![0; 100 * 100 * 4];
         renderer.render_frame_at(100.0, &mut frame);
         assert!(frame.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0));
+    }
+
+    #[test]
+    fn frame_bounds_cover_every_drawn_pixel() {
+        let mut renderer = CursorRenderer::new(
+            CursorSettings {
+                click_feedback: "ripple".into(),
+                click_size: 40.0,
+                ..Default::default()
+            },
+            make_v2_telemetry(),
+            &segments(),
+            &test_canvas(200, 200, 0),
+        )
+        .expect("valid cursor renderer");
+        let mut frame = vec![0; 200 * 200 * 4];
+        renderer.render_frame_at(100.0, &mut frame);
+        let (bx0, by0, bx1, by1) = renderer.frame_bounds(100.0).expect("cursor visible");
+        let mut found: Option<(u32, u32, u32, u32)> = None;
+        for y in 0..200u32 {
+            for x in 0..200u32 {
+                let index = ((y * 200 + x) * 4) as usize;
+                if frame[index + 3] == 0 {
+                    continue;
+                }
+                found = Some(match found {
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    None => (x, y, x, y),
+                });
+            }
+        }
+        let (x0, y0, x1, y1) = found.expect("drawn cursor");
+        assert!(
+            bx0 <= x0 as f64
+                && by0 <= y0 as f64
+                && bx1 >= x1 as f64 + 1.0
+                && by1 >= y1 as f64 + 1.0,
+            "bounds {bx0},{by0}..{bx1},{by1} miss drawn pixels {x0},{y0}..{x1},{y1}"
+        );
+    }
+
+    #[test]
+    fn tile_render_is_pixel_identical_to_the_full_canvas_crop() {
+        let mut renderer = CursorRenderer::new(
+            CursorSettings {
+                click_feedback: "ripple".into(),
+                click_size: 40.0,
+                shadow_enabled: true,
+                shadow_blur: 12.0,
+                shadow_offset_x: 3.0,
+                shadow_offset_y: 4.0,
+                shadow_opacity: 0.6,
+                ..Default::default()
+            },
+            make_v2_telemetry(),
+            &segments(),
+            &test_canvas(200, 200, 0),
+        )
+        .expect("valid cursor renderer");
+        let time_ms = 100.0;
+        let mut full = vec![0; 200 * 200 * 4];
+        renderer.render_frame_at(time_ms, &mut full);
+        let (bx0, by0, bx1, by1) = renderer.frame_bounds(time_ms).expect("cursor visible");
+        let origin_x = (bx0.floor().max(0.0) as u32) & !1;
+        let origin_y = (by0.floor().max(0.0) as u32) & !1;
+        let tile_w = (((bx1.ceil().max(0.0) as u32).saturating_sub(origin_x) + 2) + 1) & !1;
+        let tile_h = (((by1.ceil().max(0.0) as u32).saturating_sub(origin_y) + 2) + 1) & !1;
+        let mut tile = vec![0; (tile_w * tile_h * 4) as usize];
+        renderer.render_frame_at_offset(
+            time_ms,
+            &mut tile,
+            tile_w,
+            tile_h,
+            origin_x as i32,
+            origin_y as i32,
+        );
+        for row in 0..tile_h {
+            for col in 0..tile_w {
+                let tile_index = ((row * tile_w + col) * 4) as usize;
+                let canvas_x = origin_x + col;
+                let canvas_y = origin_y + row;
+                if canvas_x >= 200 || canvas_y >= 200 {
+                    // Transparent canvas overflow.
+                    assert_eq!(&tile[tile_index..tile_index + 4], &[0, 0, 0, 0]);
+                    continue;
+                }
+                let full_index = ((canvas_y * 200 + canvas_x) * 4) as usize;
+                assert_eq!(
+                    &tile[tile_index..tile_index + 4],
+                    &full[full_index..full_index + 4],
+                    "tile pixel {col},{row} differs from the full-canvas crop"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2653,7 +2938,10 @@ mod tests {
         };
         let clip = renderer.video_screen;
         let mut frame = vec![0u8; 200 * 200 * 4];
-        renderer.render_click_feedback(&mut frame, 100.0, 100.0, &click, 1.0, &clip);
+        {
+            let mut target = DrawTarget::full_canvas(&mut frame, 200, 200);
+            renderer.render_click_feedback(&mut target, 100.0, 100.0, &click, 1.0, &clip);
+        }
 
         // Coverage at pixel centers yields fractional alpha at the ring edges.
         let fractional = frame
@@ -2686,7 +2974,10 @@ mod tests {
         .expect("valid cursor renderer");
         let clip = renderer.video_screen;
         let mut frame = vec![0u8; 200 * 200 * 4];
-        renderer.render_spotlight(&mut frame, 150.0, 100.0, 1.0, &clip);
+        {
+            let mut target = DrawTarget::full_canvas(&mut frame, 200, 200);
+            renderer.render_spotlight(&mut target, 150.0, 100.0, 1.0, &clip);
+        }
 
         // A pixel far from the hole is fully dimmed with pure black.
         let index = (10 * 200 + 10) * 4;
@@ -2756,9 +3047,15 @@ mod tests {
         let scale = renderer.cursor_scale_factor * renderer.base_fit_scale;
 
         let mut frame_a = vec![0; 200 * 200 * 4];
-        renderer.draw_cursor(&mut frame_a, 50.0, 50.0, 1.0, "", scale, &clip);
+        {
+            let mut target = DrawTarget::full_canvas(&mut frame_a, 200, 200);
+            renderer.draw_cursor(&mut target, 50.0, 50.0, 1.0, "", scale, &clip);
+        }
         let mut frame_b = vec![0; 200 * 200 * 4];
-        renderer.draw_cursor(&mut frame_b, 50.25, 50.0, 1.0, "", scale, &clip);
+        {
+            let mut target = DrawTarget::full_canvas(&mut frame_b, 200, 200);
+            renderer.draw_cursor(&mut target, 50.25, 50.0, 1.0, "", scale, &clip);
+        }
         assert_ne!(
             frame_a, frame_b,
             "0.25px offset must change the rendered cursor"
@@ -2767,7 +3064,10 @@ mod tests {
         // Repeating a position hits the raster cache without growth.
         let cached = renderer.raster_cache.len();
         let mut frame_c = vec![0; 200 * 200 * 4];
-        renderer.draw_cursor(&mut frame_c, 50.0, 50.0, 1.0, "", scale, &clip);
+        {
+            let mut target = DrawTarget::full_canvas(&mut frame_c, 200, 200);
+            renderer.draw_cursor(&mut target, 50.0, 50.0, 1.0, "", scale, &clip);
+        }
         assert_eq!(renderer.raster_cache.len(), cached);
         assert_eq!(frame_a, frame_c, "same phase must reuse the same raster");
 

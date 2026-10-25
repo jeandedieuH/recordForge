@@ -156,7 +156,7 @@ bun run --cwd tooling/benchmarks benchmark:export <specDir> [--workers 2,4,8] [-
 bun run tooling/benchmarks/export-bench.ts --reparse <logDir>       # rebuild the table from logs
 ```
 
-Stage timings land in `bench-*.log` + `bench-results-*.json` next to the specs; `RECORDFORGE_EXPORT_CHUNK_WORKERS`/`RECORDFORGE_EXPORT_CHUNK_FRAMES` env knobs control chunk parallelism/size during measurement, `RECORDFORGE_EXPORT_NVENC_CHUNK_WORKERS` caps NVENC passes, and `RECORDFORGE_EXPORT_ZOOM_SNAP`/`RECORDFORGE_EXPORT_CORNER_PATCHES` opt into the Phase 1 zoom-snapping and rounded-corner fast paths (both off by default; see `docs/benchmarks/phase-1-results.md`).
+Stage timings land in `bench-*.log` + `bench-results-*.json` next to the specs; `RECORDFORGE_EXPORT_CHUNK_WORKERS`/`RECORDFORGE_EXPORT_CHUNK_FRAMES` env knobs control chunk parallelism/size during measurement, `RECORDFORGE_EXPORT_NVENC_CHUNK_WORKERS` caps NVENC passes, `RECORDFORGE_EXPORT_ZOOM_SNAP`/`RECORDFORGE_EXPORT_CORNER_PATCHES` opt into the Phase 1 zoom-snapping and rounded-corner fast paths, and `RECORDFORGE_EXPORT_CURSOR_TILE=union|sendcmd|full` selects the Phase 2 cursor plate layout (default `union`; see `docs/benchmarks/phase-1-results.md` and `phase-2-results.md`).
 
 Official desktop releases are published by `.github/workflows/release-desktop.yml` from `app-v*` tags. The workflow builds signed NSIS/MSI artifacts and uploads `latest.json` to the GitHub Release.
 

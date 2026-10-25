@@ -25,8 +25,9 @@ pub struct AudioTrackInput {
 
 /// Concatenate finalized segment files into a single MP4.
 ///
-/// For a single segment this is a filesystem copy. For multiple segments an
-/// FFmpeg concat demuxer list is generated and fed to a stream-copy job.
+/// For a single segment this publishes a hard link (falling back to a copy on
+/// filesystems without hard links). For multiple segments an FFmpeg concat
+/// demuxer list is generated and fed to a stream-copy job.
 #[instrument(skip(ffmpeg_path, segment_files))]
 pub fn concatenate_segments(
     ffmpeg_path: &str,
@@ -47,9 +48,15 @@ pub fn concatenate_segments(
     }
 
     if segment_files.len() == 1 {
-        std::fs::copy(&segment_files[0], output_path).map_err(|e| {
-            crate::errors::InternalError::Media(format!("copy single segment: {e}"))
-        })?;
+        // A single segment needs no remux. Publish it as a hard link when the
+        // filesystem supports one (same instant cost as a rename, but the
+        // fragment stays on disk for recovery); fall back to a copy on
+        // filesystems without hard links.
+        if std::fs::hard_link(&segment_files[0], output_path).is_err() {
+            std::fs::copy(&segment_files[0], output_path).map_err(|e| {
+                crate::errors::InternalError::Media(format!("copy single segment: {e}"))
+            })?;
+        }
         disk::sync_file(output_path)?;
         return Ok(());
     }
@@ -604,6 +611,24 @@ pub fn probe_dshow_device(ffmpeg_path: &str, input_spec: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_segment_concat_publishes_without_removing_the_fragment() {
+        let dir = std::env::temp_dir().join(format!("rf-single-concat-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let segment = dir.join("segment_000.mp4");
+        std::fs::write(&segment, b"not real video but non-empty").unwrap();
+        let output = dir.join("output.partial.mp4");
+        concatenate_segments("ffmpeg", &dir, std::slice::from_ref(&segment), &output)
+            .expect("concat");
+        assert!(output.is_file());
+        assert!(segment.is_file(), "fragment must remain for recovery");
+        assert_eq!(
+            std::fs::read(&segment).unwrap(),
+            std::fs::read(&output).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn webcam_stitch_filter_preserves_each_segment_start_offset() {

@@ -52,11 +52,12 @@ impl Drop for TempExportDir {
 }
 
 /// Temp artifacts an export leaves behind when the process dies mid-job.
-const STALE_EXPORT_TEMP_PREFIXES: [&str; 10] = [
+const STALE_EXPORT_TEMP_PREFIXES: [&str; 11] = [
     "recordforge_chunks_",
     "recordforge_bg_",
     "recordforge_cam_shadow_",
     "rf-corner-patches-",
+    "rf-sendcmd-",
     "rf-filter-complex-",
     "rf-mask-",
     "rf-border-cam-",
@@ -2709,9 +2710,10 @@ fn render_composition_window(
     // below camera bubbles and privacy masks, overlay items above both, and
     // burned-in captions on top.
     // Layout windows the cursor maps through: the full rect outside
-    // side-by-side windows, the smaller slot inside them. The streamed plate
-    // crop is the union of all window rects, so every drawn pixel is covered.
-    let (cursor_screen_windows, cursor_plane_rect) = if let Some(sbs_rect) = sbs_screen_rect {
+    // side-by-side windows, the smaller slot inside them. The tile sweep
+    // evaluates the active window per frame, so only the drawn cursor is
+    // streamed.
+    let cursor_screen_windows = if let Some(sbs_rect) = sbs_screen_rect {
         let mut windows: Vec<cursor::ScreenRectWindow> = Vec::new();
         let mut cursor = 0u64;
         for &(start, end) in &sbs_windows {
@@ -2736,17 +2738,9 @@ fn render_composition_window(
                 rect: (screen_x, screen_y, screen_w, screen_h),
             });
         }
-        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-        for window in &windows {
-            let (rx, ry, rw, rh) = window.rect;
-            x0 = x0.min(rx);
-            y0 = y0.min(ry);
-            x1 = x1.max(rx + rw);
-            y1 = y1.max(ry + rh);
-        }
-        (Some(windows), (x0, y0, x1 - x0, y1 - y0))
+        Some(windows)
     } else {
-        (None, (screen_x, screen_y, screen_w, screen_h))
+        None
     };
     let mut cursor_renderers = build_cursor_renderers(
         plan,
@@ -2829,7 +2823,7 @@ fn render_composition_window(
             plan,
             settings,
             asset_paths,
-            cursor_plane_rect,
+            (screen_x, screen_y, screen_w, screen_h),
             shared,
             window.first_frame,
             window.frame_count,
@@ -2866,8 +2860,17 @@ fn render_composition_window(
                 ));
             }
             if let Some((plate_x, plate_y, _, _)) = prepared.plane_rect(PlatePlane::Cursor) {
+                let cursor_source = if let Some(path) = prepared.sendcmd_path.as_ref() {
+                    let escaped = captions::escape_filter_path(path);
+                    filters.push(format!(
+                        "[cursor_plate]sendcmd=f='{escaped}'[cursor_plate_cmd]"
+                    ));
+                    "[cursor_plate_cmd]".to_string()
+                } else {
+                    "[cursor_plate]".to_string()
+                };
                 filters.push(format!(
-                    "[{current_label}][cursor_plate]overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
+                    "[{current_label}]{cursor_source}overlay@cursor=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
                 ));
                 current_label = "with_cursor".to_string();
             }
@@ -2883,13 +2886,23 @@ fn render_composition_window(
             match prepared.planes.first().copied() {
                 Some(PlatePlane::Cursor) => {
                     // Cursor-only stream: composite directly below the camera
-                    // layer at the plate rect's canvas origin.
+                    // layer at the plate rect's canvas origin; sendcmd moves
+                    // the overlay with the tile.
                     let (plate_x, plate_y) = prepared
                         .plane_rect(PlatePlane::Cursor)
                         .map(|(x, y, _, _)| (x, y))
                         .unwrap_or((0, 0));
+                    let cursor_source = if let Some(path) = prepared.sendcmd_path.as_ref() {
+                        let escaped = captions::escape_filter_path(path);
+                        filters.push(format!(
+                            "{plate_source}sendcmd=f='{escaped}'[cursor_plate_cmd]"
+                        ));
+                        "[cursor_plate_cmd]".to_string()
+                    } else {
+                        plate_source.clone()
+                    };
                     filters.push(format!(
-                        "[{current_label}]{plate_source}overlay=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
+                        "[{current_label}]{cursor_source}overlay@cursor=x={plate_x}:y={plate_y}:shortest=1:format=yuv420{cursor_enable}[with_cursor]"
                     ));
                     current_label = "with_cursor".to_string();
                 }
@@ -4619,6 +4632,15 @@ pub(crate) struct CursorFramePlan {
     /// `[first_frame_index, first_frame_index + frame_count)` — renderer
     /// timestamps are absolute, so the offset is applied at render time.
     first_frame_index: u64,
+    /// Per-frame cursor tile origin in canvas space, indexed by
+    /// `frame_index - first_frame_index`. The plate is a fixed tile size and
+    /// `sendcmd` moves `overlay@cursor` to each frame's origin.
+    cursor_origins: Arc<Vec<(i32, i32)>>,
+    /// `sendcmd` script moving `overlay@cursor`; `None` when the origin never
+    /// changes (or the plane is absent).
+    sendcmd_path: Option<PathBuf>,
+    /// Owns the `sendcmd` script temp file for the plan's lifetime.
+    _sendcmd_guard: Option<TempMaskFile>,
     /// Share of the machine this feed may use for producer workers and memory
     /// budgets. Chunked renders run several FFmpeg processes concurrently, so
     /// each divides its budgets by this factor; 1 is the single-pass default.
@@ -4689,6 +4711,182 @@ fn pack_plane_layout(plane_rects: &[(u32, u32, u32, u32)]) -> (Vec<(u32, u32)>, 
         let width = plane_rects.iter().map(|rect| rect.2).max().unwrap_or(1);
         let height = plane_rects.iter().map(|rect| rect.3).sum();
         (offsets, width.max(1), height)
+    }
+}
+
+/// Format `sendcmd` lines that move `overlay@cursor` between per-frame tile
+/// origins. Commands are absolute output seconds and only emitted when an axis
+/// actually changes; a single position needs no script.
+fn build_cursor_sendcmd_script(origins: &[(i32, i32)], first_frame: u64, fps: u32) -> String {
+    let mut script = String::new();
+    let mut previous: Option<(i32, i32)> = None;
+    let mut written = 0usize;
+    for (frame, origin) in origins.iter().enumerate() {
+        let changed = previous.map(|prev| prev != *origin).unwrap_or(true);
+        if !changed {
+            continue;
+        }
+        // Command times are matched with `>=` against the plate frame PTS.
+        // `frame_time_ms` rounding (and FFmpeg's CFR timestamp grid) can put
+        // the formatted time a hair after the frame's actual PTS, which would
+        // delay the move by one frame; 0.1 ms lands safely inside the frame.
+        let time_s =
+            (cursor::frame_time_ms(first_frame + frame as u64, fps) / 1000.0 - 0.000_1).max(0.0);
+        if previous.is_none_or(|prev| prev.0 != origin.0) {
+            script.push_str(&format!("{time_s:.6} overlay@cursor x {};\n", origin.0));
+        }
+        if previous.is_none_or(|prev| prev.1 != origin.1) {
+            script.push_str(&format!("{time_s:.6} overlay@cursor y {};\n", origin.1));
+        }
+        previous = Some(*origin);
+        written += 1;
+    }
+    if written <= 1 {
+        script.clear();
+    }
+    script
+}
+
+/// Cursor plate layout. `Union` keeps one fixed tile covering every frame in
+/// the pass (no `sendcmd`); `Sendcmd` moves a smaller tile per frame; `Full`
+/// keeps the full fitted-screen plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorTileMode {
+    Union,
+    Sendcmd,
+    Full,
+}
+
+/// Tiling shrinks the streamed cursor plane to its drawn bounds.
+/// `RECORDFORGE_EXPORT_CURSOR_TILE=sendcmd|union|full` selects the layout.
+/// The default is the fixed union tile: it is parity-exact, while the
+/// per-frame `sendcmd` variant is faster but changes FFmpeg's composited cursor
+/// shadow enough to fail the 50 dB gate (kept for investigation/opt-in).
+fn cursor_tile_mode() -> CursorTileMode {
+    match std::env::var("RECORDFORGE_EXPORT_CURSOR_TILE") {
+        Ok(value) if value.eq_ignore_ascii_case("full") || value == "0" => CursorTileMode::Full,
+        Ok(value) if value.eq_ignore_ascii_case("sendcmd") => CursorTileMode::Sendcmd,
+        _ => CursorTileMode::Union,
+    }
+}
+
+fn full_screen_cursor_tile(
+    screen_rect: (f64, f64, f64, f64),
+    frame_count: u64,
+    fps: u32,
+) -> CursorTilePlan {
+    let (sx, sy, sw, sh) = screen_rect;
+    let origin_x = (sx.round().max(0.0) as u32) & !1;
+    let origin_y = (sy.round().max(0.0) as u32) & !1;
+    let width = (((sw.round().max(1.0) as u32) + 1) & !1).max(2);
+    let height = (((sh.round().max(1.0) as u32) + 1) & !1).max(2);
+    CursorTilePlan {
+        width,
+        height,
+        origins: Arc::new(vec![
+            (origin_x as i32, origin_y as i32);
+            frame_count.max(1) as usize
+        ]),
+        script: build_cursor_sendcmd_script(&[], 0, fps),
+    }
+}
+
+/// Fixed tile size plus per-frame origins for the cursor plane, and the
+/// `sendcmd` script that moves `overlay@cursor` between them.
+struct CursorTilePlan {
+    width: u32,
+    height: u32,
+    origins: Arc<Vec<(i32, i32)>>,
+    script: String,
+}
+
+/// Sweep every frame in the pass, union the cursor bounds, and derive an even
+/// tile origin per frame. The tile is the max local extent over the window;
+/// origins are floored to even so the RGBA overlay stays on the chroma grid.
+fn prepare_cursor_tile(
+    renderers: &[(u64, u64, cursor::CursorRenderer)],
+    first_frame: u64,
+    frame_count: u64,
+    fps: u32,
+    canvas: &cursor::RenderCanvas,
+    per_frame_origins: bool,
+) -> CursorTilePlan {
+    let mut origins = Vec::with_capacity(frame_count as usize);
+    let mut max_width = 0u32;
+    let mut max_height = 0u32;
+    let mut union: Option<(u32, u32, u32, u32)> = None;
+    if frame_count == 0 || renderers.is_empty() {
+        return CursorTilePlan {
+            width: 1,
+            height: 1,
+            origins: Arc::new(vec![(0, 0); frame_count.max(1) as usize]),
+            script: String::new(),
+        };
+    }
+
+    for frame in 0..frame_count {
+        let frame_index = first_frame + frame;
+        let output_ms = cursor::frame_time_ms(frame_index, fps);
+        let bounds = renderers
+            .iter()
+            .find(|(start_ms, end_ms, _)| {
+                output_ms >= *start_ms as f64 && output_ms < *end_ms as f64
+            })
+            .and_then(|(_, _, renderer)| renderer.frame_bounds(output_ms));
+        let Some((x0, y0, x1, y1)) = bounds else {
+            origins.push((0, 0));
+            continue;
+        };
+        let origin_x = (x0.floor().max(0.0) as u32) & !1;
+        let origin_y = (y0.floor().max(0.0) as u32) & !1;
+        origins.push((origin_x as i32, origin_y as i32));
+        let right = (x1.ceil().max(0.0) as u32).min(canvas.width);
+        let bottom = (y1.ceil().max(0.0) as u32).min(canvas.height);
+        max_width = max_width.max(right.saturating_sub(origin_x));
+        max_height = max_height.max(bottom.saturating_sub(origin_y));
+        union = Some(match union {
+            Some((ux0, uy0, ux1, uy1)) => (
+                ux0.min(origin_x),
+                uy0.min(origin_y),
+                ux1.max(right),
+                uy1.max(bottom),
+            ),
+            None => (origin_x, origin_y, right, bottom),
+        });
+    }
+
+    if !per_frame_origins {
+        let Some((ux0, uy0, ux1, uy1)) = union else {
+            return CursorTilePlan {
+                width: 1,
+                height: 1,
+                origins: Arc::new(vec![(0, 0); frame_count.max(1) as usize]),
+                script: String::new(),
+            };
+        };
+        let origin_x = ux0 & !1;
+        let origin_y = uy0 & !1;
+        let width = (((ux1.saturating_sub(origin_x) + 2) + 1) & !1).clamp(1, canvas.width.max(1));
+        let height = (((uy1.saturating_sub(origin_y) + 2) + 1) & !1).clamp(1, canvas.height.max(1));
+        return CursorTilePlan {
+            width,
+            height,
+            origins: Arc::new(vec![
+                (origin_x as i32, origin_y as i32);
+                frame_count as usize
+            ]),
+            script: String::new(),
+        };
+    }
+
+    let width = (((max_width + 2) + 1) & !1).clamp(1, canvas.width.max(1));
+    let height = (((max_height + 2) + 1) & !1).clamp(1, canvas.height.max(1));
+    let script = build_cursor_sendcmd_script(&origins, first_frame, fps);
+    CursorTilePlan {
+        width,
+        height,
+        origins: Arc::new(origins),
+        script,
     }
 }
 
@@ -4794,6 +4992,34 @@ fn prepare_cursor_frame_plan(
         planes.push(PlatePlane::Keys);
     }
 
+    let cursor_tile = if renderers.is_empty() {
+        None
+    } else {
+        match cursor_tile_mode() {
+            CursorTileMode::Full => Some(full_screen_cursor_tile(
+                screen_rect,
+                window_frame_count,
+                canvas.fps,
+            )),
+            CursorTileMode::Union => Some(prepare_cursor_tile(
+                &renderers,
+                window_first_frame,
+                window_frame_count,
+                canvas.fps,
+                canvas,
+                false,
+            )),
+            CursorTileMode::Sendcmd => Some(prepare_cursor_tile(
+                &renderers,
+                window_first_frame,
+                window_frame_count,
+                canvas.fps,
+                canvas,
+                true,
+            )),
+        }
+    };
+
     // Each plane ships only the rect its content can appear in: the cursor
     // clips to the fitted screen rect, while the items/keys rects come from a
     // bounds sweep over this pass's frames — cheap `evaluate` calls, no
@@ -4804,19 +5030,17 @@ fn prepare_cursor_frame_plan(
         .map(|kind| {
             let rect = match kind {
                 PlatePlane::Cursor => {
-                    let (sx, sy, sw, sh) = screen_rect;
-                    // Every drawn pixel is clipped to this rect (rounded ints,
-                    // matching `ClipRect` construction in cursor.rs), so the
-                    // crop covers all content exactly; clamp to the canvas
-                    // for degenerate rect inputs.
-                    let x = sx.round().clamp(0.0, canvas.width.saturating_sub(1) as f64) as u32;
-                    let y = sy
-                        .round()
-                        .clamp(0.0, canvas.height.saturating_sub(1) as f64)
-                        as u32;
-                    let w = (sw.round().max(1.0) as u32).min(canvas.width - x);
-                    let h = (sh.round().max(1.0) as u32).min(canvas.height - y);
-                    Some((x, y, w, h))
+                    // The cursor ships only its animated tile; `sendcmd` moves
+                    // the overlay to each frame's even origin.
+                    cursor_tile.as_ref().map(|tile| {
+                        let (origin_x, origin_y) = tile.origins.first().copied().unwrap_or((0, 0));
+                        (
+                            origin_x.max(0) as u32,
+                            origin_y.max(0) as u32,
+                            tile.width,
+                            tile.height,
+                        )
+                    })
                 }
                 PlatePlane::Items => overlay_engine.as_ref().and_then(|engine| {
                     items_plane_rect(
@@ -4839,6 +5063,23 @@ fn prepare_cursor_frame_plan(
         })
         .collect();
     let (plane_offsets, stream_width, stream_height) = pack_plane_layout(&plane_rects);
+    let (sendcmd_path, sendcmd_guard) = cursor_tile
+        .as_ref()
+        .filter(|tile| !tile.script.is_empty())
+        .and_then(|tile| {
+            let path = std::env::temp_dir().join(format!(
+                "rf-sendcmd-{}-{}.txt",
+                plan.project_id,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&path, tile.script.as_bytes()).ok()?;
+            Some((path.clone(), TempMaskFile(path)))
+        })
+        .map_or((None, None), |(path, guard)| (Some(path), Some(guard)));
+    let cursor_origins = cursor_tile
+        .as_ref()
+        .map(|tile| Arc::clone(&tile.origins))
+        .unwrap_or_else(|| Arc::new(vec![(0, 0); window_frame_count.max(1) as usize]));
     Ok(CursorFramePlan {
         fps: canvas.fps,
         plane_rects,
@@ -4849,6 +5090,9 @@ fn prepare_cursor_frame_plan(
         canvas_height: canvas.height,
         frame_count: window_frame_count,
         first_frame_index: window_first_frame,
+        cursor_origins,
+        sendcmd_path,
+        _sendcmd_guard: sendcmd_guard,
         parallel_divisor: 1,
         planes,
         renderers,
@@ -4965,27 +5209,6 @@ fn pack_overlay_planes(
     }
 }
 
-/// Copy the `x,y,w,h` rect out of an RGBA buffer whose rows are `stride_w`
-/// pixels wide into a tightly packed `w`×`h` plane.
-fn crop_rgba_region(
-    src: &[u8],
-    stride_w: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-) -> Vec<u8> {
-    let row_bytes = w * 4;
-    let mut out = vec![0u8; row_bytes * h];
-    let src_stride = stride_w * 4;
-    for row in 0..h {
-        let src_start = (y + row) * src_stride + x * 4;
-        out[row * row_bytes..(row + 1) * row_bytes]
-            .copy_from_slice(&src[src_start..src_start + row_bytes]);
-    }
-    out
-}
-
 /// One produced overlay frame: rasterized bytes, a fully transparent frame
 /// (the writer holds a shared zero buffer), or a worker failure.
 enum ProducedFrame {
@@ -5039,9 +5262,13 @@ struct OverlayWorkerState {
     overlay_engine: Option<Arc<overlay_engine::OverlayEngine>>,
     keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
     cursor_pixmap: resvg::tiny_skia::Pixmap,
-    /// Canvas-space rects each plane is rasterized at — the cursor renders the
-    /// full canvas then crops, while the items/keys pixmaps are allocated at
-    /// their rect size and rendered with the rect origin offset.
+    cursor_origins: Arc<Vec<(i32, i32)>>,
+    first_frame_index: u64,
+    canvas_width: u32,
+    canvas_height: u32,
+    /// Canvas-space rects each plane is rasterized at — the cursor renders its
+    /// animated tile, while the items/keys pixmaps are allocated at their rect
+    /// size and rendered with the rect origin offset.
     cursor_rect: Option<(u32, u32, u32, u32)>,
     items_rect: Option<(u32, u32, u32, u32)>,
     keys_rect: Option<(u32, u32, u32, u32)>,
@@ -5059,17 +5286,27 @@ impl OverlayWorkerState {
         keystroke_renderer: Option<keystrokes::KeystrokeRenderer>,
         width: u32,
         height: u32,
+        cursor_origins: Arc<Vec<(i32, i32)>>,
+        first_frame_index: u64,
         cursor_rect: Option<(u32, u32, u32, u32)>,
         items_rect: Option<(u32, u32, u32, u32)>,
         keys_rect: Option<(u32, u32, u32, u32)>,
     ) -> std::result::Result<Self, String> {
-        let cursor_pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        // The cursor plane is a fixed animated tile, not the canvas.
+        let (cursor_w, cursor_h) = cursor_rect
+            .map(|(_, _, w, h)| (w, h))
+            .unwrap_or((width, height));
+        let cursor_pixmap = resvg::tiny_skia::Pixmap::new(cursor_w.max(1), cursor_h.max(1))
             .ok_or_else(|| "allocate cursor pixmap failed".to_string())?;
         Ok(Self {
             renderers,
             overlay_engine,
             keystroke_renderer,
             cursor_pixmap,
+            cursor_origins,
+            first_frame_index,
+            canvas_width: width,
+            canvas_height: height,
             cursor_rect,
             items_rect,
             keys_rect,
@@ -5103,8 +5340,8 @@ impl OverlayWorkerState {
                 let (rect_x, rect_y, rect_w, rect_h) = self.items_rect.unwrap_or((
                     0,
                     0,
-                    self.cursor_pixmap.width(),
-                    self.cursor_pixmap.height(),
+                    self.canvas_width.max(1),
+                    self.canvas_height.max(1),
                 ));
                 let layer = match &mut self.items_layer {
                     Some(layer) => layer,
@@ -5142,24 +5379,30 @@ impl OverlayWorkerState {
             Some((_, _, renderer)) => {
                 self.cursor_pixmap
                     .fill(resvg::tiny_skia::Color::TRANSPARENT);
-                renderer.render_frame_at(output_time_ms, self.cursor_pixmap.data_mut());
                 match self.cursor_rect {
-                    // Crop to the fitted screen rect first — every drawn pixel
-                    // is clipped to it — then unpremultiply only the drawn
-                    // bounding box inside the smaller plane.
                     Some((rx, ry, rw, rh)) => {
-                        let mut plane = crop_rgba_region(
-                            self.cursor_pixmap.data(),
-                            self.cursor_pixmap.width() as usize,
-                            rx as usize,
-                            ry as usize,
-                            rw as usize,
-                            rh as usize,
+                        // Tile origins are canvas-space; the renderer maps
+                        // canvas pixels into this small buffer.
+                        let local = frame_index.saturating_sub(self.first_frame_index) as usize;
+                        let (origin_x, origin_y) = self
+                            .cursor_origins
+                            .get(local)
+                            .copied()
+                            .unwrap_or((rx as i32, ry as i32));
+                        renderer.render_frame_at_offset(
+                            output_time_ms,
+                            self.cursor_pixmap.data_mut(),
+                            rw,
+                            rh,
+                            origin_x,
+                            origin_y,
                         );
+                        let mut plane = self.cursor_pixmap.data().to_vec();
                         cursor::unpremultiply_rgba_bounded(&mut plane, rw as usize);
                         Some(plane)
                     }
                     None => {
+                        renderer.render_frame_at(output_time_ms, self.cursor_pixmap.data_mut());
                         let stride = self.cursor_pixmap.width() as usize;
                         cursor::unpremultiply_rgba_bounded(self.cursor_pixmap.data_mut(), stride);
                         Some(self.cursor_pixmap.data().to_vec())
@@ -5186,8 +5429,8 @@ impl OverlayWorkerState {
                 let (rect_x, rect_y, rect_w, rect_h) = self.keys_rect.unwrap_or((
                     0,
                     0,
-                    self.cursor_pixmap.width(),
-                    self.cursor_pixmap.height(),
+                    self.canvas_width.max(1),
+                    self.canvas_height.max(1),
                 ));
                 let pixmap = match &mut self.keys_pixmap {
                     Some(pixmap) => pixmap,
@@ -5343,6 +5586,7 @@ fn feed_cursor_frames(
             let keystroke_renderer = cursor.keystroke_renderer.clone();
             let width = cursor.canvas_width;
             let height = cursor.canvas_height;
+            let cursor_origins = Arc::clone(&cursor.cursor_origins);
             let cursor_rect = cursor.plane_rect(PlatePlane::Cursor);
             let items_rect = cursor.plane_rect(PlatePlane::Items);
             let keys_rect = cursor.plane_rect(PlatePlane::Keys);
@@ -5364,6 +5608,8 @@ fn feed_cursor_frames(
                         keystroke_renderer,
                         width,
                         height,
+                        cursor_origins,
+                        first_frame_index,
                         cursor_rect,
                         items_rect,
                         keys_rect,
@@ -5621,6 +5867,8 @@ fn feed_cursor_frames_sequential(
         cursor.keystroke_renderer.clone(),
         cursor.canvas_width,
         cursor.canvas_height,
+        Arc::clone(&cursor.cursor_origins),
+        cursor.first_frame_index,
         cursor.plane_rect(PlatePlane::Cursor),
         cursor.plane_rect(PlatePlane::Items),
         cursor.plane_rect(PlatePlane::Keys),
@@ -8652,6 +8900,24 @@ mod tests {
         let mut muted = plan;
         muted.audio_tracks.as_mut().unwrap()[0].muted = true;
         assert!(audio_input_windows(&muted, 5_000).is_empty());
+    }
+
+    #[test]
+    fn cursor_sendcmd_script_emits_only_changes_at_absolute_times() {
+        let script = build_cursor_sendcmd_script(
+            &[(10, 20), (10, 20), (12, 20), (12, 24), (12, 24)],
+            150,
+            30,
+        );
+        assert_eq!(
+            script,
+            "4.999900 overlay@cursor x 10;\n\
+             4.999900 overlay@cursor y 20;\n\
+             5.066567 overlay@cursor x 12;\n\
+             5.099900 overlay@cursor y 24;\n"
+        );
+        // A fixed origin needs no commands; the overlay's x/y args place it.
+        assert!(build_cursor_sendcmd_script(&[(8, 8), (8, 8)], 0, 30).is_empty());
     }
 
     #[test]

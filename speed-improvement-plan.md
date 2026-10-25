@@ -203,3 +203,10 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
   opt-in (`RECORDFORGE_EXPORT_ZOOM_SNAP=1`) because the measured matrix
   preferred the uniform grid. All 11 software baseline renders pass parity at
   100 dB. Numbers and validation: `docs/benchmarks/phase-1-results.md`.
+- **Phase 2** — partial (2026-10-25): 2.1 cursor tile ships in `union` mode
+  (parity-exact; `sendcmd` per-frame tiling is implemented but opt-in while its
+  moving-plane shadow parity issue is investigated). 2.2 YUVA transport, 2.3
+  piecewise zoom and 2.4 chunk retuning remain.
+- **Phase 3** — partial (2026-10-25): 3.1 parallel webcam finalize and 3.2
+  single-segment hard-link publish + duplicate-sync removal shipped. 3.3–3.7
+  remain. Results: `docs/benchmarks/phase-2-results.md`.

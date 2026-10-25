@@ -442,6 +442,59 @@ fn discard_failed_segment_auxiliaries(work_dir: &Path, index: u32, cursor_time_o
     }
 }
 
+/// Build the standalone webcam asset from per-segment captures.
+///
+/// Free function so finalization can run it on a worker thread while the screen
+/// segments are validated/assembled; it only needs cloned inputs.
+#[allow(clippy::too_many_arguments)]
+fn publish_webcam_asset(
+    ffmpeg_path: &Path,
+    work_dir: &Path,
+    webcam_segments: &[media::WebcamSegmentInput],
+    profile: &RecordingProfile,
+    available_encoders: &[String],
+    capture_webcam: bool,
+    webcam_capture_failed: bool,
+    webcam_segments_started: usize,
+) -> Option<PathBuf> {
+    if !capture_webcam
+        || webcam_capture_failed
+        || webcam_segments.is_empty()
+        || webcam_segments.len() != webcam_segments_started
+    {
+        if capture_webcam {
+            tracing::warn!(
+                expected = webcam_segments_started,
+                finalized = webcam_segments.len(),
+                failed = webcam_capture_failed,
+                "standalone webcam asset was not published"
+            );
+        }
+        return None;
+    }
+
+    let output = work_dir.join("webcam.mp4");
+    let partial = work_dir.join("webcam.partial.mp4");
+    if partial.exists() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    if let Err(error) = media::concatenate_webcam_segments(
+        &ffmpeg_path.to_string_lossy(),
+        webcam_segments,
+        &partial,
+        profile,
+        available_encoders,
+    ) {
+        tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
+        return None;
+    }
+    if let Err(error) = disk::atomic_replace(&partial, &output) {
+        tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
+        return None;
+    }
+    Some(output)
+}
+
 impl Recorder {
     pub fn new(
         ffmpeg_path: PathBuf,
@@ -1741,45 +1794,6 @@ impl Recorder {
         }
     }
 
-    fn finalize_webcam_asset(&self, session: &ActiveSession) -> Option<PathBuf> {
-        if !session.config.capture_webcam
-            || session.webcam_capture_failed
-            || session.webcam_segments.is_empty()
-            || session.webcam_segments.len() != session.webcam_segments_started
-        {
-            if session.config.capture_webcam {
-                tracing::warn!(
-                    expected = session.webcam_segments_started,
-                    finalized = session.webcam_segments.len(),
-                    failed = session.webcam_capture_failed,
-                    "standalone webcam asset was not published"
-                );
-            }
-            return None;
-        }
-
-        let output = session.work_dir.join("webcam.mp4");
-        let partial = session.work_dir.join("webcam.partial.mp4");
-        if partial.exists() {
-            let _ = std::fs::remove_file(&partial);
-        }
-        if let Err(error) = media::concatenate_webcam_segments(
-            &self.ffmpeg_path.to_string_lossy(),
-            &session.webcam_segments,
-            &partial,
-            &session.profile,
-            &self.available_encoders,
-        ) {
-            tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
-            return None;
-        }
-        if let Err(error) = disk::atomic_replace(&partial, &output) {
-            tracing::warn!(error = ?error, "failed to publish standalone webcam asset");
-            return None;
-        }
-        Some(output)
-    }
-
     fn stop_audio_captures(&self, audio_captures: &mut Vec<ActiveAudioCapture>) {
         for mut audio_capture in audio_captures.drain(..) {
             if let Err(error) = audio_capture.track.stop() {
@@ -2254,21 +2268,47 @@ impl Recorder {
         let finalize_started = std::time::Instant::now();
         let session_id = session.session_id.clone();
         let total = session.total_recorded_ms;
-        let step_started = std::time::Instant::now();
-        let webcam_output = self.finalize_webcam_asset(session);
-        info!(
-            step = "webcam_asset",
-            elapsed_ms = step_started.elapsed().as_millis() as u64,
-            "finalize: step finished"
-        );
+        // The webcam re-encode is the longest stop-path stage. Run it on a
+        // worker while the screen segments are validated, concatenated, probed
+        // and postered; join just before the manifest that records its path.
+        let webcam_handle = {
+            let ffmpeg_path = self.ffmpeg_path.clone();
+            let work_dir = session.work_dir.clone();
+            let webcam_segments = session.webcam_segments.clone();
+            let profile = session.profile.clone();
+            let available_encoders = self.available_encoders.clone();
+            let capture_webcam = session.config.capture_webcam;
+            let failed = session.webcam_capture_failed;
+            let started = session.webcam_segments_started;
+            if capture_webcam && !failed && !webcam_segments.is_empty() {
+                Some(std::thread::spawn(move || {
+                    let step_started = std::time::Instant::now();
+                    let output = publish_webcam_asset(
+                        &ffmpeg_path,
+                        &work_dir,
+                        &webcam_segments,
+                        &profile,
+                        &available_encoders,
+                        capture_webcam,
+                        failed,
+                        started,
+                    );
+                    info!(
+                        step = "webcam_asset",
+                        elapsed_ms = step_started.elapsed().as_millis() as u64,
+                        "finalize: step finished"
+                    );
+                    output
+                }))
+            } else {
+                None
+            }
+        };
         {
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             manifest.set_total_recorded_ms(total);
-            if let Some(path) = webcam_output.as_ref() {
-                manifest.set_webcam_path(path.to_string_lossy());
-            }
             manifest.set_state(RecorderState::Finalizing);
             manifest.write()?;
         }
@@ -2333,7 +2373,6 @@ impl Recorder {
             )
             .into());
         }
-        disk::sync_file(&output)?;
 
         progress(FinalizationProgress {
             session_id: session_id.clone(),
@@ -2390,10 +2429,14 @@ impl Recorder {
         });
 
         let manifest_clone = {
+            let webcam_output = webcam_handle.and_then(|handle| handle.join().ok().flatten());
             let mut manifest = session.manifest.lock().map_err(|_| {
                 crate::errors::InternalError::Capture("manifest mutex poisoned".into())
             })?;
             manifest.set_output_path(output.to_string_lossy());
+            if let Some(webcam) = &webcam_output {
+                manifest.set_webcam_path(webcam.to_string_lossy());
+            }
             if let Some(poster) = &poster_path_str {
                 manifest.set_thumbnail_path(poster);
             }
