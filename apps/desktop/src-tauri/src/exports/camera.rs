@@ -307,6 +307,75 @@ pub(crate) fn evaluate_zoom_transform(
     }
 }
 
+/// True when a zoom transform is the identity: the full canvas is sampled and
+/// mapped 1:1, so a `zoompan` stage would only add a swscale round trip.
+pub(crate) fn zoom_transform_is_identity(
+    state: &ZoomTransformState,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> bool {
+    const EPS: f64 = 1e-6;
+    state.crop_x.abs() <= EPS
+        && state.crop_y.abs() <= EPS
+        && (state.crop_w - canvas_width as f64).abs() <= EPS
+        && (state.crop_h - canvas_height as f64).abs() <= EPS
+}
+
+/// Whether any frame in `[first_frame, first_frame + frame_count)` needs a
+/// non-identity zoom. Sampling every CFR frame (rather than only segment
+/// edges) catches short transitions and follow/keyframe pans that are not
+/// identity even at a segment's endpoints.
+pub(crate) fn window_needs_zoom(
+    zoom_segments: &[RenderPlanZoomSegment],
+    canvas: &cursor::RenderCanvas,
+    first_frame: u64,
+    frame_count: u64,
+) -> bool {
+    if frame_count == 0 || !zoom_segments.iter().any(|segment| segment.enabled) {
+        return false;
+    }
+    let fps = canvas.fps.max(1) as f64;
+    for frame in first_frame..first_frame.saturating_add(frame_count) {
+        let output_ms = frame as f64 * 1000.0 / fps;
+        let state = evaluate_zoom_transform(
+            zoom_segments,
+            canvas.width,
+            canvas.height,
+            canvas.padding,
+            output_ms,
+        );
+        if !zoom_transform_is_identity(&state, canvas.width, canvas.height) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Frame indices where enabled zoom regions begin and end, for chunk-boundary
+/// snapping. A region contributes `start` (first zoomed frame) and `end`
+/// (first frame after it), both clamped to `total_frames`.
+pub(crate) fn zoom_region_frame_edges(
+    zoom_segments: &[RenderPlanZoomSegment],
+    fps: u32,
+    total_frames: u64,
+) -> Vec<u64> {
+    let fps = fps.max(1) as f64;
+    let mut edges = Vec::new();
+    for segment in zoom_segments
+        .iter()
+        .filter(|segment| segment.enabled && segment.end_ms > segment.start_ms)
+    {
+        let start = (segment.start_ms as f64 / 1000.0 * fps).round() as u64;
+        let end = (segment.end_ms as f64 / 1000.0 * fps).round() as u64;
+        edges.push(start.min(total_frames));
+        edges.push(end.min(total_frames));
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    edges.retain(|edge| *edge > 0 && *edge < total_frames);
+    edges
+}
+
 /// Reproduce FFmpeg zoompan's integer crop selection in screen pixels so the
 /// cursor can be registered onto the exact region sws_scale samples.
 ///
@@ -2057,5 +2126,90 @@ mod tests {
                 "y at {t_ms}ms: expr {y_expr_val} vs numeric {expected_y}"
             );
         }
+    }
+
+    #[test]
+    fn window_needs_zoom_only_inside_zoom_regions() {
+        let canvas = cursor::RenderCanvas {
+            width: 1_920,
+            height: 1_080,
+            fps: 30,
+            ..Default::default()
+        };
+        let segments = vec![zoom_segment(
+            "zoom",
+            4_000,
+            9_000,
+            RenderCropFloat {
+                x: 480.0,
+                y: 270.0,
+                width: 960.0,
+                height: 540.0,
+            },
+            1.5,
+            "linear",
+            0,
+            0,
+            None,
+        )];
+        // Frames before, inside, and after the region (region is [120, 270)).
+        assert!(!window_needs_zoom(&segments, &canvas, 0, 120));
+        assert!(window_needs_zoom(&segments, &canvas, 120, 150));
+        assert!(!window_needs_zoom(&segments, &canvas, 270, 120));
+        // A window that only clips the region's last frame still needs zoom.
+        assert!(window_needs_zoom(&segments, &canvas, 269, 1));
+        // No enabled segments at all is always identity.
+        assert!(!window_needs_zoom(&segments, &canvas, 120, 0));
+        let mut disabled = segments.clone();
+        disabled[0].enabled = false;
+        assert!(!window_needs_zoom(&disabled, &canvas, 120, 150));
+    }
+
+    #[test]
+    fn zoom_region_frame_edges_clamp_and_dedupe() {
+        let segments = vec![
+            zoom_segment(
+                "a",
+                1_000,
+                2_000,
+                RenderCropFloat {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 960.0,
+                    height: 540.0,
+                },
+                2.0,
+                "linear",
+                0,
+                0,
+                None,
+            ),
+            zoom_segment(
+                "b",
+                2_000,
+                2_500,
+                RenderCropFloat {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 960.0,
+                    height: 540.0,
+                },
+                2.0,
+                "linear",
+                0,
+                0,
+                None,
+            ),
+        ];
+        assert_eq!(
+            zoom_region_frame_edges(&segments, 30, 300),
+            vec![30, 60, 75]
+        );
+        // Frames outside the plan are dropped.
+        assert_eq!(zoom_region_frame_edges(&segments, 30, 45), vec![30]);
+        // A disabled region contributes nothing.
+        let mut disabled = segments;
+        disabled[0].enabled = false;
+        assert_eq!(zoom_region_frame_edges(&disabled, 30, 300), vec![60, 75]);
     }
 }

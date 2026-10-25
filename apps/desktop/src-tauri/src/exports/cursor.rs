@@ -1254,8 +1254,21 @@ pub fn generate_rounded_rect_mask_png(
     height: u32,
     radius: f32,
 ) -> Result<Vec<u8>, String> {
-    let mut pixmap = Pixmap::new(width.max(1), height.max(1))
+    let pixmap = render_rounded_rect_mask_pixmap(width, height, radius)
         .ok_or_else(|| "failed to allocate mask pixmap".to_string())?;
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("encode mask png: {e}"))
+}
+
+/// Grayscale rounded-rect coverage mask (white inside, black outside) shared
+/// by the alphamerge PNG and the canvas corner-patch renderer.
+pub(crate) fn render_rounded_rect_mask_pixmap(
+    width: u32,
+    height: u32,
+    radius: f32,
+) -> Option<Pixmap> {
+    let mut pixmap = Pixmap::new(width.max(1), height.max(1))?;
     pixmap.fill(Color::BLACK);
 
     let w = width.max(1) as f32;
@@ -1294,9 +1307,7 @@ pub fn generate_rounded_rect_mask_png(
             None,
         );
     }
-    pixmap
-        .encode_png()
-        .map_err(|e| format!("encode mask png: {e}"))
+    Some(pixmap)
 }
 
 /// Generates a grayscale anti-aliased circle mask PNG for fast hardware/SIMD compositing with alphamerge.

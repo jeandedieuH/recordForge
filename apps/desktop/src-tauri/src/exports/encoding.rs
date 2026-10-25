@@ -134,6 +134,81 @@ pub(crate) fn append_export_device_args(command: &mut Command, encoder: ExportEn
     }
 }
 
+/// Two-frame pre-flight encode using the real output geometry and encoder
+/// arguments. Hardware encoders can pass a 320x240 startup probe and still
+/// fail to initialize at the export's resolution/pixel format; catching that
+/// here (~200 ms) avoids re-running the entire export in software.
+pub(crate) fn encoder_preflight_command(
+    ffmpeg_path: &str,
+    settings: &ExportSettings,
+    encoder: ExportEncoder,
+    fps: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Command {
+    let width = (canvas_width.max(2) / 2 * 2).max(2);
+    let height = (canvas_height.max(2) / 2 * 2).max(2);
+    let fps = fps.max(1);
+    let mut command = crate::process::create_command(ffmpeg_path);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    append_export_device_args(&mut command, encoder);
+    command
+        .args(["-f", "lavfi", "-i"])
+        .arg(format!("color=c=black:s={width}x{height}:r={fps}:d=0.1"));
+    if encoder == ExportEncoder::Vaapi {
+        command.args(["-vf", "format=nv12,hwupload"]);
+    }
+    append_export_video_args(&mut command, settings, encoder, fps, width, height);
+    command.args(["-frames:v", "2", "-an", "-f", "null", "-"]);
+    command
+}
+
+/// Run the exact-geometry pre-flight. `Err` carries a short redacted reason for
+/// logs; the caller downgrades to the software encoder instead of retrying
+/// after a full failed render.
+pub(crate) fn preflight_export_encoder(
+    ffmpeg_path: &str,
+    settings: &ExportSettings,
+    encoder: ExportEncoder,
+    fps: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> std::result::Result<(), String> {
+    if encoder == ExportEncoder::Software {
+        return Ok(());
+    }
+    let mut command = encoder_preflight_command(
+        ffmpeg_path,
+        settings,
+        encoder,
+        fps,
+        canvas_width,
+        canvas_height,
+    );
+    let output = command.output().map_err(|error| {
+        format!(
+            "could not run {} pre-flight: {error}",
+            encoder.display_name()
+        )
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or("encoder produced no output")
+        .trim()
+        .chars()
+        .take(400)
+        .collect::<String>();
+    Err(format!(
+        "{} pre-flight failed at {canvas_width}x{canvas_height}: {detail}",
+        encoder.display_name()
+    ))
+}
+
 /// Final filter stage that moves the composed export frame onto the VAAPI device.
 ///
 /// Returns the segment plus the label the renderer must `-map`. VAAPI consumes
@@ -488,6 +563,51 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-cq", "18"]));
         assert!(args.windows(2).any(|pair| pair == ["-b:v", "0"]));
         assert!(!args.contains(&"-crf".to_string()));
+    }
+
+    #[test]
+    fn encoder_preflight_uses_the_real_geometry_and_encoder_args() {
+        let command = encoder_preflight_command(
+            "ffmpeg",
+            &settings("default-mp4", "h264", "auto"),
+            ExportEncoder::Nvenc,
+            30,
+            1_920,
+            1_080,
+        );
+        let args = args_of(&command);
+        assert_eq!(paired(&args, "-c:v"), Some("h264_nvenc"));
+        assert_eq!(paired(&args, "-pix_fmt"), Some("yuv420p"));
+        assert_eq!(paired(&args, "-r"), Some("30"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-i", "color=c=black:s=1920x1080:r=30:d=0.1"]));
+        assert_eq!(paired(&args, "-frames:v"), Some("2"));
+        assert!(args.windows(2).any(|pair| pair == ["-f", "null"]));
+        // Software pre-flight is a no-op, and odd canvas sizes are rounded
+        // to the even output grid.
+        assert!(preflight_export_encoder(
+            "ffmpeg",
+            &settings("default-mp4", "h264", "auto"),
+            ExportEncoder::Software,
+            30,
+            1_920,
+            1_080
+        )
+        .is_ok());
+        let command = encoder_preflight_command(
+            "ffmpeg",
+            &settings("default-mp4", "h264", "auto"),
+            ExportEncoder::Qsv,
+            30,
+            1_921,
+            1_081,
+        );
+        let args = args_of(&command);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-i", "color=c=black:s=1920x1080:r=30:d=0.1"]));
+        assert_eq!(paired(&args, "-pix_fmt"), Some("nv12"));
     }
 
     #[test]

@@ -52,10 +52,11 @@ impl Drop for TempExportDir {
 }
 
 /// Temp artifacts an export leaves behind when the process dies mid-job.
-const STALE_EXPORT_TEMP_PREFIXES: [&str; 9] = [
+const STALE_EXPORT_TEMP_PREFIXES: [&str; 10] = [
     "recordforge_chunks_",
     "recordforge_bg_",
     "recordforge_cam_shadow_",
+    "rf-corner-patches-",
     "rf-filter-complex-",
     "rf-mask-",
     "rf-border-cam-",
@@ -981,7 +982,7 @@ pub fn run_render_plan(
     // one-second test encode before committing the job to it.
     let ffmpeg = ffmpeg_path.to_string_lossy().to_string();
     let probe_started = std::time::Instant::now();
-    let encoder = encoding::resolve_export_encoder(
+    let mut encoder = encoding::resolve_export_encoder(
         &settings.encoder,
         &settings.codec,
         available_encoders,
@@ -993,6 +994,42 @@ pub fn run_render_plan(
         probe_ms = probe_started.elapsed().as_millis() as u64,
         "selected export encoder"
     );
+    // Hardware init can depend on resolution/pixel format, which the generic
+    // startup probe does not cover. A two-frame encode at the real geometry
+    // catches that now instead of after a whole failed render + software
+    // retry.
+    if encoder != encoding::ExportEncoder::Software {
+        if let Some(canvas) = plan.canvas.as_ref() {
+            let (out_w, out_h) = capped_output_dimensions(canvas.width, canvas.height, output_cap);
+            let preflight_started = std::time::Instant::now();
+            if let Err(detail) = encoding::preflight_export_encoder(
+                &ffmpeg, &settings, encoder, canvas.fps, out_w, out_h,
+            ) {
+                warn!(
+                    project_id = %project_id,
+                    encoder = encoder.display_name(),
+                    detail = %detail,
+                    "hardware encoder pre-flight failed; using software"
+                );
+                update_progress(
+                    &db,
+                    app,
+                    job_id,
+                    0.04,
+                    "rendering",
+                    Some("hardware encoder unavailable at this size; using software"),
+                )?;
+                encoder = encoding::ExportEncoder::Software;
+            } else {
+                info!(
+                    project_id = %project_id,
+                    preflight_ms = preflight_started.elapsed().as_millis() as u64,
+                    encoder = encoder.display_name(),
+                    "export: encoder pre-flight passed"
+                );
+            }
+        }
+    }
 
     // Composition is the primary export workload (0.05..0.96 of the job); FFmpeg reports elapsed time.
     let progress_reporter = {
@@ -1883,6 +1920,14 @@ fn render_composition_window(
     let asset_inputs = collect_input_assets(plan, asset_paths)?;
     let hwaccel_inputs = encoder != encoding::ExportEncoder::Software;
     let mut input_specs: Vec<InputSpec> = Vec::new();
+    // Audio-only inputs in the seeked layout get their own decode window;
+    // `append_audio_graph` needs the same seek offsets to rebase atrim.
+    let audio_windows = if pass.include_audio {
+        audio_input_windows(plan, plan.duration_ms.max(1))
+    } else {
+        HashMap::new()
+    };
+    let mut audio_seek_by_asset: HashMap<String, f64> = HashMap::new();
     // asset_id → input index. Holds every asset in the legacy layout, only
     // audio-referenced assets in the seeked layout — segments and camera
     // overlays consume their dedicated window inputs instead.
@@ -1940,12 +1985,16 @@ fn render_composition_window(
                     if !audio_asset_ids.contains(asset_id) {
                         continue;
                     }
+                    let window = audio_windows.get(asset_id).copied();
+                    if let Some((seek_s, _)) = window {
+                        audio_seek_by_asset.insert(asset_id.clone(), seek_s);
+                    }
                     input_indices.insert(asset_id.clone(), input_specs.len());
                     input_specs.push(InputSpec {
                         key: asset_id.clone(),
                         path: path.clone(),
-                        seek_s: None,
-                        duration_s: None,
+                        seek_s: window.map(|(seek_s, _)| seek_s),
+                        duration_s: window.map(|(_, duration_s)| duration_s),
                         hwaccel: false,
                     });
                 }
@@ -2076,7 +2125,53 @@ fn render_composition_window(
         None
     };
 
-    let canvas_mask_idx = if canvas.border_radius > 0 {
+    // Rounded canvas corners can be rendered as four small patches over an
+    // opaque screen instead of a full-frame RGBA screen stream + alphamerge
+    // (`RECORDFORGE_EXPORT_CORNER_PATCHES=1`, opt-in while its ~1-code-level
+    // anti-aliasing shift is outside the export parity gate). The patch path
+    // needs a static screen rect and no transparent gap frames; otherwise it
+    // falls back to the alphamerge path.
+    let window_has_gap = plan
+        .gaps
+        .iter()
+        .any(|gap| (gap.end_ms as f64) > win_start_ms && (gap.start_ms as f64) < win_end_ms);
+    let corner_patches = if corner_patches_enabled()
+        && canvas.border_radius > 0
+        && !layout_varies
+        && !window_has_gap
+    {
+        let key = format!(
+            "corner_patches:{}:{}:{}:{}:{}:{}",
+            screen_x.round() as i64,
+            screen_y.round() as i64,
+            screen_w.round() as i64,
+            screen_h.round() as i64,
+            canvas.border_radius,
+            bg_image_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        );
+        shared.plates.get_or_create(&key, || {
+            Ok(generate_canvas_corner_patches_png(
+                canvas,
+                (screen_x, screen_y, screen_w, screen_h),
+                bg_image_path.as_deref(),
+            )
+            .and_then(|bytes| {
+                let path = std::env::temp_dir().join(format!(
+                    "rf-corner-patches-{}-{}.png",
+                    project_id,
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::write(&path, &bytes).ok()?;
+                Some((path, true))
+            }))
+        })?
+    } else {
+        None
+    };
+    let canvas_mask_idx = if canvas.border_radius > 0 && corner_patches.is_none() {
         let radius = (canvas.border_radius as f32)
             .min(screen_w as f32 / 2.0)
             .min(screen_h as f32 / 2.0);
@@ -2104,10 +2199,19 @@ fn render_composition_window(
     } else {
         None
     };
+    let corner_patch_idx = corner_patches
+        .as_ref()
+        .map(|path| push_generated(&mut input_specs, "canvas:corners", path));
+    let corner_patch_size = if corner_patch_idx.is_some() {
+        canvas_corner_patch_size(canvas, (screen_x, screen_y, screen_w, screen_h))
+    } else {
+        None
+    };
 
     let mut camera_mask_indices = HashMap::new();
     let mut camera_border_indices = HashMap::new();
-    let mut camera_shadow_indices = HashMap::new();
+    // overlay index → (shadow input index, plate origin x, origin y).
+    let mut camera_shadow_indices: HashMap<usize, (usize, u32, u32)> = HashMap::new();
     for job in &camera_jobs {
         let index = job.overlay_index;
         let overlay = &plan.overlays[index];
@@ -2134,11 +2238,27 @@ fn render_composition_window(
                     overlay.shadow_offset_x,
                     overlay.shadow_offset_y,
                 )
-                .map(|path| (path, true)))
+                .map(|(path, _, _)| (path, true)))
             })? {
+                // The plate file is the cropped shadow; its origin was baked in
+                // at generation time. Recompute it (same inputs) for the
+                // compositor. Both are pure functions of the overlay geometry.
+                let (origin_x, origin_y, _, _) = camera_shadow_bounds(
+                    canvas.width,
+                    canvas.height,
+                    overlay_x as f64 + overlay.shadow_offset_x.unwrap_or(0.0),
+                    overlay_y as f64 + overlay.shadow_offset_y.unwrap_or(4.0),
+                    overlay_w as f64,
+                    overlay_h as f64,
+                    camera_shadow_blur_radius(overlay.shadow_blur),
+                );
                 camera_shadow_indices.insert(
                     index,
-                    push_generated(&mut input_specs, &format!("shadow:cam:{index}"), &sp),
+                    (
+                        push_generated(&mut input_specs, &format!("shadow:cam:{index}"), &sp),
+                        origin_x,
+                        origin_y,
+                    ),
                 );
             }
         }
@@ -2213,7 +2333,19 @@ fn render_composition_window(
             }
         }
     }
-    let has_zoom = plan.zoom_segments.iter().any(|segment| segment.enabled);
+    let plan_has_zoom = plan.zoom_segments.iter().any(|segment| segment.enabled);
+    // Window-local zoom: a pass whose frames all sample the full canvas skips
+    // `zoompan` entirely. Chunks fully outside every zoom region then run the
+    // cached swscale pass below instead of zoompan's per-frame SwsContext
+    // allocation. `RECORDFORGE_EXPORT_ZOOM_SNAP=1` can additionally snap chunk
+    // boundaries onto region edges, but the measured matrix preferred the
+    // uniform grid.
+    let has_zoom = camera::window_needs_zoom(
+        &plan.zoom_segments,
+        canvas,
+        window.first_frame,
+        window.frame_count,
+    );
     let can_pad_canvas = bg_input_index.is_none()
         && canvas.border_radius == 0
         && !canvas.shadow
@@ -2463,8 +2595,18 @@ fn render_composition_window(
                 canvas.fps
             )
         } else {
+            // A zoom-free chunk inside a zoomed timeline still carries the
+            // same-size swscale pass identity `zoompan` performed, so its
+            // pixels stay bit-compatible with the zoomed passes. A `scale`
+            // filter caches its SwsContext instead of allocating one per
+            // frame, which is the cost Phase 1 removes.
+            let parity_scale = if plan_has_zoom {
+                format!(",scale={screen_w:.0}:{screen_h:.0}:flags=bicubic:threads=auto")
+            } else {
+                String::new()
+            };
             format!(
-                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},setsar=1"
+                "{video_input}tpad=stop_mode=clone:stop_duration={plan_duration},tpad=stop_mode=add:stop_duration={plan_duration}:color=black,trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts}{parity_scale},setsar=1"
             )
         };
         if let Some(mask_idx) = canvas_mask_idx {
@@ -2513,7 +2655,50 @@ fn render_composition_window(
         ));
     }
 
-    let composed_label = base_label.to_string();
+    let mut composed_label = base_label.to_string();
+
+    // Paint the four precomputed background corner patches over the opaque
+    // screen. Patch alpha is `1 - rounded mask coverage`, so the blend restores
+    // `screen*a + background*(1-a)` without an RGBA screen stream.
+    if let (Some(corner_idx), Some(corner)) = (corner_patch_idx, corner_patch_size) {
+        let canvas_w = canvas.width;
+        let canvas_h = canvas.height;
+        filters.push(format!(
+            "[{corner_idx}:v]format=rgba,setsar=1,loop=loop=-1:size=1:start=0,fps={},trim=duration={plan_duration},setpts=PTS-STARTPTS{abs_pts},split=4[corner_tl_src][corner_tr_src][corner_bl_src][corner_br_src]",
+            canvas.fps
+        ));
+        for (label, slice_x) in [
+            ("tl", 0),
+            ("tr", corner),
+            ("bl", corner * 2),
+            ("br", corner * 3),
+        ] {
+            filters.push(format!(
+                "[corner_{label}_src]crop={corner}:{corner}:{slice_x}:0[corner_{label}]"
+            ));
+        }
+        let right_x = (screen_x + screen_w).round() as i64 - corner as i64;
+        let bottom_y = (screen_y + screen_h).round() as i64 - corner as i64;
+        let left_x = screen_x.round() as i64;
+        let top_y = screen_y.round() as i64;
+        let corners = [
+            ("tl", left_x, top_y),
+            ("tr", right_x, top_y),
+            ("bl", left_x, bottom_y),
+            ("br", right_x, bottom_y),
+        ];
+        let mut chain_input = base_label.to_string();
+        for (label, x, y) in corners {
+            let output = format!("corner_stage_{label}");
+            filters.push(format!(
+                "[{chain_input}][corner_{label}]overlay=x={}:y={}:eof_action=repeat[{output}]",
+                x.clamp(0, canvas_w as i64),
+                y.clamp(0, canvas_h as i64),
+            ));
+            chain_input = output;
+        }
+        composed_label = chain_input;
+    }
 
     let mut current_label = composed_label;
 
@@ -2780,12 +2965,12 @@ fn render_composition_window(
         );
 
         // 1. Composite shadow underlay if present
-        if let Some(&shadow_idx) = camera_shadow_indices.get(&index) {
+        if let Some(&(shadow_idx, shadow_x, shadow_y)) = camera_shadow_indices.get(&index) {
             let after_shadow_label = format!("cam_with_shadow{index}");
             let shadow_loop_label = format!("cam_shadow_loop{index}");
             filters.push(format!(
                 "[{shadow_idx}:v]format=rgba,setsar=1,loop=loop=-1:size=1:start=0[{shadow_loop_label}];\
-                 [{current_label}][{shadow_loop_label}]overlay=x=0:y=0:eof_action=repeat:enable='{enable}':format=auto[{after_shadow_label}]"
+                 [{current_label}][{shadow_loop_label}]overlay=x={shadow_x}:y={shadow_y}:eof_action=repeat:enable='{enable}':format=auto[{after_shadow_label}]"
             ));
             current_label = after_shadow_label;
         }
@@ -3126,6 +3311,7 @@ fn render_composition_window(
             asset_paths,
             &shared.probe,
             duration_ms,
+            &audio_seek_by_asset,
             &cancel,
         )?;
 
@@ -3348,6 +3534,7 @@ fn append_audio_graph(
     asset_paths: &HashMap<String, PathBuf>,
     probe: &ProbeCache,
     duration_ms: u64,
+    source_seek_s: &HashMap<String, f64>,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<bool> {
     let audio_tracks = plan
@@ -3415,10 +3602,20 @@ fn append_audio_graph(
                 .output_end_ms
                 .saturating_sub(segment.output_start_ms)
                 .max(1);
+            // An input-side `-ss` rebases the source timeline to zero, so every
+            // atrim timestamp shifts by the same seek.
+            let seek_s = source_seek_s
+                .get(&segment.asset_id)
+                .copied()
+                .unwrap_or(0.0)
+                .max(0.0);
+            let trim_start_s = (segment.source_in_ms as f64 / 1000.0 - seek_s).max(0.0);
+            let trim_end_s =
+                (segment.source_out_ms as f64 / 1000.0 - seek_s).max(trim_start_s + 0.001);
             let mut audio_filter = format!(
                 "{input}atrim=start={}:end={},asetpts=PTS-STARTPTS",
-                seconds(segment.source_in_ms),
-                seconds(segment.source_out_ms),
+                fmt_secs(trim_start_s),
+                fmt_secs(trim_end_s),
             );
             if (segment.speed - 1.0).abs() > f64::EPSILON {
                 audio_filter.push_str(&atempo_filter(segment.speed));
@@ -3471,12 +3668,14 @@ fn append_audio_graph(
     Ok(!audio_labels.is_empty())
 }
 
-/// Per-asset upper decode bound for the dedicated audio pass: the maximum
-/// `source_out_ms` across every segment referencing the asset, using the same
-/// legacy-fallback convention as `append_audio_graph` (a segmentless track
-/// reads the first `duration_ms` of its source).
-fn audio_source_bounds_ms(plan: &RenderPlan, duration_ms: u64) -> HashMap<String, u64> {
-    let mut bounds: HashMap<String, u64> = HashMap::new();
+/// Per-asset `(seek_s, duration_s)` decode window for a dedicated audio pass.
+///
+/// Seeking the input past the head (`-ss`) is what actually saves work on a
+/// long recording whose timeline starts near the end: `-t` alone still decodes
+/// everything from 0 up to the bound. `append_audio_graph` subtracts the same
+/// seek from every `atrim` timestamp so the graph sees rebased input times.
+fn audio_input_windows(plan: &RenderPlan, duration_ms: u64) -> HashMap<String, (f64, f64)> {
+    let mut spans: HashMap<String, (u64, u64)> = HashMap::new();
     let tracks: Vec<&RenderPlanAudio> = plan
         .audio_tracks
         .as_ref()
@@ -3487,20 +3686,30 @@ fn audio_source_bounds_ms(plan: &RenderPlan, duration_ms: u64) -> HashMap<String
             continue;
         }
         if track.segments.is_empty() {
-            bounds
+            spans
                 .entry(track.asset_id.clone())
-                .and_modify(|bound| *bound = (*bound).max(duration_ms))
-                .or_insert(duration_ms);
+                .and_modify(|span| span.1 = span.1.max(duration_ms))
+                .or_insert((0, duration_ms));
             continue;
         }
         for segment in &track.segments {
-            bounds
+            spans
                 .entry(segment.asset_id.clone())
-                .and_modify(|bound| *bound = (*bound).max(segment.source_out_ms))
-                .or_insert(segment.source_out_ms);
+                .and_modify(|span| {
+                    span.0 = span.0.min(segment.source_in_ms);
+                    span.1 = span.1.max(segment.source_out_ms);
+                })
+                .or_insert((segment.source_in_ms, segment.source_out_ms));
         }
     }
-    bounds
+    spans
+        .into_iter()
+        .map(|(asset_id, (in_ms, out_ms))| {
+            let seek_s = floor_to_ms(in_ms as f64 / 1000.0 - SEEK_PREROLL_S).max(0.0);
+            let duration_s = (out_ms as f64 / 1000.0 - seek_s + SEEK_TAIL_MARGIN_S).max(0.1);
+            (asset_id, (seek_s, duration_s))
+        })
+        .collect()
 }
 
 /// One `-i` argument for the composition command: the file plus an optional
@@ -3791,6 +4000,78 @@ fn chunk_boundaries(total_frames: u64, chunk_frames: u64) -> Vec<(u64, u64)> {
     boundaries
 }
 
+/// Chunk-boundary snapping onto zoom-region edges is off by default: on the
+/// 30 s benchmark matrix it added a chunk, ran slower than the uniform grid, and
+/// moved frame boundaries enough to fail the pixel-parity gate. Zoom-free
+/// chunks still skip `zoompan` without it. `RECORDFORGE_EXPORT_ZOOM_SNAP=1`
+/// enables the experiment.
+fn zoom_chunk_snapping_enabled() -> bool {
+    std::env::var("RECORDFORGE_EXPORT_ZOOM_SNAP")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Chunk boundaries with interior cuts nudged onto zoom-region edges.
+///
+/// Without snapping, any chunk that merely overlaps a zoom segment runs
+/// `zoompan` for all of its frames. Snapping keeps zoomed and zoom-free frames
+/// in separate passes, which is what lets the per-window zoom check drop the
+/// stage. A boundary may move at most half a chunk length from its nominal
+/// position, and chunks never shrink below one second (or the target length,
+/// whichever is smaller), so the worker queue stays balanced.
+fn chunk_boundaries_with_zoom(
+    total_frames: u64,
+    chunk_frames: u64,
+    fps: u64,
+    zoom_edges: &[u64],
+) -> Vec<(u64, u64)> {
+    if total_frames == 0 || chunk_frames == 0 {
+        return chunk_boundaries(total_frames, chunk_frames);
+    }
+    if zoom_edges.is_empty() {
+        return chunk_boundaries(total_frames, chunk_frames);
+    }
+    let min_chunk = fps.max(1).min(chunk_frames);
+    let max_end_delta = (chunk_frames / 2).max(1);
+    let mut boundaries = Vec::new();
+    let mut start = 0;
+    while start < total_frames {
+        let desired = (start + chunk_frames).min(total_frames);
+        let mut end = desired;
+        if desired < total_frames {
+            let earliest = start.saturating_add(min_chunk).min(total_frames);
+            let latest = desired.saturating_add(max_end_delta).min(total_frames);
+            if let Some(edge) = zoom_edges
+                .iter()
+                .copied()
+                .filter(|edge| *edge >= earliest && *edge <= latest)
+                .min_by_key(|edge| edge.abs_diff(desired))
+            {
+                end = edge;
+            }
+        }
+        let end = end.max(start + 1).min(total_frames);
+        boundaries.push((start, end));
+        start = end;
+    }
+    boundaries
+}
+
+/// True when the export streams a cursor/items/keystroke plate per frame.
+/// Those passes also run Rust raster producers on the CPU, so extra parallel
+/// encoder sessions compete with them (see the NVENC worker cap).
+fn plan_has_plate_work(plan: &RenderPlan, settings: &ExportSettings) -> bool {
+    plan.cursor_effects.iter().any(|effect| effect.enabled)
+        || plan.overlay_render_plan.is_some()
+        || !plan.annotations.is_empty()
+        || !plan.texts.is_empty()
+        || !plan.images.is_empty()
+        || settings
+            .keystroke_overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.enabled && !plan.keystrokes.is_empty())
+}
+
 /// Chunked rendering pays a fixed per-chunk cost — an extra FFmpeg process
 /// and a re-decoded source prefix — and only wins when slices run side by
 /// side. Short exports and low-core machines keep the single pass; GIF/WebP
@@ -3854,15 +4135,23 @@ fn render_timeline_chunked(
     // Half the cores per pass keeps each process's encode/decode thread pools
     // from drowning the serial filter stages; ~2 chunks per worker absorbs
     // uneven slice costs. The cap scales with the machine — 4 leaves 16+
-    // core boxes half idle. NVENC is capped separately: consumer GeForce
-    // drivers refuse more than ~3 concurrent encode sessions, and a session
-    // failure escalates into a whole-export software retry (the slowest
-    // possible outcome).
+    // core boxes half idle. NVENC caps sessions by driver (8 since driver 551,
+    // 12 since 591), but every extra FFmpeg process also competes with the
+    // raster producers for CPU: on the baseline 6c/12t laptop, 12 NVENC chunks
+    // across 6 workers ran 12% slower than 6 chunks across 3 whenever the
+    // cursor/items plate was active. So the hardware cap only opens up to 8 for
+    // plate-free exports; `RECORDFORGE_EXPORT_NVENC_CHUNK_WORKERS` overrides it.
     let cores = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(4);
     let worker_cap = if encoder == encoding::ExportEncoder::Nvenc {
-        3
+        env_usize("RECORDFORGE_EXPORT_NVENC_CHUNK_WORKERS").unwrap_or(
+            if plan_has_plate_work(plan, settings) {
+                3
+            } else {
+                8
+            },
+        )
     } else {
         8
     };
@@ -3878,7 +4167,12 @@ fn render_timeline_chunked(
                 .div_ceil((workers * 2) as u64)
                 .max(fps.saturating_mul(2))
         });
-    let boundaries = chunk_boundaries(total_frames, chunk_frames);
+    let zoom_edges = if zoom_chunk_snapping_enabled() {
+        camera::zoom_region_frame_edges(&plan.zoom_segments, canvas.fps, total_frames)
+    } else {
+        Vec::new()
+    };
+    let boundaries = chunk_boundaries_with_zoom(total_frames, chunk_frames, fps, &zoom_edges);
     if boundaries.len() <= 1 {
         return render_composition_window(
             ffmpeg_path,
@@ -3926,6 +4220,11 @@ fn render_timeline_chunked(
         .map(|(index, (asset_id, _))| (asset_id.clone(), index))
         .collect();
     let mut audio_filters = Vec::new();
+    let audio_windows = audio_input_windows(plan, plan.duration_ms.max(1));
+    let audio_seek_by_asset: HashMap<String, f64> = audio_windows
+        .iter()
+        .map(|(asset_id, (seek_s, _))| (asset_id.clone(), *seek_s))
+        .collect();
     let has_audio = append_audio_graph(
         &mut audio_filters,
         plan,
@@ -3934,12 +4233,13 @@ fn render_timeline_chunked(
         asset_paths,
         &shared.probe,
         plan.duration_ms.max(1),
+        &audio_seek_by_asset,
         &cancel,
     )?;
-    // Each asset's decode is bounded to its last needed source timestamp —
-    // without `-t` a 60-minute recording trims to a 5-minute export by decoding
-    // all 60 minutes of audio before atrim drops the tail.
-    let audio_input_bounds = audio_source_bounds_ms(plan, plan.duration_ms.max(1));
+    // Each asset's decode is bounded to the window its segments actually read:
+    // `-ss` skips a large unused head and `-t` caps the tail, so a 5-minute
+    // timeline cut from the end of a 60-minute recording does not decode the
+    // whole file first.
     let audio_path = chunk_dir.join("audio.m4a");
     let audio_filter_path = chunk_dir.join("audio-filter.txt");
     if has_audio {
@@ -4006,13 +4306,13 @@ fn render_timeline_chunked(
                 .arg("-thread_queue_size")
                 .arg("128");
             for (asset_id, path) in &audio_inputs {
-                // Input-side `-t` only: `-ss` would rebase pts and force every
-                // atrim timestamp in the graph to shift; `-t` leaves pts
-                // absolute. The 1s margin covers demux granularity.
-                if let Some(max_out_ms) = audio_input_bounds.get(asset_id) {
-                    command
-                        .arg("-t")
-                        .arg(seconds(max_out_ms.saturating_add(1_000)));
+                // `-ss` skips the unused head and rebases the input timeline;
+                // `append_audio_graph` subtracts the same seek from atrim.
+                if let Some((seek_s, duration_s)) = audio_windows.get(asset_id) {
+                    if *seek_s > 1e-9 {
+                        command.args(["-ss", &fmt_secs(*seek_s)]);
+                    }
+                    command.args(["-t", &fmt_secs(*duration_s)]);
                 }
                 command.arg("-i").arg(path);
             }
@@ -6642,9 +6942,8 @@ pub(crate) fn generate_camera_shadow_plate_png(
     shadow_blur: Option<f64>,
     shadow_offset_x: Option<f64>,
     shadow_offset_y: Option<f64>,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, u32, u32)> {
     let mut pixmap = Pixmap::new(canvas_w, canvas_h)?;
-    let blur = shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0);
     let off_x = shadow_offset_x.unwrap_or(0.0);
     let off_y = shadow_offset_y.unwrap_or(4.0);
     let x = (overlay_x + off_x) as f32;
@@ -6655,7 +6954,78 @@ pub(crate) fn generate_camera_shadow_plate_png(
     let hex_color = safe_filter_color(shadow_color.unwrap_or("#000000"));
     let color = parse_color_hex(&hex_color, 0.4);
 
-    let path = match shape {
+    let path = camera_shadow_path(shape, x, y, w, h)?;
+
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    let blur_radius = camera_shadow_blur_radius(shadow_blur);
+    fast_blur_pixmap(&mut pixmap, blur_radius);
+
+    // The shadow's non-transparent pixels live inside the shape bounds plus
+    // the blur support. Ship only that crop and composite it at its origin:
+    // the camera bubble used to blend a full-canvas RGBA plate every frame
+    // while it was visible.
+    let (crop_x, crop_y, crop_w, crop_h) = camera_shadow_bounds(
+        canvas_w,
+        canvas_h,
+        overlay_x + off_x,
+        overlay_y + off_y,
+        overlay_w,
+        overlay_h,
+        blur_radius,
+    );
+    let cropped = crop_pixmap(&pixmap, crop_x, crop_y, crop_w, crop_h)?;
+
+    let temp_path = std::env::temp_dir().join(format!(
+        "recordforge_cam_shadow_{}.png",
+        uuid::Uuid::new_v4()
+    ));
+    cropped.save_png(&temp_path).ok()?;
+    Some((temp_path, crop_x, crop_y))
+}
+
+/// Blur radius used by `fast_blur_pixmap` for a camera shadow, shared by the
+/// plate renderer and its crop-bounds calculation.
+fn camera_shadow_blur_radius(shadow_blur: Option<f64>) -> f32 {
+    (shadow_blur.unwrap_or(16.0).clamp(1.0, 64.0) / 2.0).clamp(1.0, 32.0) as f32
+}
+
+/// Integer, even-aligned canvas rect covering a camera shadow plate: the
+/// shape's bounds plus the three box-blur passes' support (`3 * radius`) and a
+/// one-pixel safety margin for path anti-aliasing. Even edges keep the RGBA
+/// overlay on the YUV chroma grid.
+fn camera_shadow_bounds(
+    canvas_w: u32,
+    canvas_h: u32,
+    overlay_x: f64,
+    overlay_y: f64,
+    overlay_w: f64,
+    overlay_h: f64,
+    blur_radius: f32,
+) -> (u32, u32, u32, u32) {
+    let canvas_w = canvas_w.max(1) as i64;
+    let canvas_h = canvas_h.max(1) as i64;
+    let support = 3 * blur_radius.round().max(1.0) as i64 + 1;
+    let x0 = ((overlay_x.floor() as i64 - support).clamp(0, canvas_w - 1)) & !1;
+    let y0 = ((overlay_y.floor() as i64 - support).clamp(0, canvas_h - 1)) & !1;
+    let x1 = ((overlay_x + overlay_w).ceil() as i64 + support).clamp(x0 + 1, canvas_w);
+    let y1 = ((overlay_y + overlay_h).ceil() as i64 + support).clamp(y0 + 1, canvas_h);
+    // Even edges keep the RGBA overlay on the YUV chroma grid.
+    let x1 = ((x1 + 1) & !1).clamp(x0 + 1, canvas_w);
+    let y1 = ((y1 + 1) & !1).clamp(y0 + 1, canvas_h);
+    (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32)
+}
+
+fn camera_shadow_path(shape: &str, x: f32, y: f32, w: f32, h: f32) -> Option<tiny_skia::Path> {
+    match shape {
         "circle" => {
             let rx = (w / 2.0).min(h / 2.0);
             let ry = rx;
@@ -6686,26 +7056,146 @@ pub(crate) fn generate_camera_shadow_plate_png(
             pb.close();
             pb.finish()
         }
-    }?;
+    }
+}
 
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
-    pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::Winding,
-        Transform::identity(),
-        None,
-    );
-    fast_blur_pixmap(&mut pixmap, (blur / 2.0).clamp(1.0, 32.0) as f32);
+/// Copy an RGBA sub-rect out of a pixmap. Inputs are expected to be inside the
+/// source bounds (the caller clamps them).
+fn crop_pixmap(pixmap: &Pixmap, x: u32, y: u32, w: u32, h: u32) -> Option<Pixmap> {
+    let mut out = Pixmap::new(w.max(1), h.max(1))?;
+    let src_w = pixmap.width() as usize;
+    let src = pixmap.data();
+    let dst_w = out.width() as usize;
+    let dst = out.data_mut();
+    for row in 0..h as usize {
+        let src_start = ((y as usize + row) * src_w + x as usize) * 4;
+        let src_row = &src[src_start..src_start + dst_w * 4];
+        let dst_start = row * dst_w * 4;
+        dst[dst_start..dst_start + dst_w * 4].copy_from_slice(src_row);
+    }
+    Some(out)
+}
 
-    let temp_path = std::env::temp_dir().join(format!(
-        "recordforge_cam_shadow_{}.png",
-        uuid::Uuid::new_v4()
-    ));
-    pixmap.save_png(&temp_path).ok()?;
-    Some(temp_path)
+/// Corner patches are an opt-in fast path for rounded canvases.
+/// `RECORDFORGE_EXPORT_CORNER_PATCHES=1` enables it; the alphamerge mask stays
+/// the default because the patch blend shifts the anti-aliased corner pixels by
+/// ~1 code level, which the export parity gate (50 dB mean) rejects.
+fn corner_patches_enabled() -> bool {
+    std::env::var("RECORDFORGE_EXPORT_CORNER_PATCHES")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Even, at-least-2px corner patch size for the canvas rounded corners. Even so
+/// the four overlay positions stay on the YUV chroma grid.
+fn canvas_corner_patch_size(
+    canvas: &cursor::RenderCanvas,
+    screen: (f64, f64, f64, f64),
+) -> Option<u32> {
+    let (_, _, screen_w, screen_h) = screen;
+    let radius = (canvas.border_radius as f32)
+        .min(screen_w as f32 / 2.0)
+        .min(screen_h as f32 / 2.0);
+    if radius <= 0.0 {
+        return None;
+    }
+    let max = (screen_w.round().max(2.0) as u32)
+        .min(screen_h.round().max(2.0) as u32)
+        .max(2);
+    let size = ((radius.ceil() as u32 + 2) / 2 * 2).clamp(2, max);
+    Some(size)
+}
+
+/// Build a single PNG strip with the four rounded-corner patches for the fitted
+/// screen rect: background pixels with alpha `1 - mask coverage`.
+///
+/// Overlaying an opaque screen and then painting these patches over its corners
+/// produces `screen*a + bg*(1-a)` at every pixel — the same result as the
+/// full-frame `format=rgba` + `alphamerge` screen stream, without two
+/// full-frame swscale conversions per frame.
+fn generate_canvas_corner_patches_png(
+    canvas: &cursor::RenderCanvas,
+    screen: (f64, f64, f64, f64),
+    bg_plate: Option<&Path>,
+) -> Option<Vec<u8>> {
+    let (screen_x, screen_y, screen_w, screen_h) = screen;
+    let corner = canvas_corner_patch_size(canvas, screen)?;
+    let mask_w = screen_w.round().max(1.0) as u32;
+    let mask_h = screen_h.round().max(1.0) as u32;
+    let radius = (canvas.border_radius as f32)
+        .min(screen_w as f32 / 2.0)
+        .min(screen_h as f32 / 2.0);
+    let mask = cursor::render_rounded_rect_mask_pixmap(mask_w, mask_h, radius)?;
+
+    // The background under the corners comes from the already-composited plate
+    // so gradient/image/blur/dim/shadow content is reproduced exactly.
+    let background = bg_plate
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| Pixmap::decode_png(&bytes).ok());
+    let fallback_color = parse_color_hex(&safe_filter_color(&canvas.background), 1.0).to_color_u8();
+
+    let corner_usize = corner as usize;
+    let strip_w = corner_usize * 4;
+    let mut strip = Pixmap::new(strip_w as u32, corner)?;
+    strip.fill(Color::TRANSPARENT);
+    let mask_data = mask.data();
+    let mask_stride = mask_w as usize;
+    let bg_origin_x = screen_x.round() as i64;
+    let bg_origin_y = screen_y.round() as i64;
+
+    // TL, TR, BL, BR order matches the filter graph's crop offsets.
+    let origins = [
+        (0, 0),
+        (mask_w.saturating_sub(corner), 0),
+        (0, mask_h.saturating_sub(corner)),
+        (mask_w.saturating_sub(corner), mask_h.saturating_sub(corner)),
+    ];
+    let strip_data = strip.data_mut();
+    for (index, (src_x, src_y)) in origins.into_iter().enumerate() {
+        for py in 0..corner {
+            for px in 0..corner {
+                let mask_idx = ((src_y + py) as usize * mask_stride + (src_x + px) as usize) * 4;
+                let coverage = mask_data[mask_idx] as u16;
+                let alpha = 255 - coverage;
+                if alpha == 0 {
+                    continue;
+                }
+                let (r, g, b) = if let Some(bg) = background.as_ref() {
+                    let bg_x = bg_origin_x + (src_x + px) as i64;
+                    let bg_y = bg_origin_y + (src_y + py) as i64;
+                    if bg_x >= 0
+                        && bg_y >= 0
+                        && bg_x < bg.width() as i64
+                        && bg_y < bg.height() as i64
+                    {
+                        let idx = ((bg_y as usize) * bg.width() as usize + bg_x as usize) * 4;
+                        let data = bg.data();
+                        (data[idx], data[idx + 1], data[idx + 2])
+                    } else {
+                        (
+                            fallback_color.red(),
+                            fallback_color.green(),
+                            fallback_color.blue(),
+                        )
+                    }
+                } else {
+                    (
+                        fallback_color.red(),
+                        fallback_color.green(),
+                        fallback_color.blue(),
+                    )
+                };
+                // Pixmap data is premultiplied RGBA.
+                let a = alpha as u32;
+                let dst_idx = (py as usize * strip_w + index * corner_usize + px as usize) * 4;
+                strip_data[dst_idx] = ((r as u32 * a) / 255) as u8;
+                strip_data[dst_idx + 1] = ((g as u32 * a) / 255) as u8;
+                strip_data[dst_idx + 2] = ((b as u32 * a) / 255) as u8;
+                strip_data[dst_idx + 3] = alpha as u8;
+            }
+        }
+    }
+    strip.encode_png().ok()
 }
 
 fn parse_css_gradient_to_svg(gradient_str: &str, width: u32, height: u32) -> Option<String> {
@@ -8087,6 +8577,138 @@ mod tests {
         );
         assert_eq!(chunk_boundaries(100, 500), vec![(0, 100)]);
         assert!(chunk_boundaries(0, 100).is_empty());
+    }
+
+    #[test]
+    fn audio_input_windows_seek_past_the_unused_head() {
+        let segment = |source_in_ms: u64, source_out_ms: u64, output_end_ms: u64| RenderSegment {
+            asset_id: "mic".into(),
+            stream_index: Some(0),
+            volume: Some(1.0),
+            fade_in_ms: None,
+            fade_out_ms: None,
+            volume_keyframes: None,
+            audio_filter: None,
+            speed: 1.0,
+            source_in_ms,
+            source_out_ms,
+            output_start_ms: 0,
+            output_end_ms,
+            source_width: None,
+            source_height: None,
+        };
+        let plan = RenderPlan {
+            project_id: "audio-window".into(),
+            duration_ms: 5_000,
+            segments: vec![RenderSegment {
+                asset_id: "screen".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 5_000,
+                output_start_ms: 0,
+                output_end_ms: 5_000,
+                source_width: None,
+                source_height: None,
+            }],
+            gaps: Vec::new(),
+            overlays: Vec::new(),
+            captions: Vec::new(),
+            caption_mode: "burn-in".into(),
+            chapters: Vec::new(),
+            chapter_mode: "embed".into(),
+            masks: Vec::new(),
+            zoom_segments: Vec::new(),
+            cursor_effects: Vec::new(),
+            overlay_render_plan: None,
+            canvas: None,
+            audio: None,
+            audio_tracks: Some(vec![RenderPlanAudio {
+                asset_id: "mic".into(),
+                stream_index: Some(0),
+                role: Some("microphone".into()),
+                muted: false,
+                volume: 1.0,
+                segments: vec![segment(1_200_000, 1_500_000, 5_000)],
+            }]),
+            annotations: Vec::new(),
+            texts: Vec::new(),
+            images: Vec::new(),
+            keystrokes: Vec::new(),
+            keystroke_platform: "unknown".into(),
+        };
+        let windows = audio_input_windows(&plan, 5_000);
+        let (seek_s, duration_s) = windows.get("mic").copied().unwrap();
+        // 1200 s - 0.5 s preroll, then the tail margin past the last read.
+        assert!((seek_s - 1_199.5).abs() < 1e-9);
+        assert!((duration_s - 301.5).abs() < 1e-9);
+
+        // A muted track contributes no decode window.
+        let mut muted = plan;
+        muted.audio_tracks.as_mut().unwrap()[0].muted = true;
+        assert!(audio_input_windows(&muted, 5_000).is_empty());
+    }
+
+    #[test]
+    fn chunk_boundaries_without_zoom_match_plain_boundaries() {
+        assert_eq!(
+            chunk_boundaries_with_zoom(900, 75, 30, &[]),
+            chunk_boundaries(900, 75)
+        );
+    }
+
+    #[test]
+    fn chunk_boundaries_snap_to_zoom_region_edges() {
+        // Zoom from 4 s to 9 s at 30 fps = frames 120..270.
+        let boundaries = chunk_boundaries_with_zoom(900, 75, 30, &[120, 270]);
+        // Contiguous, exact coverage.
+        assert_eq!(boundaries.first(), Some(&(0, 75)));
+        for pair in boundaries.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|(start, end)| end - start)
+                .sum::<u64>(),
+            900
+        );
+        assert_eq!(boundaries.last(), Some(&(870, 900)));
+        // Boundaries land on the zoom edges, so no chunk mixes zoomed and
+        // zoom-free frames across an edge.
+        assert!(boundaries.iter().any(|(_, end)| *end == 120));
+        assert!(boundaries.iter().any(|(_, end)| *end == 270));
+        for (start, end) in &boundaries {
+            let inside_zoom = *start >= 120 && *end <= 270;
+            let outside_zoom = *end <= 120 || *start >= 270;
+            assert!(
+                inside_zoom || outside_zoom,
+                "chunk {start}..{end} straddles a zoom edge"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_boundaries_never_shrink_below_one_second() {
+        // An edge one frame after a chunk start must not create a 1-frame pass.
+        let boundaries = chunk_boundaries_with_zoom(300, 75, 30, &[31, 32, 220]);
+        for (index, (start, end)) in boundaries.iter().enumerate() {
+            if index + 1 < boundaries.len() {
+                assert!(end - start >= 30, "chunk {start}..{end} is too short");
+            }
+        }
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|(start, end)| end - start)
+                .sum::<u64>(),
+            300
+        );
     }
 
     #[test]
@@ -11584,10 +12206,108 @@ mod tests {
                 shadow_path.is_some(),
                 "Shadow plate generation failed for shape {shape}"
             );
-            let path = shadow_path.unwrap();
+            let (path, origin_x, origin_y) = shadow_path.unwrap();
             assert!(path.exists());
+            // The plate is cropped to the shadow's blur bounds, not the canvas.
+            let bytes = std::fs::read(&path).unwrap();
+            let pixmap = Pixmap::decode_png(&bytes).unwrap();
+            assert!(pixmap.width() < 1920 && pixmap.height() < 1080);
+            assert_eq!(origin_x % 2, 0);
+            assert_eq!(origin_y % 2, 0);
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    #[test]
+    fn canvas_corner_patches_invert_the_rounded_mask() {
+        let canvas = cursor::RenderCanvas {
+            width: 640,
+            height: 360,
+            padding: 20,
+            background: "#112233".into(),
+            border_radius: 24,
+            ..Default::default()
+        };
+        let screen = (80.0, 40.0, 480.0, 270.0);
+        // Background plate with position-dependent colors so a mis-cropped or
+        // mirrored patch cannot pass by accident.
+        let mut bg = Pixmap::new(canvas.width, canvas.height).unwrap();
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                let idx = ((y * canvas.width + x) * 4) as usize;
+                let data = bg.data_mut();
+                data[idx] = (x % 256) as u8;
+                data[idx + 1] = (y % 256) as u8;
+                data[idx + 2] = 77;
+                data[idx + 3] = 255;
+            }
+        }
+        let bg_path =
+            std::env::temp_dir().join(format!("rf-test-corner-bg-{}.png", uuid::Uuid::new_v4()));
+        bg.save_png(&bg_path).unwrap();
+
+        let bytes = generate_canvas_corner_patches_png(&canvas, screen, Some(&bg_path)).unwrap();
+        let strip = Pixmap::decode_png(&bytes).unwrap();
+        let corner = canvas_corner_patch_size(&canvas, screen).unwrap() as usize;
+        assert_eq!(strip.width() as usize, corner * 4);
+        assert_eq!(strip.height() as usize, corner);
+        let mask_w = screen.2.round() as usize;
+        let mask_h = screen.3.round() as usize;
+        let mask = cursor::render_rounded_rect_mask_pixmap(
+            mask_w as u32,
+            mask_h as u32,
+            canvas.border_radius as f32,
+        )
+        .unwrap();
+        let mask_data = mask.data();
+        let strip_data = strip.data();
+        let origins = [
+            (0usize, 0usize),
+            (mask_w - corner, 0),
+            (0, mask_h - corner),
+            (mask_w - corner, mask_h - corner),
+        ];
+        for (index, (src_x, src_y)) in origins.into_iter().enumerate() {
+            for py in 0..corner {
+                for px in 0..corner {
+                    let coverage = mask_data[((src_y + py) * mask_w + src_x + px) * 4] as u32;
+                    let alpha = 255 - coverage;
+                    let idx = (py * corner * 4 + index * corner + px) * 4;
+                    assert_eq!(strip_data[idx + 3] as u32, alpha, "alpha at corner {index}");
+                    if alpha > 0 {
+                        let bg_x = screen.0 as usize + src_x + px;
+                        let bg_y = screen.1 as usize + src_y + py;
+                        let bg_idx = (bg_y * canvas.width as usize + bg_x) * 4;
+                        for (channel, offset) in [(0usize, 0usize), (1, 1), (2, 2)] {
+                            let expected = (bg.data()[bg_idx + offset] as u32 * alpha) / 255;
+                            assert_eq!(
+                                strip_data[idx + channel] as u32,
+                                expected,
+                                "channel {channel} at corner {index} ({px},{py})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&bg_path);
+    }
+
+    #[test]
+    fn camera_shadow_bounds_cover_the_blurred_shape() {
+        // Circle at (100,100) 320x240, offset (4,8), blur 16 → radius 8,
+        // support 3*8+1 = 25. Bounds are floor/ceil then even-aligned.
+        let (x, y, w, h) = camera_shadow_bounds(1920, 1080, 104.0, 108.0, 320.0, 240.0, 8.0);
+        assert_eq!((x, y), (78, 82));
+        assert_eq!((x + w, y + h), (450, 374));
+        // Degenerate/oversized shadows clamp to the canvas without panicking.
+        let (x, y, w, h) = camera_shadow_bounds(1920, 1080, -500.0, -500.0, 4000.0, 3000.0, 32.0);
+        assert_eq!((x, y), (0, 0));
+        assert_eq!((w, h), (1920, 1080));
+        // An off-canvas shadow still returns an in-bounds rect (no clamp panic
+        // when the even-aligned origin reaches the canvas edge).
+        let (x, y, w, h) = camera_shadow_bounds(1920, 1080, 5000.0, 5000.0, 320.0, 240.0, 8.0);
+        assert!(x + w <= 1920 && y + h <= 1080 && w >= 1 && h >= 1);
     }
 
     #[test]

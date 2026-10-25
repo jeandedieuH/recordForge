@@ -190,3 +190,16 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
 - **GPU variance:** adapter and driver bugs and device loss → auto fallback plus telemetry-free logging (no media paths, per security rules).
 - **The webcam stream-copy (3.3) and aspect-preserving capture (4.1) change data-model assumptions.** Each needs its own design check before implementation.
 - **Security:** no new Tauri capabilities. Temp files (sendcmd scripts, corner plates) go into the existing `STALE_EXPORT_TEMP_PREFIXES` sweep and temp guards.
+
+## 8. Implementation status
+
+- **Phase 0** — complete (2026-10-25 baseline, harness encoder override,
+  ablation matrix, parity gate).
+- **Phase 1** — complete (2026-10-25): window-local zoom, camera-shadow crop,
+  NVENC chunk cap, exact-geometry encoder pre-flight, and bounded audio inputs
+  shipped. Corner patches are implemented but opt-in
+  (`RECORDFORGE_EXPORT_CORNER_PATCHES=1`) because their anti-aliased corner
+  blend is outside the 50 dB parity gate; chunk-boundary snapping is also
+  opt-in (`RECORDFORGE_EXPORT_ZOOM_SNAP=1`) because the measured matrix
+  preferred the uniform grid. All 11 software baseline renders pass parity at
+  100 dB. Numbers and validation: `docs/benchmarks/phase-1-results.md`.
