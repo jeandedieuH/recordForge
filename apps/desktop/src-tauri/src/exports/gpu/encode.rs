@@ -16,8 +16,8 @@ use tracing::warn;
 
 use super::super::encoding::{self, ExportEncoder};
 use super::super::{
-    append_audio_graph, audio_bitrate, audio_input_windows, collect_input_assets, hvc1_tag_args,
-    CompositionShared, ExportSettings, RenderPlan,
+    append_audio_graph, audio_bitrate, audio_input_windows, captions, collect_input_assets,
+    generate_ffmetadata, hvc1_tag_args, CompositionShared, ExportSettings, RenderPlan,
 };
 use super::gpu_error;
 
@@ -29,6 +29,9 @@ pub(super) struct EncodeProcess {
     output_path: PathBuf,
     /// `[aout]` was mixed, so the finished file carries an audio stream.
     has_audio: bool,
+    /// Temp files this process owns (chapter metadata); the guards remove them
+    /// on finish, kill, or an early return from setup.
+    cleanup: Vec<super::super::TempMaskFile>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -43,7 +46,10 @@ pub(super) fn spawn(
     shared: &CompositionShared,
     width: u32,
     height: u32,
+    out_width: u32,
+    out_height: u32,
     fps: u32,
+    caption_script: Option<&Path>,
 ) -> Result<EncodeProcess> {
     let audio_windows = audio_input_windows(plan, plan.duration_ms.max(1));
     let asset_inputs = collect_input_assets(plan, asset_paths)?;
@@ -95,6 +101,57 @@ pub(super) fn spawn(
         &std::sync::atomic::AtomicBool::new(false),
     )?;
 
+    // The GPU pass owns the canvas; G3 features run here on its NV12 output so
+    // they stay byte-compatible with the compatibility renderer's stages.
+    let chapters_index = if (settings.chapter_mode == "embed" || settings.chapter_mode == "both")
+        && !plan.chapters.is_empty()
+    {
+        // Inputs are: 0 = composited stdin, then one per audio asset.
+        Some(1 + audio_inputs.len())
+    } else {
+        None
+    };
+
+    // `None` means the composited stdin stream is mapped directly; only a
+    // filter stage that consumes `[0:v]` produces a label to map instead.
+    let mut video_label: Option<String> = None;
+    if let Some(script) = caption_script {
+        let input = video_label.as_deref().unwrap_or("0:v");
+        filters.push(captions::subtitles_filter(input, "captioned", script));
+        video_label = Some("captioned".into());
+    }
+    if (out_width, out_height) != (width, height) {
+        // License-driven cap: the composed canvas is downscaled at the final
+        // node with the same kernel the compatibility graph uses.
+        let input = video_label.as_deref().unwrap_or("0:v");
+        filters.push(format!(
+            "[{input}]scale={out_width}:{out_height}:flags=lanczos[capped]"
+        ));
+        video_label = Some("capped".into());
+    }
+    if encoder == ExportEncoder::Vaapi {
+        let input = video_label.as_deref().unwrap_or("0:v");
+        let (stage, label) = encoding::vaapi_export_upload(input);
+        filters.push(stage);
+        video_label = Some(label.into());
+    }
+
+    let mut cleanup = Vec::new();
+    let chapters_path = if chapters_index.is_some() {
+        let path = std::env::temp_dir().join(format!(
+            "rf-gpu-chapters-{}-{}.ffmeta",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, generate_ffmetadata(project_id, &plan.chapters)).map_err(
+            |error| InternalError::Storage(format!("write GPU chapter metadata: {error}")),
+        )?;
+        cleanup.push(super::super::TempMaskFile(path.clone()));
+        Some(path)
+    } else {
+        None
+    };
+
     let mut command = crate::process::create_command(ffmpeg_path);
     command.args(["-hide_banner", "-loglevel", "warning", "-nostdin", "-y"]);
     encoding::append_export_device_args(&mut command, encoder);
@@ -113,16 +170,26 @@ pub(super) fn spawn(
         }
         command.arg("-i").arg(path);
     }
-    if has_audio {
+    if let Some(path) = &chapters_path {
+        command.args(["-f", "ffmetadata"]).arg("-i").arg(path);
+    }
+    if has_audio || !filters.is_empty() {
         command.args(["-filter_complex", &filters.join(";\n")]);
     }
-    command.args(["-map", "0:v"]);
+    command.arg("-map").arg(match &video_label {
+        Some(label) => format!("[{label}]"),
+        None => "0:v".to_string(),
+    });
     if has_audio {
         command.args(["-map", "[aout]"]);
+        command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
     } else {
         command.arg("-an");
     }
-    encoding::append_export_video_args(&mut command, settings, encoder, fps, width, height);
+    if let Some(index) = chapters_index {
+        command.args(["-map_chapters", &index.to_string()]);
+    }
+    encoding::append_export_video_args(&mut command, settings, encoder, fps, out_width, out_height);
     if encoder != ExportEncoder::Vaapi {
         // The compositor already emits NV12. Repeating `-pix_fmt` makes it the
         // authoritative value (FFmpeg's last occurrence wins), so the encoder
@@ -130,9 +197,6 @@ pub(super) fn spawn(
         // NV12→yuv420p swscale first. VAAPI is exempt: it consumes uploaded
         // hardware frames, not a system pixel format.
         command.args(["-pix_fmt", "nv12"]);
-    }
-    if has_audio {
-        command.args(["-c:a", "aac", "-b:a", audio_bitrate(settings)]);
     }
     command.args(hvc1_tag_args(settings));
     command.args(["-movflags", "+faststart"]);
@@ -179,6 +243,7 @@ pub(super) fn spawn(
         stderr,
         output_path: output_path.to_path_buf(),
         has_audio,
+        cleanup,
     })
 }
 
@@ -203,6 +268,7 @@ impl EncodeProcess {
             .child
             .wait()
             .map_err(|error| InternalError::Media(format!("wait for GPU encode pass: {error}")))?;
+        self.cleanup_temp_files();
         if status.success() {
             return Ok(());
         }
@@ -215,7 +281,13 @@ impl EncodeProcess {
         drop(self.stdin.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.cleanup_temp_files();
         self.log_stderr("gpu export: encoder stopped before the stream finished");
+    }
+
+    fn cleanup_temp_files(&mut self) {
+        // Dropping each guard removes its file.
+        self.cleanup.clear();
     }
 
     fn log_stderr(&self, message: &str) {
@@ -239,5 +311,17 @@ impl EncodeProcess {
                 "{message}"
             );
         }
+    }
+}
+
+impl Drop for EncodeProcess {
+    fn drop(&mut self) {
+        // Never leave an encoder (or its chapter temp file) behind when setup
+        // fails after spawn; `finish`/`kill` already reap it, so this is a
+        // no-op on the success path.
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.cleanup_temp_files();
     }
 }

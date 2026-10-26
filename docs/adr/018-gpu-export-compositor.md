@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — Phase 5, milestone G0 implemented (2026-10-26)
+Accepted - Phase 5, milestones G0-G3 implemented (2026-10-26)
 
 ## Context
 
@@ -43,6 +43,19 @@ scale/pad/concat ─┴─► stdout ──────► battery ─► readba
   shader through an integer crop rect from `camera::zoompan_integer_crop`, and
   writes an `Rgba16Float` canvas. Colour conversion is BT.601 limited both ways,
   matching swscale's assumption for the untagged screen chain.
+- **Layers** are drawn in the compatibility graph's stack order: cursor tile,
+  camera shadow/bubble/border, privacy masks, overlay items, then keystroke
+  badges. Generated plates reuse the existing Rust rasterizers
+  (`CursorFramePlan`/`OverlayWorkerState`) and upload YUVA420p planes; camera
+  overlays are shaped, opacity-blended NV12 quads fed by one decode sidecar
+  each. Two RGBA16Float stage targets ping-pong through mask passes, so
+  redact/blur/pixelate never need an extra copy or a CPU pass. Side-by-side
+  layout windows are per-frame destination rects (a uniform layout decodes
+  straight into the slot; a varying layout scales the full picture per frame).
+- **Burned-in captions stay in FFmpeg** (libass parity) on the GPU raster:
+  `subtitles` runs in the encode sidecar before the final pixel-format/scale
+  stage. Chapters, HEVC tagging and the license output cap ride the same
+  encoder command.
 - **Pack** runs a compute shader that converts RGB→NV12 into a storage buffer
   whose layout is byte-for-byte the encoder's expected pixel format, so the
   readback feeds the encoder stdin with no further conversion or copy.
@@ -77,12 +90,15 @@ benchmarks. `renderer = gpu` asks for the GPU path explicitly and still
 degrades per feature.
 
 `gpu::plan_limitations` is the single source of truth for what the compositor
-supports. Anything outside it keeps the FFmpeg renderer: cursor and overlay
-items, camera/side-by-side, masks, keystrokes, burned-in captions, timeline
-gaps, non-MP4/H.264 delivery, and canvases that are not a 4×2 NV12 grid. Canvas
-framing (padding, background colour/gradient/image, blur, dim, rounded corners,
-shadow) and letterboxed fits are part of the compositor. Explicit `gpu` requests
-that fall outside the gate render on FFmpeg with the reason logged — failing an
+supports. Anything outside it keeps the FFmpeg renderer: timeline gaps and
+coverage holes, mixed or unknown source dimensions, animated containers
+(GIF/WebP), canvases that are not a 4×2 NV12 grid, and the one stack-order pair
+the hybrid cannot express (keystroke badges must sit above burned-in captions,
+but captions run through libass in the encode sidecar after the GPU raster).
+Canvas framing, letterboxed fits, zoom, cursor/items, camera and side-by-side,
+privacy masks, keystrokes, burned-in captions, chapters, HEVC, the license
+output cap, and selected-range plans are in scope. Explicit `gpu` requests that
+fall outside the gate render on FFmpeg with the reason logged — failing an
 export over a renderer preference would be worse than rendering it on the path
 that works.
 
@@ -98,8 +114,11 @@ slower software path.
 
 - No new Tauri capabilities; the compositor runs inside the existing export
   worker.
-- No new temp files: the decode filter graph is passed inline and plans larger
-  than `MAX_INLINE_FILTER_LEN` stay on FFmpeg.
+- The decode filter graph is passed inline and plans larger than
+  `MAX_INLINE_FILTER_LEN` stay on FFmpeg. Generated assets (caption directory,
+  chapter `ffmetadata`, camera border/shadow plates) are ordinary export temp
+  files under the existing guards; camera shadow plates are deleted as soon as
+  they are uploaded.
 - Frame data never leaves Rust.
 - `wgpu` is pinned in `apps/desktop/src-tauri/Cargo.toml` with the `dx12`,
   `metal`, `vulkan`, `gles` and `wgsl` backends only.
@@ -109,9 +128,9 @@ slower software path.
 | Gate | Scope |
 |---|---|
 | G0 | Passthrough + zoom at canvas size (implemented) |
-| G1 | Background plate, canvas frame/corners, shadow (implemented; cursor tile and items outstanding) |
-| G2 | Camera mask/border/shadow, privacy masks, keystrokes, side-by-side |
-| G3 | Captions (libass burn-in), chapters, HEVC, output cap, selected range |
+| G1 | Background plate, canvas frame/corners/shadow, cursor tile, overlay items (implemented) |
+| G2 | Camera mask/border/shadow, privacy masks, keystrokes, side-by-side (implemented) |
+| G3 | Captions (libass burn-in in the encode sidecar), chapters, HEVC, output cap, selected range (implemented) |
 | G4 | Parity suite across the ablation matrix; ships behind the setting |
 | G5 | `auto` turns GPU on by default once parity and failure gates hold |
 

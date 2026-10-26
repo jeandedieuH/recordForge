@@ -2,9 +2,12 @@
 //
 // The screen plane arrives as NV12 (Y full resolution, interleaved UV at half
 // resolution) — the format the FFmpeg decode sidecar emits — already scaled into
-// the canvas content rect and padded out to the canvas. This shader paints the
+// the full content rect and padded out to the canvas. This shader paints the
 // canvas background (a plate texture or a solid colour), then composites the
-// content rect on top with an analytically anti-aliased rounded-corner mask.
+// *current* screen rect on top with an analytically anti-aliased rounded-corner
+// mask. The current rect equals the full content rect except inside side-by-side
+// layout windows, where the same decoded picture is drawn into the smaller slot
+// (the compatibility graph's per-frame `eval=frame` scale).
 //
 // Colour conversion is BT.601 limited range, which is what swscale assumes for
 // the untagged screen chain the compatibility renderer builds, so a GPU frame
@@ -25,6 +28,10 @@ struct FrameParams {
     background: vec4<f32>,
     // x = corner radius in canvas px.
     corner: vec4<f32>,
+    // xy = decoded source-rect origin in canvas px, zw = its size in px. The
+    // decode pass always fits the screen into this rect; `dest_rect` is where
+    // the current frame draws it.
+    source_rect: vec4<f32>,
 };
 
 @group(0) @binding(0) var src_y: texture_2d<f32>;
@@ -142,11 +149,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(bg, 1.0);
     }
 
-    // Content-local uv, then the zoom crop, mapped back into canvas uv (the
-    // decoded planes are canvas-sized with the content letterboxed in place).
+    // Content-local uv, then the zoom crop inside the *decoded* content rect,
+    // mapped back into canvas uv. The decoded planes are canvas-sized with the
+    // picture already fitted at `source_rect`, so the crop space is the source
+    // rect — never the current (possibly smaller side-by-side) destination.
     let content_uv = local / frame.dest_rect.zw;
-    let crop_uv = clamp(frame.crop.xy + content_uv * frame.crop.zw, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-    let sample_uv = (frame.dest_rect.xy + crop_uv * frame.dest_rect.zw) / frame.canvas_size.xy;
+    let crop_uv = clamp(
+        frame.crop.xy + content_uv * frame.crop.zw,
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    let sample_uv =
+        (frame.source_rect.xy + crop_uv * frame.source_rect.zw) / frame.canvas_size.xy;
 
     let y_dims = vec2<i32>(textureDimensions(src_y));
     let uv_dims = vec2<i32>(textureDimensions(src_uv));

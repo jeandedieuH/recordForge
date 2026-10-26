@@ -1626,6 +1626,7 @@ fn render_timeline_composition_shared(
                 on_progress,
                 resource_dir,
                 shared,
+                output_cap,
             ) {
                 Ok(outcome) => return Ok(outcome),
                 Err(error) => {

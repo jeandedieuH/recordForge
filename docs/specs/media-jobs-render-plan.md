@@ -263,33 +263,39 @@ compositor. `auto` stays on the FFmpeg graph until the Phase 5 G5 gate flips;
 
 `gpu::plan_limitations` is the feature gate. The compositor handles the full
 canvas frame (padding, background colour/gradient/image, blur, dim, rounded
-corners, shadow), the fitted screen rect and zoom; overlay layers (cursor, text,
-annotations, images), camera/side-by-side, masks, keystrokes, burned-in
-captions, timeline gaps, non-MP4/H.264 delivery and non-4×2-grid canvases keep
-the compatibility renderer. Explicit `gpu` requests outside the gate degrade with
-a logged reason rather than failing the export, and a runtime failure (no
-hardware adapter, device loss, sidecar error) falls back once to the FFmpeg
-renderer — mirroring the hardware→software encoder retry.
+corners, shadow), the fitted screen rect and zoom, cursor/overlay items,
+camera + side-by-side layout windows, privacy masks, keystrokes, burned-in
+captions (encode-side libass), chapters, HEVC, the license output cap and
+selected-range plans. Timeline gaps/coverage holes, mixed source dimensions,
+animated containers (GIF/WebP), non-4×2-grid canvases, and the keystroke +
+burned-caption pair (badges must sit above captions, which run after the GPU
+raster) keep the compatibility renderer. Explicit `gpu` requests outside the
+gate degrade with a logged reason rather than failing the export, and a runtime
+failure (no hardware adapter, device loss, sidecar error) falls back once to the
+FFmpeg renderer — mirroring the hardware→software encoder retry.
 
-The pipeline is three processes: an FFmpeg **decode sidecar** (the same
-`trim`/`setpts` chain, scaling each segment into the **fitted content rect** and
-padding out to the canvas at that rect's origin so the compositor receives a
-canvas-sized frame, emitting `rawvideo`/`nv12` on stdout; `-hwaccel auto` is
-opt-in via `RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` because every frame is
-downloaded anyway), a **wgpu compositor** (canvas background plate or solid
-colour, `YUV→RGB` at BT.601 limited through an integer crop from
-`zoompan_integer_crop` in content uv, Catmull-Rom bicubic sampling, an analytic
-signed-distance rounded-corner mask, an `Rgba16Float` canvas, then a compute
-`RGB→NV12` pass that writes a storage buffer byte-identical to the encoder's
-expected pixel format), and an FFmpeg **encode sidecar** reading that NV12 on
-stdin plus the existing semantic audio graph. Identity-zoom frames bypass the GPU
-when the canvas frame is plain (no padding, radius, shadow or background);
-otherwise they still composite, because the background has to be painted under
-the screen.
+The pipeline is an FFmpeg **decode sidecar** (the same `trim`/`setpts` chain,
+scaling each segment into the **fitted content rect** and padding out to the
+canvas at that rect's origin so the compositor receives a canvas-sized frame,
+emitting `rawvideo`/`nv12` on stdout; `-hwaccel auto` is opt-in via
+`RECORDFORGE_EXPORT_GPU_DECODE_HWACCEL=1` because every frame is downloaded
+anyway), a **wgpu compositor**, one extra **camera decode sidecar per camera
+overlay**, and an FFmpeg **encode sidecar** reading the composited NV12 on
+stdin plus the existing semantic audio graph. The compositor paints the canvas
+background plate or solid colour, converts `YUV→RGB` at BT.601 limited through
+an integer crop from `zoompan_integer_crop`, samples Catmull-Rom bicubic,
+applies an analytic signed-distance rounded-corner mask, and draws layers in the
+compatibility stack order: cursor tile, camera shadow/bubble/border, privacy
+masks (two `Rgba16Float` stages ping-pong through the mask shader), overlay
+items, then keystroke badges. A compute `RGB→NV12` pass writes a storage buffer
+byte-identical to the encoder's expected pixel format. Identity-zoom frames with
+no visible layer bypass the GPU entirely, even when captions/chapters/codec/
+output-cap work is pending in the encode sidecar.
 
-The wgpu device, adapter and both pipelines are process-wide and cached
-(`RECORDFORGE_EXPORT_GPU_CACHE=0` disables reuse), so only the size-dependent
-planes, render target and readback buffers are allocated per export. Readback
+The wgpu device, adapter and pipelines (screen composite, layer, mask, NV12
+pack) are process-wide and cached (`RECORDFORGE_EXPORT_GPU_CACHE=0` disables
+reuse), so only the size-dependent planes, stage targets, layer textures and
+readback buffers are allocated per export. Readback
 runs through a three-buffer host-visible ring: a submit returns the frame that
 has been on the GPU longest, which lets the GPU compose while the CPU copies and
 feeds the encoder. Decode and encode sidecar queues hold 8 and 6 frames by

@@ -138,8 +138,8 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
 - **Milestones and gates:**
   - **G0 spike:** passthrough + zoom at 1080p30. Target ≥4x realtime with NVENC on the RTX 3050 and PSNR ≥45 dB against the FFmpeg path. **Below 2x → stop and re-plan.**
   - **G1:** background, fit, corners, shadow, zoom, cursor, items.
-  - **G2:** camera, masks, keystrokes, side-by-side layout windows.
-  - **G3:** captions, chapters, HEVC, output cap, selected range.
+  - **G2:** camera, masks, keystrokes, side-by-side layout windows. *(implemented 2026-10-26; see §8)*
+  - **G3:** captions, chapters, HEVC, output cap, selected range. *(implemented 2026-10-26; captions run in the encode sidecar)*
   - **G4:** parity suite across the ablation matrix; ships behind the setting, off by default.
   - **G5:** `auto` turns GPU on by default once the parity and failure-rate gates hold.
 - **Known limits:** pipe throughput is ~3.1 MB/frame at 1080p NV12, which is fine. 4K tops out at ~100 fps over pipes; D3D11/Metal interop is future work.
@@ -327,7 +327,26 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
     existing `prepare_canvas_background_plate` image plus an analytic SDF corner
     mask over the fitted screen. Parity on the padded variants lands at the
     resampler bound: padding 43.50, radius 43.96, shadow 43.48 dB mean (plain
-    stays bit-identical at 100 dB). Remaining in G1: overlay items and the
-    cursor. Then G2 (camera/masks/keystrokes/side-by-side), G3 (captions,
-    chapters, HEVC, output cap, selected range), the full ablation matrix, and
-    G4/G5.
+    stays bit-identical at 100 dB).
+  - **G1 cursor/items + G2 + G3 shipped 2026-10-26.** The compositor is now a
+    layered GPU pass: canvas/screen, cursor tile, camera shadow/bubble/border,
+    privacy masks (ping-ponged stage targets), overlay items, then keystroke
+    badges, in the compatibility graph's stack order. Generated plates reuse
+    the compatibility path's own `CursorFramePlan`/`OverlayWorkerState`
+    rasterizers and upload YUVA420p planes directly (no RGBA round trip);
+    camera overlays get one FFmpeg decode sidecar each and a shaped,
+    opacity-blended quad. Side-by-side layout windows are per-frame screen
+    rects: a uniform layout decodes straight into the smaller slot, a varying
+    layout decodes at full size and the compositor draws the slot while the
+    cursor renderer follows the same windows. G3 runs in the encode sidecar:
+    burned-in captions are the existing libass `subtitles` pass over the GPU
+    raster, chapters are an `ffmetadata` input, HEVC/mp4 tags and the license
+    output cap (lanczos final stage) sit on the same encoder path, and a
+    selected-range plan is just a zero-based plan (pinned by a gate test).
+    `docs/benchmarks/phase-5-results.md` records the end-to-end evidence.
+    Deliberate limits: keystroke badges + burned-in captions stay on FFmpeg
+    (the badges must sit above captions, but captions run after the GPU
+    raster); blur/pixelate masks are a shader approximation of the
+    downscale/avgblur/upscale graph; the G4 parity matrix has not been run for
+    the new layers yet.
+  - Remaining: G4 (ablation parity + per-feature rows) and G5 (`auto`).

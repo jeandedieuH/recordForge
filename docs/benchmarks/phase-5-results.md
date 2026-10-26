@@ -208,15 +208,38 @@ up for many-export sessions and for larger canvases rather than in a single
 short export. Frame-count queues are now `RECORDFORGE_EXPORT_GPU_DECODE_QUEUE`
 (8) and `_ENCODE_QUEUE` (6).
 
+## G1 remainder, G2 and G3 (2026-10-26)
+
+The compositor is now a layered pass, and the gate accepts every editor layer:
+
+| Layer / feature | Where it runs | Evidence |
+|---|---|---|
+| Cursor tile, overlay items, keystroke badges | GPU (`layer.wgsl`, YUVA420p textures) | unit: cursor tile composites at its per-frame origin |
+| Camera mask/border/shadow | GPU (`layer.wgsl` + generated plates), one decode sidecar per overlay | end-to-end: camera pixel survives the screen/background |
+| Privacy masks (redact / blur / pixelate) | GPU ping-pong stage pass (`mask.wgsl`) | unit: redact rect paints only its rect; e2e: black redact pixels |
+| Side-by-side layout windows | per-frame screen rect (uniform = single decode fit, varying = per-frame draw) | e2e: uniform slot and a mid-timeline switch from full screen to slot |
+| Burned-in captions | encode sidecar `subtitles` (libass) over the GPU raster | e2e: caption glyph pixels in the lower third |
+| Chapters | encode sidecar `ffmetadata` + `-map_chapters` | e2e: `ffprobe -show_chapters` carries the title |
+| HEVC | same encoder path + `hvc1` tag | e2e: HEVC render validates |
+| Output cap | encode-side `scale=…:flags=lanczos` | e2e: 320×240 canvas capped to 160×120 validates |
+| Selected range | already a zero-based plan | gate test |
+
+The end-to-end test renders a 1 s 320×240 fixture with a side-by-side camera
+bubble, a redact mask, a burned-in caption and an embedded chapter, then reads a
+frame back and asserts blue screen / red camera / black mask pixels. It skips
+only when no hardware adapter exists. The parity matrix (`parity.ts`) has not
+been rerun for the new layers yet; mask blur/pixelate approximate the
+FFmpeg downscale/avgblur/upscale graph, and keystrokes + burned-in captions
+intentionally stay on FFmpeg because the compatibility graph draws badges above
+captions while the encode-side captions run after the GPU raster.
+
 ## Follow-ups
 
-1. **G1 (rest)**: cursor tile and overlay items. Text/annotations/images are
-   rasterized by the same tiny-skia code the compatibility path uses, so they
-   need a texture per display-list hash plus the per-frame cursor evaluation.
-2. **G2**: camera mask/border/shadow, privacy masks, keystrokes, side-by-side.
-3. **G3**: captions, chapters, HEVC, output cap, selected range.
-4. **G4/G5**: extend the parity suite across the whole ablation matrix (cursor /
-   items / camera / captions currently SKIP because the gate keeps them on
-   FFmpeg), then flip `auto`. The renderer budget is already in `parity.ts`; G4
-   adds a per-feature row so a regression in one layer cannot hide behind the
-   mean.
+1. **G4**: extend the parity suite across the whole ablation matrix (cursor /
+   items / camera / masks / captions), add a per-feature row, and measure the
+   new layered passes on the 30 s fixture. The renderer budget is already in
+   `parity.ts`. The GPU path currently rasterizes generated plates on the
+   compose thread (the compatibility path uses a producer pool) and reads each
+   camera decoder synchronously; if the matrix shows plate-bound exports, a
+   bounded plate-producer queue is the first optimization.
+2. **G5**: flip `auto` once the parity and failure-rate gates hold.

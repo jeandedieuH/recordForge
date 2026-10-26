@@ -269,6 +269,76 @@ trim=duration={segment_duration},setpts=PTS-STARTPTS[{label}]"
     filter
 }
 
+/// A camera overlay's dedicated decode pass: its own FFmpeg process emitting
+/// overlay-sized NV12 frames, one per output frame inside the overlay window.
+pub(super) struct CameraPlan {
+    pub input: DecodeInput,
+    pub filter: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+/// Plan one camera overlay's decode chain. Mirrors the compatibility graph's
+/// camera stream (`trim`, speed, cover/contain crop, fps, tpad) so the bubble
+/// sees the same frames the FFmpeg renderer composites.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn plan_camera(
+    project_id: &str,
+    overlay: &super::super::RenderPlanOverlay,
+    asset_paths: &HashMap<String, PathBuf>,
+    shared: &CompositionShared,
+    clamp: &super::super::CameraClamp,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> Result<CameraPlan> {
+    let asset_path = asset_paths
+        .get(&overlay.asset_id)
+        .cloned()
+        .ok_or_else(|| InternalError::Media("camera overlay references an unknown asset".into()))?;
+    let seek_s = super::super::floor_to_ms(clamp.src_in_s - super::super::SEEK_PREROLL_S).max(0.0);
+    let input = resolve_video_stream_specifier(
+        &shared.probe,
+        &asset_path,
+        &overlay.asset_id,
+        0,
+        overlay.stream_index,
+    )?;
+    let geometry = if let Some(crop) = &overlay.crop {
+        format!(
+            ",crop={}:{}:{}:{},scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:threads=auto,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0",
+            crop.width, crop.height, crop.x, crop.y
+        )
+    } else {
+        format!(
+            ",scale={width}:{height}:force_original_aspect_ratio=increase:force_divisible_by=2:threads=auto,crop={width}:{height}:(iw-ow)/2:(ih-oh)/2"
+        )
+    };
+    let duration = fmt_secs(clamp.chain_dur_s);
+    let filter = format!(
+        "{input}trim=start={}:end={},setpts=(PTS-STARTPTS+{:.6}/TB)/{:.6}{geometry},fps={fps},setsar=1,\
+tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration},setpts=PTS-STARTPTS,format=nv12[vout]",
+        fmt_secs(clamp.src_in_s - seek_s),
+        fmt_secs(clamp.src_out_s - seek_s),
+        clamp.cut_out_s * overlay.speed,
+        overlay.speed.max(1e-6),
+    );
+    let _ = project_id;
+    Ok(CameraPlan {
+        input: DecodeInput {
+            path: asset_path,
+            seek_s: Some(seek_s),
+            duration_s: Some(clamp.src_out_s - seek_s + SEEK_TAIL_MARGIN_S),
+            hwaccel: false,
+        },
+        filter,
+        width,
+        height,
+        fps,
+    })
+}
+
 /// A spawned decode pass. Frames are read straight off stdout as raw NV12.
 pub(super) struct DecodeProcess {
     child: Child,
@@ -279,9 +349,38 @@ pub(super) struct DecodeProcess {
 
 impl DecodeProcess {
     pub(super) fn spawn(ffmpeg_path: &str, plan: &DecodePlan) -> Result<Self> {
+        Self::spawn_with(
+            ffmpeg_path,
+            &plan.inputs,
+            &plan.filter,
+            plan.width,
+            plan.height,
+            plan.fps,
+        )
+    }
+
+    pub(super) fn spawn_camera(ffmpeg_path: &str, plan: &CameraPlan) -> Result<Self> {
+        Self::spawn_with(
+            ffmpeg_path,
+            std::slice::from_ref(&plan.input),
+            &plan.filter,
+            plan.width,
+            plan.height,
+            plan.fps,
+        )
+    }
+
+    fn spawn_with(
+        ffmpeg_path: &str,
+        inputs: &[DecodeInput],
+        filter: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Self> {
         let mut command = crate::process::create_command(ffmpeg_path);
         command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
-        for input in &plan.inputs {
+        for input in inputs {
             if input.hwaccel {
                 // Decode on the GPU and download each frame once; the filter
                 // chain stays in system memory so frames match the encoder
@@ -297,7 +396,7 @@ impl DecodeProcess {
             command.arg("-i").arg(&input.path);
         }
         command
-            .args(["-filter_complex", &plan.filter])
+            .args(["-filter_complex", filter])
             .args(["-map", "[vout]"])
             .args([
                 "-an",
@@ -306,9 +405,9 @@ impl DecodeProcess {
                 "-pix_fmt",
                 "nv12",
                 "-s",
-                &format!("{}x{}", plan.width, plan.height),
+                &format!("{width}x{height}"),
                 "-r",
-                &plan.fps.to_string(),
+                &fps.to_string(),
                 "pipe:1",
             ]);
         command
@@ -351,7 +450,7 @@ impl DecodeProcess {
             child,
             stdout: BufReader::with_capacity(4 << 20, stdout),
             stderr,
-            frame_len: (plan.width as usize * plan.height as usize * 3 / 2).max(1),
+            frame_len: (width as usize * height as usize * 3 / 2).max(1),
         })
     }
 
@@ -396,8 +495,13 @@ impl DecodeProcess {
         if status.success() {
             return Ok(());
         }
+        let redacted = diagnostic
+            .lines()
+            .map(super::super::redact_paths)
+            .collect::<Vec<_>>()
+            .join("\n");
         warn!(
-            detail = %diagnostic.chars().take(400).collect::<String>(),
+            detail = %redacted.chars().take(400).collect::<String>(),
             "gpu export: decode pass failed"
         );
         Err(gpu_error("GPU decode pass failed"))
@@ -406,5 +510,13 @@ impl DecodeProcess {
     pub(super) fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for DecodeProcess {
+    fn drop(&mut self) {
+        // A setup error or an early return must not leave FFmpeg blocked on a
+        // pipe nobody reads. Reaping an already-finished child is a no-op.
+        self.kill();
     }
 }

@@ -1,25 +1,31 @@
 //! wgpu side of the native export compositor.
 //!
 //! The compositor owns one GPU device and the fixed set of resources a
-//! composition pass needs: an NV12 screen plane pair, an RGBA render target
-//! (the composed canvas), and NV12 output buffers that are read back on the
-//! CPU and handed straight to the encode sidecar's stdin.
+//! composition pass needs: an NV12 screen plane pair, two RGBA stage targets
+//! (ping-ponged by privacy-mask passes), generated overlay/camera layer
+//! textures, and NV12 output buffers that are read back on the CPU and handed
+//! straight to the encode sidecar's stdin.
 //!
 //! The device, adapter and pipelines are **process-wide**: creating them costs
 //! ~2–3 s (adapter probe, DX12 device, naga/FXC shader compile), which is a
 //! large share of a short export. Only size-dependent resources (planes, render
-//! target, readback ring) are per export.
+//! targets, layer textures, readback ring) are per export.
 //!
 //! Readback is pipelined through a ring of host-visible buffers: submitting a
 //! frame hands back the frame that has been on the GPU longest, so the GPU
 //! keeps working while the CPU copies and writes the previous one.
 //!
-//! Only the parts of the FFmpeg graph that G0 covers run here: the screen plane
-//! with a zoom crop and the BT.601 colour round trip. Cursor, camera, items,
-//! masks, captions and the canvas frame/wrapper are gated out by
-//! [`super::plan_limitations`] until their milestones land.
+//! Layers are composited in the same order as the compatibility graph: canvas
+//! and screen, cursor, camera shadow/bubble/border, privacy masks, overlay
+//! items, then keystroke badges. Burned-in captions stay in the encode sidecar
+//! (libass parity), so they are not drawn here.
+//!
+//! The screen plane is always decoded into the full content rect; `dest_rect`
+//! is the rect the current frame draws it at, which is the side-by-side slot
+//! inside layout windows. Masks ping-pong between two stage targets.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -29,6 +35,8 @@ use tracing::{info, warn};
 use super::gpu_error;
 
 const COMPOSITE_WGSL: &str = include_str!("shaders/composite.wgsl");
+const LAYER_WGSL: &str = include_str!("shaders/layer.wgsl");
+const MASK_WGSL: &str = include_str!("shaders/mask.wgsl");
 const NV12_WGSL: &str = include_str!("shaders/nv12_encode.wgsl");
 
 /// Readback buffers kept in flight. Three is enough to cover the copy-out while
@@ -54,25 +62,106 @@ pub(super) struct Nv12Frame {
 
 /// What to do with one timeline frame.
 pub(super) enum Frame {
-    /// Composite it through the GPU (zoom is not the identity).
+    /// Composite it through the GPU (zoom, canvas framing, layers).
     Compose(Nv12Frame),
-    /// Forward the decoder's bytes untouched (identity zoom).
+    /// Forward the decoder's bytes untouched (identity zoom, no layers).
     Pass(Vec<u8>),
 }
 
-/// Canvas framing for one export: where the screen content sits, how round its
-/// corners are, and what shows through around it.
+/// A generated overlay plane shipped for one frame: packed YUVA420p at the
+/// plane rect's size, plus the canvas origin it draws at.
+pub(super) struct PlaneFrame {
+    pub data: std::sync::Arc<Vec<u8>>,
+    pub dest: (u32, u32),
+}
+
+/// One active camera overlay's decoded NV12 frame for this output frame.
+pub(super) struct CameraFrame {
+    pub index: usize,
+    pub data: Vec<u8>,
+}
+
+/// Mask shape for a generated overlay/camera quad.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Shape {
+    Rect,
+    /// Ellipse inscribed in the layer rect (camera "circle" shape).
+    Circle,
+    /// Rounded rectangle with this corner radius.
+    Rounded(f32),
+}
+
+/// Privacy-mask treatment for one rect.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum MaskMode {
+    Redact([f32; 3]),
+    /// Blur sampling factor (`factor` px between taps).
+    Blur(f32),
+    /// Pixel block size in px.
+    Pixelate(f32),
+}
+
+/// One privacy mask's canvas rect and mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct MaskConfig {
+    pub rect: (u32, u32, u32, u32),
+    pub mode: MaskMode,
+}
+
+/// Canvas rect a generated plate occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PlaneInfo {
+    pub rect: (u32, u32, u32, u32),
+}
+
+/// One camera overlay's fixed composition geometry and optional generated
+/// border/shadow plates.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CameraConfig {
+    /// Camera NV12 frame size.
+    pub size: (u32, u32),
+    /// Canvas origin.
+    pub dest: (u32, u32),
+    pub shape: Shape,
+    pub opacity: f32,
+    /// Generated border PNG bytes (device-ready).
+    pub border: Option<Vec<u8>>,
+    /// Generated shadow PNG bytes plus its canvas origin.
+    pub shadow: Option<(Vec<u8>, u32, u32)>,
+}
+
+/// Per-export layer inventory. Everything is created once; only pixel data and
+/// the cursor origin change per frame.
+#[derive(Default)]
+pub(super) struct CompositorSpec {
+    pub cursor: Option<PlaneInfo>,
+    pub items: Option<PlaneInfo>,
+    pub keys: Option<PlaneInfo>,
+    pub cameras: Vec<CameraConfig>,
+    pub masks: Vec<MaskConfig>,
+}
+
+/// Canvas framing for one export: the full content rect, the optional
+/// side-by-side slot and its active windows, corner rounding and background.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct CanvasFrame {
-    /// Content rect on the canvas, in canvas pixels: `(x, y, w, h)`.
+    /// Full content rect on the canvas, in canvas pixels: `(x, y, w, h)`. The
+    /// decode sidecar always fits the screen into this rect.
     pub rect: (f64, f64, f64, f64),
+    /// Smaller screen slot used inside side-by-side layout windows.
+    pub sbs_rect: Option<(f64, f64, f64, f64)>,
+    /// Absolute `[start_ms, end_ms)` windows where `sbs_rect` applies.
+    pub sbs_windows: Vec<(u64, u64)>,
     /// Rounded corner radius in canvas pixels (0 = square).
     pub radius: u32,
     /// Solid background colour as sRGB floats, used when `plate` is `None`.
     pub background: [f32; 3],
     /// Canvas-size RGBA background plate (colour, gradient, image, blur, dim
     /// and the canvas shadow are all baked in by `prepare_canvas_background_plate`).
-    pub plate: Option<std::path::PathBuf>,
+    pub plate: Option<PathBuf>,
+    /// Second background plate with the shadow painted around `sbs_rect`; only
+    /// present when the layout varies and the canvas has a shadow.
+    pub sbs_plate: Option<PathBuf>,
 }
 
 impl CanvasFrame {
@@ -80,12 +169,49 @@ impl CanvasFrame {
     /// background is visible, so an identity-zoom frame needs no compositing.
     pub(super) fn is_plain(&self, width: u32, height: u32) -> bool {
         self.plate.is_none()
+            && self.sbs_rect.is_none()
             && self.radius == 0
             && self.rect.0.abs() < 0.5
             && self.rect.1.abs() < 0.5
             && self.rect.2 >= width as f64 - 0.5
             && self.rect.3 >= height as f64 - 0.5
     }
+
+    /// True while the side-by-side slot is active at `output_ms`.
+    pub(super) fn side_by_side_at(&self, output_ms: f64) -> bool {
+        self.sbs_rect.is_some()
+            && self
+                .sbs_windows
+                .iter()
+                .any(|(start, end)| output_ms >= *start as f64 && output_ms < *end as f64)
+    }
+
+    /// Screen rect to draw at `output_ms`.
+    pub(super) fn dest_rect(&self, output_ms: f64) -> (f64, f64, f64, f64) {
+        match self.sbs_rect {
+            Some(sbs) if self.side_by_side_at(output_ms) => sbs,
+            _ => self.rect,
+        }
+    }
+}
+
+/// Everything one output frame needs, excluding the decoded screen frame.
+pub(super) struct FrameRequest {
+    pub crop: Crop,
+    /// Screen rect on the canvas for this frame (the full content rect, or the
+    /// smaller side-by-side slot).
+    pub dest: (f64, f64, f64, f64),
+    /// Canvas corner radius (unscaled; the compositor scales it to `dest`).
+    pub radius: u32,
+    /// True when `dest` is the side-by-side slot, so the side-by-side
+    /// background plate is sampled.
+    pub side_by_side: bool,
+    pub cursor: Option<PlaneFrame>,
+    pub items: Option<PlaneFrame>,
+    pub keys: Option<PlaneFrame>,
+    pub cameras: Vec<CameraFrame>,
+    /// Indices into [`CompositorSpec::masks`] active this frame, in plan order.
+    pub masks: Vec<usize>,
 }
 
 fn nv12_len(width: u32, height: u32) -> usize {
@@ -101,6 +227,7 @@ struct FrameParams {
     crop: [f32; 4],
     background: [f32; 4],
     corner: [f32; 4],
+    source_rect: [f32; 4],
 }
 
 #[repr(C)]
@@ -112,8 +239,25 @@ struct Nv12Params {
     uv_word_offset: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LayerParams {
+    canvas_size: [f32; 4],
+    dest_rect: [f32; 4],
+    shape: [f32; 4],
+    opacity: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MaskParams {
+    rect: [f32; 4],
+    color: [f32; 4],
+    params: [f32; 4],
+}
+
 /// Minimal `Pod` substitute so the crate does not take a `bytemuck` dependency
-/// for its uniform structs. Safety: both types are `#[repr(C)]`, made entirely
+/// for its uniform structs. Safety: all types are `#[repr(C)]`, made entirely
 /// of `u32`/`f32`, and contain no padding.
 mod bytemuck_free {
     /// # Safety
@@ -122,6 +266,8 @@ mod bytemuck_free {
     pub unsafe trait Pod: Copy {}
     unsafe impl Pod for super::FrameParams {}
     unsafe impl Pod for super::Nv12Params {}
+    unsafe impl Pod for super::LayerParams {}
+    unsafe impl Pod for super::MaskParams {}
     unsafe impl Pod for [f32; 4] {}
 }
 
@@ -135,8 +281,12 @@ struct SharedGpu {
     lost: Arc<AtomicBool>,
     render_layout: wgpu::BindGroupLayout,
     compute_layout: wgpu::BindGroupLayout,
+    layer_layout: wgpu::BindGroupLayout,
+    mask_layout: wgpu::BindGroupLayout,
     render_pipeline: wgpu::RenderPipeline,
     compute_pipeline: wgpu::ComputePipeline,
+    layer_pipeline: wgpu::RenderPipeline,
+    mask_pipeline: wgpu::RenderPipeline,
 }
 
 static SHARED_GPU: OnceLock<Mutex<Option<Arc<SharedGpu>>>> = OnceLock::new();
@@ -154,6 +304,27 @@ struct RingSlot {
     mapped: Option<std::sync::mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>>,
 }
 
+/// One composited layer's textures, uniform and bind group.
+struct Quad {
+    y: wgpu::Texture,
+    uv: wgpu::Texture,
+    a: wgpu::Texture,
+    uniform: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    size: (u32, u32),
+}
+
+/// One camera overlay's GPU resources.
+struct CameraResources {
+    camera: Quad,
+    border: Option<Quad>,
+    shadow: Option<Quad>,
+}
+
+struct MaskResources {
+    binds: [wgpu::BindGroup; 2],
+}
+
 /// GPU resources for one composition pass at a fixed output size.
 pub(super) struct Compositor {
     shared: Arc<SharedGpu>,
@@ -163,12 +334,22 @@ pub(super) struct Compositor {
     height: u32,
     src_y: wgpu::Texture,
     src_uv: wgpu::Texture,
-    stage_view: wgpu::TextureView,
-    params_buffer: wgpu::Buffer,
+    _stage: [wgpu::Texture; 2],
+    stage_views: [wgpu::TextureView; 2],
+    params_full: wgpu::Buffer,
+    params_sbs: wgpu::Buffer,
     params: FrameParams,
     out_buffer: wgpu::Buffer,
-    render_bind_group: wgpu::BindGroup,
-    compute_bind_group: wgpu::BindGroup,
+    render_bind_full: wgpu::BindGroup,
+    render_bind_sbs: wgpu::BindGroup,
+    compute_binds: [wgpu::BindGroup; 2],
+    _layer_sampler: wgpu::Sampler,
+    _mask_sampler: wgpu::Sampler,
+    cursor: Option<Quad>,
+    items: Option<Quad>,
+    keys: Option<Quad>,
+    cameras: Vec<CameraResources>,
+    masks: Vec<MaskResources>,
     ring: Vec<RingSlot>,
     ring_next: usize,
     pending: VecDeque<Inflight>,
@@ -180,7 +361,12 @@ pub(super) struct Compositor {
 impl Compositor {
     /// Create a compositor at `width` × `height` for `frame`, reusing the
     /// process-wide device and pipelines when they are still healthy.
-    pub(super) fn new(width: u32, height: u32, frame: &CanvasFrame) -> Result<Self> {
+    pub(super) fn new(
+        width: u32,
+        height: u32,
+        frame: &CanvasFrame,
+        spec: &CompositorSpec,
+    ) -> Result<Self> {
         if width == 0 || height == 0 || !width.is_multiple_of(4) || !height.is_multiple_of(2) {
             return Err(gpu_error(
                 "GPU compositor needs an even canvas width divisible by 4",
@@ -206,35 +392,56 @@ impl Compositor {
         );
         let src_y_view = src_y.create_view(&wgpu::TextureViewDescriptor::default());
         let src_uv_view = src_uv.create_view(&wgpu::TextureViewDescriptor::default());
-        let background = match &frame.plate {
-            Some(path) => upload_plate(&device, &queue, path, width, height)?,
-            None => placeholder_background(&device, &queue, width, height),
+        let full_background = match &frame.plate {
+            Some(path) => Some(upload_plate(&device, &queue, path, width, height)?),
+            None => None,
         };
-        let background_view = background.create_view(&wgpu::TextureViewDescriptor::default());
+        let sbs_background = match &frame.sbs_plate {
+            Some(path) => Some(upload_plate(&device, &queue, path, width, height)?),
+            None => None,
+        };
+        // A texture binding always has to exist; a 1×1 black texel stands in
+        // when the shader is told to use the solid colour instead.
+        let placeholder = placeholder_background(&device, &queue);
+        let full_bg_view = full_background
+            .as_ref()
+            .unwrap_or(&placeholder)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        // The side-by-side slot falls back to the full plate when no
+        // shadow-positioned plate exists (the background art is canvas-wide).
+        let sbs_bg_source = sbs_background.as_ref().or(full_background.as_ref());
+        let sbs_bg_view = sbs_bg_source
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
+            .unwrap_or_else(|| placeholder.create_view(&wgpu::TextureViewDescriptor::default()));
 
-        // The composed canvas stays in `Rgba16Float` so the YUV→RGB→YUV round
-        // trip quantizes once (at the NV12 write) instead of twice.
-        let stage = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("gpu-export-stage"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        // Two RGBA16Float stages let a privacy-mask pass read one while writing
+        // the other; every other layer draws into the current stage.
+        let stage = std::array::from_fn(|index| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("gpu-export-stage-{index}")),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
         });
-        let stage_view = stage.create_view(&wgpu::TextureViewDescriptor::default());
+        let stage_views = std::array::from_fn(|index| {
+            stage[index].create_view(&wgpu::TextureViewDescriptor::default())
+        });
 
-        let radius = frame
-            .radius
-            .min((frame.rect.2 / 2.0).max(0.0) as u32)
-            .min((frame.rect.3 / 2.0).max(0.0) as u32);
-        let has_plate = u8::from(frame.plate.is_some()) as f32;
+        let full_plate = full_background.is_some();
+        // The side-by-side bind group samples the shadow-positioned plate when
+        // it exists and the canvas-wide plate otherwise, so "plate present"
+        // covers either source.
+        let sbs_plate = sbs_background.is_some() || full_plate;
         let params = FrameParams {
             canvas_size: [width as f32, height as f32, 0.0, 0.0],
             dest_rect: [
@@ -248,16 +455,22 @@ impl Compositor {
                 frame.background[0],
                 frame.background[1],
                 frame.background[2],
-                1.0 - has_plate,
+                1.0 - f32::from(full_plate),
             ],
-            corner: [radius as f32, 0.0, 0.0, 0.0],
+            corner: [frame.radius as f32, 0.0, 0.0, 0.0],
+            source_rect: [
+                frame.rect.0 as f32,
+                frame.rect.1 as f32,
+                frame.rect.2.max(1.0) as f32,
+                frame.rect.3.max(1.0) as f32,
+            ],
         };
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpu-export-frame-params"),
-            size: std::mem::size_of::<FrameParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let mut sbs_params = params;
+        sbs_params.background[3] = 1.0 - f32::from(sbs_plate);
+        let params_full = create_uniform(&device, &queue, "gpu-export-frame-params", &params);
+        let params_sbs =
+            create_uniform(&device, &queue, "gpu-export-frame-params-sbs", &sbs_params);
+
         let nv12_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gpu-export-nv12-params"),
             size: std::mem::size_of::<Nv12Params>() as u64,
@@ -284,8 +497,17 @@ impl Compositor {
             })
             .collect();
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("gpu-export-sampler"),
+        let layer_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("gpu-export-layer-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("gpu-export-mask-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -294,49 +516,56 @@ impl Compositor {
             ..Default::default()
         });
 
-        let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gpu-export-composite-bind"),
-            layout: &shared.render_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&src_y_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&src_uv_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&background_view),
-                },
-            ],
-        });
-        let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gpu-export-nv12-bind"),
-            layout: &shared.compute_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&stage_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: out_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: nv12_buffer.as_entire_binding(),
-                },
-            ],
+        let render_bind = |params: &wgpu::Buffer, bg: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gpu-export-composite-bind"),
+                layout: &shared.render_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_y_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&src_uv_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&layer_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(bg),
+                    },
+                ],
+            })
+        };
+        let render_bind_full = render_bind(&params_full, &full_bg_view);
+        let render_bind_sbs = render_bind(&params_sbs, &sbs_bg_view);
+
+        let compute_binds = std::array::from_fn(|index| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gpu-export-nv12-bind"),
+                layout: &shared.compute_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&stage_views[index]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: out_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: nv12_buffer.as_entire_binding(),
+                    },
+                ],
+            })
         });
 
         queue.write_buffer(
@@ -349,7 +578,156 @@ impl Compositor {
                 uv_word_offset: (width as usize * height as usize / 4) as u32,
             }),
         );
-        queue.write_buffer(&params_buffer, 0, pod_bytes(&params));
+
+        let cursor = spec
+            .cursor
+            .map(|info| {
+                Quad::planes(
+                    &device,
+                    &queue,
+                    &shared,
+                    &layer_sampler,
+                    (width, height),
+                    info.rect.2,
+                    info.rect.3,
+                    (0, 0),
+                    "cursor",
+                )
+            })
+            .transpose()?;
+        let items = spec
+            .items
+            .map(|info| {
+                Quad::planes(
+                    &device,
+                    &queue,
+                    &shared,
+                    &layer_sampler,
+                    (width, height),
+                    info.rect.2,
+                    info.rect.3,
+                    (info.rect.0, info.rect.1),
+                    "items",
+                )
+            })
+            .transpose()?;
+        let keys = spec
+            .keys
+            .map(|info| {
+                Quad::planes(
+                    &device,
+                    &queue,
+                    &shared,
+                    &layer_sampler,
+                    (width, height),
+                    info.rect.2,
+                    info.rect.3,
+                    (info.rect.0, info.rect.1),
+                    "keys",
+                )
+            })
+            .transpose()?;
+
+        let mut cameras = Vec::with_capacity(spec.cameras.len());
+        for (index, camera) in spec.cameras.iter().enumerate() {
+            let camera_quad = Quad::nv12(
+                &device,
+                &queue,
+                &shared,
+                &layer_sampler,
+                (width, height),
+                camera.size.0,
+                camera.size.1,
+                camera.dest,
+                camera.shape,
+                camera.opacity,
+                &format!("cam{index}"),
+            )?;
+            let border = camera
+                .border
+                .as_ref()
+                .map(|bytes| {
+                    Quad::rgba(
+                        &device,
+                        &queue,
+                        &shared,
+                        &layer_sampler,
+                        (width, height),
+                        bytes,
+                        camera.size.0,
+                        camera.size.1,
+                        camera.dest,
+                        Shape::Rect,
+                        1.0,
+                        &format!("cam{index}-border"),
+                    )
+                })
+                .transpose()?;
+            let shadow = camera
+                .shadow
+                .as_ref()
+                .map(|(bytes, x, y)| {
+                    let image = image::load_from_memory(bytes)
+                        .map_err(|error| gpu_error(&format!("decode camera shadow: {error}")))?
+                        .to_rgba8();
+                    let (w, h) = image.dimensions();
+                    Quad::rgba(
+                        &device,
+                        &queue,
+                        &shared,
+                        &layer_sampler,
+                        (width, height),
+                        image.as_raw(),
+                        w,
+                        h,
+                        (*x, *y),
+                        Shape::Rect,
+                        1.0,
+                        &format!("cam{index}-shadow"),
+                    )
+                })
+                .transpose()?;
+            cameras.push(CameraResources {
+                camera: camera_quad,
+                border,
+                shadow,
+            });
+        }
+
+        let masks = spec
+            .masks
+            .iter()
+            .enumerate()
+            .map(|(index, mask)| {
+                let uniform = create_uniform(
+                    &device,
+                    &queue,
+                    &format!("gpu-export-mask-{index}"),
+                    &mask_params(mask),
+                );
+                let binds = std::array::from_fn(|stage| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&format!("gpu-export-mask-{index}-bind-{stage}")),
+                        layout: &shared.mask_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&stage_views[stage]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&mask_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: uniform.as_entire_binding(),
+                            },
+                        ],
+                    })
+                });
+                MaskResources { binds }
+            })
+            .collect();
 
         let adapter_label = shared.adapter_label.clone();
         info!(
@@ -357,8 +735,14 @@ impl Compositor {
             width,
             height,
             content = ?frame.rect,
-            radius = params.corner[0],
+            sbs = frame.sbs_rect.is_some(),
+            radius = frame.radius,
             plate = frame.plate.is_some(),
+            cursor = cursor.is_some(),
+            items = items.is_some(),
+            keys = keys.is_some(),
+            cameras = cameras.len(),
+            masks = spec.masks.len(),
             "gpu export: compositor ready"
         );
 
@@ -370,12 +754,22 @@ impl Compositor {
             height,
             src_y,
             src_uv,
-            stage_view,
-            params_buffer,
+            _stage: stage,
+            stage_views,
+            params_full,
+            params_sbs,
             params,
             out_buffer,
-            render_bind_group,
-            compute_bind_group,
+            render_bind_full,
+            render_bind_sbs,
+            compute_binds,
+            _layer_sampler: layer_sampler,
+            _mask_sampler: mask_sampler,
+            cursor,
+            items,
+            keys,
+            cameras,
+            masks,
             ring,
             ring_next: 0,
             pending: VecDeque::with_capacity(READBACK_RING + 1),
@@ -392,7 +786,11 @@ impl Compositor {
     /// A [`Frame::Pass`] never touches the GPU, but it still travels through
     /// the queue so the returned order matches submission order. `Ok(None)`
     /// means nothing is ready yet (the pipeline is filling).
-    pub(super) fn submit(&mut self, frame: Frame, crop: Crop) -> Result<Option<Vec<u8>>> {
+    pub(super) fn submit(
+        &mut self,
+        screen: Frame,
+        request: FrameRequest,
+    ) -> Result<Option<Vec<u8>>> {
         // Evict the oldest frame *before* reusing its readback buffer: the ring
         // cycles every `READBACK_RING` GPU submits, and a slot whose mapping was
         // never taken out is still mapped (a second `map_async` would fail).
@@ -401,17 +799,17 @@ impl Compositor {
         } else {
             None
         };
-        match frame {
+        match screen {
+            Frame::Pass(data) => self.pending.push_back(Inflight::Ready(data)),
             Frame::Compose(frame) => {
                 if frame.data.len() != nv12_len(self.width, self.height) {
                     return Err(gpu_error("decoded frame size does not match the canvas"));
                 }
                 let slot = self.ring_next;
                 self.ring_next = (self.ring_next + 1) % READBACK_RING;
-                self.dispatch(frame, crop, slot)?;
+                self.dispatch(frame, &request, slot)?;
                 self.pending.push_back(Inflight::Gpu { slot });
             }
-            Frame::Pass(data) => self.pending.push_back(Inflight::Ready(data)),
         }
         Ok(ready)
     }
@@ -476,62 +874,102 @@ impl Compositor {
         Ok(data)
     }
 
-    fn dispatch(&mut self, frame: Nv12Frame, crop: Crop, slot: usize) -> Result<()> {
+    fn dispatch(&mut self, frame: Nv12Frame, request: &FrameRequest, slot: usize) -> Result<()> {
         self.upload(&frame);
         // Drop the caller's buffer before the copy so only the plane textures
         // hold the decoded frame.
         drop(frame);
-        // The crop is normalized against the *content* rect: the vertical/horiz
-        // zoom math runs on the fitted screen, matching the compatibility
-        // graph's `crop`+`scale` on the fitted stream.
-        let content_w = self.params.dest_rect[2].max(1.0);
-        let content_h = self.params.dest_rect[3].max(1.0);
-        self.params.crop = [
-            crop.x as f32 / content_w,
-            crop.y as f32 / content_h,
-            crop.width as f32 / content_w,
-            crop.height as f32 / content_h,
+
+        let full = self.full_rect();
+        let radius = self.radius_for(request, request.dest);
+        self.params.dest_rect = [
+            request.dest.0 as f32,
+            request.dest.1 as f32,
+            request.dest.2.max(1.0) as f32,
+            request.dest.3.max(1.0) as f32,
         ];
-        self.queue.write_buffer(
-            &self.params_buffer,
-            // `crop` is the third 16-byte row of `FrameParams`.
-            (std::mem::size_of::<[f32; 4]>() * 2) as u64,
-            pod_bytes(&self.params.crop),
-        );
+        self.params.crop = [
+            request.crop.x as f32 / full.2.max(1.0) as f32,
+            request.crop.y as f32 / full.3.max(1.0) as f32,
+            request.crop.width as f32 / full.2.max(1.0) as f32,
+            request.crop.height as f32 / full.3.max(1.0) as f32,
+        ];
+        self.params.corner[0] = radius as f32;
+        // The two bind groups keep their own plate-presence flag; only the
+        // per-frame rect/crop/radius rows are rewritten here.
+        let row = std::mem::size_of::<[f32; 4]>() as u64;
+        for buffer in [&self.params_full, &self.params_sbs] {
+            self.queue
+                .write_buffer(buffer, row, pod_bytes(&self.params.dest_rect));
+            self.queue
+                .write_buffer(buffer, row * 2, pod_bytes(&self.params.crop));
+            self.queue
+                .write_buffer(buffer, row * 4, pod_bytes(&self.params.corner));
+        }
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("gpu-export-frame"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("gpu-export-composite"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.stage_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.shared.render_pipeline);
-            pass.set_bind_group(0, &self.render_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+        self.draw_canvas(&mut encoder, request);
+
+        let mut stage = 0usize;
+        if let Some(plane) = &request.cursor {
+            self.upload_plane(PlaneKind::Cursor, plane)?;
         }
+        if let (Some(cursor), Some(plane)) = (&self.cursor, &request.cursor) {
+            self.write_quad_dest(
+                cursor,
+                (plane.dest.0, plane.dest.1, cursor.size.0, cursor.size.1),
+            );
+            self.draw_quad(&mut encoder, &self.stage_views[stage], cursor);
+        }
+        for camera in &request.cameras {
+            self.upload_camera(camera.index, &camera.data)?;
+            let Some(resources) = self.cameras.get(camera.index) else {
+                continue;
+            };
+            if let Some(shadow) = &resources.shadow {
+                self.draw_quad(&mut encoder, &self.stage_views[stage], shadow);
+            }
+            self.draw_quad(&mut encoder, &self.stage_views[stage], &resources.camera);
+            if let Some(border) = &resources.border {
+                self.draw_quad(&mut encoder, &self.stage_views[stage], border);
+            }
+        }
+        for index in &request.masks {
+            let Some(mask) = self.masks.get(*index) else {
+                continue;
+            };
+            self.draw_mask(&mut encoder, stage, mask);
+            stage = 1 - stage;
+        }
+        if let Some(plane) = &request.items {
+            self.upload_plane(PlaneKind::Items, plane)?;
+            if let Some(items) = &self.items {
+                self.write_quad_dest(
+                    items,
+                    (plane.dest.0, plane.dest.1, items.size.0, items.size.1),
+                );
+                self.draw_quad(&mut encoder, &self.stage_views[stage], items);
+            }
+        }
+        if let Some(plane) = &request.keys {
+            self.upload_plane(PlaneKind::Keys, plane)?;
+            if let Some(keys) = &self.keys {
+                self.write_quad_dest(keys, (plane.dest.0, plane.dest.1, keys.size.0, keys.size.1));
+                self.draw_quad(&mut encoder, &self.stage_views[stage], keys);
+            }
+        }
+
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("gpu-export-nv12"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.shared.compute_pipeline);
-            pass.set_bind_group(0, &self.compute_bind_group, &[]);
+            pass.set_bind_group(0, &self.compute_binds[stage], &[]);
             pass.dispatch_workgroups(
                 self.width.div_ceil(4).div_ceil(16).max(1),
                 self.height.div_ceil(16).max(1),
@@ -554,7 +992,109 @@ impl Compositor {
         Ok(())
     }
 
-    pub(super) fn upload(&mut self, frame: &Nv12Frame) {
+    fn full_rect(&self) -> (f64, f64, f64, f64) {
+        // `source_rect` is written once at creation.
+        let source = self.params.source_rect;
+        (
+            source[0] as f64,
+            source[1] as f64,
+            source[2] as f64,
+            source[3] as f64,
+        )
+    }
+
+    fn radius_for(&self, request: &FrameRequest, dest: (f64, f64, f64, f64)) -> u32 {
+        let full = self.full_rect();
+        if request.radius == 0 {
+            return 0;
+        }
+        let scale = if full.2 > 0.0 {
+            (dest.2 / full.2).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        ((request.radius as f64 * scale).round() as u32)
+            .min((dest.2 / 2.0) as u32)
+            .min((dest.3 / 2.0) as u32)
+    }
+
+    fn draw_canvas(&self, encoder: &mut wgpu::CommandEncoder, request: &FrameRequest) {
+        let bind = if request.side_by_side {
+            &self.render_bind_sbs
+        } else {
+            &self.render_bind_full
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gpu-export-composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.stage_views[0],
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.shared.render_pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn draw_quad(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        quad: &Quad,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gpu-export-layer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.shared.layer_pipeline);
+        pass.set_bind_group(0, &quad.bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn draw_mask(&self, encoder: &mut wgpu::CommandEncoder, stage: usize, mask: &MaskResources) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gpu-export-mask"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.stage_views[1 - stage],
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.shared.mask_pipeline);
+        pass.set_bind_group(0, &mask.binds[stage], &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn upload(&mut self, frame: &Nv12Frame) {
         let luma_len = self.width as usize * self.height as usize;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -595,6 +1135,380 @@ impl Compositor {
             },
         );
     }
+
+    fn upload_plane(&mut self, kind: PlaneKind, plane: &PlaneFrame) -> Result<()> {
+        let quad = match kind {
+            PlaneKind::Cursor => self.cursor.as_mut(),
+            PlaneKind::Items => self.items.as_mut(),
+            PlaneKind::Keys => self.keys.as_mut(),
+        };
+        let Some(quad) = quad else {
+            return Ok(());
+        };
+        let (w, h) = quad.size;
+        let expected = crate::exports::cursor::yuva420p_len(w, h);
+        if plane.data.len() != expected {
+            return Err(gpu_error("generated overlay plane size does not match"));
+        }
+        let luma = w as usize * h as usize;
+        let chroma = (w as usize / 2) * (h as usize / 2);
+        write_plane(&self.queue, &quad.y, w, h, &plane.data[..luma]);
+        // The generated plane is planar (U then V); the texture is interleaved
+        // Rg8 so one sample yields both chroma components.
+        let (u, v) = plane.data[luma..luma + chroma * 2].split_at(chroma);
+        let mut uv = Vec::with_capacity(chroma * 2);
+        for index in 0..chroma {
+            uv.push(u[index]);
+            uv.push(v[index]);
+        }
+        write_plane(&self.queue, &quad.uv, w / 2, h / 2, &uv);
+        write_plane(&self.queue, &quad.a, w, h, &plane.data[luma + chroma * 2..]);
+        Ok(())
+    }
+
+    fn upload_camera(&mut self, index: usize, data: &[u8]) -> Result<()> {
+        let Some(resources) = self.cameras.get_mut(index) else {
+            return Ok(());
+        };
+        let (w, h) = resources.camera.size;
+        if data.len() != nv12_len(w, h) {
+            return Err(gpu_error("camera frame size does not match the overlay"));
+        }
+        let luma = w as usize * h as usize;
+        write_plane(&self.queue, &resources.camera.y, w, h, &data[..luma]);
+        write_plane(
+            &self.queue,
+            &resources.camera.uv,
+            w / 2,
+            h / 2,
+            &data[luma..],
+        );
+        Ok(())
+    }
+
+    fn write_quad_dest(&self, quad: &Quad, dest: (u32, u32, u32, u32)) {
+        self.queue.write_buffer(
+            &quad.uniform,
+            (std::mem::size_of::<[f32; 4]>()) as u64,
+            pod_bytes(&[
+                dest.0 as f32,
+                dest.1 as f32,
+                dest.2.max(1) as f32,
+                dest.3.max(1) as f32,
+            ]),
+        );
+    }
+}
+
+/// Which generated plane a [`PlaneFrame`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlaneKind {
+    Cursor,
+    Items,
+    Keys,
+}
+
+fn mask_params(mask: &MaskConfig) -> MaskParams {
+    let (mode, factor, color) = match mask.mode {
+        MaskMode::Redact(color) => (0.0, 1.0, [color[0], color[1], color[2], 1.0]),
+        MaskMode::Blur(factor) => (1.0, factor.max(1.0), [0.0, 0.0, 0.0, 0.0]),
+        MaskMode::Pixelate(size) => (2.0, size.max(2.0), [0.0, 0.0, 0.0, 0.0]),
+    };
+    MaskParams {
+        rect: [
+            mask.rect.0 as f32,
+            mask.rect.1 as f32,
+            mask.rect.2.max(1) as f32,
+            mask.rect.3.max(1) as f32,
+        ],
+        color,
+        params: [mode, factor, 0.0, 0.0],
+    }
+}
+
+fn create_uniform<T: bytemuck_free::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    value: &T,
+) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: std::mem::size_of::<T>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, pod_bytes(value));
+    buffer
+}
+
+impl Quad {
+    #[allow(clippy::too_many_arguments)]
+    fn planes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SharedGpu,
+        sampler: &wgpu::Sampler,
+        canvas: (u32, u32),
+        width: u32,
+        height: u32,
+        dest: (u32, u32),
+        label: &str,
+    ) -> Result<Self> {
+        let y = create_plane(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+            &format!("gpu-export-{label}-y"),
+        );
+        let uv = create_plane(
+            device,
+            width / 2,
+            height / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+            &format!("gpu-export-{label}-uv"),
+        );
+        let a = create_plane(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+            &format!("gpu-export-{label}-a"),
+        );
+        Self::finish(
+            device,
+            queue,
+            shared,
+            sampler,
+            y,
+            uv,
+            a,
+            canvas,
+            (width, height),
+            dest,
+            Shape::Rect,
+            1.0,
+            1.0,
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn nv12(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SharedGpu,
+        sampler: &wgpu::Sampler,
+        canvas: (u32, u32),
+        width: u32,
+        height: u32,
+        dest: (u32, u32),
+        shape: Shape,
+        opacity: f32,
+        label: &str,
+    ) -> Result<Self> {
+        let y = create_plane(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+            &format!("gpu-export-{label}-y"),
+        );
+        let uv = create_plane(
+            device,
+            width / 2,
+            height / 2,
+            wgpu::TextureFormat::Rg8Unorm,
+            &format!("gpu-export-{label}-uv"),
+        );
+        let a = placeholder_r8(device);
+        Self::finish(
+            device,
+            queue,
+            shared,
+            sampler,
+            y,
+            uv,
+            a,
+            canvas,
+            (width, height),
+            dest,
+            shape,
+            opacity,
+            0.0,
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rgba(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SharedGpu,
+        sampler: &wgpu::Sampler,
+        canvas: (u32, u32),
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        dest: (u32, u32),
+        shape: Shape,
+        opacity: f32,
+        label: &str,
+    ) -> Result<Self> {
+        let y = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("gpu-export-{label}-rgba")),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &y,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let uv = placeholder_rg8(device);
+        let a = placeholder_r8(device);
+        let quad = Self::finish(
+            device,
+            queue,
+            shared,
+            sampler,
+            y,
+            uv,
+            a,
+            canvas,
+            (width, height),
+            dest,
+            shape,
+            opacity,
+            2.0,
+            label,
+        )?;
+        Ok(quad)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shared: &SharedGpu,
+        sampler: &wgpu::Sampler,
+        y: wgpu::Texture,
+        uv: wgpu::Texture,
+        a: wgpu::Texture,
+        canvas: (u32, u32),
+        size: (u32, u32),
+        dest: (u32, u32),
+        shape: Shape,
+        opacity: f32,
+        format: f32,
+        label: &str,
+    ) -> Result<Self> {
+        let y_view = y.create_view(&wgpu::TextureViewDescriptor::default());
+        let uv_view = uv.create_view(&wgpu::TextureViewDescriptor::default());
+        let a_view = a.create_view(&wgpu::TextureViewDescriptor::default());
+        let (kind, radius) = match shape {
+            Shape::Rect => (0.0, 0.0),
+            Shape::Circle => (1.0, 0.0),
+            Shape::Rounded(radius) => (2.0, radius),
+        };
+        let params = LayerParams {
+            canvas_size: [canvas.0 as f32, canvas.1 as f32, 0.0, 0.0],
+            dest_rect: [dest.0 as f32, dest.1 as f32, size.0 as f32, size.1 as f32],
+            shape: [kind, radius, 0.0, 0.0],
+            opacity: [opacity, format, 0.0, 0.0],
+        };
+        let uniform = create_uniform(
+            device,
+            queue,
+            &format!("gpu-export-{label}-params"),
+            &params,
+        );
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("gpu-export-{label}-bind")),
+            layout: &shared.layer_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&y_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&uv_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&a_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        });
+        Ok(Self {
+            y,
+            uv,
+            a,
+            uniform,
+            bind,
+            size,
+        })
+    }
+}
+
+fn write_plane(queue: &wgpu::Queue, texture: &wgpu::Texture, width: u32, height: u32, data: &[u8]) {
+    let format = texture.format();
+    let bytes_per_row = match format {
+        wgpu::TextureFormat::Rg8Unorm => width * 2,
+        _ => width,
+    };
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 /// Get the process-wide device, creating it on first use.
@@ -690,6 +1604,14 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         label: Some("gpu-export-composite"),
         source: wgpu::ShaderSource::Wgsl(COMPOSITE_WGSL.into()),
     });
+    let layer_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gpu-export-layer"),
+        source: wgpu::ShaderSource::Wgsl(LAYER_WGSL.into()),
+    });
+    let mask_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("gpu-export-mask"),
+        source: wgpu::ShaderSource::Wgsl(MASK_WGSL.into()),
+    });
     let nv12_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gpu-export-nv12"),
         source: wgpu::ShaderSource::Wgsl(NV12_WGSL.into()),
@@ -726,6 +1648,34 @@ fn create_shared_gpu() -> Result<SharedGpu> {
             uniform_binding(2),
         ],
     });
+    let layer_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gpu-export-layer-layout"),
+        entries: &[
+            texture_binding(0, wgpu::ShaderStages::FRAGMENT),
+            texture_binding(1, wgpu::ShaderStages::FRAGMENT),
+            texture_binding(2, wgpu::ShaderStages::FRAGMENT),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            uniform_binding(4),
+        ],
+    });
+    let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("gpu-export-mask-layout"),
+        entries: &[
+            texture_binding(0, wgpu::ShaderStages::FRAGMENT),
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            uniform_binding(2),
+        ],
+    });
 
     let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("gpu-export-composite-pipeline"),
@@ -750,6 +1700,87 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &composite_module,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let layer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gpu-export-layer-pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-export-layer-pipeline-layout"),
+                bind_group_layouts: &[Some(&layer_layout)],
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &layer_module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &layer_module,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("gpu-export-mask-pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-export-mask-pipeline-layout"),
+                bind_group_layouts: &[Some(&mask_layout)],
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &mask_module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &mask_module,
             entry_point: Some("fs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
@@ -799,8 +1830,12 @@ fn create_shared_gpu() -> Result<SharedGpu> {
         lost,
         render_layout,
         compute_layout,
+        layer_layout,
+        mask_layout,
         render_pipeline,
         compute_pipeline,
+        layer_pipeline,
+        mask_pipeline,
     })
 }
 
@@ -863,12 +1898,7 @@ fn upload_plate(
 
 /// One opaque black texel: the bind group always needs a background texture,
 /// and the shader ignores it whenever `background.a` says the colour is solid.
-fn placeholder_background(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    width: u32,
-    height: u32,
-) -> wgpu::Texture {
+fn placeholder_background(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("gpu-export-background-placeholder"),
         size: wgpu::Extent3d {
@@ -883,7 +1913,6 @@ fn placeholder_background(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let _ = (width, height);
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
@@ -904,6 +1933,20 @@ fn placeholder_background(
         },
     );
     texture
+}
+
+fn placeholder_r8(device: &wgpu::Device) -> wgpu::Texture {
+    create_plane(device, 1, 1, wgpu::TextureFormat::R8Unorm, "gpu-export-r8")
+}
+
+fn placeholder_rg8(device: &wgpu::Device) -> wgpu::Texture {
+    create_plane(
+        device,
+        1,
+        1,
+        wgpu::TextureFormat::Rg8Unorm,
+        "gpu-export-rg8",
+    )
 }
 
 fn create_plane(
@@ -1066,9 +2109,12 @@ mod tests {
     fn plain_frame(width: u32, height: u32) -> CanvasFrame {
         CanvasFrame {
             rect: (0.0, 0.0, width as f64, height as f64),
+            sbs_rect: None,
+            sbs_windows: Vec::new(),
             radius: 0,
             background: [0.0, 0.0, 0.0],
             plate: None,
+            sbs_plate: None,
         }
     }
 
@@ -1079,7 +2125,7 @@ mod tests {
     }
 
     fn compositor_for(width: u32, height: u32, frame: CanvasFrame) -> Option<Compositor> {
-        match Compositor::new(width, height, &frame) {
+        match Compositor::new(width, height, &frame, &CompositorSpec::default()) {
             Ok(compositor) => Some(compositor),
             Err(error) => {
                 eprintln!("skipping GPU compositor test: {error}");
@@ -1088,12 +2134,32 @@ mod tests {
         }
     }
 
+    fn request(width: u32, height: u32, crop: Crop) -> FrameRequest {
+        FrameRequest {
+            crop,
+            dest: (0.0, 0.0, width as f64, height as f64),
+            radius: 0,
+            side_by_side: false,
+            cursor: None,
+            items: None,
+            keys: None,
+            cameras: Vec::new(),
+            masks: Vec::new(),
+        }
+    }
+
     /// Submit one frame through the pipelined API and return its finished NV12
     /// bytes. Tests run the ring dry rather than asserting pipeline depth.
-    fn compose_one(compositor: &mut Compositor, frame: Nv12Frame, crop: Crop) -> Vec<u8> {
+    fn compose_one(
+        compositor: &mut Compositor,
+        width: u32,
+        height: u32,
+        frame: Nv12Frame,
+        crop: Crop,
+    ) -> Vec<u8> {
         assert!(
             compositor
-                .submit(Frame::Compose(frame), crop)
+                .submit(Frame::Compose(frame), request(width, height, crop))
                 .expect("submit")
                 .is_none(),
             "the first frame must stay in flight"
@@ -1131,6 +2197,8 @@ mod tests {
         };
         let out = compose_one(
             &mut compositor,
+            width,
+            height,
             ramp_frame(width, height),
             Crop {
                 x: 0,
@@ -1156,6 +2224,8 @@ mod tests {
         };
         let out = compose_one(
             &mut compositor,
+            width,
+            height,
             ramp_frame(width, height),
             Crop {
                 x: 160,
@@ -1181,6 +2251,8 @@ mod tests {
         };
         let out = compose_one(
             &mut compositor,
+            width,
+            height,
             ramp_frame(width, height),
             Crop {
                 x: 480,
@@ -1206,6 +2278,8 @@ mod tests {
         };
         let out = compose_one(
             &mut compositor,
+            width,
+            height,
             chroma_block_frame(width, height),
             Crop {
                 x: 480,
@@ -1248,15 +2322,14 @@ mod tests {
         let frame = CanvasFrame {
             rect: (8.0, 4.0, 48.0, 24.0),
             radius: 8,
-            background: [0.0, 0.0, 0.0],
-            plate: None,
+            ..plain_frame(width, height)
         };
         let Some(mut compositor) = compositor_for(width, height, frame) else {
             return;
         };
-        let out = compose_one(
-            &mut compositor,
-            flat_frame(width, height, 200),
+        let mut req = request(
+            width,
+            height,
             Crop {
                 x: 0,
                 y: 0,
@@ -1264,6 +2337,12 @@ mod tests {
                 height: 24,
             },
         );
+        req.dest = (8.0, 4.0, 48.0, 24.0);
+        req.radius = 8;
+        compositor
+            .submit(Frame::Compose(flat_frame(width, height, 200)), req)
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
         let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
         // Padding: black background (limited-range floor is 16).
         assert!(luma(0, 0) <= 20, "padding luma {}", luma(0, 0));
@@ -1286,6 +2365,179 @@ mod tests {
     }
 
     #[test]
+    fn side_by_side_dest_draws_the_full_picture_into_the_smaller_slot() {
+        let (width, height) = (64, 32);
+        let frame = CanvasFrame {
+            rect: (0.0, 0.0, 64.0, 32.0),
+            sbs_rect: Some((4.0, 4.0, 32.0, 16.0)),
+            sbs_windows: vec![(0, 1_000)],
+            ..plain_frame(width, height)
+        };
+        let Some(mut compositor) = compositor_for(width, height, frame) else {
+            return;
+        };
+        let mut req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 32,
+            },
+        );
+        req.side_by_side = true;
+        req.dest = (4.0, 4.0, 32.0, 16.0);
+        compositor
+            .submit(Frame::Compose(flat_frame(width, height, 200)), req)
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
+        let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
+        assert!(
+            (luma(20, 12) - 200).abs() <= 3,
+            "slot luma {}",
+            luma(20, 12)
+        );
+        assert!(luma(56, 24) <= 20, "outside slot luma {}", luma(56, 24));
+    }
+
+    #[test]
+    fn redact_mask_paints_only_its_rect() {
+        let (width, height) = (64, 32);
+        let spec = CompositorSpec {
+            masks: vec![MaskConfig {
+                rect: (16, 8, 16, 12),
+                mode: MaskMode::Redact([1.0, 0.0, 0.0]),
+            }],
+            ..Default::default()
+        };
+        let Some(mut compositor) =
+            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
+        else {
+            return;
+        };
+        let mut req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+        req.masks.push(0);
+        compositor
+            .submit(Frame::Compose(flat_frame(width, height, 200)), req)
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
+        let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
+        let u = |x: u32, y: u32| {
+            out[width as usize * height as usize
+                + (y as usize / 2) * width as usize
+                + (x as usize / 2) * 2] as i16
+        };
+        // Red inside the rect (BT.601 red is ~81 luma, U ~90).
+        assert!((luma(24, 14) - 81).abs() <= 12, "red luma {}", luma(24, 14));
+        assert!((u(24, 14) - 90).abs() <= 20, "red U {}", u(24, 14));
+        // Untouched outside.
+        assert!(
+            (luma(4, 14) - 200).abs() <= 3,
+            "outside luma {}",
+            luma(4, 14)
+        );
+    }
+
+    #[test]
+    fn pixelate_mask_blocks_the_ramp_into_equal_cells() {
+        let (width, height) = (64, 32);
+        let spec = CompositorSpec {
+            masks: vec![MaskConfig {
+                rect: (0, 0, 64, 32),
+                mode: MaskMode::Pixelate(8.0),
+            }],
+            ..Default::default()
+        };
+        let Some(mut compositor) =
+            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
+        else {
+            return;
+        };
+        let mut req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+        req.masks.push(0);
+        compositor
+            .submit(Frame::Compose(ramp_frame(width, height)), req)
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
+        let luma = |x: u32, y: u32| out[y as usize * width as usize + x as usize];
+        // Each 8-px cell samples the block centre, so a whole cell is flat.
+        assert_eq!(luma(0, 4), luma(7, 4), "pixelate cell is not flat");
+        assert_ne!(luma(4, 4), luma(20, 4), "pixelate cells did not move");
+    }
+
+    #[test]
+    fn cursor_plane_composites_at_its_per_frame_origin() {
+        let (width, height) = (64, 32);
+        let spec = CompositorSpec {
+            cursor: Some(PlaneInfo {
+                rect: (0, 0, 16, 16),
+            }),
+            ..Default::default()
+        };
+        let Some(mut compositor) =
+            Compositor::new(width, height, &plain_frame(width, height), &spec).ok()
+        else {
+            return;
+        };
+        // Opaque white tile, every plane byte at full value (white Y, neutral
+        // UV, opaque alpha).
+        let tile = 16u32;
+        let luma = (tile * tile) as usize;
+        let chroma = (tile as usize / 2) * (tile as usize / 2);
+        let mut data = vec![235u8; luma];
+        data.extend(std::iter::repeat_n(128u8, chroma * 2));
+        data.extend(std::iter::repeat_n(255u8, luma));
+        let mut req = request(
+            width,
+            height,
+            Crop {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+        req.cursor = Some(PlaneFrame {
+            data: std::sync::Arc::new(data),
+            dest: (32, 16),
+        });
+        compositor
+            .submit(Frame::Compose(flat_frame(width, height, 100)), req)
+            .expect("submit");
+        let out = compositor.drain().expect("drain").remove(0);
+        let luma_at = |x: u32, y: u32| out[y as usize * width as usize + x as usize] as i16;
+        assert!(
+            (luma_at(36, 20) - 235).abs() <= 3,
+            "cursor luma {}",
+            luma_at(36, 20)
+        );
+        assert!(
+            (luma_at(4, 4) - 100).abs() <= 3,
+            "background luma {}",
+            luma_at(4, 4)
+        );
+    }
+
+    #[test]
     fn ring_reuse_returns_every_frame_once_in_order() {
         let (width, height) = (64, 32);
         let Some(mut compositor) = compositor(width, height) else {
@@ -1297,20 +2549,16 @@ mod tests {
             width,
             height,
         };
-        // Flat luma per frame identifies it after the whole YUV round trip.
-        let flat = |value: u8| {
-            let luma = width as usize * height as usize;
-            let mut data = vec![128u8; nv12_len(width, height)];
-            data[..luma].fill(value);
-            Nv12Frame { data }
-        };
         let total = READBACK_RING * 3;
         let mut out = Vec::new();
         for index in 0..total {
             let value = 40 + index as u8 * 10;
             out.extend(
                 compositor
-                    .submit(Frame::Compose(flat(value)), crop)
+                    .submit(
+                        Frame::Compose(flat_frame(width, height, value)),
+                        request(width, height, crop),
+                    )
                     .expect("submit"),
             );
         }
@@ -1344,18 +2592,24 @@ mod tests {
         for _ in 0..READBACK_RING {
             ready.extend(
                 compositor
-                    .submit(Frame::Compose(ramp_frame(width, height)), crop)
+                    .submit(
+                        Frame::Compose(ramp_frame(width, height)),
+                        request(width, height, crop),
+                    )
                     .expect("submit"),
             );
         }
         ready.extend(
             compositor
-                .submit(Frame::Pass(vec![7; 16]), crop)
+                .submit(Frame::Pass(vec![7; 16]), request(width, height, crop))
                 .expect("bypass"),
         );
         ready.extend(
             compositor
-                .submit(Frame::Compose(ramp_frame(width, height)), crop)
+                .submit(
+                    Frame::Compose(ramp_frame(width, height)),
+                    request(width, height, crop),
+                )
                 .expect("submit"),
         );
         ready.extend(compositor.drain().expect("drain"));

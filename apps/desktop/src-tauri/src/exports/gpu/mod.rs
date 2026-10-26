@@ -5,10 +5,12 @@
 //! the feature gate that keeps unsupported plans on the compatibility path, and
 //! the decode → compose → encode pipeline itself.
 //!
-//! Milestone state: G0 (passthrough + zoom) is implemented. G1–G3 features
-//! (canvas frame/background, cursor, items, camera, masks, keystrokes, captions)
-//! are listed in [`plan_limitations`] and keep those plans on the FFmpeg
-//! renderer, which stays the authoritative output for every feature.
+//! Milestone state: G0–G3 are implemented. The GPU pass owns canvas framing,
+//! zoom, cursor/overlay items, camera and side-by-side layout, privacy masks and
+//! keystroke badges; the encode sidecar owns burned-in captions (libass),
+//! chapters, HEVC tagging and the license output cap. [`plan_limitations`]
+//! keeps structurally unsupported plans on the FFmpeg renderer, which stays the
+//! authoritative output and the fallback for every feature.
 
 mod compositor;
 mod decode;
@@ -27,9 +29,8 @@ use tracing::{info, warn};
 use super::camera::{self, ZoomTransformState};
 use super::encoding::ExportEncoder;
 use super::{
-    background_plate_unneeded, common_screen_source, parse_color_hex,
-    prepare_canvas_background_plate, safe_filter_color, video_screen_rect, CompositionShared,
-    CompositionWindow, ExportSettings, RenderOutcome, RenderPlan,
+    common_screen_source, CompositionShared, CompositionWindow, ExportSettings, RenderOutcome,
+    RenderPlan,
 };
 
 /// Which compositor renders an export.
@@ -111,10 +112,16 @@ pub(crate) fn resolve_renderer(
     }
 }
 
-/// Every reason this plan cannot render on the GPU compositor yet. An empty list
-/// means "G1-compatible": a canvas-sized screen plane with optional zoom and
-/// canvas framing (padding, background, rounded corners, shadow), and nothing
-/// that needs a per-frame overlay shader.
+/// Every reason this plan cannot render on the GPU compositor. An empty list
+/// means G3-compatible: canvas framing, zoom, cursor, overlay items, camera and
+/// side-by-side layout, privacy masks, keystroke badges, burned-in captions,
+/// chapters, HEVC and the license output cap all render on the GPU path.
+///
+/// The remaining exclusions are structural: animated containers (GIF/WebP),
+/// timeline gaps/coverage holes the decode pass cannot synthesise, mixed source
+/// dimensions, non-NV12 canvases, and the one ordering pair the hybrid pipeline
+/// cannot express (keystrokes must sit above captions, but captions run in the
+/// encode sidecar after the GPU raster).
 pub(crate) fn plan_limitations(
     plan: &RenderPlan,
     settings: &ExportSettings,
@@ -126,13 +133,13 @@ pub(crate) fn plan_limitations(
         return vec!["plan has no render canvas".into()];
     };
 
-    // Delivery format: NV12 into FFmpeg, so animated containers and HEVC
-    // tagging land in later milestones.
+    // Delivery format: the encode sidecar muxes MP4 and tags `hvc1`. Animated
+    // containers stay on FFmpeg by design (ADR 018).
     if settings.container != "mp4" {
         reasons.push(format!("container {} is not mp4", settings.container));
     }
-    if settings.codec != "h264" {
-        reasons.push(format!("codec {} is not h264", settings.codec));
+    if !matches!(settings.codec.as_str(), "h264" | "hevc") {
+        reasons.push(format!("codec {} is not h264/hevc", settings.codec));
     }
     if canvas.width % 4 != 0 || canvas.height % 2 != 0 {
         reasons.push(format!(
@@ -141,27 +148,20 @@ pub(crate) fn plan_limitations(
         ));
     }
 
-    // Overlay layers (G1/G2).
-    if !plan.cursor_effects.is_empty() {
-        reasons.push("cursor overlay".into());
-    }
-    if !plan.texts.is_empty() || !plan.annotations.is_empty() || !plan.images.is_empty() {
-        reasons.push("overlay items".into());
-    }
-    if plan.overlay_render_plan.is_some() {
-        reasons.push("overlay display list".into());
-    }
-    if !plan.overlays.is_empty() {
-        reasons.push("camera overlay / side-by-side layout".into());
-    }
-    if !plan.masks.is_empty() {
-        reasons.push("privacy masks".into());
-    }
-    if !plan.keystrokes.is_empty() {
-        reasons.push("keystroke overlay".into());
-    }
-    if !plan.captions.is_empty() && plan.caption_mode == "burn-in" {
-        reasons.push("burned-in captions".into());
+    // Keystroke badges are composited by the GPU before the encode sidecar's
+    // libass pass, but the compatibility graph draws them *above* captions.
+    // Keep the pair on the authoritative renderer rather than silently
+    // reordering layers.
+    let keystrokes_enabled = settings
+        .keystroke_overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.enabled);
+    if keystrokes_enabled
+        && !plan.keystrokes.is_empty()
+        && !plan.captions.is_empty()
+        && plan.caption_mode == "burn-in"
+    {
+        reasons.push("keystroke overlay with burned-in captions".into());
     }
 
     // Timeline coverage: a gap needs a solid-fill source, which the decode
@@ -266,6 +266,7 @@ pub(crate) fn render_timeline_on_gpu(
     on_progress: &(dyn Fn(f64) + Sync),
     resource_dir: Option<&Path>,
     shared: &CompositionShared,
+    output_cap: Option<super::ExportOutputCap>,
 ) -> Result<RenderOutcome> {
     let canvas = plan
         .canvas
@@ -274,10 +275,32 @@ pub(crate) fn render_timeline_on_gpu(
     let width = canvas.width;
     let height = canvas.height;
     let fps = canvas.fps.max(1);
+    let (out_width, out_height) = super::capped_output_dimensions(width, height, output_cap);
     let window = CompositionWindow::full(plan);
 
+    // Same input validation the compatibility renderer performs; catching a
+    // malformed camera/mask/caption here keeps a broken plan from producing a
+    // device-lost fallback instead of a precise error.
+    super::captions::validate_captions(&plan.captions)?;
+    for overlay in plan.overlays.iter().filter(|overlay| overlay.visible) {
+        super::validate_overlay(overlay, project_id, asset_paths, canvas)?;
+    }
+    for mask in plan.masks.iter().filter(|mask| mask.enabled) {
+        super::validate_mask(mask, project_id, asset_paths, canvas)?;
+    }
+
     let started = Instant::now();
-    let frame = canvas_frame(plan, canvas, project_id, asset_paths, resource_dir, shared)?;
+    let frame = canvas_frame(plan, canvas, asset_paths, resource_dir, shared)?;
+    let overlay = build_overlay_runtime(
+        plan,
+        project_id,
+        asset_paths,
+        settings,
+        canvas,
+        &frame,
+        shared,
+    )?;
+    let (spec, mask_schedules) = compositor_spec(plan, canvas, overlay.as_ref())?;
     let decode_plan = decode::plan(
         plan,
         project_id,
@@ -297,9 +320,37 @@ pub(crate) fn render_timeline_on_gpu(
         ));
     }
 
-    let mut compositor = compositor::Compositor::new(width, height, &frame)?;
+    let mut compositor = compositor::Compositor::new(width, height, &frame, &spec)?;
     let compositor_ready_ms = started.elapsed().as_millis() as u64;
     let compositor_ms = compositor_ready_ms - plan_ms;
+
+    // Burned-in captions stay in the encode sidecar's libass pass after the GPU
+    // raster, which is exactly the compatibility renderer's ordering.
+    let caption_dir = if plan.caption_mode == "burn-in" && !plan.captions.is_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "rf-gpu-captions-{}-{}",
+            project_id,
+            uuid::Uuid::new_v4()
+        ));
+        let script = super::captions::write_burn_in_assets(&dir, &plan.captions, width, height)?;
+        Some((dir, script))
+    } else {
+        None
+    };
+    let _caption_guard = caption_dir
+        .as_ref()
+        .map(|(dir, _)| super::TempExportDir(dir.clone()));
+    let caption_script = caption_dir.as_ref().map(|(_, script)| script.as_path());
+
+    let mut cameras = build_cameras(
+        ffmpeg_path,
+        plan,
+        project_id,
+        asset_paths,
+        shared,
+        canvas,
+        fps,
+    )?;
     let encode_process = encode::spawn(
         ffmpeg_path,
         output_path,
@@ -311,7 +362,10 @@ pub(crate) fn render_timeline_on_gpu(
         shared,
         width,
         height,
+        out_width,
+        out_height,
         fps,
+        caption_script,
     )?;
     let has_audio = encode_process.has_audio();
     let mut decoder = decode::DecodeProcess::spawn(ffmpeg_path, &decode_plan)?;
@@ -320,9 +374,12 @@ pub(crate) fn render_timeline_on_gpu(
         adapter = compositor.adapter_label(),
         width,
         height,
+        out_width,
+        out_height,
         fps,
         plan_ms,
         compositor_ms,
+        cameras = cameras.len(),
         sidecars_ms = started.elapsed().as_millis() as u64 - compositor_ready_ms,
         "gpu export: starting decode → compose → encode"
     );
@@ -383,6 +440,7 @@ pub(crate) fn render_timeline_on_gpu(
         let mut main_result: Result<()> = Ok(());
         let mut emitted = 0u64;
         let mut sent_frames = 0u64;
+        let mut overlay = overlay;
         while emitted < total_frames {
             if cancel.load(Ordering::Relaxed) {
                 main_result = Err(InternalError::Media("export cancelled".into()).into());
@@ -402,22 +460,106 @@ pub(crate) fn render_timeline_on_gpu(
                 canvas.padding,
                 output_ms,
             );
-            let compose_started = Instant::now();
-            // An identity-zoom frame only needs the GPU when the canvas frame
-            // itself has to be painted (background, padding or rounded corners).
-            let ready = if camera::zoom_transform_is_identity(&state, width, height)
+
+            // Generated plates: cursor tile, overlay items, keystroke badges.
+            let planes = match overlay.as_mut() {
+                Some(runtime) => {
+                    let OverlayRuntime { frame_plan, worker } = runtime;
+                    let (planes, _) = worker
+                        .render_planes(emitted, fps)
+                        .map_err(|error| gpu_error(&error))?;
+                    let cursor = planes.cursor.and_then(|data| {
+                        plane_frame(
+                            frame_plan,
+                            super::PlatePlane::Cursor,
+                            Arc::new(data),
+                            emitted,
+                        )
+                    });
+                    let items = planes.items.and_then(|data| {
+                        plane_frame(frame_plan, super::PlatePlane::Items, data, emitted)
+                    });
+                    let keys = planes.keys.and_then(|data| {
+                        plane_frame(frame_plan, super::PlatePlane::Keys, Arc::new(data), emitted)
+                    });
+                    (cursor, items, keys)
+                }
+                None => (None, None, None),
+            };
+
+            let mut camera_frames = Vec::new();
+            for camera in &mut cameras {
+                if camera.done {
+                    continue;
+                }
+                if output_ms >= camera.end_ms as f64 {
+                    camera.process.kill();
+                    camera.done = true;
+                    continue;
+                }
+                if output_ms >= camera.start_ms as f64 {
+                    match camera.process.read_frame() {
+                        Ok(Some(data)) => camera_frames.push(compositor::CameraFrame {
+                            index: camera.index,
+                            data,
+                        }),
+                        Ok(None) => camera.done = true,
+                        Err(error) => {
+                            main_result = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+            if main_result.is_err() {
+                break;
+            }
+
+            let masks: Vec<usize> = mask_schedules
+                .iter()
+                .enumerate()
+                .filter(|(_, (start, end))| output_ms >= *start as f64 && output_ms < *end as f64)
+                .map(|(index, _)| index)
+                .collect();
+
+            let dest = frame.dest_rect(output_ms);
+            let side_by_side = frame.side_by_side_at(output_ms);
+            let has_layers = planes.0.is_some()
+                || planes.1.is_some()
+                || planes.2.is_some()
+                || !camera_frames.is_empty();
+            // Identity-zoom frames never reach a shader unless a layer, mask or
+            // canvas treatment needs one.
+            let bypass = camera::zoom_transform_is_identity(&state, width, height)
                 && frame.is_plain(width, height)
-            {
+                && !has_layers
+                && masks.is_empty()
+                && dest == frame.rect;
+
+            let compose_started = Instant::now();
+            let screen = if bypass {
                 passthrough_frames += 1;
-                compositor.submit(compositor::Frame::Pass(decoded), FULL_FRAME)
+                compositor::Frame::Pass(decoded)
             } else {
                 composed_frames += 1;
-                let crop = zoom_crop(&state, width, height, frame.rect);
-                compositor.submit(
-                    compositor::Frame::Compose(compositor::Nv12Frame { data: decoded }),
-                    crop,
-                )
+                compositor::Frame::Compose(compositor::Nv12Frame { data: decoded })
             };
+            let request = compositor::FrameRequest {
+                crop: if bypass {
+                    FULL_FRAME
+                } else {
+                    zoom_crop(&state, width, height, frame.rect)
+                },
+                dest,
+                radius: frame.radius,
+                side_by_side,
+                cursor: planes.0,
+                items: planes.1,
+                keys: planes.2,
+                cameras: camera_frames,
+                masks,
+            };
+            let ready = compositor.submit(screen, request);
             compose_time += compose_started.elapsed();
             match ready {
                 Ok(Some(bytes)) => {
@@ -457,6 +599,9 @@ pub(crate) fn render_timeline_on_gpu(
                 }
                 Err(error) => main_result = Err(error),
             }
+        }
+        for camera in &mut cameras {
+            camera.process.kill();
         }
         drop(encode_tx);
         drop(decode_rx);
@@ -504,23 +649,269 @@ pub(crate) fn render_timeline_on_gpu(
     Ok(RenderOutcome { has_audio })
 }
 
-/// Where the screen sits on the canvas, how round its corners are, and the
-/// background behind it. Mirrors the compatibility renderer's canvas framing so
-/// the two paths frame a padded/rounded/shadowed canvas identically.
+/// Generated-plate runtime: the prepared plan owns the rects/origins while the
+/// worker owns the per-frame raster state.
+struct OverlayRuntime {
+    frame_plan: super::CursorFramePlan,
+    worker: super::OverlayWorkerState,
+}
+
+/// One camera overlay's decode process and absolute display window.
+struct CameraRuntime {
+    index: usize,
+    start_ms: u64,
+    end_ms: u64,
+    process: decode::DecodeProcess,
+    done: bool,
+}
+
+impl Drop for CameraRuntime {
+    fn drop(&mut self) {
+        // Any early return (cancel, sidecar failure, a later setup error) must
+        // reap the camera decoder instead of leaving it blocked on its pipe.
+        self.process.kill();
+    }
+}
+
+fn build_overlay_runtime(
+    plan: &RenderPlan,
+    project_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    settings: &ExportSettings,
+    canvas: &super::cursor::RenderCanvas,
+    frame: &compositor::CanvasFrame,
+    shared: &CompositionShared,
+) -> Result<Option<OverlayRuntime>> {
+    let has_cursor = plan
+        .cursor_effects
+        .iter()
+        .any(|effect| effect.enabled && effect.end_ms > effect.start_ms);
+    let has_items = plan.overlay_render_plan.is_some()
+        || !plan.annotations.is_empty()
+        || !plan.texts.is_empty()
+        || !plan.images.is_empty();
+    let has_keys = settings
+        .keystroke_overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.enabled)
+        && !plan.keystrokes.is_empty();
+    if !has_cursor && !has_items && !has_keys {
+        return Ok(None);
+    }
+    let screen_windows = side_by_side_screen_windows(plan, frame);
+    let renderers = super::build_cursor_renderers(
+        plan,
+        project_id,
+        asset_paths,
+        canvas,
+        frame.rect,
+        screen_windows,
+        shared,
+    )?;
+    let frame_count = plan
+        .duration_ms
+        .saturating_mul(canvas.fps.max(1) as u64)
+        .saturating_add(999)
+        .checked_div(1000)
+        .unwrap_or(1)
+        .max(1);
+    let frame_plan = super::prepare_cursor_frame_plan(
+        canvas,
+        renderers,
+        plan,
+        settings,
+        asset_paths,
+        frame.rect,
+        shared,
+        0,
+        frame_count,
+    )?;
+    let cursor_rect = frame_plan.plane_rect(super::PlatePlane::Cursor);
+    let items_rect = frame_plan.plane_rect(super::PlatePlane::Items);
+    let keys_rect = frame_plan.plane_rect(super::PlatePlane::Keys);
+    let worker = super::OverlayWorkerState::new(
+        frame_plan.renderers.clone(),
+        frame_plan.overlay_engine.clone(),
+        frame_plan.keystroke_renderer.clone(),
+        canvas.width,
+        canvas.height,
+        Arc::clone(&frame_plan.cursor_origins),
+        0,
+        cursor_rect,
+        items_rect,
+        keys_rect,
+    )
+    .map_err(|error| gpu_error(&error))?;
+    Ok(Some(OverlayRuntime { frame_plan, worker }))
+}
+
+/// Screen-rect windows the cursor renderer maps through when the side-by-side
+/// layout changes mid-timeline. `None` when the slot is constant (or absent).
+fn side_by_side_screen_windows(
+    plan: &RenderPlan,
+    frame: &compositor::CanvasFrame,
+) -> Option<Vec<super::cursor::ScreenRectWindow>> {
+    let sbs = frame.sbs_rect?;
+    let full = frame.rect;
+    let mut windows = Vec::new();
+    let mut cursor = 0u64;
+    for &(start, end) in &frame.sbs_windows {
+        if start > cursor {
+            windows.push(super::cursor::ScreenRectWindow {
+                start_ms: cursor,
+                end_ms: start,
+                rect: full,
+            });
+        }
+        windows.push(super::cursor::ScreenRectWindow {
+            start_ms: start,
+            end_ms: end,
+            rect: sbs,
+        });
+        cursor = end;
+    }
+    if cursor < plan.duration_ms {
+        windows.push(super::cursor::ScreenRectWindow {
+            start_ms: cursor,
+            end_ms: plan.duration_ms,
+            rect: full,
+        });
+    }
+    Some(windows)
+}
+
+fn plane_frame(
+    plan: &super::CursorFramePlan,
+    kind: super::PlatePlane,
+    data: Arc<Vec<u8>>,
+    emitted: u64,
+) -> Option<compositor::PlaneFrame> {
+    let (x, y, _, _) = plan.plane_rect(kind)?;
+    let (dest_x, dest_y) = if kind == super::PlatePlane::Cursor {
+        plan.cursor_origins
+            .get(emitted as usize)
+            .copied()
+            .unwrap_or((x as i32, y as i32))
+    } else {
+        (x as i32, y as i32)
+    };
+    Some(compositor::PlaneFrame {
+        data,
+        dest: (dest_x.max(0) as u32, dest_y.max(0) as u32),
+    })
+}
+
+fn build_cameras(
+    ffmpeg_path: &str,
+    plan: &RenderPlan,
+    project_id: &str,
+    asset_paths: &HashMap<String, PathBuf>,
+    shared: &CompositionShared,
+    canvas: &super::cursor::RenderCanvas,
+    fps: u32,
+) -> Result<Vec<CameraRuntime>> {
+    let mut cameras = Vec::new();
+    for overlay in plan.overlays.iter().filter(|overlay| {
+        overlay.visible
+            && overlay.output_end_ms > overlay.output_start_ms
+            && overlay.output_start_ms < plan.duration_ms
+            && overlay.output_end_ms > 0
+    }) {
+        if !overlay.speed.is_finite() || overlay.speed <= 0.0 {
+            return Err(InternalError::Media("camera overlay speed is invalid".into()).into());
+        }
+        let video_delay_s = asset_paths
+            .get(&overlay.asset_id)
+            .map(|path| shared.probe.video_start_delay_s(path, &overlay.asset_id))
+            .unwrap_or(0.0);
+        let Some(clamp) = super::camera_window_clamp(
+            overlay.output_start_ms,
+            overlay.output_end_ms,
+            overlay.source_in_ms,
+            overlay.source_out_ms,
+            overlay.speed,
+            canvas.fps as f64,
+            0.0,
+            plan.duration_ms as f64,
+            video_delay_s,
+        ) else {
+            continue;
+        };
+        let width = ((overlay.width.round() as u32) / 2 * 2).max(2);
+        let height = ((overlay.height.round() as u32) / 2 * 2).max(2);
+        let camera_plan = decode::plan_camera(
+            project_id,
+            overlay,
+            asset_paths,
+            shared,
+            &clamp,
+            width,
+            height,
+            fps,
+        )?;
+        let process = decode::DecodeProcess::spawn_camera(ffmpeg_path, &camera_plan)?;
+        // Index the compositor's camera inventory, not the plan overlay list:
+        // hidden/zero-length overlays never reach either.
+        cameras.push(CameraRuntime {
+            index: cameras.len(),
+            start_ms: overlay.output_start_ms,
+            end_ms: overlay.output_end_ms,
+            process,
+            done: false,
+        });
+    }
+    Ok(cameras)
+}
+
+/// Where the screen sits on the canvas, the side-by-side slot, how round its
+/// corners are, and the background behind it. Mirrors the compatibility
+/// renderer's canvas framing so the two paths frame a padded/rounded/shadowed
+/// canvas identically.
 fn canvas_frame(
     plan: &RenderPlan,
     canvas: &super::cursor::RenderCanvas,
-    _project_id: &str,
     asset_paths: &HashMap<String, PathBuf>,
     resource_dir: Option<&Path>,
     shared: &CompositionShared,
 ) -> Result<compositor::CanvasFrame> {
     let source = common_screen_source(&plan.segments, asset_paths, &shared.probe)
         .ok_or_else(|| gpu_error("segments have mixed or unknown source dimensions"))?;
-    let rect = video_screen_rect(canvas, Some(source), false);
+    let sbs_windows = super::merge_ms_windows(
+        plan.overlays
+            .iter()
+            .filter(|overlay| super::overlay_is_side_by_side(overlay, canvas))
+            .map(|overlay| (overlay.output_start_ms, overlay.output_end_ms))
+            .collect(),
+    );
+    let uniform_sbs =
+        sbs_windows.len() == 1 && sbs_windows[0].0 == 0 && sbs_windows[0].1 >= plan.duration_ms;
+    let layout_varies = !sbs_windows.is_empty() && !uniform_sbs;
+    // A uniform side-by-side layout decodes straight into the smaller slot —
+    // one resample, exactly like the compatibility graph. A varying layout
+    // decodes into the full rect and the compositor draws the slot per frame.
+    let (rect, sbs_rect, sbs_windows) = if uniform_sbs {
+        (
+            super::video_screen_rect(canvas, Some(source), true),
+            None,
+            Vec::new(),
+        )
+    } else if layout_varies {
+        (
+            super::video_screen_rect(canvas, Some(source), false),
+            Some(super::video_screen_rect(canvas, Some(source), true)),
+            sbs_windows,
+        )
+    } else {
+        (
+            super::video_screen_rect(canvas, Some(source), false),
+            None,
+            Vec::new(),
+        )
+    };
+    let varying = sbs_rect.is_some();
     // Same rule as the FFmpeg path: skip the plate when nothing behind the
     // screen can ever be visible.
-    let plate = if background_plate_unneeded(plan, canvas, rect, false, false) {
+    let plate = if super::background_plate_unneeded(plan, canvas, rect, uniform_sbs, varying) {
         None
     } else {
         let key = format!(
@@ -536,16 +927,192 @@ fn canvas_frame(
         );
         shared.plates.get_or_create(&key, || {
             Ok(
-                prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
+                super::prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
                     .map(|path| (path, true)),
             )
         })?
     };
+    // A second plate pins the canvas shadow to the smaller slot inside the
+    // side-by-side windows (the background art itself is canvas-wide).
+    let sbs_plate = match (varying, sbs_rect, canvas.shadow) {
+        (true, Some(rect), true) => {
+            let key = format!(
+                "gpu_bg_sbs:{}x{}:{}:{}:{}:{}",
+                canvas.width,
+                canvas.height,
+                rect.0.round() as i64,
+                rect.1.round() as i64,
+                rect.2.round() as i64,
+                rect.3.round() as i64
+            );
+            shared.plates.get_or_create(&key, || {
+                Ok(
+                    super::prepare_canvas_background_plate(canvas, rect, asset_paths, resource_dir)
+                        .map(|path| (path, true)),
+                )
+            })?
+        }
+        _ => None,
+    };
     Ok(compositor::CanvasFrame {
         rect,
+        sbs_rect,
+        sbs_windows,
         radius: canvas.border_radius,
         background: solid_background(&canvas.background),
         plate,
+        sbs_plate,
+    })
+}
+
+/// Per-export GPU layer inventory plus the absolute windows each privacy mask
+/// is active in.
+fn compositor_spec(
+    plan: &RenderPlan,
+    canvas: &super::cursor::RenderCanvas,
+    overlay: Option<&OverlayRuntime>,
+) -> Result<(compositor::CompositorSpec, Vec<(u64, u64)>)> {
+    let mut spec = compositor::CompositorSpec::default();
+    if let Some(runtime) = overlay {
+        spec.cursor = runtime
+            .frame_plan
+            .plane_rect(super::PlatePlane::Cursor)
+            .map(|rect| compositor::PlaneInfo { rect });
+        spec.items = runtime
+            .frame_plan
+            .plane_rect(super::PlatePlane::Items)
+            .map(|rect| compositor::PlaneInfo { rect });
+        spec.keys = runtime
+            .frame_plan
+            .plane_rect(super::PlatePlane::Keys)
+            .map(|rect| compositor::PlaneInfo { rect });
+    }
+
+    for overlay in plan.overlays.iter().filter(|overlay| {
+        overlay.visible
+            && overlay.output_end_ms > overlay.output_start_ms
+            && overlay.output_start_ms < plan.duration_ms
+            && overlay.output_end_ms > 0
+    }) {
+        let width = ((overlay.width.round() as u32) / 2 * 2).max(2);
+        let height = ((overlay.height.round() as u32) / 2 * 2).max(2);
+        let x = (overlay.x.round() as i32) / 2 * 2;
+        let y = (overlay.y.round() as i32) / 2 * 2;
+        let shape = match overlay.shape.as_str() {
+            "circle" => compositor::Shape::Circle,
+            "rounded" => compositor::Shape::Rounded(
+                (overlay.width.min(overlay.height) * 0.12).max(4.0) as f32,
+            ),
+            _ => compositor::Shape::Rect,
+        };
+        let border = overlay
+            .border_width
+            .filter(|value| *value > 0.0)
+            .map(|border_width| {
+                super::generate_camera_border_png(
+                    width,
+                    height,
+                    &overlay.shape,
+                    border_width,
+                    overlay.border_color.as_deref(),
+                    overlay.border_opacity,
+                )
+                .map_err(InternalError::Media)
+            })
+            .transpose()?;
+        let shadow = if overlay.shadow_enabled.unwrap_or(false) {
+            super::generate_camera_shadow_plate_png(
+                canvas.width,
+                canvas.height,
+                x as f64,
+                y as f64,
+                width as f64,
+                height as f64,
+                &overlay.shape,
+                overlay.shadow_color.as_deref(),
+                overlay.shadow_blur,
+                overlay.shadow_offset_x,
+                overlay.shadow_offset_y,
+            )
+            .map(
+                |(path, origin_x, origin_y)| -> Result<(Vec<u8>, u32, u32)> {
+                    let bytes = std::fs::read(&path).map_err(|error| {
+                        InternalError::Storage(format!("read camera shadow: {error}"))
+                    })?;
+                    let _ = std::fs::remove_file(&path);
+                    Ok((bytes, origin_x, origin_y))
+                },
+            )
+            .transpose()?
+        } else {
+            None
+        };
+        spec.cameras.push(compositor::CameraConfig {
+            size: (width, height),
+            dest: (x.max(0) as u32, y.max(0) as u32),
+            shape,
+            opacity: overlay.opacity.clamp(0.0, 1.0) as f32,
+            border,
+            shadow,
+        });
+    }
+
+    let mut mask_schedules = Vec::new();
+    for mask in plan.masks.iter().filter(|mask| mask.enabled) {
+        if mask.end_ms <= mask.start_ms {
+            continue;
+        }
+        spec.masks.push(mask_config(mask, canvas)?);
+        mask_schedules.push((mask.start_ms, mask.end_ms));
+    }
+    Ok((spec, mask_schedules))
+}
+
+/// Even-snapped mask rect and mode, mirroring the compatibility graph's
+/// drawbox/blur/pixelate construction.
+fn mask_config(
+    mask: &super::RenderPlanMask,
+    canvas: &super::cursor::RenderCanvas,
+) -> Result<compositor::MaskConfig> {
+    let x_raw = mask
+        .rect
+        .x
+        .round()
+        .clamp(0.0, canvas.width.saturating_sub(1) as f64) as u32;
+    let y_raw = mask
+        .rect
+        .y
+        .round()
+        .clamp(0.0, canvas.height.saturating_sub(1) as f64) as u32;
+    let right_raw = (mask.rect.x + mask.rect.width)
+        .round()
+        .clamp(1.0, canvas.width as f64) as u32;
+    let bottom_raw = (mask.rect.y + mask.rect.height)
+        .round()
+        .clamp(1.0, canvas.height as f64) as u32;
+    let x = (x_raw / 2 * 2).min(canvas.width.saturating_sub(2));
+    let y = (y_raw / 2 * 2).min(canvas.height.saturating_sub(2));
+    let right = (right_raw.div_ceil(2) * 2).min(canvas.width);
+    let bottom = (bottom_raw.div_ceil(2) * 2).min(canvas.height);
+    let width = right.saturating_sub(x).max(2);
+    let height = bottom.saturating_sub(y).max(2);
+    let mode = match mask.mode.as_str() {
+        "redact" => compositor::MaskMode::Redact(solid_background(&mask.redact_color)),
+        "blur" => {
+            let radius = mask.blur_radius.clamp(1.0, 128.0);
+            let factor = if radius > 3.0 {
+                (radius / 4.0).round().clamp(2.0, 16.0) as f32
+            } else {
+                (radius.round() as u32).max(1) as f32
+            };
+            compositor::MaskMode::Blur(factor)
+        }
+        "pixelate" => compositor::MaskMode::Pixelate(mask.pixel_size.clamp(2, 128) as f32),
+        _ => return Err(InternalError::Media("mask mode is unsupported".into()).into()),
+    };
+    Ok(compositor::MaskConfig {
+        rect: (x, y, width, height),
+        mode,
     })
 }
 
@@ -571,7 +1138,7 @@ fn solid_background(value: &str) -> [f32; 3] {
             }
         }
     }
-    let color = parse_color_hex(&safe_filter_color(trimmed), 1.0);
+    let color = super::parse_color_hex(&super::safe_filter_color(trimmed), 1.0);
     [color.red(), color.green(), color.blue()]
 }
 
@@ -580,9 +1147,9 @@ fn solid_background(value: &str) -> [f32; 3] {
 /// cursor registration and the sampled region stay consistent between
 /// renderers; widths/heights are snapped to the NV12 chroma grid.
 ///
-/// `content` is the fitted screen rect on the canvas: the compatibility graph
-/// zooms the *fitted* stream (scale to `screen_w`×`screen_h`, then `zoompan`),
-/// so the crop space is the content rect, not the canvas.
+/// `content` is the decoded screen rect: the decode pass fits the screen into
+/// that rect, and the compatibility graph zooms the *fitted* stream (scale to
+/// `screen_w`×`screen_h`, then `zoompan`), so the crop space is that rect.
 fn zoom_crop(
     state: &ZoomTransformState,
     width: u32,
@@ -709,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_layers_keep_the_ffmpeg_renderer() {
+    fn g2_layers_are_gpu_compatible() {
         let mut plan = plan_with_canvas(gated_canvas());
         plan.cursor_effects
             .push(crate::exports::RenderPlanCursorEffect {
@@ -723,9 +1290,113 @@ mod tests {
                 smoothing: "strong".into(),
                 settings: serde_json::json!({}),
             });
-        assert!(limitations(&plan)
-            .iter()
-            .any(|reason| reason.contains("cursor")));
+        plan.masks.push(crate::exports::RenderPlanMask {
+            id: "mask".into(),
+            asset_id: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            mode: "blur".into(),
+            rect: crate::exports::RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            blur_radius: 12.0,
+            pixel_size: 8,
+            redact_color: "#000000".into(),
+            enabled: true,
+        });
+        plan.overlays.push(
+            serde_json::from_value(serde_json::json!({
+                "assetId": "webcam",
+                "sourceInMs": 0,
+                "sourceOutMs": 3_000,
+                "outputStartMs": 0,
+                "outputEndMs": 3_000,
+                "x": 1_400.0,
+                "y": 700.0,
+                "width": 400.0,
+                "height": 300.0,
+                "shape": "rounded",
+                "visible": true,
+            }))
+            .expect("camera overlay"),
+        );
+        plan.keystrokes
+            .push(crate::capture::keystrokes::KeystrokeEvent {
+                t_ms: 500,
+                key: "a".into(),
+                modifiers: Vec::new(),
+            });
+        assert!(limitations(&plan).is_empty(), "{:?}", limitations(&plan));
+    }
+
+    #[test]
+    fn g3_captions_chapters_and_hevc_are_gpu_compatible() {
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.captions.push(crate::exports::RenderPlanCaption {
+            id: "caption".into(),
+            text: "Hello".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            style: "default".into(),
+            placement: "bottom".into(),
+            safe_area_margin: 48,
+            layout: None,
+        });
+        plan.chapters.push(crate::exports::RenderPlanChapter {
+            id: "chapter".into(),
+            title: "Intro".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+        });
+        let mut export = settings();
+        export.codec = "hevc".into();
+        let shared = CompositionShared::new(None);
+        let assets: HashMap<String, PathBuf> = HashMap::new();
+        let reasons = plan_limitations(&plan, &export, &shared, &assets);
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    #[test]
+    fn keystrokes_with_captions_stay_on_the_ffmpeg_renderer() {
+        // The compatibility graph draws badges above captions; the hybrid GPU
+        // pipeline only composites them below the encode-side libass pass.
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.captions.push(crate::exports::RenderPlanCaption {
+            id: "caption".into(),
+            text: "Hello".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            style: "default".into(),
+            placement: "bottom".into(),
+            safe_area_margin: 48,
+            layout: None,
+        });
+        plan.keystrokes
+            .push(crate::capture::keystrokes::KeystrokeEvent {
+                t_ms: 500,
+                key: "a".into(),
+                modifiers: Vec::new(),
+            });
+        let mut export = settings();
+        export.keystroke_overlay = Some(
+            serde_json::from_value(serde_json::json!({
+                "enabled": true,
+            }))
+            .expect("keystroke overlay"),
+        );
+        let reasons = plan_limitations(
+            &plan,
+            &export,
+            &CompositionShared::new(None),
+            &HashMap::new(),
+        );
+        assert!(
+            reasons.iter().any(|reason| reason.contains("keystroke")),
+            "{reasons:?}"
+        );
     }
 
     #[test]
@@ -758,8 +1429,7 @@ mod tests {
         let plan = plan_with_canvas(canvas.clone());
         let shared = CompositionShared::new(None);
         let assets: HashMap<String, PathBuf> = HashMap::new();
-        let frame = canvas_frame(&plan, &canvas, "project-1", &assets, None, &shared)
-            .expect("canvas frame");
+        let frame = canvas_frame(&plan, &canvas, &assets, None, &shared).expect("canvas frame");
         // Content is 16:9 inside a 1080 - 2*48 square, vertically centred.
         assert!((frame.rect.2 - 984.0).abs() < 2.0, "{:?}", frame.rect);
         assert!((frame.rect.3 - 553.5).abs() < 2.0, "{:?}", frame.rect);
@@ -801,22 +1471,9 @@ mod tests {
     #[test]
     fn explicit_gpu_degrades_with_a_reason_when_the_plan_is_out_of_scope() {
         let mut plan = plan_with_canvas(gated_canvas());
-        plan.masks.push(crate::exports::RenderPlanMask {
-            id: "mask".into(),
-            asset_id: None,
-            start_ms: 0,
-            end_ms: 1_000,
-            mode: "blur".into(),
-            rect: crate::exports::RenderCropFloat {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-            blur_radius: 12.0,
-            pixel_size: 8,
-            redact_color: "#000000".into(),
-            enabled: true,
+        plan.gaps.push(crate::exports::RenderPlanGap {
+            start_ms: 1_000,
+            end_ms: 2_000,
         });
         let choice = resolve_renderer(
             "gpu",
@@ -826,7 +1483,458 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(choice.renderer, ExportRenderer::Compatibility);
-        assert!(choice.reason.unwrap_or_default().contains("masks"));
+        assert!(choice.reason.unwrap_or_default().contains("gap"));
+    }
+
+    #[test]
+    fn a_selected_range_plan_is_gpu_compatible() {
+        // Selected-range exports arrive as a zero-based plan with source
+        // offsets; the GPU pass renders that plan like any other.
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.duration_ms = 3_000;
+        plan.segments[0].source_in_ms = 10_000;
+        plan.segments[0].source_out_ms = 13_000;
+        assert!(limitations(&plan).is_empty());
+    }
+
+    #[test]
+    fn g2_g3_end_to_end_render_composites_camera_masks_and_captions() {
+        let Ok(ffmpeg) = crate::media::resolve_executable("ffmpeg") else {
+            return;
+        };
+        let Ok(ffprobe) = crate::media::resolve_executable("ffprobe") else {
+            return;
+        };
+        let ffmpeg = ffmpeg.to_string_lossy().to_string();
+        let shared = CompositionShared::new(Some(&ffprobe));
+        let dir = std::env::temp_dir().join(format!("rf-gpu-g2g3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let screen = dir.join("screen.mp4");
+        let camera = dir.join("camera.mp4");
+        let audio = dir.join("audio.m4a");
+        for (path, color) in [(&screen, "blue"), (&camera, "red")] {
+            let status = crate::process::create_command(&ffmpeg)
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=c={color}:s=320x240:r=10"),
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-an",
+                ])
+                .arg(path)
+                .status()
+                .expect("generate fixture");
+            assert!(status.success(), "fixture generation failed");
+        }
+        let status = crate::process::create_command(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&audio)
+            .output()
+            .expect("generate audio fixture");
+        assert!(status.status.success(), "audio fixture generation failed");
+
+        let mut canvas = gated_canvas();
+        canvas.width = 320;
+        canvas.height = 240;
+        canvas.fps = 10;
+        let mut plan = plan_with_canvas(canvas);
+        plan.duration_ms = 1_000;
+        plan.segments[0].asset_id = "screen".into();
+        plan.segments[0].source_out_ms = 1_000;
+        plan.segments[0].output_end_ms = 1_000;
+        plan.segments[0].source_width = Some(320);
+        plan.segments[0].source_height = Some(240);
+        plan.overlays.push(
+            serde_json::from_value(serde_json::json!({
+                "assetId": "camera",
+                "sourceInMs": 0,
+                "sourceOutMs": 1_000,
+                "outputStartMs": 0,
+                "outputEndMs": 1_000,
+                "x": 160.0,
+                "y": 120.0,
+                "width": 160.0,
+                "height": 120.0,
+                "shape": "rounded",
+                "visible": true,
+                "preset": "side-by-side",
+                "borderWidth": 4.0,
+                "borderColor": "#ffffff",
+                "borderOpacity": 1.0,
+                "shadowEnabled": true,
+                "shadowBlur": 12.0
+            }))
+            .expect("camera overlay"),
+        );
+        plan.masks.push(crate::exports::RenderPlanMask {
+            id: "mask".into(),
+            asset_id: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            mode: "redact".into(),
+            rect: crate::exports::RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 48.0,
+            },
+            blur_radius: 12.0,
+            pixel_size: 8,
+            redact_color: "#000000".into(),
+            enabled: true,
+        });
+        plan.captions.push(crate::exports::RenderPlanCaption {
+            id: "caption".into(),
+            text: "Hello".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            style: "default".into(),
+            placement: "bottom".into(),
+            safe_area_margin: 12,
+            layout: None,
+        });
+        plan.chapters.push(crate::exports::RenderPlanChapter {
+            id: "chapter".into(),
+            title: "Intro".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+        });
+        plan.audio = Some(crate::exports::RenderPlanAudio {
+            asset_id: "audio".into(),
+            stream_index: Some(0),
+            role: None,
+            muted: false,
+            volume: 1.0,
+            segments: vec![crate::exports::RenderSegment {
+                asset_id: "audio".into(),
+                stream_index: Some(0),
+                volume: None,
+                fade_in_ms: None,
+                fade_out_ms: None,
+                volume_keyframes: None,
+                audio_filter: None,
+                speed: 1.0,
+                source_in_ms: 0,
+                source_out_ms: 1_000,
+                output_start_ms: 0,
+                output_end_ms: 1_000,
+                source_width: None,
+                source_height: None,
+            }],
+        });
+
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("screen".to_string(), screen);
+        asset_paths.insert("camera".to_string(), camera);
+        asset_paths.insert("audio".to_string(), audio);
+
+        let mut export = settings();
+        export.codec = "h264".into();
+        export.caption_mode = "burn-in".into();
+        export.chapter_mode = "embed".into();
+        let choice = resolve_renderer("gpu", &plan, &export, &shared, &asset_paths);
+        assert_eq!(choice.renderer, ExportRenderer::Gpu, "{:?}", choice.reason);
+
+        let output = dir.join("out.mp4");
+        let result = render_timeline_on_gpu(
+            &ffmpeg,
+            &output,
+            &plan,
+            "gpu-g2g3",
+            &asset_paths,
+            &export,
+            ExportEncoder::Software,
+            Arc::new(AtomicBool::new(false)),
+            &|_| {},
+            None,
+            &shared,
+            None,
+        );
+        match result {
+            Ok(outcome) => {
+                assert!(outcome.has_audio);
+                super::super::validate_export_output_with_dims(
+                    &ffprobe,
+                    &output,
+                    &plan,
+                    &export,
+                    true,
+                    Some((320, 240)),
+                )
+                .expect("validated GPU deliverable");
+
+                // Layer order and the privacy mask, read back from the encode:
+                // blue screen, red camera bubble on top, black redact rect.
+                let frame = crate::process::create_command(&ffmpeg)
+                    .args(["-loglevel", "error", "-ss", "0.5", "-i"])
+                    .arg(&output)
+                    .args([
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "rgb24",
+                        "pipe:1",
+                    ])
+                    .output()
+                    .expect("decode one output frame");
+                assert!(frame.status.success(), "frame readback failed");
+                assert_eq!(frame.stdout.len(), 320 * 240 * 3);
+                let pixel = |x: usize, y: usize| {
+                    let offset = (y * 320 + x) * 3;
+                    (
+                        frame.stdout[offset],
+                        frame.stdout[offset + 1],
+                        frame.stdout[offset + 2],
+                    )
+                };
+                let (r, g, b) = pixel(200, 100);
+                assert!(b > 120 && b > r + 40, "screen pixel {r},{g},{b}");
+                let (r, g, b) = pixel(240, 180);
+                assert!(r > 120 && r > b + 40, "camera pixel {r},{g},{b}");
+                let (r, g, b) = pixel(16, 16);
+                assert!(r < 40 && g < 40 && b < 40, "mask pixel {r},{g},{b}");
+
+                // Burned-in captions are the encode sidecar's libass pass;
+                // white glyph pixels must exist in the lower third.
+                let white = (160..240)
+                    .flat_map(|y| (0..320).map(move |x| (x, y)))
+                    .filter(|(x, y)| {
+                        let (r, g, b) = pixel(*x, *y);
+                        r > 200 && g > 200 && b > 200
+                    })
+                    .count();
+                assert!(white > 10, "no caption glyph pixels ({white})");
+
+                // Chapters are embedded by the encode sidecar's ffmetadata
+                // input, not dropped on the floor.
+                let chapters = crate::process::create_command(&ffprobe)
+                    .args(["-v", "error", "-show_chapters", "-of", "csv=p=0"])
+                    .arg(&output)
+                    .output()
+                    .expect("ffprobe chapters");
+                assert!(
+                    String::from_utf8_lossy(&chapters.stdout).contains("Intro"),
+                    "chapter missing: {}",
+                    String::from_utf8_lossy(&chapters.stdout)
+                );
+
+                // HEVC and the license output cap ride the same pipeline.
+                let mut hevc = export.clone();
+                hevc.codec = "hevc".into();
+                let hevc_out = dir.join("out_hevc.mp4");
+                render_timeline_on_gpu(
+                    &ffmpeg,
+                    &hevc_out,
+                    &plan,
+                    "gpu-g2g3",
+                    &asset_paths,
+                    &hevc,
+                    ExportEncoder::Software,
+                    Arc::new(AtomicBool::new(false)),
+                    &|_| {},
+                    None,
+                    &shared,
+                    None,
+                )
+                .expect("HEVC GPU render");
+                super::super::validate_export_output_with_dims(
+                    &ffprobe,
+                    &hevc_out,
+                    &plan,
+                    &hevc,
+                    true,
+                    Some((320, 240)),
+                )
+                .expect("validated HEVC deliverable");
+
+                let capped_out = dir.join("out_capped.mp4");
+                render_timeline_on_gpu(
+                    &ffmpeg,
+                    &capped_out,
+                    &plan,
+                    "gpu-g2g3",
+                    &asset_paths,
+                    &export,
+                    ExportEncoder::Software,
+                    Arc::new(AtomicBool::new(false)),
+                    &|_| {},
+                    None,
+                    &shared,
+                    Some(super::super::ExportOutputCap {
+                        max_width: 160,
+                        max_height: 120,
+                    }),
+                )
+                .expect("capped GPU render");
+                super::super::validate_export_output_with_dims(
+                    &ffprobe,
+                    &capped_out,
+                    &plan,
+                    &export,
+                    true,
+                    Some((160, 120)),
+                )
+                .expect("validated capped deliverable");
+            }
+            Err(error) => {
+                let text = error.to_string();
+                if text.contains("no GPU adapter") || text.contains("software rasterizer") {
+                    // CI/headless machines skip the hardware leg.
+                    return;
+                }
+                panic!("GPU render failed: {error}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn g2_varying_side_by_side_windows_switch_the_screen_rect() {
+        let Ok(ffmpeg) = crate::media::resolve_executable("ffmpeg") else {
+            return;
+        };
+        let Ok(ffprobe) = crate::media::resolve_executable("ffprobe") else {
+            return;
+        };
+        let ffmpeg = ffmpeg.to_string_lossy().to_string();
+        let shared = CompositionShared::new(Some(&ffprobe));
+        let dir = std::env::temp_dir().join(format!("rf-gpu-sbs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let screen = dir.join("screen.mp4");
+        let camera = dir.join("camera.mp4");
+        for (path, color) in [(&screen, "blue"), (&camera, "red")] {
+            let status = crate::process::create_command(&ffmpeg)
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=c={color}:s=320x240:r=10"),
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-an",
+                ])
+                .arg(path)
+                .status()
+                .expect("generate fixture");
+            assert!(status.success(), "fixture generation failed");
+        }
+
+        let mut canvas = gated_canvas();
+        canvas.width = 320;
+        canvas.height = 240;
+        canvas.fps = 10;
+        let mut plan = plan_with_canvas(canvas);
+        plan.duration_ms = 1_000;
+        plan.segments[0].asset_id = "screen".into();
+        plan.segments[0].source_out_ms = 1_000;
+        plan.segments[0].output_end_ms = 1_000;
+        plan.segments[0].source_width = Some(320);
+        plan.segments[0].source_height = Some(240);
+        // The camera slot starts halfway through: before it the screen fills
+        // the canvas, after it the screen shrinks to the side-by-side rect.
+        plan.overlays.push(
+            serde_json::from_value(serde_json::json!({
+                "assetId": "camera",
+                "sourceInMs": 500,
+                "sourceOutMs": 1_000,
+                "outputStartMs": 500,
+                "outputEndMs": 1_000,
+                "x": 0.0,
+                "y": 120.0,
+                "width": 160.0,
+                "height": 120.0,
+                "shape": "rectangle",
+                "visible": true,
+                "preset": "side-by-side"
+            }))
+            .expect("camera overlay"),
+        );
+        let mut asset_paths = HashMap::new();
+        asset_paths.insert("screen".to_string(), screen);
+        asset_paths.insert("camera".to_string(), camera);
+        let export = settings();
+        assert_eq!(
+            resolve_renderer("gpu", &plan, &export, &shared, &asset_paths).renderer,
+            ExportRenderer::Gpu
+        );
+
+        let output = dir.join("out.mp4");
+        let result = render_timeline_on_gpu(
+            &ffmpeg,
+            &output,
+            &plan,
+            "gpu-sbs",
+            &asset_paths,
+            &export,
+            ExportEncoder::Software,
+            Arc::new(AtomicBool::new(false)),
+            &|_| {},
+            None,
+            &shared,
+            None,
+        );
+        let Err(error) = result else {
+            let frame_at = |seconds: &str| {
+                let output = crate::process::create_command(&ffmpeg)
+                    .args(["-loglevel", "error", "-ss", seconds, "-i"])
+                    .arg(&output)
+                    .args([
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "rgb24",
+                        "pipe:1",
+                    ])
+                    .output()
+                    .expect("decode frame");
+                assert!(output.status.success());
+                output.stdout
+            };
+            let pixel = |data: &[u8], x: usize, y: usize| {
+                let offset = (y * 320 + x) * 3;
+                (data[offset], data[offset + 1], data[offset + 2])
+            };
+            let early = frame_at("0.2");
+            let (r, g, b) = pixel(&early, 300, 20);
+            assert!(b > 120 && b > r + 40, "full-screen pixel {r},{g},{b}");
+            let late = frame_at("0.8");
+            let (r, g, b) = pixel(&late, 200, 100);
+            assert!(b > 120 && b > r + 40, "slot pixel {r},{g},{b}");
+            let (r, g, b) = pixel(&late, 300, 20);
+            assert!(r < 40 && g < 40 && b < 40, "outside-slot pixel {r},{g},{b}");
+            let (r, g, b) = pixel(&late, 80, 180);
+            assert!(r > 120 && r > b + 40, "camera pixel {r},{g},{b}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let text = error.to_string();
+        if !text.contains("no GPU adapter") && !text.contains("software rasterizer") {
+            panic!("GPU render failed: {error}");
+        }
     }
 
     #[test]
