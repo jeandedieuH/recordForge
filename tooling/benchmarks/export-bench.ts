@@ -14,6 +14,11 @@
  *   --workers a,b,c  RECORDFORGE_EXPORT_CHUNK_WORKERS overrides (chunked only)
  *   --filter <str>   run only specs whose name contains <str>
  *   --no-build       skip the release-binary build check
+ *   --require-gpu    fail when a spec that asks for `renderer: "gpu"` did not
+ *                    actually render on the GPU compositor (a silently gated
+ *                    plan would otherwise look like a valid measurement). The
+ *                    synthetic `spec_fallback_*` specs are exempt: they exist to
+ *                    prove the automatic fallback still renders correctly.
  *   --out <dir>      where to write logs + results JSON (default: spec dir)
  *   --scratch <dir>  redirect each run's output mp4 + rewritten spec here
  *                    (default: <TEMP>/rf-bench — keeps exports off a full disk)
@@ -34,6 +39,7 @@ interface BenchArgs {
   workers: number[]
   filter?: string
   noBuild: boolean
+  requireGpu: boolean
   outDir?: string
   scratchDir: string
   reparseDir?: string
@@ -45,6 +51,7 @@ function parseArgs(argv: string[]): BenchArgs {
     repeats: 1,
     workers: [],
     noBuild: false,
+    requireGpu: false,
     scratchDir: join(process.env.TEMP ?? "/tmp", "rf-bench"),
   }
   for (let i = 0; i < argv.length; i++) {
@@ -63,6 +70,9 @@ function parseArgs(argv: string[]): BenchArgs {
         break
       case "--no-build":
         args.noBuild = true
+        break
+      case "--require-gpu":
+        args.requireGpu = true
         break
       case "--out":
         args.outDir = resolve(argv[++i])
@@ -83,7 +93,7 @@ function parseArgs(argv: string[]): BenchArgs {
   }
   if (!args.input && !args.reparseDir) {
     console.error(
-      "usage: export-bench.ts <spec.json|dir> [--repeats N] [--workers a,b,c] [--filter str] [--no-build] [--out dir] [--scratch dir]",
+      "usage: export-bench.ts <spec.json|dir> [--repeats N] [--workers a,b,c] [--filter str] [--no-build] [--require-gpu] [--out dir] [--scratch dir]",
     )
     process.exit(2)
   }
@@ -164,6 +174,21 @@ interface FfmpegPass {
   ffmpegSpeed?: string
 }
 
+/** `gpu export: finished` — the GPU compositor's own stage spans. */
+interface GpuRun {
+  setupMs?: number
+  pipelineMs?: number
+  composeMs?: number
+  decodeWaitMs?: number
+  encodeWaitMs?: number
+  frames?: number
+  composed?: number
+  passthrough?: number
+  realtimeX?: number
+  planMs?: number
+  compositorMs?: number
+}
+
 interface RunMetrics {
   spec: string
   label: string
@@ -175,6 +200,7 @@ interface RunMetrics {
   chunkElapsedMs: number[]
   plateFeeds: PlateFeed[]
   passes: FfmpegPass[]
+  gpu?: GpuRun
   muxMs?: number
   compositionMs?: number
   validateMs?: number
@@ -206,6 +232,32 @@ function parseLog(stderr: string): Omit<RunMetrics, "spec" | "label" | "wallMs" 
   for (const raw of stderr.split(/\r?\n/)) {
     // tracing fmt wraps field names/values in ANSI styles; strip first.
     const line = raw.replace(/\x1b\[[0-9;]*m/g, "")
+    // The GPU finish line's message is `gpu export: finished`, so the generic
+    // "export: " marker below would cut off the `gpu ` prefix.
+    if (line.includes("gpu export: starting")) {
+      const fields = parseFields(line)
+      const gpu = (metrics.gpu ??= {})
+      gpu.planMs = num(fields, "plan_ms")
+      gpu.compositorMs = num(fields, "compositor_ms")
+      continue
+    }
+    if (line.includes("gpu export: finished")) {
+      const fields = parseFields(line)
+      metrics.gpu = {
+        setupMs: num(fields, "setup_ms"),
+        pipelineMs: num(fields, "pipeline_ms"),
+        composeMs: num(fields, "compose_ms"),
+        decodeWaitMs: num(fields, "decode_wait_ms"),
+        encodeWaitMs: num(fields, "encode_wait_ms"),
+        frames: num(fields, "frames"),
+        composed: num(fields, "composed"),
+        passthrough: num(fields, "passthrough"),
+        realtimeX: num(fields, "realtime_x"),
+        planMs: num(fields, "plan_ms"),
+        compositorMs: num(fields, "compositor_ms"),
+      }
+      continue
+    }
     const marker = line.indexOf("export: ")
     if (marker < 0) continue
     const rest = line.slice(marker)
@@ -260,6 +312,7 @@ interface RunConfig {
 
 const results: RunMetrics[] = []
 const summaryRows: string[] = []
+const gpuGateFailures: string[] = []
 
 if (args.reparseDir) {
   // bench-<specName>-<label>.log — the tag may itself contain dashes; the spec
@@ -276,7 +329,11 @@ if (args.reparseDir) {
 } else {
   for (const specPath of specPaths) {
     const specName = basename(specPath, ".json")
-    const spec = JSON.parse(readFileSync(specPath, "utf8")) as { forceSinglePass?: boolean }
+    const spec = JSON.parse(readFileSync(specPath, "utf8")) as {
+      forceSinglePass?: boolean
+      settings?: { renderer?: string }
+    }
+    const expectsGpu = spec.settings?.renderer === "gpu" && !specName.includes("fallback")
     const configs: RunConfig[] = [{ label: "auto", env: {} }]
     if (!spec.forceSinglePass) {
       for (const workers of args.workers) {
@@ -319,6 +376,9 @@ if (args.reparseDir) {
           ...parsed,
         }
         results.push(metrics)
+        if (args.requireGpu && expectsGpu && run.status === 0 && !metrics.gpu) {
+          gpuGateFailures.push(`${specName} (${config.label})`)
+        }
         console.log(
           run.status === 0
             ? `${(wallMs / 1000).toFixed(1)}s wall, compose=${metrics.compositionMs ?? "?"}ms`
@@ -390,10 +450,39 @@ for (const metrics of results) {
   )
 }
 
+// --- GPU stage table ---------------------------------------------------------
+// Only runs that actually rendered on the wgpu compositor carry these spans;
+// the compatibility fallback leaves them empty.
+
+const gpuRuns = results.filter((metrics) => metrics.gpu)
+summaryRows.push("", "## GPU compositor stages", "")
+if (gpuRuns.length > 0) {
+  summaryRows.push(
+    "| spec | run | setup ms | plan ms | pipeline ms | compose ms | decode wait ms | encode wait ms | composed | passthrough | realtime x |",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
+  )
+  for (const metrics of [...gpuRuns].sort((a, b) =>
+    `${a.spec}|${a.label}`.localeCompare(`${b.spec}|${b.label}`),
+  )) {
+    const gpu = metrics.gpu ?? {}
+    const fmt = (value: number | undefined) => (value === undefined ? "-" : `${Math.round(value)}`)
+    summaryRows.push(
+      `| ${metrics.spec} | ${metrics.label} | ${fmt(gpu.setupMs)} | ${fmt(gpu.planMs)} | ` +
+        `${fmt(gpu.pipelineMs)} | ${fmt(gpu.composeMs)} | ${fmt(gpu.decodeWaitMs)} | ` +
+        `${fmt(gpu.encodeWaitMs)} | ${gpu.composed ?? "-"} | ${gpu.passthrough ?? "-"} | ` +
+        `${gpu.realtimeX === undefined ? "-" : `${gpu.realtimeX.toFixed(2)}x`} |`,
+    )
+  }
+} else {
+  summaryRows.push("_no run used the GPU compositor_")
+}
+
 // --- ablation report --------------------------------------------------------
-// spec_abl-<variant>_chunked[_<enc>].json runs measure each feature's marginal
-// cost. The baseline is `plain` within the same encoder suffix; radius and
-// shadow also diff against `padding` since they build on it.
+// spec_abl-<variant>_chunked[_<enc>][_gpu].json runs measure each feature's
+// marginal cost. The baseline is `plain` within the same encoder + renderer
+// suffix; radius and shadow also diff against `padding` since they build on it.
+// The per-feature table lines the two renderers up for the same plan, which is
+// the G4 parity-suite companion measurement.
 
 const ABLATION_ORDER = [
   "plain",
@@ -403,55 +492,152 @@ const ABLATION_ORDER = [
   "zoom",
   "cursor",
   "items",
+  "masks",
+  "keys",
   "captions",
   "camera",
 ]
 
-function ablationKey(spec: string): { variant: string; enc: string } | undefined {
-  const match = /^spec_abl-([a-z]+)_chunked(?:_([a-z0-9]+))?$/.exec(spec)
-  if (!match) return undefined
-  return { variant: match[1], enc: match[2] ?? "" }
+const KNOWN_ENCODERS = new Set([
+  "software",
+  "auto",
+  "nvenc",
+  "qsv",
+  "amf",
+  "mf",
+  "videotoolbox",
+  "vaapi",
+])
+
+interface AblationKey {
+  variant: string
+  encoder: string
+  renderer: string
 }
 
-const ablationWalls = new Map<string, Map<string, number>>()
+function ablationKey(spec: string): AblationKey | undefined {
+  const match = /^spec_abl-([a-z]+)_chunked((?:_[a-z0-9]+)*)$/.exec(spec)
+  if (!match) return undefined
+  const tokens = match[2].split("_").filter(Boolean)
+  const renderer = tokens.includes("gpu") ? "gpu" : "compatibility"
+  const encoder = tokens.find((token) => KNOWN_ENCODERS.has(token)) ?? "software"
+  return { variant: match[1], encoder, renderer }
+}
+
+interface AblationStats {
+  walls: number[]
+  /** Compatibility: the FFmpeg composition pass wall. GPU: the compose loop. */
+  composeMs: number[]
+  gpuComposeMs: number[]
+}
+
+const ablationStats = new Map<string, Map<string, AblationStats>>()
 for (const metrics of results) {
   const key = ablationKey(metrics.spec)
   if (!key || metrics.wallMs <= 0) continue
-  const walls = results
-    .filter((run) => run.spec === metrics.spec && run.wallMs > 0)
-    .map((run) => run.wallMs)
-  if (!ablationWalls.has(key.enc)) ablationWalls.set(key.enc, new Map())
-  ablationWalls.get(key.enc)?.set(key.variant, median(walls))
+  const groupKey = `${key.encoder}|${key.renderer}`
+  if (!ablationStats.has(groupKey)) ablationStats.set(groupKey, new Map())
+  const variants = ablationStats.get(groupKey)
+  if (!variants) continue
+  if (!variants.has(key.variant)) {
+    variants.set(key.variant, { walls: [], composeMs: [], gpuComposeMs: [] })
+  }
+  const stats = variants.get(key.variant)
+  if (!stats) continue
+  stats.walls.push(metrics.wallMs)
+  const passMs = metrics.passes
+    .filter((pass) => pass.stage?.includes("composition"))
+    .reduce((sum, pass) => sum + (pass.elapsedMs ?? 0), 0)
+  if (passMs > 0) stats.composeMs.push(passMs)
+  else if (metrics.compositionMs !== undefined) stats.composeMs.push(metrics.compositionMs)
+  if (metrics.gpu?.composeMs !== undefined) stats.gpuComposeMs.push(metrics.gpu.composeMs)
 }
 
-if (ablationWalls.size > 0) {
+const medianOf = (values: number[]): number | undefined =>
+  values.length > 0 ? median(values) : undefined
+
+if (ablationStats.size > 0) {
   const delta = (wall: number, base: number | undefined): string =>
     base === undefined ? "-" : `${(((wall - base) / base) * 100).toFixed(1)}%`
+  const order = (variant: string) => ABLATION_ORDER.indexOf(variant) + 1 || ABLATION_ORDER.length
   summaryRows.push(
     "",
-    "| ablation | encoder | wall s (median) | Δ vs plain | Δ vs padding |",
-    "|---|---|---|---|---|",
+    "## Per-feature ablation (marginal cost)",
+    "",
+    "| ablation | encoder | renderer | wall s (median) | Δ vs plain | Δ vs padding | compose/pass ms (median) |",
+    "|---|---|---|---|---|---|---|",
   )
-  for (const [enc, walls] of [...ablationWalls.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const plain = walls.get("plain")
-    const padding = walls.get("padding")
-    const variants = [...walls.keys()].sort(
-      (a, b) =>
-        (ABLATION_ORDER.indexOf(a) + 1 || ABLATION_ORDER.length) -
-        (ABLATION_ORDER.indexOf(b) + 1 || ABLATION_ORDER.length),
-    )
-    for (const variant of variants) {
-      const wall = walls.get(variant) ?? 0
+  for (const [group, variants] of [...ablationStats.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const [encoder, renderer] = group.split("|")
+    const plain = medianOf(variants.get("plain")?.walls ?? [])
+    const padding = medianOf(variants.get("padding")?.walls ?? [])
+    const names = [...variants.keys()].sort((a, b) => order(a) - order(b))
+    for (const variant of names) {
+      const stats = variants.get(variant)
+      const wall = medianOf(stats?.walls ?? []) ?? 0
+      const compose = medianOf(stats?.composeMs ?? [])
       summaryRows.push(
-        `| abl-${variant} | ${enc || "software"} | ${(wall / 1000).toFixed(1)} | ` +
+        `| abl-${variant} | ${encoder} | ${renderer} | ${(wall / 1000).toFixed(1)} | ` +
           `${variant === "plain" ? "baseline" : delta(wall, plain)} | ` +
-          `${variant === "radius" || variant === "shadow" ? delta(wall, padding) : "-"} |`,
+          `${variant === "radius" || variant === "shadow" ? delta(wall, padding) : "-"} | ` +
+          `${compose === undefined ? "-" : Math.round(compose)} |`,
       )
     }
   }
+
+  // Per-feature row: both renderers of the same plan, side by side.
+  const encoders = [
+    ...new Set([...ablationStats.keys()].map((group) => group.split("|")[0])),
+  ].sort()
+  const compared: string[] = []
+  for (const encoder of encoders) {
+    const compat = ablationStats.get(`${encoder}|compatibility`) ?? new Map()
+    const gpu = ablationStats.get(`${encoder}|gpu`) ?? new Map()
+    const variants = [...new Set([...compat.keys(), ...gpu.keys()])].sort(
+      (a, b) => order(a) - order(b),
+    )
+    for (const variant of variants) {
+      const compatWall = medianOf(compat.get(variant)?.walls ?? [])
+      const gpuWall = medianOf(gpu.get(variant)?.walls ?? [])
+      const compatCompose = medianOf(compat.get(variant)?.composeMs ?? [])
+      // The GPU path's own compose span is the comparable number; its
+      // `composition_ms` includes setup and sidecar waits.
+      const gpuCompose = medianOf(gpu.get(variant)?.gpuComposeMs ?? [])
+      const speedup =
+        compatWall !== undefined && gpuWall !== undefined && gpuWall > 0
+          ? `${(compatWall / gpuWall).toFixed(2)}x`
+          : "-"
+      compared.push(
+        `| abl-${variant} | ${encoder} | ` +
+          `${compatWall === undefined ? "-" : (compatWall / 1000).toFixed(1)} | ` +
+          `${gpuWall === undefined ? "-" : (gpuWall / 1000).toFixed(1)} | ${speedup} | ` +
+          `${compatCompose === undefined ? "-" : Math.round(compatCompose)} | ` +
+          `${gpuCompose === undefined ? "-" : Math.round(gpuCompose)} |`,
+      )
+    }
+  }
+  summaryRows.push(
+    "",
+    "## Renderer comparison (same plan, both compositors)",
+    "",
+    "| feature | encoder | compat wall s | gpu wall s | speed-up | compat pass ms | gpu compose ms |",
+    "|---|---|---|---|---|---|---|",
+    ...compared,
+  )
+}
+
+if (gpuGateFailures.length > 0) {
+  summaryRows.push(
+    "",
+    `**--require-gpu failed**: ${gpuGateFailures.join(", ")} requested the GPU renderer but rendered on the compatibility path.`,
+  )
 }
 
 console.log("\n" + summaryRows.join("\n"))
+
+if (gpuGateFailures.length > 0) process.exitCode = 1
 
 const resultsPath = join(
   outDir,

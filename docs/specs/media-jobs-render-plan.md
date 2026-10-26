@@ -258,21 +258,26 @@ How a compiled render plan reaches FFmpeg processes:
 ### 5.6 Native GPU compositor (ADR 018)
 
 `ExportSettings.renderer` (`auto` | `gpu` | `compatibility`) selects the
-compositor. `auto` stays on the FFmpeg graph until the Phase 5 G5 gate flips;
-`RECORDFORGE_EXPORT_GPU=1` opts `auto` in for A/B benchmarks.
+compositor. Since Phase 5 G5, `auto` selects the GPU compositor when the plan is
+inside the gate and the adapter is real hardware, and the FFmpeg graph otherwise.
+`RECORDFORGE_EXPORT_GPU=0` opts out (support/troubleshooting and A/B runs), and
+three consecutive runtime GPU failures drop `auto` back to the FFmpeg renderer
+for the rest of the process (a success resets the count).
 
 `gpu::plan_limitations` is the feature gate. The compositor handles the full
 canvas frame (padding, background colour/gradient/image, blur, dim, rounded
 corners, shadow), the fitted screen rect and zoom, cursor/overlay items,
-camera + side-by-side layout windows, privacy masks, keystrokes, burned-in
-captions (encode-side libass), chapters, HEVC, the license output cap and
-selected-range plans. Timeline gaps/coverage holes, mixed source dimensions,
-animated containers (GIF/WebP), non-4×2-grid canvases, and the keystroke +
-burned-caption pair (badges must sit above captions, which run after the GPU
-raster) keep the compatibility renderer. Explicit `gpu` requests outside the
-gate degrade with a logged reason rather than failing the export, and a runtime
-failure (no hardware adapter, device loss, sidecar error) falls back once to the
-FFmpeg renderer — mirroring the hardware→software encoder retry.
+camera + side-by-side layout windows, redact/pixelate privacy masks, keystrokes,
+burned-in captions (encode-side libass), chapters, HEVC, the license output cap
+and selected-range plans. Timeline gaps/coverage holes, mixed source dimensions,
+animated containers (GIF/WebP), non-4×2-grid canvases, blur privacy masks (the
+shader's scaled-average blur measured below the parity floor; see
+`docs/benchmarks/phase-5-results.md`), and the keystroke + burned-caption pair
+(badges must sit above captions, which run after the GPU raster) keep the
+compatibility renderer. Explicit `gpu` requests outside the gate degrade with a
+logged reason rather than failing the export, and a runtime failure (no hardware
+adapter, device loss, sidecar error) falls back once to the FFmpeg renderer —
+mirroring the hardware→software encoder retry.
 
 The pipeline is an FFmpeg **decode sidecar** (the same `trim`/`setpts` chain,
 scaling each segment into the **fitted content rect** and padding out to the

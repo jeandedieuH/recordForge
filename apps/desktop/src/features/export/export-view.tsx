@@ -833,14 +833,14 @@ export function ExportView({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="auto">Auto</SelectItem>
-                          <SelectItem value="gpu">GPU compositor (experimental)</SelectItem>
+                          <SelectItem value="auto">Auto (GPU when supported)</SelectItem>
+                          <SelectItem value="gpu">GPU compositor</SelectItem>
                           <SelectItem value="compatibility">FFmpeg compatibility</SelectItem>
                         </SelectContent>
                       </Select>
                       <span className="text-[11px] text-subtle-foreground">
-                        GPU compositing is used only for exports it fully supports; anything else
-                        renders on the FFmpeg path automatically.
+                        Auto composites on the GPU and falls back to the FFmpeg path for exports it
+                        does not fully support, or if the GPU is unavailable.
                       </span>
                     </label>
                   </>

@@ -10,10 +10,12 @@
  * `--encoder` (default `software`) is written into each spec's top-level
  * `encoder` field for the harness to resolve; non-software runs get a
  * `_<encoder>` suffix on spec and render file stems so matrices coexist.
- * `--renderer` (default `compatibility`) sets `settings.renderer`. With
- * `--renderer gpu` only the gate-compatible ablations (`plain`, `zoom`) are
- * emitted — the rest need overlay milestones the GPU compositor does not cover
- * yet — and stems get a `_<renderer>` suffix. `--single-pass` forces every spec
+ * `--renderer` (default `compatibility`) sets `settings.renderer`. Every
+ * ablation is gate-compatible with the G3 GPU compositor (canvas framing, zoom,
+ * cursor, items, keystroke badges, privacy masks, camera, captions), so
+ * `--renderer gpu` emits the whole matrix; stems get a `_<renderer>` suffix.
+ * The all-features `synth` spec is always emitted too, so the automatic
+ * fallback keeps being exercised. `--single-pass` forces every spec
  * through one encoder pass; use it — with its own outDir — for the compatibility
  * baselines that will be compared against the single-pass GPU renderer, because
  * chunked and single-pass x264 encodes of the same frames differ by ~46 dB from
@@ -363,6 +365,55 @@ const captions = [
   },
   { id: "cap-3", text: "final caption for chunked seams", startMs: 26_000, endMs: 29_500 },
 ]
+// Privacy masks cover the two shader-exact modes: an opaque redact block and a
+// pixelate window. Blur masks stay on the compatibility renderer (see
+// `spec_fallback_blur`), because the GPU approximation of FFmpeg's
+// downscale/avgblur/upscale chain does not clear the parity floor.
+const masks = [
+  {
+    id: "mask-redact",
+    assetId: null,
+    startMs: 6_000,
+    endMs: 12_000,
+    mode: "redact",
+    rect: { x: 240, y: 180, width: 480, height: 320 },
+    blurRadius: 12,
+    pixelSize: 8,
+    redactColor: "#101010",
+    enabled: true,
+  },
+  {
+    id: "mask-pixelate",
+    assetId: null,
+    startMs: 18_000,
+    endMs: 24_000,
+    mode: "pixelate",
+    rect: { x: 420, y: 620, width: 360, height: 240 },
+    blurRadius: 8,
+    pixelSize: 16,
+    redactColor: "#000000",
+    enabled: true,
+  },
+]
+const blurMask = {
+  id: "mask-blur",
+  assetId: null,
+  startMs: 1_500,
+  endMs: 8_500,
+  mode: "blur",
+  rect: { x: 1_100, y: 500, width: 520, height: 340 },
+  blurRadius: 24,
+  pixelSize: 8,
+  redactColor: "#000000",
+  enabled: true,
+}
+// Keystroke badges: modifier combos every ~2 s, within the default 2.2 s hold
+// window so the badge plate is populated on most frames.
+const keystrokes = Array.from({ length: 15 }, (_, index) => ({
+  tMs: 1_000 + index * 2_000,
+  key: index % 2 === 0 ? "s" : "c",
+  modifiers: index % 2 === 0 ? ["ctrl"] : ["ctrl", "shift"],
+}))
 // One camera overlay covering the whole export: circle, bottom-right with the
 // same 48 px margin the padded variants use, border + shadow on so the full
 // mask/border/shadow-plate path is exercised.
@@ -425,6 +476,8 @@ const ablations: Array<{
   { name: "zoom", plan: { ...plainPlan(), zoomSegments } },
   { name: "cursor", plan: { ...plainPlan(), cursorEffects } },
   { name: "items", plan: { ...plainPlan(), texts, annotations } },
+  { name: "masks", plan: { ...plainPlan(), masks } },
+  { name: "keys", plan: { ...plainPlan(), keystrokes, keystrokePlatform: "windows" } },
   { name: "captions", plan: { ...plainPlan(), captions } },
   {
     name: "camera",
@@ -434,7 +487,8 @@ const ablations: Array<{
 ]
 
 // The "all features" plan is unchanged from the original fixture so existing
-// docs/benchmarks numbers stay comparable.
+// docs/benchmarks numbers stay comparable (no privacy masks or keystrokes: they
+// get their own ablation rows).
 const synthPlan = {
   projectId: "bench-synth",
   durationMs: EXPORT_MS,
@@ -464,6 +518,10 @@ const settings = {
   container: "mp4",
   captionMode: "burn-in",
   chapterMode: "off",
+  // Enabled for every spec: only plans that carry keystroke events rasterize a
+  // badge plate, so the other ablations are unaffected and the `keys` row can
+  // share one settings block.
+  keystrokeOverlay: { enabled: true },
 }
 
 const baseAssetPaths = {
@@ -482,11 +540,58 @@ interface SpecEntry {
 }
 
 const specs: SpecEntry[] = []
-// With an explicit GPU request only the plans the compositor actually renders
-// are worth measuring; everything else is rejected by the feature gate and
-// would just re-run the compatibility renderer under a different label.
-// G1 added canvas framing (padding / radius / shadow / background).
-const gpuCompatible = new Set(["plain", "padding", "radius", "shadow", "zoom"])
+// A blur mask is deliberately outside the GPU gate: the shader's approximation
+// of FFmpeg's scaled avgblur is below the parity floor, so this spec proves the
+// automatic fallback still produces the compatibility output (100 dB) and gives
+// the matrix a second gated shape besides the timeline gap.
+const blurMaskPlan = {
+  ...plainPlan(),
+  durationMs: 10_000,
+  segments: [screenSegment(5_000, 15_000, 0)],
+  masks: [blurMask],
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [{ ...audioTracks[0].segments[0], sourceOutMs: 15_000, outputEndMs: 10_000 }],
+    },
+  ],
+}
+// A coverage hole plus a gap entry is deliberately outside the GPU gate: this
+// spec proves the automatic fallback still produces the compatibility output
+// (the pair must score 100 dB in parity) and keeps the runtime fallback path
+// exercised by every matrix run.
+const fallbackGapPlan = {
+  ...plainPlan(),
+  // Short on purpose: < 20 s keeps both sides single-pass, so the fallback pair
+  // is a bit-exact comparison instead of a chunking-artifact comparison.
+  durationMs: 10_000,
+  segments: [screenSegment(5_000, 9_500, 0), screenSegment(30_500, 35_000, 5_500)],
+  gaps: [{ startMs: 4_500, endMs: 5_500 }],
+  audioTracks: [
+    {
+      ...audioTracks[0],
+      segments: [{ ...audioTracks[0].segments[0], sourceOutMs: 15_000, outputEndMs: 10_000 }],
+    },
+  ],
+}
+// Every ablation is inside the G3 GPU gate (canvas framing, zoom, cursor,
+// items, masks, keystrokes, camera, burned-in captions), so the whole matrix is
+// meaningful on both renderers. Keep the list explicit: a future ablation that
+// the compositor cannot render must not silently fall back and report a 100 dB
+// "parity" row.
+const gpuCompatible = new Set([
+  "plain",
+  "padding",
+  "radius",
+  "shadow",
+  "zoom",
+  "cursor",
+  "items",
+  "masks",
+  "keys",
+  "captions",
+  "camera",
+])
 if (longMode) {
   specs.push({
     name: `spec_synth_chunked${variantSuffix}`,
@@ -513,6 +618,20 @@ if (longMode) {
       name: `spec_synth_${mode}${variantSuffix}`,
       outputName: `render_synth_${mode}${variantSuffix}.mp4`,
       plan: synthPlan,
+      assetPaths: baseAssetPaths,
+      forceSinglePass: single,
+    })
+    specs.push({
+      name: `spec_fallback_gap_${mode}${variantSuffix}`,
+      outputName: `render_fallback_gap_${mode}${variantSuffix}.mp4`,
+      plan: fallbackGapPlan,
+      assetPaths: baseAssetPaths,
+      forceSinglePass: single,
+    })
+    specs.push({
+      name: `spec_fallback_blur_${mode}${variantSuffix}`,
+      outputName: `render_fallback_blur_${mode}${variantSuffix}.mp4`,
+      plan: blurMaskPlan,
       assetPaths: baseAssetPaths,
       forceSinglePass: single,
     })

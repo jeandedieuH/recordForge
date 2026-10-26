@@ -162,10 +162,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sample_uv =
         (frame.source_rect.xy + crop_uv * frame.source_rect.zw) / frame.canvas_size.xy;
 
-    let y_dims = vec2<i32>(textureDimensions(src_y));
+    // 1:1 fast path: an identity crop on a full-canvas content rect makes every
+    // luma fragment its own texel, which is exactly what the bicubic taps
+    // produce at frac 0. Chroma stays on the bicubic path (it is subsampled, so
+    // the fragment sits between chroma texels by design).
+    let identity =
+        frame.crop.x == 0.0 && frame.crop.y == 0.0 &&
+        frame.crop.z == 1.0 && frame.crop.w == 1.0 &&
+        abs(frame.dest_rect.x) < 0.5 && abs(frame.dest_rect.y) < 0.5 &&
+        abs(frame.dest_rect.z - frame.canvas_size.x) < 0.5 &&
+        abs(frame.dest_rect.w - frame.canvas_size.y) < 0.5 &&
+        abs(frame.source_rect.x - frame.dest_rect.x) < 0.5 &&
+        abs(frame.source_rect.y - frame.dest_rect.y) < 0.5 &&
+        abs(frame.source_rect.z - frame.dest_rect.z) < 0.5 &&
+        abs(frame.source_rect.w - frame.dest_rect.w) < 0.5;
+
     let uv_dims = vec2<i32>(textureDimensions(src_uv));
-    let y_byte = sample_bicubic(src_y, sample_uv, y_dims).r * 255.0;
     let uv_byte = sample_bicubic(src_uv, sample_uv, uv_dims).rg * 255.0;
+    var y_byte: f32;
+    if (identity) {
+        y_byte = textureLoad(src_y, vec2<i32>(canvas_px), 0).r * 255.0;
+    } else {
+        let y_dims = vec2<i32>(textureDimensions(src_y));
+        y_byte = sample_bicubic(src_y, sample_uv, y_dims).r * 255.0;
+    }
     let screen = yuv_to_rgb(y_byte, uv_byte);
     return vec4<f32>(mix(bg, screen, coverage), 1.0);
 }

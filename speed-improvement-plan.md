@@ -140,8 +140,8 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
   - **G1:** background, fit, corners, shadow, zoom, cursor, items.
   - **G2:** camera, masks, keystrokes, side-by-side layout windows. *(implemented 2026-10-26; see §8)*
   - **G3:** captions, chapters, HEVC, output cap, selected range. *(implemented 2026-10-26; captions run in the encode sidecar)*
-  - **G4:** parity suite across the ablation matrix; ships behind the setting, off by default.
-  - **G5:** `auto` turns GPU on by default once the parity and failure-rate gates hold.
+  - **G4:** parity suite across the ablation matrix; ships behind the setting, off by default. *(implemented 2026-10-26; 11 variants on both compositors)*
+  - **G5:** `auto` turns GPU on by default once the parity and failure-rate gates hold. *(implemented 2026-10-26)*
 - **Known limits:** pipe throughput is ~3.1 MB/frame at 1080p NV12, which is fine. 4K tops out at ~100 fps over pipes; D3D11/Metal interop is future work.
 
 ## 4. Files to modify (main ones)
@@ -347,6 +347,27 @@ Priority follows the GPU-first decision: Phase 0 runs first; Phase 1 and the Pha
     Deliberate limits: keystroke badges + burned-in captions stay on FFmpeg
     (the badges must sit above captions, but captions run after the GPU
     raster); blur/pixelate masks are a shader approximation of the
-    downscale/avgblur/upscale graph; the G4 parity matrix has not been run for
-    the new layers yet.
-  - Remaining: G4 (ablation parity + per-feature rows) and G5 (`auto`).
+    downscale/avgblur/upscale graph; the G4 parity matrix runs over the new
+    layers below.
+  - **G4 + G5 shipped 2026-10-26.** The synthetic matrix now emits
+    `masks` (redact / pixelate) and `keys` rows alongside the existing ones,
+    `--renderer gpu` renders all 11 ablations, and `export-bench.ts` reports a
+    per-feature table (compat vs GPU wall and compose spans, Δ vs
+    plain/padding) plus the GPU stage spans; `--require-gpu` fails a run that
+    asked for the GPU and silently fell back. All 14 parity pairs pass
+    (`docs/benchmarks/phase-5-results.md`), including bit-identical plain,
+    captions and both fallback rows. The gate found three real bugs (camera
+    border uploaded as PNG bytes into a raw-RGBA quad, mask end-boundary
+    off-by-one, pixelate block phase) and drove the plate-producer pool.
+    Blur masks stay on FFmpeg (the shader cannot match swscale's widened
+    downscale; 18.6 dB worst frame) and the `fallback_blur` row proves that path
+    is still bit-identical.
+  - `auto` now selects the GPU compositor, `RECORDFORGE_EXPORT_GPU=0` is the
+    opt-out, a three-strike failure gate drops `auto` back to FFmpeg for the
+    process, and passthrough-only plans stay on the in-process FFmpeg pipeline
+    (nothing to composite). Measured on the baseline laptop the GPU is a
+    **1.49× win for rounded corners and 1.14× for camera overlays**, and ~10 %
+    slower elsewhere because the export is encode-bound and pays the
+    decode-sidecar → Rust → encode-sidecar copy; removing that hop needs
+    D3D11/Metal interop (the documented follow-up).
+  - Remaining: none for Phase 5.

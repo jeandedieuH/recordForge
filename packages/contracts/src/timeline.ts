@@ -706,10 +706,10 @@ export type ExportRange = z.infer<typeof exportRangeSchema>
 export const exportEncoderSchema = z.enum(["auto", "software"])
 export type ExportEncoderPreference = z.infer<typeof exportEncoderSchema>
 
-// Compositor selection (ADR 018). `auto` uses the native GPU compositor once the
-// Phase 5 parity gate (G5) holds and the compatibility FFmpeg graph until then;
-// `gpu` asks for the GPU path explicitly and still degrades per-feature, and
-// `compatibility` pins the FFmpeg renderer.
+// Compositor selection (ADR 018). `auto` uses the native GPU compositor when the
+// plan and adapter support it and the FFmpeg graph otherwise (including after
+// repeated GPU failures in one session); `gpu` asks for the GPU path explicitly
+// and still degrades per-feature, and `compatibility` pins the FFmpeg renderer.
 export const exportRendererSchema = z.enum(["auto", "gpu", "compatibility"])
 export type ExportRendererPreference = z.infer<typeof exportRendererSchema>
 

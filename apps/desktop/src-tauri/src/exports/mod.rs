@@ -692,9 +692,10 @@ pub struct ExportSettings {
     pub range: Option<ExportRange>,
     #[serde(default)]
     pub keystroke_overlay: Option<KeystrokeOverlay>,
-    /// Compositor selection: `auto` (compatibility today, GPU once the Phase 5
-    /// parity gate flips), `gpu` (native wgpu compositor, falls back when the
-    /// plan is outside its feature set) or `compatibility` (always FFmpeg).
+    /// Compositor selection: `auto` (GPU when the plan and adapter allow it,
+    /// FFmpeg otherwise), `gpu` (native wgpu compositor, degrades per feature)
+    /// or `compatibility` (always FFmpeg). `RECORDFORGE_EXPORT_GPU=0` opts
+    /// `auto` out, and repeated GPU failures drop it back for the process.
     #[serde(default = "default_export_renderer")]
     pub renderer: String,
 }
@@ -1628,11 +1629,15 @@ fn render_timeline_composition_shared(
                 shared,
                 output_cap,
             ) {
-                Ok(outcome) => return Ok(outcome),
+                Ok(outcome) => {
+                    gpu::note_gpu_success();
+                    return Ok(outcome);
+                }
                 Err(error) => {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         return Err(error);
                     }
+                    gpu::note_gpu_failure();
                     warn!(
                         project_id,
                         error = %error,

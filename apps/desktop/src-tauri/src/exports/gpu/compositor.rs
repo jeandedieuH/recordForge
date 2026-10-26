@@ -95,8 +95,13 @@ pub(super) enum Shape {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum MaskMode {
     Redact([f32; 3]),
-    /// Blur sampling factor (`factor` px between taps).
-    Blur(f32),
+    /// Blur. `factor` is the small-grid step for the multi-scale approximation
+    /// (`scale → avgblur(3×3) → scale`) or the `avgblur` window size for the
+    /// small-radius direct branch.
+    Blur {
+        factor: f32,
+        multi_scale: bool,
+    },
     /// Pixel block size in px.
     Pixelate(f32),
 }
@@ -647,15 +652,20 @@ impl Compositor {
                 .border
                 .as_ref()
                 .map(|bytes| {
+                    // The generator emits a PNG; the quad uploads raw RGBA.
+                    let image = image::load_from_memory(bytes)
+                        .map_err(|error| gpu_error(&format!("decode camera border: {error}")))?
+                        .to_rgba8();
+                    let (w, h) = image.dimensions();
                     Quad::rgba(
                         &device,
                         &queue,
                         &shared,
                         &layer_sampler,
                         (width, height),
-                        bytes,
-                        camera.size.0,
-                        camera.size.1,
+                        image.as_raw(),
+                        w,
+                        h,
                         camera.dest,
                         Shape::Rect,
                         1.0,
@@ -1209,10 +1219,18 @@ pub(super) enum PlaneKind {
 }
 
 fn mask_params(mask: &MaskConfig) -> MaskParams {
-    let (mode, factor, color) = match mask.mode {
-        MaskMode::Redact(color) => (0.0, 1.0, [color[0], color[1], color[2], 1.0]),
-        MaskMode::Blur(factor) => (1.0, factor.max(1.0), [0.0, 0.0, 0.0, 0.0]),
-        MaskMode::Pixelate(size) => (2.0, size.max(2.0), [0.0, 0.0, 0.0, 0.0]),
+    let (mode, factor, extra, color) = match mask.mode {
+        MaskMode::Redact(color) => (0.0, 1.0, 0.0, [color[0], color[1], color[2], 1.0]),
+        MaskMode::Blur {
+            factor,
+            multi_scale,
+        } => (
+            1.0,
+            factor.max(1.0),
+            if multi_scale { 1.0 } else { 0.0 },
+            [0.0, 0.0, 0.0, 0.0],
+        ),
+        MaskMode::Pixelate(size) => (2.0, size.max(2.0), 0.0, [0.0, 0.0, 0.0, 0.0]),
     };
     MaskParams {
         rect: [
@@ -1222,7 +1240,7 @@ fn mask_params(mask: &MaskConfig) -> MaskParams {
             mask.rect.3.max(1) as f32,
         ],
         color,
-        params: [mode, factor, 0.0, 0.0],
+        params: [mode, factor, extra, 0.0],
     }
 }
 

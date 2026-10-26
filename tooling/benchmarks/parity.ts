@@ -19,9 +19,14 @@
  * every `render_*.mp4` present in either directory by file name (a file
  * missing on one side is a failure). `--suffix` strips a variant suffix from
  * candidate names before pairing, so a matrix rendered with `--renderer gpu`
- * (`render_abl-plain_chunked_gpu.mp4`) pairs with its compatibility baseline
- * (`render_abl-plain_chunked.mp4`). Exits 1 on any failed pair, 0 when every
- * pair passes.
+ * (`render_abl-plain_chunked_gpu.mp4`, or the bench runner's
+ * `render-spec_abl-plain_chunked_nvenc_gpu-auto.mp4`) pairs with its
+ * compatibility baseline (`render_abl-plain_chunked.mp4` /
+ * `render-spec_abl-plain_chunked_nvenc-auto.mp4`). Exits 1 on any failed pair, 0
+ * when every pair passes. `export-synth-spec.ts` emits the full G4 ablation
+ * matrix (plain/padding/radius/shadow/zoom/cursor/items/masks/keys/captions/
+ * camera) for both renderers; run the renderer side with `export-bench.ts
+ * --require-gpu` so a silently gated plan cannot masquerade as a GPU row.
  *
  * ffmpeg/ffprobe resolve like export-synth-spec.ts: repo sidecars first,
  * RF_FFMPEG/RF_FFPROBE override.
@@ -321,11 +326,12 @@ function collectPairs(reference: string, candidate: string): Pair[] {
     (file.startsWith("render_") || file.startsWith("render-")) && file.endsWith(".mp4")
   const refFiles = new Set(readdirSync(reference).filter(isRender))
   const candFiles = new Set(readdirSync(candidate).filter(isRender))
-  // A variant candidate (`render_abl-plain_chunked_gpu.mp4`) pairs with its
-  // baseline (`render_abl-plain_chunked.mp4`) by stripping the suffix.
+  // A variant candidate (`render_abl-plain_chunked_gpu.mp4` or the bench
+  // runner's `render-spec_abl-plain_chunked_nvenc_gpu-auto.mp4`) pairs with its
+  // baseline by removing the variant suffix from the stem.
   const suffix = args.suffix ?? ""
   const pairName = (file: string) =>
-    suffix && file.endsWith(`${suffix}.mp4`) ? `${file.slice(0, -suffix.length - 4)}.mp4` : file
+    suffix && file.includes(suffix) ? file.replace(suffix, "") : file
   const names = [...new Set([...refFiles, ...candFiles].map(pairName))].sort()
   if (names.length === 0) {
     console.error(`no render_*.mp4 / render-*.mp4 files in ${reference} or ${candidate}`)

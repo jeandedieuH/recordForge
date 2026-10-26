@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted - Phase 5, milestones G0-G3 implemented (2026-10-26)
+Accepted - Phase 5, milestones G0-G5 implemented (2026-10-26)
 
 ## Context
 
@@ -83,24 +83,34 @@ the encoder write instead of blocking on every frame.
 
 ### Selection and fallback
 
-`renderer = auto` resolves to the compatibility renderer today
-(`GPU_ENABLED_BY_DEFAULT = false`); milestone G5 flips it once the parity and
-failure-rate gates hold. `RECORDFORGE_EXPORT_GPU=1` opts `auto` in for A/B
-benchmarks. `renderer = gpu` asks for the GPU path explicitly and still
-degrades per feature.
+`renderer = auto` resolves to the GPU compositor (`GPU_ENABLED_BY_DEFAULT =
+true` since G5) when `gpu::plan_limitations` accepts the plan; plans outside the
+gate keep the FFmpeg renderer with the reason logged. Two guards keep the default
+honest: a plan that would bypass the compositor on every frame (identity zoom, no
+layers/masks/keystrokes, plain full-canvas fit) stays on FFmpeg because the
+cross-process copy is then pure cost, and a process-level failure gate drops
+`auto` back after three consecutive runtime GPU failures. `RECORDFORGE_EXPORT_GPU=0`
+forces `auto` onto the compatibility path for support and A/B runs. `renderer =
+gpu` asks for the GPU path explicitly and still degrades per feature.
+
+A successful GPU render resets the failure counter; an explicit `gpu` request
+still tries (the user asked for it).
 
 `gpu::plan_limitations` is the single source of truth for what the compositor
 supports. Anything outside it keeps the FFmpeg renderer: timeline gaps and
 coverage holes, mixed or unknown source dimensions, animated containers
-(GIF/WebP), canvases that are not a 4×2 NV12 grid, and the one stack-order pair
-the hybrid cannot express (keystroke badges must sit above burned-in captions,
-but captions run through libass in the encode sidecar after the GPU raster).
-Canvas framing, letterboxed fits, zoom, cursor/items, camera and side-by-side,
-privacy masks, keystrokes, burned-in captions, chapters, HEVC, the license
-output cap, and selected-range plans are in scope. Explicit `gpu` requests that
-fall outside the gate render on FFmpeg with the reason logged — failing an
-export over a renderer preference would be worse than rendering it on the path
-that works.
+(GIF/WebP), canvases that are not a 4×2 NV12 grid, blur privacy masks, and the
+one stack-order pair the hybrid cannot express (keystroke badges must sit above
+burned-in captions, but captions run through libass in the encode sidecar after
+the GPU raster). Redact and pixelate masks are shader-exact; blur approximates
+FFmpeg's scaled `avgblur` chain and measured 33 dB inside the mask rect (G4), so
+it stays on FFmpeg until the shader reproduces swscale's widened bilinear
+downscale. Canvas framing, letterboxed fits, zoom, cursor/items, camera and
+side-by-side, privacy masks (redact/pixelate), keystrokes, burned-in captions,
+chapters, HEVC, the license output cap, and selected-range plans are in scope.
+Explicit `gpu` requests that fall outside the gate render on FFmpeg with the
+reason logged — failing an export over a renderer preference would be worse than
+rendering it on the path that works.
 
 Runtime failures (no qualifying adapter, device loss, sidecar failure) also
 fall back once to the compatibility renderer, mirroring the existing
@@ -131,8 +141,16 @@ slower software path.
 | G1 | Background plate, canvas frame/corners/shadow, cursor tile, overlay items (implemented) |
 | G2 | Camera mask/border/shadow, privacy masks, keystrokes, side-by-side (implemented) |
 | G3 | Captions (libass burn-in in the encode sidecar), chapters, HEVC, output cap, selected range (implemented) |
-| G4 | Parity suite across the ablation matrix; ships behind the setting |
-| G5 | `auto` turns GPU on by default once parity and failure gates hold |
+| G4 | Parity suite across the ablation matrix; ships behind the setting (implemented) |
+| G5 | `auto` turns GPU on by default once parity and failure gates hold (implemented) |
+
+G4 ran the full 14-spec matrix (11 ablations — plain, padding, radius, shadow,
+zoom, cursor, items, masks, keystrokes, captions, camera — plus the all-features
+plan and two deliberately gated fallback shapes) on both compositors and added a
+per-feature measurement table; every row passes the renderer budget with exact
+frame counts and audio, and both fallback rows are bit-identical. G5 then flipped
+`auto`, added the three-strike failure gate and the passthrough-only guard.
+Evidence: `docs/benchmarks/phase-5-results.md`.
 
 G0 closed its parity question in favour of a *methodology* fix rather than a
 pixel fix: the renderer's encode input is bit-exact, and the residual gap is the

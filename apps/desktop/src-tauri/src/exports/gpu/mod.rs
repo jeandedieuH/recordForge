@@ -5,12 +5,13 @@
 //! the feature gate that keeps unsupported plans on the compatibility path, and
 //! the decode → compose → encode pipeline itself.
 //!
-//! Milestone state: G0–G3 are implemented. The GPU pass owns canvas framing,
-//! zoom, cursor/overlay items, camera and side-by-side layout, privacy masks and
-//! keystroke badges; the encode sidecar owns burned-in captions (libass),
-//! chapters, HEVC tagging and the license output cap. [`plan_limitations`]
-//! keeps structurally unsupported plans on the FFmpeg renderer, which stays the
-//! authoritative output and the fallback for every feature.
+//! Milestone state: G0–G5 are complete. The GPU pass owns canvas framing,
+//! zoom, cursor/overlay items, camera and side-by-side layout, redact/pixelate
+//! privacy masks and keystroke badges; the encode sidecar owns burned-in
+//! captions (libass), chapters, HEVC tagging and the license output cap.
+//! [`plan_limitations`] keeps structurally unsupported plans on the FFmpeg
+//! renderer, which stays the authoritative output and the fallback for every
+//! feature.
 
 mod compositor;
 mod decode;
@@ -18,7 +19,7 @@ mod encode;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,11 +68,63 @@ impl RendererChoice {
     }
 }
 
-/// G5 flips this once the parity and failure-rate gates hold. Until then `auto`
-/// keeps every user export on the compatibility renderer; `gpu` still asks for
-/// the new path explicitly, and `RECORDFORGE_EXPORT_GPU=1` opts `auto` in for
-/// A/B benchmarks.
-const GPU_ENABLED_BY_DEFAULT: bool = false;
+/// G5: `auto` selects the GPU compositor. `RECORDFORGE_EXPORT_GPU=0` opts out
+/// (support/troubleshooting), and a process-level failure gate drops back to
+/// the FFmpeg renderer after repeated runtime failures.
+const GPU_ENABLED_BY_DEFAULT: bool = true;
+
+/// Runtime GPU failures tolerated back-to-back before `auto` stops trying for
+/// the rest of the process. A render that succeeds resets the count; one that
+/// keeps failing (device loss loop, driver bug, broken sidecar) should not cost
+/// every following export a failed attempt and its wgpu setup time.
+const GPU_FAILURE_GATE_THRESHOLD: u32 = 3;
+
+/// Consecutive GPU render failures in this process. Only touched from the
+/// export worker, and only for diagnostics and the `auto` gate.
+static GPU_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
+
+/// Whether `auto` may use the GPU compositor. `RECORDFORGE_EXPORT_GPU` accepts
+/// `1/true/on` and `0/false/off`; unset follows [`GPU_ENABLED_BY_DEFAULT`].
+fn auto_gpu_enabled(env_value: Option<&str>) -> bool {
+    match env_value.map(str::trim) {
+        Some("0") | Some("false") | Some("off") => false,
+        Some(_) => true,
+        None => GPU_ENABLED_BY_DEFAULT,
+    }
+}
+
+/// True when repeated runtime failures have tripped the process-level gate.
+fn failure_gate_tripped(consecutive_failures: u32) -> bool {
+    consecutive_failures >= GPU_FAILURE_GATE_THRESHOLD
+}
+
+/// Why `auto` must stay on the compatibility renderer, if it must.
+fn auto_gpu_blocked(env_value: Option<&str>, consecutive_failures: u32) -> Option<&'static str> {
+    if !auto_gpu_enabled(env_value) {
+        return Some("auto GPU compositing is disabled by RECORDFORGE_EXPORT_GPU");
+    }
+    if failure_gate_tripped(consecutive_failures) {
+        return Some("auto fell back to the compatibility renderer after repeated GPU failures");
+    }
+    None
+}
+
+/// Reset the failure gate after a GPU render finished and validated.
+pub(crate) fn note_gpu_success() {
+    GPU_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
+}
+
+/// Record a runtime GPU failure (device loss, sidecar error, shader validation)
+/// so `auto` can stop retrying after [`GPU_FAILURE_GATE_THRESHOLD`] in a row.
+pub(crate) fn note_gpu_failure() {
+    let failures = GPU_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+    if failures == GPU_FAILURE_GATE_THRESHOLD {
+        warn!(
+            failures,
+            "gpu export: failure gate tripped; auto will use the compatibility renderer until the process restarts"
+        );
+    }
+}
 
 /// Resolve the renderer for one export. Never fails: an unusable GPU request
 /// degrades to the compatibility renderer with a logged reason, because failing
@@ -90,14 +143,20 @@ pub(crate) fn resolve_renderer(
             reason: None,
         };
     }
-    let auto_enabled = GPU_ENABLED_BY_DEFAULT
-        || std::env::var("RECORDFORGE_EXPORT_GPU")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-    if preference != "gpu" && !auto_enabled {
-        return RendererChoice::compatibility(
-            "auto keeps the compatibility renderer until the GPU parity gate (G5) holds",
-        );
+    if preference != "gpu" {
+        let env = std::env::var("RECORDFORGE_EXPORT_GPU").ok();
+        let failures = GPU_CONSECUTIVE_FAILURES.load(Ordering::Relaxed);
+        if let Some(reason) = auto_gpu_blocked(env.as_deref(), failures) {
+            return RendererChoice::compatibility(reason);
+        }
+        // Nothing to composite: the compatibility renderer then wins outright
+        // (one in-process FFmpeg pipeline versus decode sidecar → Rust copy →
+        // encode sidecar), so `auto` keeps those exports on FFmpeg.
+        if plan_is_passthrough_only(plan, settings) {
+            return RendererChoice::compatibility(
+                "auto keeps passthrough-only exports on the in-process FFmpeg pipeline",
+            );
+        }
     }
     let limitations = plan_limitations(plan, settings, shared, asset_paths);
     if !limitations.is_empty() {
@@ -112,16 +171,56 @@ pub(crate) fn resolve_renderer(
     }
 }
 
+/// True when every frame of the plan would take the compositor's bypass path:
+/// identity zoom on a plain full-canvas fit with no layer, mask or keystroke
+/// work. Captions and chapters do not count — they run in the encode sidecar
+/// after the (bypassed) raster.
+///
+/// `auto` then keeps the export on the compatibility renderer: a cross-process
+/// decode → copy → encode pipeline is measurably slower (~2 s on a 30 s 1080p30
+/// clip) than FFmpeg's single in-process pass, and the GPU has nothing to add.
+fn plan_is_passthrough_only(plan: &RenderPlan, settings: &ExportSettings) -> bool {
+    let Some(canvas) = plan.canvas.as_ref() else {
+        return false;
+    };
+    let keystrokes = settings
+        .keystroke_overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.enabled)
+        && !plan.keystrokes.is_empty();
+    plan.zoom_segments.is_empty()
+        && !keystrokes
+        && plan.masks.iter().all(|mask| !mask.enabled)
+        && plan
+            .cursor_effects
+            .iter()
+            .all(|effect| !effect.enabled || effect.end_ms <= effect.start_ms)
+        && plan.texts.is_empty()
+        && plan.annotations.is_empty()
+        && plan.images.is_empty()
+        && plan.overlay_render_plan.is_none()
+        // Any visible camera/overlay also decides the side-by-side layout.
+        && plan
+            .overlays
+            .iter()
+            .all(|overlay| !overlay.visible || overlay.output_end_ms <= overlay.output_start_ms)
+        && canvas.padding == 0
+        && canvas.border_radius == 0
+        && !canvas.shadow
+}
+
 /// Every reason this plan cannot render on the GPU compositor. An empty list
-/// means G3-compatible: canvas framing, zoom, cursor, overlay items, camera and
-/// side-by-side layout, privacy masks, keystroke badges, burned-in captions,
-/// chapters, HEVC and the license output cap all render on the GPU path.
+/// means G5-compatible: canvas framing, zoom, cursor, overlay items, camera and
+/// side-by-side layout, redact/pixelate privacy masks, keystroke badges,
+/// burned-in captions, chapters, HEVC and the license output cap all render on
+/// the GPU path.
 ///
 /// The remaining exclusions are structural: animated containers (GIF/WebP),
 /// timeline gaps/coverage holes the decode pass cannot synthesise, mixed source
-/// dimensions, non-NV12 canvases, and the one ordering pair the hybrid pipeline
-/// cannot express (keystrokes must sit above captions, but captions run in the
-/// encode sidecar after the GPU raster).
+/// dimensions, non-NV12 canvases, blur privacy masks (the shader approximation
+/// of FFmpeg's scaled avgblur is below the parity floor), and the one ordering
+/// pair the hybrid pipeline cannot express (keystrokes must sit above captions,
+/// but captions run in the encode sidecar after the GPU raster).
 pub(crate) fn plan_limitations(
     plan: &RenderPlan,
     settings: &ExportSettings,
@@ -162,6 +261,20 @@ pub(crate) fn plan_limitations(
         && plan.caption_mode == "burn-in"
     {
         reasons.push("keystroke overlay with burned-in captions".into());
+    }
+
+    // Blur masks emulate FFmpeg's `scale → avgblur(3×3) → scale` chain in the
+    // mask shader. Measured on the G4 matrix the approximation is 18.6 dB on the
+    // worst frame (33 dB inside the rect) versus the 28 dB floor: swscale's
+    // widened bilinear downscale is a different kernel, not a rounding detail.
+    // Redact and pixelate are exact, so only blur keeps the FFmpeg renderer
+    // until the shader reproduces swscale's kernel.
+    if plan
+        .masks
+        .iter()
+        .any(|mask| mask.enabled && mask.mode == "blur")
+    {
+        reasons.push("blur privacy masks".into());
     }
 
     // Timeline coverage: a gap needs a solid-fill source, which the decode
@@ -221,6 +334,22 @@ fn queue_frames(name: &str, default: usize) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| (1..=64).contains(value))
         .unwrap_or(default)
+}
+
+/// Plate-producer threads. The compatibility renderer spreads the same CPU work
+/// (tiny-skia raster + full-canvas YUVA conversion) over `producer_worker_count`
+/// threads, but the GPU pipeline also competes for CPU with the compose/readback
+/// loop and the two FFmpeg sidecars, so the target is capped at four.
+/// `RECORDFORGE_EXPORT_GPU_PLATE_WORKERS` overrides it for measurement.
+fn plate_worker_target() -> usize {
+    if let Some(value) = std::env::var("RECORDFORGE_EXPORT_GPU_PLATE_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (1..=16).contains(value))
+    {
+        return value;
+    }
+    super::producer_worker_count().clamp(1, 4)
 }
 
 /// Identity frames never reach the compositor, so its crop argument is unused.
@@ -291,7 +420,7 @@ pub(crate) fn render_timeline_on_gpu(
 
     let started = Instant::now();
     let frame = canvas_frame(plan, canvas, asset_paths, resource_dir, shared)?;
-    let overlay = build_overlay_runtime(
+    let plate_runtimes = build_overlay_runtime(
         plan,
         project_id,
         asset_paths,
@@ -299,8 +428,9 @@ pub(crate) fn render_timeline_on_gpu(
         canvas,
         &frame,
         shared,
-    )?;
-    let (spec, mask_schedules) = compositor_spec(plan, canvas, overlay.as_ref())?;
+    )?
+    .unwrap_or_default();
+    let (spec, mask_schedules) = compositor_spec(plan, canvas, plate_runtimes.first())?;
     let decode_plan = decode::plan(
         plan,
         project_id,
@@ -393,6 +523,25 @@ pub(crate) fn render_timeline_on_gpu(
         mpsc::sync_channel::<Vec<u8>>(queue_frames("RECORDFORGE_EXPORT_GPU_DECODE_QUEUE", 8));
     let (encode_tx, encode_rx) =
         mpsc::sync_channel::<Vec<u8>>(queue_frames("RECORDFORGE_EXPORT_GPU_ENCODE_QUEUE", 6));
+    // Generated plates are canvas-sized pixmaps (items/keys) or a union cursor
+    // tile, rasterized and converted on the CPU. Measured on the G4 matrix that
+    // is the dominant cost for cursor/item plans (~18 ms/frame for the cursor
+    // tile alone), so `build_overlay_runtime` prepared one worker per producer
+    // thread; frame `i` is owned by worker `i % n` and each feeds a bounded
+    // queue so the compose loop never serializes against tiny-skia.
+    let mut plate_senders = Vec::with_capacity(plate_runtimes.len());
+    let mut plate_receivers = Vec::with_capacity(plate_runtimes.len());
+    for _ in 0..plate_runtimes.len() {
+        // Two frames per worker: enough to overlap raster with compose, small
+        // enough that N workers × 2 planes stays bounded.
+        let (sender, receiver) = mpsc::sync_channel::<PlateFrames>(queue_frames(
+            "RECORDFORGE_EXPORT_GPU_PLATE_QUEUE",
+            2,
+        ));
+        plate_senders.push(sender);
+        plate_receivers.push(receiver);
+    }
+    let plate_count = plate_runtimes.len();
 
     let mut composed_frames = 0u64;
     let mut passthrough_frames = 0u64;
@@ -437,10 +586,77 @@ pub(crate) fn render_timeline_on_gpu(
             encode_process.finish()
         });
 
+        // One plate frame per output frame, in timeline order. Frame `i` is
+        // produced by worker `i % plate_count`, so the consumer round-robins
+        // its receivers and never reorders.
+        let mut plate_handles = Vec::with_capacity(plate_count);
+        for (worker_index, runtime) in plate_runtimes.into_iter().enumerate() {
+            let sender = plate_senders[worker_index].clone();
+            let cancel = Arc::clone(&cancel);
+            let count = plate_count as u64;
+            plate_handles.push(scope.spawn(move || -> Result<()> {
+                let mut runtime = runtime;
+                let cursor_rect = runtime.cursor_rect;
+                let items_rect = runtime.items_rect;
+                let keys_rect = runtime.keys_rect;
+                let cursor_origins = Arc::clone(&runtime.cursor_origins);
+                let mut index = worker_index as u64;
+                while index < total_frames {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    let (planes, _) = runtime
+                        .worker
+                        .render_planes(index, fps)
+                        .map_err(|error| gpu_error(&error))?;
+                    let cursor = planes.cursor.and_then(|data| {
+                        plane_frame(
+                            cursor_rect,
+                            &cursor_origins,
+                            super::PlatePlane::Cursor,
+                            Arc::new(data),
+                            index,
+                        )
+                    });
+                    let items = planes.items.and_then(|data| {
+                        plane_frame(
+                            items_rect,
+                            &cursor_origins,
+                            super::PlatePlane::Items,
+                            data,
+                            index,
+                        )
+                    });
+                    let keys = planes.keys.and_then(|data| {
+                        plane_frame(
+                            keys_rect,
+                            &cursor_origins,
+                            super::PlatePlane::Keys,
+                            Arc::new(data),
+                            index,
+                        )
+                    });
+                    if sender
+                        .send(PlateFrames {
+                            cursor,
+                            items,
+                            keys,
+                        })
+                        .is_err()
+                    {
+                        // Compose loop finished or failed.
+                        return Ok(());
+                    }
+                    index += count;
+                }
+                Ok(())
+            }));
+        }
+        drop(plate_senders);
+
         let mut main_result: Result<()> = Ok(());
         let mut emitted = 0u64;
         let mut sent_frames = 0u64;
-        let mut overlay = overlay;
         while emitted < total_frames {
             if cancel.load(Ordering::Relaxed) {
                 main_result = Err(InternalError::Media("export cancelled".into()).into());
@@ -461,31 +677,21 @@ pub(crate) fn render_timeline_on_gpu(
                 output_ms,
             );
 
-            // Generated plates: cursor tile, overlay items, keystroke badges.
-            let planes = match overlay.as_mut() {
-                Some(runtime) => {
-                    let OverlayRuntime { frame_plan, worker } = runtime;
-                    let (planes, _) = worker
-                        .render_planes(emitted, fps)
-                        .map_err(|error| gpu_error(&error))?;
-                    let cursor = planes.cursor.and_then(|data| {
-                        plane_frame(
-                            frame_plan,
-                            super::PlatePlane::Cursor,
-                            Arc::new(data),
-                            emitted,
-                        )
-                    });
-                    let items = planes.items.and_then(|data| {
-                        plane_frame(frame_plan, super::PlatePlane::Items, data, emitted)
-                    });
-                    let keys = planes.keys.and_then(|data| {
-                        plane_frame(frame_plan, super::PlatePlane::Keys, Arc::new(data), emitted)
-                    });
-                    (cursor, items, keys)
+            // Generated plates: cursor tile, overlay items, keystroke badges,
+            // rendered by the plate workers ahead of this frame.
+            let planes = if plate_count > 0 {
+                let worker = emitted as usize % plate_count;
+                match plate_receivers[worker].recv() {
+                    Ok(planes) => planes,
+                    Err(_) => {
+                        main_result = Err(gpu_error("GPU overlay plate producer stopped"));
+                        break;
+                    }
                 }
-                None => (None, None, None),
+            } else {
+                PlateFrames::default()
             };
+            let planes = (planes.cursor, planes.items, planes.keys);
 
             let mut camera_frames = Vec::new();
             for camera in &mut cameras {
@@ -515,10 +721,14 @@ pub(crate) fn render_timeline_on_gpu(
                 break;
             }
 
+            // FFmpeg's `between(t,start,end)` is inclusive at both ends, so a
+            // mask whose span ends exactly on a frame timestamp still applies
+            // there. Match it: the gate's parity check caught the off-by-one
+            // frame at a mask end boundary.
             let masks: Vec<usize> = mask_schedules
                 .iter()
                 .enumerate()
-                .filter(|(_, (start, end))| output_ms >= *start as f64 && output_ms < *end as f64)
+                .filter(|(_, (start, end))| output_ms >= *start as f64 && output_ms <= *end as f64)
                 .map(|(index, _)| index)
                 .collect();
 
@@ -605,7 +815,19 @@ pub(crate) fn render_timeline_on_gpu(
         }
         drop(encode_tx);
         drop(decode_rx);
+        drop(plate_receivers);
         pipeline_wall = started.elapsed();
+
+        let mut plates: Result<()> = Ok(());
+        for handle in plate_handles {
+            let result = match handle.join() {
+                Ok(result) => result,
+                Err(_) => Err(gpu_error("GPU overlay plate producer panicked")),
+            };
+            if plates.is_ok() {
+                plates = result;
+            }
+        }
 
         let read = reader
             .join()
@@ -620,7 +842,7 @@ pub(crate) fn render_timeline_on_gpu(
         if main_result.is_ok() && sent_frames != total_frames {
             return Err(gpu_error("GPU compose produced the wrong frame count"));
         }
-        main_result.and(read).and(write)
+        main_result.and(read).and(write).and(plates)
     });
 
     let elapsed = started.elapsed();
@@ -649,11 +871,61 @@ pub(crate) fn render_timeline_on_gpu(
     Ok(RenderOutcome { has_audio })
 }
 
-/// Generated-plate runtime: the prepared plan owns the rects/origins while the
-/// worker owns the per-frame raster state.
+/// Generated plates for one output frame, produced by a plate worker.
+#[derive(Default)]
+struct PlateFrames {
+    cursor: Option<compositor::PlaneFrame>,
+    items: Option<compositor::PlaneFrame>,
+    keys: Option<compositor::PlaneFrame>,
+}
+
+/// One generated-plate worker: per-frame raster state plus the immutable rects
+/// it draws into. `CursorFramePlan` is `!Sync` (the keystroke renderer owns a
+/// `RefCell`), so every worker gets its own clone rather than sharing the plan
+/// — the same split the compatibility renderer's producer pool uses.
 struct OverlayRuntime {
-    frame_plan: super::CursorFramePlan,
     worker: super::OverlayWorkerState,
+    cursor_rect: Option<(u32, u32, u32, u32)>,
+    items_rect: Option<(u32, u32, u32, u32)>,
+    keys_rect: Option<(u32, u32, u32, u32)>,
+    cursor_origins: Arc<Vec<(i32, i32)>>,
+}
+
+impl OverlayRuntime {
+    /// Build one worker's state from the prepared plan.
+    fn from_plan(frame_plan: &super::CursorFramePlan) -> Result<Self> {
+        let cursor_rect = frame_plan.plane_rect(super::PlatePlane::Cursor);
+        let items_rect = frame_plan.plane_rect(super::PlatePlane::Items);
+        let keys_rect = frame_plan.plane_rect(super::PlatePlane::Keys);
+        let worker = super::OverlayWorkerState::new(
+            frame_plan.renderers.clone(),
+            frame_plan.overlay_engine.clone(),
+            frame_plan.keystroke_renderer.clone(),
+            frame_plan.canvas_width,
+            frame_plan.canvas_height,
+            Arc::clone(&frame_plan.cursor_origins),
+            frame_plan.first_frame_index,
+            cursor_rect,
+            items_rect,
+            keys_rect,
+        )
+        .map_err(|error| gpu_error(&error))?;
+        Ok(Self {
+            worker,
+            cursor_rect,
+            items_rect,
+            keys_rect,
+            cursor_origins: Arc::clone(&frame_plan.cursor_origins),
+        })
+    }
+
+    fn plane_rect(&self, kind: super::PlatePlane) -> Option<(u32, u32, u32, u32)> {
+        match kind {
+            super::PlatePlane::Cursor => self.cursor_rect,
+            super::PlatePlane::Items => self.items_rect,
+            super::PlatePlane::Keys => self.keys_rect,
+        }
+    }
 }
 
 /// One camera overlay's decode process and absolute display window.
@@ -681,7 +953,7 @@ fn build_overlay_runtime(
     canvas: &super::cursor::RenderCanvas,
     frame: &compositor::CanvasFrame,
     shared: &CompositionShared,
-) -> Result<Option<OverlayRuntime>> {
+) -> Result<Option<Vec<OverlayRuntime>>> {
     let has_cursor = plan
         .cursor_effects
         .iter()
@@ -726,23 +998,12 @@ fn build_overlay_runtime(
         0,
         frame_count,
     )?;
-    let cursor_rect = frame_plan.plane_rect(super::PlatePlane::Cursor);
-    let items_rect = frame_plan.plane_rect(super::PlatePlane::Items);
-    let keys_rect = frame_plan.plane_rect(super::PlatePlane::Keys);
-    let worker = super::OverlayWorkerState::new(
-        frame_plan.renderers.clone(),
-        frame_plan.overlay_engine.clone(),
-        frame_plan.keystroke_renderer.clone(),
-        canvas.width,
-        canvas.height,
-        Arc::clone(&frame_plan.cursor_origins),
-        0,
-        cursor_rect,
-        items_rect,
-        keys_rect,
-    )
-    .map_err(|error| gpu_error(&error))?;
-    Ok(Some(OverlayRuntime { frame_plan, worker }))
+    let workers = plate_worker_target().min(frame_count as usize).max(1);
+    let mut runtimes = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        runtimes.push(OverlayRuntime::from_plan(&frame_plan)?);
+    }
+    Ok(Some(runtimes))
 }
 
 /// Screen-rect windows the cursor renderer maps through when the side-by-side
@@ -781,14 +1042,15 @@ fn side_by_side_screen_windows(
 }
 
 fn plane_frame(
-    plan: &super::CursorFramePlan,
+    rect: Option<(u32, u32, u32, u32)>,
+    cursor_origins: &[(i32, i32)],
     kind: super::PlatePlane,
     data: Arc<Vec<u8>>,
     emitted: u64,
 ) -> Option<compositor::PlaneFrame> {
-    let (x, y, _, _) = plan.plane_rect(kind)?;
+    let (x, y, _, _) = rect?;
     let (dest_x, dest_y) = if kind == super::PlatePlane::Cursor {
-        plan.cursor_origins
+        cursor_origins
             .get(emitted as usize)
             .copied()
             .unwrap_or((x as i32, y as i32))
@@ -975,15 +1237,12 @@ fn compositor_spec(
     let mut spec = compositor::CompositorSpec::default();
     if let Some(runtime) = overlay {
         spec.cursor = runtime
-            .frame_plan
             .plane_rect(super::PlatePlane::Cursor)
             .map(|rect| compositor::PlaneInfo { rect });
         spec.items = runtime
-            .frame_plan
             .plane_rect(super::PlatePlane::Items)
             .map(|rect| compositor::PlaneInfo { rect });
         spec.keys = runtime
-            .frame_plan
             .plane_rect(super::PlatePlane::Keys)
             .map(|rect| compositor::PlaneInfo { rect });
     }
@@ -1062,7 +1321,15 @@ fn compositor_spec(
         if mask.end_ms <= mask.start_ms {
             continue;
         }
-        spec.masks.push(mask_config(mask, canvas)?);
+        let config = mask_config(mask, canvas)?;
+        info!(
+            id = %mask.id,
+            mode = %mask.mode,
+            rect = ?config.rect,
+            effect = ?config.mode,
+            "gpu export: privacy mask"
+        );
+        spec.masks.push(config);
         mask_schedules.push((mask.start_ms, mask.end_ms));
     }
     Ok((spec, mask_schedules))
@@ -1100,12 +1367,20 @@ fn mask_config(
         "redact" => compositor::MaskMode::Redact(solid_background(&mask.redact_color)),
         "blur" => {
             let radius = mask.blur_radius.clamp(1.0, 128.0);
-            let factor = if radius > 3.0 {
-                (radius / 4.0).round().clamp(2.0, 16.0) as f32
+            // Radius > 3 takes the compatibility graph's multi-scale branch
+            // (downscale → avgblur(3×3) → upscale); smaller radii run avgblur
+            // directly on the region.
+            if radius > 3.0 {
+                compositor::MaskMode::Blur {
+                    factor: (radius / 4.0).round().clamp(2.0, 16.0) as f32,
+                    multi_scale: true,
+                }
             } else {
-                (radius.round() as u32).max(1) as f32
-            };
-            compositor::MaskMode::Blur(factor)
+                compositor::MaskMode::Blur {
+                    factor: (radius.round() as u32).max(1) as f32,
+                    multi_scale: false,
+                }
+            }
         }
         "pixelate" => compositor::MaskMode::Pixelate(mask.pixel_size.clamp(2, 128) as f32),
         _ => return Err(InternalError::Media("mask mode is unsupported".into()).into()),
@@ -1295,7 +1570,7 @@ mod tests {
             asset_id: None,
             start_ms: 0,
             end_ms: 1_000,
-            mode: "blur".into(),
+            mode: "pixelate".into(),
             rect: crate::exports::RenderCropFloat {
                 x: 0.0,
                 y: 0.0,
@@ -1400,6 +1675,39 @@ mod tests {
     }
 
     #[test]
+    fn blur_privacy_masks_stay_on_the_ffmpeg_renderer() {
+        // Redact and pixelate are shader-exact; the scaled-average blur is an
+        // approximation that measured below the parity floor (G4).
+        let mut plan = plan_with_canvas(gated_canvas());
+        plan.masks.push(crate::exports::RenderPlanMask {
+            id: "mask".into(),
+            asset_id: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            mode: "blur".into(),
+            rect: crate::exports::RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            blur_radius: 24.0,
+            pixel_size: 8,
+            redact_color: "#000000".into(),
+            enabled: true,
+        });
+        let reasons = limitations(&plan);
+        assert!(
+            reasons.iter().any(|reason| reason.contains("blur")),
+            "{reasons:?}"
+        );
+
+        // A disabled blur mask is not a limitation.
+        plan.masks[0].enabled = false;
+        assert!(limitations(&plan).is_empty());
+    }
+
+    #[test]
     fn a_timeline_hole_needs_a_gap_source() {
         let mut plan = plan_with_canvas(gated_canvas());
         plan.segments[0].output_end_ms = 2_000;
@@ -1453,19 +1761,99 @@ mod tests {
     }
 
     #[test]
-    fn auto_stays_on_the_compatibility_renderer_until_g5() {
-        // `plan_limitations` is empty for this plan, so a GPU renderer here can
-        // only come from the auto default, which must remain off.
+    fn g5_auto_uses_the_gpu_renderer_by_default() {
+        // The default must be on now that the G4 parity matrix passed; the env
+        // var is a plain opt-out for support and A/B runs.
+        assert!(auto_gpu_enabled(None));
+        for value in ["1", "true", "on", "yes", "TRUE"] {
+            assert!(auto_gpu_enabled(Some(value)), "{value}");
+        }
+        for value in ["0", "false", "off", "0 "] {
+            assert!(!auto_gpu_enabled(Some(value)), "{value}");
+        }
+    }
+
+    #[test]
+    fn auto_keeps_passthrough_only_exports_on_ffmpeg() {
+        // A plain full-canvas plan has nothing to composite, so the GPU adds
+        // only the cross-process copy. Any layer/zoom/canvas treatment flips it.
         let plan = plan_with_canvas(gated_canvas());
-        let choice = resolve_renderer(
-            "auto",
-            &plan,
-            &settings(),
-            &CompositionShared::new(None),
-            &HashMap::new(),
+        assert!(plan_is_passthrough_only(&plan, &settings()));
+
+        let mut zoomed = plan.clone();
+        zoomed.zoom_segments.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "zoom",
+                "startMs": 0,
+                "endMs": 1_000,
+                "target": { "x": 0.0, "y": 0.0, "width": 960.0, "height": 540.0 },
+                "scale": 1.5
+            }))
+            .expect("zoom segment"),
         );
-        assert_eq!(choice.renderer, ExportRenderer::Compatibility);
-        assert!(choice.reason.as_deref().unwrap_or_default().contains("G5"));
+        assert!(!plan_is_passthrough_only(&zoomed, &settings()));
+
+        let mut padded = plan.clone();
+        padded.canvas.as_mut().expect("canvas").padding = 24;
+        assert!(!plan_is_passthrough_only(&padded, &settings()));
+
+        let mut masked = plan;
+        masked.masks.push(crate::exports::RenderPlanMask {
+            id: "mask".into(),
+            asset_id: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            mode: "redact".into(),
+            rect: crate::exports::RenderCropFloat {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 32.0,
+            },
+            blur_radius: 8.0,
+            pixel_size: 8,
+            redact_color: "#000000".into(),
+            enabled: true,
+        });
+        assert!(!plan_is_passthrough_only(&masked, &settings()));
+    }
+
+    #[test]
+    fn auto_falls_back_to_compatibility_after_repeated_gpu_failures() {
+        assert!(auto_gpu_blocked(None, 0).is_none());
+        assert!(auto_gpu_blocked(None, GPU_FAILURE_GATE_THRESHOLD - 1).is_none());
+        let reason = auto_gpu_blocked(None, GPU_FAILURE_GATE_THRESHOLD)
+            .expect("gate reason at the threshold");
+        assert!(reason.contains("repeated GPU failures"), "{reason}");
+        // The env override still wins with a clear reason.
+        let reason = auto_gpu_blocked(Some("0"), 0).expect("env opt-out reason");
+        assert!(reason.contains("RECORDFORGE_EXPORT_GPU"), "{reason}");
+    }
+
+    #[test]
+    fn the_failure_gate_counts_consecutive_failures_and_resets_on_success() {
+        note_gpu_success();
+        for _ in 0..GPU_FAILURE_GATE_THRESHOLD - 1 {
+            note_gpu_failure();
+        }
+        assert!(!failure_gate_tripped(
+            GPU_CONSECUTIVE_FAILURES.load(Ordering::Relaxed)
+        ));
+        // A success in between must clear the count.
+        note_gpu_success();
+        note_gpu_failure();
+        assert!(!failure_gate_tripped(
+            GPU_CONSECUTIVE_FAILURES.load(Ordering::Relaxed)
+        ));
+        note_gpu_failure();
+        note_gpu_failure();
+        assert!(failure_gate_tripped(
+            GPU_CONSECUTIVE_FAILURES.load(Ordering::Relaxed)
+        ));
+        note_gpu_success();
+        assert!(!failure_gate_tripped(
+            GPU_CONSECUTIVE_FAILURES.load(Ordering::Relaxed)
+        ));
     }
 
     #[test]
